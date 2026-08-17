@@ -15,6 +15,16 @@ import (
 
 const watermarkStateKey = "__wm__"
 
+// partitionRecencyMs bounds how long a partition stays in the idle-flush sweep
+// after the last time this runner popped from it. Partition ownership rotates
+// between replicas (the gate/window cycle releases the lease on every commit),
+// so without a cutoff a runner keeps flushing partitions another replica now
+// owns — and since the flush path commits with ack=nil, the server's lease
+// check (inside `IF v_ack IS NOT NULL`) never runs and both replicas can read,
+// emit and delete the same ripe window. Mirrors PARTITION_RECENCY_MS in
+// clients/client-js/client-v2/streams/runtime/Runner.js.
+const partitionRecencyMs int64 = 5 * 60 * 1000 // 5 minutes
+
 // Source abstracts the QueueBuilder methods the Runner needs from the
 // queen-mq Go client. The real *queen.QueueBuilder satisfies this.
 type Source interface {
@@ -136,7 +146,14 @@ type Runner struct {
 	loopDone        chan struct{}
 	flushDone       chan struct{}
 	watermarks      map[string]int64
-	recent          map[string]string
+	// recent is the idle-flush sweep set: partitionId -> last pop. Entries
+	// older than partitionRecencyMs are pruned on every touch and on every
+	// sweep, so a partition lost to another replica leaves the sweep instead
+	// of being flushed forever. Guarded by mu.
+	recent map[string]recentPartition
+	// nowMs is the clock used by the recency cutoff and the processing-time
+	// flush. Set once at construction; overridden only by tests, before Start.
+	nowMs func() int64
 	// partLocks serialises the pop/cycle loop against the idle-flush goroutine
 	// per partition. Both paths do read(state) -> compute -> commit against the
 	// same (query_id, partition_id) rows; the server's advisory lock only
@@ -144,6 +161,13 @@ type Runner struct {
 	// the cycle just emitted+deleted (duplicate) or clobber a freshly-reduced
 	// accumulator (drop). Guarded by mu.
 	partLocks map[string]*sync.Mutex
+}
+
+// recentPartition is one entry of the idle-flush sweep set: the partition name
+// to report downstream plus the last time this runner popped from it.
+type recentPartition struct {
+	name      string
+	touchedAt int64
 }
 
 // NewRunner constructs a Runner around a compiled stream.
@@ -171,7 +195,8 @@ func NewRunner(stream *CompiledStream, opts RunOptions) *Runner {
 		http:          NewHTTPClient(opts.URL, opts.BearerToken, 0, 0),
 		consumerGroup: cg,
 		watermarks:    map[string]int64{},
-		recent:        map[string]string{},
+		recent:        map[string]recentPartition{},
+		nowMs:         func() int64 { return time.Now().UnixMilli() },
 		partLocks:     map[string]*sync.Mutex{},
 	}
 }
@@ -390,9 +415,37 @@ func (r *Runner) touchPartition(pid, pname string) {
 	if pid == "" {
 		return
 	}
+	now := r.nowMs()
 	r.mu.Lock()
-	r.recent[pid] = pname
+	r.recent[pid] = recentPartition{name: pname, touchedAt: now}
+	r.pruneRecentLocked(now)
 	r.mu.Unlock()
+}
+
+// pruneRecentLocked drops sweep entries whose last pop is older than the
+// recency window. Caller holds mu.
+func (r *Runner) pruneRecentLocked(now int64) {
+	cutoff := now - partitionRecencyMs
+	for pid, e := range r.recent {
+		if e.touchedAt < cutoff {
+			delete(r.recent, pid)
+		}
+	}
+}
+
+// partitionsToFlush prunes the sweep set and returns what is still in it. The
+// prune runs here as well as in touchPartition so a runner that stops popping
+// entirely (quiet source, or every partition reassigned) also stops flushing.
+func (r *Runner) partitionsToFlush() map[string]string {
+	now := r.nowMs()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pruneRecentLocked(now)
+	out := make(map[string]string, len(r.recent))
+	for pid, e := range r.recent {
+		out[pid] = e.name
+	}
+	return out
 }
 
 func (r *Runner) processCycle(ctx context.Context, g partitionGroup) error {
@@ -920,13 +973,7 @@ func (r *Runner) flushTick(ctx context.Context) {
 	if w == nil {
 		return
 	}
-	r.mu.Lock()
-	partitions := make(map[string]string, len(r.recent))
-	for k, v := range r.recent {
-		partitions[k] = v
-	}
-	r.mu.Unlock()
-	for pid, pname := range partitions {
+	for pid, pname := range r.partitionsToFlush() {
 		// Mutual exclusion with the pop/cycle loop (see partLocks).
 		l := r.partitionLock(pid)
 		l.Lock()
@@ -943,7 +990,7 @@ func (r *Runner) flushPartition(ctx context.Context, pid, pname string) error {
 	if w.EventTime() != nil {
 		clock, _ = r.getWatermark(pid)
 	} else {
-		clock = time.Now().UnixMilli()
+		clock = r.nowMs()
 	}
 	if clock == 0 {
 		return nil
