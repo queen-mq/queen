@@ -24,6 +24,8 @@ every call blocks and hands back an `nlohmann::json`. Read that reply rather tha
 absence of an exception. `ack()` wraps the broker's, and its outer `success` says only that the
 call did not throw: the per-item verdict is inside `result`.
 
+<Render file="snippets/diagram-round-trip" />
+
 <Render file="snippets/tut-cpp-hello-world" />
 
 ## Run it

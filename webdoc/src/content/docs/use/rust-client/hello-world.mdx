@@ -24,6 +24,8 @@ the check, and a failed `pop` is an `Err` rather than an empty vector: an empty 
 as `Ok` with nothing in it, which is what the drain at the end tests. The acknowledgement takes
 the message itself, because this client reads the consumer group and the lease id off it.
 
+<Render file="snippets/diagram-round-trip" />
+
 <Render file="snippets/tut-rust-hello-world" />
 
 ## Run it

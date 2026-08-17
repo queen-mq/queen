@@ -33,6 +33,17 @@ A full deployment has four parts:
 - one PostgreSQL, dedicated or shared with your other applications
 - the clients, all of them over HTTP
 
+<pre class="mermaid">{`
+flowchart LR
+  C["clients<br/>six SDKs, queenctl, curl"] -->|HTTP| P["Rust proxy<br/>optional: isolation, tenancy"]
+  P -->|HTTP| B["Rust broker<br/>stateless, holds no durable state"]
+  C -.->|HTTP, with no proxy| B
+  B -->|stored procedures| PG[("PostgreSQL<br/>the source of truth")]
+`}</pre>
+
+Only the last box keeps anything. The broker can be restarted, scaled or rolled without a
+rebalance because there is no state in it to move.
+
 Pushing looks like this, and the partition is created by this call:
 
 <Render file="snippets/js-push" />

@@ -151,6 +151,28 @@ const componentMap = {
   },
 
   /**
+   * A partition schematic becomes its description, for the same reason a
+   * `<Chart />` does, with one difference: this figure is drawn from props
+   * rather than rendered from an artifact, so there is no `source` to cite.
+   * Its `alt` states where every cursor sits, which is the whole content of
+   * the picture — an agent reading the `.md` gets the position, not just the
+   * fact that a figure was here.
+   */
+  Partition: ({ attrs }: { attrs: Record<string, string | boolean> }): string => {
+    const str = (key: string): string => {
+      const value = attrs[key];
+      return typeof value === "string" ? value.trim() : "";
+    };
+    const alt = str("alt");
+    const caption = str("caption");
+
+    const parts: string[] = [];
+    if (alt) parts.push(`**Figure.** ${alt}`);
+    if (caption) parts.push(caption);
+    return parts.length > 0 ? `\n${parts.join("\n\n")}\n` : "";
+  },
+
+  /**
    * A dashboard screenshot becomes its description, for the same reason a
    * `<Chart />` does: a PNG of a dark web application carries nothing to a
    * reader consuming markdown, and the `alt` is already written for someone who

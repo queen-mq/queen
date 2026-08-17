@@ -19,6 +19,30 @@ Queen's answer: a partition is a row, created by the first push that names it, a
 from taking that row's lock before allocating an offset. Consumption state is one cursor per
 partition and consumer group. Nothing is preallocated, nothing is assigned, nothing rebalances.
 
+<pre class="mermaid">{`
+flowchart LR
+  subgraph K["A fixed set of partitions, keys hash-modded onto it"]
+    direction LR
+    K1["cust-1"] --> KP0["partition 0"]
+    K3["cust-3<br/>slow to process"] --> KP0
+    K2["cust-2"] --> KP1["partition 1"]
+    K4["cust-4"] --> KP1
+    KP0 --> KX["cust-1 waits behind cust-3<br/>for sharing a partition with it"]
+  end
+  subgraph Q["One lane per entity, created by the push that names it"]
+    direction LR
+    Q1["cust-1"] --> QL1["lane cust-1"]
+    Q3["cust-3<br/>slow to process"] --> QL3["lane cust-3"]
+    Q2["cust-2"] --> QL2["lane cust-2"]
+    Q4["cust-4"] --> QL4["lane cust-4"]
+    QL3 --> QX["cust-3 waits for itself<br/>and for nobody else"]
+  end
+`}</pre>
+
+The collision on the left is not a misconfiguration: it is what hashing a changing set of
+entities onto a fixed set of shards does. Adding partitions moves existing keys and does not
+remove it.
+
 ## Kafka
 
 A topic is split into a fixed number of physical partitions, each an append-only log with its own

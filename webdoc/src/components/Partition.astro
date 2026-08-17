@@ -1,0 +1,285 @@
+---
+/**
+ * A partition drawn as its offsets, with the markers that sit on top of them.
+ *
+ * Four things in the model are the same picture with different markers on it:
+ * where an ack leaves the cursor, what a lease holds while the cursor stays
+ * put, two groups reading one copy of the data, and how far back retention
+ * lets a seek go. They are drawn by this one component so a reader who learns
+ * to read the first one can read the other three.
+ *
+ * The figure is inline SVG rather than a file pair like <Chart>, because it
+ * carries no data: it is a schematic, so it can take its colours from the
+ * theme tokens and follow the reader's surface with no second asset and no
+ * JavaScript. Charts come from a script and are measured; these are drawn by
+ * hand and are not.
+ *
+ * Geometry is computed here rather than hand-placed so that changing a cell
+ * width or adding a cursor cannot leave a label pointing at the wrong column.
+ */
+interface Cell {
+  /** The offset this cell is. Cells are drawn in the order given. */
+  offset: number;
+  /** Overrides the offset as the cell's caption, for a message id. */
+  label?: string;
+  /**
+   * How the cell reads. `plain` is retained data, `gone` is deleted by
+   * retention, and the rest are the ack verdicts, coloured by the same
+   * tokens the callouts use.
+   */
+  state?: "plain" | "completed" | "failed" | "leased" | "gone";
+}
+
+interface Cursor {
+  /** Whose position this is: a consumer group name, usually. */
+  label: string;
+  /**
+   * The last offset this cursor has committed. The marker is drawn on the
+   * boundary after that cell, because `committed` is the last offset done
+   * and `committed + 1` is the next one wanted. Pass a value below the first
+   * cell to park it at the left edge.
+   */
+  committed: number;
+  /** Draws the marker in the accent instead of the muted foreground. */
+  emphasis?: boolean;
+  /** A short note next to the label: "was here", "after the seek". */
+  note?: string;
+}
+
+interface Props {
+  /** What the figure shows, for readers who cannot see it. Required. */
+  alt: string;
+  /** One line under the figure: what it demonstrates. */
+  caption?: string;
+  cells: Cell[];
+  /** Cursors under the axis, drawn in the order given. */
+  cursors?: Cursor[];
+  /** An inclusive offset range held under lease, bracketed above the axis. */
+  lease?: { from: number; to: number; label?: string };
+  /**
+   * The retention floor: the first offset still readable. Everything left of
+   * it is drawn as deleted and a seek cannot go past it.
+   */
+  floor?: { at: number; label?: string };
+}
+
+const { alt, caption, cells, cursors = [], lease, floor } = Astro.props;
+
+const CELL_W = 66;
+const CELL_H = 46;
+const PAD_X = 10;
+const LEASE_BAND = lease ? 32 : 0;
+const FLOOR_BAND = floor ? 20 : 0;
+const CURSOR_ROW = 26;
+
+const axisY = LEASE_BAND + 6;
+const axisBottom = axisY + CELL_H;
+const height = axisBottom + FLOOR_BAND + cursors.length * CURSOR_ROW + 12;
+const width = PAD_X * 2 + cells.length * CELL_W;
+
+/** Left edge of the cell holding `offset`, or null when it is not drawn. */
+function cellX(offset: number): number | null {
+  const i = cells.findIndex((c) => c.offset === offset);
+  return i === -1 ? null : PAD_X + i * CELL_W;
+}
+
+/**
+ * The boundary after `offset`: where a cursor that has committed it sits.
+ * An offset left of the first cell clamps to the axis start, so a group that
+ * has read nothing still gets a marker instead of disappearing.
+ */
+function boundaryX(offset: number): number {
+  const x = cellX(offset);
+  if (x !== null) return x + CELL_W;
+  return offset < cells[0].offset ? PAD_X : PAD_X + cells.length * CELL_W;
+}
+
+const FILL: Record<string, string> = {
+  plain: "var(--nb-card)",
+  completed: "var(--nb-success-muted)",
+  failed: "var(--nb-danger-muted)",
+  leased: "var(--nb-warning-muted)",
+  gone: "transparent",
+};
+
+const STROKE: Record<string, string> = {
+  plain: "var(--nb-border-strong)",
+  completed: "var(--nb-success)",
+  failed: "var(--nb-danger)",
+  leased: "var(--nb-warning)",
+  gone: "var(--nb-border)",
+};
+---
+
+<figure class="nb-partition">
+  <svg
+    viewBox={`0 0 ${width} ${height}`}
+    width={width}
+    height={height}
+    role="img"
+    aria-label={alt}
+    xmlns="http://www.w3.org/2000/svg"
+  >
+    <title>{alt}</title>
+
+    {
+      lease && (
+        <g>
+          <path
+            d={`M ${boundaryX(lease.from) - CELL_W} ${LEASE_BAND - 6}
+                v -8 H ${boundaryX(lease.to)} v 8`}
+            fill="none"
+            stroke="var(--nb-warning)"
+            stroke-width="1.5"
+          />
+          <text
+            x={(boundaryX(lease.from) - CELL_W + boundaryX(lease.to)) / 2}
+            y={LEASE_BAND - 20}
+            text-anchor="middle"
+            class="nb-partition-note"
+            fill="var(--nb-warning)"
+          >
+            {lease.label ?? "leased"}
+          </text>
+        </g>
+      )
+    }
+
+    {
+      cells.map((cell, i) => {
+        const state = cell.state ?? "plain";
+        const x = PAD_X + i * CELL_W;
+        return (
+          <g>
+            <rect
+              x={x}
+              y={axisY}
+              width={CELL_W}
+              height={CELL_H}
+              rx="4"
+              fill={FILL[state]}
+              stroke={STROKE[state]}
+              stroke-width="1.5"
+              stroke-dasharray={state === "gone" ? "4 3" : undefined}
+            />
+            <text
+              x={x + CELL_W / 2}
+              y={axisY + CELL_H / 2 + 5}
+              text-anchor="middle"
+              class="nb-partition-cell"
+              fill={
+                state === "gone"
+                  ? "var(--nb-muted-foreground)"
+                  : "var(--nb-foreground)"
+              }
+            >
+              {cell.label ?? cell.offset}
+            </text>
+          </g>
+        );
+      })
+    }
+
+    {
+      floor && (
+        <g>
+          <line
+            x1={boundaryX(floor.at - 1)}
+            y1={axisY - 4}
+            x2={boundaryX(floor.at - 1)}
+            y2={axisBottom + 12}
+            stroke="var(--nb-muted-foreground)"
+            stroke-width="1.5"
+            stroke-dasharray="3 3"
+          />
+          <text
+            x={boundaryX(floor.at - 1) + 6}
+            y={axisBottom + 15}
+            class="nb-partition-note"
+            fill="var(--nb-muted-foreground)"
+          >
+            {floor.label ?? "log_start"}
+          </text>
+        </g>
+      )
+    }
+
+    {
+      cursors.map((cursor, row) => {
+        const x = boundaryX(cursor.committed);
+        const y = axisBottom + FLOOR_BAND + row * CURSOR_ROW;
+        const tone = cursor.emphasis
+          ? "var(--nb-primary)"
+          : "var(--nb-muted-foreground)";
+        return (
+          <g>
+            <path
+              d={`M ${x} ${axisY + 2} V ${y + 4}`}
+              stroke={tone}
+              stroke-width="1.5"
+              fill="none"
+            />
+            <path
+              d={`M ${x - 4} ${y + 4} L ${x + 4} ${y + 4} L ${x} ${y - 2} Z`}
+              fill={tone}
+            />
+            <text
+              x={x + 8}
+              y={y + 12}
+              class="nb-partition-label"
+              fill={tone}
+            >
+              {cursor.label}
+              {cursor.note && (
+                <tspan class="nb-partition-note" fill="var(--nb-muted-foreground)">
+                  {" "}
+                  {cursor.note}
+                </tspan>
+              )}
+            </text>
+          </g>
+        );
+      })
+    }
+  </svg>
+  {caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<style>
+  .nb-partition {
+    margin: 1.25rem 0;
+    border: 1px solid var(--nb-border);
+    border-radius: 0.5rem;
+    padding: 0.75rem 0.5rem 0.5rem;
+    /* A narrow screen scrolls the axis rather than shrinking the offsets
+     * into illegibility; the figure is a row of fixed-width cells. */
+    overflow-x: auto;
+  }
+  .nb-partition svg {
+    display: block;
+    margin: 0 auto;
+    max-width: 100%;
+    height: auto;
+  }
+  .nb-partition figcaption {
+    margin-top: 0.5rem;
+    text-align: center;
+    font-size: 0.8125rem;
+    line-height: 1.5;
+    color: var(--nb-muted-foreground);
+  }
+  .nb-partition-cell {
+    font-family: var(--nb-font-mono);
+    font-size: 14px;
+  }
+  .nb-partition-label {
+    font-family: var(--nb-font-sans);
+    font-size: 12.5px;
+    font-weight: 500;
+  }
+  .nb-partition-note {
+    font-family: var(--nb-font-sans);
+    font-size: 12px;
+    font-weight: 400;
+  }
+</style>

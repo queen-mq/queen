@@ -96,6 +96,21 @@ Acks are addressed by `transactionId` plus `partitionId`, and always answer `200
 ]
 ```
 
+<Partition
+  alt="A partition holding offsets 6 to 9. Offset 6 is already committed; 7 is m1, acknowledged completed; 8 is m2, acknowledged failed; 9 is m3, acknowledged completed. The cursor moves from 6 to 7 and stops there, below the failure at 8, even though 9 was acknowledged completed."
+  caption="m3 was acknowledged completed and the cursor still does not reach it: the failure at m2 clamps it below. The group's next pop starts at m2."
+  cells={[
+    { offset: 6 },
+    { offset: 7, label: "m1", state: "completed" },
+    { offset: 8, label: "m2", state: "failed" },
+    { offset: 9, label: "m3", state: "completed" },
+  ]}
+  cursors={[
+    { label: "committed", committed: 6, note: "before the ack" },
+    { label: "committed", committed: 7, emphasis: true, note: "after the ack" },
+  ]}
+/>
+
 That call commits past `m1` only. The lowest explicit `failed`, `retry` or `dlq` clamps the
 cursor below itself and a completed ack above it does not survive; offsets you never mention are
 completed silently. A duplicate delivery is recoverable, a swallowed failure is not.
@@ -109,6 +124,19 @@ cursor in the transaction that reads the messages, which is at-most-once.
 A leased pop removes nothing. It writes a holder, an expiry and the last delivered offset onto
 the (partition, group) row; until an ack releases the claim or it expires, no other consumer in
 the group takes that partition.
+
+<Partition
+  alt="The same partition. Offsets 7, 8 and 9 are held under a lease, bracketed above the axis, while the committed cursor stays at offset 6."
+  caption="A lease is a claim, not a consumption: it covers 7 to 9 while committed stays at 6. Nothing was removed, so an expiry redelivers the whole span from committed + 1."
+  cells={[
+    { offset: 6 },
+    { offset: 7, state: "leased" },
+    { offset: 8, state: "leased" },
+    { offset: 9, state: "leased" },
+  ]}
+  lease={{ from: 7, to: 9, label: "leased until expiry" }}
+  cursors={[{ label: "committed", committed: 6, emphasis: true }]}
+/>
 
 ```http
 POST /api/v1/ack                     # completed, retry, failed or dlq
@@ -161,6 +189,25 @@ the retry budget. It touches exactly one group: everyone else keeps their positi
 A timestamp lands on a segment boundary rather than an exact message, so you also get messages
 committed slightly before the instant you asked for: seek a little early and filter in the
 handler. Retention is the floor, and deleted data cannot be replayed by any means.
+
+<Partition
+  alt="A partition whose offsets 2 and 3 have been deleted by retention and are drawn as dashed empty cells. A dashed vertical line at offset 4 marks log_start. The billing cursor sits at 7 before the seek and at the log_start boundary after it."
+  caption="Seek is arithmetic on one group's cursor, and log_start is where the arithmetic stops: 2 and 3 are gone, so no seek reaches them."
+  cells={[
+    { offset: 2, state: "gone" },
+    { offset: 3, state: "gone" },
+    { offset: 4 },
+    { offset: 5 },
+    { offset: 6 },
+    { offset: 7 },
+    { offset: 8 },
+  ]}
+  floor={{ at: 4, label: "log_start" }}
+  cursors={[
+    { label: "billing", committed: 7, note: "before the seek" },
+    { label: "billing", committed: 3, emphasis: true, note: "after seeking back" },
+  ]}
+/>
 
 ## Retention
 

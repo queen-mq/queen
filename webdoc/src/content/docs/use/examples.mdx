@@ -47,6 +47,23 @@ await client.queue('orders').group('analytics').batch(500)
   .consume(async messages => { await index(messages) })
 ```
 
+<Partition
+  alt="One partition holding offsets 4 to 9, drawn once. Two cursors sit under it at different positions: billing at 8 and analytics at 5."
+  caption="One copy of the data, two cursors. A group is a position, not a queue, so the second reader costs a row per partition rather than a second copy of the messages."
+  cells={[
+    { offset: 4 },
+    { offset: 5 },
+    { offset: 6 },
+    { offset: 7 },
+    { offset: 8 },
+    { offset: 9 },
+  ]}
+  cursors={[
+    { label: "billing", committed: 8, emphasis: true },
+    { label: "analytics", committed: 5, note: "reading at its own pace" },
+  ]}
+/>
+
 The message bytes are written once. A second group costs one cursor row per partition it reads
 and one in-place update per ack, so fan-out is free on the write side. Reads do scale with
 groups: each one fetches and decompresses the segments it needs.

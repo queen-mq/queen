@@ -17,6 +17,7 @@ import { Frame } from "./components/ui/frame";
 import { LinkButton } from "./components/ui/link-button";
 import { LinkCard } from "./components/ui/link-card";
 import { PackageManagers } from "./components/ui/package-managers";
+import Partition from "./components/Partition.astro";
 import Render from "./components/Render.astro";
 import Screenshot from "./components/Screenshot.astro";
 import { Step, Steps } from "./components/ui/steps";
@@ -39,6 +40,7 @@ export const components = {
   LinkButton,
   LinkCard,
   PackageManagers,
+  Partition,
   Render,
   Screenshot,
   Step,
