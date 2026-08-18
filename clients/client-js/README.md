@@ -28,7 +28,7 @@ Queen MQ is a PostgreSQL-backed message queue system with a powerful feature set
 - **Message Tracing** - Debug distributed workflows with trace timelines
 - **Client-Side Buffering** - 10x-100x throughput boost for high-volume pushes
 - **Real-time Streaming** - Windowed aggregation and processing
-- **Key/Value State and Timers** - Transactional state and scheduled messages, off by default on the broker
+- **Key/Value State and Timers** - Transactional state and scheduled messages
 
 This client provides a fluent, promise-based API for Node.js applications.
 

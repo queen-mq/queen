@@ -9,6 +9,7 @@ sidebar:
 sourceOfTruth:
   - server/src/handlers/mod.rs
   - server/src/handlers/data.rs
+  - crates/queen-protocol/src/transaction.rs
   - server/src/handlers/status.rs
   - server/src/handlers/static_files.rs
   - server/src/handlers/streams.rs
@@ -29,7 +30,9 @@ digest: >-
   broker makes a request wait for an admission slot instead of refusing it. Never 502 or 504.
   Procedure error text with `not found` (case-insensitive) maps to 404, else 500. 2xx is not
   success: push item status is `queued`, `duplicate`, `error`, `buffered` or `failed` (spooled
-  still 201); ack and transaction report `success:false` at 200. The proxy adds `code` and
+  still 201); ack and transaction report `success:false` at 200. Failed transactions carry a
+  closed-taxonomy `reason`: branch on it, never on `error`. `kv_precondition` is a lost
+  idempotency gate at 200, not a failure to retry. The proxy adds `code` and
   `Retry-After` in seconds on 429; SDKs retry only 429.
 ---
 
@@ -123,8 +126,30 @@ consumer.
 has run they arrive at HTTP `200`:
 
 ```json
-{"transactionId":"019...","success":false,"error":"...","results":[]}
+{"transactionId":"019...","success":false,"reason":"kv_precondition","error":"...","results":[]}
 ```
+
+`reason` is a code from a closed taxonomy, and it is the only thing to branch on.
+Until the key/value and timer riders existed, a rolled-back transaction carried
+nothing but a prose `error`, which left every client string-matching on a message.
+
+| `reason` | What rolled the bundle back |
+| --- | --- |
+| `bad_request` | The body never reached the database. |
+| `duplicate` | A duplicate push rolled the bundle back. |
+| `ack_rejected` | An ack was invalid, expired or unknown. |
+| `kv_precondition` | A `required` key/value gate lost. |
+| `timer_horizon_exceeded` | A schedule landed beyond this cell's horizon. |
+| `payload_too_large` | A value or a timer payload was over its ceiling. |
+| `misaligned` | An internal index-space failure, never the caller's doing. |
+| `db_error` | Everything else. |
+
+`kv_precondition` is the one to design around. A lost gate is the expected outcome
+of every legitimate redelivery, which is the idempotency marker doing its job, so
+it arrives at `200` and belongs in neither a retry policy nor an error metric. The
+body carries `failedIndex`, `kvReason`, `version` and `value` alongside the code,
+so the caller can see who won without a second round trip. See
+[KV state](/use/kv/).
 
 Only the pre-flight validation failures (bad body, no operations array, an
 unsupported operation) come back as `400` with that same shape.

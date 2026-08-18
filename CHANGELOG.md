@@ -3,7 +3,7 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
-## 1.1.0 (unreleased)
+## 1.0.3 (2026-08-18)
 
 **Key/value state and timers are part of the engine, not features to switch on.** There is no
 `QUEEN_KV_ENABLED` and no `QUEEN_TIMERS_ENABLED` — the broker reads neither, and setting them

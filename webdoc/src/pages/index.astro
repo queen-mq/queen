@@ -80,7 +80,8 @@ const differentiators: { title: string; body: string; href?: string }[] = [
   },
   {
     title: "Key/value state and timers are part of the engine",
-    body: "A key/value write can share the transaction with a push and an ack, which a store standing beside the broker cannot give you at any price, because its commit and Queen's are two commits. A timer is a scheduled message you can cancel and reprogram until it fires, which an append-only log cannot express. Neither is a flag you turn on: they are on every cell that runs the binary.",
+    body: "A key/value write can share the transaction with a push and an ack, and if your lease expired while the work ran, the ack is refused and the marker is refused with it. A compare-and-swap in a second store cannot do that: it succeeds from a worker that no longer owns the message. A timer is a scheduled message you can cancel and reprogram until it fires, which an append-only log cannot express. Neither is a flag you turn on: they are on every cell that runs the binary.",
+    href: "/use/kv/",
   },
   {
     title: "Windowed aggregation, in the same transaction",
@@ -94,6 +95,47 @@ const differentiators: { title: string; body: string; href?: string }[] = [
   {
     title: "Plain HTTP, six SDKs, one binary",
     body: "No custom wire protocol, no JVM, no Erlang, no ZooKeeper. Anything that can make an HTTP request is a first-class client.",
+  },
+];
+
+/**
+ * The concession, and the reason it is on the front page rather than buried in
+ * /start/compare.
+ *
+ * An application write that commits with the cursor advance is NOT new and is
+ * available at least four other ways. The reader most likely to buy this is the
+ * one who already knows that, so conceding it first is what keeps them reading:
+ * copy that implied nobody else could do it lost exactly that reader, on a
+ * claim we were never actually making. The differentiator is the price, so the
+ * price is what this table is.
+ *
+ * Every row here is a system whose mechanism we are confident about. Azure
+ * Service Bus (session state inside a namespace transaction) and Pulsar
+ * (function state excluded from transactions) are deliberately absent: both are
+ * plausible and neither is verified, and a wrong "closest competitor" claim on
+ * a front page is the expensive kind.
+ */
+const alternatives: { system: string; cost: string; ours?: boolean }[] = [
+  {
+    system: "Kafka Streams",
+    cost: "The stream processing model, state that is local to the partition, and a restore from the changelog on every rebalance.",
+  },
+  {
+    system: "Transactional outbox",
+    cost: "A relay process with its own failure modes, the latency between committing and emitting, and schema coupling between your database and your topics.",
+  },
+  {
+    system: "Redis Streams",
+    cost: "Every key involved in one hash slot, and a default fsync policy that loses up to a second of already committed work when the process dies.",
+  },
+  {
+    system: "pgmq and friends",
+    cost: "The atomicity for free, on a queue head that contends far below the throughput measured further down this page.",
+  },
+  {
+    system: "Queen",
+    cost: "A method call.",
+    ours: true,
   },
 ];
 
@@ -253,6 +295,53 @@ const featureLine = [
               ))
             }
           </div>
+        </div>
+      </section>
+
+      {/* The concession */}
+      <section class="border-t border-border">
+        <div class="mx-auto max-w-5xl w-full px-6 py-16">
+          <h2 class="text-xl font-semibold text-foreground">
+            You can already buy this. Here is what it costs.
+          </h2>
+          <p class="mt-2 max-w-2xl text-muted-foreground leading-relaxed">
+            A consumer charges a card and is still writing its done flag to a side store when its
+            lease expires. The broker gives the batch to somebody else, and somebody else finds no
+            flag. An application write that commits with the cursor advance is what closes that
+            window, and nothing about it is new: it is available today, four other ways, and every
+            one of them is priced.
+          </p>
+
+          <dl class="mt-8 divide-y divide-border border-y border-border">
+            {
+              alternatives.map((a) => (
+                <div class="grid grid-cols-1 gap-1 py-4 sm:grid-cols-[13rem_1fr] sm:gap-6">
+                  <dt class={a.ours ? "font-semibold text-foreground" : "font-medium text-foreground"}>
+                    {a.system}
+                  </dt>
+                  <dd
+                    class={
+                      a.ours
+                        ? "text-sm font-medium text-foreground leading-relaxed"
+                        : "text-sm text-muted-foreground leading-relaxed"
+                    }
+                  >
+                    {a.cost}
+                  </dd>
+                </div>
+              ))
+            }
+          </dl>
+
+          <p class="mt-6 max-w-3xl text-sm text-muted-foreground leading-relaxed">
+            None of these is exactly-once end to end, and neither is Queen. The card charge happens
+            outside PostgreSQL, so a crash between the charge and the commit repeats the charge on
+            redelivery, and no broker can prevent that. What a shared commit removes is the state in
+            between: the work marked done while the message comes back anyway, or the message
+            acknowledged while the work is left unmarked. With two commits, whichever order you
+            pick, a crash inside the window gives you one of those two.
+            <a href="/use/kv/"> How the marker, the output and the cursor commit together →</a>
+          </p>
         </div>
       </section>
 

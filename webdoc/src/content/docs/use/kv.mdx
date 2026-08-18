@@ -35,8 +35,14 @@ const tx = queen.transaction()
 
 await chargeCard(order)          // the external effect
 const res = await tx.commit()    // marker and cursor, one commit
+
 if (!res.success && res.reason === 'kv_precondition') {
-  // Somebody already did this work. Nothing was committed by this call.
+  // Somebody already did this work, and NOTHING in the bundle was committed:
+  // the ack rolled back together with the marker. So this message is still on
+  // the group's cursor, and it has to be taken off separately or it comes back
+  // forever. `res.value` carries the winner's value, so the charge id is here
+  // without a second round trip.
+  await queen.ack(message, 'completed', { group: message.consumerGroup })
 }
 ```
 

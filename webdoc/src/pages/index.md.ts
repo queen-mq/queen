@@ -128,7 +128,7 @@ const differentiators = [
   },
   {
     title: "Key/value state and timers are part of the engine",
-    body: "A key/value write can share the transaction with a push and an ack, which a store standing beside the broker cannot give you at any price, because its commit and Queen's are two commits. A timer is a scheduled message you can cancel and reprogram until it fires, which an append-only log cannot express. Neither is a flag you turn on: they are on every cell that runs the binary.",
+    body: "A key/value write can share the transaction with a push and an ack, and if your lease expired while the work ran, the ack is refused and the marker is refused with it. A compare-and-swap in a second store cannot do that: it succeeds from a worker that no longer owns the message. A timer is a scheduled message you can cancel and reprogram until it fires, which an append-only log cannot express. Neither is a flag you turn on: they are on every cell that runs the binary.",
   },
   {
     title: "Windowed aggregation, in the same transaction",
@@ -143,6 +143,49 @@ const differentiators = [
     body: "No custom wire protocol, no JVM, no Erlang, no ZooKeeper. Anything that can make an HTTP request is a first-class client.",
   },
 ];
+
+/**
+ * The concession section. An agent asked to compare brokers is exactly the
+ * reader this section is written for, so leaving it out of the corpus would
+ * strip the one part of the page that names the alternatives by mechanism.
+ */
+const HOME_ALTERNATIVES_LEAD =
+  "A consumer charges a card and is still writing its done flag to a side store when its " +
+  "lease expires. The broker gives the batch to somebody else, and somebody else finds no " +
+  "flag. An application write that commits with the cursor advance is what closes that " +
+  "window, and nothing about it is new: it is available today, four other ways, and every " +
+  "one of them is priced.";
+
+const alternatives = [
+  {
+    system: "Kafka Streams",
+    cost: "The stream processing model, state that is local to the partition, and a restore from the changelog on every rebalance.",
+  },
+  {
+    system: "Transactional outbox",
+    cost: "A relay process with its own failure modes, the latency between committing and emitting, and schema coupling between your database and your topics.",
+  },
+  {
+    system: "Redis Streams",
+    cost: "Every key involved in one hash slot, and a default fsync policy that loses up to a second of already committed work when the process dies.",
+  },
+  {
+    system: "pgmq and friends",
+    cost: "The atomicity for free, on a queue head that contends far below the throughput measured further down this page.",
+  },
+  {
+    system: "Queen",
+    cost: "A method call.",
+  },
+];
+
+const HOME_ALTERNATIVES_CODA =
+  "None of these is exactly-once end to end, and neither is Queen. The card charge happens " +
+  "outside PostgreSQL, so a crash between the charge and the commit repeats the charge on " +
+  "redelivery, and no broker can prevent that. What a shared commit removes is the state in " +
+  "between: the work marked done while the message comes back anyway, or the message " +
+  "acknowledged while the work is left unmarked. With two commits, whichever order you pick, " +
+  "a crash inside the window gives you one of those two.";
 
 /** The dashboard section, and the screenshot's alt text with it. */
 const HOME_DASHBOARD =
@@ -225,6 +268,17 @@ export function homepageBody(): string {
   for (const item of differentiators) {
     lines.push(`### ${item.title}`, "", item.body, "");
   }
+
+  lines.push("## You can already buy this. Here is what it costs.", "");
+  lines.push(HOME_ALTERNATIVES_LEAD, "");
+  for (const item of alternatives) {
+    lines.push(`- **${item.system}**: ${item.cost}`);
+  }
+  lines.push("", HOME_ALTERNATIVES_CODA, "");
+  lines.push(
+    `[How the marker, the output and the cursor commit together](${url("/use/kv/")})`,
+    "",
+  );
 
   lines.push("## The dashboard is already in there", "", HOME_DASHBOARD, "");
   lines.push(HOME_DASHBOARD_IMAGE, "");
