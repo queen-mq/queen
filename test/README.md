@@ -20,10 +20,11 @@ parallel, without touching your live Postgres on `:5432`.
 | `go`   | `client-go/tests` + `streams_integration` | ✓ | ✓ | ✓ | — | Go 1.24, standalone module (`GOWORK=off`) |
 | `py`   | `client-py/tests` (pytest, incl. streams) | ✓ | ✓ | ✓ | — | Python 3.12 |
 | `cli`  | `queenctl` E2E (`client-cli/tests`) | ✓ | ✓ | ✓ | — | needs the Go **workspace** (local client-go) + `QUEEN_E2E=1` |
-| `cpp`  | `client-cpp/test_client` (~40 HTTP tests) | ✓ | ✓ | ✓ | — | no Postgres access |
+| `cpp`  | `client-cpp/test_retry429` + `test_kv_timers` (both broker-free) then `client-cpp/test_client` (50 HTTP tests, 13 of them kv/timers) | ✓ | ✓ | ✓ | — | no Postgres access; the kv/timer HTTP tests run unconditionally — a 404 from those routes is a bug, not a cell without the surface |
 | `rust` | 50 in-process broker unit tests (`cargo test`) | — | — | — | — | `unit` — no stack, no PG |
 | `mesh` | asserts the 2 brokers formed an authenticated mesh | — | ✓ | — | — | HA only |
 | `tenancy` | two-tenant isolation over the mesh pair | — | — | — | ✓ | flag-ON only |
+| `http` | every kv and timer route, and every form of the wire, with **no SDK** in the way | ✓ | — | — | — | no PG access; no env of its own — kv and timers are on every broker |
 
 - **`single`** = 1 Postgres + 1 broker + the runner.
 - **`ha`** = 1 Postgres + `queen-a` + `queen-b` (framed-TCP mesh) + the runner.
@@ -119,8 +120,8 @@ test/run.sh --no-build-broker           # reuse an existing queen:test image
 test/run.sh --keep                      # leave stacks up to poke at them
 ```
 
-`--topo` filters the **client** lanes (`single`, `ha`, `tenanted`); `mesh` and
-`tenancy` always bring their own topology, as `mesh` already did.
+`--topo` filters the **client** lanes (`single`, `ha`, `tenanted`); `mesh`,
+`tenancy` and `http` always bring their own topology, as `mesh` already did.
 
 Requirements: Docker + Compose v2. The broker image builds from
 [`server/Dockerfile`](../server/Dockerfile) (~100 MB, `queen:test`); runner
@@ -147,6 +148,7 @@ The suites diverge on env names; the runners map a single canonical set
 | py  | `QUEEN_SERVER_URL` **and** `QUEEN_URL` | `PG_DB` | — |
 | cli | `QUEEN_SERVER` (not `_URL`) | `PG_DB` | `QUEEN_E2E=1`, per-run `QUEEN_TEST_QUEUE_PREFIX` |
 | cpp | argv[1] (no env) | — | no PG |
+| http | `QUEEN_HTTP_URL` | — | no PG; `PLAN_PORT` picks the plan server's port |
 
 ## Fixes that landed with this harness
 
@@ -158,6 +160,40 @@ The suites diverge on env names; the runners map a single canonical set
 - **Python `pytest.ini`** now sets `asyncio_default_fixture_loop_scope=session`,
   which the session-scoped async fixtures require on modern pytest-asyncio
   (`pyproject.toml` already intended it, but `pytest.ini` shadowed it).
+
+## The HTTP wire gate (kv + timers)
+
+`PLAN_KV_TIMERS.md` §10.2 lists seven SDK rows and one row that is not an SDK:
+HTTP, raw bodies, "a script executed in CI". `test/runners/http` is that row, and
+it is written first on purpose: every other suite asserts through a client
+library, so a wire that a library gets wrong and re-reads the same wrong way is
+green. Here the request is `curl` and the response is `jq`.
+
+It is two halves, and the split is the point:
+
+| file | needs a broker | what it pins |
+|------|:--------------:|--------------|
+| [`kv-timers-wire.sh`](runners/http/kv-timers-wire.sh) | — | **the client.** Every request body of the surface, built in one place |
+| [`http-wire-unit.sh`](runners/http/http-wire-unit.sh) | no | the exact BYTES of each body, against a scripted plan server, plus the §8.3 commit contract (a lost precondition RETURNS, everything else raises) |
+| [`http-wire-check.sh`](runners/http/http-wire-check.sh) | yes | all eight routes, every op, every envelope, every documented refusal, and the transaction bundle's three sibling arrays |
+
+If the integration half built its own bodies inline, the unit half would be
+pinning bytes nobody sends. And the unit half is where the mistakes that no live
+broker can see are caught: a rider that travelled inside `operations` on a broker
+that also reads the top level, a `ttl` beside a `ttlSeconds`, a `getPrefix` in a
+query string that the handler answers correctly after every access log in between
+has already recorded it.
+
+Both halves run from the same entrypoint, unit first: it needs nothing, so a
+wrong body is reported in a second with its exact bytes instead of arriving
+thirty seconds later as an unexplained 400 from a stored procedure.
+
+`cleanupTestData` is load-bearing here rather than cosmetic (§10.4): the
+namespace and the timer queues are purged at the start AND from an EXIT trap, and
+two assertions are built to go red if the purge ever stops working (a fixed key
+that must be absent at the start, a fixed counter that must reach a fixed value).
+The mirror rule is that anything reaching the message log carries a per-run id,
+because no purge can reach the broker's dedup window.
 
 ## The deep mesh gate
 

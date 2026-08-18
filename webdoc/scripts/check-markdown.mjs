@@ -113,12 +113,14 @@ const ALLOWED_TO_VANISH = new Map([
 
 /** Explicit assertions for the pages the regression gutted completely. */
 const MUST_CARRY = [
-  // The three complete applications: one whole program each, and the page is
+  // The complete applications: one whole program each, and the page is
   // worthless without it. The tutorials are covered by the generic partial
   // check above, since each of them renders exactly one snippet too.
   { page: "use/full-examples/chat", fences: 1, langs: ["js"] },
   { page: "use/full-examples/webhooks", fences: 1, langs: ["js"] },
   { page: "use/full-examples/rate-limiter", fences: 1, langs: ["js"] },
+  { page: "use/full-examples/exactly-once", fences: 1, langs: ["js"] },
+  { page: "use/full-examples/saga", fences: 1, langs: ["js"] },
   { page: "reference/config", tableRows: 100 },
 ];
 

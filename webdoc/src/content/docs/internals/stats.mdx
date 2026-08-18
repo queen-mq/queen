@@ -27,6 +27,14 @@ There are three independent sources of numbers, and they answer different questi
 | Stats reconciler | `STATS_INTERVAL_MS`, 10000 ms | `queen.stats` | how much data exists and how far behind consumers are |
 | Metrics collector | `METRICS_FLUSH_MS`, 60000 ms | `queen.worker_metrics`, `queen.system_metrics`, `queen.queue_lag_metrics` | what this replica did, per minute |
 | In-process counters | live | nothing | `/metrics/prometheus` gauges and `queen_process_*` totals |
+| KV and timer usage rollup | `QUEEN_KV_USAGE_EVERY_MS`, 300000 ms | `queen.kv_usage` | how much state each tenant holds |
+
+The fourth row is not this page's subject and is listed so nobody looks for it here. The KV and timer
+usage numbers are the [sweeper](/internals/sweeper)'s third and slowest clock, not the reconciler's
+work: they write `queen.kv_usage`, they are what the quota gauges and the `403` release decision read,
+and they are deliberately allowed to go stale under pressure, because they are precision rather than
+delivery. `GET /api/v1/system/kv-timers` reports their age as `quotaAgeMs`, and an age that keeps
+growing means the refresh is failing while the local write delta keeps enforcing.
 
 ## The stats reconciler
 

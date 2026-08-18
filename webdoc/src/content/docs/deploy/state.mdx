@@ -1,0 +1,283 @@
+---
+title: KV and timers
+description: "Operating the two state surfaces: the runtime kill switches and what each refusal answers, the order the broker sheds in, the three defences this endpoint has and no other does, and the condition a shared cell has to meet."
+type: how-to
+tier: operate
+sidebar:
+  order: 7
+sourceOfTruth:
+  - server/src/switches.rs
+  - server/src/quota.rs
+  - server/src/handlers/maintenance.rs
+  - server/src/config.rs
+  - server/sql/procedures/027_kv_quota.sql
+  - proxy/src/routes.rs
+  - proxy/src/registry.rs
+---
+
+[KV state](/use/kv) and [timers](/use/timers) are part of the engine. There is no environment variable
+that turns them on, for the same reason there is none for push and for pop: every cell running this
+binary serves both surfaces, on every route, from the first boot. This page is what the operator of
+such a cell needs.
+
+The tables are created at every boot. Empty they cost nothing, and an always-virgin deployment model
+does not tolerate two possible schemas.
+
+## There is no gate. There is a kill switch, and it is a different instrument
+
+Two things are easy to confuse and are opposites. A **gate** is turned on to try something out: it is
+read once at boot, it decides whether a surface exists at all, changing it is a rollout, and different
+cells may legitimately answer differently. Queen has no gate for KV or timers, and the boot flags that
+used to be one, `QUEEN_KV_ENABLED` and `QUEEN_TIMERS_ENABLED`, no longer exist. Setting them does
+nothing.
+
+A **kill switch** is turned off to stop something that is already running and is hurting. It is read on
+every call, the surface exists either way, the flip takes effect now on a cell somebody is holding at
+three in the morning, and it is expected to be flipped back. That is the same class as
+[maintenance mode](/deploy/operations), and it is why it wears the same shape: an in-process atomic on
+the hot path, a row in `queen.system_state` as a best-effort mirror, a fresh read on the `GET`.
+
+<Aside type="caution">
+This changes how a release lands. There is no step where the binary is in production with the surfaces
+dark: from the moment it is deployed, KV and timers are live on every cell, and the rollout question is
+not "which cells have it on" but "is the cell's quota configuration right before the binary arrives".
+Grants and plan limits are what stage a tenant onto the feature now, and they are database rows rather
+than restarts.
+</Aside>
+
+## Three rungs, and each answers differently
+
+A refused call is told the outermost reason, because that is the one the caller can act on.
+
+| Rung | Set by | Where it lives | Answer |
+| --- | --- | --- | --- |
+| 1. An operator paused it | `POST /api/v1/system/kv-timers` | `queen.system_state`, mirrored to an in-process atomic | **503** with `Retry-After` on a route, **403** inside the transaction wire |
+| 2. The tenant is granted it | `queen.kv_quota` | Database | **403** `feature_gated` |
+| 3. The tenant is inside its quota | `queen.kv_quota` limits, against the measurement | Database plus a local delta | **403** `kv_quota_exceeded` or `timers_quota_exceeded` |
+
+Nothing on this ladder answers `404`. A `404` from a KV or timer route means the path is wrong, not
+that the surface is missing, and a client that treats it as "this cell does not offer the feature" is
+reading a typo as a deployment mode.
+
+Rung 1 answers differently depending on where the call arrived. On `/api/v1/kv` a paused cell is a
+`503` with `Retry-After` and the client comes back. Inside `/api/v1/transaction` the `kv` array is
+refused **permanently**, because a bundle that retries a paused KV forever is a client spinning on the
+hot path of the product with messages in its hands.
+
+<Aside type="caution">
+Two surfaces sit outside rung 1 deliberately. A **timer cancel** is never blocked, and neither is a
+**timer peek or list**. The fire never switches itself off, so a tenant that cannot cancel keeps
+producing messages it cannot stop, and a peek that answered `503` would stop a caller finding out
+whether a timer it can no longer cancel is still pending.
+</Aside>
+
+Reads and deletes are also never blocked by rung 3. A tenant that is over quota has to be able to get
+back under it.
+
+### The runtime switches
+
+Three keys, independent, and an omitted field in the body is left alone: pausing new timers at three in
+the morning must not also stop delivering the ones already promised.
+
+```bash
+curl -s http://localhost:6632/api/v1/system/kv-timers
+
+curl -s -X POST http://localhost:6632/api/v1/system/kv-timers \
+  -H 'Content-Type: application/json' \
+  -d '{"timersSchedule":false}'
+```
+
+| Key in `queen.system_state` | Field | What pausing it does |
+| --- | --- | --- |
+| `kv_enabled` | `kv` | Every KV route answers `503`, the wire's `kv` array is refused permanently, and nothing already stored is affected |
+| `timers_schedule_enabled` | `timersSchedule` | No new timers are accepted. Existing ones still fire, and cancels are never blocked |
+| `timers_fire_enabled` | `timersFire` | Promised messages stop being delivered |
+
+An absent row means **on**. That is the difference between a kill switch and a feature flag: the other
+way round, a fresh cell would boot with the feature dead and no row to explain why.
+
+The atomic is written first and the database row second, because an operator pulling a lever during an
+incident must not have the effect wait on a database that may be the thing going wrong. The response
+carries `mirrored`, and a `false` there means the flip is in force on this broker but will not survive
+a restart and will not reach the other replicas.
+
+<Aside type="danger">
+`timersFire` is the only switch that stops delivery, and no automatic degradation ever touches it.
+Nothing is lost while it is off (`deliverAt` is a floor, and the backlog drains oldest first when it
+comes back), but promised messages are not arriving. Watch `queen_timers_due` and
+`queen_timers_oldest_late_seconds`, and treat the pause as an incident with a clock on it.
+</Aside>
+
+### What sheds before an operator has to do anything
+
+Under pressure the broker gives things up in a fixed order, and the property that order exists to hold
+is that **the first thing to cede is the new thing, not the product**.
+
+<Steps>
+
+1. **Per-tenant `429`.** The tenant above its own rate slows down first, and knows it is its own doing.
+
+2. **`503 kv_unavailable`.** The dedicated KV pool is exhausted. A different status on purpose: this is
+   the cell being slow, not the tenant being greedy.
+
+3. **KV pruning suspended.** Reads stay perfectly correct, only the table grows. It is sacrificed first
+   because it is the only phase whose cost is disk alone.
+
+4. **The usage rollup suspended.** Quotas go stale. Second, because it is precision rather than
+   delivery.
+
+5. **Standalone KV writes refused.** KV writes riding the transaction wire continue: the transaction is
+   the value of the product and the POST is the convenience.
+
+6. **`403` on occupancy.** Writes blocked, reads and deletes still allowed.
+
+7. **The operator's KV kill switch.** Rung 1 above, and the first step on this list that is not
+   automatic.
+
+8. **The operator's timer schedule pause.** New timers refused, existing ones still delivered.
+
+</Steps>
+
+The fire is not on that ladder at any rung. Under pressure the sweeper shrinks its batch and lengthens
+its sleep, and the visible result is a rising fire lag. Switching it off would turn a delay into what a
+customer reads as loss.
+
+## The three defences this endpoint has and no other does
+
+`POST /api/v1/kv` is the first endpoint in the product whose call rate is decided by **your customer's
+end users** rather than by message volume. Every other route has a natural limiter upstream of it; here
+the limiter is somebody else's web traffic. Three things stand in the way, and they are not
+interchangeable.
+
+**A dedicated connection pool, and the pool is itself the semaphore.**
+`QUEEN_KV_POOL_SIZE` is derived from `DB_POOL_SIZE` rather than fixed, `clamp(pool / 10, 4, 32)`, which
+on the default 160 is 16. What no other defence gives is this: at roughly 1 ms per read the pool is
+worth about 16,000 reads a second, far above any rate limit, so it is not the constraint in normal
+operation. It becomes the constraint exactly when the database slows down, because at 100 ms a read the
+same pool is worth 160 a second and everything else takes a `503` instead of stealing connections from
+the message path.
+
+**No admission lane, for reads or for writes.** Putting KV writes on the push lane would let thirty
+tenants, each inside its own limit of a hundred writes a second, consume three thousand push slots a
+second on a small stack whose measured commit-bound ceiling is around 480 messages a second. Nobody would
+have violated anything, the message path would be starved, and the weigher could not tell the two kinds
+of work apart because they would be the same lane. Standalone KV writes take the dedicated pool and the
+backpressure is the pool. KV writes that ride **inside** a push or an ack inherit the slot the handler
+already took, because that is a bundle of messages and it belongs in the message lane.
+
+**A per-tenant token bucket in the broker, evaluated before the pool.** In the broker and not only in
+the proxy, because self-hosted and dedicated without a proxy are real deployments and a defence that
+exists only in the proxy is not a defence of the product. Defaults are 200 reads a second with a burst
+of 400 and 100 writes a second, plus an aggregate cell ceiling above the per-tenant ones, because N
+conforming tenants can add up to a non-conforming cell.
+
+<Aside type="caution">
+On a dedicated cell these limits come down but they do not come off. Every other plan limit treats
+`NULL` as unlimited on dedicated, because those limits protect the neighbours and a dedicated cell has
+none. This one protects the tenant from itself: the competitor for those connections is its own message
+path, on its own PostgreSQL.
+</Aside>
+
+A fourth thing is an obligation rather than a defence: the KV path always sets a server-side query
+timeout. A slow `getPrefix` with no cancellation leaves the backend running and puts the connection in
+quarantine, and on a pool of 16 three quarantines are a fifth of the capacity.
+
+## What the operator actually does
+
+Nothing here turns the surfaces on. What these steps decide is who may use them, and whether you would
+see it if they stopped working.
+
+<Steps>
+
+1. **Settle the tenancy interaction before the binary lands.** With `QUEEN_TENANCY_HEADER=1` the tenant
+   header is opaque and validated against nothing, and the KV is the surface where that means reading
+   and writing another tenant's state **knowing only its name**. A broker started with the header and
+   without `QUEEN_KV_TRUSTED_PROXY=1` refuses to boot, unconditionally, and the affirmation is that
+   something in front of it sets that header and strips the client's. There is no longer a third
+   answer: the KV cannot be switched off at boot to make an unvalidated tenant identity safe. See
+   [multi-tenancy](/deploy/multi-tenant) and [security](/deploy/security).
+
+2. **Grant the tenants.** With tenancy on, the absence of a row in `queen.kv_quota` is a denial and not
+   a permission, so a `403 feature_gated` means the row is missing rather than the feature being
+   broken. With tenancy off, `QUEEN_KV_REQUIRE_GRANT` derives to `false` and the surfaces work without
+   configuring anything.
+
+3. **Read the boot log once.** The `config: kv_timers` block names the pool size, the grant mode, the
+   horizon and the payload ceiling, and `config: sweeper` names the cadences. Both are printed on every
+   cell, because both surfaces are on every cell.
+
+4. **Watch the two gauges that speak first.** `queen_kv_expired_not_pruned` with
+   `queen_kv_expiry_lag_seconds` says whether the prune is keeping up, and `queen_timers_oldest_late_seconds`
+   says whether the fire is. The first is the one that hides: reads stay correct while the heap grows,
+   and `vacuum_truncate = off` means the heap never gives the pages back. The `queen_kv_*`,
+   `queen_timers_*` and `queen_sweeper_*` families are exposed by a broker that has never seen a key,
+   so an alert on them can be written before the first tenant arrives.
+
+</Steps>
+
+Stopping a surface is a runtime decision, it is safe, and it is not silent.
+
+| What you switch off | What happens |
+| --- | --- |
+| `timersSchedule`, with timers pending | New timers are refused. The pending ones still fire and cancels still work, because nothing that was already promised is affected by refusing to promise more |
+| `timersFire`, with timers pending | They stay in the table and do not fire. Nothing is lost and nothing drains sideways; turning it back on resumes from the oldest. This is the only switch that stops delivery, and it is an incident with a clock on it |
+| `kv`, with live keys | Every KV route answers `503` and the wire's `kv` array is refused permanently. The keys stay and are still pruned, because the sweeper is not on this switch |
+| `QUEEN_SWEEPER=false` | Expired keys are never pruned and timers never fire. They are not lost, they simply wait. Logged at boot, and this is the one knob in this area that is still boot-time, because it decides whether a background task is spawned rather than whether a surface exists |
+| The binary, rolled back | Tables and procedures stay, orphaned and harmless. Nothing existing is emptied, nothing is moved, and nothing becomes unreadable. Dropping `queen.kv_quota` would delete an operator's configuration, so a rollback never does |
+
+## The condition a shared cell has to meet
+
+The version of this feature that is ready to ship is **self-hosted and dedicated, without a proxy**,
+which is also the right place for a soft quota to land, because there the operator is the customer.
+
+A shared cell is different, and the difference is one measurable gap rather than a judgement. The
+proxy's storage quota is real and already enforced: it blocks above the cap with hysteresis and answers
+`403 storage_quota_exceeded` on every produce route. What it measures is the sum of `retainedBytes` per
+queue, and `queen.kv` and `queen.log_timers` have no queue. That is the only place in the product where
+a tenant could occupy disk that a live quota cannot see.
+
+Four conditions, each of which can be checked rather than argued about.
+
+| Condition | How you check it |
+| --- | --- |
+| The proxy's storage total includes KV and timer bytes | The broker's cluster response carries `kvBytes` and `timerBytes` as top-level fields, and the proxy sums them into the same total as `retainedBytes`. Absent fields are counted as zero with a warning once per cluster, never as "not measured" |
+| The feature gate is per plan | `plans.features` carries the KV and timers keys, a missing key reads as `false`, and the timer cancel route is classified so that no gate can ever block it |
+| Plan limits exist as numbers | `maxRows`, `maxBytes` and `maxTimers` resolve for every tenant on the cell, and a tenant with no row is denied rather than treated as unlimited. `granted: false` and `enabled: false` are different answers and collapsing them either denies a tenant nobody restricted or admits one nobody authorised |
+| A schedule is billed | A timer fires from inside the broker and never crosses the proxy, so it is the one way in the product to produce a message the gateway's meter cannot see. The rule is **bill the promise, not the delivery**: one message per `schedule` operation, another per reschedule, zero for a cancel and zero for the fire |
+
+The last one has a shape worth stating plainly to whoever owns the price list, because it is not
+recoverable after the first invoice: a timer is a scheduled message, and it is counted when you
+schedule it.
+
+<Aside type="caution">
+The occupancy quota is soft by construction, and the reason is the lock order rather than laziness. An
+exact counter would be one row per tenant that every KV write of that tenant has to lock, in the
+outermost of the six lock spaces, held for the whole bundle, serialising every write of a tenant in
+front of the message path. So the enforcer is a local in-process delta that blocks immediately, and the
+shared measurement is used only to decide when to **release** the block, with hysteresis. Blocking is
+fast, releasing is slow, and the overshoot is bounded by the fan-out across brokers rather than by the
+refresh interval.
+</Aside>
+
+<CardGrid>
+  <LinkCard
+    href="/use/kv"
+    title="KV state"
+    description="What the surface promises, so the switches above have something to switch."
+  />
+  <LinkCard
+    href="/use/timers"
+    title="Timers"
+    description="Why the fire never switches itself off, and what absent means to the caller."
+  />
+  <LinkCard
+    href="/internals/sweeper"
+    title="The sweeper"
+    description="The component the fire switch acts on: two clocks, leaderless, and what it is allowed to drop under pressure."
+  />
+  <LinkCard
+    href="/deploy/operations"
+    title="Operations"
+    description="The log blocks and metrics to watch day to day, retention, backup and the cutover."
+  />
+</CardGrid>

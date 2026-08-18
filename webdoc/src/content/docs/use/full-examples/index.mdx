@@ -1,6 +1,6 @@
 ---
 title: Full examples
-description: "Three complete applications, each a whole program that measures the property it exists to demonstrate, and each one run before it ships."
+description: "Complete applications, each a whole program that measures the property it exists to demonstrate, and each one run before it ships."
 type: overview
 tier: use
 sidebar:
@@ -30,6 +30,16 @@ property instead of asserting it in prose.
     href="/use/full-examples/rate-limiter"
     title="Rate limiter in streaming"
     description="Windowed counting per API key, where the counter commits in the same transaction as the requests it counted."
+  />
+  <LinkCard
+    href="/use/full-examples/exactly-once"
+    title="Exactly-once charging"
+    description="N orders, a forced redelivery, exactly N charges. Measures that the idempotency marker and the acknowledgement cannot disagree."
+  />
+  <LinkCard
+    href="/use/full-examples/saga"
+    title="Saga with a compensating timer"
+    description="A hold, its compensation timer and the payment request in one commit, and a compensating consumer that checks the state before it unwinds anything."
   />
 </CardGrid>
 

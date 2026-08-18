@@ -10,9 +10,13 @@ keep using ``Queen``/``Admin`` and ignore the rest.
 """
 
 from .admin import Admin
+from .builders.transaction_builder import TransactionResult
 from .client import Queen
+from .errors import KvError, QueenError, QueenHttpError, TimerError
+from .kv import KV, KvResult
 from .streams.stream import Stream
 from .streams.helpers.rate_limiter import token_bucket_gate, sliding_window_gate
+from .timers import TimerBuilder, TimerResult, Timers
 from .types import Message, AckResponse, BufferStats, DLQResponse, TransactionResponse
 from .utils.defaults import (
     CLIENT_DEFAULTS,
@@ -27,6 +31,16 @@ __version__ = "0.15.0"
 __all__ = [
     "Queen",
     "Admin",
+    "KV",
+    "KvResult",
+    "Timers",
+    "TimerBuilder",
+    "TimerResult",
+    "TransactionResult",
+    "QueenError",
+    "QueenHttpError",
+    "KvError",
+    "TimerError",
     "Stream",
     "token_bucket_gate",
     "sliding_window_gate",

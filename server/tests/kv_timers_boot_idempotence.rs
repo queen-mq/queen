@@ -575,9 +575,9 @@ async fn forbid_reloption(
 async fn seed(c: &tokio_postgres::Client) -> Result<(), tokio_postgres::Error> {
     c.execute(
         "INSERT INTO queen.kv (tenant_id, namespace, key, value, version, expires_at)
-         VALUES ($1::uuid, 'saga', 'done:tx-1', '{\"ok\": true}'::jsonb,
+         VALUES ($1::text::uuid, 'saga', 'done:tx-1', '{\"ok\": true}'::jsonb,
                  nextval('queen.kv_version_seq'), now() + interval '1 day'),
-                ($1::uuid, 'saga', 'forever-marker', 'null'::jsonb,
+                ($1::text::uuid, 'saga', 'forever-marker', 'null'::jsonb,
                  nextval('queen.kv_version_seq'), NULL)",
         &[&TENANT],
     )
@@ -585,19 +585,19 @@ async fn seed(c: &tokio_postgres::Client) -> Result<(), tokio_postgres::Error> {
     c.execute(
         "INSERT INTO queen.log_timers
              (tenant_id, queue, timer_key, \"partition\", deliver_at, txn, message_id, payload)
-         VALUES ($1::uuid, 'reminders', 'trial-end:acme', 'Default',
+         VALUES ($1::text::uuid, 'reminders', 'trial-end:acme', 'Default',
                  now() + interval '30 days', 'txn-boot-1',
                  '11111111-1111-7111-8111-111111111111'::uuid, '\\x7b7d'::bytea)",
         &[&TENANT],
     )
     .await?;
     c.execute(
-        "INSERT INTO queen.kv_quota (tenant_id, max_rows, max_timers) VALUES ($1::uuid, 10000, 1000)",
+        "INSERT INTO queen.kv_quota (tenant_id, max_rows, max_timers) VALUES ($1::text::uuid, 10000, 1000)",
         &[&TENANT],
     )
     .await?;
     c.execute(
-        "INSERT INTO queen.kv_usage (tenant_id, kv_rows, timer_rows) VALUES ($1::uuid, 2, 1)",
+        "INSERT INTO queen.kv_usage (tenant_id, kv_rows, timer_rows) VALUES ($1::text::uuid, 2, 1)",
         &[&TENANT],
     )
     .await?;
@@ -615,7 +615,7 @@ async fn rows_survived(c: &tokio_postgres::Client, failures: &mut Vec<String>) {
     let rows = c
         .query(
             "SELECT key, value::text, version, (expires_at IS NULL), shard
-               FROM queen.kv WHERE tenant_id = $1::uuid AND namespace = 'saga'
+               FROM queen.kv WHERE tenant_id = $1::text::uuid AND namespace = 'saga'
               ORDER BY key COLLATE \"C\"",
             &[&TENANT],
         )
@@ -650,7 +650,7 @@ async fn rows_survived(c: &tokio_postgres::Client, failures: &mut Vec<String>) {
     for (t, n) in [("log_timers", 1i64), ("kv_quota", 1), ("kv_usage", 1)] {
         let got: i64 = c
             .query_one(
-                &format!("SELECT count(*) FROM queen.{t} WHERE tenant_id = $1::uuid"),
+                &format!("SELECT count(*) FROM queen.{t} WHERE tenant_id = $1::text::uuid"),
                 &[&TENANT],
             )
             .await

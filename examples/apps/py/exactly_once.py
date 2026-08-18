@@ -1,0 +1,339 @@
+# docs:start(app-py-exactly-once)
+#
+# Charging an order exactly once, under redelivery.
+#
+# The war story is a billing run that double-charged nineteen customers on a
+# Tuesday afternoon. Nothing had crashed and nothing was lost: a consumer took
+# a batch, charged the cards, and was still writing its "done" flag to a side
+# store when its lease expired. The broker did what a broker must do and gave
+# the batch to somebody else, and the somebody else found no flag.
+#
+# The flag was in the wrong place. It was in a second data system, so it could
+# not commit with the acknowledgement, and any window between the two is a
+# window in which the work happens twice.
+#
+# Here the marker is a row in the same PostgreSQL as the queue, written in the
+# same transaction as the ack. There is no window. Either the order is marked
+# and acknowledged, or neither, and a redelivery finds the marker and does
+# nothing.
+#
+#   orders
+#     `-- group "charger"   marker + ack in ONE transaction
+#           `-- group "replay"  reads the same orders again, charges nothing
+#
+# Run it:
+#   QUEEN_URL=http://localhost:6632 python3 exactly_once.py
+
+import asyncio
+import os
+import sys
+import time
+from datetime import timedelta
+
+from queen import Queen
+
+QUEEN_URL = os.environ.get("QUEEN_URL", "http://localhost:6632")
+
+# Two suffixes, not one. The queue name needs it because delete-then-recreate
+# leaves stale partition state for up to 30 seconds; the KV namespace needs it
+# for the same reason in reverse -- a marker outlives the run that wrote it, so
+# a second run under the same namespace would find every order already charged
+# and pass without charging anything.
+RUN = f"{int(time.time() * 1000):x}"
+ORDERS = f"app-py-exactly-once-{RUN}"
+NS = f"app-py-exactly-once-{RUN}"
+GROUP = "charger"
+REPLAY_GROUP = "replay"
+
+# Five orders. ORD-3 is scripted to fail once, before it charges anything and
+# before it commits, which is the interesting failure: the one that must leave
+# no trace at all.
+ORDER_IDS = ["ORD-1", "ORD-2", "ORD-3", "ORD-4", "ORD-5"]
+CRASHING_ORDER = "ORD-3"
+
+# Six deliveries in the charging phase, not five: ORD-3 arrives twice, once to
+# fail and once to succeed. The number is what ENDS the phase, and that is the
+# rule this program is built on -- wait for a total, never for silence. A phase
+# that stopped when nothing had arrived for a while would pass on a broker that
+# had delivered nothing at all.
+CHARGE_DELIVERIES = len(ORDER_IDS) + 1
+
+# And the deadline behind the total, so a stall is a failure rather than a hang.
+# Reaching it ends the phase early, short of the count, and the count check that
+# follows is what reports it.
+PHASE_MS = 30000
+
+CHECKS = 0
+
+# The external effect. Every entry is a real charge against a real card, which
+# is the whole reason this program exists: the ledger is what the customer's
+# statement would show.
+LEDGER: list = []
+ATTEMPTS: dict = {}
+
+
+def check(condition: bool, description: str) -> None:
+    """Record one verified fact, or abort the run.
+
+    This raises instead of using the `assert` statement, because `python3 -O`
+    removes `assert` and the checks are the whole point of the program.
+    """
+    global CHECKS
+    if not condition:
+        raise AssertionError(description)
+    CHECKS += 1
+    print(f"  ok: {description}")
+
+
+def charge_card(order: dict) -> str:
+    charge_id = f"ch_{order['orderId']}_{len(LEDGER)}"
+    LEDGER.append({"orderId": order["orderId"], "chargeId": charge_id, "cents": order["cents"]})
+    return charge_id
+
+
+def marker_key(order_id: str) -> str:
+    return f"charge:{order_id}"
+
+
+async def main() -> int:
+    queen = Queen(url=QUEEN_URL)
+    verdict, failed = "", False
+
+    try:
+        print(f"broker {QUEEN_URL}")
+
+        await queen.queue(ORDERS).config({"lease_time": 30, "retry_limit": 5}).create()
+
+        # ------------------------------------------------------------ queuing
+        print("\nqueuing orders")
+        for index, order_id in enumerate(ORDER_IDS):
+            await queen.queue(ORDERS).push(
+                {"transactionId": f"order-{order_id}", "data": {"orderId": order_id, "cents": 1000 + index}}
+            )
+        print(f"  {len(ORDER_IDS)} orders queued")
+
+        # ----------------------------------------------------------- charging
+        #
+        # handle() is the whole pattern, and it is four steps in a fixed order.
+        #
+        # It returns whether THIS delivery performed the charge: False when it
+        # found the marker and did nothing. A redelivery -- of any cause, a
+        # lease that expired, a broker that restarted, an operator replaying a
+        # queue -- must return False, and that is the property this program
+        # measures.
+        observed: list = []
+
+        async def handle(msg) -> bool:
+            order = msg["data"]
+            order_id = order["orderId"]
+            ATTEMPTS[order_id] = ATTEMPTS.get(order_id, 0) + 1
+            group = msg.get("consumerGroup")
+
+            # 1. Has this order already been charged? "found" is a separate key
+            #    from "value" because None is a legal stored value, so absence
+            #    is never inferred from the value being empty.
+            marker = await queen.kv.get(NS, marker_key(order_id))
+            if marker["found"]:
+                # Nothing to do, but the message still has to leave this
+                # group's cursor, or it comes back forever.
+                await queen.ack(msg, "completed", {"group": group})
+                return False
+
+            # 2. The scripted failure. It happens BEFORE the charge and before
+            #    the commit, which is the ordering a real handler should aim
+            #    for: whatever can fail without an external effect should fail
+            #    there.
+            if order_id == CRASHING_ORDER and ATTEMPTS[order_id] == 1:
+                raise RuntimeError(f"{order_id}: card network timed out")
+
+            # 3. The external effect.
+            charge_id = charge_card(order)
+
+            # 4. The marker and the acknowledgement, in ONE transaction.
+            #
+            #    required=True is what makes the put_if_absent a GATE rather
+            #    than a verdict. Without it a lost race would come back
+            #    applied=False and the ack would still commit; with it, a lost
+            #    race rolls the whole bundle back, ack included, so a
+            #    concurrent worker that got there first is the only one whose
+            #    ack lands. (`tx.once(...)` is the same thing under a shorter
+            #    name; it is spelled out here so `required` is visible.)
+            #
+            #    The lease travels with the ack. If this worker's lease expired
+            #    while it was charging -- the exact failure in the war story --
+            #    the ack is refused and the marker write is refused with it.
+            #    That is the guarantee a compare-and-swap cannot give: an
+            #    `expect` on a version that still matches succeeds even from a
+            #    worker that no longer owns the message.
+            res = await (
+                queen.transaction()
+                .kv.put_if_absent(
+                    NS,
+                    marker_key(order_id),
+                    {"chargeId": charge_id, "cents": order["cents"]},
+                    # The Python client takes a timedelta rather than the
+                    # JavaScript client's "1h" string; both resolve to the one
+                    # field the wire has, ttlSeconds.
+                    ttl=timedelta(hours=1),
+                    required=True,
+                )
+                .ack(msg, "completed", {"consumer_group": group})
+                .commit()
+            )
+
+            # A lost gate is RETURNED, not raised: success=False with
+            # reason="kv_precondition" and HTTP 200. It is the most frequent
+            # legitimate outcome of this shape, so it does not belong in an
+            # error path, a retry policy or an error metric.
+            if res.get("success") is False and res.get("reason") == "kv_precondition":
+                await queen.ack(msg, "completed", {"group": group})
+                return False
+
+            return True
+
+        print("\ncharging")
+
+        async def charge(msg) -> None:
+            group = msg.get("consumerGroup")
+            try:
+                ran = await handle(msg)
+                observed.append({"group": GROUP, "orderId": msg["data"]["orderId"], "ran": ran})
+                print(f"  {msg['data']['orderId']}: {'charged' if ran else 'already charged, skipped'}")
+            except RuntimeError as err:
+                # auto_ack is off, so the negative acknowledgement is explicit.
+                # It clamps the cursor below this message and charges one unit
+                # of the retry budget, which is what brings the order back.
+                print(f"  {msg['data']['orderId']}: {err} (will be redelivered)")
+                await queen.ack(msg, "failed", {"group": group, "error": str(err)})
+
+                # The claim this example exists to prove, checked at the only
+                # moment it can be checked: right after a handler failed before
+                # its commit.
+                marker = await queen.kv.get(NS, marker_key(msg["data"]["orderId"]))
+                check(
+                    not marker["found"],
+                    f"{msg['data']['orderId']} failed before committing and left no marker behind",
+                )
+
+        await (
+            queen.queue(ORDERS)
+            .group(GROUP)
+            .subscription_mode("all")
+            .auto_ack(False)
+            .each()
+            .limit(CHARGE_DELIVERIES)
+            .idle_millis(PHASE_MS)
+            .consume(charge)
+        )
+
+        check(
+            len([o for o in observed if o["group"] == GROUP]) == len(ORDER_IDS),
+            "the charger reached a decision on every order",
+        )
+
+        # ------------------------------------------------------------ replay
+        #
+        # A second consumer group with subscription_mode "all" reads the same
+        # orders from the beginning. This is a redelivery with the cause
+        # removed: the messages are identical, the handler is identical, and
+        # the only thing standing between them and a second charge is the
+        # marker.
+        print("\nreplaying")
+
+        async def replay(msg) -> None:
+            ran = await handle(msg)
+            observed.append({"group": REPLAY_GROUP, "orderId": msg["data"]["orderId"], "ran": ran})
+            print(f"  {msg['data']['orderId']}: ran is {ran}")
+
+        await (
+            queen.queue(ORDERS)
+            .group(REPLAY_GROUP)
+            .subscription_mode("all")
+            .auto_ack(False)
+            .each()
+            .limit(len(ORDER_IDS))
+            .idle_millis(PHASE_MS)
+            .consume(replay)
+        )
+
+        # ----------------------------------------------------------- checking
+        print("\nchecking")
+
+        check(
+            len(LEDGER) == len(ORDER_IDS),
+            f"{len(ORDER_IDS)} orders produced exactly {len(ORDER_IDS)} charges (got {len(LEDGER)})",
+        )
+        per_order = {order_id: sum(1 for row in LEDGER if row["orderId"] == order_id) for order_id in ORDER_IDS}
+        check(
+            all(count == 1 for count in per_order.values()),
+            "every order was charged exactly once, none twice and none not at all",
+        )
+        check(
+            ATTEMPTS.get(CRASHING_ORDER, 0) >= 2,
+            f"{CRASHING_ORDER} was delivered again after it failed ({ATTEMPTS.get(CRASHING_ORDER, 0)} attempts)",
+        )
+
+        replayed = [o for o in observed if o["group"] == REPLAY_GROUP]
+        check(
+            len(replayed) == len(ORDER_IDS),
+            f"the replay group received all {len(ORDER_IDS)} orders again (got {len(replayed)})",
+        )
+        check(
+            all(o["ran"] is False for o in replayed),
+            "every order on the second pass reported that it did not run",
+        )
+        check(
+            len(LEDGER) == len(ORDER_IDS),
+            f"the replay charged nothing: the ledger is still {len(ORDER_IDS)} rows",
+        )
+
+        # The markers are readable state, not an internal detail: each one
+        # carries the id of the charge it stands for, so a support engineer can
+        # answer "was this order billed, and under which charge" without a
+        # second system.
+        markers = await queen.kv.get_many(NS, [marker_key(o) for o in ORDER_IDS])
+        check(len(markers["rows"]) == len(ORDER_IDS), f"all {len(ORDER_IDS)} markers exist")
+        check(len(markers["missing"]) == 0, "no order is missing its marker")
+        charge_ids = {row["chargeId"] for row in LEDGER}
+        check(
+            all(row["value"]["chargeId"] in charge_ids for row in markers["rows"]),
+            "each marker names the charge that was actually made",
+        )
+
+        print("\n  ledger: " + ", ".join(f"{row['orderId']}={row['chargeId']}" for row in LEDGER))
+
+        verdict = f"\nPASS: {CHECKS} checks"
+    except Exception as err:
+        verdict, failed = f"\nFAIL: {err}", True
+    finally:
+        # -------------------------------------------------------------- purge
+        #
+        # Two things to remove, and the second is the one that is easy to
+        # forget: the markers are rows in their own table, so deleting the queue
+        # does not take them with it. They would expire on their own -- that is
+        # what the mandatory TTL bought -- but only once the sweeper gets to
+        # them, and an example that needs a background task to tidy up after
+        # itself is not one.
+        #
+        # Unconditional, in a finally, because a run that FAILED is exactly the
+        # run whose leftovers matter: markers surviving into the next run of the
+        # same namespace would make the next run pass without charging anything.
+        #
+        # Best effort: a purge that raised would replace the real failure with
+        # its own.
+        try:
+            for order_id in ORDER_IDS:
+                await queen.kv.delete(NS, marker_key(order_id))
+            await queen.queue(ORDERS).delete()
+        except Exception as err:  # noqa: BLE001 - the run's verdict outranks this
+            print(f"  (purge incomplete: {err})")
+        await queen.close()
+
+    sys.stdout.flush()
+    print(verdict, file=sys.stderr if failed else sys.stdout)
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))
+# docs:end

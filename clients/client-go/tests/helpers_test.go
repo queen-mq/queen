@@ -109,6 +109,23 @@ func cleanupTestData(ctx context.Context) error {
 	SELECT 1`
 	_, _ = dbPool.Exec(ctx, logTxnsPurge, patterns) // err: log schema not installed (rows-only server)
 
+	// KV and timers (PLAN_KV_TIMERS.md §10.4). Neither table hangs off
+	// queen.queues -- queen.kv is keyed by (tenant, namespace, key) and
+	// queen.log_timers carries the queue as TEXT -- so neither is reached by the
+	// cascade below and both need their own purge.
+	//
+	// This is not cosmetic. Without it a putIfAbsent test is green on the first
+	// run and red forever after (the marker survives and the second run loses
+	// the race it was supposed to win), an incr accumulates between runs and
+	// meets its ceiling early, and a pending timer outlives its test to fire
+	// into a queue that no longer belongs to anybody.
+	//
+	// Each in its own statement and each best-effort, like the purge above: on a
+	// broker built before this feature the two tables simply do not exist, and
+	// that must not fail the whole suite.
+	_, _ = dbPool.Exec(ctx, `DELETE FROM queen.kv WHERE namespace LIKE 'test-go-kv-%'`) // err: no kv schema
+	_, _ = dbPool.Exec(ctx, `DELETE FROM queen.log_timers WHERE queue LIKE ANY($1::text[])`, patterns)
+
 	// Deleting the queues rows cascades to everything else
 	// (partitions/watermarks/metadata/lag-metrics).
 	if _, err := dbPool.Exec(ctx, `DELETE FROM queen.queues WHERE name LIKE ANY($1::text[])`, patterns); err != nil {

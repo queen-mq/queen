@@ -56,6 +56,68 @@ Core protocol: push (with client-side batching), pop, consume, ack, transactions
 consumer groups, leases, traces, maintenance, and the observability endpoints — plus the
 full streams DSL.
 
+Key/value state (`queen.kv()`) and scheduled deliveries (`queen.timers()`), including their
+riders on `queen.transaction()`, which is the reason they exist: a marker written in the same
+PostgreSQL transaction as the ack it guards. There is nothing to turn on: both surfaces ship
+with the broker, on every cell, like push and pop. An operator can still *pause* one during an
+incident through the runtime kill switch, and that is a 503 with `Retry-After` on the routes
+(403, terminal, on a transaction rider) — a live surface stopped on purpose, never a broker
+that was built without it.
+
+```rust
+use queen_mq::Expiry;
+use std::time::Duration;
+
+// Every write states its lifetime: Expiry::seconds, ::until or ::forever, never
+// none of them. The builders end in .send().
+let claimed = queen.kv()
+    .put_if_absent("saga", "order-7", serde_json::json!({"step": "reserved"}), Expiry::seconds(86_400))
+    .send()
+    .await?;
+if !claimed.applied() {
+    return Ok(()); // somebody else won, and claimed.value is theirs: no second round trip
+}
+
+// With .max(), applied() IS the admission decision: a refusal spends no budget.
+let hit = queen.kv().incr("quota", "acme:2026-08", 1, Expiry::seconds(3600))
+    .max(1000)
+    .send()
+    .await?;
+
+queen.timers()
+    .schedule("reminders", "order-7", Duration::from_secs(1800))
+    .payload_json(&serde_json::json!({ "orderId": 7 }))?
+    .send()
+    .await?;
+queen.timers().cancel("reminders", "order-7").await?;
+
+// The reason the riders exist: marker, push and ack on one commit.
+let resp = queen.transaction()
+    .ack(&message)
+    .push("emails", mail)?
+    .kv_put_if_absent("sent", &message.transaction_id, serde_json::json!(true), Expiry::seconds(86_400))?
+    .commit()
+    .await?;
+if resp.lost_precondition().is_some() {
+    return Ok(()); // a redelivery. Nothing was pushed, nothing was acked.
+}
+```
+
+Reads are `get`, `get_many` and `get_prefix(..)` (a builder: `.after`, `.limit`, `.keys_only`);
+writes are `put`, `put_if_absent`, `delete` and `incr`, each a builder taking `.expect(version)`
+or `.required()`. Timers are `schedule` (an upsert, so `.reschedule()` is the same call under
+another name), `cancel`, `cancel_expecting`, `peek` and `list`. On a transaction the riders are
+`kv`, `kv_put`, `kv_put_if_absent`, `kv_delete`, `timer`, `schedule` and `cancel_timer`.
+
+Two behaviours worth reading before using them:
+
+* `commit()` **returns** on `{success: false, reason: "kv_precondition"}` instead of raising. A
+  redelivery meeting its own idempotency marker is the system working, so it must not land in a
+  retry policy. Read it with `resp.lost_precondition()`; `resp.success` is what says the bundle
+  landed.
+* Nothing else on these surfaces turns a verdict into an error. A lost `putIfAbsent`, a missing
+  key, a cancel that found nothing: all `Ok`, with `applied()`, `found()` or `ok` saying so.
+
 ## Streams
 
 ```rust
@@ -160,6 +222,12 @@ tested — plus a breadth pass of their own:
 | `tests/streams.rs` | every window kind, event time, gates, sinks, restart recovery |
 | `tests/coverage.rs` | queue options, payload shapes, naming, ordering under concurrency |
 | `tests/maintenance.rs` | push and pop maintenance (broker-global, so its own binary) |
+| `tests/kv_timers_wire.rs` | the exact JSON body of every kv and timer operation, against a scripted server, no broker needed |
+| `tests/kv_timers.rs` | kv and timers live: the transaction gate, the fence, the counter ceiling, a timer becoming a message |
+
+`tests/kv_timers.rs` needs nothing beyond `QUEEN_TEST_URL`. It used to probe the broker and skip
+when the surfaces answered 404, behind a `QUEEN_TEST_KVT` escape; both are gone with the boot
+flags that made a 404 a legitimate answer. A kv call that fails is now a failure.
 
 The repo-wide harness runs this as the `rust-client` suite:
 

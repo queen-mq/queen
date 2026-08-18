@@ -11,7 +11,10 @@ sourceOfTruth:
 digest: >-
   The surface is push, pop and acknowledge plus one container, `POST /api/v1/transaction`, which
   commits any number of pushes and acks across any number of queues, partitions and consumer
-  groups in one PostgreSQL transaction. The queue and partition are created by the push that names
+  groups in one PostgreSQL transaction. Two optional top-level arrays ride that same commit, and
+  every broker serves them: `kv`, a transactional key/value store where every
+  write carries an expiry, and `timers`, a message promised now and delivered later, cancellable
+  until it fires and with no recurrence. The queue and partition are created by the push that names
   them, so nothing is provisioned first. An acknowledgement commits a position, not one message,
   so acking the last message of a batch completes the batch. A consumer group holds at most one
   leased batch per partition, so parallelism comes from partitions, not from more consumers on
@@ -28,6 +31,11 @@ is not a fourth operation but a container.
 and acks, any number of each, spanning any number of queues, partitions and consumer groups, and
 commits the whole array in one PostgreSQL transaction. Every application in this section is those
 three operations and that container in a different arrangement.
+
+The container takes two more arrays, and they are top-level fields of the request body rather than
+entries in `operations`: `kv` writes [transactional state](/use/kv) and `timers` schedules or cancels
+a [timer](/use/timers). Both are served by every broker, and a bundle that carries neither is byte for
+byte the call it was before they existed.
 
 <Render file="snippets/js-push" />
 

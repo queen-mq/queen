@@ -45,7 +45,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [js, go, py, cli, cpp, rust-client, mesh]
+        # `http` is the kv/timer wire with no SDK in the way (PLAN_KV_TIMERS.md
+        # §10.2). It is a cell of its own rather than a step of another because
+        # it is the executable specification the six SDK cells are read against:
+        # when it and an SDK cell disagree, the SDK is wrong.
+        suite: [js, go, py, cli, cpp, rust-client, mesh, http]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4

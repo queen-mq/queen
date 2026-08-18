@@ -1,0 +1,46 @@
+
+PERF GATE — PLAN_KV_TIMERS §15, row "Perf gate", closes F4.
+
+  "bundle senza kv e senza timers, prima e dopo la patch, payload byte-identico: [...] CPU per
+   messaggio entro l'1%, che e' la metrica che ha catturato la regressione push del seg v2 (la
+   latenza e' troppo rumorosa a questi ordini di grandezza). Piu': pg_stat_statements non deve
+   mostrare NESSUNA query nuova con calls > 0."
+
+Two questions, one run each side:
+
+  Q1  Does a bundle that carries no `kv` and no `timers` cost more CPU after the patch?
+      Gate: median CPU microseconds per message, after vs before, within ±1%.
+  Q2  Did the patch add a query that EXECUTES on a bundle that uses neither feature?
+      Gate: no statement in pg_stat_statements with calls > 0 that the before run did not have.
+
+Q2 is not a weaker restatement of Q1. §6.3 promises zero added statements, zero added plan
+nodes and zero added locks when the arrays are absent, and the way that promise dies is a
+`FROM jsonb_array_elements(COALESCE(p->'kv','[]'))` folded into a UNION with the pushes: one
+extra Function Scan and one nested loop inside a statement that runs on EVERY bundle. At the
+rates this thing runs at, that is well under 1% of CPU and completely invisible to Q1 — and it
+is a permanent tax on people who will never turn the feature on. Q2 sees it immediately, and
+names it.
+
+USAGE
+  # build the two images from the two commits, then:
+  GATE_IMAGE=queen:gate-before ./perf-gate-hotpath.sh capture before
+  GATE_IMAGE=queen:gate-after  ./perf-gate-hotpath.sh capture after
+  ./perf-gate-hotpath.sh compare before after
+
+KNOBS (env)
+  GATE_IMAGE        broker image for this capture           (default queen:test)
+  GATE_REPS         repetitions per capture                 (default 3)
+  GATE_BUNDLES      wire bundles per repetition             (default 20000)
+  GATE_ITEMS        messages per bundle                     (default 20)
+  GATE_WORKERS      concurrent closed loops                 (default 8)
+  GATE_PARTITIONS   destination partitions                  (default 16)
+  GATE_TOLERANCE_PCT       the §15 number                   (default 1.0)
+  GATE_RATE_TOLERANCE_PCT  throughput divergence that voids the comparison (default 10)
+  GATE_ALLOW_NEW    extended regex waiving an IDENTIFIED background statement in Q2
+  GATE_BROKER_CPUS / GATE_PG_CPUS / GATE_SYNC_COMMIT / GATE_POOL_SIZE  see compose.yml
+
+GATE_REPS below 3 makes the gate report UNRESOLVED on purpose: a single repetition has a
+spread of 0%, which then satisfies the resolution check by accident.
+
+The capture is destructive to its own stack only: project `kvtgate`, its own volume, its own
+port. It never touches :5432.

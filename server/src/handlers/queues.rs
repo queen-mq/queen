@@ -284,6 +284,40 @@ pub async fn handle_list_queues(
         }
     }
 
+    // PLAN_KV_TIMERS §9.8 P2: four TOP-LEVEL fields on the response the proxy's
+    // reconciler already polls, so that the storage quota — which is a live hard
+    // gate, not a no-op — can see the bytes of the two new tables. They have no
+    // queue, so there is no per-queue entry they could ride on, and without this
+    // they are the only place in the product where a tenant occupies disk that
+    // no quota can measure.
+    //
+    // Read from the sweeper's cached measurement via the db.rs wrapper (a
+    // primary-key lookup), NEVER counted here: a cloud reconciler polls this
+    // route every ten seconds per cell.
+    //
+    // On a failure the fields are OMITTED rather than sent as zero, and that
+    // distinction is the contract: the proxy reads absent fields as zero AND
+    // warns, so a cell that cannot answer produces a loud zero instead of a
+    // silent under-count. Sending a zero we do not believe would be the silent
+    // one.
+    match db::kv_usage_snapshot(&client, tenant.as_str()).await {
+        Ok(usage) => {
+            let (kr, kb, tr, tb) = usage.unwrap_or((0, 0, 0, 0));
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("kvRows".to_string(), serde_json::json!(kr));
+                obj.insert("kvBytes".to_string(), serde_json::json!(kb));
+                obj.insert("timerRows".to_string(), serde_json::json!(tr));
+                obj.insert("timerBytes".to_string(), serde_json::json!(tb));
+            }
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "queue listing: kv/timer usage unavailable, omitting the quota fields"
+            );
+        }
+    }
+
     json(StatusCode::OK, v.to_string())
 }
 

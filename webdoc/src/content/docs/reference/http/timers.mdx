@@ -1,0 +1,284 @@
+---
+title: "Timer routes"
+description: "Schedule, reschedule and cancel a message that has not been produced yet: the closed status taxonomy, the contract absent carries, and why cancel has a route of its own."
+type: reference
+sidebar:
+  order: 18
+  label: timers
+sourceOfTruth:
+  - server/src/handlers/timers.rs
+  - server/src/main.rs
+  - server/src/switches.rs
+  - server/src/quota.rs
+  - server/sql/procedures/025_log_timers.sql
+verifiedBy:
+  - server/tests/timers_fault_injection.rs
+  - server/tests/timers_tenant_isolation.rs
+---
+
+A timer is a message that is not in the log yet. Scheduling one promises a frame in a queue at a
+future instant; cancelling one withdraws the promise, if it is still yours to withdraw.
+
+<Aside type="note">
+Every broker registers these routes and runs the fire. There is no variable that turns them on, and a
+`404` here means the path is wrong, never that the cell lacks the surface.
+</Aside>
+
+## The routes
+
+| Method | Path | Access level | What it does |
+| --- | --- | --- | --- |
+| `POST` | `/api/v1/timers` | write-only | schedule, reschedule and cancel, in one batch |
+| `DELETE` | `/api/v1/timers/:queue/*timerKey` | read-write | cancel, on its own route |
+| `GET` | `/api/v1/timers/:queue/*timerKey` | read-only | peek one timer, with its payload |
+| `GET` | `/api/v1/timers/:queue` | read-only | keyset list of a queue's pending timers |
+
+`POST` is `write-only` because scheduling a timer **is** a produce operation: the timer becomes a
+message, so a produce-only credential must be able to do it.
+
+There is no tenant-wide list. The queue is a path segment rather than a filter precisely so that no
+call can ask for "every timer of this tenant": that is a scan, and this is the first surface in the
+product whose call rate is decided by somebody else's web traffic.
+
+`*timerKey` is a catch-all, so `tenant/42` is a legal key written naturally.
+
+## Cancel is not schedule
+
+`DELETE /api/v1/timers/:queue/*timerKey` exists as a separate route with a separate authorization
+class, and this is a correctness requirement rather than a convenience.
+
+`POST /api/v1/timers` carries cancels in the same array as schedules. Classifying all timer traffic
+as a produce variant, which is otherwise right, would therefore `403` the **cancels** of a tenant
+that is over quota or over storage. Meanwhile the fire never switches itself off: no degradation
+rung may stop it, only an operator can. That tenant would keep producing messages it cannot stop,
+up to the horizon or until somebody intervenes, and the block would produce the exact opposite of
+its purpose.
+
+So: the `DELETE` route passes only the boot flag. Not a paused schedule, not a missing grant, not a
+full quota may refuse it. A mixed batch sent to `POST` when the cluster is blocked is refused
+**whole**, explicitly, rather than having half of it silently dropped, and the refusal carries an
+`x-queen-timers-hint` header naming the route that always works.
+
+An SDK that cancels should use the `DELETE` route. One that cancels inside a batch has chosen the
+schedule route's authorization.
+
+## Scheduling
+
+```json
+{ "operations": [
+  { "op": "schedule",
+    "queue": "reminders",
+    "timerKey": "trial:acme:day7",
+    "delayMs": 604800000,
+    "txn": "trial-acme-day7-v1",
+    "payload": "eyJraW5kIjoiZGF5NyJ9",
+    "partition": "acme" }
+] }
+```
+
+| Field | Required | Notes |
+| --- | --- | --- |
+| `op` | yes | `schedule`, `reschedule` or `cancel` |
+| `queue` | yes | destination queue |
+| `timerKey` | yes | identity, together with the queue and the tenant |
+| `delayMs` | schedule | **milliseconds from now**. A value in the past is legal and fires on the first cycle |
+| `txn` | schedule | the transaction id the delivered frame will carry |
+| `payload` | schedule | **base64** |
+| `partition` | no | defaults to `Default` |
+| `payloadZstd` | no | the payload is zstd-compressed |
+| `encrypted` | no | refused when the destination queue encrypts at rest: the broker sets it |
+
+`schedule` and `reschedule` are the **same upsert** on `(tenant, queue, timerKey)`, so a client
+retry after a crash is safe by construction. A reschedule resets the attempt budget and clears the
+last error: a rescheduled timer is a new timer under an old name, and a freshly corrected payload
+must not inherit the budget spent by the one that was failing.
+
+Each reschedule mints a **new** `txn`, because it is a new message. That keeps "this timer,
+rescheduled, delivered this message" answerable without ambiguity.
+
+Only relative durations are on this wire; an absolute instant is not expressible. There is one
+clock, PostgreSQL's, and no inter-broker skew can enter anywhere. The product's rule for units is
+worth stating once, because the wire carries both:
+
+> Durations that can be sub-second are in **milliseconds**; the ones that cannot are in
+> **seconds**.
+
+A 250 ms retry backoff is a real and central use of timers, so `delayMs`. A sub-second TTL is a real
+use for nobody, so `ttlSeconds` on the [KV routes](/reference/http/kv).
+
+### Fields the server owns
+
+`producerSub`, `messageId` and `tenant` are not input, and neither is any underscore-prefixed field.
+Supplying one is a `400`, never a silent drop. A tenant that could post
+`{"producerSub":"billing-service"}` would get, a second later, a frame in the log whose provenance
+is attested by the broker and forged by the client, and `producerSub` is the one non-repudiable
+field a frame has.
+
+The `messageId` is minted at schedule time and returned in the response, so a client can correlate
+the delivered frame without a second call.
+
+### `deliverAt` is a floor
+
+`deliverAt` means "not before", never "exactly at". A healthy timer lands within about ten
+milliseconds of the sweeper's minimum sleep. Above `QUEEN_SWEEPER_MAX_SLEEP_MS` you have a wake-up
+problem, not a load problem, and `queen_timers_fire_lag_seconds` is the series that says which.
+
+Order within a batch of due timers is decided **at the fire, not at the schedule**. Two timers on
+the same queue and partition that mature in the same cycle enter the log in expiry order, which is
+not necessarily the order they were scheduled in.
+
+There is no recurrence. A timer fires once; the next one is scheduled by whoever handled the first.
+
+## Encryption happens at schedule
+
+When the destination queue encrypts at rest, the payload is encrypted when the timer is
+**scheduled**, not when it fires. A timer's push happens inside the sweeper, so encrypting late
+would leave the payload in cleartext at rest for as long as the timer waits.
+
+Two consequences follow, and both are declared rather than discovered: a queue whose encryption is
+switched **on** after a timer was scheduled delivers that frame in cleartext, and a key rotated
+between schedule and fire makes that frame undecryptable.
+
+## The closed `status` taxonomy
+
+Every element of a schedule or cancel response carries `ok` and exactly one `status`, from this list
+and no other:
+
+| `status` | `ok` | When |
+| --- | --- | --- |
+| `scheduled` | `true` | the timer did not exist and now does |
+| `rescheduled` | `true` | it existed and has been replaced |
+| `cancelled` | `true` | it existed, was not claimed, and is gone |
+| `absent` | **`false`** | no row: see below, this one is not what it looks like |
+| `too_late` | `false` | a broker holds the claim and is about to deliver it |
+
+Closed because a client that has to tell these apart writes a `switch`.
+
+A successful schedule returns `{ok, status, queue, timerKey, txn, messageId, deliverAt}`.
+
+### `too_late` is a verdict, not a failure
+
+A cancel or a reschedule that lands on a claimed timer answers `too_late` with **HTTP 200**. The
+broker holding the claim has already decompressed and packed that payload and is about to commit
+it. Granting the cancel would leave "did it go out?" with no answer, and granting the reschedule
+would deliver the old payload after the client believes it replaced it.
+
+The window is bounded by the lease, at most `QUEEN_SWEEPER_LEASE_MS`, which is also the longest a
+cancel can answer `too_late` after a broker dies. The remedy is a new key, or waiting for delivery
+and acting on the message.
+
+A timer in **backoff** after a failed fire is not claimed, and cancelling it succeeds.
+
+### The contract `absent` carries
+
+This is the one place on this surface where a user gets hurt, so it is in bold:
+
+> **`absent` means "no longer pending". It may mean already delivered. The authority is the log:
+> look for the timer's `txn` in the destination queue.**
+
+Delivery deletes the row rather than marking it done, so there is **no tombstone**. Once the lease
+window has passed, a delivered timer has no row, and a cancel for it answers `absent`.
+
+Two operational consequences follow, and neither is optional.
+
+**The response echoes the `txn` you supplied**, so the check needs no second API. Send it as the one
+query parameter this route reads:
+
+```bash
+curl -sS -X DELETE 'http://localhost:6632/api/v1/timers/reminders/trial:acme:day7?txn=trial-acme-day7-v1'
+```
+
+```json
+{ "ok": false, "status": "absent", "queue": "reminders", "timerKey": "trial:acme:day7", "txn": "trial-acme-day7-v1" }
+```
+
+**A consumer that compensates must check state before compensating.** In a saga whose closing
+bundle cancels the compensation timer, the case "the timer fired 5 ms before the cancel" unwinds a
+reservation that was already shipped, and the cancel answered `absent` while looking like a
+success. The correct shape is the compensation consumer reading the saga's KV state first. It is the
+only correct shape, and nobody writes it by accident.
+
+`absent` carries `ok: false` for exactly that reason. The in-house lesson was already paid on queue
+deletion, where `deleted: false` with a `200` read as success to every client that trusted the
+field.
+
+A cancel for **another tenant's** timer also answers `absent`. Not revealing is right; saying
+`ok: true` would not be.
+
+<Aside type="caution">
+Nothing on the fire path defends against a `txn` that has already been delivered. The guarantee is
+"delete and push in one transaction", which makes a single fire attempt exactly-once, and that is
+the whole of it. Rescheduling a timer after it has fired, or reusing a `txn`, produces a second
+message in the log and no layer stops it.
+</Aside>
+
+## Peek and list
+
+`GET /api/v1/timers/:queue/*timerKey` returns one timer with its payload, base64 as stored:
+`{found, queue, timerKey, partition, deliverAt, txn, messageId, payload, payloadZstd, encrypted,
+producerSub, attempts, lastError, claimed, createdAt, updatedAt}`. A miss is `200` with
+`{"found": false}`, not a `404`.
+
+Peek does **not** decrypt. It is an inspection surface, and quietly decrypting what the fire will
+deliver as an envelope would misreport the thing being inspected.
+
+`claimed` is the single definition of "in somebody's hands", and a row in backoff reads
+`claimed: false` deliberately, because it is still cancellable.
+
+`GET /api/v1/timers/:queue` returns `{rows, truncated, nextAfter}`, without payloads. `after` is an
+exclusive keyset cursor over `timerKey`, stable across machines because the column carries a byte
+collation. `limit` defaults to 100 and is clamped rather than rejected, with `truncated` telling the
+truth.
+
+## Status codes
+
+| Code | When | `error` |
+| --- | --- | --- |
+| `200` | the call ran, whatever each operation decided | |
+| `400` | shape: no queue, no `timerKey`, no `delayMs`, no `txn`, a payload that is not base64, a server-owned field, a duplicated `(queue, timerKey)` | `timers_bad_request` |
+| `403` | the pending-timer quota is exhausted | `timers_quota_exceeded` |
+| `403` | `delayMs` is beyond the horizon in force | `timer_horizon_exceeded` |
+| `403` | the feature is not on the plan, or tenancy is on and there is no quota row | `feature_gated` |
+| `413` | the decoded payload is over its ceiling | `payload_too_large` |
+| `429` | rate exceeded, with `Retry-After` | `rate_limited` |
+| `503` | pool exhausted, the database is slow, or an operator paused scheduling, with `Retry-After` | `timers_unavailable`, `timers_disabled` |
+
+The same one-sentence rule governs the three refusals as on the KV routes: `429` retry later, `403`
+retry forever and it will not help, `503` not your fault.
+
+A horizon overrun is `403` and not `400` because it is a plan verdict rather than a malformed
+request. The horizon is finite by default, ninety days, and it is what keeps the row quota cyclic
+instead of permanent: with an infinite horizon a tenant fills its timer quota once and never frees
+it, while with a finite one the worst case is computable as the schedule rate times the horizon. A
+tenant's own horizon narrows the cell's and never widens it.
+
+The payload ceiling is derived, `min(1 MiB, the plan's max payload)`, and never independent. A timer
+becomes a message: a ceiling of its own would be a service entrance past the plan's own payload
+limit.
+
+## Metering
+
+**You are billed for the promise, not for the delivery.**
+
+Each `schedule` operation in a batch counts as one message, and each `reschedule` counts as another,
+because it is the same upsert and indistinguishable from a schedule. A `cancel` counts zero and does
+**not** refund. The fire counts zero, because it was already billed.
+
+The unit is the operation and not the call: with a cap of 256 operations per call, counting per call
+would undercount by up to 256 times.
+
+The reason is structural rather than commercial. A timer's fire happens in the sweeper, inside the
+broker, and never crosses the gateway, so it is the one way in the whole product to produce a
+message the gateway's meter cannot see. Billing the promise is the only form that does not require
+rewriting the metering model.
+
+## Timers that keep failing
+
+A fire that fails is retried with exponential backoff. The attempt budget is spent only on
+**permanent** and **configuration** failures: a serialization error, a deadlock, or a connection,
+resource or operator-intervention class is transient, backs off, and costs nothing.
+
+After `QUEEN_SWEEPER_MAX_ATTEMPTS` attempts, default 5, the timer goes to the destination queue's
+DLQ under a synthetic consumer group. Replaying that DLQ row is refused explicitly: the frame never
+had a consumer group, its offset is not a position, and republishing it into a phantom group has no
+defined meaning.

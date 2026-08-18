@@ -10,6 +10,44 @@
 pub enum Feature {
     Streams,
     Traces,
+    /// PLAN_KV_TIMERS.md §9.8 P1. `plans.features` is deliberately open JSONB,
+    /// so gating these is a data change, not a migration — and until a plan
+    /// says otherwise the key is missing, which `parse_features` reads as
+    /// false. A cell that has never heard of KV therefore denies it.
+    Kv,
+    Timers,
+}
+
+/// Which half of PLAN_KV_TIMERS.md §9.5 a gated request sits on. The plan
+/// gate (`Feature`) says whether the tenant may touch the family at all; this
+/// says what happens to the request when the tenant is over a quota, and the
+/// two decisions are genuinely independent.
+///
+/// The trap this exists to avoid (§9.6): `POST /api/v1/timers` carries
+/// `cancel` in the SAME array as `schedule`. Classifying the family as a
+/// Produce variant — which is what makes the storage/monthly blocks apply
+/// automatically — would 403 the cancels too, while nothing stops an
+/// already-scheduled fire on its own. The tenant would keep producing
+/// messages it has lost the ability to stop, until the horizon or an operator.
+/// The block would produce the opposite of its purpose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GatedOp {
+    /// GET. Read-level authorization, never quota-blocked.
+    Read,
+    /// Grows stored state (PUT). Write-level authorization, blocked exactly
+    /// like `Produce` — this is the half a storage quota is FOR.
+    Grow,
+    /// Write-level authorization and never quota-blocked. Two populations:
+    /// the DELETE/cancel paths, which are how a full tenant gets back under
+    /// its quota and how a firing timer gets stopped (§9.5, §9.6); and the
+    /// pre-existing gated surfaces (streams, traces), which have never been
+    /// on the storage gate and must not silently join it here.
+    Open,
+    /// One array, both halves: `POST /api/v1/kv` and `POST /api/v1/timers`.
+    /// Blocked only when the body really contains a growing op, and then the
+    /// WHOLE batch is refused with a named reason rather than half of it
+    /// silently dropped (§9.6).
+    Mixed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,8 +60,9 @@ pub enum RouteClass {
     QueueAdmin,
     /// listings, status, analytics, dlq/messages reads
     Read,
-    /// plan-gated feature surfaces
-    Gated(Feature),
+    /// plan-gated feature surfaces. The `GatedOp` half is the quota decision
+    /// (§9.5/§9.6), NOT a second feature flag.
+    Gated(Feature, GatedOp),
     /// Cell-wide surfaces a live OPERATOR principal may open (F3). Not
     /// tenant-scopable, so they are unreachable for every tenant credential —
     /// a non-operator gets the same 404 a `Blocked` route gives, and on a cell
@@ -134,11 +173,58 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
     }
 
     // --- gated features ---
+    // Streams and traces predate the GatedOp split and are `Open`: they have
+    // never been on the storage gate, and giving them one here would be a
+    // silent behaviour change smuggled in with an unrelated feature.
     if p.starts_with("/streams/") {
-        return RouteClass::Gated(Feature::Streams);
+        return RouteClass::Gated(Feature::Streams, GatedOp::Open);
     }
     if p == "/api/v1/traces" && *m == Method::POST {
-        return RouteClass::Gated(Feature::Traces);
+        return RouteClass::Gated(Feature::Traces, GatedOp::Open);
+    }
+
+    // --- kv (PLAN_KV_TIMERS.md §8.1 routes, §9.5 quota rule) ---
+    // The batch endpoint is the COMPLETE surface and the only one that accepts
+    // `getPrefix` and `incr`. Any other method on it is a shape the broker does
+    // not register, so it stays fail-closed here rather than travelling to a
+    // 405. Same reasoning for the `*key` routes: exactly three methods exist.
+    if p == "/api/v1/kv" || p == "/api/v1/kv/" {
+        return if *m == Method::POST {
+            RouteClass::Gated(Feature::Kv, GatedOp::Mixed)
+        } else {
+            // Also the enforcement of §5.5: there is no prefix-in-a-query-string
+            // surface, so a GET here is not a thing that can be made to work.
+            RouteClass::Blocked
+        };
+    }
+    if p.starts_with("/api/v1/kv/") {
+        // `*key` is a catch-all, so everything under here is one key route.
+        return match *m {
+            Method::GET => RouteClass::Gated(Feature::Kv, GatedOp::Read),
+            Method::PUT => RouteClass::Gated(Feature::Kv, GatedOp::Grow),
+            // A DELETE is how a tenant at its row cap gets back under it.
+            Method::DELETE => RouteClass::Gated(Feature::Kv, GatedOp::Open),
+            _ => RouteClass::Blocked,
+        };
+    }
+
+    // --- timers (§8.1, §9.6) ---
+    if p == "/api/v1/timers" || p == "/api/v1/timers/" {
+        return if *m == Method::POST {
+            RouteClass::Gated(Feature::Timers, GatedOp::Mixed)
+        } else {
+            RouteClass::Blocked
+        };
+    }
+    if p.starts_with("/api/v1/timers/") {
+        return match *m {
+            // peek (`/:queue/*timerKey`) and list (`/:queue`)
+            Method::GET => RouteClass::Gated(Feature::Timers, GatedOp::Read),
+            // THE cancel. Its own route and its own class precisely so that no
+            // quota, storage block or billing hold can ever reach it (§9.6).
+            Method::DELETE => RouteClass::Gated(Feature::Timers, GatedOp::Open),
+            _ => RouteClass::Blocked,
+        };
     }
 
     // --- reads ---
@@ -226,9 +312,99 @@ mod tests {
         );
         assert_eq!(
             classify(&Method::GET, "/streams/v1/queries"),
-            RouteClass::Gated(Feature::Streams)
+            RouteClass::Gated(Feature::Streams, GatedOp::Open)
         );
         assert_eq!(classify(&Method::GET, "/"), RouteClass::Read);
+    }
+
+    // ---- PLAN_KV_TIMERS.md §9.8 P1: the kv + timers gate ----
+
+    #[test]
+    fn kv_routes_are_gated_and_split_by_what_they_do() {
+        use GatedOp::*;
+        assert_eq!(
+            classify(&Method::POST, "/api/v1/kv"),
+            RouteClass::Gated(Feature::Kv, Mixed)
+        );
+        assert_eq!(
+            classify(&Method::GET, "/api/v1/kv/orders/9f1/items"),
+            RouteClass::Gated(Feature::Kv, Read),
+            "the key is a catch-all: slashes inside it are still one key route"
+        );
+        assert_eq!(
+            classify(&Method::PUT, "/api/v1/kv/orders/9f1"),
+            RouteClass::Gated(Feature::Kv, Grow)
+        );
+        assert_eq!(
+            classify(&Method::DELETE, "/api/v1/kv/orders/9f1"),
+            RouteClass::Gated(Feature::Kv, Open),
+            "a delete is how a tenant at its cap gets back under it (§9.5)"
+        );
+    }
+
+    /// §5.5: `getPrefix` lives only inside the POST batch. There is no
+    /// prefix-in-a-query-string surface, so a GET on the batch path is not a
+    /// shape that may ever be made to work — it fails closed at the proxy.
+    #[test]
+    fn kv_batch_path_is_post_only() {
+        for m in [Method::GET, Method::PUT, Method::DELETE, Method::PATCH] {
+            assert_eq!(classify(&m, "/api/v1/kv"), RouteClass::Blocked, "{m} /api/v1/kv");
+        }
+        assert_eq!(classify(&Method::PATCH, "/api/v1/kv/ns/k"), RouteClass::Blocked);
+    }
+
+    /// §9.6, the whole point of the split. The cancel route must never come
+    /// back as anything a quota gate can refuse.
+    #[test]
+    fn timer_cancel_is_never_on_the_blockable_half() {
+        assert_eq!(
+            classify(&Method::DELETE, "/api/v1/timers/orders/campaign-42"),
+            RouteClass::Gated(Feature::Timers, GatedOp::Open)
+        );
+        // Peek and list are reads.
+        assert_eq!(
+            classify(&Method::GET, "/api/v1/timers/orders/campaign-42"),
+            RouteClass::Gated(Feature::Timers, GatedOp::Read)
+        );
+        assert_eq!(
+            classify(&Method::GET, "/api/v1/timers/orders"),
+            RouteClass::Gated(Feature::Timers, GatedOp::Read)
+        );
+        // The batch carries both halves, so its class says "look at the body".
+        assert_eq!(
+            classify(&Method::POST, "/api/v1/timers"),
+            RouteClass::Gated(Feature::Timers, GatedOp::Mixed)
+        );
+        assert_eq!(classify(&Method::PUT, "/api/v1/timers"), RouteClass::Blocked);
+    }
+
+    /// The neighbours must not be dragged into the new families by a prefix
+    /// that is one character too short.
+    #[test]
+    fn kv_and_timer_prefixes_do_not_swallow_neighbours() {
+        assert_eq!(classify(&Method::POST, "/api/v1/kvstore"), RouteClass::Blocked);
+        assert_eq!(classify(&Method::POST, "/api/v1/timersets"), RouteClass::Blocked);
+        // and the families themselves never fall through to the open Read set
+        assert_ne!(classify(&Method::GET, "/api/v1/kv/ns/k"), RouteClass::Read);
+        assert_ne!(classify(&Method::GET, "/api/v1/timers/q"), RouteClass::Read);
+    }
+
+    /// Regression guard for the §9.6 trap in its original form: if anyone ever
+    /// "simplifies" these to Produce, every cancel starts answering 403 while
+    /// the fire keeps going. Fail here, loudly, instead of in production.
+    #[test]
+    fn no_kv_or_timer_route_is_classified_as_produce() {
+        for (m, p) in [
+            (Method::POST, "/api/v1/kv"),
+            (Method::PUT, "/api/v1/kv/ns/k"),
+            (Method::DELETE, "/api/v1/kv/ns/k"),
+            (Method::GET, "/api/v1/kv/ns/k"),
+            (Method::POST, "/api/v1/timers"),
+            (Method::DELETE, "/api/v1/timers/q/k"),
+            (Method::GET, "/api/v1/timers/q/k"),
+        ] {
+            assert_ne!(classify(&m, p), RouteClass::Produce, "{m} {p}");
+        }
     }
 
     /// The operator subset is a CLOSED list. Anything not on it that used to

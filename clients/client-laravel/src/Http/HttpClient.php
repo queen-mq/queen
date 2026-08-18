@@ -192,6 +192,8 @@ class HttpClient
         if ($statusCode >= 400) {
             $error = "HTTP {$statusCode}";
             $errorCode = null;
+            $reason = null;
+            $detail = null;
             if ($responseBody) {
                 $decoded = json_decode($responseBody, true);
                 if (isset($decoded['error'])) {
@@ -204,13 +206,36 @@ class HttpClient
                 if (isset($decoded['code']) && is_string($decoded['code'])) {
                     $errorCode = $decoded['code'];
                 }
+                // The kv/timers envelope carries two more fields: `reason`, a
+                // finer stable identifier, and `detail`, which names the
+                // offending operation index. Dropping them would leave the
+                // caller with "kv_bad_request" and nothing to act on, on the
+                // one surface whose ops arrive in batches.
+                if (isset($decoded['reason']) && is_string($decoded['reason'])) {
+                    $reason = $decoded['reason'];
+                }
+                if (isset($decoded['detail']) && is_string($decoded['detail'])) {
+                    $detail = $decoded['detail'];
+                }
             }
 
             $retryAfterSeconds = $statusCode === 429
                 ? $this->parseRetryAfter($response->getHeaderLine('Retry-After'))
                 : null;
 
-            throw new HttpException($error, $statusCode, 0, null, $errorCode, $retryAfterSeconds);
+            // The message stays the code so existing string-free branching is
+            // unchanged, with the finer identifier and the human half appended
+            // when the server sent them — a failing assertion that reads
+            // "kv_bad_request" and nothing else costs an hour.
+            $message = $error;
+            if ($reason !== null && $reason !== $error) {
+                $message .= ": {$reason}";
+            }
+            if ($detail !== null) {
+                $message .= " ({$detail})";
+            }
+
+            throw new HttpException($message, $statusCode, 0, null, $errorCode, $retryAfterSeconds, $reason, $detail);
         }
 
         if (empty($responseBody)) {

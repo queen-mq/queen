@@ -1,0 +1,725 @@
+---
+params: []
+description: "Verified snippet extracted from examples/apps/go/saga/main.go."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from examples/apps/go/saga/main.go by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```go title="examples/apps/go/saga/main.go"
+//
+// A booking saga whose compensation is a timer, and whose every step is a row
+// in the same PostgreSQL as the queue.
+//
+// The war story is a room hold that never came back. A booking system held
+// inventory when a reservation started and released it when the payment either
+// settled or failed, and the release lived in a time.AfterFunc inside the
+// worker. A rolling deploy replaced the workers; every hold in flight lost its
+// release; and a fortnight later somebody noticed a hotel had been sold out on
+// paper for nine nights it had spent empty.
+//
+// The release was not slow, it was in the wrong place. A compensation is not a
+// timeout, it is an obligation, and an obligation has to outlive the process
+// that took it on. Here the gate, the saga state, the compensation timer, the
+// payment request and the acknowledgement are ONE PostgreSQL transaction. If
+// the room is held, the compensation exists. If the room is not held, nothing
+// else happened either. There is no interval in between for a deploy to land
+// in.
+//
+//	bookings
+//	  |-- group "reserver"   ONE bundle: gate + state + timer + push + ack
+//	        |-- payments (partitioned by booking)
+//	        |     `-- group "payer"    confirm + CANCEL the timer + ack, one bundle
+//	        `-- expiries (delivered by the timer, at the hold's expiry)
+//	              `-- group "compensator"   reads the state BEFORE compensating
+//
+// Run it:
+//
+//	QUEEN_URL=http://localhost:6632 GOWORK=off go run ./saga
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	queen "github.com/smartpricing/queen/clients/client-go"
+)
+
+// A suffix on the queue names AND on the KV namespace. The queues need it
+// because delete-then-recreate leaves stale partition state for up to 30
+// seconds; the namespace needs it for the opposite reason -- a saga row
+// outlives the run that wrote it, so a second run under the same namespace
+// would find every booking already held and measure nothing.
+var runID = strconv.FormatInt(time.Now().UnixMilli(), 36)
+
+var (
+	bookingsQueue = "app-go-saga-bookings-" + runID
+	paymentsQueue = "app-go-saga-payments-" + runID
+	expiriesQueue = "app-go-saga-expiries-" + runID
+	ns            = "app-go-saga-" + runID
+)
+
+const (
+	reserverGroup    = "reserver"
+	payerGroup       = "payer"
+	compensatorGroup = "compensator"
+
+	// How long a room stays held before the compensation fires. Short enough
+	// for a test, and in production it is the only number that changes.
+	//
+	// It has to outlast the reserve and pay phases, or a timer would fire
+	// before the payment that cancels it and the run would be measuring a race
+	// rather than a design. deliverAt is a floor and never a ceiling, so a
+	// timer can only be late: a margin here is sound, where a margin in the
+	// other direction would not be.
+	hold = 15 * time.Second
+
+	// Every phase below ends on a COUNT, and this is the deadline behind the
+	// count. Never wait for silence: a phase that stops when nothing has
+	// arrived for a while passes on a broker that delivered nothing at all.
+	// Reaching the deadline ends the phase short, and the count check that
+	// follows is what reports it.
+	phaseMillis = 20000
+
+	// The compensation phase gets its own, longer deadline. A timer fires no
+	// earlier than its delay plus one sweeper cycle, and a broker whose timer
+	// table has been empty for a while wakes up lazily.
+	timerDeadlineMillis = 90000
+
+	// B-3's card is declined, so its saga never reaches "confirmed" and the
+	// timer is the thing that gives the room back. It is the compensation
+	// actually doing its job.
+	declined = "B-3"
+
+	// B-4 pays, but its cancel is deliberately skipped, which makes the race
+	// deterministic: a cancel that arrives after the fire answers `absent`, and
+	// ABSENT MAY MEAN ALREADY DELIVERED. So the compensation for a confirmed
+	// booking has to be refused by the consumer that receives it, never
+	// prevented by the cancel alone.
+	cancelSkipped = "B-4"
+)
+
+// Four bookings, five submissions. B-2 is submitted twice: the same booking,
+// two messages, which is what a redelivery looks like from the reserver's side
+// and the reason the bundle opens with a gate rather than with a check.
+type booking struct {
+	BookingID string `json:"bookingId"`
+	Room      string `json:"room"`
+	Cents     int    `json:"cents"`
+}
+
+var bookingsIn = []booking{
+	{BookingID: "B-1", Room: "101", Cents: 24000},
+	{BookingID: "B-2", Room: "102", Cents: 31000},
+	{BookingID: "B-2", Room: "102", Cents: 31000},
+	{BookingID: "B-3", Room: "103", Cents: 18000},
+	{BookingID: "B-4", Room: "104", Cents: 27000},
+}
+
+var bookingIDs = []string{"B-1", "B-2", "B-3", "B-4"}
+
+// sagaState is what the KV row holds. It is a struct rather than a map because
+// the value comes back as raw JSON and this program reads a field of it on
+// every hop: a typo in a map key would read as "the saga is not held" and the
+// run would pass for the wrong reason.
+type sagaState struct {
+	Step  string `json:"step"`
+	Room  string `json:"room"`
+	Cents int    `json:"cents"`
+}
+
+// The saga's state key. It derives from the booking id, which is also the
+// partition key of the payments queue: that is what makes the payer's
+// read-then-write safe, and it is stated here because it is a property of the
+// naming and nothing enforces it.
+func sagaKey(bookingID string) string { return "saga:" + bookingID }
+
+var checks int
+
+// assert is the whole test framework here. Go has no exceptions, so a failed
+// check is an error that unwinds run() and is printed once, at the bottom.
+func assert(condition bool, description string) error {
+	if !condition {
+		return fmt.Errorf("%s", description)
+	}
+	checks++
+	fmt.Printf("  ok: %s\n", description)
+	return nil
+}
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "\nFAIL: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("\nPASS: %d checks\n", checks)
+}
+
+func run() error {
+	brokerURL := os.Getenv("QUEEN_URL")
+	if brokerURL == "" {
+		brokerURL = "http://localhost:6632"
+	}
+
+	// Every call in the Go client takes a context, and it is the only deadline
+	// there is. This one bounds the whole program, so a broker that stops
+	// answering ends the run instead of wedging it.
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	client, err := queen.New(brokerURL)
+	if err != nil {
+		return fmt.Errorf("create client: %w", err)
+	}
+	defer client.Close(context.Background())
+
+	// ------------------------------------------------------------------ purge
+	//
+	// Three things to remove, and the first two are the ones that are easy to
+	// forget. The saga rows live in their own table, and a pending timer lives
+	// in the staging table keyed by NAME: neither is reached by deleting the
+	// queue, and a timer whose queue no longer exists still fires and
+	// provisions it again on the way out.
+	//
+	// Deferred rather than run at the end, because a run that FAILED is
+	// exactly the run whose leftovers matter: an armed timer would deliver
+	// into the next run and a surviving saga row would make the next run pass
+	// without holding anything.
+	//
+	// Best effort throughout, on its own context: a purge that reported its
+	// own trouble as the verdict would hide the real one.
+	defer func() {
+		purgeCtx, purgeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer purgeCancel()
+		for _, bookingID := range bookingIDs {
+			if _, err := client.Timers().Cancel(purgeCtx, expiriesQueue, bookingID); err != nil {
+				fmt.Fprintf(os.Stderr, "  (purge incomplete: cancel %s: %v)\n", bookingID, err)
+			}
+			if _, err := client.KV().Delete(purgeCtx, ns, sagaKey(bookingID)); err != nil {
+				fmt.Fprintf(os.Stderr, "  (purge incomplete: delete %s: %v)\n", sagaKey(bookingID), err)
+			}
+		}
+		for _, q := range []string{bookingsQueue, paymentsQueue, expiriesQueue} {
+			if _, err := client.Queue(q).Delete().Execute(purgeCtx); err != nil {
+				fmt.Fprintf(os.Stderr, "  (purge incomplete: delete %s: %v)\n", q, err)
+			}
+		}
+	}()
+
+	fmt.Printf("broker %s\n", brokerURL)
+
+	for _, q := range []string{bookingsQueue, paymentsQueue, expiriesQueue} {
+		if _, err := client.Queue(q).
+			Config(queen.QueueConfig{LeaseTime: 30, RetryLimit: 3}).
+			Create().Execute(ctx); err != nil {
+			return fmt.Errorf("create %s: %w", q, err)
+		}
+	}
+
+	// ---------------------------------------------------------------- queuing
+	fmt.Println("\nsubmitting bookings")
+	for i, b := range bookingsIn {
+		if _, err := client.Queue(bookingsQueue).
+			Push(b).
+			// Distinct transaction ids on purpose. Deduplication would swallow
+			// the duplicate submission and the gate would never be tested, and
+			// a real redelivery arrives with an identity of its own too.
+			TransactionID(fmt.Sprintf("submit-%d-%s", i, b.BookingID)).
+			Execute(ctx); err != nil {
+			return fmt.Errorf("submit %s: %w", b.BookingID, err)
+		}
+	}
+	fmt.Printf("  %d submissions for %d bookings\n", len(bookingsIn), len(bookingIDs))
+
+	// -------------------------------------------------------------- reserving
+	//
+	// The bundle, and the whole point of the example: five things commit
+	// together, so there is no ordering between them left to get wrong.
+	//
+	// Concurrency is the default of one, so this handler runs on a single
+	// goroutine and the counters below need no lock.
+	fmt.Println("\nreserving")
+	var reserveDecisions []string
+	preconditionsLost := 0
+
+	err = client.Queue(bookingsQueue).
+		Group(reserverGroup).
+		SubscriptionMode(queen.SubscriptionModeAll).
+		AutoAck(false).
+		Each().
+		// The count that ends the phase, with the deadline behind it.
+		Limit(len(bookingsIn)).
+		IdleMillis(phaseMillis).
+		// Each poll is capped at a second so the idle deadline is noticed
+		// promptly rather than inside a 30 s long poll.
+		TimeoutMillis(1000).
+		Consume(ctx, func(ctx context.Context, msg *queen.Message) error {
+			bookingID, _ := msg.Data["bookingId"].(string)
+			room, _ := msg.Data["room"].(string)
+			cents, ok := msg.Data["cents"].(float64)
+			if !ok {
+				return fmt.Errorf("submission %s carries no numeric cents", msg.TransactionID)
+			}
+
+			res, err := client.Transaction().
+				// 1. The gate AND the first state, in one row. Required is what
+				//    makes it a gate instead of a verdict: without it a lost
+				//    race would come back applied:false while the payment and
+				//    the timer went out anyway.
+				KV(queen.KVPutIfAbsentOp(
+					ns,
+					sagaKey(bookingID),
+					sagaState{Step: "held", Room: room, Cents: int(cents)},
+					// An expiry is mandatory on every KV write, and the zero
+					// value of queen.Expiry is refused rather than treated as
+					// "no opinion". Forever exists and is never used here: an
+					// example that runs in CI must not be able to leave an
+					// immortal row behind.
+					queen.TTL(time.Hour),
+					queen.KVWriteOptions{Required: true},
+				)).
+				// 2. The obligation. From the moment this commits it is a row
+				//    in the broker's own table, so it survives this handler,
+				//    this process, this deploy and this machine. The key is
+				//    chosen by us, which is the entire reason it can be
+				//    cancelled later by name.
+				Timers(queen.ScheduleTimerOp(queen.TimerSchedule{
+					Queue:    expiriesQueue,
+					TimerKey: bookingID,
+					Delay:    hold,
+					Payload:  map[string]interface{}{"bookingId": bookingID, "room": room},
+				})).
+				// 3. The work. Partitioned by booking, so every message about
+				//    one booking is in one lane.
+				Queue(paymentsQueue).
+				Partition(bookingID).
+				Push(queen.PushItem{
+					TransactionID: "pay-" + bookingID,
+					Payload:       map[string]interface{}{"bookingId": bookingID, "cents": int(cents)},
+				}).
+				// 4. The acknowledgement, carrying this delivery's lease. An
+				//    expired lease refuses the ack and takes the other three
+				//    down with it, which is the guarantee that no
+				//    compare-and-swap can give.
+				Ack(msg, "completed", queen.AckOptions{ConsumerGroup: reserverGroup}).
+				Commit(ctx)
+
+			reserveDecisions = append(reserveDecisions, bookingID)
+
+			// A lost gate is RETURNED, not an error: HTTP 200, Success false,
+			// Reason "kv_precondition". It is the ordinary outcome of every
+			// legitimate redelivery, which makes it one of the most frequent
+			// answers this product gives, and it must stay out of the error
+			// path where the reflex is to retry. Every OTHER failure of a
+			// commit IS an error, and this handler returns it.
+			if res.IsKVPrecondition() {
+				// Nothing was written: no second payment, no second timer, no
+				// second row. The message still has to leave the cursor, so it
+				// is acknowledged on its own.
+				preconditionsLost++
+				if _, err := client.Ack(ctx, msg, true, queen.AckOptions{ConsumerGroup: reserverGroup}); err != nil {
+					return fmt.Errorf("ack the duplicate submission: %w", err)
+				}
+				fmt.Printf("  %s: already held, whole bundle rolled back (%s)\n", bookingID, res.KVReason)
+				return nil
+			}
+			if err != nil {
+				return fmt.Errorf("reserve %s: %w", bookingID, err)
+			}
+
+			fmt.Printf("  %s: room %s held, compensation armed for %s\n", bookingID, room, hold)
+			return nil
+		}).
+		Execute(ctx)
+	if err != nil {
+		return fmt.Errorf("reserving: %w", err)
+	}
+
+	if err := assert(
+		len(reserveDecisions) == len(bookingsIn),
+		fmt.Sprintf("the reserver reached a decision on every submission (%d, got %d)", len(bookingsIn), len(reserveDecisions)),
+	); err != nil {
+		return err
+	}
+	if err := assert(preconditionsLost == 1, "the duplicate submission lost the gate exactly once"); err != nil {
+		return err
+	}
+
+	// Pending timers are a table you can read, not a promise you have to trust.
+	armed, err := client.Timers().List(ctx, expiriesQueue, queen.TimerListOptions{Limit: 50})
+	if err != nil {
+		return fmt.Errorf("list the armed compensations: %w", err)
+	}
+	armedKeys := make([]string, 0, len(armed.Rows))
+	for _, row := range armed.Rows {
+		armedKeys = append(armedKeys, row.TimerKey)
+	}
+	sort.Strings(armedKeys)
+	fmt.Printf("  timers armed: %s\n", strings.Join(armedKeys, ", "))
+	if err := assert(
+		len(armedKeys) == len(bookingIDs),
+		fmt.Sprintf("one compensation is armed per booking and the duplicate added none (%d, got %d)", len(bookingIDs), len(armedKeys)),
+	); err != nil {
+		return err
+	}
+
+	// ----------------------------------------------------------------- paying
+	//
+	// The other end of the saga. A settled payment confirms the state and calls
+	// the compensation off in one commit; a declined card leaves the state
+	// where it is and lets the timer do its work.
+	fmt.Println("\npaying")
+	var paymentsRequested []string
+
+	err = client.Queue(paymentsQueue).
+		Group(payerGroup).
+		SubscriptionMode(queen.SubscriptionModeAll).
+		AutoAck(false).
+		Each().
+		Limit(len(bookingIDs)).
+		IdleMillis(phaseMillis).
+		TimeoutMillis(1000).
+		// Each key's payments land in that key's partition, and a pop claims a
+		// single partition unless it is asked for more.
+		Partitions(10).
+		Consume(ctx, func(ctx context.Context, msg *queen.Message) error {
+			bookingID, _ := msg.Data["bookingId"].(string)
+			paymentsRequested = append(paymentsRequested, bookingID)
+
+			// A read in one call and a write in the next. It is safe HERE
+			// because the key derives from the partition key: every message
+			// about this booking arrives in one lane of this queue, and a lane
+			// has one reader per group. Where a key does not derive from the
+			// partition key, this shape is a race and the atomics are the
+			// answer -- which is exactly the compensator's situation below.
+			state, version, err := readSaga(ctx, client, bookingID)
+			if err != nil {
+				return err
+			}
+
+			if bookingID == declined {
+				// A declined card is a business outcome, not a delivery
+				// failure: the message is done with. The room stays held, and
+				// nothing in this process is responsible for giving it back.
+				if _, err := client.Ack(ctx, msg, true, queen.AckOptions{ConsumerGroup: payerGroup}); err != nil {
+					return fmt.Errorf("ack the declined payment: %w", err)
+				}
+				fmt.Printf("  %s: card declined, hold left to expire\n", bookingID)
+				return nil
+			}
+
+			state.Step = "confirmed"
+			tx := client.Transaction().
+				// Expect makes the serialisation assumption falsifiable
+				// instead of silent. If the lane really serialises, it never
+				// fails and costs nothing; the day it fails, two consumers are
+				// serving one partition and you learn it as a verdict rather
+				// than as a wrong total.
+				KV(queen.KVPutOp(ns, sagaKey(bookingID), state, queen.TTL(time.Hour), queen.KVWriteOptions{
+					Expect:   queen.Expect(version),
+					Required: true,
+				}))
+
+			if bookingID != cancelSkipped {
+				// The cancel rides the bundle. Either the booking is confirmed
+				// and the compensation is called off, or neither of the two
+				// happened.
+				tx = tx.Timers(queen.CancelTimerOp(expiriesQueue, bookingID))
+			}
+
+			res, err := tx.Ack(msg, "completed", queen.AckOptions{ConsumerGroup: payerGroup}).Commit(ctx)
+			if res.IsKVPrecondition() {
+				return fmt.Errorf("%s: confirmation lost its fence (%s)", bookingID, res.KVReason)
+			}
+			if err != nil {
+				return fmt.Errorf("confirm %s: %w", bookingID, err)
+			}
+
+			tail := ", compensation cancelled"
+			if bookingID == cancelSkipped {
+				tail = ", compensation deliberately NOT cancelled"
+			}
+			fmt.Printf("  %s: paid and confirmed%s\n", bookingID, tail)
+			return nil
+		}).
+		Execute(ctx)
+	if err != nil {
+		return fmt.Errorf("paying: %w", err)
+	}
+
+	if err := assert(
+		len(paymentsRequested) == len(bookingIDs),
+		fmt.Sprintf("every booking was asked to pay once and the duplicate produced no second payment (%d, got %d)",
+			len(bookingIDs), len(paymentsRequested)),
+	); err != nil {
+		return err
+	}
+	if err := assert(distinct(paymentsRequested), "no booking was asked to pay twice"); err != nil {
+		return err
+	}
+
+	// The cancel is observable before anything is delivered: the row is gone
+	// from the staging table. A peek is how you ask, and a miss is
+	// Found:false with HTTP 200, never a 404.
+	peeked := map[string]bool{}
+	for _, bookingID := range bookingIDs {
+		info, err := client.Timers().Peek(ctx, expiriesQueue, bookingID)
+		if err != nil {
+			return fmt.Errorf("peek %s: %w", bookingID, err)
+		}
+		peeked[bookingID] = info.Found
+	}
+	if err := assert(!peeked["B-1"], "the compensation cancelled inside the confirming bundle is gone from the table"); err != nil {
+		return err
+	}
+	if err := assert(peeked[declined], declined+" was never confirmed, so its compensation is still armed"); err != nil {
+		return err
+	}
+	if err := assert(peeked[cancelSkipped], cancelSkipped+" is confirmed but its compensation is still armed on purpose"); err != nil {
+		return err
+	}
+
+	// ------------------------------------------------------------ compensating
+	//
+	// What the timers deliver, and the consumer that must not trust them.
+	//
+	// A compensation message is not an instruction, it is a question: is this
+	// saga still open? A fired timer leaves no tombstone, so a cancel that
+	// arrives a millisecond late answers `absent` and the message goes out
+	// anyway. The state is the authority and it is read first.
+	//
+	// And here the key does NOT derive from the partition key: this message
+	// arrives on another queue entirely, in a lane that has nothing to do with
+	// the payments lane, so no partitioning could serialise the two writers.
+	// That is what Expect is for, and on this path it is load-bearing rather
+	// than an assertion.
+	fmt.Println("\ncompensating")
+	var compensationsDelivered []string
+	var roomsReleased []string
+	var compensationsRefused []string
+
+	compensate := func(limit, idleMillis int) error {
+		return client.Queue(expiriesQueue).
+			Group(compensatorGroup).
+			SubscriptionMode(queen.SubscriptionModeAll).
+			AutoAck(false).
+			Each().
+			Limit(limit).
+			IdleMillis(idleMillis).
+			TimeoutMillis(1000).
+			Consume(ctx, func(ctx context.Context, msg *queen.Message) error {
+				bookingID, _ := msg.Data["bookingId"].(string)
+				room, _ := msg.Data["room"].(string)
+				compensationsDelivered = append(compensationsDelivered, bookingID)
+
+				state, version, err := readSaga(ctx, client, bookingID)
+				if err != nil {
+					return err
+				}
+
+				if state.Step != "held" {
+					// The booking was confirmed before this fired.
+					// Compensating here is how a saga unwinds a sale that has
+					// already shipped.
+					compensationsRefused = append(compensationsRefused, bookingID)
+					if _, err := client.Ack(ctx, msg, true, queen.AckOptions{ConsumerGroup: compensatorGroup}); err != nil {
+						return fmt.Errorf("ack the refused compensation: %w", err)
+					}
+					step := state.Step
+					if step == "" {
+						step = "gone"
+					}
+					fmt.Printf("  %s: state is %s, compensation refused\n", bookingID, step)
+					return nil
+				}
+
+				state.Step = "expired"
+				res, err := client.Transaction().
+					KV(queen.KVPutOp(ns, sagaKey(bookingID), state, queen.TTL(time.Hour), queen.KVWriteOptions{
+						Expect:   queen.Expect(version),
+						Required: true,
+					})).
+					Ack(msg, "completed", queen.AckOptions{ConsumerGroup: compensatorGroup}).
+					Commit(ctx)
+
+				if res.IsKVPrecondition() {
+					// Somebody confirmed it between the read and the commit.
+					// The fence held, nothing was written, and the room stays
+					// sold.
+					compensationsRefused = append(compensationsRefused, bookingID)
+					if _, err := client.Ack(ctx, msg, true, queen.AckOptions{ConsumerGroup: compensatorGroup}); err != nil {
+						return fmt.Errorf("ack the fenced compensation: %w", err)
+					}
+					fmt.Printf("  %s: confirmed under us, compensation refused by the fence\n", bookingID)
+					return nil
+				}
+				if err != nil {
+					return fmt.Errorf("compensate %s: %w", bookingID, err)
+				}
+
+				roomsReleased = append(roomsReleased, room)
+				fmt.Printf("  %s: hold expired, room %s released\n", bookingID, room)
+				return nil
+			}).
+			Execute(ctx)
+	}
+
+	// Two timers were left armed, so two messages must arrive: that is the
+	// count, and timerDeadlineMillis is the deadline behind it.
+	if err := compensate(2, timerDeadlineMillis); err != nil {
+		return fmt.Errorf("compensating: %w", err)
+	}
+	if err := assert(
+		len(compensationsDelivered) == 2,
+		fmt.Sprintf("both uncancelled compensations were delivered (2, got %d: %s)",
+			len(compensationsDelivered), strings.Join(compensationsDelivered, ", ")),
+	); err != nil {
+		return err
+	}
+
+	// Then a bounded second pass with room for two more. It is the only honest
+	// way to say "a cancelled timer never arrived": the first pass would have
+	// stopped at two whatever those two were, so the claim is really that
+	// nothing else shows up afterwards.
+	if err := compensate(2, 4000); err != nil {
+		return fmt.Errorf("second compensation pass: %w", err)
+	}
+
+	// --------------------------------------------------------------- checking
+	fmt.Println("\nchecking")
+
+	if err := assert(
+		len(compensationsDelivered) == 2,
+		fmt.Sprintf("nothing else arrived on a second pass: still 2 compensations (got %d)", len(compensationsDelivered)),
+	); err != nil {
+		return err
+	}
+	if err := assert(
+		!contains(compensationsDelivered, "B-1") && !contains(compensationsDelivered, "B-2"),
+		"a cancelled compensation was never delivered",
+	); err != nil {
+		return err
+	}
+	if err := assert(
+		len(roomsReleased) == 1 && roomsReleased[0] == "103",
+		fmt.Sprintf("exactly one room went back on sale, the one whose card was declined (got %s)",
+			orNone(strings.Join(roomsReleased, ", "))),
+	); err != nil {
+		return err
+	}
+	if err := assert(
+		len(compensationsRefused) == 1 && compensationsRefused[0] == cancelSkipped,
+		"the compensation for the confirmed booking was refused by the consumer, not prevented by the cancel",
+	); err != nil {
+		return err
+	}
+
+	keys := make([]string, 0, len(bookingIDs))
+	for _, bookingID := range bookingIDs {
+		keys = append(keys, sagaKey(bookingID))
+	}
+	states, err := client.KV().GetMany(ctx, ns, keys)
+	if err != nil {
+		return fmt.Errorf("read the saga rows: %w", err)
+	}
+	if err := assert(
+		len(states.Rows) == len(bookingIDs) && len(states.Missing) == 0,
+		fmt.Sprintf("every booking left exactly one saga row (%d, got %d)", len(bookingIDs), len(states.Rows)),
+	); err != nil {
+		return err
+	}
+
+	step := map[string]string{}
+	for _, row := range states.Rows {
+		var st sagaState
+		if err := json.Unmarshal(row.Value, &st); err != nil {
+			return fmt.Errorf("decode saga row %s: %w", row.Key, err)
+		}
+		step[strings.TrimPrefix(row.Key, "saga:")] = st.Step
+	}
+
+	if err := assert(
+		step["B-1"] == "confirmed" && step["B-2"] == "confirmed",
+		"the two ordinary bookings ended confirmed",
+	); err != nil {
+		return err
+	}
+	if err := assert(
+		step[cancelSkipped] == "confirmed",
+		cancelSkipped+" is still confirmed after its compensation was delivered",
+	); err != nil {
+		return err
+	}
+	if err := assert(
+		step[declined] == "expired",
+		declined+" was unwound by its timer, with nobody awake to do it",
+	); err != nil {
+		return err
+	}
+
+	final := make([]string, 0, len(step))
+	for k, v := range step {
+		final = append(final, k+"="+v)
+	}
+	sort.Strings(final)
+	fmt.Printf("\n  final: %s\n", strings.Join(final, ", "))
+
+	return nil
+}
+
+// readSaga reads one saga row and its version. The version is what a later
+// write passes back as Expect, so the two always travel together.
+//
+// A key past its expiry is never returned and never counts as existing, even
+// while the sweeper has not pruned it: an absent row comes back as the zero
+// sagaState, whose Step is the empty string and is therefore never "held".
+func readSaga(ctx context.Context, client *queen.Queen, bookingID string) (sagaState, int64, error) {
+	var state sagaState
+	entry, err := client.KV().Get(ctx, ns, sagaKey(bookingID))
+	if err != nil {
+		return state, 0, fmt.Errorf("read the saga state of %s: %w", bookingID, err)
+	}
+	if !entry.Found {
+		return state, 0, nil
+	}
+	if err := json.Unmarshal(entry.Value, &state); err != nil {
+		return state, 0, fmt.Errorf("decode the saga state of %s: %w", bookingID, err)
+	}
+	return state, entry.Version, nil
+}
+
+func contains(values []string, want string) bool {
+	for _, v := range values {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}
+
+func distinct(values []string) bool {
+	seen := map[string]bool{}
+	for _, v := range values {
+		if seen[v] {
+			return false
+		}
+		seen[v] = true
+	}
+	return true
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
+}
+```

@@ -3,6 +3,7 @@ package queen
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 )
 
@@ -237,10 +238,46 @@ type DLQResponse struct {
 	Total    int       `json:"total"`
 }
 
+// ReasonKVPrecondition is the Reason a commit carries when a KV operation
+// marked Required lost its precondition and rolled the bundle back. It is a
+// verdict, not a failure: Commit returns it instead of raising (§8.3).
+const ReasonKVPrecondition = "kv_precondition"
+
 // TransactionResponse is the response from a transaction commit.
 type TransactionResponse struct {
 	Success bool   `json:"success"`
 	Error   string `json:"error,omitempty"`
+	// TransactionID is the broker's id for this bundle.
+	TransactionID string `json:"transactionId,omitempty"`
+	// Reason is the machine-readable failure class, e.g. ReasonKVPrecondition.
+	Reason string `json:"reason,omitempty"`
+
+	// The four fields below are filled on a lost KV precondition, and they exist
+	// so the loser needs no second round trip: without them a client would have
+	// to string-match the error message, which is forbidden in this codebase.
+	//
+	// FailedIndex is in the FLAT result space (pushes and acks first, then the
+	// kv array, then the timers array) and is -1 when absent. Version is the
+	// CURRENT version of the contended key and is advisory: it was read in the
+	// same statement as the failed write, but it is not a fencing token to reuse
+	// blindly (§5.3).
+	FailedIndex int             `json:"failedIndex,omitempty"`
+	KVReason    string          `json:"kvReason,omitempty"`
+	Version     int64           `json:"version,omitempty"`
+	Value       json.RawMessage `json:"value,omitempty"`
+
+	// KV and Timers are the rider results, in the order of the arrays that were
+	// sent. Results is the whole flat array, undecoded.
+	KV      []KVResult        `json:"-"`
+	Timers  []TimerResult     `json:"-"`
+	Results []json.RawMessage `json:"-"`
+}
+
+// IsKVPrecondition reports whether this bundle was rolled back because a
+// Required KV operation lost its precondition -- somebody else got there first.
+// It is the expected outcome of a legitimate redelivery.
+func (r *TransactionResponse) IsKVPrecondition() bool {
+	return r != nil && !r.Success && r.Reason == ReasonKVPrecondition
 }
 
 // PushItem represents an item to be pushed to a queue.
@@ -330,9 +367,30 @@ type batchAckRequest struct {
 }
 
 // transactionRequest is the internal request structure for transaction operations.
+//
+// KV AND TIMERS ARE TOP-LEVEL FIELDS, NOT ELEMENTS OF `operations`, and this is
+// the single most important line of the kv/timers work in this client
+// (PLAN_KV_TIMERS.md §6.3, §8.2, §10.4).
+//
+// The alternative — growing Operation a `kv` leg so the ops could travel inline —
+// is not merely inelegant, it is silently broken in Go: two fields carrying the
+// same JSON key at the same level are DISCARDED BY BOTH in encoding/json, with
+// no error and no warning. The body would go out with zero KV operations, the
+// broker would commit a transaction whose gate never ran, and the putIfAbsent
+// would never have existed. Nothing downstream notices: not the status code, not
+// the results array, not a log line.
+//
+// So Operation does not change, and these two arrays live here. The flat result
+// space grows only at the END — pushes and acks keep the indices they have
+// today, then the kv array, then the timers array — so a bundle carrying neither
+// produces exactly the request and the response it produced before this feature
+// existed.
 type transactionRequest struct {
 	Operations     []Operation `json:"operations"`
 	RequiredLeases []string    `json:"requiredLeases"`
+	// omitempty on both: a bundle with no riders must not even carry the keys.
+	KV     []KVOp    `json:"kv,omitempty"`
+	Timers []TimerOp `json:"timers,omitempty"`
 }
 
 // configureRequest is the internal request structure for queue configuration.

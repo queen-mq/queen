@@ -1730,6 +1730,38 @@ await queen
   .commit()
 ```
 
+### Key/Value and Timers
+
+Always present on every broker — no flag, nothing to probe. An operator's runtime kill switch can
+pause them (`503` + `Retry-After`, `error: 'kv_disabled'` / `'timers_disabled'`; `403` on a rider
+inside a transaction), which is a pause and not an absence. Full treatment in the
+[client README](../README.md#keyvalue-state-and-timers).
+
+```javascript
+// Every write states its lifetime: exactly one of ttl/ttlSeconds/until and forever.
+await queen.kv.put('orders', 'order:9f1', { state: 'held' }, { ttl: '60s' })
+const row = await queen.kv.get('orders', 'order:9f1')   // {found, value, version, ...}
+
+// Writes return an OBJECT, always truthy. Read .applied, never the result itself.
+const res = await queen.kv.delete('orders', 'order:9f1')
+if (res.applied) { }
+
+const { won } = await queen.kv.once('dedup', eventId, { ttl: '24h' })
+const hit = await queen.kv.incr('quota', key, 1, { max: 1000, ttl: '1h' })  // applied IS admission
+
+await queen.timer('reminders').key(orderId).delay('30m').payload({ orderId }).schedule()
+await queen.timer('reminders').key(orderId).cancel()    // 'absent' may mean already delivered
+
+// The gate: marker, push and ack commit or roll back together.
+const out = await queen
+  .transaction()
+  .ack(message)
+  .queue('emails').push([{ data: mail }])
+  .once('sent', message.transactionId, { ttl: '24h' })
+  .commit()
+if (out.success === false) return   // returned, not thrown: a redelivery already handled
+```
+
 ### Lease Renewal
 
 ```javascript

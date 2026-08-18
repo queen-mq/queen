@@ -103,39 +103,64 @@ fn the_sqlstate_rules_live_in_exactly_one_place() {
 // NOT here on purpose: `tests/kv_handler_isolation.rs` already owns it. Two files asserting one
 // rule means one of them gets relaxed by whoever hits it first.
 
-/// §0 and §17.1: both features ship OFF, and OFF means the routes are **not registered at all**
-/// (404 from the JSON fallback), not registered-and-guarded. A guarded route is a route: it
-/// still costs a matchit entry, it still answers differently from a broker that never heard of
-/// the feature, and "default off" stops being a property of the binary and becomes a property of
-/// a runtime check somebody can invert in one line.
+/// THIS PIN IS THE INVERSE OF THE ONE IT REPLACES, and the reversal is the decision itself.
 ///
-/// Self-arming: silent until `main.rs` learns the word `timers`.
+/// It used to assert that `/api/v1/kv` and `/api/v1/timers` were registered BEHIND a boot flag,
+/// because §0 and §17.1 shipped both features off and "off" had to mean "the route does not
+/// exist", not "the route exists and refuses". That is superseded (Alice, 2026-08-18): kv and
+/// timers are the DEFAULT, part of the engine like push and pop, and there is no
+/// `QUEEN_PUSH_ENABLED`. The existence of a boot flag is itself the claim that a surface is
+/// optional, so flipping the defaults to `true` was not enough — the flags had to go.
+///
+/// The pin stays a source pin for the same reason it always was one: nothing OBSERVABLE
+/// distinguishes "registered unconditionally" from "registered behind a flag that happens to be
+/// on in this test process", so behaviour cannot catch a reintroduction.
+///
+/// WHAT IT FORBIDS IS THE QUOTED NAME, not the word. Reading an environment variable requires
+/// its name as a string literal — `env_bool("QUEEN_KV_ENABLED", …)` — so the quoted form is
+/// exactly the shape of a reintroduction and nothing else has that shape. Prose is deliberately
+/// left free to name them, and the module headers do: somebody who meets one of these in an old
+/// runbook, a client's README or a Helm values file will grep the source for it, and finding
+/// the paragraph that says it was removed and what replaced it is the whole point. A pin that
+/// banned the word too would delete the only answer that grep can give them.
 #[test]
-fn the_new_routes_are_registered_behind_a_boot_flag() {
+fn the_kv_and_timer_routes_have_no_boot_flag() {
     let main_rs = read("src/main.rs").expect("src/main.rs");
-    if !main_rs.contains("/api/v1/timers") && !main_rs.contains("/api/v1/kv") {
-        skip("flag-gated route registration", "main.rs registers no kv/timer route yet");
-        return;
-    }
-    for (route, flag) in
-        [("/api/v1/kv", "QUEEN_KV_ENABLED"), ("/api/v1/timers", "QUEEN_TIMERS_ENABLED")]
-    {
-        if !main_rs.contains(route) {
-            continue;
+    assert!(
+        main_rs.contains("/api/v1/kv") && main_rs.contains("/api/v1/timers"),
+        "main.rs must register both surfaces unconditionally"
+    );
+    let mut offenders = Vec::new();
+    for entry in walk_rs(&server_dir().join("src")) {
+        let text = std::fs::read_to_string(&entry).unwrap_or_default();
+        for flag in ["\"QUEEN_KV_ENABLED\"", "\"QUEEN_TIMERS_ENABLED\""] {
+            if text.contains(flag) {
+                offenders.push(format!("{} reads {flag}", entry.display()));
+            }
         }
-        assert!(
-            main_rs.contains(flag),
-            "{route} is registered but {flag} is never read in main.rs: with the flag off the \
-             route must not be registered at all (§0), or a cloud cell that never enabled the \
-             feature answers something other than 404"
-        );
     }
-    // The two flags are independent (§0): one env var gating both would make "timers on, KV off"
-    // unexpressible, and that is a shipping configuration.
-    if main_rs.contains("/api/v1/kv") && main_rs.contains("/api/v1/timers") {
-        assert!(
-            main_rs.contains("QUEEN_KV_ENABLED") && main_rs.contains("QUEEN_TIMERS_ENABLED"),
-            "the two features are independent on the release path (§0): two flags, not one"
-        );
+    assert!(
+        offenders.is_empty(),
+        "the kv/timers boot flags are gone and must stay gone — kv and timers are the default, \
+         not a feature (the RUNTIME kill switches in src/switches.rs are a different thing and \
+         are keyed on queen.system_state, never on the environment):\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+/// Every `.rs` under a directory, recursively.
+fn walk_rs(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for e in entries.filter_map(|e| e.ok()) {
+        let p = e.path();
+        if p.is_dir() {
+            out.extend(walk_rs(&p));
+        } else if p.extension().is_some_and(|x| x == "rs") {
+            out.push(p);
+        }
     }
+    out
 }

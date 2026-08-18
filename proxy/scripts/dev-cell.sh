@@ -48,7 +48,7 @@ up() {
 
   echo "== starting broker :$BROKER_PORT (tenancy header ON)"
   ( PORT=$BROKER_PORT PG_HOST=127.0.0.1 PG_PORT=5466 PG_USER=postgres PG_PASSWORD=postgres \
-    PG_DATABASE=queen QUEEN_TENANCY_HEADER=true \
+    PG_DATABASE=queen QUEEN_TENANCY_HEADER=true QUEEN_KV_TRUSTED_PROXY=true \
     "$ROOT/server/target/debug/queen" >"$RUN_DIR/broker.log" 2>&1 & echo $! >"$RUN_DIR/broker.pid" )
 
   # Shadow by default (proxy default), so the cell mirrors a stock deployment.

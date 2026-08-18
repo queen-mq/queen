@@ -97,9 +97,11 @@ pub struct Rig {
 /// so this is also the proof that 025_log_timers.sql compiled in) and open one plain
 /// connection next to it.
 ///
-/// Both feature flags are forced OFF: with them off the sweeper is not spawned at all
-/// (§7.1), and these tests need to BE the sweeper. A background fire loop stealing rows
-/// out from under a claim would make every assertion here a coin flip.
+/// The SWEEPER is forced off, and that is now the only way to get it: these tests need to
+/// BE the sweeper, and a background fire loop stealing rows out from under a claim would
+/// make every assertion here a coin flip. This used to be done by turning the two kv/timers
+/// boot flags off, which suppressed the sweeper as a side effect; those flags are gone (the
+/// surfaces are the default), so the knob to reach for is the reaper's own.
 pub async fn boot() -> Rig {
     let target = std::env::var("QUEEN_EMBEDDED_TEST_PG")
         .expect("QUEEN_EMBEDDED_TEST_PG must be set (host:port) for the timer tests");
@@ -108,8 +110,7 @@ pub async fn boot() -> Rig {
         .map(|(h, p)| (h.to_string(), p.parse::<u16>().expect("port")))
         .unwrap_or((target.clone(), 5432));
 
-    std::env::set_var("QUEEN_TIMERS_ENABLED", "false");
-    std::env::set_var("QUEEN_KV_ENABLED", "false");
+    std::env::set_var("QUEEN_SWEEPER", "false");
 
     let broker = Broker::start(
         BrokerConfig::new()

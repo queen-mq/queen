@@ -4,7 +4,7 @@ description: "Put queen_proxy in front of a broker: per-tenant credentials, quot
 type: how-to
 tier: operate
 sidebar:
-  order: 9
+  order: 10
 sourceOfTruth:
   - proxy/src/main.rs
   - proxy/src/gateway.rs
@@ -72,8 +72,17 @@ covers every cluster on the cell.
 2. **Run the broker,** on a network policy that admits the proxy and nobody else.
 
    ```bash
-   JWT_ENABLED=true JWT_ALGORITHM=HS256 JWT_SECRET="$CELL_JWT_SECRET" QUEEN_TENANCY_HEADER=true ./bin/queen
+   JWT_ENABLED=true JWT_ALGORITHM=HS256 JWT_SECRET="$CELL_JWT_SECRET" QUEEN_TENANCY_HEADER=true QUEEN_KV_TRUSTED_PROXY=true ./bin/queen
    ```
+
+   The second of those two is not optional and the broker **exits 1** without it. The tenant
+   header is opaque and validated against nothing, and [key/value state](/use/kv) is addressable
+   purely by name, so a forged header reads and writes another tenant's state knowing only that
+   name. Queues survive a forged header because a caller must still name a queue and an ack
+   carries a lease id it cannot guess; the KV has no such id. Since the KV is part of the engine
+   on every cell and no flag can take it away, the requirement is unconditional: setting
+   `QUEEN_KV_TRUSTED_PROXY=true` is you stating that step 3 is what supplies the header and
+   strips the client's. If that is not true of your deployment, do not run with the header.
 
 3. **Run the proxy.** `PXDB_HOST` is the only variable it refuses to start without, and the six
    migrations that create the `queen_proxy` schema are embedded in the binary and applied at

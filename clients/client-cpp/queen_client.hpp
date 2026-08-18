@@ -55,6 +55,7 @@
 #include <stdexcept>
 #include <iostream>
 #include <optional>
+#include <limits>
 #include <regex>
 #include <future>
 #include <csignal>
@@ -426,12 +427,423 @@ inline void log_warn(const std::string& operation, const std::string& details) {
 
 inline void log_error(const std::string& operation, const std::string& details) {
     if (is_log_enabled()) {
-        std::cerr << "[" << get_iso_timestamp() << "] [ERROR] [" << operation << "] " 
+        std::cerr << "[" << get_iso_timestamp() << "] [ERROR] [" << operation << "] "
                   << details << std::endl;
     }
 }
 
+/**
+ * Standard base64 (RFC 4648), WITH padding.
+ *
+ * A timer payload travels base64 on the wire (PLAN_KV_TIMERS.md §4.1) and the
+ * broker decodes it with the STANDARD engine. Padding is not cosmetic here: an
+ * unpadded encoder produces a 22023 from the stored procedure and nothing in
+ * the error names the encoder as the cause.
+ *
+ * Written out rather than borrowed from httplib::detail, which is a private
+ * namespace of a vendored header and has no encoder at all in some releases.
+ */
+inline std::string base64_encode(const std::string& input) {
+    static const char* alphabet =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    std::string out;
+    out.reserve(((input.size() + 2) / 3) * 4);
+
+    size_t i = 0;
+    while (i + 2 < input.size()) {
+        uint32_t chunk = (static_cast<unsigned char>(input[i]) << 16) |
+                         (static_cast<unsigned char>(input[i + 1]) << 8) |
+                         static_cast<unsigned char>(input[i + 2]);
+        out += alphabet[(chunk >> 18) & 0x3F];
+        out += alphabet[(chunk >> 12) & 0x3F];
+        out += alphabet[(chunk >> 6) & 0x3F];
+        out += alphabet[chunk & 0x3F];
+        i += 3;
+    }
+
+    size_t remaining = input.size() - i;
+    if (remaining == 1) {
+        uint32_t chunk = static_cast<unsigned char>(input[i]) << 16;
+        out += alphabet[(chunk >> 18) & 0x3F];
+        out += alphabet[(chunk >> 12) & 0x3F];
+        out += "==";
+    } else if (remaining == 2) {
+        uint32_t chunk = (static_cast<unsigned char>(input[i]) << 16) |
+                         (static_cast<unsigned char>(input[i + 1]) << 8);
+        out += alphabet[(chunk >> 18) & 0x3F];
+        out += alphabet[(chunk >> 12) & 0x3F];
+        out += alphabet[(chunk >> 6) & 0x3F];
+        out += '=';
+    }
+
+    return out;
+}
+
+/** Inverse of base64_encode. Throws on anything that is not valid base64. */
+inline std::string base64_decode(const std::string& input) {
+    auto value_of = [](char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+') return 62;
+        if (c == '/') return 63;
+        return -1;
+    };
+
+    if (input.size() % 4 != 0) {
+        throw std::invalid_argument("base64_decode: length is not a multiple of 4");
+    }
+
+    std::string out;
+    out.reserve((input.size() / 4) * 3);
+
+    for (size_t i = 0; i < input.size(); i += 4) {
+        int quad[4];
+        int pad = 0;
+        for (int k = 0; k < 4; ++k) {
+            char c = input[i + k];
+            if (c == '=') {
+                // Padding is only legal in the last two positions of the last quad.
+                if (i + 4 != input.size() || k < 2) {
+                    throw std::invalid_argument("base64_decode: misplaced padding");
+                }
+                quad[k] = 0;
+                ++pad;
+            } else {
+                quad[k] = value_of(c);
+                if (quad[k] < 0) {
+                    throw std::invalid_argument("base64_decode: invalid character");
+                }
+                if (pad > 0) {
+                    throw std::invalid_argument("base64_decode: data after padding");
+                }
+            }
+        }
+        uint32_t chunk = (static_cast<uint32_t>(quad[0]) << 18) |
+                         (static_cast<uint32_t>(quad[1]) << 12) |
+                         (static_cast<uint32_t>(quad[2]) << 6) |
+                         static_cast<uint32_t>(quad[3]);
+        out += static_cast<char>((chunk >> 16) & 0xFF);
+        if (pad < 2) out += static_cast<char>((chunk >> 8) & 0xFF);
+        if (pad < 1) out += static_cast<char>(chunk & 0xFF);
+    }
+
+    return out;
+}
+
+/**
+ * Milliseconds -> ttlSeconds, ROUNDED UP.
+ *
+ * PLAN_KV_TIMERS.md §20.1, ratified: the KV wire speaks `ttlSeconds` and
+ * nothing else, and the comfortable forms (`until: <date>`) are converted to a
+ * delta of seconds at send time, rounded UP. Rounded DOWN, a marker expires
+ * before the window it was supposed to cover -- which is the one direction that
+ * turns an idempotency marker into a duplicate external effect.
+ *
+ * A non-positive TTL throws here rather than travelling as `ttlSeconds: 0`: the
+ * stored procedure would refuse it anyway, and paying a round trip to learn
+ * that a deadline is already in the past is not a service to anybody.
+ */
+inline long long ttl_seconds_from_millis(long long millis) {
+    if (millis <= 0) {
+        throw std::invalid_argument(
+            "ttlSeconds must be greater than zero; a deadline in the past is a caller bug, "
+            "and exactly one of ttlSeconds and forever is required on every KV write");
+    }
+    return (millis + 999) / 1000;
+}
+
 } // namespace util
+
+// ============================================================================
+// KV and timers - value types (PLAN_KV_TIMERS.md §5, §4)
+// ============================================================================
+
+/**
+ * The expiry of a KV write, which is MANDATORY and is exactly one thing.
+ *
+ * §5.1: every put, putIfAbsent and incr carries exactly one of `ttlSeconds`
+ * (an integer greater than zero) and `forever: true`. Zero or two declarations
+ * are the same error, because both mean the caller did not decide, and a
+ * default is how a marker becomes immortal. The rule lives in the stored
+ * procedure so all seven clients inherit it; this type makes the wrong shape
+ * INEXPRESSIBLE in C++ instead of merely refused one round trip later.
+ *
+ * A put NEVER inherits the previous key's expiry -- that is not expressible on
+ * this wire, on purpose.
+ */
+class KvTtl {
+private:
+    bool forever_ = false;
+    long long seconds_ = 0;
+
+    KvTtl(bool forever, long long seconds) : forever_(forever), seconds_(seconds) {}
+
+public:
+    /** A relative time-to-live in whole seconds. Must be greater than zero. */
+    static KvTtl seconds(long long value) {
+        if (value <= 0) {
+            throw std::invalid_argument("KvTtl::seconds requires a value greater than zero");
+        }
+        return KvTtl(false, value);
+    }
+
+    /**
+     * No expiry.
+     *
+     * FORBIDDEN in anything CI executes (§10.4): a test that goes wrong leaves
+     * immortal state in a shared database, and the next run inherits it.
+     */
+    static KvTtl forever() { return KvTtl(true, 0); }
+
+    /**
+     * The admitted sugar: an absolute instant, converted to a delta of seconds
+     * at send time and rounded UP (§20.1). There is no `expiresAt` field on the
+     * wire and there will not be -- one clock, and it is the database's.
+     */
+    static KvTtl until(std::chrono::system_clock::time_point when) {
+        auto delta = std::chrono::duration_cast<std::chrono::milliseconds>(
+            when - std::chrono::system_clock::now()).count();
+        return KvTtl(false, util::ttl_seconds_from_millis(delta));
+    }
+
+    /** Write this expiry onto an operation, as exactly one field. */
+    void apply(json& op) const {
+        if (forever_) {
+            op["forever"] = true;
+        } else {
+            op["ttlSeconds"] = seconds_;
+        }
+    }
+};
+
+/**
+ * Options for put, putIfAbsent and delete.
+ *
+ * `expect` is the optimistic lock, and §5.3 spells the three cases: absent is an
+ * unconditional upsert, 0 is "must not exist" (and wins even against an expired
+ * row not yet pruned), N > 0 is a pure UPDATE that never creates the row.
+ *
+ * `required` escalates a lost precondition from a value into a rolled-back
+ * transaction, and is only meaningful on a rider inside a bundle: it is the
+ * gate. On the standalone surface it turns a 200 verdict into a 200 verdict
+ * with a different shape, which is rarely what anyone wants.
+ *
+ * NOTE, and it is a real gap against client-js: there is no "explicitly
+ * undefined" spelling here. In JavaScript, writing `expect: undefined` means
+ * the caller intended to fence and computed nothing, which that client treats
+ * as a bug rather than a silent downgrade to upsert. In C++ an unset
+ * std::optional is indistinguishable from never having asked, so the guard does
+ * not exist -- compute the version before you build the options.
+ */
+struct KvWriteOptions {
+    std::optional<long long> expect;
+    bool required = false;
+};
+
+/**
+ * Options for incr.
+ *
+ * There is NO `expect` here, by construction: incr is the way OUT of CAS, and a
+ * precondition would reintroduce the very loop incr exists to remove (§5.4).
+ *
+ * `max` and `min` do not saturate and do not truncate: the call that would
+ * break the ceiling does not apply and comes back with the CURRENT value. That
+ * is what makes `applied` THE ADMISSION DECISION for a rate limiter -- without
+ * it the caller compares client-side after incrementing, so the request that
+ * broke the ceiling has already spent budget and cannot be undone.
+ */
+struct KvIncrOptions {
+    std::optional<long long> min;
+    std::optional<long long> max;
+    bool required = false;
+};
+
+/**
+ * One timer to schedule.
+ *
+ * `delay_millis` is `delayMs` on the wire, a RELATIVE duration in
+ * MILLISECONDS (§20.6): the declared rule of the product is "durations that can
+ * be sub-second are in milliseconds, the ones that cannot are in seconds", and
+ * a 250 ms retry backoff is a central use of timers while a sub-second TTL is
+ * not a real use for anybody. An absolute instant is not expressible: one
+ * clock, Postgres's, so no skew between brokers can enter anywhere. A delay in
+ * the past is LEGAL and fires on the first cycle.
+ *
+ * `deliverAt` is "NOT BEFORE", never "exactly at". A healthy timer lands within
+ * about ten milliseconds above the sweeper's minimum sleep; above one second
+ * there is a wake-up problem, not a load problem.
+ *
+ * `txn` is minted when left empty, the same contract push already has for
+ * transactionId. Each schedule mints its OWN -- §20.2, ratified: a rescheduled
+ * timer is a new message, so "this timer, rescheduled, delivered this message"
+ * stays answerable. Pass one explicitly only if you intend to correlate.
+ */
+struct TimerSchedule {
+    std::string queue;
+    std::string timer_key;
+    json payload = json::object();
+    long long delay_millis = 0;
+    std::string partition;                   // empty = the broker's "Default"
+    std::string txn;                         // empty = minted here
+};
+
+/**
+ * Read a KV counter as int64, or fail loudly.
+ *
+ * §5.4: the counter is `numeric` server-side, so there is no overflow THERE; a
+ * typed SDK exposes int64 and fails EXPLICITLY rather than handing back a
+ * number that is quietly wrong. Past 2^53 a JSON parser loses precision in
+ * silence, which is the failure this exists to prevent.
+ */
+inline long long kv_int64(const json& value) {
+    if (value.is_number_integer()) {
+        return value.get<long long>();
+    }
+    if (value.is_number_unsigned()) {
+        auto raw = value.get<unsigned long long>();
+        if (raw > static_cast<unsigned long long>(std::numeric_limits<long long>::max())) {
+            throw std::runtime_error("kv_int64: counter is past int64 and cannot be represented");
+        }
+        return static_cast<long long>(raw);
+    }
+    if (value.is_number_float()) {
+        throw std::runtime_error(
+            "kv_int64: counter " + value.dump() +
+            " is not an integer this client can represent exactly; read it as a string instead");
+    }
+    throw std::runtime_error("kv_int64: expected a JSON number, got " + value.dump());
+}
+
+// ============================================================================
+// KV and timers - the ONE place operations are minted
+//
+// Every KV or timer operation this client sends is built here, whether it goes
+// out standalone on POST /api/v1/kv (or POST /api/v1/timers) or rides a bundle
+// as a top-level `kv` / `timers` array on /api/v1/transaction. Two builders is
+// how the standalone path and the rider path drift apart, and the drift is
+// invisible until the gate that works over HTTP silently stops working inside a
+// transaction. test_kv_timers.cpp asserts the two are byte-identical.
+// ============================================================================
+
+namespace wire {
+
+inline json kv_get_op(const std::string& ns, const std::string& key) {
+    return json{{"op", "get"}, {"ns", ns}, {"key", key}};
+}
+
+inline json kv_write_op(const std::string& op_name, const std::string& ns, const std::string& key,
+                        const json& value, const KvTtl& ttl, const KvWriteOptions& options) {
+    json op = {{"op", op_name}, {"ns", ns}, {"key", key}, {"value", value}};
+    ttl.apply(op);
+    if (options.expect.has_value()) {
+        op["expect"] = *options.expect;
+    }
+    if (options.required) {
+        op["required"] = true;
+    }
+    return op;
+}
+
+inline json kv_delete_op(const std::string& ns, const std::string& key,
+                         const KvWriteOptions& options) {
+    json op = {{"op", "delete"}, {"ns", ns}, {"key", key}};
+    if (options.expect.has_value()) {
+        op["expect"] = *options.expect;
+    }
+    if (options.required) {
+        op["required"] = true;
+    }
+    return op;
+}
+
+inline json kv_incr_op(const std::string& ns, const std::string& key, long long delta,
+                       const KvTtl& ttl, const KvIncrOptions& options) {
+    json op = {{"op", "incr"}, {"ns", ns}, {"key", key}, {"delta", delta}};
+    // The TTL of incr is CREATE-ONLY server-side: a live row keeps its expiry.
+    // If incr extended it, a fixed-window limiter on an always-active client
+    // would never close its window, i.e. would stop limiting exactly under load.
+    ttl.apply(op);
+    if (options.min.has_value()) {
+        op["min"] = *options.min;
+    }
+    if (options.max.has_value()) {
+        op["max"] = *options.max;
+    }
+    if (options.required) {
+        op["required"] = true;
+    }
+    return op;
+}
+
+/**
+ * putIfAbsent desugars to `put` with `expect: 0` INSIDE the stored procedure,
+ * one code path there. It keeps its own name on the wire because that is the
+ * name of the thing, and because `applied` answering "did I win?" is the most
+ * frequent question asked of this API.
+ *
+ * A caller-supplied expect other than 0 is a contradiction, and it dies here
+ * rather than costing a round trip to be told so.
+ */
+inline json kv_put_if_absent_op(const std::string& ns, const std::string& key, const json& value,
+                                const KvTtl& ttl, const KvWriteOptions& options) {
+    if (options.expect.has_value() && *options.expect != 0) {
+        throw std::invalid_argument(
+            "putIfAbsent desugars to put with expect:0; a different expect is a contradiction");
+    }
+    KvWriteOptions cleaned;
+    cleaned.required = options.required;
+    return kv_write_op("putIfAbsent", ns, key, value, ttl, cleaned);
+}
+
+inline json timer_schedule_op(const TimerSchedule& timer) {
+    json op = {
+        {"op", "schedule"},
+        {"queue", timer.queue},
+        {"timerKey", timer.timer_key},
+        {"delayMs", timer.delay_millis},
+        // The payload is the serialized JSON, base64'd. The broker stores the
+        // bytes as they arrive and the fire pushes them into the destination
+        // queue unchanged, so what a consumer eventually reads is exactly this.
+        {"payload", util::base64_encode(timer.payload.dump())},
+        {"txn", timer.txn.empty() ? util::generate_uuid_v7() : timer.txn}
+    };
+    if (!timer.partition.empty()) {
+        op["partition"] = timer.partition;
+    }
+    return op;
+}
+
+inline json timer_cancel_op(const std::string& queue, const std::string& timer_key,
+                            const std::string& txn) {
+    json op = {{"op", "cancel"}, {"queue", queue}, {"timerKey", timer_key}};
+    if (!txn.empty()) {
+        op["txn"] = txn;
+    }
+    return op;
+}
+
+/**
+ * Pull one element out of a `{"results":[...]}` envelope.
+ *
+ * The client-side half of the alignment guard (§6.4, §8.2): N operations in, N
+ * results out. A missing element read as "not found" would turn a broker that
+ * never ran the operation -- an old broker whose wire procedure predates this
+ * feature, for instance -- into a business answer, and the caller would act on
+ * a gate that never fired.
+ */
+inline json single_result(const json& response, const char* what) {
+    if (response.is_object() && response.contains("results") && response["results"].is_array() &&
+        !response["results"].empty()) {
+        return response["results"][0];
+    }
+    throw std::runtime_error(
+        std::string(what) + ": the broker returned no result for the operation; this is an "
+        "alignment failure, not an absent key");
+}
+
+} // namespace wire
 
 // ============================================================================
 // LoadBalancer - Distributes requests across multiple servers
@@ -1093,8 +1505,12 @@ class TransactionBuilder {
 private:
     std::shared_ptr<HttpClient> http_client_;
     json operations_ = json::array();
+    // The two rider arrays. They are TOP-LEVEL fields of the request body and
+    // never elements of `operations` -- see the comment on commit().
+    json kv_ops_ = json::array();
+    json timer_ops_ = json::array();
     std::vector<std::string> required_leases_;
-    
+
     class QueuePushBuilder {
     private:
         TransactionBuilder* parent_;
@@ -1148,12 +1564,99 @@ private:
             return *parent_;
         }
     };
-    
+
+    /**
+     * KV writes and reads that ride this bundle, bound to one namespace.
+     *
+     * Every method returns the TransactionBuilder, exactly like
+     * QueuePushBuilder::push, so a bundle reads as one chain.
+     *
+     * THE POINT OF PUTTING KV HERE INSTEAD OF CALLING client.kv() SEPARATELY
+     * (§5.2): the ack transaction is the primary fence and `expect` is the
+     * secondary assertion. A state write that shares the transaction with the
+     * ack is undone when an expired lease makes the ack fail -- something a
+     * compare-and-set cannot do, because an `expect` on a version that still
+     * matches succeeds even from a zombie consumer.
+     */
+    class TxKvBuilder {
+    private:
+        TransactionBuilder* parent_;
+        std::string namespace_;
+
+    public:
+        TxKvBuilder(TransactionBuilder* parent, const std::string& ns)
+            : parent_(parent), namespace_(ns) {
+        }
+
+        TransactionBuilder& get(const std::string& key) {
+            parent_->kv_ops_.push_back(wire::kv_get_op(namespace_, key));
+            return *parent_;
+        }
+
+        TransactionBuilder& put(const std::string& key, const json& value, const KvTtl& ttl,
+                                const KvWriteOptions& options = KvWriteOptions()) {
+            parent_->kv_ops_.push_back(
+                wire::kv_write_op("put", namespace_, key, value, ttl, options));
+            return *parent_;
+        }
+
+        TransactionBuilder& put_if_absent(const std::string& key, const json& value,
+                                          const KvTtl& ttl,
+                                          const KvWriteOptions& options = KvWriteOptions()) {
+            parent_->kv_ops_.push_back(
+                wire::kv_put_if_absent_op(namespace_, key, value, ttl, options));
+            return *parent_;
+        }
+
+        // `del`, not `delete`: the keyword is taken, and it is the same spelling
+        // QueueBuilder and HttpClient already use.
+        TransactionBuilder& del(const std::string& key,
+                                const KvWriteOptions& options = KvWriteOptions()) {
+            parent_->kv_ops_.push_back(wire::kv_delete_op(namespace_, key, options));
+            return *parent_;
+        }
+
+        TransactionBuilder& incr(const std::string& key, long long delta, const KvTtl& ttl,
+                                 const KvIncrOptions& options = KvIncrOptions()) {
+            parent_->kv_ops_.push_back(
+                wire::kv_incr_op(namespace_, key, delta, ttl, options));
+            return *parent_;
+        }
+    };
+
+    /**
+     * Timers that ride this bundle.
+     *
+     * A cancel sent here rides the bundle's own authorization, unlike the
+     * standalone client.timers().cancel(), which has a route that is never
+     * blockable (§9.6). Use the standalone one when the cancel must land
+     * regardless; use this one when the cancel must be atomic with the ack.
+     */
+    class TxTimersBuilder {
+    private:
+        TransactionBuilder* parent_;
+
+    public:
+        explicit TxTimersBuilder(TransactionBuilder* parent) : parent_(parent) {
+        }
+
+        TransactionBuilder& schedule(const TimerSchedule& timer) {
+            parent_->timer_ops_.push_back(wire::timer_schedule_op(timer));
+            return *parent_;
+        }
+
+        TransactionBuilder& cancel(const std::string& queue, const std::string& timer_key,
+                                   const std::string& txn = "") {
+            parent_->timer_ops_.push_back(wire::timer_cancel_op(queue, timer_key, txn));
+            return *parent_;
+        }
+    };
+
 public:
     TransactionBuilder(std::shared_ptr<HttpClient> http_client)
         : http_client_(http_client) {
     }
-    
+
     TransactionBuilder& ack(const json& message, const std::string& status = "completed", const json& context = json::object()) {
         std::vector<json> messages;
         if (message.is_array()) {
@@ -1206,31 +1709,277 @@ public:
     QueuePushBuilder queue(const std::string& queue_name) {
         return QueuePushBuilder(this, queue_name);
     }
-    
+
+    /** KV operations riding this bundle, bound to one namespace. */
+    TxKvBuilder kv(const std::string& ns) {
+        return TxKvBuilder(this, ns);
+    }
+
+    /** Timer operations riding this bundle. */
+    TxTimersBuilder timers() {
+        return TxTimersBuilder(this);
+    }
+
+    /**
+     * Commit the bundle.
+     *
+     * WHERE THE TWO RIDER ARRAYS GO, AND WHY IT IS NOT NEGOTIABLE
+     * (PLAN_KV_TIMERS.md §6.3, §8.2, §10.4). `kv` and `timers` are TOP-LEVEL
+     * fields of the request body, beside `operations` and never inside it. The
+     * reason is a silent failure in another client that this wire is shared
+     * with: two Go struct fields carrying the same JSON key at the same level
+     * are BOTH dropped by encoding/json, with no error and no warning. Growing
+     * `operations` a `kv` leg would therefore let a body go out with ZERO KV
+     * operations while the broker committed the transaction WITHOUT THE GATE --
+     * the putIfAbsent the bundle existed for would simply never have happened,
+     * and nothing anywhere would say so. C++ has no such failure mode, but the
+     * shape is not this client's to choose.
+     *
+     * The arrays are omitted entirely when empty, never sent as `[]`: a bundle
+     * that uses neither feature must be byte-identical to what this client sent
+     * before the feature existed (§6.3), and the broker's own skip is written on
+     * `jsonb_typeof` for the same reason.
+     *
+     * `results[]` is a FLAT index space with an append-only layout: the
+     * operations first, exactly as today, then the KV array, then the timers.
+     * A push or an ack never changes index because a rider is present.
+     *
+     * WHAT THIS RETURNS INSTEAD OF THROWING (§8.3). A lost `required` KV
+     * precondition comes back as HTTP 200 with `success:false` and
+     * `reason:"kv_precondition"`, and this method RETURNS it. That outcome is
+     * the expected result of every legitimate redelivery -- it is the
+     * idempotency marker doing its job -- and turning it into an exception
+     * would put the single most frequent outcome of this product inside every
+     * caller's error path, its retry policy and its error metrics. The body
+     * carries `failedIndex` (in the flat space), `kvReason`, `version` and
+     * `value`, so branch on those; never string-match the message.
+     *
+     * Every other failure still throws, and a refusal by the ladder (403/429)
+     * still arrives as an HttpError from the transport layer.
+     */
     json commit() {
-        if (operations_.empty()) {
+        if (operations_.empty() && kv_ops_.empty() && timer_ops_.empty()) {
             throw std::runtime_error("Transaction has no operations to commit");
         }
-        
+
         // Remove duplicate leases
         std::sort(required_leases_.begin(), required_leases_.end());
         required_leases_.erase(std::unique(required_leases_.begin(), required_leases_.end()),
                               required_leases_.end());
-        
+
         json request = {
             {"operations", operations_},
             {"requiredLeases", required_leases_}
         };
-        
+        if (!kv_ops_.empty()) {
+            request["kv"] = kv_ops_;
+        }
+        if (!timer_ops_.empty()) {
+            request["timers"] = timer_ops_;
+        }
+
         json result = http_client_->post("/api/v1/transaction", request);
-        
+
         if (!result.contains("success") || !result["success"].get<bool>()) {
-            std::string error = result.contains("error") ? 
+            if (result.is_object() && result.value("reason", std::string()) == "kv_precondition") {
+                return result;
+            }
+            std::string error = result.contains("error") ?
                 result["error"].get<std::string>() : "Transaction failed";
             throw std::runtime_error(error);
         }
-        
+
         return result;
+    }
+};
+
+// ============================================================================
+// KvBuilder - the standalone KV surface (PLAN_KV_TIMERS.md §5, §8.1)
+//
+// Every operation goes through POST /api/v1/kv, which §8.1 calls the complete
+// surface: it is the only route carrying `incr`, and using one route means one
+// request shape to learn and one code path to keep correct. The path routes
+// (GET/PUT/DELETE /api/v1/kv/:ns/{key}) exist as sugar for the handful of cases
+// people write by hand with curl; this client does not use them, so it also
+// does not read the `ETag` header they return -- which saves bandwidth, never
+// the round trip to the database, since there is no cache in front of the KV
+// and there will not be one (§8.5).
+//
+// WHAT THIS CLIENT DOES NOT HAVE, stated rather than implied (§10.2 gives the
+// C++ client get / put / putIfAbsent / delete / incr and nothing else):
+//   * `getMany` and `getPrefix`. Both exist on the broker's POST /api/v1/kv.
+//     getPrefix is refused inside a transaction by design, since its cost is
+//     not bounded by the caller.
+//   * the `once` helper client-js has.
+// Use the HTTP surface directly if you need them.
+//
+// STATUS CODES ARE NOT VERDICTS (§8.1). An absent key, a lost putIfAbsent race
+// and a delete that hit nothing are all HTTP 200 with an explicit field, so
+// they arrive here as VALUES and never as exceptions. Read `found` on a get and
+// `applied` on a write. Do not test the returned json for truthiness.
+// ============================================================================
+
+class KvBuilder {
+private:
+    std::shared_ptr<HttpClient> http_client_;
+    std::string namespace_;
+
+    json apply(const json& op, const char* what) {
+        json request = {{"operations", json::array({op})}};
+        return wire::single_result(http_client_->post("/api/v1/kv", request), what);
+    }
+
+public:
+    KvBuilder(std::shared_ptr<HttpClient> http_client, const std::string& ns)
+        : http_client_(http_client), namespace_(ns) {
+    }
+
+    /**
+     * Read one key. Returns {found, key, value, version, expiresAt, updatedAt}.
+     *
+     * `found` is separate from `value` because a JSON null is a legal value:
+     * {found:true, value:null} and {found:false} are different things and this
+     * client does not collapse them. An expired key is NEVER returned and never
+     * counts as existing, whether or not the sweeper has pruned it yet (§5.7).
+     */
+    json get(const std::string& key) {
+        return apply(wire::kv_get_op(namespace_, key), "kv get");
+    }
+
+    /**
+     * Write a key. Returns {applied, key, value, version} and, when it did not
+     * apply, `reason` from the closed taxonomy exists | absent | version |
+     * limit | type -- with the CURRENT value and version, so the loser needs no
+     * second round trip.
+     *
+     * The version handed to a loser is ADVISORY. It is not a fencing token to
+     * reuse blindly: a row that failed the predicate was never locked, so the
+     * number describes an instant that has already passed.
+     */
+    json put(const std::string& key, const json& value, const KvTtl& ttl,
+             const KvWriteOptions& options = KvWriteOptions()) {
+        return apply(wire::kv_write_op("put", namespace_, key, value, ttl, options), "kv put");
+    }
+
+    /**
+     * Claim a key only if it does not exist -- the idempotency marker.
+     *
+     * Exactly one concurrent caller wins: the conflict arm takes the row lock
+     * BEFORE evaluating its condition, so the second caller re-evaluates
+     * against the new row and does not apply. It also wins against an expired
+     * row that has not been pruned yet, which resurrects the key as a NEW
+     * lineage.
+     *
+     * `putIfAbsent` plus a TTL is NOT a distributed lock. An expiry does not
+     * revoke anything: the old holder keeps working, it simply no longer has
+     * the row. The defence is fencing -- carry the `version` you got as
+     * `expect` on every later write, so a lapsed holder fails with
+     * reason "version" instead of overwriting the new one.
+     */
+    json put_if_absent(const std::string& key, const json& value, const KvTtl& ttl,
+                       const KvWriteOptions& options = KvWriteOptions()) {
+        return apply(wire::kv_put_if_absent_op(namespace_, key, value, ttl, options),
+                     "kv putIfAbsent");
+    }
+
+    /** Delete a key. `applied:false, reason:"absent"` when there was nothing. */
+    json del(const std::string& key, const KvWriteOptions& options = KvWriteOptions()) {
+        return apply(wire::kv_delete_op(namespace_, key, options), "kv delete");
+    }
+
+    /**
+     * Add to a numeric key, atomically, with an optional ceiling.
+     *
+     * With `max`, `applied` IS the admission decision: the call that would
+     * break the ceiling does not apply, and the counter is untouched. Read the
+     * returned `value` with kv_int64() if you need it as an integer -- the
+     * server side is `numeric` and has no overflow, so the client is where the
+     * representable range has to be checked.
+     *
+     * The TTL is CREATE-ONLY: an existing live key keeps its own expiry. An
+     * expired key counts as zero and starts a NEW window, which is what makes a
+     * fixed-window limiter a single call.
+     */
+    json incr(const std::string& key, long long delta, const KvTtl& ttl,
+              const KvIncrOptions& options = KvIncrOptions()) {
+        return apply(wire::kv_incr_op(namespace_, key, delta, ttl, options), "kv incr");
+    }
+};
+
+// ============================================================================
+// TimersBuilder - the standalone timer surface (PLAN_KV_TIMERS.md §4, §8.1)
+//
+// WHAT THIS CLIENT DOES NOT HAVE (§10.2 gives C++ schedule and cancel):
+//   * `peek` (GET /api/v1/timers/:queue/{timerKey}) and `list`
+//     (GET /api/v1/timers/:queue). Both exist on the broker.
+//   * there is no separate `reschedule()`: schedule() IS the upsert, and the
+//     returned `status` tells you which happened, "scheduled" or "rescheduled".
+//     A rescheduled timer is a NEW timer under an old name -- its retry budget
+//     resets, and it gets a new txn.
+// ============================================================================
+
+class TimersBuilder {
+private:
+    std::shared_ptr<HttpClient> http_client_;
+
+public:
+    explicit TimersBuilder(std::shared_ptr<HttpClient> http_client)
+        : http_client_(http_client) {
+    }
+
+    /**
+     * Schedule (or reschedule) one timer.
+     *
+     * Returns {ok, status, queue, timerKey, txn, messageId, deliverAt}, where
+     * `status` is one of the closed taxonomy scheduled | rescheduled |
+     * too_late. `too_late` means the row was already claimed by a broker about
+     * to fire it: granting the reschedule would deliver the OLD payload after
+     * the caller believes it replaced it. The window is bounded by the sweeper
+     * lease. The remedy is a new timer key, or waiting for the delivery and
+     * acting on the message.
+     *
+     * `messageId` is promised HERE, at schedule time, so the eventual frame can
+     * be correlated before it exists.
+     */
+    json schedule(const TimerSchedule& timer) {
+        json request = {{"operations", json::array({wire::timer_schedule_op(timer)})}};
+        return wire::single_result(http_client_->post("/api/v1/timers", request),
+                                   "timer schedule");
+    }
+
+    /**
+     * Cancel a pending timer.
+     *
+     * THIS GOES THROUGH ITS OWN ROUTE ON PURPOSE (§9.6). A cancel sent inside
+     * POST /api/v1/timers inherits the SCHEDULE's authorization class, so on a
+     * cluster whose quota is full it is refused -- and a tenant that cannot
+     * cancel keeps producing messages it cannot stop, because the fire never
+     * switches itself off. DELETE /api/v1/timers/:queue/{timerKey} is the route
+     * that is guaranteed to work, and it is the one an SDK must use.
+     *
+     * Returns {ok, status, queue, timerKey, txn}. Two answers deserve care:
+     *
+     *   `cancelled`  ok:true. It will not fire.
+     *   `absent`     ok:FALSE. There is no tombstone: a delivered timer has no
+     *                row left, so `absent` means "NO LONGER PENDING", which
+     *                INCLUDES already delivered. The authority is the log --
+     *                look for this txn in the destination queue, which is why
+     *                the answer hands the txn back. A cancel against another
+     *                tenant's timer also answers `absent`.
+     *   `too_late`   ok:false. A broker holds the claim and is about to fire.
+     *
+     * Which is why a compensation consumer must check the saga's KV state
+     * before compensating: the timer may have fired five milliseconds before
+     * your cancel arrived, and `absent` will not tell you that it did.
+     */
+    json cancel(const std::string& queue, const std::string& timer_key,
+                const std::string& txn = "") {
+        std::string path = "/api/v1/timers/" + util::url_encode(queue) + "/" +
+                           util::url_encode(timer_key);
+        if (!txn.empty()) {
+            path += "?txn=" + util::url_encode(txn);
+        }
+        return http_client_->del(path);
     }
 };
 
@@ -1713,7 +2462,60 @@ public:
     TransactionBuilder transaction() {
         return TransactionBuilder(http_client_);
     }
-    
+
+    /**
+     * The transactional key/value surface, bound to one namespace
+     * (PLAN_KV_TIMERS.md §5).
+     *
+     * A namespace is `^[a-z0-9][a-z0-9._-]{0,63}$` and is NOT a table to
+     * enumerate: there is no listing without a prefix, and this client has no
+     * prefix read at all.
+     *
+     * THE RULE THAT DECIDES EVERYTHING ELSE (§5.2): a read-modify-write across
+     * two calls is safe ONLY when the KV key derives from the partition key.
+     * Then the lanes serialize and the key has no other writer inside that
+     * consumer group -- two different groups on the same partition still race.
+     * When it does not derive, use the atomics (`incr`) or the precondition
+     * (`expect`). And put `expect` in even when you believe the lane serializes
+     * you: if it never fails it cost nothing, and the day it fails you have
+     * just discovered that two consumers are serving one partition, with a
+     * verdict instead of a wrong total.
+     *
+     * This surface is on every cell. There is nothing to switch on before
+     * using it and nothing to probe for: KV is part of the engine, like push
+     * and pop, and the broker has no boot flag that could leave it out.
+     *
+     * An operator can still PAUSE it during an incident (the runtime kill
+     * switch), and that is a different thing from an absent feature: the
+     * routes answer **503** with `Retry-After` -- temporary, come back -- and
+     * inside `transaction()` the kv rider is refused permanently with a 403.
+     * Both arrive as an HttpError. Nothing answers 404 for being switched off.
+     */
+    KvBuilder kv(const std::string& ns) {
+        return KvBuilder(http_client_, ns);
+    }
+
+    /**
+     * The scheduled-message surface (PLAN_KV_TIMERS.md §4).
+     *
+     * A timer is a promise to push a message into a queue later. `deliverAt` is
+     * "NOT BEFORE", never "exactly at". Two timers on the same queue and
+     * partition that mature in the same batch enter the log in order of
+     * EXPIRY, not in order of scheduling.
+     *
+     * Billing follows the promise, not the delivery: a schedule counts one
+     * message, a reschedule counts another, a cancel counts zero and is not
+     * refunded, and the fire counts zero.
+     *
+     * Like `kv()`, this surface is on every cell and needs nothing turned on
+     * first. An operator's runtime kill switch can pause the SCHEDULE (503 on
+     * the routes, 403 on a transaction rider, both HttpError); cancels are
+     * never blocked, and timers already scheduled still fire.
+     */
+    TimersBuilder timers() {
+        return TimersBuilder(http_client_);
+    }
+
     json ack(const json& message, bool status = true, const json& context = json::object()) {
         bool is_batch = message.is_array();
         

@@ -1,6 +1,6 @@
 ---
-title: Rate limiter in streaming
-description: "Windowed request counting per API key, where the counter is a row in the same database as the queue."
+title: Rate limiter
+description: "Counting requests per key in a window where the counter is a row in the same database as the queue, and the two things you can do with the ones over the line: discard them, or move them."
 type: example
 tier: use
 sidebar:
@@ -12,20 +12,28 @@ verifiedBy:
   - examples/apps/rust/src/bin/rate_limiter.rs
 ---
 
-The textbook rate limiter counts requests per key in a fixed window, and the usual implementation
-is a counter in Redis: a second data system to run, to size, and to lose on restart.
+The textbook rate limiter counts requests per key in a fixed window, and the usual implementation is a
+counter in Redis: a second data system to run, to size, and to lose on restart.
 
-Here the counter is a windowed aggregation over the request stream itself. The window state, the
-decisions it emits and the acknowledgement of the requests it counted commit in one PostgreSQL
-transaction, so the counter cannot drift from the stream it was computed from.
+Here the counter is a row in the same PostgreSQL as the queue, which is what makes counting exact
+rather than approximately exact. What that buys is one half of the problem. The other half is what
+happens to the request that arrives over the line, and there are exactly two answers: throw it away, or
+move it. They are different products dressed as one setting, and picking between them by accident is
+the usual way a limiter disappoints the people behind it.
 
-Counting and enforcing are deliberately separate: the counting is exact and belongs to the broker,
-the policy is yours and changes on a different schedule. Note also how the test is made
-deterministic, since a burst can land on either side of a window boundary: twenty requests split
-any way at all leave at least ten on one side, which is over a quota of five.
+## Discarding, and the shape that makes it exact
 
-This one exists only where the client has a streaming SDK. PHP, C++ and plain HTTP carry the other
-two applications.
+The programs below count with a windowed aggregation over the request stream itself. The window
+state, the decisions it emits and the acknowledgement of the requests it counted commit in one
+PostgreSQL transaction, so the counter cannot drift from the stream it was computed from.
+
+Counting and enforcing are deliberately separate: the counting is exact and belongs to the broker, the
+policy is yours and changes on a different schedule. Note also how the test is made deterministic,
+since a burst can land on either side of a window boundary: twenty requests split any way at all leave
+at least ten on one side, which is over a quota of five.
+
+This one exists only where the client has a streaming SDK. PHP, C++ and plain HTTP carry the other two
+applications.
 
 <Tabs>
   <TabItem label="JavaScript">
@@ -41,6 +49,52 @@ two applications.
     <Render file="snippets/app-rust-rate-limiter" />
   </TabItem>
 </Tabs>
+
+A gate inside a stream has a second discarding mode that costs nothing extra and is easy to miss: a
+denied message is not dropped, it stays leased, in order, and comes back when the lease expires. That
+is a defer measured in one lease, not a defer you control. It holds a burst; it does not move an hour
+of work to an hour from now.
+
+## Moving the work instead, and why it is the better default
+
+Discarding is right when the request is worthless late: a health check, a price refresh, a metric.
+Discarding is wrong for almost everything a customer sent you on purpose, and every limiter that
+discards those has a retry loop somewhere upstream that turns one rejection into several, exactly when
+the system is already at its limit.
+
+The inverse limiter never says no. It asks the counter whether there is room, and if there is not, it
+schedules the same work for the next window instead of returning a refusal.
+
+It is two primitives and no new machinery. [`incr` with a `max`](/use/kv) is the admission decision
+itself: the increment either applies, or nothing is written and the answer says `applied: false` with
+`reason: "limit"`, so the request that would have breached the ceiling has not consumed any budget and
+does not have to be given back. And a [timer](/use/timers) carries the work forward: one message,
+promised now, delivered no earlier than the moment the window rolls, and cancellable until then.
+
+Three properties fall out of it, and they are the reason to prefer this shape.
+
+The counter's expiry does the window. `incr` sets the TTL only when it creates the key, so a live
+counter keeps the expiry it was born with, and an expired one reads as zero and starts a fresh window.
+A fixed window is therefore one call rather than a read, a compare and a reset, and there is no moment
+where two callers disagree about which window they are in.
+
+Nothing is refused, so nothing retries. The caller gets an accepted answer and the work is on a clock.
+The queue does not absorb a retry storm from upstream because there is nothing upstream to retry.
+
+And the deferral is inspectable and revocable. A timer has a name you chose, so you can peek at it, and
+you can cancel it if the work stops being wanted. A message sitting in a queue behind a lease is
+neither.
+
+<Aside type="caution">
+Write it in a **flat consumer**, not inside a stream operator. A stream cycle carries no `kv` and no
+`timers` array, for a lock-ordering reason set out in [streams](/use/streams#pacing-is-not-expressible-inside-an-operator).
+From a stream you emit onto a queue and the deferral lives in the consumer of that queue. It is one
+extra line of architecture and no loss of any guarantee.
+</Aside>
+
+The programs on this page are the discarding limiter, which needs neither surface. The deferring
+shape above needs both, and both are served by every broker: it is left out here because it is a
+second architecture and not because anything has to be switched on.
 
 ## Run it
 

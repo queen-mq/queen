@@ -20,23 +20,21 @@ sourceOfTruth:
   - server/sql/procedures/001_log_schema.sql
   - server/sql/procedures/005_log_ack.sql
   - server/sql/procedures/006_log_maintenance.sql
+  - server/sql/procedures/024_kv.sql
+  - server/sql/procedures/025_log_timers.sql
+  - server/src/sweeper.rs
   - server/sql/schema.sql
   - proxy/src/state.rs
   - proxy/src/gateway.rs
 digest: >-
-  The documented non-goals and operational boundaries, all properties of the build available
-  today. Ordering granularity is the partition key: one partition is total ordering at one
-  writer's worth of throughput, and in-group parallelism equals partition count. A bare broker
-  enforces no per-caller quota; queen_proxy in front enforces a per-cluster plan of rates, counts,
-  sizes and retained bytes. One PostgreSQL is one failure domain and the ceiling; while it is
-  unreachable pushes are spooled to disk and answered 201 with a per-item status of buffered, and
-  nothing is consumable. Retention is opt-in and its granularity is a whole segment, so deleting
-  exactly one message is not an operation and a seek lands on a segment boundary. POST
-  /api/v1/configure is a full replace, not a patch, so any omitted option is written back at its
-  default. Transactions are one PostgreSQL transaction, real atomicity and not end-to-end
-  exactly-once. Payloads must be JSON, inside a request body capped by QUEEN_MAX_BODY_BYTES at 64
-  MiB. The broker expects a trusted network segment: no TLS listener, no CORS layer, JWT
-  authentication off by default.
+  The non-goals of today's build. Ordering granularity is the partition key, so
+  in-group parallelism equals the partition count. A bare broker enforces no per-caller quota;
+  queen_proxy enforces a per-cluster plan. Retention is opt-in and deletes whole segments,
+  so removing one message is not an operation. A transaction is one PostgreSQL transaction, not
+  end-to-end exactly-once. Timers and KV state are on every broker and have their own limits:
+  every KV write carries an expiry, deliverAt is a floor and not an appointment, there is no
+  recurrence, and a cancel after the fire answers absent, meaning no longer pending and never not
+  delivered.
 ---
 
 This page states Queen's opinions in one place: the design decisions, how to
@@ -257,6 +255,38 @@ stable `spool_dir` is configured; and the surface is the data plane plus the
 DLQ, with no consumer-group administration, listings, traces or streams. The
 Rust API itself is beta: [Versions and compatibility](/reference/compatibility)
 states what that means.
+
+## Timers and KV state have their own boundaries
+
+Both surfaces are part of the engine and every broker serves them: there is no variable that turns
+them on, any more than there is one for push and pop, and the boundaries below always apply. What an
+operator can do is pause a live surface with a runtime kill switch, which answers `503`, and bound a
+tenant with grants and quotas, which answer `403`; both are on [KV and timers](/deploy/state). The
+routes are on
+[kv](/reference/http/kv) and [timers](/reference/http/timers); the mechanics are in
+[Timer internals](/internals/timers), [KV internals](/internals/kv) and
+[Sweeper internals](/internals/sweeper).
+
+- **`deliverAt` is a floor, never an appointment.** A timer is delivered no earlier than the instant
+  you name, and a wake-up that reaches only the broker that scheduled it makes the worst case on
+  another broker one sleep ceiling away, `QUEEN_SWEEPER_MAX_SLEEP_MS`, which defaults to one second.
+  There is no per-message deadline anywhere in Queen, and this is not one.
+- **There are no recurring timers.** One timer is one delivery. A repeating schedule is a consumer
+  that schedules the next one, which keeps the cancellation story to a single row.
+- **A cancel after the fire answers `absent`.** The fire deletes the staging row in the same
+  transaction that pushes the message, so there is no tombstone afterwards. `absent` means **no longer
+  pending**. It never means "not delivered", and a compensation path has to check state rather than
+  read a cancel result as a verdict.
+- **Every KV write carries an expiry.** Exactly one of a TTL in seconds or an explicit `forever` is
+  required on every write; zero or two of them is an error. A store with no natural retention whose
+  TTL is optional grows in silence, and `forever` is deliberately something you have to type. This is
+  also the difference from streams state, which is scoped to a partition and has no expiry at all.
+- **The KV read boundary is a key or a prefix**, both capped, and prefix reads exist only on the
+  batch endpoint. There is no query language, no secondary index over values, no scan of a whole
+  namespace, and no cross-namespace read.
+- **A quota on either surface is soft and late.** Enforcement is an in-process count refreshed from
+  a rollup, because an exact count would mean one row per tenant locked by every write, in the
+  outermost lock space, held for a whole transaction. Overshoot is bounded, not zero.
 
 ## Smaller edges
 

@@ -422,6 +422,18 @@ pub fn route_access_level(method: &Method, path: &str) -> AccessLevel {
         if path.starts_with("/api/v1/traces") {
             return ReadOnly;
         }
+        // PLAN_KV_TIMERS.md §8.1. WITHOUT these two lines the KV and timer GETs
+        // fall through to the ReadWrite default at the bottom of this function,
+        // and a read-only token gets 403 on `GET /api/v1/kv/:ns/*key` — i.e. the
+        // broker demands WRITE access to read a key. They must live INSIDE this
+        // `if m == "GET"` block: the hurried fix is a `starts_with` placed just
+        // outside it, which hands write access to every read-only token.
+        if path.starts_with("/api/v1/kv") {
+            return ReadOnly;
+        }
+        if path.starts_with("/api/v1/timers") {
+            return ReadOnly;
+        }
     }
 
     // -------- Streams --------
@@ -435,6 +447,24 @@ pub fn route_access_level(method: &Method, path: &str) -> AccessLevel {
     // -------- WRITE_ONLY (pure produce; non-hierarchical, see issue #31) --------
     if path == "/api/v1/push" {
         return WriteOnly;
+    }
+    // Scheduling a timer IS a produce operation — the timer becomes a message —
+    // so a produce-only token must be able to do it, and without this line it
+    // would take 403 from the ReadWrite default (§8.1). The CANCEL is
+    // deliberately NOT here: `DELETE /api/v1/timers/:queue/*timerKey` is
+    // ReadWrite by the fallthrough below, which is right for a route that
+    // removes state, and it is the route §9.6 guarantees is never blocked.
+    if m == "POST" && path == "/api/v1/timers" {
+        return WriteOnly;
+    }
+
+    // -------- KV and timer writes: READ_WRITE, stated rather than inherited ---
+    // These already land on the fallthrough, and the whole point of writing them
+    // is that the fallthrough is not a decision. `webdoc/scripts/gen-routes.mjs`
+    // mirrors this function behind a fingerprint and publishes the result, so an
+    // access level nobody chose becomes an access level the site advertises.
+    if path.starts_with("/api/v1/kv") || path.starts_with("/api/v1/timers") {
+        return ReadWrite;
     }
 
     // -------- READ_WRITE (pop / ack / transaction / lease / configure / seek

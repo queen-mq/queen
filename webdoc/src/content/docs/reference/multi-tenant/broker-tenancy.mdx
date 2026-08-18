@@ -16,10 +16,12 @@ sourceOfTruth:
 ---
 
 The broker can scope queue identity to a tenant itself, in SQL, on every operation. One
-variable turns it on and one header drives it:
+variable turns it on, a second says the header is somebody's to set, and one header drives
+it:
 
 ```bash
 QUEEN_TENANCY_HEADER=true
+QUEEN_KV_TRUSTED_PROXY=true
 ```
 
 ```http
@@ -116,6 +118,31 @@ The same reasoning is why this header is absent from the client documentation. N
 sets it, no client-facing page mentions it, and a client that sends it to a proxy has it
 overwritten.
 
+### One combination the broker refuses to boot with
+
+`QUEEN_TENANCY_HEADER=1` **exits 1** unless `QUEEN_KV_TRUSTED_PROXY=1` is also set. It is
+the only place where the reasoning above is turned into an interlock rather than a
+warning, and the reason is that key/value state is the one surface with no opaque
+identifier anywhere in it.
+
+For queues the forged header is bad and bounded: a caller still has to name a queue, and
+an ack still carries a lease id the broker minted and the caller cannot guess. For
+[key/value state](/reference/http/kv) there is no such id. The only gate is the tenant in
+the `WHERE` clause, and the tenant comes from the header, so a forged one reads and writes
+another tenant's state **knowing only its name**. Setting the second variable is the
+operator asserting that a proxy supplies the header and strips the client's, which is
+exactly the trust boundary this section describes. An interlock that defaulted to
+permissive would not be one.
+
+The requirement is **unconditional**. It used to be keyed on the key/value flag as well, so
+a cell could satisfy it by leaving that surface off; the flag no longer exists and the KV
+is part of the engine on every cell, so choosing the header mode is by itself the assertion
+that something in front sets it. A deployment that cannot make that assertion is not one
+missing a feature, it is one with an open door.
+
+The eight [kv](/reference/http/kv) and [timer](/reference/http/timers) routes are
+tenant-scoped in the generated route table, and every broker registers them.
+
 ## How the proxy uses it
 
 `QUEEN_PROXY_TENANT_HEADER` defaults to `true`, so a proxy injects the header unless you
@@ -172,8 +199,9 @@ expose.
 
 <Steps>
 
-1. Set `QUEEN_TENANCY_HEADER=true` on every broker in the cell, and confirm the boot
-   line on each.
+1. Set `QUEEN_TENANCY_HEADER=true` and `QUEEN_KV_TRUSTED_PROXY=true` on every broker in
+   the cell, and confirm the boot line on each. Without the second the broker exits 1,
+   and [that interlock](#one-combination-the-broker-refuses-to-boot-with) is the reason.
 
 2. Set `JWT_ENABLED=true` with a token the proxy holds as the cell secret. Tenancy is
    not authentication; you want both.

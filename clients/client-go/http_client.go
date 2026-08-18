@@ -141,12 +141,59 @@ func (hc *HttpClient) Delete(ctx context.Context, path string, opts ...RequestOp
 	return hc.doRequest(ctx, http.MethodDelete, path, nil, 0, "", resolveRequestOptions(opts))
 }
 
+// ---------------------------------------------------------------------------
+// The RAW path (PLAN_KV_TIMERS.md §10.4, the Go bullet).
+//
+// Everything above ends in json.Unmarshal into map[string]interface{}, so EVERY
+// number that comes back is a float64: there is no path in this client on which
+// a 64-bit integer survives. `version` is a BIGINT and `incr` runs on `numeric`,
+// so the KV surface cannot be built on it -- 9007199254740993 would silently
+// become 9007199254740992, which is the same class of failure as a wrong
+// counter, only quieter.
+//
+// The fix is to move the unmarshal to the END: these four helpers return the
+// bytes and let the caller decode with the decoder its own types need. They are
+// used ONLY by kv.go, timers.go and the transaction commit, and the reason for
+// that restriction is written on parseBody below.
+// ---------------------------------------------------------------------------
+
+// GetRaw performs a GET request and returns the undecoded response body.
+func (hc *HttpClient) GetRaw(ctx context.Context, path string, opts ...RequestOption) ([]byte, error) {
+	return hc.doRequestRaw(ctx, http.MethodGet, path, nil, 0, "", resolveRequestOptions(opts))
+}
+
+// PostRaw performs a POST request and returns the undecoded response body.
+func (hc *HttpClient) PostRaw(ctx context.Context, path string, body interface{}, opts ...RequestOption) ([]byte, error) {
+	return hc.doRequestRaw(ctx, http.MethodPost, path, body, 0, "", resolveRequestOptions(opts))
+}
+
+// PutRaw performs a PUT request and returns the undecoded response body.
+func (hc *HttpClient) PutRaw(ctx context.Context, path string, body interface{}, opts ...RequestOption) ([]byte, error) {
+	return hc.doRequestRaw(ctx, http.MethodPut, path, body, 0, "", resolveRequestOptions(opts))
+}
+
+// DeleteRaw performs a DELETE request (with an optional body) and returns the
+// undecoded response body.
+func (hc *HttpClient) DeleteRaw(ctx context.Context, path string, body interface{}, opts ...RequestOption) ([]byte, error) {
+	return hc.doRequestRaw(ctx, http.MethodDelete, path, body, 0, "", resolveRequestOptions(opts))
+}
+
 // doRequest performs an HTTP request with retry logic: the outer loop here
 // retries 5xx/network failures across backends (existing RetryAttempts
 // behavior, unchanged); each individual attempt is delegated to
 // doRequestWithRetry429, which transparently retries HTTP 429 responses
 // in place (same backend, backoff-paced) before returning.
 func (hc *HttpClient) doRequest(ctx context.Context, method, path string, body interface{}, timeoutMs int, affinityKey string, ro requestOptions) (map[string]interface{}, error) {
+	respBody, err := hc.doRequestRaw(ctx, method, path, body, timeoutMs, affinityKey, ro)
+	if err != nil {
+		return nil, err
+	}
+	return parseBody(respBody)
+}
+
+// doRequestRaw is doRequest without the final decode: same failover loop, same
+// 429 policy, same error values, and the response body handed back as bytes.
+func (hc *HttpClient) doRequestRaw(ctx context.Context, method, path string, body interface{}, timeoutMs int, affinityKey string, ro requestOptions) ([]byte, error) {
 	var lastErr error
 
 	// Use custom timeout if provided
@@ -177,7 +224,7 @@ func (hc *HttpClient) doRequest(ctx context.Context, method, path string, body i
 			"attempt": attempt,
 		})
 
-		result, err := hc.doRequestWithRetry429(ctx, method, url, body, timeout, ro)
+		result, err := hc.doRequestWithRetry429Raw(ctx, method, url, body, timeout, ro)
 		if err == nil {
 			hc.loadBalancer.MarkHealthy(baseURL)
 			return result, nil
@@ -310,12 +357,12 @@ func computeRetry429Delay(attemptIndex int, retryAfterSeconds *float64, baseMs, 
 // returned immediately -- 429 is the only status this layer treats as
 // retryable; 5xx/network retry and cross-backend failover are the caller's
 // job (doRequest).
-func (hc *HttpClient) doRequestWithRetry429(ctx context.Context, method, url string, body interface{}, timeout int, ro requestOptions) (map[string]interface{}, error) {
+func (hc *HttpClient) doRequestWithRetry429Raw(ctx context.Context, method, url string, body interface{}, timeout int, ro requestOptions) ([]byte, error) {
 	policy := hc.retry429PolicyFor(ro.retryKind)
 	tries := 0
 	for {
 		tries++
-		result, err := hc.attemptOnce(ctx, method, url, body, timeout)
+		result, err := hc.attemptOnceRaw(ctx, method, url, body, timeout)
 		if err == nil {
 			return result, nil
 		}
@@ -354,11 +401,15 @@ func (hc *HttpClient) doRequestWithRetry429(ctx context.Context, method, url str
 	}
 }
 
-// attemptOnce performs exactly one HTTP round trip and parses the result.
-// Non-2xx responses come back as *HTTPError (StatusCode/Body/Code, plus
-// RetryAfterSeconds on a 429); anything else (marshal/transport/timeout
-// errors) comes back as a plain error.
-func (hc *HttpClient) attemptOnce(ctx context.Context, method, url string, body interface{}, timeout int) (map[string]interface{}, error) {
+// attemptOnceRaw performs exactly one HTTP round trip and returns the response
+// body undecoded.
+//
+// It is what attemptOnce used to be minus its last four lines, which are now
+// parseBody: the error values are unchanged, so non-2xx responses still come
+// back as *HTTPError (StatusCode/Body/Code, plus RetryAfterSeconds on a 429) and
+// anything else (marshal/transport/timeout) as a plain error. The split exists
+// so a caller that needs 64-bit integers can choose its own decoder (§10.4).
+func (hc *HttpClient) attemptOnceRaw(ctx context.Context, method, url string, body interface{}, timeout int) ([]byte, error) {
 	// Create request body
 	var bodyReader io.Reader
 	if body != nil {
@@ -431,25 +482,42 @@ func (hc *HttpClient) attemptOnce(ctx context.Context, method, url string, body 
 		return nil, httpErr
 	}
 
-	// Parse response
-	var result map[string]interface{}
-	if len(respBody) > 0 {
-		if err := json.Unmarshal(respBody, &result); err != nil {
-			// Try to parse as array
-			var arrayResult []interface{}
-			if err2 := json.Unmarshal(respBody, &arrayResult); err2 == nil {
-				return map[string]interface{}{"data": arrayResult}, nil
-			}
-			// Return raw body as string
-			return map[string]interface{}{"raw": string(respBody)}, nil
-		}
-	}
-
 	logDebug("HttpClient.doRequest", map[string]interface{}{
 		"status": "success",
 		"code":   resp.StatusCode,
 	})
 
+	return respBody, nil
+}
+
+// parseBody is the decode that used to live at the end of attemptOnce, moved
+// down the stack UNCHANGED. Three shapes, all three load-bearing somewhere:
+// a JSON object becomes the map; a top-level array becomes {"data": [...]}
+// (parseAckResponses reads exactly that); anything else becomes
+// {"raw": "<body>"}; an empty body is a nil map with no error.
+//
+// DO NOT ADD UseNumber() HERE. It is tempting, because the whole reason the raw
+// path exists is that this decode turns every number into a float64. But the
+// message parsing asserts the type it gets -- msgMap["retryCount"].(float64) and
+// its siblings -- and with UseNumber those type switches stop matching, IN
+// SILENCE: the field lands at zero, no error is raised, and a retry counter that
+// reads 0 forever looks like a broker bug. Sixty-four-bit numbers are decoded
+// where they are needed instead, from the raw bytes, by the kv and timer
+// decoders in kv.go.
+func parseBody(respBody []byte) (map[string]interface{}, error) {
+	if len(respBody) == 0 {
+		return nil, nil
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		// Try to parse as array
+		var arrayResult []interface{}
+		if err2 := json.Unmarshal(respBody, &arrayResult); err2 == nil {
+			return map[string]interface{}{"data": arrayResult}, nil
+		}
+		// Return raw body as string
+		return map[string]interface{}{"raw": string(respBody)}, nil
+	}
 	return result, nil
 }
 

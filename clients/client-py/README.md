@@ -338,6 +338,127 @@ await queen.queue('orders').consume(order_handler)
 
 ---
 
+## Key/Value State and Timers
+
+Both surfaces are **always there**. There is no flag to turn on before using
+them and nothing to probe first: any broker you can push to can also hold state
+and schedule timers.
+
+An operator can still pause either one during an incident, in which case a call
+raises `KvError` / `TimerError` with `status == 503`, `code` `kv_disabled` or
+`timers_disabled`, and a `Retry-After` in `retry_after_seconds`. Inside a
+transaction the same pause is a `403` instead, so a bundle fails fast rather
+than spinning with messages in hand. Timer *cancels* are never paused.
+
+### Key/Value
+
+```python
+from datetime import timedelta
+
+# An expiry is MANDATORY on every write: exactly one of ttl_seconds, ttl,
+# until or forever=True. A put never inherits the previous expiry: that is
+# the fastest way to make a marker immortal.
+await queen.kv.put('orders', 'order:9f1', {'state': 'held'}, ttl_seconds=60)
+await queen.kv.put('orders', 'order:9f1', {'state': 'held'}, ttl=timedelta(minutes=1))
+
+got = await queen.kv.get('orders', 'order:9f1')
+if got:                       # follows `found`, not the value
+    print(got['value'], got['version'])
+
+# "Did I win?", in one call, one boolean. This is the idempotency marker.
+if await queen.kv.once('dedup', f"evt:{event_id}", ttl_seconds=86400):
+    await do_the_external_effect()
+
+# Optimistic lock. expect=0 means "must not exist"; expect=N is a pure update
+# that creates nothing when it matches no row.
+res = await queen.kv.put('orders', 'order:9f1', {'state': 'shipped'},
+                         ttl_seconds=60, expect=got['version'])
+if not res:
+    print(res['reason'])      # 'version' | 'absent' | 'exists' | 'limit' | 'type'
+
+# Rate limiting without a CAS loop. With max, `applied` IS the admission
+# decision: nothing saturates, nothing truncates, a refusal spends no budget.
+allowed = await queen.kv.incr('quota', f"{customer}:{hour}", delta=1, max=1000, ttl_seconds=3600)
+if not allowed:
+    raise TooManyRequests()
+
+rows = await queen.kv.list_all('saga', 'order:9f1:')   # follows nextAfter
+```
+
+**A write that did not apply is not an error.** `applied: false` answers HTTP
+200 with the current value and version, so the loser needs no second round
+trip. Results are falsy when they did not apply, so `if await
+queen.kv.delete(...)` reads the verdict rather than "an object came back".
+
+**Read-modify-write across two calls is safe only when the KV key derives from
+the partition key.** Otherwise the lanes do not serialise it for you: use
+`incr`, or carry `expect`.
+
+**`put_if_absent` plus a TTL is not a distributed lock.** A lock that expires is
+not revoked: the old holder keeps working, it simply no longer has the row.
+Carry your `version` as `expect` on every later write so a lapsed holder fails
+with `reason: "version"` instead of overwriting the new one.
+
+### Timers
+
+```python
+res = await queen.timers.schedule('orders', 'order:9f1:expire',
+                                  {'orderId': '9f1'}, delay_ms=30_000)
+res['txn'], res['messageId'], res['deliverAt']
+
+await (queen.timer('orders')
+            .key('order:9f1:expire')
+            .payload({'orderId': '9f1'})
+            .after(timedelta(minutes=30))
+            .schedule())
+
+cancelled = await queen.timers.cancel('orders', 'order:9f1:expire', txn=res['txn'])
+```
+
+Durations that can be sub-second are in **milliseconds** (`delay_ms`), the ones
+that cannot are in **seconds** (`ttl_seconds`). Only relative delays exist:
+there is one clock and it is the database's. A delay in the past is legal and
+fires on the first cycle.
+
+`deliverAt` is **"not before"**, never "exactly at".
+
+**`absent` means "no longer pending" and may mean ALREADY DELIVERED.** There is
+no tombstone: a delivered timer has no row. The response echoes the `txn` back
+so the authority, the log, can be consulted without a second API call. A saga
+that cancels a compensation timer must therefore have its compensation consumer
+re-check the saga state before compensating, because the cancel may have arrived
+5 ms after the fire.
+
+Use `queen.timers.cancel(...)`, not a `cancel` op inside a batch: the DELETE
+route it takes is the one that is never blocked by a quota. A tenant that cannot
+cancel keeps producing messages it cannot stop.
+
+### Inside a transaction
+
+The transaction is the **primary fence**; `expect` is only the secondary
+assertion. A state write that shares the transaction with its ack is undone when
+an expired lease makes the ack fail, which a CAS cannot do.
+
+```python
+result = await (queen.transaction()
+    .once('dedup', f"evt:{event_id}", ttl_seconds=86400)   # the gate, first
+    .queue('orders').push([{'data': {...}}])
+    .ack(message)
+    .timer('orders').key(f"order:{oid}:expire").payload({'oid': oid}).after_ms(30_000).schedule()
+    .commit())
+
+if not result:
+    # RETURNED, not raised: a lost gate is the expected outcome of a legitimate
+    # redelivery, so it stays out of your retry policy and your error metrics.
+    assert result['reason'] == 'kv_precondition'
+    print(result['failedIndex'], result['kvReason'], result['version'], result['value'])
+```
+
+Everything else still raises. `get_prefix` is not available inside a
+transaction: its cost is not bounded by the caller.
+
+---
+
 ## API Reference
 
 ### Queue Operations

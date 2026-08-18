@@ -867,6 +867,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "op": {
+                    "description": "See the reference page for this route."
+                  },
                   "operations": {
                     "description": "See the reference page for this route."
                   },
@@ -895,6 +898,9 @@
                     "description": "See the reference page for this route."
                   },
                   "leaseId": {
+                    "description": "See the reference page for this route."
+                  },
+                  "value": {
                     "description": "See the reference page for this route."
                   },
                   "ok": {
@@ -982,7 +988,7 @@
           }
         ],
         "requestBody": {
-          "required": true,
+          "required": false,
           "content": {
             "application/json": {
               "schema": {
@@ -1406,22 +1412,6 @@
         "summary": "GET /api/v1/messages",
         "parameters": [
           {
-            "name": "error",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "messages",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
             "name": "x-queen-tenant",
             "in": "header",
             "required": false,
@@ -1458,12 +1448,13 @@
         "x-queen-access-level": "read-only",
         "x-queen-tenant-scoped": true,
         "x-queen-handler": "server/src/handlers/messages.rs::handle_list_messages",
-        "x-queen-query-params": "adhoc",
+        "x-queen-query-params": "forwarded",
         "security": [
           {
             "bearerAuth": []
           }
-        ]
+        ],
+        "x-queen-note": "Query parameters are forwarded to a stored procedure without being read by name in Rust, so they are not recoverable from the handler. See the reference page for this route."
       }
     },
     "/api/v1/messages/{partitionId}/{transactionId}": {
@@ -1710,22 +1701,6 @@
         "summary": "GET /api/v1/dlq",
         "parameters": [
           {
-            "name": "error",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "messages",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
             "name": "x-queen-tenant",
             "in": "header",
             "required": false,
@@ -1762,12 +1737,13 @@
         "x-queen-access-level": "read-only",
         "x-queen-tenant-scoped": true,
         "x-queen-handler": "server/src/handlers/messages.rs::handle_dlq",
-        "x-queen-query-params": "adhoc",
+        "x-queen-query-params": "forwarded",
         "security": [
           {
             "bearerAuth": []
           }
-        ]
+        ],
+        "x-queen-note": "Query parameters are forwarded to a stored procedure without being read by name in Rust, so they are not recoverable from the handler. See the reference page for this route."
       }
     },
     "/api/v1/traces": {
@@ -2622,14 +2598,6 @@
             }
           },
           {
-            "name": "deletedPartitions",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
             "name": "x-queen-tenant",
             "in": "header",
             "required": false,
@@ -2666,12 +2634,13 @@
         "x-queen-access-level": "admin",
         "x-queen-tenant-scoped": true,
         "x-queen-handler": "server/src/handlers/consumer_groups.rs::handle_delete_consumer_group",
-        "x-queen-query-params": "adhoc",
+        "x-queen-query-params": "forwarded",
         "security": [
           {
             "bearerAuth": []
           }
-        ]
+        ],
+        "x-queen-note": "Query parameters are forwarded to a stored procedure without being read by name in Rust, so they are not recoverable from the handler. See the reference page for this route."
       }
     },
     "/api/v1/consumer-groups/{group}/subscription": {
@@ -2776,14 +2745,6 @@
             }
           },
           {
-            "name": "deletedPartitions",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
             "name": "x-queen-tenant",
             "in": "header",
             "required": false,
@@ -2820,12 +2781,13 @@
         "x-queen-access-level": "admin",
         "x-queen-tenant-scoped": true,
         "x-queen-handler": "server/src/handlers/consumer_groups.rs::handle_delete_consumer_group_for_queue",
-        "x-queen-query-params": "adhoc",
+        "x-queen-query-params": "forwarded",
         "security": [
           {
             "bearerAuth": []
           }
-        ]
+        ],
+        "x-queen-note": "Query parameters are forwarded to a stored procedure without being read by name in Rust, so they are not recoverable from the handler. See the reference page for this route."
       }
     },
     "/api/v1/consumer-groups/{group}/queues/{queue}/seek": {
@@ -2984,7 +2946,7 @@
           }
         ],
         "requestBody": {
-          "required": true,
+          "required": false,
           "content": {
             "application/json": {
               "schema": {
@@ -3237,6 +3199,101 @@
             "bearerAuth": []
           }
         ]
+      }
+    },
+    "/api/v1/system/kv-timers": {
+      "get": {
+        "operationId": "get_kv_timers",
+        "tags": [
+          "Operator"
+        ],
+        "summary": "GET /api/v1/system/kv-timers",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          }
+        },
+        "x-queen-access-level": "admin",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/maintenance.rs::handle_get_kv_timers",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "set_kv_timers",
+        "tags": [
+          "Operator"
+        ],
+        "summary": "POST /api/v1/system/kv-timers",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "admin",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/maintenance.rs::handle_set_kv_timers",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "kv": {
+                    "type": "boolean"
+                  },
+                  "timersSchedule": {
+                    "type": "boolean"
+                  },
+                  "timersFire": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          },
+          "x-queen-schema": "derived",
+          "x-queen-schema-source": "KvTimersBody"
+        }
       }
     },
     "/internal/api/notify": {
@@ -3970,14 +4027,14 @@
         "x-queen-access-level": "read-write",
         "x-queen-tenant-scoped": true,
         "x-queen-handler": "server/src/handlers/kv.rs::handle_kv_get",
-        "x-queen-query-params": "forwarded",
+        "x-queen-query-params": "rejected",
         "security": [
           {
             "bearerAuth": []
           }
         ],
         "x-queen-catch-all": true,
-        "x-queen-note": "Query parameters are forwarded to a stored procedure without being read by name in Rust, so they are not recoverable from the handler. See the reference page for this route."
+        "x-queen-note": "This route takes no query parameters and refuses any query string outright, rather than ignoring one: a prefix or key in a URL is recorded by every access log, proxy sample and tracing span between the client and the database."
       },
       "put": {
         "operationId": "kv_put",
@@ -4021,7 +4078,7 @@
         "x-queen-access-level": "read-write",
         "x-queen-tenant-scoped": true,
         "x-queen-handler": "server/src/handlers/kv.rs::handle_kv_put",
-        "x-queen-query-params": "forwarded",
+        "x-queen-query-params": "rejected",
         "security": [
           {
             "bearerAuth": []
@@ -4041,7 +4098,7 @@
           "description": "The handler reads this body as a dynamic JSON document, so the exact shape is not recoverable from a type. The listed keys are the ones the handler reads by name."
         },
         "x-queen-catch-all": true,
-        "x-queen-note": "Query parameters are forwarded to a stored procedure without being read by name in Rust, so they are not recoverable from the handler. See the reference page for this route."
+        "x-queen-note": "This route takes no query parameters and refuses any query string outright, rather than ignoring one: a prefix or key in a URL is recorded by every access log, proxy sample and tracing span between the client and the database."
       },
       "delete": {
         "operationId": "kv_delete",
@@ -4085,14 +4142,27 @@
         "x-queen-access-level": "read-write",
         "x-queen-tenant-scoped": true,
         "x-queen-handler": "server/src/handlers/kv.rs::handle_kv_delete",
-        "x-queen-query-params": "forwarded",
+        "x-queen-query-params": "rejected",
         "security": [
           {
             "bearerAuth": []
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          },
+          "x-queen-schema": "opaque",
+          "description": "The handler reads this body as a dynamic JSON document, so the exact shape is not recoverable from a type. The listed keys are the ones the handler reads by name."
+        },
         "x-queen-catch-all": true,
-        "x-queen-note": "Query parameters are forwarded to a stored procedure without being read by name in Rust, so they are not recoverable from the handler. See the reference page for this route."
+        "x-queen-note": "This route takes no query parameters and refuses any query string outright, rather than ignoring one: a prefix or key in a URL is recorded by every access log, proxy sample and tracing span between the client and the database."
       }
     },
     "/api/v1/timers": {
@@ -4169,6 +4239,14 @@
           },
           {
             "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
             "in": "query",
             "required": false,
             "schema": {

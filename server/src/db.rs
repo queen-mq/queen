@@ -1961,6 +1961,24 @@ pub async fn get_system_flag(
     Ok(rows.first().and_then(|r| r.get::<_, Option<bool>>(0)).unwrap_or(false))
 }
 
+/// The SAME rows, read TRI-STATE: `None` means no row has ever been written.
+///
+/// `get_system_flag` above collapses "absent" to `false`, which is right for its
+/// callers — they ask "is maintenance ON?", and a cell nobody has touched is not
+/// in maintenance. The kv/timers switches (PLAN_KV_TIMERS §12.1) ask the
+/// opposite question, "is the feature still ON?", so for them absent must mean
+/// ON: a fresh cell would otherwise boot with the feature dead and no row to
+/// explain why. Two callers, two questions, one table — and the difference has
+/// to be visible in the signature or someone reuses the wrong one.
+pub async fn get_system_flag_opt(
+    client: &deadpool_postgres::Client,
+    key: &str,
+) -> Result<Option<bool>, tokio_postgres::Error> {
+    let stmt = "SELECT (value->>'enabled') = 'true' FROM queen.system_state WHERE key = $1";
+    let rows = client.query(stmt, &[&key]).await?;
+    Ok(rows.first().and_then(|r| r.get::<_, Option<bool>>(0)))
+}
+
 pub async fn set_system_flag(
     client: &deadpool_postgres::Client,
     key: &str,
@@ -2146,6 +2164,31 @@ pub async fn kv_apply(
         )
         .await?;
     let row = client.query_one(&stmt, &[&ops_json, &tenant, &in_wire]).await?;
+    Ok(row.get(0))
+}
+
+// --------------------------------------------------------------- kv quota
+// The broker's periodic read of `queen.kv_quota` + `queen.kv_usage` (§9.3), one
+// call per refresh period per broker, feeding the in-process enforcer in
+// `src/quota.rs`.
+//
+// `prepare_cached` and a bounded result, because this runs on EVERY broker
+// whether or not it sweeps: a broker with QUEEN_SWEEPER=false does not roll up
+// the measurement but still has to enforce against it.
+//
+// It COUNTS NOTHING. The obvious version of this read — `count(*)` over
+// `queen.kv` for the live number — would run every 30 s on every broker against
+// the table the quota is bounding, which is how the cost of enforcing a limit
+// becomes proportional to the data it limits. The counting lives in the rollup,
+// once every 300 s, on one broker (`026_kv_sweeper.sql`).
+pub async fn kv_quota_refresh(
+    client: &deadpool_postgres::Client,
+    max_tenants: i32,
+) -> Result<String, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached("SELECT (queen.kv_quota_refresh_v1($1::int))::text")
+        .await?;
+    let row = client.query_one(&stmt, &[&max_tenants]).await?;
     Ok(row.get(0))
 }
 
@@ -2526,6 +2569,43 @@ pub async fn timers_list(
         .await?;
     let row = client.query_one(&stmt, &[&tenant, &queue, &after, &limit]).await?;
     Ok(row.get(0))
+}
+
+/// The per-tenant KV/timer usage measurement, as the sweeper's slow rollup last
+/// stored it: `(kv_rows, kv_bytes, timer_rows, timer_bytes)`. `None` = this
+/// tenant has never been measured, which is the honest answer "zero" for a cell
+/// that has never had a KV row or a timer.
+///
+/// PLAN_KV_TIMERS §9.8 P2 — THE PIECE THAT WAS ACTUALLY MISSING. The proxy's
+/// storage quota is not a no-op: `proxy/src/registry.rs` decides `over_storage`
+/// with hysteresis and `proxy/src/gateway.rs` answers a hard
+/// `403 storage_quota_exceeded` on it. What it could not see is these two
+/// tables, because neither has a QUEUE and the reconciler only ever summed
+/// `retainedBytes` per queue. This wrapper is how they become visible, and it is
+/// deliberately the ONLY new thing on that path.
+///
+/// A PRIMARY-KEY READ OF A CACHED MEASUREMENT, NEVER AN AGGREGATE. The obvious
+/// shape — have the queue listing count the rows — would put a `count(*)` and a
+/// `sum(pg_column_size(...))` over two unindexed-for-this tables behind an
+/// endpoint the cloud reconciler polls every ten seconds per cell, i.e. exactly
+/// the scan `kv_usage_step_v1` exists to keep on a five-minute cadence and to
+/// degrade to a shard sample above 200k rows. The staleness that buys is already
+/// declared and bounded in §9.3, and it is the reason the enforcement side is
+/// the local delta rather than this number.
+pub async fn kv_usage_snapshot(
+    client: &deadpool_postgres::Client,
+    tenant: &str,
+) -> Result<Option<(i64, i64, i64, i64)>, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached(
+            "SELECT kv_rows, kv_bytes, timer_rows, timer_bytes \
+             FROM queen.kv_usage WHERE tenant_id = $1::text::uuid",
+        )
+        .await?;
+    let rows = client.query(&stmt, &[&tenant]).await?;
+    Ok(rows
+        .first()
+        .map(|r| (r.get(0), r.get(1), r.get(2), r.get(3))))
 }
 
 #[cfg(test)]

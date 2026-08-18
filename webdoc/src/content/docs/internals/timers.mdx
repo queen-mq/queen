@@ -1,0 +1,177 @@
+---
+title: Timer internals
+description: "queen.log_timers column by column: why a scheduled message cannot live in the log, why the table is keyed by names, the price paid for indexing visible_at, and the two lease columns that keep a broken timer cancellable."
+type: concept
+tier: internals
+sidebar:
+  order: 12
+sourceOfTruth:
+  - server/sql/procedures/025_log_timers.sql
+  - server/src/sweeper.rs
+  - server/src/handlers/timers.rs
+  - server/src/config.rs
+---
+
+A timer is a message that is not in the log yet. `queen.log_timers` is where it waits, and the log
+sees it only at the fire, inside one transaction that both pushes the frame and deletes the staging
+row.
+
+<Aside type="note">
+Every broker creates this table at boot, serves the timer routes and runs the fire. There is no boot
+flag deciding whether timers exist, only [runtime kill switches](/deploy/state) that pause the
+schedule or, in an incident, the delivery.
+</Aside>
+
+## Why a timer cannot live in the log
+
+This is a proof rather than a preference, and it has three independent legs.
+
+The pop is a **contiguous** offset scan from `committed + 1`. A frame with a future delivery time
+sitting in the middle of that scan either blocks the cursor for every consumer of the partition, or is
+skipped and never delivered.
+
+A row inside a solid zstd blob is not deletable. `queen.log_segments.blob` is opaque to SQL and carries
+`STORAGE EXTERNAL` precisely because the broker has already compressed it, so there is no statement
+that removes one frame from a segment. A cancellation would have nothing to act on.
+
+And a pending future frame would pin its own segment against `log_start` for the whole wait. A timer
+set ninety days out would keep ninety days of segments alive behind it.
+
+So the frame is staged in an ordinary row, with ordinary indexes and an ordinary `DELETE`, and it
+enters the log at the moment it becomes deliverable.
+
+## The table
+
+```sql
+CREATE TABLE IF NOT EXISTS queen.log_timers (
+    tenant_id     UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
+    queue         TEXT COLLATE "C" NOT NULL,
+    timer_key     TEXT COLLATE "C" NOT NULL,
+    "partition"   TEXT NOT NULL DEFAULT 'Default',
+    deliver_at    TIMESTAMPTZ NOT NULL,
+    txn           TEXT NOT NULL,
+    message_id    UUID NOT NULL,
+    payload       BYTEA NOT NULL,
+    payload_zstd  BOOLEAN NOT NULL DEFAULT FALSE,
+    encrypted     BOOLEAN NOT NULL DEFAULT FALSE,
+    producer_sub  TEXT,
+    attempts      INT NOT NULL DEFAULT 0,
+    last_error    TEXT,
+    claimed_until TIMESTAMPTZ,
+    claim_token   UUID,
+    shard         SMALLINT NOT NULL
+                  GENERATED ALWAYS AS ((hashtextextended(timer_key, 0) & 63)::smallint) STORED,
+    visible_at    TIMESTAMPTZ NOT NULL
+                  GENERATED ALWAYS AS (
+                      CASE WHEN claimed_until IS NULL OR claimed_until < deliver_at
+                           THEN deliver_at ELSE claimed_until END) STORED,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, queue, timer_key)
+);
+```
+
+| Column | What it is, and the decision inside it |
+| --- | --- |
+| `tenant_id` | Part of the key, with the same default as `queen.hotlist_repairs`, so a pre-tenancy caller lands in the default tenant |
+| `queue`, `timer_key` | The identity a caller chose. `COLLATE "C"` on both, for the lock order first and for keyset stability second, exactly as on `queen.kv` |
+| `partition` | The destination partition name, defaulting to `Default`, resolved at the fire like any push |
+| `deliver_at` | The floor of delivery, never an appointment. The contract is "no earlier than", which is what makes a one-second worst-case wake-up on another broker a correct implementation rather than a bug |
+| `txn` | The fixed transaction id of the future frame. It reads like a **secondary** net against double delivery and it is not one: the fire calls the allocator with the partition's own last-verified marker, so the [deduplication](/internals/dedup#the-fire-of-a-timer-does-not-probe-the-window) probe never runs for it. The whole guarantee is that the push and the `DELETE` share one transaction, which is why correctness never depends on the dedup window. A reschedule overwrites it, because a rescheduled timer is a new message |
+| `message_id` | Minted by the broker at **schedule** time, so the schedule call can answer "this is the id you will see", and a re-fire after a rolled-back attempt delivers the same id. Not an input field |
+| `payload`, `payload_zstd`, `encrypted` | The frame as it will be delivered. Encryption happens at schedule, like on a push, so the payload is not in clear text here. The declared consequence: a queue whose encryption is switched on **after** a timer was scheduled delivers that frame in clear, because the flag travels with the frame |
+| `producer_sub` | The authenticated subject of whoever scheduled, taken from the middleware as a separate argument. A `producerSub` supplied inside an op is refused, never quietly ignored |
+| `attempts`, `last_error` | Permanent failures only. A transient error must not spend budget, or five minutes of database trouble would send every timer in the system to the dead-letter queue, turning an infrastructure failure into product loss |
+| `claimed_until`, `claim_token` | The fire's lease. Two columns, deliberately. See below |
+| `shard` | A contention spreader, not an ownership partition: 64, generated, fixed permanently, and no environment variable changes it |
+| `visible_at` | The one scan key, generated and indexed. The price is declared below |
+
+## Keyed by names, and the second reason is the stronger one
+
+The primary key is `(tenant_id, queue, timer_key)`. There is no queue id and no partition id anywhere
+in this table.
+
+The obvious reason is that at schedule time the destination queue may not exist: provisioning is lazy
+and happens at the fire, inside the same code path a push uses. The in-house precedent is
+`queen.hotlist_repairs`, keyed by names for the same motive.
+
+The decisive reason is different. Because no column names a partition, this table adds no leg to
+`queen.log_partition_dead_v1`, so that per-partition scan does not get more expensive as timers
+accumulate. And the invariant has a free compile-time check: `log_partition_dead_v1` is `LANGUAGE sql`,
+so it resolves its tables at creation time; it lives in `006` and this table lives in `025`. Adding a
+leg that names `queen.log_timers` kills the boot rather than silently making maintenance quadratic.
+
+A third consequence falls out of the same choice and is worth stating because it is what a reader of
+the schedule path notices first: the schedule never writes `queen.queues`. Validating the destination
+queue at schedule time would put two statements that write `queen.queues` with different row sets in
+one transaction wire, and two such transactions wait on each other on the unique index, which
+per-statement ordering does not prevent because they are different statements. So there is no
+validation at schedule, and the queue is born at the fire.
+
+## visible_at, and the price of indexing it
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_log_timers_visible
+    ON queen.log_timers (shard, visible_at);
+```
+
+`visible_at` is "not visible to the sweeper before this instant": the delivery time, or the lease
+expiry when a lease is outstanding and reaches further. It is generated and stored rather than
+computed at query time, so the claim is a range scan per shard with zero rows filtered.
+
+The price is paid at every claim and is stated rather than discovered: the claim's `UPDATE` writes an
+**indexed** column, so it is never HOT. That is bought deliberately. The alternative, an index on
+`(shard, deliver_at)`, keeps the claim HOT, and then every poisoned timer serving out its backoff sits
+at the **head** of the index and is re-read by every pass of every broker for the whole backoff. The
+cost would grow with the number of broken timers, which is the one direction that must not degrade.
+Timer rates are control-plane rates, orders of magnitude below message rates, so the write amplification
+is the cheaper side of that trade.
+
+Also deliberately not created: an index on `deliver_at`, which has no reader because the sweeper orders
+by `visible_at`; one on `(tenant_id, queue)`, because the leading columns of the primary key already
+serve peek and list; and one on `claim_token`, because the fire addresses rows by primary key.
+
+## The two lease columns
+
+`claim_token IS NOT NULL AND claimed_until > now()` is the only definition of "in somebody's hands".
+
+They are two columns rather than one because of what a single one would do to a broken timer. A row
+that is **backing off** after a failed fire has `claimed_until` in the future and `claim_token` set to
+`NULL`: it is not claimed, it is merely not due yet. Collapsing the two would make that row look
+claimed, and a claimed row cannot be cancelled, so a poisoned timer would be uncancellable for the
+whole of its backoff. The user would be unable to remove the broken thing, which is the one thing they
+certainly want to do.
+
+The fire itself never waits in this space. It verifies its claimed rows with `FOR UPDATE SKIP LOCKED`,
+then provisions, pre-locks partitions in ascending id order and pushes, and deletes rows it already
+holds as its last step. A design note once prescribed a plain `FOR UPDATE` before that final delete;
+it is cancelled, and the header of `025_log_timers.sql` says why in both of the ways it fails. The
+statement names an `id` column this table does not have, so the boot dies. And a `FOR UPDATE` without
+`SKIP LOCKED` would make the fire a waiter here, so one slow cancel inside a long transaction wire
+could stop the fire of the whole broker while holding the lease of every other timer in its batch.
+
+## Delete, not "mark done", and the price of having no tombstone
+
+The fire deletes. There is no `status` column and no completed-timer history, so the push and the
+disappearance of the staging row are the same commit, the fire is exactly-once with nothing to
+reconcile after a crash, and the table is bounded by pending work rather than by history. "Was it
+sent?" is answered by the log, by looking for the timer's fixed `txn` in the destination queue.
+
+The price is real and is declared instead of hidden: after the fire there is no tombstone, so a late
+cancel answers `absent`. That verdict means **no longer pending**. It never means "not delivered", and
+a consumer of a compensation path has to check the state rather than infer it from a cancel result.
+
+## Numbers on this page that are not measured
+
+The dated blocks in `001_log_schema.sql` are the house formula: a storage setting carries the date it
+was measured, the symptom that produced it, and the number observed. The following carry no such
+block.
+
+| Number | Status |
+| --- | --- |
+| `fillfactor = 70` on `queen.log_timers` | By analogy with `queen.log_partitions`, not measured, and here the analogy is weak by construction: the claim is non-HOT because `visible_at` is indexed, so the headroom buys page locality rather than HOT chains |
+| How many timers per second a machine sustains before autovacuum on this table enters the profile | Not measured. It is the number that would decide whether indexing `visible_at`, which is right against the failure mode and wrong against load, stays affordable |
+| Autovacuum workers occupied by this table in steady state | Not measured, against a global `autovacuum_max_workers` that defaults to 3 |
+
+Each is to be replaced with a measured number after the first soak on a test rig, in the style of those
+dated blocks, and never with one taken from a live stack.

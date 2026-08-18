@@ -5,7 +5,10 @@ name: docs
 # the environment-variable reference, the Prometheus family list, the proxy
 # route classes and every published code snippet are derived by
 # webdoc/scripts/*.mjs, so this job also has to run when the code they read
-# changes, not only when a page changes.
+# changes, not only when a page changes. examples/** is on that list for the
+# same reason: every snippet on the tutorial and full-example pages is extracted
+# verbatim from a program under it, so editing a program without rebuilding the
+# partials is exactly the drift gen:check exists to catch.
 on:
   push:
     paths:
@@ -21,6 +24,7 @@ on:
       - "clients/client-js/test-v2/**"
       - "clients/client-py/tests/**"
       - "clients/client-go/tests/**"
+      - "examples/**"
       - ".github/workflows/docs.yml"
   pull_request:
     paths:
@@ -36,6 +40,7 @@ on:
       - "clients/client-js/test-v2/**"
       - "clients/client-py/tests/**"
       - "clients/client-go/tests/**"
+      - "examples/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 

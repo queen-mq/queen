@@ -39,7 +39,7 @@ use super::{BrokerConfig, StartError};
 use crate::handlers::AppState;
 use crate::{
     ack_fusion, ack_registry, admission, config, db, encryption, file_buffer, fusion, hotlist,
-    metrics, notify, obs, pop_fusion, retention, schema, stats, syscollect,
+    metrics, notify, obs, pop_fusion, quota, retention, schema, stats, switches, syscollect,
 };
 
 /// Every boolean env knob the boot path reads (config.rs `env_bool` call sites
@@ -305,6 +305,38 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
         Err(_) => (false, false),
     };
 
+    // PLAN_KV_TIMERS §12.1 — the runtime kill switches, seeded from the SAME
+    // queen.system_state table and on the same best-effort terms as the two
+    // above, with ONE difference that is the whole point of them: an ABSENT row
+    // means ON. `get_system_flag_opt` is what makes that expressible; using
+    // `get_system_flag` here would boot every fresh cell with the features dead
+    // and no row to explain why.
+    let switches = switches::Switches::new();
+    if let Ok(c) = pool.get().await {
+        for key in [
+            switches::Switches::KEY_KV,
+            switches::Switches::KEY_TIMERS_SCHEDULE,
+            switches::Switches::KEY_TIMERS_FIRE,
+        ] {
+            if let Ok(v) = db::get_system_flag_opt(&c, key).await {
+                switches.adopt(key, v);
+            }
+        }
+    }
+
+    // PLAN_KV_TIMERS §9.3 — the occupancy gate, and ONE refresh awaited before
+    // the listener opens. With `require_grant` on, an empty snapshot denies, so
+    // a cell that started serving before its first refresh would answer
+    // `feature_gated` to every tenant for a refresh period on every rollout.
+    let quota = quota::from_config(&cfg);
+    match quota::refresh_once(&quota, &pool, cfg.kv_max_tenants).await {
+        Ok(n) => tracing::info!(target: "quota", tenants = n, "quota seeded"),
+        Err(e) => tracing::warn!(
+            target: "quota", error = %e,
+            "quota seed failed; limits are unknown until the first successful refresh"
+        ),
+    }
+
     let notifier = notify::Notifier::new(cfg.tenancy_header);
     let encryption = encryption::Encryption::from_env();
 
@@ -372,6 +404,10 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
         enc_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         maintenance: std::sync::atomic::AtomicBool::new(init_maint),
         pop_maintenance: std::sync::atomic::AtomicBool::new(init_pop_maint),
+        quota: quota.clone(),
+        switches: switches.clone(),
+        kv_pressure: std::sync::atomic::AtomicU32::new(0),
+        kv_standalone_shed_after: cfg.kv_standalone_shed_after,
         notifier: notifier.clone(),
         file_buffer: file_buffer.clone(),
         partition_queue: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -526,6 +562,18 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
                             tracing::info!(target: "reconcile", flag = "pop_maintenance_mode", from = %prev, to = %pm, "flag changed");
                         }
                     }
+                    // PLAN_KV_TIMERS §12.1 kill switches (KEEP IN SYNC with
+                    // reconcile::spawn). `get_system_flag_opt`, because an absent
+                    // row means ON for these three.
+                    for key in [
+                        crate::switches::Switches::KEY_KV,
+                        crate::switches::Switches::KEY_TIMERS_SCHEDULE,
+                        crate::switches::Switches::KEY_TIMERS_FIRE,
+                    ] {
+                        if let Ok(v) = db::get_system_flag_opt(&c, key).await {
+                            state.switches.adopt(key, v);
+                        }
+                    }
                     crate::reconcile::apply_hotlist_repairs(&state, &c, &mut repaired)
                         .await;
                 }
@@ -536,6 +584,16 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
             }
         }));
     }
+
+    // PLAN_KV_TIMERS §9.3 — the quota/measurement refresh. Not inlined: unlike
+    // the reconcile loop it captures no AppState, so the shared helper is usable
+    // and the handle it returns is what shutdown() aborts.
+    tasks.push(quota::spawn_refresh(
+        st.quota.clone(),
+        pool.clone(),
+        cfg.kv_quota_refresh_ms,
+        cfg.kv_max_tenants,
+    ));
 
     // Idle sweep for the hot-list rings and long-poll wake gates (inlined from
     // reconcile::spawn_idle_sweep for the same handle reason; 0 disables).

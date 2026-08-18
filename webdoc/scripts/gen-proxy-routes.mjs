@@ -26,7 +26,10 @@ const PROXY_ROUTES = "proxy/src/routes.rs";
 const MAIN = "server/src/main.rs";
 
 // Bump after re-reading the Rust when a guard trips.
-const CLASSIFY_FINGERPRINT = "06215a923e412832";
+// 2026-08-17: `classify` grew the KV and timer families and split every gated
+// class into a `(Feature, GatedOp)` pair, where the second half is the quota
+// decision and not a second feature flag. Re-read and mirrored below.
+const CLASSIFY_FINGERPRINT = "1e4d1611b9e875e4";
 const OPERATOR_FINGERPRINT = "04d6dea7366b466d";
 
 // --- mirror of `is_operator_route` -----------------------------------------
@@ -75,6 +78,25 @@ function classify(m, p) {
   if (p.startsWith("/streams/")) return "gated (streams)";
   if (p === "/api/v1/traces" && m === "POST") return "gated (traces)";
 
+  // The KV and timer families. The Rust returns `Gated(Feature, GatedOp)`; the
+  // feature half is the plan gate and the op half is the quota decision, so
+  // only the feature half names a class here and the op half is described in
+  // the class meaning. Any method the broker does not register on these paths
+  // is `Blocked` in the Rust rather than left to travel to a 405, so the same
+  // fail-closed default is mirrored rather than assumed.
+  if (p === "/api/v1/kv" || p === "/api/v1/kv/") {
+    return m === "POST" ? "gated (kv)" : "blocked";
+  }
+  if (p.startsWith("/api/v1/kv/")) {
+    return ["GET", "PUT", "DELETE"].includes(m) ? "gated (kv)" : "blocked";
+  }
+  if (p === "/api/v1/timers" || p === "/api/v1/timers/") {
+    return m === "POST" ? "gated (timers)" : "blocked";
+  }
+  if (p.startsWith("/api/v1/timers/")) {
+    return ["GET", "DELETE"].includes(m) ? "gated (timers)" : "blocked";
+  }
+
   if (
     p.startsWith("/api/v1/resources") ||
     p.startsWith("/api/v1/status") ||
@@ -98,6 +120,14 @@ const CLASS_MEANING = [
   ["read", "Listings, status, analytics, DLQ and message reads, all tenant-scoped."],
   ["gated (streams)", "Available when the plan enables the streams feature."],
   ["gated (traces)", "Writing a trace is available when the plan enables the traces feature."],
+  [
+    "gated (kv)",
+    "Available when the plan enables the KV feature, which a plan that has never heard of it does not. A `PUT` is the half a storage quota blocks; a `GET` is read level; a `DELETE` is how a tenant at its cap gets back under it and is never quota-blocked. The batch `POST` carries both halves in one array, so a quota refuses the whole call with a named reason rather than dropping part of it.",
+  ],
+  [
+    "gated (timers)",
+    "Available when the plan enables the timers feature. Scheduling is quota-blockable; cancelling is not, and has its own route for that reason, since a tenant blocked from cancelling would keep producing messages it can no longer stop.",
+  ],
   ["operator", "Cell-wide surfaces. Not tenant-scopable, so a tenant credential gets the same 404 a blocked route returns."],
   ["blocked", "Never exposed to a tenant, whatever the credential. Returns 404."],
 ];

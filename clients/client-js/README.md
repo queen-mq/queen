@@ -28,6 +28,7 @@ Queen MQ is a PostgreSQL-backed message queue system with a powerful feature set
 - **Message Tracing** - Debug distributed workflows with trace timelines
 - **Client-Side Buffering** - 10x-100x throughput boost for high-volume pushes
 - **Real-time Streaming** - Windowed aggregation and processing
+- **Key/Value State and Timers** - Transactional state and scheduled messages, off by default on the broker
 
 This client provides a fluent, promise-based API for Node.js applications.
 
@@ -373,6 +374,145 @@ await queen.queue('orders').consume(async (msg) => {
 
 ---
 
+## Key/Value State and Timers
+
+Both surfaces are **always there**. There is nothing to enable: kv and timers are part of the
+broker the way push and pop are, on every cell that runs it. There is no capability to probe and
+no 404 that means "this cell does not have the feature" — a 404 from these routes is a bug.
+
+What an operator can still do is **pause** them, with the runtime kill switch in
+`queen.system_state` (`kv_enabled`, `timers_schedule_enabled`, `timers_fire_enabled`) — the same
+class of lever as maintenance mode, pulled live during an incident and expected to be pulled back.
+A paused surface answers `503` with `Retry-After` and `error: 'kv_disabled'` / `'timers_disabled'`,
+which this client retries like any other 5xx. Inside a transaction it is a `403` on the `kv` or
+`timers` rider instead, so a bundle holding messages does not spin forever on a paused cell.
+
+```javascript
+try {
+  await queen.kv.put('orders', 'order:9f1', { state: 'held' }, { ttl: '60s' })
+} catch (e) {
+  if (e.code === 'kv_disabled') { /* paused by an operator; it will come back */ }
+  throw e
+}
+```
+
+Branch on `e.code`, never on the message. And write that branch as "temporarily paused", not as
+"this deployment lacks KV": handling the refusal is right, treating it as a configuration to check
+before you use the surface is not.
+
+### Key/Value
+
+```javascript
+// An expiry is MANDATORY on every write: exactly one of ttlSeconds (or the
+// sugar ttl / until) and forever: true. A put never inherits the previous TTL.
+await queen.kv.put('orders', 'order:9f1', { state: 'held' }, { ttl: '60s' })
+
+const row = await queen.kv.get('orders', 'order:9f1')
+if (row.found) console.log(row.value, row.version)   // found is separate: null is a legal value
+
+// "Did I win?" in one call. This is the idempotency marker.
+const { won, value } = await queen.kv.once('dedup', eventId, { ttl: '24h' })
+if (!won) return                                     // somebody already did this
+
+// Optimistic lock. expect: 0 means "must not exist"; expect: N is a pure
+// update that creates nothing when it matches no row.
+const res = await queen.kv.put('orders', 'order:9f1', { state: 'shipped' },
+                               { ttl: '60s', expect: row.version })
+if (!res.applied) console.log(res.reason)            // 'version' | 'exists' | 'absent' | 'limit' | 'type'
+
+// Rate limiting without a CAS loop. With max, `applied` IS the admission
+// decision: nothing saturates, nothing truncates, a refusal spends no budget.
+const hit = await queen.kv.incr('quota', `${customer}:${hour}`, 1, { max: 1000, ttl: '1h' })
+if (!hit.applied) throw new TooManyRequests()
+
+for await (const r of queen.kv.listAll('saga', 'order:9f1:')) { /* follows nextAfter */ }
+```
+
+Seven operations: `get`, `getMany`, `getPrefix`, `put`, `putIfAbsent`, `delete`, `incr`, plus the
+two conveniences this client owns, `once` and `listAll`.
+
+**Every write returns an OBJECT, and objects are always truthy.** `if (await queen.kv.delete(ns,
+key))` is always taken and is a bug. Read `.applied`, or `.won` on `once`, or `.found` on a read.
+That holds for all five writes, and it is the one trap this language cannot defend against
+structurally.
+
+**A write that did not apply is not an error.** `applied: false` answers HTTP 200 with the current
+value and version, so the loser needs no second round trip.
+
+**Read-modify-write across two calls is safe only when the KV key derives from the partition key.**
+Otherwise the lanes do not serialise it for you: use `incr`, or carry `expect`.
+
+**`putIfAbsent` plus a TTL is not a distributed lock.** A lock that expires is not revoked: the old
+holder keeps working, it simply no longer has the row. Carry your `version` as `expect` on every
+later write so a lapsed holder fails with `reason: 'version'` instead of overwriting the new one.
+
+### Timers
+
+```javascript
+// Fire no earlier than 30 minutes from now, into a real queue, through the log.
+const res = await queen.timer('reminders')
+  .key(`order:${orderId}`)
+  .delay('30m')                    // or .delayMs(250)
+  .payload({ orderId })
+  .schedule()                      // status: 'scheduled' | 'rescheduled' | 'too_late'
+
+await queen.timer('reminders').key(`order:${orderId}`).peek()
+await queen.timer('reminders').list({ limit: 50 })
+await queen.timer('reminders').key(`order:${orderId}`).cancel()
+```
+
+Scheduling the same `(queue, timerKey)` again is the same upsert, so a retry after a client crash
+is safe by construction and `status` says which it was. A reschedule mints a new `txn` and resets
+the retry budget.
+
+Durations that can be sub-second are in **milliseconds** (`delayMs`), the ones that cannot are in
+**seconds** (`ttlSeconds`). Only relative delays exist, because there is one clock and it is the
+database's. A delay in the past is legal and fires on the first cycle.
+
+`deliverAt` is **"not before"**, never "exactly at".
+
+**`absent` means "no longer pending" and may mean ALREADY DELIVERED.** There is no tombstone: a
+fired timer has no row left, so `absent` carries `ok: false` and the answer echoes the `txn` so the
+authority, the log, can be consulted without a second API. A saga that cancels a compensation timer
+must have the compensating consumer re-check the saga's KV state before compensating, because the
+cancel may have arrived 5 ms after the fire.
+
+Use `queen.timer(q).key(k).cancel()` rather than a cancel inside a bundle when the cancel must land
+regardless: it takes the DELETE route, the one a quota is forbidden to block. A tenant that cannot
+cancel keeps producing messages it cannot stop.
+
+### Inside a transaction
+
+The transaction is the **primary fence**; `expect` is only the secondary assertion. A state write
+that shares the transaction with its ack is undone when an expired lease makes the ack fail, which
+a compare-and-set cannot do.
+
+```javascript
+const result = await queen.transaction()
+  .ack(message)
+  .queue('emails').push([{ data: mail }])
+  .once('sent', message.transactionId, { ttl: '24h' })   // the gate
+  .timer('reminders').key(orderId).delay('24h').payload({ orderId }).schedule()
+  .commit()
+
+if (result.success === false) {
+  // RETURNED, not thrown: a lost gate is the expected outcome of a legitimate
+  // redelivery, so it stays out of your retry policy and your error metrics.
+  result.reason        // 'kv_precondition'
+  result.failedIndex, result.kvReason, result.version, result.value
+  return
+}
+```
+
+`once` is `putIfAbsent` with `required: true`, and `required` is what makes it a gate: without it a
+lost precondition is only a verdict in the results, and the push and the ack still go through.
+
+`kv.getPrefix` is not available inside a transaction and throws here rather than at the broker: its
+cost is not bounded by the caller. `get` and `getMany` are allowed, because they are. Everything
+other than the lost precondition still throws.
+
+---
+
 ## Examples
 
 ### Complete Pipeline with Consumer Groups
@@ -521,6 +661,41 @@ await queen.transaction()
   .queue('output')
   .push([{ data: { result: 'processed' } }])
   .commit()
+
+// Riders. commit() RETURNS on a lost gate, and throws on everything else.
+await queen.transaction()
+  .ack(message)
+  .kv.put('saga', sagaId, { step: 'charged' }, { ttl: '24h' })
+  .once('dedup', message.transactionId, { ttl: '24h' })
+  .timer('reminders').key(orderId).delay('30m').payload({ orderId }).schedule()
+  .commit()
+```
+
+### Key/Value
+
+```javascript
+await queen.kv.get(ns, key)                      // {found, key, value, version, expiresAt, updatedAt}
+await queen.kv.getMany(ns, [k1, k2])             // {rows, missing, truncated}
+await queen.kv.getPrefix(ns, prefix, { limit: 100, after, keysOnly })
+await queen.kv.put(ns, key, value, { ttl: '24h', expect, required })
+await queen.kv.putIfAbsent(ns, key, value, { ttlSeconds: 86400 })
+await queen.kv.delete(ns, key, { expect })
+await queen.kv.incr(ns, key, 1, { max: 1000, min, ttl: '1h' })
+await queen.kv.once(ns, key, { ttl: '24h' })     // {won, value, version, result}
+for await (const row of queen.kv.listAll(ns, prefix)) { }
+```
+
+### Timers
+
+```javascript
+// Builder steps: .key(timerKey) required, .delayMs(250) or .delay('30m') required,
+// .payload(anyJsonOrBuffer) required to schedule, .partition(name) optional
+// (defaults to 'Default'), .txn(transactionId) optional (minted when absent).
+
+await queen.timer(q).key(k).delay('30m').payload(p).schedule()   // {ok, status, txn, messageId, deliverAt}
+await queen.timer(q).key(k).cancel()                             // {ok, status, txn}
+await queen.timer(q).key(k).peek()                               // {found, ...}
+await queen.timer(q).list({ limit: 50, after })                  // {rows, truncated, nextAfter}
 ```
 
 ### Lease Renewal

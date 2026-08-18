@@ -47,6 +47,25 @@ tenant one. The full family list is in [Prometheus](/reference/prometheus).
 Do not alert on `/health` answering 503 as "the broker is down": it is a database check, and
 [the probe wiring](/deploy/kubernetes#the-probes) is where that matters.
 
+## Maintenance mode suspends the timer fire
+
+<Aside type="danger">
+While push maintenance mode is on, pushes are diverted to the broker's disk spool, and **a timer fire
+cannot be diverted**. The fire is a `DELETE` of the staging row and a push of the frame in the *same*
+transaction, and that shared commit is the whole of its exactly-once guarantee; putting the push half
+on the spool would break it. So the fire suspends for the duration of the window.
+
+Nothing is lost and nothing is duplicated. The timers stay in `queen.log_timers`, the backlog drains
+oldest first when the window closes, and the visible symptom in the meantime is
+`queen_timers_oldest_late_seconds` climbing. Read that as a delay, not as message loss, and check
+`GET /api/v1/system/maintenance` before concluding the sweeper is broken.
+</Aside>
+
+The sweeper is also the component an operator kill switch acts on, separately from maintenance mode
+and of exactly the same class: those switches pause something that is running, they do not turn a
+feature on. [KV and timers](/deploy/state) has the three rungs of refusal, what each one answers, and
+the order in which the broker sheds work before anybody has to pull a lever.
+
 ## Retention
 
 A queue keeps everything forever, and consuming deletes nothing. Turning retention on is one call:
@@ -95,6 +114,13 @@ pg_restore --no-owner --no-privileges -d "postgresql://postgres@host:5432/queen_
 
 `--no-owner --no-privileges` because the broker re-issues its own grants at boot, which is also
 why a schema-only dump is redundant. Restore into the version that produced the dump.
+
+`queen.kv`, `queen.log_timers` and the two quota tables live in the `queen` schema, so the command
+above already carries them. One of them is not data but configuration: `queen.kv_quota` holds the
+per-tenant grants and limits an operator wrote by hand, and it is the one table in this feature that a
+rollback must never drop. A restore also brings back timers that were pending at the dump instant,
+which then fire again, so the same idempotency the rest of a restore demands applies to their
+consumers.
 
 A restore rolls consumption back to the dump instant, so every message acked since redelivers: an
 hour-old dump means an hour of reprocessing, and it is a recovery only if handlers are idempotent.

@@ -116,25 +116,28 @@ impl std::fmt::Display for DrainErr {
     }
 }
 
-/// Classify a DB push error. A connection-level failure (no SQLSTATE) and the
-/// retryable serialization/deadlock/connection/resource SQLSTATE classes are
-/// transient; any other server-side SQL error (bad data, constraint, custom RAISE)
-/// is permanent — the same data will fail every retry, so quarantine it.
+/// Classify a DB push error. The SQLSTATE table itself lives in exactly one place —
+/// `db::classify_sqlstate` (PLAN_KV_TIMERS §7.6) — because a second copy does not fail
+/// loudly, it drifts: the spool would quarantine something the timer path retries, and the
+/// divergence would only surface months later. This function is the spool's *mapping* of
+/// that shared verdict onto its own two-armed type, nothing more.
+///
+/// `Config` (SQLSTATE class 42: undefined function, wrong argument types — a schema/binary
+/// skew) collapses onto `Permanent` deliberately: it is permanent in shape, the same bytes
+/// will fail every retry, and the spool has no third thing to do with it. It carries a
+/// distinct name in `db` only so the timer path can count it separately.
+///
+/// The message is built the way the old local table built it, and must not be "simplified":
+/// an error WITHOUT a SQLSTATE reports `e.to_string()` (the connection-level text — there is
+/// no db message to read), one WITH a SQLSTATE reports the server's `message()` alone.
 fn classify_push_error(e: &tokio_postgres::Error) -> DrainErr {
-    match e.as_db_error() {
-        None => DrainErr::Transient(e.to_string()),
-        Some(db) => {
-            let code = db.code().code();
-            let class = &code[..2.min(code.len())];
-            let transient = code == "40001" // serialization_failure
-                || code == "40P01" // deadlock_detected
-                || matches!(class, "08" | "53" | "57" | "58");
-            if transient {
-                DrainErr::Transient(db.message().to_string())
-            } else {
-                DrainErr::Permanent(db.message().to_string())
-            }
-        }
+    let msg = e
+        .as_db_error()
+        .map(|d| d.message().to_string())
+        .unwrap_or_else(|| e.to_string());
+    match crate::db::classify_sql(e) {
+        crate::db::SqlClass::Transient => DrainErr::Transient(msg),
+        crate::db::SqlClass::Config | crate::db::SqlClass::Permanent => DrainErr::Permanent(msg),
     }
 }
 

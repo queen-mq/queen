@@ -12,6 +12,11 @@
 # The rate limiter exists only where the client has a streaming SDK (js, py, go,
 # rust). PHP, C++ and the plain HTTP client carry chat and webhooks.
 #
+# The exactly-once application needs the key/value surface and the saga needs
+# that one plus timers. Every broker serves both, so there is nothing to probe
+# for and nothing to skip: a cell that refuses them is an operator's kill switch
+# or a quota, and each program says which when it meets one.
+#
 # Needs, per language: node 22+, python 3.9+, go 1.24+, rust 1.75+, php 8.3+, a
 # C++17 compiler, and curl with jq. A language whose toolchain is missing is
 # skipped with a note rather than failing the run.
@@ -30,6 +35,19 @@ if ! curl -fsS "$QUEEN_URL/health" >/dev/null 2>&1; then
   echo "no broker answering at $QUEEN_URL/health" >&2
   exit 1
 fi
+
+# The applications one language carries, in run order. Go has no exactly-once
+# program and the plain HTTP client no rate limiter; the other languages are
+# literal lists at their own call site, because nothing about them varies.
+apps_for() {
+  case "$1" in
+    js) printf 'chat webhooks rate-limiter exactly-once saga' ;;
+    py) printf 'chat webhooks rate_limiter exactly_once saga' ;;
+    go) printf 'chat webhooks rate-limiter saga' ;;
+    http) printf 'chat webhooks exactly-once saga' ;;
+  esac
+  return 0
+}
 
 pass=0
 fail=0
@@ -62,7 +80,7 @@ if wanted js; then
   echo "JavaScript"
   if command -v node >/dev/null; then
     [ -d "$HERE/js/node_modules" ] || (cd "$HERE/js" && npm install --silent)
-    for f in chat webhooks rate-limiter; do
+    for f in $(apps_for js); do
       run "$f" env -C "$HERE/js" node "$f.mjs"
     done
   else
@@ -74,7 +92,7 @@ if wanted py; then
   echo
   echo "Python"
   if command -v python3 >/dev/null; then
-    for f in chat webhooks rate_limiter; do
+    for f in $(apps_for py); do
       [ -f "$HERE/py/$f.py" ] && run "$f" env -C "$ROOT" PYTHONPATH=clients/client-py python3 "examples/apps/py/$f.py"
     done
   else
@@ -86,7 +104,7 @@ if wanted go; then
   echo
   echo "Go"
   if command -v go >/dev/null && [ -f "$HERE/go/go.mod" ]; then
-    for f in chat webhooks rate-limiter; do
+    for f in $(apps_for go); do
       [ -d "$HERE/go/$f" ] && run "$f" env -C "$HERE/go" GOWORK=off go run "./$f"
     done
   else
@@ -163,7 +181,7 @@ if wanted http; then
   echo
   echo "HTTP"
   if command -v curl >/dev/null && [ -d "$HERE/http" ]; then
-    for f in chat webhooks; do
+    for f in $(apps_for http); do
       [ -f "$HERE/http/$f.sh" ] && run "$f" bash "$HERE/http/$f.sh"
     done
   else

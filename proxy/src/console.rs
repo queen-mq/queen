@@ -252,7 +252,15 @@ fn limits_json(l: &EffectiveLimits) -> Value {
 }
 
 fn features_json(f: Features) -> Value {
-    json!({ "streams": f.streams, "traces": f.traces })
+    json!({
+        "streams": f.streams,
+        "traces": f.traces,
+        // PLAN_KV_TIMERS.md §9.8 P1. Reported so the console shows the same
+        // answer the data plane enforces — a tenant told "not in your plan" by
+        // a 403 can see which flag said it.
+        "kv": f.kv,
+        "timers": f.timers,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -936,9 +944,11 @@ mod tests {
 
     #[test]
     fn features_json_roundtrip() {
-        let v = features_json(Features { streams: true, traces: false });
+        let v = features_json(Features { streams: true, traces: false, kv: true, timers: false });
         assert_eq!(v["streams"], true);
         assert_eq!(v["traces"], false);
+        assert_eq!(v["kv"], true);
+        assert_eq!(v["timers"], false);
     }
 
     // --- role gate ------------------------------------------------------------

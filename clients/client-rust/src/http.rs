@@ -429,12 +429,41 @@ impl HttpClient {
         decode(out)
     }
 
+    pub async fn put_json<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+        opts: &Opts,
+    ) -> Result<Option<T>> {
+        let bytes = serde_json::to_vec(body)?;
+        let out = self
+            .send(reqwest::Method::PUT, path, Some(bytes), opts)
+            .await?;
+        decode(out)
+    }
+
     pub async fn delete_json<T: DeserializeOwned>(
         &self,
         path: &str,
         opts: &Opts,
     ) -> Result<Option<T>> {
         let out = self.send(reqwest::Method::DELETE, path, None, opts).await?;
+        decode(out)
+    }
+
+    /// DELETE with a body — the KV delete route reads an optional `expect`
+    /// there. An empty body is legal on that route and is the common case, so
+    /// callers that have nothing to say use [`HttpClient::delete_json`].
+    pub async fn delete_json_body<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+        opts: &Opts,
+    ) -> Result<Option<T>> {
+        let bytes = serde_json::to_vec(body)?;
+        let out = self
+            .send(reqwest::Method::DELETE, path, Some(bytes), opts)
+            .await?;
         decode(out)
     }
 

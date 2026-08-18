@@ -192,6 +192,14 @@ Atomicity covers the broker's state, not the network: a blind retry after a lost
 duplicates the pushes unless their transaction ids are deterministic and the deduplication
 window covers your retry horizon.
 
+**The bundle is not only pushes and acks.** Two more arrays ride the same commit when their surfaces
+are switched on: `kv`, which writes [transactional state](/use/kv), and `timers`, which schedules or
+cancels a [timer](/use/timers). Both are **top-level fields of the request body**, beside `operations`
+and never inside it, and a bundle that carries neither is byte for byte the call it was before they
+existed. That is what makes an idempotency marker, an external effect and the cursor advance a single
+commit instead of three, and it is the one thing a key/value store or a scheduler standing beside the
+broker cannot offer at any price.
+
 ## Replay
 
 Consuming does not remove a message, so replay is arithmetic on a cursor. Seek moves one

@@ -6,11 +6,15 @@
 #    CICLO A TABELLA VUOTA su una cella 2-core, che e' il costo che pagherebbero tutti quelli che
 #    non useranno mai la feature."
 #
-# One image, three conditions, run back to back so nothing but the flags differs:
+# One image, three conditions, run back to back so nothing but the sweeper differs:
 #
-#   A  flags OFF   — the sweeper task is not spawned at all (§7.1). The baseline.
-#   B  flags ON, timers table EMPTY — the bill for a feature nobody uses.
-#   C  flags ON, timers table SEEDED far in the future — the sweeper is awake and probing on
+#   A  QUEEN_SWEEPER=false — the sweeper task is not spawned (§7.1). The baseline. This used to
+#      be "both feature flags off"; those flags are gone (kv and timers are part of the engine),
+#      and QUEEN_SWEEPER is now the only knob that yields a broker with no sweep loop.
+#   B  sweeper ON, timers table EMPTY — the bill on a cell that never schedules a timer. That
+#      used to be "a feature nobody uses" and is now simply the DEFAULT cell, which is what
+#      makes G1 a harder budget than when it was written: nobody opts into paying it.
+#   C  sweeper ON, timers table SEEDED far in the future — the sweeper is awake and probing on
 #      every cycle while producers work. This is the "hot path unchanged" condition.
 #
 # THREE GATES
@@ -52,7 +56,7 @@ IDLE_BUDGET_MCPU="${GATE_IDLE_BUDGET_MCPU:-20}"
 MAX_IDLE_PROBES="${GATE_MAX_IDLE_PROBES:-12}"
 TOLERANCE_PCT="${GATE_TOLERANCE_PCT:-1.0}"
 
-usage() { sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 
 # Seed the staging table directly. Not through POST /api/v1/timers on purpose: 200k HTTP round
 # trips would take longer than the whole gate, and what condition C needs is a table with rows
@@ -96,15 +100,15 @@ sweeper_all_calls() {
 # One condition: fresh stack, warm up, optionally seed, measure an idle window, then measure a
 # fixed-work load window. Appends one line per rep to <dir>/reps.tsv.
 run_condition() {
-  local name="$1" kv="$2" timers="$3" seed="$4"
+  local name="$1" sweeper="$2" seed="$3"
   local dir; dir="$(label_dir "sweeper-$name")"
   rm -rf "$dir"; mkdir -p "$dir"
 
-  step "condition $name — KV=$kv TIMERS=$timers seed=$seed"
+  step "condition $name — SWEEPER=$sweeper seed=$seed"
 
-  # Exported, not prefixed onto stack_up: compose reads them, and so does save_env, which is the
+  # Exported, not prefixed onto stack_up: compose reads it, and so does save_env, which is the
   # only record of which condition a results directory belongs to.
-  export GATE_KV_ENABLED="$kv" GATE_TIMERS_ENABLED="$timers"
+  export GATE_SWEEPER="$sweeper"
 
   local rep
   for rep in $(seq 1 "$REPS"); do
@@ -117,10 +121,10 @@ run_condition() {
        schema does not create it. Build an image that includes 025_log_timers.sql (F1) before
        running the sweeper gate."
       seed_timers "$seed"
-    elif [ "$timers" = "true" ] && ! timers_table_exists; then
-      die "QUEEN_TIMERS_ENABLED=true but queen.log_timers does not exist — this image predates
-       F1, so conditions B and C would measure a broker that cannot have a sweeper. Only
-       condition A is meaningful here."
+    elif [ "$sweeper" = "true" ] && ! timers_table_exists; then
+      die "the sweeper is on but queen.log_timers does not exist — this image predates F1, so
+       conditions B and C would measure a broker that cannot have a sweeper. Only condition A
+       is meaningful here."
     fi
 
     loadgen --url "$BROKER_URL" --mode bundle --tag warm \
@@ -169,9 +173,9 @@ run_all() {
   need docker; need node; need curl; need awk
   mkdir -p "$RESULTS_DIR"
 
-  run_condition A false false 0
-  run_condition B true  true  0
-  run_condition C true  true  "$SEED_TIMERS"
+  run_condition A false 0
+  run_condition B true  0
+  run_condition C true  "$SEED_TIMERS"
 
   local a_cpu b_cpu c_cpu a_idle b_idle c_idle b_probes c_probes a_rate c_rate
   a_cpu="$(col_median A 2)";  b_cpu="$(col_median B 2)";  c_cpu="$(col_median C 2)"
@@ -188,15 +192,16 @@ run_all() {
   printf '  %-38s %10s %10s %10s\n' 'CPU per message (us)' "$a_cpu" "$b_cpu" "$c_cpu"
   printf '  %-38s %10s %10s %10s\n' 'throughput (msg/s)' "$a_rate" '-' "$c_rate"
 
-  step "G1 — what an installation that never uses the feature pays"
+  step "G1 — what an installation that never schedules a timer pays"
   local idle_delta
   idle_delta="$(awk -v a="$a_idle" -v b="$b_idle" 'BEGIN{printf "%.2f", b-a}')"
   printf '  B - A = %s mCPU   (budget %s mCPU)\n' "$idle_delta" "$IDLE_BUDGET_MCPU"
   if awk -v d="$idle_delta" -v t="$IDLE_BUDGET_MCPU" 'BEGIN{exit !(d>t)}'; then
     printf '  \033[31mFAIL\033[0m the empty-table cycle costs more than the budget.\n'
-    printf '       §7.1 is explicit that this is the cost nobody asked for. The levers, in\n'
-    printf '       order: is the task spawned with both flags off (it must not be)? does the\n'
-    printf '       backoff engage (G2)? is the due probe one call or several?\n'
+    printf '       §7.1 is explicit that this is the cost nobody asked for, and every cell now\n'
+    printf '       pays it by default. The levers, in order: is the task spawned under\n'
+    printf '       QUEEN_SWEEPER=false (it must not be)? does the backoff engage (G2)? is the\n'
+    printf '       due probe one call or several?\n'
     fail=1
   else
     printf '  \033[32mPASS\033[0m\n'

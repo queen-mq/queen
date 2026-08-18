@@ -158,6 +158,22 @@ pub fn spawn(state: Arc<AppState>, pool: Pool, interval_ms: u64) {
                         tracing::info!(target: "reconcile", flag = "pop_maintenance_mode", from = %prev, to = %pm, "flag changed");
                     }
                 }
+                // PLAN_KV_TIMERS §12.1 — the kv/timers kill switches, from the
+                // SAME table and for the same reason as the two above: the mesh
+                // is best-effort, so without this a replica that missed the flip
+                // stays divergent for ever. `get_system_flag_opt` and not
+                // `get_system_flag`: an ABSENT row means ON for these, and
+                // reusing the collapsing reader would switch the features off on
+                // every cell that has never had an operator touch them.
+                for key in [
+                    crate::switches::Switches::KEY_KV,
+                    crate::switches::Switches::KEY_TIMERS_SCHEDULE,
+                    crate::switches::Switches::KEY_TIMERS_FIRE,
+                ] {
+                    if let Ok(v) = db::get_system_flag_opt(&c, key).await {
+                        state.switches.adopt(key, v);
+                    }
+                }
                 apply_hotlist_repairs(&state, &c, &mut repaired).await;
             }
             // Drop the per-queue caches so a lost QUEUE_CONFIG_SET heals within one

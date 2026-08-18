@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -652,13 +652,14 @@ impl SweepPhase {
 /// plan series, a self-diagnostic) says when the cap is biting.
 const FIRE_LAG_TENANT_CAP: usize = 1024;
 
+/// The kv/timers series. NO EXPOSITION GATE: this block used to be suppressed when
+/// the two boot flags were off, so a broker that never turned them on scraped
+/// byte-identically to the pre-feature broker. The flags are gone (see the header of
+/// `switches.rs`), so the series are ALWAYS emitted — a dashboard or an alert rule
+/// may now assume `queen_kv_ops_total` exists on every cell, which is the point.
+/// Zeros are the truthful reading for a cell nobody has written a key to.
 #[derive(Default)]
 pub struct KvTimers {
-    /// Exposition gates. Both off ⇒ `prometheus()` emits NOTHING for this feature,
-    /// so an installation that never turns the flags on gets byte-identical output.
-    kv_on: AtomicBool,
-    timers_on: AtomicBool,
-
     // ---- kv ------------------------------------------------------------------
     kv_ops: [[AtomicU64; KV_RESULTS]; KV_OPS],
     kv_dur: [Ring; KV_OPS],
@@ -730,21 +731,6 @@ pub struct TenantUsage {
 }
 
 impl KvTimers {
-    /// Called once at boot from the resolved config. Until then nothing is exposed.
-    pub fn enable(&self, kv: bool, timers: bool) {
-        self.kv_on.store(kv, Ordering::Relaxed);
-        self.timers_on.store(timers, Ordering::Relaxed);
-    }
-    pub fn kv_on(&self) -> bool {
-        self.kv_on.load(Ordering::Relaxed)
-    }
-    pub fn timers_on(&self) -> bool {
-        self.timers_on.load(Ordering::Relaxed)
-    }
-    pub fn any_on(&self) -> bool {
-        self.kv_on() || self.timers_on()
-    }
-
     // ---- recording (hot path: one relaxed add, or one add plus a ring slot) ----
 
     /// One KV operation with its outcome and its own duration.
@@ -769,6 +755,14 @@ impl KvTimers {
     /// ONLY safe amplification mechanism for this store (a cached VALUE is forbidden
     /// outright, §8.5) — and also the tell that a customer has put KV on their web
     /// path, which is why it is a series of its own.
+    ///
+    /// NO CALLER YET. Single-flight is one of the two §8.4 defences that own live
+    /// state (the other is the dedicated KV pool, `set_kv_pool` below); both are
+    /// declared-not-implemented in this pass and live on `AppState`, not here. The
+    /// counter and the exported series exist already so that turning the defence on
+    /// is a change in one module rather than a change in three — and so that the
+    /// series name is fixed BEFORE any dashboard is built on it.
+    #[allow(dead_code)]
     pub fn kv_singleflight_coalesced(&self, n: u64) {
         if n > 0 {
             self.kv_singleflight_coalesced.fetch_add(n, Ordering::Relaxed);
@@ -780,6 +774,12 @@ impl KvTimers {
             .store(capped as i64, Ordering::Relaxed);
         self.kv_expiry_lag_ms.store(lag_ms, Ordering::Relaxed);
     }
+    /// NO CALLER YET — see `kv_singleflight_coalesced`. The dedicated KV pool of
+    /// §8.4 point 1 is the defence that turns a slow database into 503s on the KV
+    /// surface instead of into connections stolen from the message path, and it is
+    /// the one whose gauges an operator needs FIRST during that incident. The
+    /// three series are exported now so the gauge exists the day the pool does.
+    #[allow(dead_code)]
     pub fn set_kv_pool(&self, size: i64, available: i64, waiting: i64) {
         self.kv_pool_size.store(size, Ordering::Relaxed);
         self.kv_pool_available.store(available, Ordering::Relaxed);
@@ -945,97 +945,93 @@ impl KvTimers {
     }
 
     fn render(&self, s: &mut String, ht: &dyn Fn(&mut String, &str, &str, &str), g: &dyn Fn(&mut String, &str, &str, String)) {
-        if self.kv_on() {
-            ht(s, "queen_kv_ops_total", "KV operations by code path and outcome", "counter");
-            for op in KvOp::ALL {
-                for res in KvResult::ALL {
-                    g(
-                        s,
-                        "queen_kv_ops_total",
-                        &format!("{{op=\"{}\",result=\"{}\"}}", op.as_str(), res.as_str()),
-                        self.kv_ops[op as usize][res as usize]
-                            .load(Ordering::Relaxed)
-                            .to_string(),
-                    );
-                }
-            }
-            ht(s, "queen_kv_op_duration_milliseconds", "KV operation latency", "gauge");
-            for op in KvOp::ALL {
-                for (q, p) in [("0.5", 50.0), ("0.99", 99.0)] {
-                    g(
-                        s,
-                        "queen_kv_op_duration_milliseconds",
-                        &format!("{{op=\"{}\",quantile=\"{}\"}}", op.as_str(), q),
-                        format!("{:.3}", self.kv_dur[op as usize].percentile(p)),
-                    );
-                }
-            }
-            ht(s, "queen_kv_bytes_total", "KV value bytes written / read", "counter");
-            g(s, "queen_kv_bytes_total", "{dir=\"in\"}", self.kv_bytes_in.load(Ordering::Relaxed).to_string());
-            g(s, "queen_kv_bytes_total", "{dir=\"out\"}", self.kv_bytes_out.load(Ordering::Relaxed).to_string());
-            ht(s, "queen_kv_expired_not_pruned", "Expired KV rows the sweeper has not pruned yet (capped)", "gauge");
-            g(s, "queen_kv_expired_not_pruned", "", self.kv_expired_not_pruned.load(Ordering::Relaxed).to_string());
-            ht(s, "queen_kv_expired_not_pruned_capped", "1 when the unpruned count hit its cap and is a floor", "gauge");
-            g(s, "queen_kv_expired_not_pruned_capped", "", self.kv_expired_not_pruned_capped.load(Ordering::Relaxed).to_string());
-            ht(s, "queen_kv_expiry_lag_seconds", "Age of the oldest expired, unpruned KV row", "gauge");
-            g(s, "queen_kv_expiry_lag_seconds", "", format!("{:.3}", self.kv_expiry_lag_ms.load(Ordering::Relaxed) as f64 / 1000.0));
-            ht(s, "queen_kv_read_rejected_total", "KV reads refused before reaching the database", "counter");
-            for why in KvReject::ALL {
+        ht(s, "queen_kv_ops_total", "KV operations by code path and outcome", "counter");
+        for op in KvOp::ALL {
+            for res in KvResult::ALL {
                 g(
                     s,
-                    "queen_kv_read_rejected_total",
-                    &format!("{{reason=\"{}\"}}", why.as_str()),
-                    self.kv_read_rejected[why as usize].load(Ordering::Relaxed).to_string(),
+                    "queen_kv_ops_total",
+                    &format!("{{op=\"{}\",result=\"{}\"}}", op.as_str(), res.as_str()),
+                    self.kv_ops[op as usize][res as usize]
+                        .load(Ordering::Relaxed)
+                        .to_string(),
                 );
             }
-            ht(s, "queen_kv_pool", "Dedicated KV connection pool", "gauge");
-            g(s, "queen_kv_pool", "{state=\"size\"}", self.kv_pool_size.load(Ordering::Relaxed).to_string());
-            g(s, "queen_kv_pool", "{state=\"available\"}", self.kv_pool_available.load(Ordering::Relaxed).to_string());
-            g(s, "queen_kv_pool", "{state=\"waiting\"}", self.kv_pool_waiting.load(Ordering::Relaxed).to_string());
-            ht(s, "queen_kv_singleflight_coalesced_total", "KV reads that shared an in-flight query", "counter");
-            g(s, "queen_kv_singleflight_coalesced_total", "", self.kv_singleflight_coalesced.load(Ordering::Relaxed).to_string());
         }
-        if self.timers_on() {
-            ht(s, "queen_timers_due", "Timers due now, from the sweep probe (capped)", "gauge");
-            g(s, "queen_timers_due", "", self.timers_due.load(Ordering::Relaxed).to_string());
-            ht(s, "queen_timers_due_capped", "1 when the due count hit its cap and is a floor", "gauge");
-            g(s, "queen_timers_due_capped", "", self.timers_due_capped.load(Ordering::Relaxed).to_string());
-            ht(s, "queen_timers_oldest_late_seconds", "Lateness of the oldest due timer", "gauge");
-            g(s, "queen_timers_oldest_late_seconds", "", format!("{:.3}", self.timers_oldest_late_ms.load(Ordering::Relaxed) as f64 / 1000.0));
-            // The motivated exception to the cardinality rule (§14.1): an occupancy
-            // gauge, and the only series that names which tenant caused a backlog.
-            ht(s, "queen_timers_fire_lag_seconds", "Delivery lateness of fired timers, per tenant", "gauge");
-            for (tenant, ring) in self.fire_lag.read().unwrap().iter() {
-                for (q, p) in [("0.5", 50.0), ("0.95", 95.0)] {
-                    g(
-                        s,
-                        "queen_timers_fire_lag_seconds",
-                        &format!("{{tenant=\"{}\",quantile=\"{}\"}}", escape_label(tenant), q),
-                        format!("{:.3}", ring.percentile(p) / 1000.0),
-                    );
-                }
-            }
-            ht(s, "queen_timers_fire_lag_tenants_dropped_total", "Fire-lag samples dropped because the tenant cap was reached", "counter");
-            g(s, "queen_timers_fire_lag_tenants_dropped_total", "", self.fire_lag_dropped.load(Ordering::Relaxed).to_string());
-            ht(s, "queen_timers_fired_total", "Fired timer segments by outcome", "counter");
-            for r in FireResult::ALL {
-                g(s, "queen_timers_fired_total", &format!("{{result=\"{}\"}}", r.as_str()), self.timers_fired[r as usize].load(Ordering::Relaxed).to_string());
-            }
-            ht(s, "queen_timers_dlq_total", "Timers dead-lettered after exhausting attempts", "counter");
-            g(s, "queen_timers_dlq_total", "", self.timers_dlq.load(Ordering::Relaxed).to_string());
-            ht(s, "queen_timers_fire_failures_total", "Failed fire transactions by SQLSTATE class", "counter");
-            for c in FireFailure::ALL {
-                g(s, "queen_timers_fire_failures_total", &format!("{{class=\"{}\"}}", c.as_str()), self.timers_fire_failures[c as usize].load(Ordering::Relaxed).to_string());
-            }
-            ht(s, "queen_timers_poisoned_total", "Batches replayed one segment per call after a permanent error", "counter");
-            g(s, "queen_timers_poisoned_total", "", self.timers_poisoned.load(Ordering::Relaxed).to_string());
-            ht(s, "queen_timers_schedule_rejected_total", "Timer schedules refused", "counter");
-            for w in ScheduleReject::ALL {
-                g(s, "queen_timers_schedule_rejected_total", &format!("{{reason=\"{}\"}}", w.as_str()), self.timers_schedule_rejected[w as usize].load(Ordering::Relaxed).to_string());
+        ht(s, "queen_kv_op_duration_milliseconds", "KV operation latency", "gauge");
+        for op in KvOp::ALL {
+            for (q, p) in [("0.5", 50.0), ("0.99", 99.0)] {
+                g(
+                    s,
+                    "queen_kv_op_duration_milliseconds",
+                    &format!("{{op=\"{}\",quantile=\"{}\"}}", op.as_str(), q),
+                    format!("{:.3}", self.kv_dur[op as usize].percentile(p)),
+                );
             }
         }
-        // The sweeper serves both features, so its block is emitted whenever either
-        // is on — the phase labels already say which half did the work.
+        ht(s, "queen_kv_bytes_total", "KV value bytes written / read", "counter");
+        g(s, "queen_kv_bytes_total", "{dir=\"in\"}", self.kv_bytes_in.load(Ordering::Relaxed).to_string());
+        g(s, "queen_kv_bytes_total", "{dir=\"out\"}", self.kv_bytes_out.load(Ordering::Relaxed).to_string());
+        ht(s, "queen_kv_expired_not_pruned", "Expired KV rows the sweeper has not pruned yet (capped)", "gauge");
+        g(s, "queen_kv_expired_not_pruned", "", self.kv_expired_not_pruned.load(Ordering::Relaxed).to_string());
+        ht(s, "queen_kv_expired_not_pruned_capped", "1 when the unpruned count hit its cap and is a floor", "gauge");
+        g(s, "queen_kv_expired_not_pruned_capped", "", self.kv_expired_not_pruned_capped.load(Ordering::Relaxed).to_string());
+        ht(s, "queen_kv_expiry_lag_seconds", "Age of the oldest expired, unpruned KV row", "gauge");
+        g(s, "queen_kv_expiry_lag_seconds", "", format!("{:.3}", self.kv_expiry_lag_ms.load(Ordering::Relaxed) as f64 / 1000.0));
+        ht(s, "queen_kv_read_rejected_total", "KV reads refused before reaching the database", "counter");
+        for why in KvReject::ALL {
+            g(
+                s,
+                "queen_kv_read_rejected_total",
+                &format!("{{reason=\"{}\"}}", why.as_str()),
+                self.kv_read_rejected[why as usize].load(Ordering::Relaxed).to_string(),
+            );
+        }
+        ht(s, "queen_kv_pool", "Dedicated KV connection pool", "gauge");
+        g(s, "queen_kv_pool", "{state=\"size\"}", self.kv_pool_size.load(Ordering::Relaxed).to_string());
+        g(s, "queen_kv_pool", "{state=\"available\"}", self.kv_pool_available.load(Ordering::Relaxed).to_string());
+        g(s, "queen_kv_pool", "{state=\"waiting\"}", self.kv_pool_waiting.load(Ordering::Relaxed).to_string());
+        ht(s, "queen_kv_singleflight_coalesced_total", "KV reads that shared an in-flight query", "counter");
+        g(s, "queen_kv_singleflight_coalesced_total", "", self.kv_singleflight_coalesced.load(Ordering::Relaxed).to_string());
+        ht(s, "queen_timers_due", "Timers due now, from the sweep probe (capped)", "gauge");
+        g(s, "queen_timers_due", "", self.timers_due.load(Ordering::Relaxed).to_string());
+        ht(s, "queen_timers_due_capped", "1 when the due count hit its cap and is a floor", "gauge");
+        g(s, "queen_timers_due_capped", "", self.timers_due_capped.load(Ordering::Relaxed).to_string());
+        ht(s, "queen_timers_oldest_late_seconds", "Lateness of the oldest due timer", "gauge");
+        g(s, "queen_timers_oldest_late_seconds", "", format!("{:.3}", self.timers_oldest_late_ms.load(Ordering::Relaxed) as f64 / 1000.0));
+        // The motivated exception to the cardinality rule (§14.1): an occupancy
+        // gauge, and the only series that names which tenant caused a backlog.
+        ht(s, "queen_timers_fire_lag_seconds", "Delivery lateness of fired timers, per tenant", "gauge");
+        for (tenant, ring) in self.fire_lag.read().unwrap().iter() {
+            for (q, p) in [("0.5", 50.0), ("0.95", 95.0)] {
+                g(
+                    s,
+                    "queen_timers_fire_lag_seconds",
+                    &format!("{{tenant=\"{}\",quantile=\"{}\"}}", escape_label(tenant), q),
+                    format!("{:.3}", ring.percentile(p) / 1000.0),
+                );
+            }
+        }
+        ht(s, "queen_timers_fire_lag_tenants_dropped_total", "Fire-lag samples dropped because the tenant cap was reached", "counter");
+        g(s, "queen_timers_fire_lag_tenants_dropped_total", "", self.fire_lag_dropped.load(Ordering::Relaxed).to_string());
+        ht(s, "queen_timers_fired_total", "Fired timer segments by outcome", "counter");
+        for r in FireResult::ALL {
+            g(s, "queen_timers_fired_total", &format!("{{result=\"{}\"}}", r.as_str()), self.timers_fired[r as usize].load(Ordering::Relaxed).to_string());
+        }
+        ht(s, "queen_timers_dlq_total", "Timers dead-lettered after exhausting attempts", "counter");
+        g(s, "queen_timers_dlq_total", "", self.timers_dlq.load(Ordering::Relaxed).to_string());
+        ht(s, "queen_timers_fire_failures_total", "Failed fire transactions by SQLSTATE class", "counter");
+        for c in FireFailure::ALL {
+            g(s, "queen_timers_fire_failures_total", &format!("{{class=\"{}\"}}", c.as_str()), self.timers_fire_failures[c as usize].load(Ordering::Relaxed).to_string());
+        }
+        ht(s, "queen_timers_poisoned_total", "Batches replayed one segment per call after a permanent error", "counter");
+        g(s, "queen_timers_poisoned_total", "", self.timers_poisoned.load(Ordering::Relaxed).to_string());
+        ht(s, "queen_timers_schedule_rejected_total", "Timer schedules refused", "counter");
+        for w in ScheduleReject::ALL {
+            g(s, "queen_timers_schedule_rejected_total", &format!("{{reason=\"{}\"}}", w.as_str()), self.timers_schedule_rejected[w as usize].load(Ordering::Relaxed).to_string());
+        }
+        // The sweeper serves both surfaces; the phase labels say which half did the
+        // work.
         ht(s, "queen_sweeper_cycle_milliseconds", "Sweeper phase duration", "gauge");
         for ph in SweepPhase::ALL {
             for (q, p) in [("0.5", 50.0), ("0.99", 99.0)] {
@@ -1236,12 +1232,13 @@ impl Metrics {
             g(&mut s, "queen_batch_rtt_milliseconds", &format!("{{op=\"{}\",quantile=\"0.5\"}}", op.name), format!("{:.3}", op.rtt_percentile(50.0)));
             g(&mut s, "queen_batch_rtt_milliseconds", &format!("{{op=\"{}\",quantile=\"0.99\"}}", op.name), format!("{:.3}", op.rtt_percentile(99.0)));
         }
-        // PLAN_KV_TIMERS.md §14.2. Appended LAST and only when a flag is on, so with
-        // both off this function returns the same bytes it returned before the
-        // feature existed — the parity gate (§15) is a test, not a promise.
-        if self.kvt.any_on() {
-            self.kvt.render(&mut s, &ht, &g);
-        }
+        // PLAN_KV_TIMERS.md §14.2. Appended LAST, and UNCONDITIONALLY: the block used
+        // to be suppressed while the two boot flags were off, so that a broker which
+        // never enabled them scraped byte-identically to the pre-feature broker. The
+        // flags are gone, so the parity that mattered is the other one — every cell
+        // running this binary exposes the same series, and an alert rule can be
+        // written once for the fleet.
+        self.kvt.render(&mut s, &ht, &g);
         s
     }
 }
@@ -1294,19 +1291,63 @@ fn resident_bytes() -> u64 {
 mod kv_timers_tests {
     use super::*;
 
-    /// The parity gate of PLAN_KV_TIMERS.md §15, expressed where it can actually
-    /// fail: "default-OFF is not a promise, it is a test". With both flags off the
-    /// exposition must be IDENTICAL to a broker that never had the feature — not
-    /// "identical except twenty-five families reading 0", because a family that
-    /// exists is a family somebody alerts on, dashboards, and then has to explain.
+    /// Two renders of the same `Metrics` are NOT byte-identical on their own, and the
+    /// reason is not kv or timers: `queen_uptime_seconds` and
+    /// `queen_process_resident_memory_bytes` are live samples of the process taken at
+    /// render time, and the second render happens after the recording calls below have
+    /// allocated. On Linux `resident_bytes()` reads /proc/self/statm and the two
+    /// renders differ by whatever the allocator did in between; on macOS there is no
+    /// /proc, the gauge reads 0 both times, and the difference is invisible. Comparing
+    /// them raw is therefore a test that is green on the author's laptop and red in
+    /// CI — which is exactly how it was found — for a reason that has nothing to do
+    /// with the property it claims to hold. So the two live samples are normalised to
+    /// their family name and everything else, every family and label set and value,
+    /// still has to match byte for byte.
+    fn without_live_process_samples(exposition: &str) -> String {
+        const LIVE: [&str; 2] = ["queen_uptime_seconds", "queen_process_resident_memory_bytes"];
+        exposition
+            .lines()
+            .map(|line| match LIVE.iter().find(|n| line.starts_with(&format!("{n} "))) {
+                Some(name) => format!("{name} <live sample>"),
+                None => line.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// THE INVERSE OF THE OLD GATE, and deliberately so. §15 used to demand that a
+    /// broker with both boot flags off scrape byte-identically to a pre-feature
+    /// broker. The flags are gone, so what has to be proven now is that the families
+    /// are THERE on a virgin process: an alert rule or a dashboard panel written once
+    /// must apply to every cell in the fleet, and a series that appears only after the
+    /// first write is a series that pages nobody the day it matters.
     #[test]
-    fn nothing_is_exposed_while_both_flags_are_off() {
+    fn every_family_is_exposed_on_a_virgin_broker() {
         let m = Metrics::new();
-        let before = m.prometheus();
-        // Record on every path, including the ones an operator would consider
-        // impossible with the feature off — recording is cheap and unconditional by
-        // design (the flag gates EXPOSITION, not accounting), so this is the case
-        // that would leak if the gate were in the wrong place.
+        let out = without_live_process_samples(&m.prometheus());
+        for probe in [
+            "queen_kv_ops_total",
+            "queen_kv_bytes_total",
+            "queen_kv_expired_not_pruned",
+            "queen_kv_read_rejected_total",
+            "queen_kv_pool",
+            "queen_timers_due",
+            "queen_timers_fired_total",
+            "queen_timers_dlq_total",
+            "queen_timers_schedule_rejected_total",
+            "queen_sweeper_cycle_milliseconds",
+            "queen_sweeper_rows_total",
+        ] {
+            assert!(out.contains(probe), "{probe} missing on a fresh broker");
+        }
+    }
+
+    /// Recording stays cheap and unconditional, and every recorded number reaches the
+    /// exposition. There is no longer any latch between the two, which is the point:
+    /// the one that existed could be left unset and silently swallow the lot.
+    #[test]
+    fn what_is_recorded_is_exposed() {
+        let m = Metrics::new();
         m.kvt.kv_op(KvOp::Put, KvResult::Applied, 1.5);
         m.kvt.kv_bytes(128, 256);
         m.kvt.kv_read_rejected(KvReject::RateLimited);
@@ -1315,33 +1356,13 @@ mod kv_timers_tests {
         m.kvt.set_kv_pool(16, 15, 1);
         m.kvt.set_timers_due(2000, true, 12_000);
         m.kvt.timers_fired(FireResult::Fired, 7);
-        m.kvt.fire_lag("t-1", 4200.0);
         m.kvt.sweeper_cycle(SweepPhase::Fire, 12.0, 40);
-        let after = m.prometheus();
-        assert_eq!(before, after, "a kv/timers series leaked with both flags off");
-        for probe in ["queen_kv_", "queen_timers_", "queen_sweeper_"] {
-            assert!(!after.contains(probe), "{probe} present with both flags off");
-        }
-    }
-
-    /// The two flags are INDEPENDENT (§0): a cell may want timers without KV, and one
-    /// half must not drag the other's series into the exposition.
-    #[test]
-    fn each_flag_exposes_only_its_own_half() {
-        let m = Metrics::new();
-        m.kvt.enable(true, false);
-        let kv_only = m.prometheus();
-        assert!(kv_only.contains("queen_kv_ops_total"));
-        assert!(!kv_only.contains("queen_timers_fired_total"));
-        // The sweeper serves both halves, so its block rides on either flag.
-        assert!(kv_only.contains("queen_sweeper_cycle_milliseconds"));
-
-        let m = Metrics::new();
-        m.kvt.enable(false, true);
-        let timers_only = m.prometheus();
-        assert!(timers_only.contains("queen_timers_fired_total"));
-        assert!(!timers_only.contains("queen_kv_ops_total"));
-        assert!(timers_only.contains("queen_sweeper_cycle_milliseconds"));
+        let out = m.prometheus();
+        assert!(out.contains("queen_kv_ops_total{op=\"put\",result=\"applied\"} 1"));
+        assert!(out.contains("queen_kv_bytes_total{dir=\"in\"} 128"));
+        assert!(out.contains("queen_kv_singleflight_coalesced_total 3"));
+        assert!(out.contains("queen_timers_due 2000"));
+        assert!(out.contains("queen_timers_fired_total{result=\"fired\"} 7"));
     }
 
     /// §14.1: `tenant` is allowed on the fire-lag gauge and NOWHERE else. This is the
@@ -1350,7 +1371,6 @@ mod kv_timers_tests {
     #[test]
     fn tenant_appears_only_on_the_fire_lag_gauge() {
         let m = Metrics::new();
-        m.kvt.enable(true, true);
         m.kvt.kv_op(KvOp::Get, KvResult::Applied, 0.4);
         m.kvt.timers_fired(FireResult::Fired, 1);
         m.kvt.fire_lag("acme", 1000.0);
@@ -1371,7 +1391,6 @@ mod kv_timers_tests {
     #[test]
     fn tenant_label_is_escaped() {
         let m = Metrics::new();
-        m.kvt.enable(false, true);
         m.kvt.fire_lag("ev\"il\\", 10.0);
         let out = m.prometheus();
         assert!(out.contains(r#"tenant="ev\"il\\""#), "unescaped label: {out}");
@@ -1384,7 +1403,6 @@ mod kv_timers_tests {
     #[test]
     fn fire_lag_tenant_map_denies_past_the_cap_and_says_so() {
         let m = Metrics::new();
-        m.kvt.enable(false, true);
         for i in 0..(FIRE_LAG_TENANT_CAP + 25) {
             m.kvt.fire_lag(&format!("tenant-{i}"), 1.0);
         }

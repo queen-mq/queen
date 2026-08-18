@@ -3,10 +3,21 @@
          xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
          bootstrap="vendor/autoload.php"
          colors="true"
+         defaultTestSuite="Unit"
          cacheDirectory=".phpunit.cache">
     <testsuites>
+        <!-- The default run. No broker, no network: `vendor/bin/phpunit` on a
+             laptop must stay a pure unit run, so tests/Integration is excluded
+             here rather than left to skip itself. -->
         <testsuite name="Unit">
             <directory>tests</directory>
+            <exclude>tests/Integration</exclude>
+        </testsuite>
+        <!-- Needs a live broker, and nothing else: KV and timers are part of
+             every broker, so there is no flag to set first. Run by
+             test/runners/laravel; skips without QUEEN_HTTP_URL. -->
+        <testsuite name="Integration">
+            <directory>tests/Integration</directory>
         </testsuite>
     </testsuites>
     <source>

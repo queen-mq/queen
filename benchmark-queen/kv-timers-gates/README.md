@@ -8,7 +8,7 @@ folder — the dated folders in this directory are campaigns that happened once.
 | script | plan row | phase | question |
 |---|---|---|---|
 | `perf-gate-hotpath.sh` | Perf gate | F4 | does a bundle carrying **neither** `kv` nor `timers` cost more CPU per message after the patch, and did any new statement start executing? |
-| `perf-gate-sweeper.sh` | Perf gate sweeper | F3 | what does the sweeper cost an installation that never uses the feature, and does it tax the message path when it is awake with a non-empty table? |
+| `perf-gate-sweeper.sh` | Perf gate sweeper | F3 | what does the sweeper cost an installation that never schedules a timer, and does it tax the message path when it is awake with a non-empty table? |
 
 Both run on their own compose project (`kvtgate`), their own volume and port 16644. Neither goes
 anywhere near `:5432`, which is the live channel-ts stack.
@@ -74,7 +74,8 @@ restatement of Q1: §6.3 promises zero added statements, zero added plan nodes a
 locks when the arrays are absent, and the way that promise dies is a
 `FROM jsonb_array_elements(COALESCE(p->'kv','[]'))` folded into a `UNION` with the pushes. One
 extra Function Scan on a statement that runs on every bundle is far below 1% of CPU and
-completely invisible to Q1 — and it is a permanent tax on everyone who never enables the feature.
+completely invisible to Q1 — and it is a permanent tax on everyone who never sends a `kv` or
+`timers` array, which since the boot flags were removed is every installation by default.
 
 New statements are reported in two classes. One naming `queen.kv`, `queen.log_timers`,
 `kv_apply_v1`, `log_timers_*` and friends is **unwaivable**. Anything else is nearly always a
@@ -94,13 +95,17 @@ GATE_IMAGE=queen:gate-after ./perf-gate-sweeper.sh run
 
 One image, three conditions, back to back:
 
-| | flags | timers table |
+| | sweeper | timers table |
 |---|---|---|
-| A | both OFF — the task is not spawned at all (§7.1) | — |
-| B | both ON | empty |
-| C | both ON | seeded (200k rows, due in ~30 days) |
+| A | `QUEEN_SWEEPER=false` — the task is not spawned at all (§7.1) | — |
+| B | on (the default) | empty |
+| C | on (the default) | seeded (200k rows, due in ~30 days) |
 
-- **G1 — the bill for a feature nobody uses.** Idle CPU of B minus A, in milli-CPU, against
+Condition A used to be "both feature flags off". Those flags are gone: kv and timers are part of
+the engine, so `QUEEN_SWEEPER` is the only knob left that produces a broker with no sweep loop,
+and B is no longer an opt-in condition but the shape of every cell that ships.
+
+- **G1 — the bill on a cell that never schedules a timer.** Idle CPU of B minus A, in milli-CPU, against
   `GATE_IDLE_BUDGET_MCPU` (default 20 = 2% of one core = 1% of the 2-core free tier whose
   measured ceiling is ~480 msg/s). §7.1 is explicit that a per-second probe, a `Lane::Maint` slot
   and a pool connection on two empty tables is "rumore misurabile che nessun cliente ha chiesto".

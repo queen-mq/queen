@@ -316,7 +316,15 @@ pub fn authorize(p: &Principal, class: RouteClass) -> Result<(), Response> {
         (Principal::ApiKey { scopes, .. }, RouteClass::Read) => {
             scopes.read || scopes.admin
         }
-        (Principal::ApiKey { scopes, .. }, RouteClass::Gated(_)) => {
+        // A gated READ is a read: a read-only key must be able to do
+        // `GET /api/v1/kv/:ns/*key`, which PLAN_KV_TIMERS.md §8.1 puts at the
+        // broker's `ReadOnly` access level. Only the kv/timers families ever
+        // produce this arm — streams and traces classify as `Open` — so this
+        // widens nothing that exists today.
+        (Principal::ApiKey { scopes, .. }, RouteClass::Gated(_, crate::routes::GatedOp::Read)) => {
+            scopes.read || scopes.admin || scopes.produce || scopes.consume
+        }
+        (Principal::ApiKey { scopes, .. }, RouteClass::Gated(_, _)) => {
             scopes.produce || scopes.consume
         }
         (Principal::User { role, .. }, RouteClass::Produce) => {
@@ -327,7 +335,8 @@ pub fn authorize(p: &Principal, class: RouteClass) -> Result<(), Response> {
         }
         (Principal::User { role, .. }, RouteClass::QueueAdmin) => matches!(role, Role::Admin),
         (Principal::User { .. }, RouteClass::Read) => true,
-        (Principal::User { role, .. }, RouteClass::Gated(_)) => {
+        (Principal::User { .. }, RouteClass::Gated(_, crate::routes::GatedOp::Read)) => true,
+        (Principal::User { role, .. }, RouteClass::Gated(_, _)) => {
             !matches!(role, Role::Viewer)
         }
     };
@@ -1398,6 +1407,54 @@ mod tests {
         assert!(authorize(&user(Role::Viewer, true), RouteClass::Produce).is_err());
         assert!(authorize(&user(Role::Viewer, true), RouteClass::QueueAdmin).is_err());
         assert!(authorize(&user(Role::Viewer, false), RouteClass::Read).is_ok());
+    }
+
+    // ---- PLAN_KV_TIMERS.md §9.8 P1: the gated read/write split ----
+
+    #[test]
+    fn a_gated_read_is_a_read_for_authorization() {
+        use crate::routes::{Feature, GatedOp};
+        let read_only =
+            Principal::ApiKey { key_id: Uuid::new_v4(), scopes: Scopes { read: true, ..Default::default() } };
+        // GET /api/v1/kv/:ns/*key is `ReadOnly` in the broker's own access
+        // table (§8.1); a read-scoped key must not be 403'd at the proxy for
+        // an operation the broker would allow.
+        assert!(authorize(&read_only, RouteClass::Gated(Feature::Kv, GatedOp::Read)).is_ok());
+        assert!(authorize(&user(Role::Viewer, false), RouteClass::Gated(Feature::Kv, GatedOp::Read)).is_ok());
+    }
+
+    #[test]
+    fn a_gated_write_still_needs_a_writing_credential() {
+        use crate::routes::{Feature, GatedOp};
+        let read_only =
+            Principal::ApiKey { key_id: Uuid::new_v4(), scopes: Scopes { read: true, ..Default::default() } };
+        // Reading a key does not license writing one, cancelling one, or
+        // scheduling one — including on the never-quota-blocked `Open` half,
+        // which is about quotas, not about credentials.
+        for op in [GatedOp::Grow, GatedOp::Open, GatedOp::Mixed] {
+            assert!(
+                authorize(&read_only, RouteClass::Gated(Feature::Timers, op)).is_err(),
+                "{op:?} must not be reachable with a read-only key"
+            );
+            assert!(authorize(&user(Role::Viewer, false), RouteClass::Gated(Feature::Timers, op)).is_err());
+        }
+        let producer = Principal::ApiKey {
+            key_id: Uuid::new_v4(),
+            scopes: Scopes { produce: true, ..Default::default() },
+        };
+        assert!(authorize(&producer, RouteClass::Gated(Feature::Timers, GatedOp::Mixed)).is_ok());
+    }
+
+    /// The pre-existing gated surfaces must come out of this change with the
+    /// exact matrix they had: `Open` is what preserves it.
+    #[test]
+    fn streams_and_traces_authorization_is_unchanged() {
+        use crate::routes::{Feature, GatedOp};
+        let read_only =
+            Principal::ApiKey { key_id: Uuid::new_v4(), scopes: Scopes { read: true, ..Default::default() } };
+        assert!(authorize(&read_only, RouteClass::Gated(Feature::Streams, GatedOp::Open)).is_err());
+        assert!(authorize(&user(Role::Viewer, false), RouteClass::Gated(Feature::Traces, GatedOp::Open)).is_err());
+        assert!(authorize(&user(Role::Consumer, false), RouteClass::Gated(Feature::Streams, GatedOp::Open)).is_ok());
     }
 
     // ---- credential extraction ---------------------------------------------

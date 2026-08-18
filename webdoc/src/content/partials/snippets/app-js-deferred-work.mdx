@@ -1,0 +1,301 @@
+---
+params: []
+description: "Verified snippet extracted from examples/apps/js/deferred-work.mjs."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from examples/apps/js/deferred-work.mjs by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```js title="examples/apps/js/deferred-work.mjs"
+//
+// A quota that moves work instead of refusing it.
+//
+// The war story is an export service that answered 429 to everything above a
+// hundred reports an hour. The customers who hit the ceiling were, by
+// construction, the ones with the most data, and every one of them had a
+// retry loop. The refusals arrived fastest when the service was busiest, the
+// retries came straight back, and an afternoon of nobody getting their report
+// was reported to us as an outage. It was not an outage. It was a limiter
+// doing exactly what it had been asked to do.
+//
+// A refusal is only the right answer when the work is worthless late. A report
+// somebody asked for is not: what they want is the report, and they do not
+// much mind whether it arrives now or when the window rolls. So this admission
+// controller never says no. It asks the counter whether there is room, and
+// when there is not, it puts the same work on a timer for the moment the
+// window opens.
+//
+// Two primitives and no new machinery, and each does the thing it is for:
+//
+//   incr with max IS the admission decision. The increment either applies, or
+//   nothing is written and the answer says applied:false, reason:"limit" --
+//   so the request that would have breached the ceiling has not consumed any
+//   budget, and there is nothing to give back.
+//
+//   A timer carries the work forward. One message, promised now, delivered no
+//   earlier than the moment the window opens, and cancellable by name until
+//   then.
+//
+//   requests (one partition per tenant)
+//     └── group "admission"   ONE bundle: incr + gate + push + ack
+//           ├── work          admitted now
+//           └── timer back onto `requests`, for the next window
+//
+// Run it:
+//   QUEEN_URL=http://localhost:6632 node deferred-work.mjs
+
+import { Queen } from 'queen-mq'
+
+const QUEEN_URL = process.env.QUEEN_URL || 'http://localhost:6632'
+const RUN = Date.now().toString(36)
+
+const REQUESTS = `app-js-deferred-requests-${RUN}`
+const WORK = `app-js-deferred-work-${RUN}`
+const NS = `app-js-deferred-${RUN}`
+const GROUP = 'admission'
+
+// Three exports per tenant per window. A window is eight seconds here and an
+// hour in the service this is drawn from; nothing else in the program changes
+// with the number.
+const QUOTA = 3
+const WINDOW_S = 8
+
+// The deadline on every wait for a timer. A timer fires no earlier than its
+// delay plus one sweep of the broker, and a broker whose timer table has been
+// empty backs its sweep off, so this is generous on purpose.
+const TIMER_DEADLINE_MS = 90_000
+
+let checks = 0
+const assert = (condition, description) => {
+  if (!condition) throw new Error(description)
+  checks++
+  console.log(`  ok: ${description}`)
+}
+
+const quotaKey = (tenant) => `quota:${tenant}`
+const admittedKey = (requestId) => `admitted:${requestId}`
+const timerKey = (requestId) => `req:${requestId}`
+
+const admitted = []
+const deferred = []
+const alreadyAdmitted = []
+
+const queen = new Queen({ url: QUEEN_URL, handleSignals: false })
+
+// submit puts one export request on the queue. Each tenant gets its own
+// partition, so a tenant's requests are decided in the order they were made.
+let submitted = 0
+const submit = (tenant, requestId) =>
+  queen.queue(REQUESTS).partition(tenant).push({
+    transactionId: `submit-${submitted++}-${requestId}`,
+    data: { tenant, requestId },
+  })
+
+try {
+  console.log(`broker ${QUEEN_URL}`)
+
+  for (const q of [REQUESTS, WORK]) {
+    await queen.queue(q).config({ leaseTime: 30, retryLimit: 3 }).create()
+  }
+
+  // --------------------------------------------------------------- admission
+  //
+  // The bundle. Everything that decides, records and dispatches one request is
+  // in it, so there is no state in which some of it happened.
+  //
+  // NOTE THE ORDER, WHICH IS DELIBERATELY THE DANGEROUS ONE. The counter is
+  // incremented BEFORE the duplicate is detected, so a redelivery of a request
+  // that was already admitted spends budget on its way to being refused. What
+  // gives the budget back is not the ordering, and not a compensating
+  // decrement: it is that both are in one transaction, and the lost gate rolls
+  // the increment back with everything else. Written the other way around this
+  // program behaves identically, which is the point.
+  const decide = async (msg) => {
+    const { tenant, requestId } = msg.data
+
+    const res = await queen
+      .transaction()
+      .kv.incr(NS, quotaKey(tenant), 1, { max: QUOTA, ttl: `${WINDOW_S}s`, required: true })
+      .kv.putIfAbsent(NS, admittedKey(requestId), { tenant }, { ttl: '1h', required: true })
+      .queue(WORK).partition(tenant).push({ transactionId: `work-${requestId}`, data: { tenant, requestId } })
+      .ack(msg, 'completed', { consumerGroup: msg.consumerGroup })
+      .commit()
+
+    if (res.success !== false) {
+      admitted.push({ tenant, requestId })
+      console.log(`  ${requestId}: admitted`)
+      return
+    }
+
+    // Everything below is a 200 with `success:false` and
+    // `reason:"kv_precondition"`. It is a verdict, not an error: it does not
+    // belong in a retry policy or an error metric, and `kvReason` says which
+    // of the two gates said no.
+    if (res.kvReason === 'exists') {
+      // A redelivery of a request that was already admitted. Nothing was
+      // written, including the increment above.
+      alreadyAdmitted.push(requestId)
+      await queen.ack(msg, 'completed', { group: msg.consumerGroup })
+      console.log(`  ${requestId}: already admitted, nothing written`)
+      return
+    }
+
+    if (res.kvReason !== 'limit') throw new Error(`${requestId}: unexpected verdict ${res.kvReason}`)
+
+    // Over the ceiling. The counter's own expiry IS the window boundary, so
+    // the wait is not guessed: it is read off the row that refused the
+    // request. `incr` sets the TTL only when it creates the key, which is what
+    // makes a fixed window one call rather than a read, a compare and a reset.
+    const counter = await queen.kv.get(NS, quotaKey(tenant))
+    const delayMs = counter.found ? Math.max(0, new Date(counter.expiresAt).getTime() - Date.now()) : 0
+
+    // The deferral, also one bundle. If the timer is not written, the request
+    // is not acknowledged, so it comes back and is decided again.
+    const out = await queen
+      .transaction()
+      .timer(REQUESTS).key(timerKey(requestId)).partition(tenant).delayMs(delayMs)
+      .payload({ tenant, requestId }).schedule()
+      .ack(msg, 'completed', { consumerGroup: msg.consumerGroup })
+      .commit()
+    if (out.success === false) throw new Error(`${requestId}: deferral failed (${out.reason})`)
+
+    deferred.push(requestId)
+    console.log(`  ${requestId}: over quota, moved to the next window in ${delayMs} ms`)
+  }
+
+  const admission = (limit, idleMillis) => queen
+    .queue(REQUESTS)
+    .group(GROUP)
+    .subscriptionMode('all')
+    .autoAck(false)
+    .each()
+    // A count, with a deadline. The limit is the number of decisions this
+    // phase must make, so the loop returns the moment it has made them;
+    // idleMillis is what turns a decision that never happens into a failed
+    // assertion below rather than a hang.
+    .limit(limit)
+    .idleMillis(idleMillis)
+    .consume(decide)
+
+  // ------------------------------------------- the gate, and what it protects
+  //
+  // One tenant on its own, before anything else exists, so the two decisions
+  // below are the only things touching this counter.
+  console.log('\na duplicate request, and the budget it must not spend')
+  await submit('globex', 'G-1')
+  await admission(1, 20_000)
+
+  const afterFirst = await queen.kv.get(NS, quotaKey('globex'))
+  console.log(`  globex counter: ${afterFirst.value}`)
+
+  // The same request again, as a new message. This is what a redelivery looks
+  // like from the admission controller's side.
+  await submit('globex', 'G-1')
+  await admission(1, 20_000)
+
+  const afterDuplicate = await queen.kv.get(NS, quotaKey('globex'))
+  console.log(`  globex counter: ${afterDuplicate.value}`)
+
+  assert(alreadyAdmitted.length === 1 && alreadyAdmitted[0] === 'G-1', 'the duplicate lost the gate')
+  assert(admitted.length === 1, 'the duplicate produced no second export request')
+  assert(
+    afterDuplicate.value === afterFirst.value,
+    `the rolled-back bundle gave the budget back: counter is still ${afterFirst.value} (got ${afterDuplicate.value})`
+  )
+
+  // ------------------------------------------------------- over the ceiling
+  console.log(`\nsix requests against a quota of ${QUOTA}`)
+  const ACME = ['R-1', 'R-2', 'R-3', 'R-4', 'R-5', 'R-6']
+  for (const requestId of ACME) await submit('acme', requestId)
+  await admission(ACME.length, 20_000)
+
+  const acmeAdmitted = () => admitted.filter(a => a.tenant === 'acme')
+  assert(
+    acmeAdmitted().length === QUOTA,
+    `exactly ${QUOTA} of acme's requests ran now, and none was refused (got ${acmeAdmitted().length})`
+  )
+  assert(
+    deferred.length === ACME.length - QUOTA,
+    `the other ${ACME.length - QUOTA} were moved rather than discarded (got ${deferred.length})`
+  )
+
+  // ----------------------------------------------------- withdrawing one
+  //
+  // A deferral is inspectable and revocable, which is the third thing this
+  // shape buys and the one a message sitting behind a lease cannot give. The
+  // customer changed their mind, so the work is called off by name.
+  console.log('\nwithdrawing one deferred request')
+  const withdrawn = deferred[deferred.length - 1]
+  const cancelled = await queen.timer(REQUESTS).key(timerKey(withdrawn)).cancel()
+  assert(cancelled.status === 'cancelled', `${withdrawn} was cancelled while it waited`)
+
+  // ------------------------------------------------------- the next window
+  //
+  // The timers deliver the same requests back onto the same queue, where the
+  // same admission controller decides them again. Nothing about a re-entering
+  // request is special, and that is what makes the loop safe.
+  console.log('\nthe next window')
+  await admission(deferred.length - 1, TIMER_DEADLINE_MS)
+
+  // Then a short pass with room for the withdrawn one, which is the only
+  // honest way to say it never came back.
+  await admission(1, 5000)
+
+  // ------------------------------------------------------------- the work
+  console.log('\nthe work that actually ran')
+  const ran = []
+  await queen
+    .queue(WORK)
+    .group('exporter')
+    .subscriptionMode('all')
+    .each()
+    // One slot more than the six exports that must exist, so a seventh would be
+    // consumed and fail the count rather than pass unnoticed.
+    .limit(ACME.length + 1)
+    .idleMillis(8000)
+    .consume(async (msg) => {
+      ran.push(msg.data.requestId)
+      console.log(`  exported ${msg.data.requestId}`)
+    })
+
+  // ----------------------------------------------------------------- checking
+  console.log('\nchecking')
+
+  const expected = ['G-1', ...ACME.filter(id => id !== withdrawn)].sort()
+  assert(
+    ran.length === expected.length,
+    `${expected.length} exports ran (got ${ran.length}: ${ran.sort().join(', ')})`
+  )
+  assert(
+    JSON.stringify(ran.sort()) === JSON.stringify(expected),
+    'exactly the requests that were not withdrawn ran, each of them once'
+  )
+  assert(!ran.includes(withdrawn), `${withdrawn} was withdrawn and never ran`)
+  assert(
+    admitted.map(a => a.requestId).sort().join(',') === expected.join(','),
+    'every request that ran was admitted by the counter, and nothing ran without being admitted'
+  )
+  assert(
+    alreadyAdmitted.length === 1,
+    'the gate fired exactly once, for the one duplicate, and never for a re-entering deferral'
+  )
+
+  // Nothing is left armed: the two deferrals were admitted and the third was
+  // withdrawn.
+  const left = await queen.timer(REQUESTS).list({ limit: 50 })
+  assert(left.rows.length === 0, `no timer is still pending (got ${left.rows.length})`)
+
+  console.log(`\n  ran: ${ran.join(', ')}`)
+  console.log(`  never ran: ${withdrawn}`)
+
+  for (const q of [REQUESTS, WORK]) await queen.queue(q).delete()
+  console.log(`\nPASS: ${checks} checks`)
+} catch (err) {
+  console.error(`\nFAIL: ${err.message}`)
+  process.exitCode = 1
+} finally {
+  await queen.close()
+}
+```

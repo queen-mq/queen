@@ -62,6 +62,7 @@ whatever your PostgreSQL already does.
 - **Transactional handoff.** Acking one message and pushing the next stage's happens in a single PostgreSQL transaction.
 - **Windowed aggregation in the same transaction.** Tumbling, sliding, session and cron windows over a queue, with the window state, the emitted messages and the source acknowledgement committing together or not at all. No changelog topic, no state store, no second system.
 - **Exact, windowed deduplication.** A `transactionId` you supply makes a push idempotent inside a configurable window, enforced in the database rather than a cache.
+- **Transactional key/value state, and messages scheduled for later**, both committing with your acks and pushes rather than beside them. Behind flags, off by default: see [Key/value state and timers](#keyvalue-state-and-timers).
 - **A dead-letter queue, tracing, and a dashboard**, all served by the same binary.
 - **Six client SDKs, an operator CLI, and a plain HTTP API**, so anything that can make an HTTP request is a first-class client.
 - **An embeddable engine.** The broker is a Rust library before it is a binary: a product can run the same engine inside its own process instead of shipping a second container. See [Embedding the engine](#embedding-the-engine).
@@ -129,6 +130,53 @@ An empty pop answers `204` with no body at all. The dashboard is at
 [http://localhost:6632](http://localhost:6632).
 
 Full walkthrough: **[queenmq.com/start/quickstart](https://queenmq.com/start/quickstart)**.
+
+## Key/value state and timers
+
+Two surfaces that share the log's transaction instead of sitting beside it.
+
+**Key/value** (`POST /api/v1/kv`) is a namespaced store with `get`, `getMany`, `getPrefix`, `put`,
+`putIfAbsent`, `delete` and `incr`. Its point is not the store: it is that the idempotency marker,
+the message it guards and the cursor advance commit together. Every write states its lifetime,
+exactly one of `ttlSeconds` and `forever`, because a marker with no expiry is how a table grows in
+silence.
+
+**Timers** (`POST /api/v1/timers`) schedule a message into a queue for later, keyed by
+`(queue, timerKey)` so a reschedule is the same upsert and a retry after a crash is safe. At fire
+time the staging row is deleted and the message appended in one transaction, so there is no
+half-delivered state.
+
+```js
+// Do the bundle at most once: the marker, the push and the ack commit or roll back together.
+const res = await queen.transaction()
+  .ack(message)
+  .queue('emails').push([{ data: mail }])
+  .once('sent', message.transactionId, { ttl: '24h' })
+  .commit()
+
+if (res.success === false) return  // a redelivery. Already done, nothing was sent twice.
+
+// Not before 30 minutes from now, into a real queue, through the real log.
+await queen.timer('reminders').key(orderId).delay('30m').payload({ orderId }).schedule()
+```
+
+Three things to know before you reach for them:
+
+- **Neither is behind a flag.** There is no `QUEEN_KV_ENABLED` and no `QUEEN_TIMERS_ENABLED`, for
+  the same reason there is no `QUEEN_PUSH_ENABLED`: every broker serves both surfaces from its first
+  boot. What an operator has is a runtime kill switch for pausing one during an incident, which
+  answers **503** and never 404.
+- **A verdict is not an error.** A lost `putIfAbsent`, a key that is not there, a cancel that found
+  nothing: all HTTP 200 with an explicit field. `applied: false` is the most frequent outcome of
+  this API, and the SDKs return it rather than raising, so it stays out of your retry policy.
+- **A cancel that answers `absent` may mean already delivered.** A fired timer leaves no tombstone,
+  so `absent` means "no longer pending". The authority is the log: the answer carries the `txn` the
+  delivered message would have.
+
+Guides: **[queenmq.com/use/kv](https://queenmq.com/use/kv)** ·
+**[queenmq.com/use/timers](https://queenmq.com/use/timers)**. How they work:
+**[internals/kv](https://queenmq.com/internals/kv)** ·
+**[internals/timers](https://queenmq.com/internals/timers)**.
 
 ## Developing on Queen
 
@@ -208,6 +256,12 @@ The Rust client is the one exception to "an SDK re-describes the wire by hand": 
 broker both depend on [`crates/queen-protocol`](crates/queen-protocol), and the broker's own
 tests round-trip its request parsers and rendered responses through those types. A renamed
 field fails a test instead of reaching a client.
+
+Key/value and timers reach the six SDKs, not `queenctl`, which has no `kv` or `timer` command in
+1.0: its value there would be inspection, and `curl` already covers it. The C++ client wraps five
+of the seven key/value operations and two of the four timer ones. The capability matrix, row by
+row and including the boxes where parity is not there, is on every SDK reference page:
+[queenmq.com/reference/sdk/javascript](https://queenmq.com/reference/sdk/javascript).
 
 ## Embedding the engine
 

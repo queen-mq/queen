@@ -139,6 +139,25 @@ All of them work normally when the context points straight at a broker.
 
 Run `queenctl <command> --help` for full flag descriptions.
 
+### Not in queenctl: key/value and timers
+
+Said here rather than left out, because an omission reads as an oversight. The broker's key/value
+store and its scheduled messages have **no `kv` and no `timer` command in 1.0**, and none is
+planned for it. The value of a CLI over those surfaces is inspection rather than writing, and
+inspection is already one `curl` away:
+
+```bash
+curl -s localhost:6632/api/v1/kv -H 'Content-Type: application/json' \
+  -d '{"operations":[{"op":"get","ns":"saga","key":"order-7"}]}'
+curl -s localhost:6632/api/v1/timers/reminders          # pending timers of one queue
+curl -s localhost:6632/api/v1/timers/reminders/order-7  # one timer, payload included
+```
+
+Every broker serves those routes: there is no flag that turns them on. The six language SDKs wrap
+them too: see
+[queenmq.com/use/kv](https://queenmq.com/use/kv) and
+[queenmq.com/use/timers](https://queenmq.com/use/timers).
+
 ## Output formats
 
 Auto-detects: table for TTY, JSON for pipes. Override with `-o`:

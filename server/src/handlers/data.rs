@@ -3551,14 +3551,974 @@ fn txn_add_push(
     });
 }
 
-fn txn_fail_body(txn_id: &str, err: &str, status: StatusCode) -> Response {
-    let out = serde_json::json!({
+// ============================================================================
+// THE HTTP -> WIRE DEMUX (PLAN_KV_TIMERS.md §8.2), which no design specified.
+//
+// The transaction wire the STORED PROCEDURE speaks is parallel arrays (pushes,
+// acks, and now kv and timers). The transaction wire the CLIENTS speak is
+// `{"operations":[...]}` — ONE FLAT array, demuxed here by `type`. Those are two
+// different index spaces, and mapping between them is this file's job. It is
+// also, per §16, the single place in this feature where a contract two shipped
+// clients already read can be silently misaligned, so every rule below is
+// written to be checkable rather than believed.
+//
+// WHERE THE TWO NEW ARRAYS LIVE ON THE REQUEST, AND WHY IT IS NOT NEGOTIABLE.
+// `kv` and `timers` are TOP-LEVEL fields of the request body, never elements of
+// `operations` (§10.4). The reason is a silent failure in Go: two struct fields
+// carrying the same JSON key at the same level are BOTH DROPPED by
+// `encoding/json`, with no error and no warning. Growing `Operation` a `kv` leg
+// would therefore let a body go out with ZERO kv ops while the broker committed
+// a transaction with no gate — the `putIfAbsent` the bundle existed for would
+// simply never have happened, and nothing anywhere would say so. An op that
+// still arrives as `{"type":"kv"}` inside `operations` gets a NAMED 400 below,
+// which is the best failure available and the same mechanism that gives a new
+// client against an old broker a nominative refusal instead of a silent drop.
+//
+// THE FLAT INDEX SPACE, AND HOW ALIGNMENT IS MAINTAINED. `results[]` is indexed
+// by the flat ordinal, and the layout is APPEND-ONLY:
+//
+//     [0, ops_flat)                             `operations`, exactly as today
+//     [ops_flat, ops_flat + kv_n)               the top-level `kv` array
+//     [ops_flat + kv_n, + timers_n)             the top-level `timers` array
+//
+// Stated so it can be checked: a push or an ack NEVER changes index because a
+// rider is present, and a bundle carrying neither array produces a `results[]`
+// of exactly today's length with exactly today's contents. Riders can only ever
+// appear AFTER the last index that exists today. There is no interleaving rule
+// to get wrong, which is precisely why this layout was chosen over honouring
+// some request-order between three arrays that JSON does not order anyway.
+//
+// `failedIndex` (§8.2 point 4, §8.3) is in the FLAT space. The KV procedure
+// raises with its own ARRAY-LOCAL ordinal in the DETAIL, and the translation
+// `flat = kv_base + local` happens in exactly one place, `txn_fail_precondition`.
+// Getting it wrong points the client at somebody else's operation.
+//
+// THE COUNT GUARD, PORTED ACROSS THE TWO SPACES (§8.2 point 3, §6.4). Each
+// procedure guards its own array ("N ops in, N results out, no unfilled
+// ordinal"). That guard is not expressible BETWEEN two index spaces, so it is
+// rewritten here as "every flat ordinal has exactly one result", and it fails
+// LOUDLY. It catches a second and sharper thing, which is the reason it is not
+// decoration: a NEW BROKER against a database whose wire procedure predates the
+// kv/timers graft would have its `kv` array SILENTLY IGNORED — the bundle
+// commits, the client reads `success:true`, and the gate that was the whole
+// point of the bundle never ran. A missing or short rider result array IS that
+// case, and it must never read as success.
+// ============================================================================
+
+/// Edge ceilings for the rider arrays.
+///
+/// SEAM, identical to the one `handlers/kv.rs` declares and for the same reason:
+/// `Config` already resolves every one of these (`kv_max_value_bytes`,
+/// `timers_max_payload_bytes`, `timers_max_horizon_s`), but `AppState` does not
+/// carry them yet and `AppState` is not this phase's file. For the HTTP broker
+/// the two agree by construction — same variable, same default. For the EMBEDDED
+/// broker they can diverge, because its configuration comes from a builder and
+/// not from the process environment. Three fields on `AppState` close it.
+fn wire_env_usize(key: &'static str, def: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(def)
+}
+
+fn wire_kv_max_value_bytes() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| wire_env_usize("QUEEN_KV_MAX_VALUE_BYTES", 65_536))
+}
+
+fn wire_timers_max_payload_bytes() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| wire_env_usize("QUEEN_TIMERS_MAX_PAYLOAD_BYTES", 1_048_576))
+}
+
+fn wire_timers_max_horizon_ms() -> i64 {
+    static V: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| wire_env_usize("QUEEN_TIMERS_MAX_HORIZON_S", 7_776_000) as i64 * 1000)
+}
+
+/// The WIRE caps, which are deliberately tighter than the HTTP ones and are the
+/// mirror of the constants the KV procedure carries for `p_in_wire = true`
+/// (64 ops / 256 keys). Two numbers in two places is a cost paid on purpose: the
+/// procedure is the floor nothing can get under (it also protects the embedded
+/// broker, which never passes through a handler), and this is the guard that
+/// refuses the body BEFORE a `Lane::Push` slot, a pooled connection and a blob
+/// pack are spent on it. §6.1 point 4 is why a key budget exists at all next to
+/// an op budget: 63 `getMany` of 256 keys is 16 128 rows read under the
+/// OUTERMOST lock space of the whole product.
+const WIRE_KV_MAX_OPS: usize = 64;
+const WIRE_KV_MAX_KEYS: usize = 256;
+const WIRE_TIMERS_MAX_OPS: usize = 256;
+
+/// The two rider arrays of one transaction, already validated and prepared, plus
+/// the flat base of each (see the layout above).
+struct TxnRiders {
+    kv: Vec<serde_json::Value>,
+    timers: Vec<serde_json::Value>,
+    kv_base: usize,
+    timers_base: usize,
+    /// Smallest `delayMs` among this bundle's schedules, for the post-commit
+    /// sweeper wake (§7.4). `None` when the bundle schedules nothing.
+    min_delay_ms: Option<i64>,
+}
+
+/// Read one top-level rider array.
+///
+/// `null` is accepted as absent and is not a nicety: it is what every serializer
+/// emits for an unset optional field, and it is the same tolerance the wire
+/// procedure buys on its side with `jsonb_typeof` instead of
+/// `jsonb_array_length` (§6.3). Rejecting it would break, at the moment a client
+/// merely ADDS the field, bundles that work today.
+// The Err is a fully rendered `Response`, which is this module's error currency
+// on every handler path; boxing it would add an allocation to a value that is
+// returned immediately by the only caller.
+#[allow(clippy::result_large_err)]
+fn txn_rider_array(
+    root: &serde_json::Value,
+    key: &'static str,
+    txn_id: &str,
+) -> Result<Vec<serde_json::Value>, Response> {
+    match root.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+        Some(serde_json::Value::Array(a)) => Ok(a.clone()),
+        Some(_) => Err(txn_fail_body(
+            txn_id,
+            "bad_request",
+            &format!(
+                "`{key}` must be an array at the TOP LEVEL of the request body, beside \
+                 `operations` and never inside it"
+            ),
+            StatusCode::BAD_REQUEST,
+        )),
+    }
+}
+
+/// Body guard for the KV rider. Shape belongs to the procedure (one rule for all
+/// seven clients and the embedded broker); what is checked here is what the
+/// procedure cannot check as cheaply, or at all before the money is spent.
+fn txn_check_kv(ops: &[serde_json::Value], txn_id: &str) -> Option<Response> {
+    if ops.len() > WIRE_KV_MAX_OPS {
+        return Some(txn_fail_body(
+            txn_id,
+            "bad_request",
+            &format!(
+                "{} kv operations in one transaction, the ceiling on this wire is {}",
+                ops.len(),
+                WIRE_KV_MAX_OPS
+            ),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let mut keys = 0usize;
+    for (i, o) in ops.iter().enumerate() {
+        let obj = match o.as_object() {
+            Some(m) => m,
+            None => {
+                return Some(txn_fail_body(
+                    txn_id,
+                    "bad_request",
+                    &format!("kv operation at index {i} is not an object"),
+                    StatusCode::BAD_REQUEST,
+                ))
+            }
+        };
+        match obj.get("op").and_then(|v| v.as_str()) {
+            // §5.5: forbidden on this wire, and the boundary is COST, not the
+            // kind of operation. `get` and `getMany` are allowed because the
+            // caller fixes their cost; a prefix read is unbounded work held
+            // inside the transaction that owns the outermost lock space and,
+            // downstream, the partition locks. The procedure refuses it too —
+            // this copy exists so the refusal costs no connection and names
+            // itself instead of arriving as a rolled-back SQLSTATE.
+            Some("getPrefix") => {
+                return Some(txn_fail_body(
+                    txn_id,
+                    "bad_request",
+                    &format!(
+                        "kv operation at index {i}: getPrefix is not available inside a \
+                         transaction; it lives only on POST /api/v1/kv"
+                    ),
+                    StatusCode::BAD_REQUEST,
+                ))
+            }
+            Some("getMany") => {
+                keys += obj
+                    .get("keys")
+                    .and_then(|k| k.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0)
+            }
+            _ => keys += 1,
+        }
+        // The raw-body half of the value ceiling (§9.2). The two halves measure
+        // DIFFERENT THINGS on purpose and that surprise belongs in the
+        // documentation: here it is the serialized bytes, in the procedure it is
+        // the canonical JSONB text, which is normally shorter.
+        if let Some(v) = obj.get("value") {
+            let n = v.to_string().len();
+            if n > wire_kv_max_value_bytes() {
+                return Some(txn_fail_body(
+                    txn_id,
+                    "payload_too_large",
+                    &format!(
+                        "kv operation at index {i}: value is {n} bytes, the ceiling is {}",
+                        wire_kv_max_value_bytes()
+                    ),
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                ));
+            }
+        }
+    }
+    if keys > WIRE_KV_MAX_KEYS {
+        return Some(txn_fail_body(
+            txn_id,
+            "bad_request",
+            &format!(
+                "{keys} kv keys in one transaction, the ceiling on this wire is {}",
+                WIRE_KV_MAX_KEYS
+            ),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    None
+}
+
+/// Prepare the timer rider: the half of §8.2 point 5 that belongs to the broker.
+///
+/// Three of these checks exist ONLY here, and each one is load-bearing:
+///
+///   * UNDERSCORE-PREFIXED FIELDS ARE REFUSED. The procedure takes the message
+///     id as `COALESCE((op->>'_messageId')::uuid, ...)` — that is how the broker
+///     promises the id at schedule time — and it CANNOT tell the broker's
+///     injection from a client's, because both arrive in the same JSON. This
+///     boundary can, so this is where a forged message id has to die. The
+///     procedure independently refuses the client-spellable spellings
+///     (`producerSub`, `messageId`, `tenant`, `deliverAt`, `delaySeconds`, ...).
+///   * THE HORIZON. The procedure has no ceiling on `delayMs` at all; without
+///     this the 90-day horizon of §9.2 exists nowhere, and with an unbounded
+///     horizon the row quota stops being cyclic — a tenant fills it and never
+///     frees it.
+///   * THE PAYLOAD CEILING, which is `min(1 MiB, plan.max_payload_bytes)` and
+///     DERIVED rather than independent: a timer becomes a message, so if its
+///     ceiling were not the message's, a timer would be a service entrance
+///     around `max_payload_bytes`.
+///
+/// ENCRYPTION HAPPENS AT SCHEDULE, NOT AT FIRE (§13.4), exactly as on the
+/// standalone route: the fire happens inside the sweeper, so a payload not
+/// encrypted here would sit in cleartext at rest for days. The consequences are
+/// declared rather than discovered — a queue whose encryption is turned ON after
+/// a timer was scheduled delivers that frame in CLEARTEXT, and a key rotation
+/// between schedule and fire makes the frame undecryptable. Encryption is
+/// OUTERMOST, so a `payloadZstd` payload is decrypted first and decompressed
+/// second.
+async fn txn_prepare_timers(
+    st: &Arc<AppState>,
+    tenant: &str,
+    ops: Vec<serde_json::Value>,
+    txn_id: &str,
+) -> Result<(Vec<serde_json::Value>, Option<i64>), Response> {
+    if ops.len() > WIRE_TIMERS_MAX_OPS {
+        return Err(txn_fail_body(
+            txn_id,
+            "bad_request",
+            &format!(
+                "{} timer operations in one transaction, the ceiling is {}",
+                ops.len(),
+                WIRE_TIMERS_MAX_OPS
+            ),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    let mut out: Vec<serde_json::Value> = Vec::with_capacity(ops.len());
+    let mut min_delay: Option<i64> = None;
+
+    for (i, raw) in ops.into_iter().enumerate() {
+        let mut obj = match raw {
+            serde_json::Value::Object(m) => m,
+            _ => {
+                return Err(txn_fail_body(
+                    txn_id,
+                    "bad_request",
+                    &format!("timer operation at index {i} is not an object"),
+                    StatusCode::BAD_REQUEST,
+                ))
+            }
+        };
+        if let Some(k) = obj.keys().find(|k| k.starts_with('_')) {
+            return Err(txn_fail_body(
+                txn_id,
+                "bad_request",
+                &format!(
+                    "timer operation at index {i}: `{k}` is server-owned; \
+                     underscore-prefixed fields are injected by the broker and cannot be supplied"
+                ),
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+        // And the CLIENT-SPELLABLE server-owned names, at this boundary rather
+        // than only in the procedure.
+        //
+        // The procedure rejects these too and remains the authority — its list is
+        // longer and it is the copy that protects the embedded broker and every
+        // future caller. But on THIS route its RAISE arrives as SQLSTATE 22023
+        // and the wire maps every procedure RAISE to HTTP 200 with a switchable
+        // `reason` (see `txn_reason_for`), deliberately: a business verdict must
+        // not read as a client error. The consequence, without these lines, is
+        // that one class of bug gets two statuses in the SAME bundle —
+        // `_messageId` is a 400 from four lines up and `producerSub` a 200 from
+        // the procedure — and the integrator who hits the second one concludes
+        // the field was accepted. Checking here makes "you supplied a field you
+        // do not own" a 400 on both surfaces, and leaves 200 to mean what §8.3
+        // says it means: a verdict the caller is expected to see.
+        //
+        // KEEP IN SYNC with the FOREACH list in 025_log_timers.sql. Drift is
+        // safe in one direction only: a name here that the procedure does not
+        // have is merely stricter, a name the procedure has and this list does
+        // not falls back to the 200 path rather than escaping.
+        const TIMER_SERVER_OWNED: [&str; 15] = [
+            "producerSub",
+            "producer_sub",
+            "messageId",
+            "message_id",
+            "tenant",
+            "tenantId",
+            "tenant_id",
+            "deliverAt",
+            "deliver_at",
+            "delaySeconds",
+            "delay_seconds",
+            "attempts",
+            "claimToken",
+            "claim_token",
+            "claimedUntil",
+        ];
+        if let Some(k) = obj.keys().find(|k| TIMER_SERVER_OWNED.contains(&k.as_str())) {
+            return Err(txn_fail_body(
+                txn_id,
+                "bad_request",
+                &format!(
+                    "timer operation at index {i}: `{k}` is server-owned and cannot be supplied. \
+                     producerSub and the tenant come from the authenticated request; the message \
+                     id is minted by the broker; deliverAt is not expressible — the wire carries \
+                     only the relative delayMs"
+                ),
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+
+        let kind = obj.get("op").and_then(|v| v.as_str()).unwrap_or_default();
+        // `cancel`, and anything unknown, travel untouched: the procedure owns
+        // the closed taxonomy (§4.1) and a second copy here would give the
+        // product two places to disagree about what an operation is.
+        if kind != "schedule" && kind != "reschedule" {
+            out.push(serde_json::Value::Object(obj));
+            continue;
+        }
+
+        let queue = match obj.get("queue").and_then(|v| v.as_str()) {
+            Some(q) if !q.is_empty() => q.to_string(),
+            _ => {
+                return Err(txn_fail_body(
+                    txn_id,
+                    "bad_request",
+                    &format!("timer operation at index {i}: queue is required"),
+                    StatusCode::BAD_REQUEST,
+                ))
+            }
+        };
+
+        // §4.2 and §20.6: only RELATIVE durations on this wire, in MILLISECONDS.
+        // The declared rule of the product is "durations that can be sub-second
+        // are in milliseconds, the ones that cannot are in seconds" — a 250 ms
+        // retry backoff is a real and central use of timers, a sub-second TTL is
+        // not a real use for anybody. An absolute instant is not expressible:
+        // one clock, Postgres's, and no inter-broker skew enters anywhere.
+        let delay = match obj.get("delayMs") {
+            Some(v) if v.is_number() => v.as_f64().unwrap_or(0.0),
+            _ => {
+                return Err(txn_fail_body(
+                    txn_id,
+                    "bad_request",
+                    &format!(
+                        "timer operation at index {i}: delayMs (a number of milliseconds) is \
+                         required; a delayMs in the past is LEGAL and fires on the first cycle"
+                    ),
+                    StatusCode::BAD_REQUEST,
+                ))
+            }
+        };
+        // 403 and not 400: §9.5 makes the two mean different things — "retry as
+        // much as you like, it will not work until you change something" — and a
+        // horizon overrun is a plan verdict, not a malformed body.
+        if delay > wire_timers_max_horizon_ms() as f64 {
+            return Err(txn_fail_body(
+                txn_id,
+                "timer_horizon_exceeded",
+                &format!(
+                    "timer operation at index {i}: delayMs {} is beyond the {} ms horizon of \
+                     this cell",
+                    delay as i64,
+                    wire_timers_max_horizon_ms()
+                ),
+                StatusCode::FORBIDDEN,
+            ));
+        }
+        let d = delay as i64;
+        min_delay = Some(min_delay.map_or(d, |m: i64| m.min(d)));
+
+        let payload_b64 = match obj.get("payload").and_then(|v| v.as_str()) {
+            Some(p) => p.to_string(),
+            None => {
+                return Err(txn_fail_body(
+                    txn_id,
+                    "bad_request",
+                    &format!("timer operation at index {i}: payload (base64) is required"),
+                    StatusCode::BAD_REQUEST,
+                ))
+            }
+        };
+        let rawb = match base64::engine::general_purpose::STANDARD.decode(payload_b64.as_bytes()) {
+            Ok(b) => b,
+            Err(e) => {
+                return Err(txn_fail_body(
+                    txn_id,
+                    "bad_request",
+                    &format!("timer operation at index {i}: payload is not valid base64: {e}"),
+                    StatusCode::BAD_REQUEST,
+                ))
+            }
+        };
+        if rawb.len() > wire_timers_max_payload_bytes() {
+            return Err(txn_fail_body(
+                txn_id,
+                "payload_too_large",
+                &format!(
+                    "timer operation at index {i}: payload is {} bytes, the ceiling is {}",
+                    rawb.len(),
+                    wire_timers_max_payload_bytes()
+                ),
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ));
+        }
+
+        // A client that ALSO claims `encrypted:true` while the broker is about to
+        // encrypt is an ambiguity, not a convenience: double encryption or a lie
+        // to the consumer, depending on who is right. Refuse instead of guessing.
+        let broker_encrypts =
+            st.encryption.is_enabled() && st.encryption_enabled_for(&queue, tenant).await;
+        let client_claims = obj.get("encrypted").and_then(|v| v.as_bool()) == Some(true);
+        if broker_encrypts && client_claims {
+            return Err(txn_fail_body(
+                txn_id,
+                "bad_request",
+                &format!(
+                    "timer operation at index {i}: queue `{queue}` encrypts at rest, so \
+                     `encrypted` is set by the broker and must not be supplied"
+                ),
+                StatusCode::BAD_REQUEST,
+            ));
+        }
+        if broker_encrypts {
+            match st.encryption.encrypt(&rawb) {
+                Some(env) => {
+                    obj.insert(
+                        "payload".to_string(),
+                        serde_json::Value::String(
+                            base64::engine::general_purpose::STANDARD.encode(&env),
+                        ),
+                    );
+                    obj.insert("encrypted".to_string(), serde_json::Value::Bool(true));
+                }
+                // Same policy as the push path: warn (sampled — a broken cipher
+                // must not flood stderr at ingest rate) and keep plaintext.
+                // NEVER fail the transaction for it.
+                None => {
+                    static ENC_FAIL_TIMER: crate::obs::Sampler = crate::obs::Sampler::new(10_000);
+                    if let Some(suppressed) = ENC_FAIL_TIMER.tick_now() {
+                        tracing::warn!(
+                            target: "txn",
+                            queue = %queue,
+                            suppressed,
+                            "encryption failed; timer payload stored as plaintext"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Minted here and promised back in the result, so a client knows the id
+        // of the frame it will see without a second API. The procedure mints its
+        // own only as a fallback.
+        let mid = uuid_bytes_to_string(&uuidv7_bytes());
+        obj.insert("_messageId".to_string(), serde_json::Value::String(mid));
+        out.push(serde_json::Value::Object(obj));
+    }
+    Ok((out, min_delay))
+}
+
+/// The inverse scatter: per-array results back into the FLAT space of
+/// `results[]`, which is the contract clients read today.
+///
+/// The element's own `index` is the procedure's ARRAY-LOCAL ordinal and is
+/// OVERWRITTEN with the flat one — that overwrite IS the mapping, and it is the
+/// reason `failedIndex` and `results[i].index` can never disagree. The local
+/// ordinal is kept as `opIndex` so the mapping stays inspectable from the
+/// outside instead of having to be reconstructed.
+fn txn_scatter_rider(
+    results: &mut [serde_json::Value],
+    base: usize,
+    kind: &'static str,
+    arr: &[serde_json::Value],
+) {
+    for (i, r) in arr.iter().enumerate() {
+        let flat = base + i;
+        if flat >= results.len() {
+            break;
+        }
+        let mut obj = match r {
+            serde_json::Value::Object(m) => m.clone(),
+            other => {
+                let mut m = serde_json::Map::new();
+                m.insert("result".to_string(), other.clone());
+                m
+            }
+        };
+        obj.insert("opIndex".to_string(), serde_json::Value::from(i));
+        obj.insert("index".to_string(), serde_json::Value::from(flat));
+        obj.insert("type".to_string(), serde_json::Value::String(kind.to_string()));
+        results[flat] = serde_json::Value::Object(obj);
+    }
+}
+
+/// Read one rider's result array out of the procedure's answer, with the count
+/// guard of §8.2 point 3. `Err` carries the flat-space explanation.
+///
+/// The `None` arm is the one that matters operationally: a new broker against a
+/// database whose wire procedure predates the graft returns no `kv` key at all,
+/// which without this guard reads as a completely successful transaction whose
+/// gate never ran.
+fn txn_rider_results<'a>(
+    v: &'a serde_json::Value,
+    key: &'static str,
+    sent: usize,
+) -> Result<Option<&'a Vec<serde_json::Value>>, String> {
+    if sent == 0 {
+        return Ok(None);
+    }
+    match v.get(key).and_then(|x| x.as_array()) {
+        Some(a) if a.len() == sent => Ok(Some(a)),
+        Some(a) => Err(format!(
+            "QTXN the transaction returned {} `{key}` results for {sent} operations; \
+             the flat result space cannot be aligned and the bundle is reported failed",
+            a.len()
+        )),
+        None => Err(format!(
+            "QTXN the transaction returned no `{key}` results for {sent} operations: this \
+             database's transaction procedure does not carry the {key} array, so those \
+             operations were IGNORED while the rest of the bundle committed. Apply the \
+             schema (QUEEN_APPLY_SCHEMA=1) before enabling this feature"
+        )),
+    }
+}
+
+/// `putIfAbsent` is not a label of its own: it desugars to `put` with `expect:0`
+/// inside the procedure, so it is one code path and therefore one series.
+///
+/// DUPLICATE, declared: this and the recorder below mirror `kv_op_label` and
+/// `record_results` in `handlers/kv.rs`, which are private there. In-wire KV work
+/// has to land in the SAME series as the standalone surface — §14.2 gives
+/// `queen_kv_ops_total{op,result}` no `surface` label, and the in-wire gate is
+/// the product's number-one use case, so leaving it uncounted would make the
+/// series lie exactly where it is read. Two lines of `pub(super)` in `kv.rs`
+/// delete this copy.
+fn txn_kv_op_label(op: Option<&str>) -> Option<crate::metrics::KvOp> {
+    use crate::metrics::KvOp;
+    match op? {
+        "get" => Some(KvOp::Get),
+        "getMany" => Some(KvOp::GetMany),
+        "getPrefix" => Some(KvOp::GetPrefix),
+        "put" | "putIfAbsent" => Some(KvOp::Put),
+        "delete" => Some(KvOp::Delete),
+        "incr" => Some(KvOp::Incr),
+        _ => None,
+    }
+}
+
+/// Attribute each returned KV element to its own op and outcome. The element's
+/// own `op` is authoritative rather than the input's: the procedure is where
+/// `putIfAbsent` becomes `put`, and reading the answer instead of the question
+/// keeps the two from drifting.
+///
+/// `ms` is the whole bundle's duration divided by the number of KV ops, and that
+/// is the honest number rather than an approximation: a bundle is ONE round trip
+/// and ONE commit, so this is what the KV operation actually cost its caller.
+fn txn_record_kv(st: &AppState, results: &[serde_json::Value], ms: f64, bytes_in: u64) {
+    use crate::metrics::KvResult;
+    let mut out: u64 = 0;
+    for r in results {
+        let Some(op) = txn_kv_op_label(r.get("op").and_then(|v| v.as_str())) else {
+            continue;
+        };
+        // Writes report `applied`; a read has no predicate to lose, so a read
+        // that reached the database is `applied` whether or not it found a row —
+        // `found:false` is a datum, not a rejection.
+        let outcome = match r.get("applied").and_then(|v| v.as_bool()) {
+            Some(true) => KvResult::Applied,
+            Some(false) => KvResult::Rejected,
+            None => KvResult::Applied,
+        };
+        st.metrics.kvt.kv_op(op, outcome, ms);
+        if let Some(v) = r.get("value") {
+            out += v.to_string().len() as u64;
+        }
+        if let Some(rows) = r.get("rows").and_then(|v| v.as_array()) {
+            for row in rows {
+                if let Some(v) = row.get("value") {
+                    out += v.to_string().len() as u64;
+                }
+            }
+        }
+    }
+    st.metrics.kvt.kv_bytes(bytes_in, out);
+}
+
+fn txn_record_kv_all(
+    st: &AppState,
+    ops: &[serde_json::Value],
+    result: crate::metrics::KvResult,
+    ms: f64,
+) {
+    for o in ops {
+        if let Some(k) = txn_kv_op_label(o.get("op").and_then(|v| v.as_str())) {
+            st.metrics.kvt.kv_op(k, result, ms);
+        }
+    }
+}
+
+// ---------------------------------------------------------------- failure body
+//
+// §8.3: the failure body has to grow, and it is shared by EVERY transaction
+// failure, so this is a wire change across all seven clients and their retry
+// policies — not a KV detail.
+//
+// `reason` is a CODE from a closed taxonomy and is the only field a client may
+// branch on. String matching on the message is forbidden everywhere in this
+// codebase, and until now `error` was the only thing a failed transaction
+// carried, which left every client with no choice but to match on it:
+//
+//   bad_request           the body never reached the database
+//   duplicate             a duplicate push rolled the bundle back (QDUP)
+//   ack_rejected          an ack was invalid, expired or unknown (QTXN)
+//   kv_precondition       a `required` KV gate lost — see below
+//   timer_horizon_exceeded a schedule beyond this cell's horizon
+//   payload_too_large     a value or a timer payload over its ceiling
+//   misaligned            an internal index-space failure; never the caller's
+//   db_error              everything else
+//
+// THE STATUS RULE ON THIS ROUTE, AND WHERE IT DIVERGES FROM §9.5 ON PURPOSE.
+// §8.1's rule is that the status describes the outcome of the CALL. On this
+// route that has always meant: a body that never reached the database answers
+// 4xx (the pre-existing `any_unknown` 400), and every verdict the database
+// itself returned answers **200** with the v1 envelope — the comment on the
+// `Err` arm has said so since the C++ port, and every client's transaction path
+// parses that envelope on 200. So a shape rejection caught HERE is a 400/403/413
+// out of §9.5's table, and the SAME rejection caught inside a procedure is a 200
+// carrying `reason:"bad_request"`. The boundary is "did we touch the database",
+// which is the boundary this handler already had; promoting the second case to
+// 4xx would change the status of a rolled-back transaction for seven clients,
+// which is far beyond what §8.3 asks for. `reason` is what a client switches on,
+// and it is the same string on both sides.
+
+fn txn_fail_json(txn_id: &str, reason: &str, err: &str) -> serde_json::Value {
+    serde_json::json!({
         "transactionId": txn_id,
         "success": false,
+        "reason": reason,
         "error": err,
         "results": [],
+    })
+}
+
+fn txn_fail_body(txn_id: &str, reason: &str, err: &str, status: StatusCode) -> Response {
+    json(status, txn_fail_json(txn_id, reason, err).to_string())
+}
+
+/// The wire's refund, as a drop guard (§9.3).
+///
+/// `handle_transaction` has more than a dozen early returns between the quota
+/// charge and the commit — ack resolution, the bogus-ack pre-check, encryption,
+/// the pool, the SP itself — and a refund written at each one is a refund that
+/// will be forgotten at the next one added. What must not be forgotten is the
+/// consequence: a database outage charges every bundle and commits none, the
+/// deltas inflate with nothing to correct them (the refresh is failing too), and
+/// on recovery the tenant meets a 403 that says "you are full" for a fault that
+/// was the cell's. §12 forbids exactly that conversion.
+///
+/// So the charge is refunded UNLESS the bundle committed, and `commit()` is
+/// called on exactly one line — the success arm. A panic refunds too, which is
+/// the right way round.
+struct TxnRefund<'a> {
+    st: &'a AppState,
+    tenant: &'a str,
+    rows: i64,
+    bytes: i64,
+    timers: i64,
+}
+
+impl TxnRefund<'_> {
+    /// The bundle committed: the charge is real and stands until the next
+    /// measurement supersedes it.
+    fn commit(mut self) {
+        self.rows = 0;
+        self.bytes = 0;
+        self.timers = 0;
+    }
+}
+
+impl Drop for TxnRefund<'_> {
+    fn drop(&mut self) {
+        if self.rows != 0 || self.bytes != 0 || self.timers != 0 {
+            self.st
+                .quota
+                .refund(self.tenant, self.rows, self.bytes, self.timers);
+        }
+    }
+}
+
+/// The kv/timers ladder on the transaction wire (§9.5, §12.1), rendered into the
+/// wire's OWN failure envelope rather than the KV route's.
+///
+/// A client that sent a bundle gets `success:false` with a `reason` it already
+/// knows how to read, and the `reason` is the ladder's code — so the same
+/// condition is named identically whether it was met on `/api/v1/kv` or here.
+/// The bundle is refused WHOLE: partial application is what the transaction
+/// exists to prevent, and "commit the messages, drop the kv gate" would commit
+/// exactly the transaction the gate was there to stop.
+fn txn_gate(
+    st: &AppState,
+    tenant: &str,
+    surface: crate::switches::Surface,
+    add_rows: i64,
+    add_bytes: i64,
+    txn_id: &str,
+) -> Option<Response> {
+    use crate::switches::{decide, Origin};
+    let a = decide(&st.switches, &st.quota, tenant, surface, add_rows, add_bytes);
+    let h = a.http(Origin::Wire, surface)?;
+    st.metrics.kvt.kv_read_rejected(match h.status {
+        429 => crate::metrics::KvReject::RateLimited,
+        403 => crate::metrics::KvReject::Quota,
+        503 => crate::metrics::KvReject::Pool,
+        _ => crate::metrics::KvReject::Disabled,
     });
-    json(status, out.to_string())
+    Some(txn_fail_body(
+        txn_id,
+        h.code,
+        "the bundle was not committed: its kv/timers riders were refused, and a transaction \
+         that dropped them would commit the very operations the riders exist to gate",
+        StatusCode::from_u16(h.status).unwrap_or(StatusCode::FORBIDDEN),
+    ))
+}
+
+/// A lost `required` KV gate, translated at the boundary (§8.3).
+///
+/// HTTP **200**. The transaction really did abort in SQL and the RAISE really
+/// was necessary, but a lost precondition is the EXPECTED outcome of every
+/// legitimate redelivery — it is the idempotency marker doing its job — and it
+/// must pollute neither the error metrics nor the retry policies of seven
+/// clients. Everything the caller needs is read from the DETAIL, which is JSON,
+/// and never from the message: the message is deliberately opaque because
+/// handlers echo DB text and namespace/key names would land in shared logs and
+/// error aggregators (§13.5).
+///
+/// `failedIndex` is translated from the procedure's array-local ordinal into the
+/// FLAT space here, and nowhere else.
+///
+/// `ok:false` is emitted ALONGSIDE `success:false` so that a client handling
+/// `reason:"kv_precondition"` reads the same shape whether the verdict arrived
+/// from `/api/v1/transaction` or from `/api/v1/kv`, which answers with `ok`.
+fn txn_precondition_json(
+    txn_id: &str,
+    err: &str,
+    detail: Option<&str>,
+    kv_base: usize,
+) -> serde_json::Value {
+    // The DETAIL is capped at 4 KiB in the procedure, so a pathological value
+    // can truncate it into invalid JSON. Degrade to the bare verdict rather than
+    // turning a legitimate lost race into a 500.
+    let parsed: Option<serde_json::Value> = detail.and_then(|d| serde_json::from_str(d).ok());
+    let mut out = txn_fail_json(txn_id, "kv_precondition", err);
+    out["ok"] = serde_json::Value::Bool(false);
+    if let Some(v) = parsed {
+        let flat = v
+            .get("index")
+            .and_then(|x| x.as_u64())
+            .map(|n| serde_json::Value::from(kv_base + n as usize))
+            .unwrap_or(serde_json::Value::Null);
+        out["failedIndex"] = flat;
+        out["kvReason"] = v.get("reason").cloned().unwrap_or(serde_json::Value::Null);
+        out["version"] = v.get("version").cloned().unwrap_or(serde_json::Value::Null);
+        out["value"] = v.get("value").cloned().unwrap_or(serde_json::Value::Null);
+    }
+    out
+}
+
+fn txn_fail_precondition(
+    txn_id: &str,
+    err: &str,
+    detail: Option<&str>,
+    kv_base: usize,
+) -> Response {
+    json(
+        StatusCode::OK,
+        txn_precondition_json(txn_id, err, detail, kv_base).to_string(),
+    )
+}
+
+/// Map a database error onto the failure taxonomy above, and say whether it is a
+/// real database failure. A verdict (a rolled-back business rule) must not
+/// inflate the DB error series — the same discrimination the QDUP/QTXN arm makes
+/// today, generalized so the KV and timer rejections inherit it.
+fn txn_reason_for(sqlstate: Option<&str>, msg: &str) -> (&'static str, bool) {
+    match sqlstate {
+        Some("23514") => ("kv_precondition", false),
+        Some("22001") => ("payload_too_large", false),
+        Some("22023") => ("bad_request", false),
+        _ => {
+            if msg.starts_with("QDUP") {
+                ("duplicate", false)
+            } else if msg.starts_with("QTXN") || msg.starts_with("QTIMER") {
+                ("ack_rejected", false)
+            } else {
+                ("db_error", true)
+            }
+        }
+    }
+}
+
+fn txn_db_reason(e: &tokio_postgres::Error, msg: &str) -> (&'static str, bool) {
+    let code = e.as_db_error().map(|d| d.code().code().to_string());
+    txn_reason_for(code.as_deref(), msg)
+}
+
+/// §2.5's free mitigation, and the ONE case that is routed away from the wire.
+///
+/// The KV row lock taken at step 0 of the wire is held for the whole bundle —
+/// provisioning, the ascending partition pre-lock, every push with its blob,
+/// every ack, all the way to the fsync. That is accepted risk §18.2 and it buys
+/// atomicity. A bundle that contains ONLY KV operations buys nothing with it:
+/// there is no push and no ack to be atomic with, so it goes straight to the KV
+/// procedure, which is a short transaction.
+///
+/// It is routed BEFORE `Lane::Push` admission is taken, and that is the point of
+/// doing it at all: §8.4 point 2 keeps standalone KV work out of the arbiter's
+/// lanes entirely, because thirty tenants each inside their own write rate would
+/// otherwise burn thousands of `Lane::Push` slots per second on a stack whose
+/// measured commit-bound ceiling is around 480 msg/s — nobody violating anything
+/// and the message path starving.
+///
+/// `in_wire = true` is deliberate and is NOT a leftover of the routing: this is
+/// still the transaction wire's surface, so it keeps the wire's tighter caps and
+/// its ban on `getPrefix`. The flag is a parameter of the one procedure rather
+/// than a second procedure, so the two surfaces cannot drift.
+///
+/// A timers-only bundle is deliberately NOT routed here. §2.5 names KV only, the
+/// timer procedure's lock discipline is written for the wire's sequence, and a
+/// second bypass would be a second place for that discipline to be re-derived.
+async fn txn_kv_only(
+    st: &Arc<AppState>,
+    tenant: &str,
+    txn_id: &str,
+    ops: Vec<serde_json::Value>,
+) -> Response {
+    let n = ops.len();
+    let bytes_in: u64 = ops
+        .iter()
+        .filter_map(|o| o.get("value"))
+        .map(|v| v.to_string().len() as u64)
+        .sum();
+    let ops_json = serde_json::Value::Array(ops.clone()).to_string();
+
+    // SEAM (§8.4 point 1): `st.kv_pool` once `AppState` carries the dedicated
+    // pool. Until then this is correct but NOT yet a bulkhead — the difference
+    // between "the KV endpoint is slow" and "the KV endpoint made the message
+    // path slow". The 500 shape is the wire's existing one, deliberately, so
+    // this route is indistinguishable from the wire on infrastructure failure.
+    let client = match st.pool.get().await {
+        Ok(c) => c,
+        Err(_) => {
+            st.metrics.record_db_error();
+            return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string());
+        }
+    };
+    // Captured BEFORE the query: on a broker-side timeout the still-running
+    // statement is cancelled server-side and the connection quarantined rather
+    // than abandoned (§8.4 point 4). An abandoned statement keeps row locks in
+    // the outermost lock space, and those are what another bundle waits behind.
+    let cancel = client.cancel_token();
+    let t0 = std::time::Instant::now();
+    let res = tokio::time::timeout(
+        st.stmt_timeout,
+        db::kv_apply(&client, &ops_json, tenant, true),
+    )
+    .await;
+    let ms = t0.elapsed().as_secs_f64() * 1000.0 / (n.max(1) as f64);
+
+    match super::kv::resolve_db(res, client, cancel, "kv_apply", &st.metrics) {
+        Ok(txt) => match serde_json::from_str::<serde_json::Value>(&txt) {
+            Ok(serde_json::Value::Array(a)) if a.len() == n => {
+                txn_record_kv(st, &a, ms, bytes_in);
+                let mut results: Vec<serde_json::Value> =
+                    vec![serde_json::Value::Null; n];
+                txn_scatter_rider(&mut results, 0, "kv", &a);
+                let out = serde_json::json!({
+                    "transactionId": txn_id,
+                    "success": true,
+                    "results": results,
+                });
+                json(StatusCode::OK, out.to_string())
+            }
+            _ => {
+                st.metrics.record_db_error();
+                txn_record_kv_all(st, &ops, crate::metrics::KvResult::Error, ms);
+                txn_fail_body(
+                    txn_id,
+                    "misaligned",
+                    "QTXN the kv procedure did not return one result per operation",
+                    StatusCode::OK,
+                )
+            }
+        },
+        Err(Some(e)) => {
+            let msg = e
+                .as_db_error()
+                .map(|d| d.message().to_string())
+                .unwrap_or_else(|| e.to_string());
+            let (reason, is_db_failure) = txn_db_reason(&e, &msg);
+            if is_db_failure {
+                st.metrics.record_db_error();
+            }
+            let outcome = if reason == "db_error" {
+                crate::metrics::KvResult::Error
+            } else {
+                crate::metrics::KvResult::Rejected
+            };
+            txn_record_kv_all(st, &ops, outcome, ms);
+            if reason == "kv_precondition" {
+                let detail = e.as_db_error().and_then(|d| d.detail()).map(str::to_string);
+                return txn_fail_precondition(txn_id, &msg, detail.as_deref(), 0);
+            }
+            // HTTP 200 like every other transaction verdict: this route answers
+            // on the transaction contract, not on the KV route's, and a client of
+            // /api/v1/transaction must not start seeing 4xx because the broker
+            // took a shortcut behind its back.
+            txn_fail_body(txn_id, reason, &msg, StatusCode::OK)
+        }
+        Err(None) => {
+            txn_record_kv_all(st, &ops, crate::metrics::KvResult::Error, ms);
+            txn_fail_body(txn_id, "db_error", "QTXN kv apply timed out", StatusCode::OK)
+        }
+    }
 }
 
 pub async fn handle_transaction(
@@ -3576,15 +4536,121 @@ pub async fn handle_transaction(
     // when auth is enabled. None when auth is disabled or the token had no sub.
     let producer_sub = authed.0.filter(|s| !s.is_empty());
 
-    let operations = match root.get("operations").and_then(|o| o.as_array()) {
-        Some(o) => o,
-        None => {
-            return txn_fail_body(&txn_id, "transaction requires an operations array", StatusCode::BAD_REQUEST)
+    // ---------------------------------------------------------- riders (§8.2)
+    // Read BEFORE `operations`, because a KV-only bundle legitimately carries no
+    // `operations` at all and must not be refused by a guard written when push
+    // and ack were the only things a transaction could contain.
+    let kv_in = match txn_rider_array(&root, "kv", &txn_id) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let timers_in = match txn_rider_array(&root, "timers", &txn_id) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    // A `kv` or `timers` rider no longer has a boot flag to be refused by: both
+    // surfaces exist on every cell, so a bundle carrying one cannot be rejected for
+    // arriving at the wrong broker. What used to be two 400s here has become one
+    // fewer thing a client has to handle — see the header of `switches.rs`.
+    //
+    // THE REMAINING RUNGS (§9.5, §12.1), on `Origin::Wire`.
+    //
+    // The wire differs from the routes in exactly one way, and it is deliberate:
+    // the operator's runtime kill switch answers PERMANENTLY here (403) instead
+    // of 503. A bundle carries MESSAGES, and a client that retries it in a loop
+    // against a cell an operator has deliberately paused is a retry storm on the
+    // hottest path of the product. `switches::Answer::http` owns that difference
+    // so the two surfaces cannot drift.
+    //
+    // The whole bundle is refused, and it must be: partial application is exactly
+    // what the transaction exists to prevent.
+    let (kv_rows, kv_bytes) = super::kv::write_footprint(&kv_in);
+    let kv_charge = if kv_rows > 0 || kv_bytes > 0 {
+        Some((kv_rows, kv_bytes))
+    } else {
+        None
+    };
+    if !kv_in.is_empty() {
+        let surface = if kv_charge.is_some() {
+            crate::switches::Surface::KvWrite
+        } else {
+            crate::switches::Surface::KvRead
+        };
+        if let Some(r) = txn_gate(&st, tenant.as_str(), surface, kv_rows, kv_bytes, &txn_id) {
+            return r;
+        }
+    }
+    // Timer ops on the wire are schedules and cancels in one array, as on the
+    // POST route. A bundle whose timer array is only cancels is charged nothing
+    // and refused by nothing below the env rung (§9.6).
+    let timer_schedules = timers_in
+        .iter()
+        .filter(|o| {
+            matches!(
+                o.get("op").and_then(|v| v.as_str()),
+                Some("schedule") | Some("reschedule")
+            )
+        })
+        .count() as i64;
+    if timer_schedules > 0 {
+        if let Some(r) = txn_gate(
+            &st,
+            tenant.as_str(),
+            crate::switches::Surface::TimerSchedule,
+            timer_schedules,
+            0,
+            &txn_id,
+        ) {
+            return r;
+        }
+    }
+    // Everything charged above is given back unless the bundle commits. See
+    // `TxnRefund`: the number of early returns between here and the commit is
+    // exactly why this is a guard and not a line at each one.
+    let refund = TxnRefund {
+        st: &st,
+        tenant: tenant.as_str(),
+        rows: kv_charge.map(|(r, _)| r).unwrap_or(0),
+        bytes: kv_charge.map(|(_, b)| b).unwrap_or(0),
+        timers: timer_schedules,
+    };
+    if let Some(r) = txn_check_kv(&kv_in, &txn_id) {
+        return r;
+    }
+    let (timers_ops, timers_min_delay) =
+        match txn_prepare_timers(&st, tenant.as_str(), timers_in, &txn_id).await {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+
+    let empty_ops: Vec<serde_json::Value> = Vec::new();
+    let operations = match root.get("operations") {
+        Some(serde_json::Value::Array(o)) => o,
+        // Absent or null is only legal when the bundle is riders-only. The
+        // message stays the one clients have been reading, with the new shape
+        // named beside it.
+        None | Some(serde_json::Value::Null) if !kv_in.is_empty() || !timers_ops.is_empty() => {
+            &empty_ops
+        }
+        _ => {
+            return txn_fail_body(
+                &txn_id,
+                "bad_request",
+                "transaction requires an operations array (or a top-level kv/timers array)",
+                StatusCode::BAD_REQUEST,
+            )
         }
     };
     st.metrics
         .transactions
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    // §2.5's free mitigation: a bundle of ONLY kv operations never reaches the
+    // wire, and never takes a `Lane::Push` slot. Everything above this line has
+    // already validated it.
+    if operations.is_empty() && timers_ops.is_empty() && !kv_in.is_empty() {
+        return txn_kv_only(&st, tenant.as_str(), &txn_id, kv_in).await;
+    }
 
     // Combined lease hints: top-level requiredLeases (where the JS/Go builders
     // put the leaseId) + any per-op ack leaseId (raw HTTP callers).
@@ -3606,7 +4672,7 @@ pub async fn handle_transaction(
     let mut group_of: HashMap<(String, String), usize> = HashMap::new();
     let mut ack_groups: Vec<TxnAckGroup> = Vec::new();
     let mut ack_group_of: HashMap<(String, String), usize> = HashMap::new();
-    let mut any_unknown = false;
+    let mut any_unknown: Option<String> = None;
 
     for op in operations {
         let ty = op.get("type").and_then(|x| x.as_str()).unwrap_or("");
@@ -3670,19 +4736,45 @@ pub async fn handle_transaction(
                 flat += 1;
             }
             _ => {
-                any_unknown = true;
+                if any_unknown.is_none() {
+                    any_unknown = Some(ty.to_string());
+                }
                 flat += 1;
             }
         }
     }
 
-    if any_unknown {
-        return txn_fail_body(
-            &txn_id,
-            "segments transaction supports only push and ack operations",
-            StatusCode::BAD_REQUEST,
-        );
+    if let Some(ty) = any_unknown {
+        // §8.2's desirable side effect: a new client against an old broker gets a
+        // CLEAN, NAMED 400 on an operation it does not understand, which is the
+        // best failure available and belongs in reference/compatibility.mdx.
+        //
+        // The two kv/timer spellings get their own sentence because the mistake
+        // they represent is the exact one §10.4 forbids: putting these ops inside
+        // `operations` is what Go's encoding/json would silently drop, so the one
+        // person most likely to try it is the one who must be told where they go.
+        let err = match ty.as_str() {
+            "kv" | "timer" | "timers" => "kv and timer operations are TOP-LEVEL arrays of the \
+                 request (\"kv\":[...], \"timers\":[...]), never elements of `operations`"
+                .to_string(),
+            "" => "every transaction operation needs a `type` of push or ack".to_string(),
+            other => format!(
+                "segments transaction supports only push and ack operations, got `{other}`"
+            ),
+        };
+        return txn_fail_body(&txn_id, "bad_request", &err, StatusCode::BAD_REQUEST);
     }
+
+    // The flat layout, fixed here and nowhere else: operations keep the indices
+    // they have today, the riders append. See the demux header.
+    let riders = TxnRiders {
+        kv_base: flat,
+        timers_base: flat + kv_in.len(),
+        kv: kv_in,
+        timers: timers_ops,
+        min_delay_ms: timers_min_delay,
+    };
+    flat += riders.kv.len() + riders.timers.len();
 
     // RUSTFIX item 24: per-queue transaction throughput (each distinct queue the
     // transaction pushes to; an ack-only transaction maps to no queue here).
@@ -3817,20 +4909,21 @@ pub async fn handle_transaction(
             Ok(s) => s,
             Err(e) => {
                 st.metrics.record_db_error();
-                return txn_fail_body(&txn_id, &e.to_string(), StatusCode::OK);
+                return txn_fail_body(&txn_id, "db_error", &e.to_string(), StatusCode::OK);
             }
         };
         match client.query_opt(&stmt, &[&ag.partition_id, &hashes]).await {
             Ok(Some(_)) => {
                 return txn_fail_body(
                     &txn_id,
+                    "ack_rejected",
                     "QTXN ack references unknown transactionId; transaction rolled back",
                     StatusCode::OK,
                 )
             }
             Err(e) => {
                 st.metrics.record_db_error();
-                return txn_fail_body(&txn_id, &e.to_string(), StatusCode::OK);
+                return txn_fail_body(&txn_id, "db_error", &e.to_string(), StatusCode::OK);
             }
             Ok(None) => {}
         }
@@ -3931,12 +5024,41 @@ pub async fn handle_transaction(
     // auto-create is (tenant, name)-scoped, and the positional/hash acks are guarded
     // pid→queue→tenant (a pid not owned by this tenant aborts the whole txn). So the
     // atomic push+ack path is scoped/owned by construction, no separate Rust gate.
-    let payload = serde_json::json!({
+    //
+    // THE TWO RIDER ARRAYS ARE ADDED ONLY WHEN NON-EMPTY, and that is a
+    // requirement rather than tidiness (§6.3): a bundle that carries neither must
+    // produce a payload BYTE-IDENTICAL to today's, or the perf gate of §15 — same
+    // payload, same plan, CPU per message within 1% — has nothing to compare
+    // against, and `pg_stat_statements` would show a second prepared text for the
+    // one statement that runs on every transaction in the product.
+    //
+    // `_producerSub` travels the same way `_tenant` does, for the same reason:
+    // the procedure's signature is `(p JSONB)` and must not change, and an
+    // underscore-prefixed key is one a client cannot spell — which is what makes
+    // `producer_sub` the only non-repudiable field of a frame. A timer becomes a
+    // message, so without this a scheduled frame would carry no provenance at all.
+    let mut payload_obj = serde_json::json!({
         "pushes": pushes_json,
         "acks": acks_json,
         "_tenant": tenant.as_str(),
-    })
-    .to_string();
+    });
+    if !riders.kv.is_empty() {
+        payload_obj["kv"] = serde_json::Value::Array(riders.kv.clone());
+    }
+    if !riders.timers.is_empty() {
+        payload_obj["timers"] = serde_json::Value::Array(riders.timers.clone());
+        if let Some(p) = producer_sub.as_deref() {
+            payload_obj["_producerSub"] = serde_json::Value::String(p.to_string());
+        }
+    }
+    let payload = payload_obj.to_string();
+    let kv_bytes_in: u64 = riders
+        .kv
+        .iter()
+        .filter_map(|o| o.get("value"))
+        .map(|v| v.to_string().len() as u64)
+        .sum();
+    let t_txn = std::time::Instant::now();
 
     match db::transaction(&client, &payload).await {
         Ok(txt) => {
@@ -4049,6 +5171,85 @@ pub async fn handle_transaction(
                         });
                     }
                 }
+
+                // ------------------------------------------- the inverse scatter
+                // Per-array results back into the flat space (§8.2 point 2). The
+                // count guard runs FIRST and is not optional: without it, a
+                // database whose wire procedure has no kv leg answers with no
+                // `kv` key, every rider ordinal stays unfilled, and the caller
+                // reads `success:true` for a bundle whose gate never ran.
+                for (key, sent, base, kind) in [
+                    ("kv", riders.kv.len(), riders.kv_base, "kv"),
+                    ("timers", riders.timers.len(), riders.timers_base, "timer"),
+                ] {
+                    match txn_rider_results(&v, key, sent) {
+                        Ok(None) => {}
+                        Ok(Some(arr)) => {
+                            if key == "kv" {
+                                let ms = t_txn.elapsed().as_secs_f64() * 1000.0
+                                    / (sent.max(1) as f64);
+                                txn_record_kv(&st, arr, ms, kv_bytes_in);
+                            }
+                            txn_scatter_rider(&mut results, base, kind, arr);
+                        }
+                        Err(msg) => {
+                            st.metrics.record_db_error();
+                            static RIDER_GAP: crate::obs::Sampler =
+                                crate::obs::Sampler::new(60_000);
+                            if let Some(suppressed) = RIDER_GAP.tick_now() {
+                                tracing::error!(
+                                    target: "txn",
+                                    rider = key,
+                                    suppressed,
+                                    "transaction rider results missing or short; is the schema \
+                                     applied on this database?"
+                                );
+                            }
+                            return txn_fail_body(&txn_id, "misaligned", &msg, StatusCode::OK);
+                        }
+                    }
+                }
+                // §8.2 point 3, the guard rewritten between the two index spaces:
+                // EVERY flat ordinal has exactly one result. The procedures make
+                // the same assertion inside their own arrays and RAISE on a
+                // violation; here it can only be an internal fault, so it is
+                // reported as such and never blamed on the caller. A null left in
+                // position is precisely the silent misalignment class that
+                // 003_log_push.sql:372-375 fails loudly on.
+                if let Some(gap) = results.iter().position(|r| r.is_null()) {
+                    tracing::error!(
+                        target: "txn",
+                        gap,
+                        total = results.len(),
+                        "transaction result misaligned: a flat ordinal has no result"
+                    );
+                    return txn_fail_body(
+                        &txn_id,
+                        "misaligned",
+                        &format!(
+                            "QTXN transaction produced no result for flat operation {gap} of \
+                             {}; the bundle committed but its result array cannot be trusted",
+                            results.len()
+                        ),
+                        StatusCode::OK,
+                    );
+                }
+
+                // SEAM (§7.4): the local, in-process sweeper wake goes HERE,
+                // AFTER the commit and never before — a wake for a transaction
+                // that then rolls back costs a wasted cycle and, worse, teaches
+                // the loop that work exists which does not. It is one
+                // `sweeper::hint_in_ms(ms)` call, and it cannot be written yet:
+                // `sweeper` is declared in `main.rs` only and NOT in the twin
+                // list in `lib.rs` (§7.1 names both), so naming it from a file
+                // compiled into both targets breaks the library build. Nothing
+                // breaks without it: QUEEN_SWEEPER_MAX_SLEEP_MS (1 s) is the
+                // recovery window and `deliverAt` is "no earlier than".
+                let _wake_in_ms = riders.min_delay_ms;
+
+                // The bundle committed, so what the ladder charged actually
+                // happened and the local delta keeps it (§9.3).
+                refund.commit();
                 let out = serde_json::json!({
                     "transactionId": txn_id,
                     "success": true,
@@ -4061,12 +5262,12 @@ pub async fn handle_transaction(
                     .and_then(|x| x.as_str())
                     .map(str::to_string)
                     .unwrap_or_else(|| "transaction failed".to_string());
-                txn_fail_body(&txn_id, &err, StatusCode::OK)
+                txn_fail_body(&txn_id, "db_error", &err, StatusCode::OK)
             }
         }
-        // The SP RAISEs on rollback (duplicate push / rejected ack): surface the
-        // DB message (e.g. "QDUP ...", "QTXN ...") as a v1-shaped failure,
-        // HTTP 200 (matches the C++ broker).
+        // The SP RAISEs on rollback (duplicate push / rejected ack / a lost KV
+        // gate): surface the DB message (e.g. "QDUP ...", "QTXN ...") as a
+        // v1-shaped failure, HTTP 200 (matches the C++ broker).
         Err(e) => {
             let msg = e
                 .as_db_error()
@@ -4075,10 +5276,32 @@ pub async fn handle_transaction(
             // A QDUP/QTXN RAISE is a business rollback, not a database failure —
             // counting it would inflate "DB errors" on every duplicate push.
             // Anything else (connection dropped, timeout, syntax) is a real one.
-            if !(msg.starts_with("QDUP") || msg.starts_with("QTXN")) {
+            // The KV and timer rejections inherit that same discrimination
+            // through `txn_db_reason`, and the most frequent one of all — a lost
+            // idempotency gate — must never read as an error anywhere.
+            let (reason, is_db_failure) = txn_db_reason(&e, &msg);
+            if is_db_failure {
                 st.metrics.record_db_error();
             }
-            txn_fail_body(&txn_id, &msg, StatusCode::OK)
+            if !riders.kv.is_empty() {
+                let ms = t_txn.elapsed().as_secs_f64() * 1000.0 / (riders.kv.len() as f64);
+                let outcome = if reason == "db_error" {
+                    crate::metrics::KvResult::Error
+                } else {
+                    crate::metrics::KvResult::Rejected
+                };
+                txn_record_kv_all(&st, &riders.kv, outcome, ms);
+            }
+            if reason == "kv_precondition" {
+                let detail = e.as_db_error().and_then(|d| d.detail()).map(str::to_string);
+                return txn_fail_precondition(
+                    &txn_id,
+                    &msg,
+                    detail.as_deref(),
+                    riders.kv_base,
+                );
+            }
+            txn_fail_body(&txn_id, reason, &msg, StatusCode::OK)
         }
     }
 }
@@ -4678,4 +5901,182 @@ mod push_body_charset {
     fn the_txn_wire_limit_matches_the_frame_codec() {
         assert_eq!(MAX_TXN_BYTES, u16::MAX as usize);
     }
+}
+
+/// The HTTP -> wire demux (PLAN_KV_TIMERS §8.2): the index contract, which is
+/// the one thing in this feature that can break two shipped clients WITHOUT any
+/// error appearing anywhere.
+#[cfg(test)]
+mod wire_demux {
+    use super::*;
+
+// ---------------------------------------------- the HTTP -> wire demux (§8.2)
+//
+// These pin the index contract, which is the one thing in this feature that
+// can break two shipped clients WITHOUT any error appearing anywhere.
+
+/// PARITY, and the reason it is the first test here: with no riders, nothing
+/// about the answer path changes. The guard does not consult the response at
+/// all when nothing was sent — it must not turn "this database has no kv leg"
+/// into a failure for a bundle that never asked for one, which is every
+/// bundle every existing client sends.
+#[test]
+fn no_rider_means_no_guard_and_no_lookup() {
+    let answer = serde_json::json!({"ok": true, "pushes": [], "acks": []});
+    assert!(matches!(txn_rider_results(&answer, "kv", 0), Ok(None)));
+    assert!(matches!(txn_rider_results(&answer, "timers", 0), Ok(None)));
+}
+
+/// The old-database detector. A broker that grew the kv array against a
+/// database whose wire procedure predates it gets NO `kv` key back: the
+/// bundle committed, and without this the caller would read `success:true`
+/// for a transaction whose gate never ran.
+#[test]
+fn a_missing_rider_result_is_loud_not_silent() {
+    let answer = serde_json::json!({"ok": true, "pushes": [], "acks": []});
+    let e = txn_rider_results(&answer, "kv", 2).expect_err("must not read as success");
+    assert!(e.contains("IGNORED"), "{e}");
+    // Short is the same class of fault as missing.
+    let short = serde_json::json!({"ok": true, "kv": [{"index": 0}]});
+    assert!(txn_rider_results(&short, "kv", 2).is_err());
+    let exact = serde_json::json!({"ok": true, "kv": [{"index": 0}, {"index": 1}]});
+    assert!(txn_rider_results(&exact, "kv", 2).is_ok());
+}
+
+/// The scatter, which is the mapping itself: `index` becomes the FLAT
+/// ordinal (what `results[]` and `failedIndex` both speak), and the
+/// array-local one survives as `opIndex`. If these two were ever swapped,
+/// every client would index somebody else's operation and nothing would say
+/// so.
+#[test]
+fn the_scatter_rewrites_index_into_the_flat_space() {
+    let mut results = vec![serde_json::Value::Null; 4];
+    // Two pushes already occupy 0 and 1.
+    results[0] = serde_json::json!({"index": 0, "type": "push"});
+    results[1] = serde_json::json!({"index": 1, "type": "push"});
+    let kv = vec![
+        serde_json::json!({"index": 0, "op": "put", "applied": true}),
+        serde_json::json!({"index": 1, "op": "get", "found": false}),
+    ];
+    txn_scatter_rider(&mut results, 2, "kv", &kv);
+    assert_eq!(results[2]["index"], 2);
+    assert_eq!(results[2]["opIndex"], 0);
+    assert_eq!(results[2]["type"], "kv");
+    assert_eq!(results[3]["index"], 3);
+    assert_eq!(results[3]["opIndex"], 1);
+    // The existing entries are untouched: riders APPEND, they never move
+    // anything that was already there.
+    assert_eq!(results[0]["index"], 0);
+    assert_eq!(results[1]["type"], "push");
+    assert!(results.iter().all(|r| !r.is_null()));
+}
+
+/// §8.2 point 4. The procedure raises with its own array-local ordinal; a
+/// client that indexed with it would blame the wrong operation whenever a
+/// bundle carries any push or ack at all — i.e. in the case the feature
+/// exists for.
+#[test]
+fn failed_index_is_translated_into_the_flat_space() {
+    let detail = r#"{"index":1,"op":"put","ns":"saga","key":"k","reason":"exists","version":7,"value":{"a":1}}"#;
+    let v = txn_precondition_json("txn-1", "kv_precondition_failed", Some(detail), 3);
+    assert_eq!(v["failedIndex"], 4, "kv ordinal 1 with kv_base 3 is flat 4");
+    assert_eq!(v["reason"], "kv_precondition");
+    assert_eq!(v["kvReason"], "exists");
+    assert_eq!(v["version"], 7);
+    assert_eq!(v["value"]["a"], 1);
+    // Both spellings: the transaction envelope's `success` and the KV
+    // route's `ok`, so one client branch reads the same verdict from either
+    // surface.
+    assert_eq!(v["success"], false);
+    assert_eq!(v["ok"], false);
+}
+
+/// A DETAIL truncated by the procedure's 4 KiB cap is invalid JSON. It must
+/// degrade to the bare verdict, never turn a legitimate lost race into a 500.
+#[test]
+fn a_truncated_detail_still_yields_the_verdict() {
+    let v = txn_precondition_json("txn-1", "kv_precondition_failed", Some("{\"index\":1,\"val"), 0);
+    assert_eq!(v["reason"], "kv_precondition");
+    assert!(v.get("failedIndex").is_none());
+    assert_eq!(
+        txn_fail_precondition("txn-1", "x", None, 0).status(),
+        StatusCode::OK,
+        "a lost precondition is a verdict, never a 4xx or a 5xx"
+    );
+}
+
+/// §5.5: the boundary on this wire is COST, not the kind of operation.
+/// `getMany` is allowed and counted by its keys; `getPrefix` is refused
+/// before a connection is spent.
+#[test]
+fn the_wire_kv_guard_counts_keys_and_refuses_prefix() {
+    let many: Vec<serde_json::Value> = (0..3)
+        .map(|_| serde_json::json!({"op": "getMany", "ns": "n", "keys": ["a", "b", "c"]}))
+        .collect();
+    assert!(txn_check_kv(&many, "t").is_none(), "9 keys is under the ceiling");
+
+    let over: Vec<serde_json::Value> = (0..2)
+        .map(|_| {
+            let keys: Vec<String> = (0..200).map(|i| format!("k{i}")).collect();
+            serde_json::json!({"op": "getMany", "ns": "n", "keys": keys})
+        })
+        .collect();
+    assert!(
+        txn_check_kv(&over, "t").is_some(),
+        "400 keys over 2 ops must be refused by the KEY budget, which an op \
+         count alone does not bound"
+    );
+
+    let prefix = vec![serde_json::json!({"op": "getPrefix", "ns": "n", "prefix": "p"})];
+    assert!(txn_check_kv(&prefix, "t").is_some());
+}
+
+/// A verdict is not a database failure. Counting a lost idempotency gate — the
+/// single most frequent outcome of the product's number-one use case — as a DB
+/// error would make every dashboard read as broken under normal operation.
+#[test]
+fn a_verdict_is_never_counted_as_a_database_failure() {
+    for (state, msg, reason) in [
+        (Some("23514"), "kv_precondition_failed", "kv_precondition"),
+        (Some("22023"), "kv_bad_request", "bad_request"),
+        (Some("22001"), "kv_value_too_large", "payload_too_large"),
+        (None, "QDUP duplicate messages", "duplicate"),
+        (None, "QTXN ack failed", "ack_rejected"),
+        (None, "QTIMER op 0: field producerSub is server-owned", "ack_rejected"),
+    ] {
+        let (got, is_failure) = txn_reason_for(state, msg);
+        assert_eq!(got, reason, "{msg}");
+        assert!(!is_failure, "a verdict must not inflate the DB error series: {msg}");
+    }
+    // A real infrastructure failure is the one thing that IS counted.
+    let (got, is_failure) = txn_reason_for(Some("08006"), "connection closed");
+    assert_eq!(got, "db_error");
+    assert!(is_failure);
+}
+
+/// The failure envelope grew (§8.3) and every failure now carries a `reason`
+/// code. Without it a client has to string-match the message, which is
+/// forbidden everywhere in this codebase — and it is what all seven of them
+/// have had to do until now.
+#[test]
+fn every_failure_carries_a_switchable_reason() {
+    let v = txn_fail_json("txn-1", "duplicate", "QDUP ...");
+    assert_eq!(v["reason"], "duplicate");
+    assert_eq!(v["success"], false);
+    assert_eq!(v["transactionId"], "txn-1");
+    assert!(v["results"].as_array().unwrap().is_empty());
+    // The three fields every client already reads are still exactly where
+    // they were: this grew, it did not change shape.
+    assert!(v.get("error").is_some());
+}
+
+/// The wire caps are the mirror of the procedure's `p_in_wire = true`
+/// constants. They are deliberately tighter than the HTTP surface's, and if
+/// one side moves without the other the edge stops being a guard and starts
+/// being a second, disagreeing opinion.
+#[test]
+fn the_wire_caps_mirror_the_procedures_in_wire_constants() {
+    assert_eq!(WIRE_KV_MAX_OPS, 64);
+    assert_eq!(WIRE_KV_MAX_KEYS, 256);
+}
 }

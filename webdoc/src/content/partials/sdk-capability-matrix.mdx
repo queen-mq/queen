@@ -1,11 +1,11 @@
 ---
 params: []
-description: "What each of the six Queen SDKs implements, and the twelve rows where they diverge."
+description: "What each of the six Queen SDKs implements, and the sixteen rows where they diverge."
 ---
 
 Parity here is a claim about the surface, not about shared code: each client is written natively
-in its own idiom. These twelve rows are that surface, read out of `clients/` on this tree. Five
-of them are full parity across all six clients; the other seven are where a client stops.
+in its own idiom. These sixteen rows are that surface, read out of `clients/` on this tree. Six
+of them are full parity across all six clients; the other ten are where a client stops.
 
 | Capability | JavaScript | Python | Go | Rust | PHP | C++ |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -14,6 +14,10 @@ of them are full parity across all six clients; the other seven are where a clie
 | Transactions through `POST /api/v1/transaction` | yes | yes | yes | yes | yes | yes |
 | Dead-letter reader | yes | yes | yes | yes | yes | yes |
 | HTTP 429 policy, separate from the retry counter | yes | yes | yes | yes | yes | yes |
+| `kv` and `timers` riders on a transaction | yes | yes | yes | yes | yes | yes |
+| Key/value: the seven operations | yes | yes | yes | yes | yes | five of seven |
+| Timers: `schedule`, `cancel`, `peek`, `list` | yes | yes | yes | yes | yes | two of four |
+| `once`, the idempotency marker in one call | yes | yes | no | no | no | no |
 | `Admin` facade | yes | yes | yes | yes | yes | no |
 | `affinity` load-balancing strategy | yes | yes | yes | yes | yes | no |
 | Streams DSL over `/streams/v1/*` | yes | yes | yes | yes | no | no |
@@ -22,8 +26,24 @@ of them are full parity across all six clients; the other seven are where a clie
 | `Host` override independent of the address dialled | yes | no | no | yes | no | no |
 | `pop` reports a failure instead of an empty result | no | no | yes | yes | yes | no |
 
-The seven divergent rows, with their conditions:
+The ten divergent rows, with their conditions:
 
+- **Key/value.** The seven operations are `get`, `getMany`, `getPrefix`, `put`, `putIfAbsent`,
+  `delete` and `incr`. C++ wraps five of them: `getMany` and `getPrefix` have no method, and both
+  remain reachable through `POST /api/v1/kv` on the shared `HttpClient`. `getPrefix` inside a
+  transaction is refused by the broker in every client, which is its rule and not a client's gap.
+- **Timers.** C++ has `schedule` and `cancel` only; `peek` and `list` are reads and stay on
+  `GET /api/v1/timers/{queue}[/{timerKey}]`. There is no reschedule *operation* anywhere, because
+  `schedule` is the upsert and `status` reports which happened; Python, Go, Rust and PHP still
+  spell a `reschedule` alias over it, JavaScript and C++ do not.
+- **`once`.** JavaScript (`kv.once`, `transaction().once`) and Python (`kv.once`,
+  `transaction().once`) fold `putIfAbsent` plus `required` into the question people actually ask,
+  "did I win?". The other four write the `putIfAbsent` themselves, which is the same wire and one
+  line longer.
+- **`kv` on a streams operator context.** No client has it, so it is not a row. Inside a stream the
+  state primitive is `state_ops`, which commits with the sink and the ack in the cycle's own
+  transaction; a key/value write from an operator would not, and that atomicity is the thing the
+  stream already gives you for free.
 - **`Admin` facade.** C++ has no `Admin` class. Every management and observability route is still
   reachable, through the shared `HttpClient` returned by `get_http_client()`.
 - **`affinity`.** The C++ `LoadBalancer` implements round-robin and `"session"` only, and

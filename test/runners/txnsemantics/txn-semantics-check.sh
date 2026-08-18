@@ -37,8 +37,8 @@
 #       exists so a broker that simply never writes KV cannot pass this.
 #
 #    4. RESULTS ARE INDEX-ALIGNED IN THE FLAT SPACE.
-#       §8.2 is the layer no design document had: the client sends ONE flat
-#       operations[] array, the SP speaks four parallel arrays, and something in
+#       §8.2 is the layer no design document had: the client sends operations[]
+#       plus two sibling arrays, the SP speaks parallel arrays, and something in
 #       the middle has to scatter the per-array results back to flat ordinals.
 #       §6.4's count guard cannot be expressed across two index spaces. The
 #       cheap bug is failedIndex reported in the kv array's ordinal space, which
@@ -47,6 +47,40 @@
 #
 #  All four are HTTP-only assertions on purpose: they are the contract seven
 #  clients depend on, so they must hold at the wire, not just in the database.
+#
+#  ---------------------------------------------------------------------------
+#  THE WIRE SHAPE THIS FILE ASSERTS, AND WHY IT IS NOT `type:"kv"`.
+#
+#  KV and timer operations are TOP-LEVEL ARRAYS of the request body — `kv` and
+#  `timers`, siblings of `operations` — never elements of `operations` with a
+#  `type` discriminator. An element carrying `type:"kv"` or `type:"timer"` is a
+#  400 that names where it should have gone.
+#
+#  This is §10.4, and the reason is Go: `Operation` cannot grow. Two Go struct
+#  fields with the same JSON key at the same level are BOTH DROPPED by
+#  encoding/json, silently — the body would leave with zero kv ops, the broker
+#  would commit a transaction with no gate, and the putIfAbsent would simply
+#  never have existed. There is no error and no warning anywhere in that chain.
+#  §6.3 agrees in the other direction: 005_log_ack.sql reads `p->'kv'` and
+#  `p->'timers'` off the payload root.
+#
+#  So the FLAT SPACE IS APPEND-ONLY, in exactly this order:
+#
+#      [0, ops_flat)                 operations[], expanded (items[] counts once
+#                                    per item — that is what makes the space
+#                                    non-trivial and is why §8.2 needs a map)
+#      [ops_flat, +kv_n)             the top-level `kv` array
+#      [ops_flat + kv_n, +timers_n)  the top-level `timers` array
+#
+#  A push or an ack therefore NEVER changes ordinal because a rider was added,
+#  and a bundle with neither array produces exactly today's results[]. Each
+#  result carries `index` (flat) and, for the two riders, `opIndex` (the ordinal
+#  inside its own array) so the mapping stays inspectable from outside.
+#
+#  One more shape detail this file depends on: a timer `payload` is BASE64 TEXT,
+#  not a JSON object. It is opaque bytes end to end (it may be zstd-compressed
+#  and it may be encrypted, §13.4), so there is no point in the wire at which it
+#  is a JSON value.
 #  ---------------------------------------------------------------------------
 # =============================================================================
 set -uo pipefail
@@ -102,17 +136,30 @@ RC=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$URL/health" 2>/dev/n
 [ "$RC" = "200" ] || { say "!! broker not healthy at $URL (health -> $RC)"; say "TXNSEMANTICS: FAIL"; exit 1; }
 ok "broker healthy at $URL"
 
-# With the flags off the kv/timer routes are not registered at all (§0) and the
-# wire demux answers 400 "supports only push and ack operations". Every
-# assertion below would then be vacuously "no push happened". Refuse.
+# Both surfaces are part of the engine and no flag can withhold them, so this is
+# not a "was the feature enabled" check: it establishes that the thing answering
+# at $URL is a broker of this build. If it is not, the wire demux answers 400
+# "supports only push and ack operations" and every assertion below is vacuously
+# "no push happened". Refuse rather than report that as green.
+NOTBROKER="the routes are on every broker of this build, so check that QUEEN_HTTP_URL is not the proxy or an older image"
 req PUT "/api/v1/kv/$NS/preflight:$RID" '{"value":{"p":1},"ttlSeconds":60}'
 KVRC="$RC"
-if [ "$KVRC" = "404" ]; then
-  say "!! PUT /api/v1/kv/... -> 404: the KV routes are not registered."
-  say "!! This gate needs QUEEN_KV_ENABLED=true AND QUEEN_TIMERS_ENABLED=true."
-  say "TXNSEMANTICS: FAIL"; exit 1
-fi
-case "$KVRC" in 2??) ok "kv surface answers ($KVRC)";; *) say "!! kv surface answered $KVRC: $(head -c 300 "$BODYF")"; say "TXNSEMANTICS: FAIL"; exit 1;; esac
+case "$KVRC" in
+  2??) ok "kv surface answers ($KVRC)";;
+  *)   say "!! kv surface answered $KVRC: $(head -c 300 "$BODYF")"
+       say "!! $NOTBROKER"
+       say "TXNSEMANTICS: FAIL"; exit 1;;
+esac
+
+# Both surfaces, not one. Scenario 1 asserts "no timer row", which a broker that
+# never had the timer route satisfies vacuously.
+req GET "/api/v1/timers/preflight-$RID/nothing"
+case "$RC" in
+  2??) ok "timer surface answers ($RC)";;
+  *)   say "!! timer surface answered $RC: $(head -c 300 "$BODYF")"
+       say "!! $NOTBROKER"
+       say "TXNSEMANTICS: FAIL"; exit 1;;
+esac
 
 req POST /api/v1/configure "{\"queue\":\"$Q\",\"leaseTime\":30,\"retryLimit\":5}"
 req POST /api/v1/configure "{\"queue\":\"$LQ\",\"leaseTime\":30,\"retryLimit\":5}"
@@ -135,12 +182,15 @@ TIMERTXN="txnsem-timer-$RID"
 # three effects. Only then does the absence of those same three effects mean
 # "the gate rolled them back".
 CGATE="gate-ctl:$RID"; CSTATE="state-ctl:$RID"; CTK="tk-ctl:$RID"
-req POST /api/v1/transaction "{\"operations\":[
-  {\"type\":\"kv\",\"op\":\"putIfAbsent\",\"ns\":\"$NS\",\"key\":\"$CGATE\",\"value\":{\"who\":\"ctl\"},\"ttlSeconds\":600,\"required\":true},
-  {\"type\":\"push\",\"queue\":\"$Q\",\"partition\":\"Default\",\"payload\":{\"marker\":\"ctl-$RID\"},\"transactionId\":\"txnsem-ctl-$RID\"},
-  {\"type\":\"timer\",\"op\":\"schedule\",\"queue\":\"$TQ\",\"timerKey\":\"$CTK\",\"partition\":\"Default\",\"delayMs\":60000,\"txn\":\"txnsem-ctltimer-$RID\",\"payload\":{\"marker\":\"ctl\"}},
-  {\"type\":\"kv\",\"op\":\"put\",\"ns\":\"$NS\",\"key\":\"$CSTATE\",\"value\":{\"step\":\"done\"},\"ttlSeconds\":600}
-]}"
+req POST /api/v1/transaction "{
+  \"operations\":[
+    {\"type\":\"push\",\"queue\":\"$Q\",\"partition\":\"Default\",\"payload\":{\"marker\":\"ctl-$RID\"},\"transactionId\":\"txnsem-ctl-$RID\"}],
+  \"kv\":[
+    {\"op\":\"putIfAbsent\",\"ns\":\"$NS\",\"key\":\"$CGATE\",\"value\":{\"who\":\"ctl\"},\"ttlSeconds\":600,\"required\":true},
+    {\"op\":\"put\",\"ns\":\"$NS\",\"key\":\"$CSTATE\",\"value\":{\"step\":\"done\"},\"ttlSeconds\":600}],
+  \"timers\":[
+    {\"op\":\"schedule\",\"queue\":\"$TQ\",\"timerKey\":\"$CTK\",\"partition\":\"Default\",\"delayMs\":60000,\"txn\":\"txnsem-ctltimer-$RID\",\"payload\":\"$(printf '{"marker":"ctl"}' | base64)\"}]
+}"
 eq "CONTROL: the same bundle shape with a WON gate commits" "true" "$(jv '.success')"
 req GET "/api/v1/pop/queue/$Q?batch=10&consumerGroup=$GRP&subscriptionMode=all&autoAck=true&wait=false"
 eq "CONTROL: and its push is deliverable" "1" "$(nmsgs)"
@@ -155,14 +205,26 @@ req DELETE "/api/v1/timers/$TQ/$CTK" '{}'
 req PUT "/api/v1/kv/$NS/$GATE" '{"value":{"who":"first"},"forever":true}'
 case "$RC" in 2??) ok "gate seeded by the winner";; *) bad "seeding the gate returned $RC: $BODY";; esac
 
-# The loser's bundle. Four flat ordinals, and the losing gate is ordinal 0 so
-# scenario 2's failedIndex has an unambiguous answer here.
+# The loser's bundle. FOUR flat ordinals, laid out so the losing gate does NOT
+# sit at flat 0: one push comes first, so the gate is kv-array ordinal 0 but
+# flat ordinal 1. Scenario 2's failedIndex therefore has an answer that
+# discriminates — a broker reporting the array ordinal would say 0.
+#
+#   flat 0  push          (operations[0])
+#   flat 1  kv  putIfAbsent   <- kv[0], THE LOSER
+#   flat 2  kv  put           <- kv[1], the sibling write
+#   flat 3  timer schedule    <- timers[0]
+LOSER_PAYLOAD_B64=$(printf '{"marker":"%s"}' "$RID" | base64)
 LOSER_BUNDLE=$(cat <<JSON
 {"operations":[
-  {"type":"kv","op":"putIfAbsent","ns":"$NS","key":"$GATE","value":{"who":"second"},"ttlSeconds":600,"required":true},
-  {"type":"push","queue":"$Q","partition":"Default","payload":{"marker":"$RID"},"transactionId":"$PUSHTXN"},
-  {"type":"timer","op":"schedule","queue":"$TQ","timerKey":"$TK","partition":"Default","delayMs":60000,"txn":"$TIMERTXN","payload":{"marker":"$RID"}},
-  {"type":"kv","op":"put","ns":"$NS","key":"$STATE","value":{"step":"done"},"ttlSeconds":600}
+  {"type":"push","queue":"$Q","partition":"Default","payload":{"marker":"$RID"},"transactionId":"$PUSHTXN"}
+],
+"kv":[
+  {"op":"putIfAbsent","ns":"$NS","key":"$GATE","value":{"who":"second"},"ttlSeconds":600,"required":true},
+  {"op":"put","ns":"$NS","key":"$STATE","value":{"step":"done"},"ttlSeconds":600}
+],
+"timers":[
+  {"op":"schedule","queue":"$TQ","timerKey":"$TK","partition":"Default","delayMs":60000,"txn":"$TIMERTXN","payload":"$LOSER_PAYLOAD_B64"}
 ]}
 JSON
 )
@@ -204,7 +266,16 @@ eq "HTTP status of a lost precondition is 200, not 4xx/5xx" "200" "$LOSER_RC"
 # the F4 brief, so it is what this gate asserts. `ok` may be present as well.
 eq "success:false" "false" "$(jv '.success')"
 eq "reason is the machine-readable kv_precondition" "kv_precondition" "$(jv '.reason')"
-eq "failedIndex names the losing op in FLAT space" "0" "$(jv '.failedIndex')"
+# 1, not 0: one push precedes the kv array, so the flat ordinal and the kv-array
+# ordinal differ. A broker answering 0 is reporting the array ordinal.
+LOSER_FI=$(jv '.failedIndex')
+if [ "$LOSER_FI" = "1" ]; then
+  ok "failedIndex names the losing op in FLAT space (1, not the kv array's 0)"
+elif [ "$LOSER_FI" = "0" ]; then
+  bad "failedIndex is 0: that is the kv ARRAY ordinal, not the flat one (§8.2 point 4)"
+else
+  bad "failedIndex is '$LOSER_FI'; expected 1 (flat ordinal of the losing op)"
+fi
 eq "kvReason discriminates WHY it lost" "exists" "$(jv '.kvReason')"
 
 # §6.1 point 5: the loser must not need a second round trip. The winner's value
@@ -260,10 +331,11 @@ else
   #   * `forever:true`   -> a TTL cannot be what stops it
   # If the row is absent afterwards, the transaction is the only thing left that
   # could have stopped it. That is §5.2's hierarchy, made falsifiable.
-  req POST /api/v1/transaction "{\"operations\":[
-    {\"type\":\"ack\",\"transactionId\":\"$ZTXN\",\"partitionId\":\"$PID\",\"consumerGroup\":\"$GRP\",\"leaseId\":\"$LEASE\",\"status\":\"completed\"},
-    {\"type\":\"kv\",\"op\":\"put\",\"ns\":\"$NS\",\"key\":\"$ZK\",\"value\":{\"wrote\":\"zombie\"},\"forever\":true}
-  ],\"requiredLeases\":[\"$LEASE\"]}"
+  req POST /api/v1/transaction "{
+    \"operations\":[
+      {\"type\":\"ack\",\"transactionId\":\"$ZTXN\",\"partitionId\":\"$PID\",\"consumerGroup\":\"$GRP\",\"leaseId\":\"$LEASE\",\"status\":\"completed\"}],
+    \"kv\":[{\"op\":\"put\",\"ns\":\"$NS\",\"key\":\"$ZK\",\"value\":{\"wrote\":\"zombie\"},\"forever\":true}],
+    \"requiredLeases\":[\"$LEASE\"]}"
   eq "the zombie bundle is rejected (expired lease)" "false" "$(jv '.success')"
 
   req GET "/api/v1/kv/$NS/$ZK"
@@ -278,10 +350,11 @@ else
   if [ -z "$PID2" ] || [ "$PID2" = "?" ] || [ "$PID2" = "null" ]; then
     bad "the message was not redelivered after the lease expired; the control case cannot run"
   else
-    req POST /api/v1/transaction "{\"operations\":[
-      {\"type\":\"ack\",\"transactionId\":\"$ZTXN2\",\"partitionId\":\"$PID2\",\"consumerGroup\":\"$GRP\",\"leaseId\":\"$LEASE2\",\"status\":\"completed\"},
-      {\"type\":\"kv\",\"op\":\"put\",\"ns\":\"$NS\",\"key\":\"$ZK2\",\"value\":{\"wrote\":\"live\"},\"forever\":true}
-    ],\"requiredLeases\":[\"$LEASE2\"]}"
+    req POST /api/v1/transaction "{
+      \"operations\":[
+        {\"type\":\"ack\",\"transactionId\":\"$ZTXN2\",\"partitionId\":\"$PID2\",\"consumerGroup\":\"$GRP\",\"leaseId\":\"$LEASE2\",\"status\":\"completed\"}],
+      \"kv\":[{\"op\":\"put\",\"ns\":\"$NS\",\"key\":\"$ZK2\",\"value\":{\"wrote\":\"live\"},\"forever\":true}],
+      \"requiredLeases\":[\"$LEASE2\"]}"
     eq "CONTROL: the same bundle with a LIVE lease commits" "true" "$(jv '.success')"
     req GET "/api/v1/kv/$NS/$ZK2"
     eq "CONTROL: and its kv write landed" "true" "$(jv '.found')"
@@ -292,28 +365,40 @@ fi
 say ""
 say "== 4. results are index-aligned in the FLAT space =="
 # =============================================================================
-# Six operations, SEVEN flat ordinals: the first push carries items[] and
-# expands to two. That expansion is what makes the flat space non-trivial and it
-# is the reason §8.2's map cannot just be "op number".
+# Three operations plus two riders, SEVEN flat ordinals: the first push carries
+# items[] and expands to two. That expansion is what makes the flat space
+# non-trivial and is the reason §8.2's map cannot just be "op number".
 #
-#   flat 0  push   (items[0])
-#   flat 1  push   (items[1])
-#   flat 2  kv     put
-#   flat 3  timer  schedule
-#   flat 4  push
-#   flat 5  kv     get
-#   flat 6  timer  cancel
+#   flat 0  push   (operations[0].items[0])
+#   flat 1  push   (operations[0].items[1])
+#   flat 2  push   (operations[1])
+#   flat 3  kv     put            <- kv[0]
+#   flat 4  kv     get            <- kv[1]
+#   flat 5  timer  schedule       <- timers[0]
+#   flat 6  timer  cancel         <- timers[1]
+#
+# The cancel targets a key scheduled by a PREVIOUS request, never one scheduled
+# in this same bundle: log_timers_apply_v1 applies ops in (queue, timer_key)
+# order, so a schedule and a cancel of the same key inside one array have an
+# ordering this gate has no business pinning. Alignment is what is under test.
 ALIGN_TK="align:$RID"
-req POST /api/v1/transaction "{\"operations\":[
-  {\"type\":\"push\",\"items\":[
-     {\"queue\":\"$Q\",\"partition\":\"Default\",\"payload\":{\"a\":0}},
-     {\"queue\":\"$Q\",\"partition\":\"Default\",\"payload\":{\"a\":1}}]},
-  {\"type\":\"kv\",\"op\":\"put\",\"ns\":\"$NS\",\"key\":\"align:$RID\",\"value\":{\"i\":2},\"ttlSeconds\":600},
-  {\"type\":\"timer\",\"op\":\"schedule\",\"queue\":\"$TQ\",\"timerKey\":\"$ALIGN_TK\",\"partition\":\"Default\",\"delayMs\":60000,\"txn\":\"align-$RID\",\"payload\":{\"i\":3}},
-  {\"type\":\"push\",\"queue\":\"$Q\",\"partition\":\"Default\",\"payload\":{\"a\":4}},
-  {\"type\":\"kv\",\"op\":\"get\",\"ns\":\"$NS\",\"key\":\"align:$RID\"},
-  {\"type\":\"timer\",\"op\":\"cancel\",\"queue\":\"$TQ\",\"timerKey\":\"$ALIGN_TK\"}
-]}"
+ALIGN_TK2="align2:$RID"
+req POST /api/v1/timers "[{\"op\":\"schedule\",\"queue\":\"$TQ\",\"timerKey\":\"$ALIGN_TK2\",\"partition\":\"Default\",\"delayMs\":60000,\"txn\":\"align2-$RID\",\"payload\":\"$(printf '{"i":9}' | base64)\"}]"
+case "$RC" in 2??) : ;; *) bad "seeding the cancel target returned $RC: $BODY";; esac
+
+req POST /api/v1/transaction "{
+  \"operations\":[
+    {\"type\":\"push\",\"items\":[
+       {\"queue\":\"$Q\",\"partition\":\"Default\",\"payload\":{\"a\":0}},
+       {\"queue\":\"$Q\",\"partition\":\"Default\",\"payload\":{\"a\":1}}]},
+    {\"type\":\"push\",\"queue\":\"$Q\",\"partition\":\"Default\",\"payload\":{\"a\":4}}],
+  \"kv\":[
+    {\"op\":\"put\",\"ns\":\"$NS\",\"key\":\"align:$RID\",\"value\":{\"i\":3},\"ttlSeconds\":600},
+    {\"op\":\"get\",\"ns\":\"$NS\",\"key\":\"align:$RID\"}],
+  \"timers\":[
+    {\"op\":\"schedule\",\"queue\":\"$TQ\",\"timerKey\":\"$ALIGN_TK\",\"partition\":\"Default\",\"delayMs\":60000,\"txn\":\"align-$RID\",\"payload\":\"$(printf '{"i":5}' | base64)\"},
+    {\"op\":\"cancel\",\"queue\":\"$TQ\",\"timerKey\":\"$ALIGN_TK2\"}]
+}"
 eq "the mixed bundle commits" "true" "$(jv '.success')"
 eq "results has one entry per FLAT ordinal" "7" "$(jv '(.results // []) | length')"
 # index must equal position, and no ordinal may be a silent null (§6.4: an
@@ -330,28 +415,36 @@ elif [ -z "$BADIDX" ]; then
 else
   bad "results misaligned or null at flat ordinal(s): $BADIDX"
 fi
-WANT="push,push,kv,timer,push,kv,timer"
+WANT="push,push,push,kv,kv,timer,timer"
 GOT=$(printf '%s' "$BODY" | jq -r '[(.results // [])[] | (.type // "?")] | join(",")' 2>/dev/null)
 eq "each result carries the type of the op at ITS flat ordinal" "$WANT" "$GOT"
+# And the ARRAY-LOCAL ordinal survives alongside the flat one, so the mapping is
+# inspectable from outside instead of being a broker-private convention.
+WANTOP="0,1,0,1"
+GOTOP=$(printf '%s' "$BODY" | jq -r '[(.results // [])[] | select(.type=="kv" or .type=="timer") | (.opIndex|tostring)] | join(",")' 2>/dev/null)
+eq "each rider result also carries its own array's ordinal (opIndex)" "$WANTOP" "$GOTOP"
 
 say ""
 say "-- and failedIndex is flat, not the kv array's ordinal --"
 # Flat layout:
 #   0,1  push items[]
-#   2    timer schedule
+#   2    push
 #   3    kv put            <- kv array ordinal 0
 #   4    kv putIfAbsent    <- kv array ordinal 1, and THE LOSER
-#   5    push
+#   5    timer schedule
 # A broker that reports the kv array's ordinal says 1. The right answer is 4.
-req POST /api/v1/transaction "{\"operations\":[
-  {\"type\":\"push\",\"items\":[
-     {\"queue\":\"$Q\",\"partition\":\"Default\",\"payload\":{\"b\":0}},
-     {\"queue\":\"$Q\",\"partition\":\"Default\",\"payload\":{\"b\":1}}]},
-  {\"type\":\"timer\",\"op\":\"schedule\",\"queue\":\"$TQ\",\"timerKey\":\"fi:$RID\",\"partition\":\"Default\",\"delayMs\":60000,\"txn\":\"fi-$RID\",\"payload\":{\"b\":2}},
-  {\"type\":\"kv\",\"op\":\"put\",\"ns\":\"$NS\",\"key\":\"fi-ok:$RID\",\"value\":{\"i\":3},\"ttlSeconds\":600},
-  {\"type\":\"kv\",\"op\":\"putIfAbsent\",\"ns\":\"$NS\",\"key\":\"$GATE\",\"value\":{\"who\":\"third\"},\"ttlSeconds\":600,\"required\":true},
-  {\"type\":\"push\",\"queue\":\"$Q\",\"partition\":\"Default\",\"payload\":{\"b\":5}}
-]}"
+req POST /api/v1/transaction "{
+  \"operations\":[
+    {\"type\":\"push\",\"items\":[
+       {\"queue\":\"$Q\",\"partition\":\"Default\",\"payload\":{\"b\":0}},
+       {\"queue\":\"$Q\",\"partition\":\"Default\",\"payload\":{\"b\":1}}]},
+    {\"type\":\"push\",\"queue\":\"$Q\",\"partition\":\"Default\",\"payload\":{\"b\":2}}],
+  \"kv\":[
+    {\"op\":\"put\",\"ns\":\"$NS\",\"key\":\"fi-ok:$RID\",\"value\":{\"i\":3},\"ttlSeconds\":600},
+    {\"op\":\"putIfAbsent\",\"ns\":\"$NS\",\"key\":\"$GATE\",\"value\":{\"who\":\"third\"},\"ttlSeconds\":600,\"required\":true}],
+  \"timers\":[
+    {\"op\":\"schedule\",\"queue\":\"$TQ\",\"timerKey\":\"fi:$RID\",\"partition\":\"Default\",\"delayMs\":60000,\"txn\":\"fi-$RID\",\"payload\":\"$(printf '{"b":5}' | base64)\"}]
+}"
 eq "the bundle with a losing gate at flat 4 returns 200" "200" "$RC"
 eq "success:false" "false" "$(jv '.success')"
 eq "reason:kv_precondition" "kv_precondition" "$(jv '.reason')"
@@ -363,6 +456,42 @@ elif [ "$FI" = "1" ]; then
 else
   bad "failedIndex is '$FI'; expected 4 (flat ordinal of the losing op)"
 fi
+
+# =============================================================================
+say ""
+say "== 5. the WRONG shape fails loudly, and the riders are refusable as a unit =="
+# =============================================================================
+# §8.2's "desirable side effect": an unknown op type is a clean, NAMED 400. This
+# is the assertion that keeps the Go trap of §10.4 from ever being reintroduced
+# quietly — if someone moves kv back inside operations[], the old broker's
+# generic "supports only push and ack" is the best case and a silent commit
+# without the gate is the worst.
+req POST /api/v1/transaction "{\"operations\":[
+  {\"type\":\"kv\",\"op\":\"put\",\"ns\":\"$NS\",\"key\":\"wrong-shape:$RID\",\"value\":{\"x\":1},\"ttlSeconds\":600}
+]}"
+case "$RC" in
+  4??) ok "an inline type:\"kv\" op is refused at the boundary ($RC), not silently dropped" ;;
+  2??) bad "an inline type:\"kv\" op was ACCEPTED ($RC): the flat space now has two encodings" ;;
+  *)   bad "an inline type:\"kv\" op answered $RC: $(printf '%s' "$BODY" | head -c 160)" ;;
+esac
+req GET "/api/v1/kv/$NS/wrong-shape:$RID"
+absent "$(jv '.found')" \
+  "and it wrote nothing" \
+  "the refused inline op WROTE ANYWAY: the 4xx is cosmetic"
+
+# The op-level fields the server owns are refused inside a rider op. This is the
+# only place a forged messageId or a forged producerSub can die: the stored
+# procedure COALESCEs `_messageId` blindly and cannot tell the broker's
+# injection from a client's (§8.2 point 5).
+for FIELD in '"producerSub":"someone-else"' '"_messageId":"11111111-1111-7111-8111-111111111111"' '"_tenant":"00000000-0000-0000-0000-0000000000ff"'; do
+  req POST /api/v1/transaction "{\"operations\":[],\"timers\":[
+    {\"op\":\"schedule\",\"queue\":\"$TQ\",\"timerKey\":\"forge:$RID\",\"partition\":\"Default\",\"delayMs\":60000,\"txn\":\"forge-$RID\",\"payload\":\"e30=\",$FIELD}
+  ]}"
+  case "$RC" in
+    4??) ok "a timer op carrying ${FIELD%%:*} is refused ($RC)" ;;
+    *)   bad "a timer op carrying ${FIELD%%:*} answered $RC: provenance is forgeable" ;;
+  esac
+done
 
 say ""
 say "passed: $PASS   failed: $FAIL"

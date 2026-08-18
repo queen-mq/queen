@@ -418,24 +418,26 @@ pub struct Config {
 
     // ----------------------------------------------------- kv + timers (PLAN_KV_TIMERS.md)
     //
-    // TWO INDEPENDENT features sharing one background component, one lock order and
-    // one quota surface (§0). Both flags default to `false` and stay that way for GA
-    // (§20.4, ratified). OFF is not "the code runs and returns 404": with the flag off
-    //   * the routes are NOT REGISTERED at all in main.rs (the JSON fallback answers
-    //     404 — §16 step 1: "le rotte non sono nemmeno registrate"),
-    //   * the sweeper task is NOT SPAWNED (§7.1 — an installation that will never use
-    //     the feature must not pay one due-probe per second per broker, forever),
-    //   * the wire's `kv` branch is refused with a class-42 SQLSTATE (config,
-    //     permanent, never retried).
-    // The TABLES are created at every boot either way: empty they cost nothing, and an
-    // always-virgin schema model does not tolerate two possible shapes.
+    // THERE IS NO `kv_enabled` / `timers_enabled` HERE, and that absence is the
+    // decision (Alice, 2026-08-18, supersedes §16 and §20.4). KV and timers are not
+    // features a deployment opts into, they are part of the engine, like push and pop
+    // — and `Config` carries no `push_enabled` either. A boot flag is not a neutral
+    // convenience: its existence is the statement that the surface is optional, that a
+    // client may find a cell without it, and that every SDK, doc page and dashboard
+    // must carry the "if enabled" caveat. So the flags are gone rather than defaulted
+    // to `true`.
     //
-    // Turning a default from `false` to `true` after a measurement campaign is an
-    // upgrade; the other direction is a regression for whoever already relies on it
-    // (§17.3, one-way door taken in the right direction).
-    pub kv_enabled: bool,
-    pub timers_enabled: bool,
-
+    // What remains, in `switches.rs`, is the RUNTIME kill switch (`kv_enabled`,
+    // `timers_schedule_enabled`, `timers_fire_enabled` in `queen.system_state`), which
+    // is a different instrument: same class as maintenance mode, flipped by an
+    // operator during an incident on a live cell, expected to be flipped back, and
+    // read on every call rather than once at boot. Read the header of `switches.rs`
+    // before reintroducing anything here — a gate and a kill switch look alike and are
+    // opposites.
+    //
+    // What follows are the LIMITS and CADENCES of those surfaces. Every one is a knob
+    // on something that is always running; none of them can turn it off.
+    //
     // --- KV shape limits (§9.2). "Shape" limits live in SQL, inside the SP, plus a
     // body guard at the HTTP boundary: seven clients and the EMBEDDED broker (which
     // never passes through the handlers) inherit one rule instead of seven copies.
@@ -510,6 +512,23 @@ pub struct Config {
     /// `PARTITION_SWEEP_EVERY`: the phase is O(space), not O(work), so it gets its own
     /// slow clock. It must NEVER move onto the due-driven path.
     pub kv_usage_every_ms: u64,
+    /// How often each broker RE-READS the measurement and the limits (§9.3). The
+    /// enforcer is the local delta, so this cadence does not bound the overrun — it
+    /// bounds how long a RELEASE takes, which is the half that may be slow.
+    pub kv_quota_refresh_ms: u64,
+    /// Release band, as a percentage of the cap. Block above the cap, release only
+    /// under this — the same number and the same hysteresis as the proxy's
+    /// `STORAGE_RELEASE_PERCENT` (`proxy/src/registry.rs:44`). Without a band a tenant
+    /// oscillates in and out of the block on every refresh.
+    pub kv_quota_release_percent: i64,
+    /// The watermark, in percent, above which a tenant makes the cell "hot" and the
+    /// usage rollup drops to the refresh cadence (§9.3). 80, because §14.3 point 5
+    /// says that with a soft quota 80% is already late.
+    pub kv_quota_hot_percent: i64,
+    /// Consecutive KV pool refusals before rung 5 of §12.1 engages and STANDALONE KV
+    /// writes are shed. In-wire KV writes continue: the transaction is the value of
+    /// the product and `POST /api/v1/kv` is the convenience.
+    pub kv_standalone_shed_after: u32,
 
     // --- Timers shape limits (§9.2).
     /// DERIVED, not independent: `min(1 MiB, plan.max_payload_bytes)`. A timer BECOMES
@@ -890,16 +909,14 @@ pub fn log_effective(cfg: &Config) {
         tenancy_header = cfg.tenancy_header,
         "config: security"
     );
-    // PLAN_KV_TIMERS.md. Printed even when both flags are off, and deliberately so:
-    // "the feature is not on" is exactly the fact an operator comes to this block to
-    // check, and inferring it from the absence of a line is how a flag ends up
-    // half-believed. The derived values (`kv_pool`, `kv_require_grant`,
-    // `timers_max_payload_bytes`) are printed with the number ACTUALLY in force, not
-    // the formula — the formula is in the struct docs, the log carries the value.
+    // PLAN_KV_TIMERS.md. No `kv=` / `timers=` line: they were the boot flags, and a
+    // config block that still printed "kv: true" on every boot would keep teaching
+    // operators that there is a state where it prints false. The derived values
+    // (`kv_pool`, `kv_require_grant`, `timers_max_payload_bytes`) are printed with the
+    // number ACTUALLY in force, not the formula — the formula is in the struct docs,
+    // the log carries the value.
     tracing::info!(
         target: "boot",
-        kv = cfg.kv_enabled,
-        timers = cfg.timers_enabled,
         kv_pool = cfg.kv_pool_size,
         kv_require_grant = cfg.kv_require_grant,
         kv_max_value_bytes = cfg.kv_max_value_bytes,
@@ -914,6 +931,14 @@ pub fn log_effective(cfg: &Config) {
             cfg.kv_write_rate, cfg.kv_write_burst, cfg.kv_cell_rate),
         kv_max_tenants = cfg.kv_max_tenants,
         kv_usage_every_ms = cfg.kv_usage_every_ms,
+        // The two cadences on one line, because the pair is what an operator needs
+        // in order to read the published overrun formula: the rollup WRITES the
+        // measurement and the refresh READS it, and no reader can be fresher than
+        // its writer (§9.3). `hot` is the cadence in force above the watermark.
+        kv_quota = %format!(
+            "refresh {}ms / release {}% / hot above {}%",
+            cfg.kv_quota_refresh_ms, cfg.kv_quota_release_percent, cfg.kv_quota_hot_percent),
+        kv_standalone_shed_after = cfg.kv_standalone_shed_after,
         timers_max_payload_bytes = cfg.timers_max_payload_bytes,
         timers_max_horizon_s = cfg.timers_max_horizon_s,
         timers_max_ops_per_call = cfg.timers_max_ops_per_call,
@@ -921,12 +946,11 @@ pub fn log_effective(cfg: &Config) {
     );
     tracing::info!(
         target: "boot",
+        // `QUEEN_SWEEPER=false` is the one knob that still stops the task, and it is
+        // not a feature gate: it turns off the REAPER of surfaces that keep running.
+        // A cell with it off accumulates expired KV rows that are never pruned and
+        // timers that never fire (main.rs warns at boot, once).
         enabled = cfg.sweeper_enabled,
-        // The task is not spawned at all unless one of the two features is on (§7.1):
-        // with both off, a `QUEEN_SWEEPER=true` that still ran would cost every
-        // existing installation one due probe and one expire step per second per
-        // broker, forever, over two empty tables.
-        spawns = cfg.sweeper_enabled && (cfg.kv_enabled || cfg.timers_enabled),
         sleep_ms = %format!(
             "{}..{} (idle {})",
             cfg.sweeper_min_sleep_ms, cfg.sweeper_max_sleep_ms, cfg.sweeper_idle_max_sleep_ms),
@@ -1003,7 +1027,6 @@ pub fn load() -> Config {
     // knob, and a derived default that is written as a constant is a default that
     // silently stops tracking what it was derived from.
     let tenancy_header = env_bool("QUEEN_TENANCY_HEADER", false);
-    let kv_enabled = env_bool("QUEEN_KV_ENABLED", false);
     // §8.4: derived from the pool rather than hardcoded, same precedent as
     // `admission_floor`. With DB_POOL_SIZE=160 the KV pool is 16 — exactly the
     // admission reserve the product already considers acceptable to hold idle.
@@ -1016,13 +1039,34 @@ pub fn load() -> Config {
     // with no proxy). So the combination requires the operator to STATE that a proxy
     // sets the header, and the boot dies otherwise: a safety interlock must fail
     // closed, and `env_bool` already treats a typo as fatal for the same reason.
-    if kv_enabled && tenancy_header && !env_bool("QUEEN_KV_TRUSTED_PROXY", false) {
+    // The unsafe thing here is NOT the KV surface, it is an opaque tenant identity
+    // that nothing validates. KV only made it visible, because it is the first
+    // surface addressable purely BY NAME.
+    //
+    // So the interlock is KEYED ON THE TENANCY MODE ALONE. It used to also test the
+    // KV flag; with that flag gone the requirement is simply unconditional for anyone
+    // running with the header, which is the honest shape it always had: choosing
+    // QUEEN_TENANCY_HEADER=1 IS the assertion that a proxy in front sets the header
+    // and strips the client's, and a deployment that cannot assert it is not a
+    // deployment missing a feature, it is a deployment with an open door.
+    //
+    // FATAL, and there is no third option to offer. There is no longer a flag that
+    // could switch KV off to make this safe — and there should not be: "the engine is
+    // missing on some cells" is worse than a boot that tells you which env to set. If
+    // an operator genuinely has to take the KV surface down on a live cell, that is
+    // the RUNTIME kill switch (`switches.rs`, `kv_enabled` in `queen.system_state`,
+    // POST /api/v1/system/kv-timers), which is a different instrument for a different
+    // situation and does not make an unvalidated tenant header safe anyway.
+    if tenancy_header && !env_bool("QUEEN_KV_TRUSTED_PROXY", false) {
         crate::obs::fatal(
-            "QUEEN_KV_ENABLED=1 with QUEEN_TENANCY_HEADER=1: the tenant header is \
-             opaque and unvalidated, so KV would let any caller read and write another \
-             tenant's state by NAME. Set QUEEN_KV_TRUSTED_PROXY=1 to affirm that a \
-             proxy in front sets x-queen-tenant (and strips the client's), or turn one \
-             of the two flags off",
+            "QUEEN_TENANCY_HEADER=1 without QUEEN_KV_TRUSTED_PROXY=1: the tenant header \
+             is opaque and validated against nothing, so any caller could read and write \
+             another tenant's KV state BY NAME. Set QUEEN_KV_TRUSTED_PROXY=1 to affirm \
+             that a proxy in front sets x-queen-tenant and strips the client's. If you \
+             cannot affirm that, do not run with QUEEN_TENANCY_HEADER=1 — the KV surface \
+             is part of the engine and cannot be switched off at boot to make an \
+             unvalidated tenant identity safe (an operator pausing KV on a running cell \
+             wants the runtime kill switch: POST /api/v1/system/kv-timers)",
         );
     }
 
@@ -1137,8 +1181,6 @@ pub fn load() -> Config {
         log_top_n_queues: env_int("QUEEN_LOG_TOPN_QUEUES", 10).max(1) as usize,
         tenancy_header,
         // ------------------------------------------- kv + timers (PLAN_KV_TIMERS.md)
-        kv_enabled,
-        timers_enabled: env_bool("QUEEN_TIMERS_ENABLED", false),
         kv_max_value_bytes: env_int("QUEEN_KV_MAX_VALUE_BYTES", 65536).max(1) as usize,
         kv_max_key_bytes: env_int("QUEEN_KV_MAX_KEY_BYTES", 512).max(1) as usize,
         kv_max_ops_per_call: env_int("QUEEN_KV_MAX_OPS_PER_CALL", 256).max(1) as usize,
@@ -1157,6 +1199,13 @@ pub fn load() -> Config {
         kv_cell_rate: env_int("QUEEN_KV_CELL_RATE", 2000).max(0) as u32,
         kv_max_tenants: env_int("QUEEN_KV_MAX_TENANTS", 10_000).max(1) as usize,
         kv_usage_every_ms: env_int("QUEEN_KV_USAGE_EVERY_MS", 300_000).max(1000) as u64,
+        kv_quota_refresh_ms: env_int("QUEEN_KV_QUOTA_REFRESH_MS", 30_000).max(1000) as u64,
+        // Clamped to 1..=99: 100 would mean "release exactly at the cap", i.e. no
+        // band and the oscillation the band exists to remove; 0 would mean a tenant
+        // that ever blocked can only be released by emptying itself completely.
+        kv_quota_release_percent: env_int("QUEEN_KV_QUOTA_RELEASE_PERCENT", 90).clamp(1, 99),
+        kv_quota_hot_percent: env_int("QUEEN_KV_QUOTA_HOT_PERCENT", 80).clamp(1, 100),
+        kv_standalone_shed_after: env_int("QUEEN_KV_STANDALONE_SHED_AFTER", 5).max(1) as u32,
         timers_max_payload_bytes: env_int("QUEEN_TIMERS_MAX_PAYLOAD_BYTES", 1024 * 1024)
             .max(1) as usize,
         timers_max_horizon_s: env_int("QUEEN_TIMERS_MAX_HORIZON_S", 7_776_000).max(1),

@@ -1,0 +1,190 @@
+---
+title: KV internals
+description: "queen.kv column by column: the identity that has no partition id, why COLLATE \"C\" is load-bearing twice, a version that comes from a sequence and is not monotonic, and kv_live_v1 as the only definition of existence."
+type: concept
+tier: internals
+sidebar:
+  order: 13
+sourceOfTruth:
+  - server/sql/procedures/024_kv.sql
+  - server/sql/procedures/026_kv_sweeper.sql
+  - server/src/handlers/kv.rs
+  - server/src/config.rs
+---
+
+`queen.kv` is one table, one sequence, two small side tables and a set of pure helpers. The product
+value is not the store. It is that the idempotency marker, the effect and the cursor advance commit
+in **one** PostgreSQL transaction: a key/value store standing beside the broker cannot give that at
+any price, however fast it is. Everything on this page exists so that the shape rules are written in
+SQL exactly once, and the seven clients, the HTTP routes, the transaction wire and the embedded
+broker inherit them without a per-language copy.
+
+<Aside type="note">
+Every broker creates these objects at boot and serves these routes. There is no boot flag deciding
+whether the KV exists, only a [runtime kill switch](/deploy/state) that pauses a live surface and
+answers `503`.
+</Aside>
+
+## The table
+
+```sql
+CREATE TABLE IF NOT EXISTS queen.kv (
+    tenant_id  UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
+    namespace  TEXT COLLATE "C" NOT NULL,
+    key        TEXT COLLATE "C" NOT NULL,
+    value      JSONB NOT NULL,
+    version    BIGINT NOT NULL,
+    expires_at TIMESTAMPTZ,
+    shard      SMALLINT NOT NULL
+               GENERATED ALWAYS AS ((hashtextextended(key, 0) & 63)::smallint) STORED,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, namespace, key)
+);
+```
+
+| Column | What it is, and the decision inside it |
+| --- | --- |
+| `tenant_id` | Part of the **key**, not a filter applied to a received id. A conflict target that is the complete primary key can never be cross-tenant. The default is the same one `queen.hotlist_repairs` uses, so a pre-tenancy caller lands in the default tenant and behaves byte for byte as before |
+| `namespace` | Registered nowhere. Like a queue, a namespace exists if and only if a row exists, so an unknown namespace reads empty and is never an error. The charset **is** validated, precisely because nothing registers it: without validation a typo does not fail, it mints a phantom namespace that reads empty forever |
+| `key` | The caller's own name. Never an opaque identifier the broker handed out, which is what keeps the isolation argument down to one `WHERE` clause |
+| `value` | `JSONB`. `'null'::jsonb` is a legal value, and it is not the same thing as an absent key |
+| `version` | Opaque, unique, **not** monotonic. See below |
+| `expires_at` | `NULL` means forever, and forever is an explicit opt-in on the wire rather than a default. A table with no natural retention whose TTL is optional grows in silence, and that growth is a liability the operator pays |
+| `shard` | A contention spreader, not an ownership partition. `GENERATED ALWAYS ... STORED`, so no update can move a row between shards, and the modulus is fixed at 64 permanently: the always-virgin deployment model applies to the schema, not to rows already written |
+| `created_at` | The one field of the datum that never comes back to the caller, so the one where a mistake goes unnoticed. A `put` with `expect: 0` that resurrects an expired lineage resets it, deliberately, because that is a new lineage |
+| `updated_at` | Not indexed, deliberately. See the index budget below |
+
+The identity is `(tenant, namespace, key)` and nothing else. There is deliberately no `partition_id`,
+unlike `queen_streams.state`, because a KV key is a business identity and the caller does not know,
+and must not need to know, which partition it falls on.
+
+That omission has an exact price, and it is the reason two of the seven operations exist. The streams
+state model gets serialisation for free: the operator holds an exclusive lease on the partition, so
+nothing else writes those rows. This table has **no** lease. Two workers can hit the same key at the
+same instant. `putIfAbsent` and `incr` are therefore mandatory primitives rather than conveniences,
+and a read-modify-write performed by the caller across two round trips is unsound unless the key
+derives from the partition key the caller already owns.
+
+The omission is also what keeps the table out of the engine's maintenance costs. Nothing here names a
+partition, so `queen.log_partition_dead_v1` gains no veto leg and its per-partition scan does not get
+more expensive. That invariant has a free mechanical check, and it is the reason for the file number:
+`log_partition_dead_v1` is `LANGUAGE sql`, so it resolves its tables at creation time, and it lives in
+`006` while this table lives in `024`. Adding a leg that names `queen.kv` **kills the boot**. The file
+number is the verification.
+
+## COLLATE "C" is load-bearing twice, and the first reason is not the obvious one
+
+Both name columns carry an explicit `COLLATE "C"`. Before this file, `COLLATE` appeared nowhere in the
+schema, so nothing about it could be assumed from precedent.
+
+1. **It is the foundation of the lock order.** Several actors take more than one row in this space, so
+   they take them in ascending `(namespace, key)` order. Under the database default collation, two
+   pods with different `lc_collate`, or two ICU minor versions, which is the real case during a rolling
+   base-image upgrade, order two keys in opposite directions. Two overlapping bundles then take their
+   rows in inverted order and deadlock with `40P01` on some installations only and for some keys only,
+   which is the worst shape a deadlock can have.
+2. **Byte order is stable across machines**, so a prefix scan is sargable and a keyset cursor keeps its
+   meaning across a libc or ICU upgrade. A cursor whose meaning depends on the host locale is a
+   corruption waiting for a minor version bump.
+
+Two consequences follow, and both are written into the SQL where they can be seen.
+
+Prefix results come back in **byte** order, so non-ASCII keys are not in locale-alphabetical order.
+And an extraction from JSONB does **not** inherit a column's collation: every `ORDER BY` over
+`op->>'key'` spells `COLLATE "C"` out. The broker never pre-sorts either. Ordering is a property of
+the stored procedure, in one place, because one differing libc between two pods is all it takes to
+reopen the cycle if the Rust starts helping.
+
+## The version is a token, not a counter
+
+`version` is drawn from `queen.kv_version_seq`, a `BIGINT` sequence with `CACHE 1000`, and callers may
+compare it for **equality only**. Never arithmetic, never an ordering comparison.
+
+It is not a write count and it is not monotonic. With a cache, each backend draws a block, so backend
+A can emit `91005` in real time after backend B emitted `92000` for the same key. Gaps are expected.
+
+It comes from a sequence rather than from `version + 1` for a reason that only shows up after an
+expiry: a key that expired, was pruned and was written again must not be able to re-issue a version
+that some long-lived holder is still carrying. A per-lineage counter can do exactly that, and the
+compare-and-set that follows succeeds against a lineage that no longer exists.
+
+The large `CACHE` exists to keep a `nextval` on the hot path from writing a WAL record per write. It
+is **not** a defence against the sequence side channel: with a connection pool, a backend's block is
+consumed by interleaved tenants, so the channel becomes coarser rather than closed.
+
+## kv_live_v1 is the only definition of existence
+
+```sql
+CREATE OR REPLACE FUNCTION queen.kv_live_v1(TIMESTAMPTZ, TIMESTAMPTZ)
+RETURNS BOOLEAN LANGUAGE sql IMMUTABLE PARALLEL SAFE
+AS $$ SELECT $1 IS NULL OR $1 > $2 $$;
+```
+
+Every read, every precondition and every write path routes its notion of "this key exists" through
+that one predicate. An expired row is invisible from the first read after its instant, whether or not
+anything has deleted it, so the prune is a disk-space job and never a correctness job.
+
+`kv_ver_v1` builds on it and is **total**: the effective version of an absent row, and of an expired
+one, is `0`. That is what lets `expect: 0` mean "must not exist" with no magic flag, and it is why a
+compare-and-set against a dead lineage cannot succeed.
+
+Both helpers take `now` as a **parameter** rather than calling `clock_timestamp()` inside themselves,
+so one call to `kv_apply_v1` uses one instant for its whole batch. A `getMany` can never see one key
+alive and the next dead a few microseconds later. For the same reason none of the pure helpers is
+declared `STRICT`: a `STRICT` declaration turns a documented total function into `NULL` on its single
+most important input, an absent row or a forever key, and a `NULL` inside a `WHERE` is a row that has
+silently vanished.
+
+## One secondary index, and the ones deliberately not created
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_kv_shard_expires
+    ON queen.kv (shard, expires_at) WHERE expires_at IS NOT NULL;
+```
+
+It has exactly one reader, the sweeper. It is partial, so a key written with `forever` costs nothing
+in it, and `shard` leads because the sweeper filters by shard and then range-scans `expires_at`.
+
+Not created, with the reason recorded next to each: an index on `updated_at`, which `queen_streams.state`
+carries and no reader queries, and which would make every counter update non-HOT; and an index on
+`value`, which has no query to serve because the declared read boundary is keys and prefixes.
+
+<Aside type="caution">
+`vacuum_truncate = off` on this table is not only the defence against the wobble class that
+`001_log_schema.sql` documents with a dated block. An MVCC read still takes `ACCESS SHARE`, which
+conflicts with the `ACCESS EXCLUSIVE` heap truncation takes, so on `queen.kv` that setting is **part of
+the lock order**. There is also no `ALTER COLUMN ... SET STORAGE` here: `EXTENDED` is already the
+default for `jsonb`, so the statement would do nothing except take an `ACCESS EXCLUSIVE` on this table
+at every boot, since the schema is re-applied in full every time.
+</Aside>
+
+## Quota and usage are two tables because they have two authors
+
+`queen.kv_quota` is configuration, written by an operator. `queen.kv_usage` is measurement, overwritten
+by the sweeper on its slow sub-cadence. Merging them would leave "who wrote this number?" without an
+answer. Both are keyed by `tenant_id` alone: the decided model is that any broker may measure any
+shard, so a per-shard key would produce write-write contention between brokers and multiply the scan
+cost, and last-writer-wins on `computed_at` is the intended semantics.
+
+No write path touches either table. A per-tenant counter row updated by every write would be one row
+held for the whole duration of a bundle in the outermost of the six lock spaces. That is not a
+deadlock, it is worse: a throughput ceiling of one over the bundle duration, for every caller of that
+tenant. Enforcement is an in-process delta held in the broker's state, and it emits no SQL on the
+write path, which is why the quota is soft and late by construction.
+
+## Numbers on this page that are not measured
+
+The dated blocks in `001_log_schema.sql` are the house formula: a storage setting carries the date it
+was measured, the symptom that produced it, and the number that was observed. The settings below carry
+no such block, because they were chosen by analogy and the measurement has not been done. They are
+written here rather than left to be inferred from the DDL.
+
+| Number | Status |
+| --- | --- |
+| `fillfactor = 70` on `queen.kv` | By analogy with `queen.log_partitions`. Not measured. Steady state here is in-place updates of non-indexed columns on rows that should stay HOT, which is the same shape, but the analogy is an argument and not a result |
+| The cost of the usage rollup above roughly five million rows | Not measured, and it is the number that decides whether the rollup keeps scanning or degrades to sampling |
+| Autovacuum workers occupied by this table in steady state | Not measured, against a global `autovacuum_max_workers` that defaults to 3. If it bites, the first symptom is the log slowing down with no visible culprit |
+
+Each is to be replaced by a measured number after the first soak on a test rig, in the style of those
+dated blocks, and never by a number taken from a production cluster's live stack.

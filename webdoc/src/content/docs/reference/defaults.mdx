@@ -45,6 +45,28 @@ One more that is often assumed off: **`QUEEN_HOTLIST` defaults to on**. The
 broker selects wildcard-pop candidates in memory rather than by scanning
 PostgreSQL. `QUEEN_HOTLIST=0` reverts to the SQL candidate scan.
 
+And one that is often assumed to be a flag and is not: **the key/value and timer
+surfaces have no boot switch**. Every broker registers those routes and exposes
+their metrics, exactly as it does for push and pop. Pausing a live surface is a
+runtime call on `POST /api/v1/system/kv-timers`, which answers 503, never 404.
+
+<Aside type="caution">
+`QUEEN_TENANCY_HEADER=1` **refuses to boot** unless `QUEEN_KV_TRUSTED_PROXY=1` is
+also set. The tenant header is opaque and validated against nothing, and the
+key/value surface is addressable purely by name, so any caller could read and
+write another tenant's state knowing only that name. Setting the second variable
+is the operator asserting that a proxy in front supplies the header and strips
+the client's. The requirement is unconditional: no flag can switch the KV off to
+make that header safe. A safety interlock has to fail closed, which is also why an
+unparseable boolean anywhere in the configuration is a fatal boot error rather
+than a fallback to the default.
+</Aside>
+
+`QUEEN_KV_REQUIRE_GRANT` is derived from `QUEEN_TENANCY_HEADER` rather than
+defaulted independently. With tenancy on, a tenant with no quota row is a
+**denial**; with tenancy off, a self-hosted operator, who is their own customer,
+configures nothing.
+
 ## Environment defaults that shape behaviour
 
 The full list, with every variable, is in
@@ -81,6 +103,10 @@ each of them sits where it does.
 | `QUEEN_DEDUP_CACHE` | on, `512` MB | Broker-side dedup cache. Correctness never depends on it; disabled, SQL probes the full window. |
 | `JWT_ENABLED` | `false` | No authentication. Every route is open, including admin ones. |
 | `QUEEN_TENANCY_HEADER` | `false` | Every request resolves to the default tenant `00000000-0000-0000-0000-000000000001`. |
+| `QUEEN_SWEEPER` | `true` | Spawned on every broker, because the surfaces it serves are on every broker. Off, expired keys are never pruned and timers never fire: nothing is lost, it waits. This decides whether a background task exists, not whether a surface does. |
+| `QUEEN_KV_POOL_SIZE` | `16` on the default pool | The key/value routes take their connections from a pool of their own, `DB_POOL_SIZE / 10` clamped to 4..32, so a slow database costs them their throughput instead of costing the message path its connections. Derived, like the admission floor: shrink the pool and this shrinks with it. |
+| `QUEEN_TIMERS_MAX_HORIZON_S` | `7776000` (90 days) | Finite on purpose, and not "0 means unlimited". A finite horizon is what keeps the pending-timer quota cyclic: with an infinite one a tenant fills it once and never frees it. |
+| `QUEEN_SWEEPER_LEASE_MS` | `30000` | How long a broker holds a claimed timer, and therefore the longest a cancel can answer `too_late` after that broker dies. |
 | `QUEEN_APPLY_SCHEMA` | `true` | The broker applies the schema and all stored procedures on every boot. |
 | `QUEEN_SYNC_ENABLED` | `true` | Enabled, but inert with no `QUEEN_MESH_PEERS`: a single broker binds nothing. |
 | `QUEEN_ENCRYPTION_KEY` | unset | At-rest payload encryption is off, and a queue flagged `encryptionEnabled` stores plaintext. |
@@ -138,6 +164,11 @@ is reset to the value in this table, not left alone. See
 | `DELETE /api/v1/consumer-groups/:group` | `deleteMetadata` | `true` |
 | `POST …/queues/:queue/partitions/:partition/seek` | body | an empty body means `toEnd: true` |
 | `POST …/queues/:queue/seek` | body | required (`toEnd: true` or a `timestamp`), else 400 |
+| `POST /api/v1/kv`, a `getPrefix` op | `limit` | `100`, clamped to `QUEEN_KV_PREFIX_LIMIT` (1000) and never rejected |
+| | `keysOnly` | `false` |
+| `PUT /api/v1/kv/:ns/*key` | `ttlSeconds` or `forever` | **no default**: exactly one of the two is mandatory, and a `put` never inherits the previous key's expiry |
+| `GET /api/v1/timers/:queue` | `limit` / `after` | `100` clamped to 1000 / none |
+| `POST /api/v1/timers` | `partition` | `Default` |
 
 <Aside type="note">
 The queue-level seek and the partition-level seek differ here on purpose: the

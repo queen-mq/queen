@@ -1,6 +1,6 @@
 ---
 title: System and internal routes
-description: "Maintenance mode, shared state, the stats refresh trigger and the broker-to-broker /internal routes: all admin-gated operator surfaces."
+description: "Maintenance mode, the kv and timer kill switches, shared state, the stats refresh trigger and the broker-to-broker /internal routes: all admin-gated operator surfaces."
 type: reference
 tier: operate
 status: internal
@@ -9,6 +9,7 @@ sidebar:
   label: System and internal
 sourceOfTruth:
   - server/src/handlers/maintenance.rs
+  - server/src/switches.rs
   - server/src/handlers/status.rs
   - server/src/internal.rs
   - server/src/main.rs
@@ -152,6 +153,80 @@ That is deliberate, and it is why the flag has an explicit `GET`.
 
 The flip is mirrored to `queen.system_state` and broadcast to mesh peers as
 `POP_MAINTENANCE_MODE_SET`.
+
+## The kv and timer kill switches
+
+Access level **admin**, like every route under `/api/v1/system/`.
+
+KV and timers have no boot flag. There is no variable that decides whether those routes exist, for
+the same reason there is none for push and for pop, so nothing here is a way to opt into a feature.
+What these three switches are is the other instrument entirely: "stop the bleeding, now", for an
+incident at three in the morning that a rollout does not resolve. They are on the same pattern as
+maintenance mode above, an in-process atomic that is authoritative on the hot path, mirrored into
+`queen.system_state` for propagation and restart.
+
+That is why a paused surface answers **503** with `Retry-After` and never `404`: an operator pulled a
+lever, it is temporary, and the client should come back. A `404` on a KV or timer path means the path
+is wrong. Inside the transaction wire the same pause answers `403`, because a bundle that retries a
+paused surface forever is a client spinning on the hot path with messages in hand.
+
+### GET /api/v1/system/kv-timers
+
+```json
+{
+  "kvEnabled": true,
+  "timersScheduleEnabled": true,
+  "timersFireEnabled": true,
+  "quotaTenants": 12,
+  "quotaAgeMs": 8412,
+  "quotaHot": 1
+}
+```
+
+The three `…Enabled` fields are the switches, and they are what `POST` writes. There is no boot half
+to report beside them any more. The `GET` re-reads the mirror rows before answering and falls back to
+the in-process atomics, so it never fails on a busy pool.
+
+`quotaAgeMs` is the number to look at when limits behave oddly. It is how stale the measurement the
+quota gate is enforcing against has become, and a value that keeps growing means the refresh is
+failing. Enforcement still works, because each broker adds its own local delta to whatever it last
+measured, but nothing is being **released**: a tenant that has come back under its limit stays
+blocked. `quotaHot` counts the tenants above the hot threshold, whose measurement is refreshed on
+the faster cadence.
+
+### POST /api/v1/system/kv-timers
+
+```json
+{ "timersSchedule": false }
+```
+
+| Field | Effect when `false` |
+| --- | --- |
+| `kv` | every KV route answers `503`, and the `kv` array of a transaction is refused permanently. Nothing already stored is affected |
+| `timersSchedule` | no **new** timers are accepted. The ones already scheduled still fire, and cancels are never blocked |
+| `timersFire` | promised messages are **not being delivered** |
+
+Each field is independent and an omitted one is left alone. A body that reset the unmentioned ones
+would turn "pause new timers" into "and also stop delivering the ones already promised". A body
+with none of the three is a `400`.
+
+An absent mirror row means **on**. That is the difference between a kill switch and a feature flag,
+and getting it backwards would mean every fresh cell booting with the feature dead and no row to
+explain why.
+
+<Aside type="danger">
+`timersFire: false` is the one switch that accumulates damage while it is off. Nothing is lost,
+because `deliverAt` is a floor and the backlog drains oldest first, but the tenant experiences
+promised work that has not arrived, which reads as message loss rather than as lateness. It is
+also the only thing that can stop the fire: no degradation rung touches it, precisely because
+automatic shedding here would produce silent undelivered promises. Watch
+`queen_timers_oldest_late_seconds` while it is off, and expect the backlog to cost a burst of
+fires when you turn it back on.
+</Aside>
+
+Every flip of any of the three writes a single `sweeper` log line at the instant it happens,
+naming the switch and what the operator has just done to the cell. It is on-change only, so a
+switch that has been off for an hour does not write an hour of lines.
 
 ## GET /api/v1/system/shared-state
 

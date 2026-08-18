@@ -122,6 +122,23 @@ pub struct AppState {
     // or foreign pid re-checks every time, so an attacker cannot grow the map,
     // and legitimate acks (pids from a real pop) are always positive.
     pub ownership_ok: Mutex<HashSet<String>>,
+    // PLAN_KV_TIMERS §9.3 — the occupancy gate. The measurement this broker last
+    // read plus ITS OWN delta since, which is what makes the block immediate for
+    // the writer that overruns instead of one rollup period late. The write path
+    // pays one hashmap lookup and no SQL; anything that would make it pay a query
+    // is the anti-pattern §2.4 D7 forbids.
+    pub quota: Arc<crate::quota::Quotas>,
+    // PLAN_KV_TIMERS §12.1 — the boot flags plus the operator's runtime kill
+    // switches, in one place so no caller can check one level and forget the
+    // other. Shared with the sweeper (which reads `fire_allowed`) and with the
+    // reconcile loop (which mirrors queen.system_state into it).
+    pub switches: Arc<crate::switches::Switches>,
+    // Rung 5 of the degradation ladder (§12.1): consecutive KV pool refusals.
+    // Above `kv_standalone_shed_after`, STANDALONE KV writes are shed while
+    // in-wire KV writes continue — the transaction is the value of the product
+    // and POST /api/v1/kv is the convenience.
+    pub kv_pressure: std::sync::atomic::AtomicU32,
+    pub kv_standalone_shed_after: u32,
     // Broker-direct dashboard identity surface (handlers/standalone.rs):
     // whether JWT auth is on decides what /auth/me and /auth/login answer;
     // `server_id` (QUEEN_SERVER_ID → HOSTNAME → random) becomes the synthetic
@@ -421,11 +438,10 @@ pub(crate) fn sp_result_to_response(txt: String) -> Response {
 
 
 mod data;
-// PLAN_KV_TIMERS.md §8.1 — the KV and timer HTTP surfaces. Both modules are
-// compiled unconditionally; whether their routes EXIST is decided in main.rs by
-// QUEEN_KV_ENABLED / QUEEN_TIMERS_ENABLED (§16 step 1: with the flag off "the
-// routes are not even registered", so the answer is 404 and not 403). Each
-// handler re-checks its own flag as the second lock on that door.
+// PLAN_KV_TIMERS.md §8.1 — the KV and timer HTTP surfaces. Compiled and
+// REGISTERED unconditionally, like every other module here: the boot flags that
+// once decided whether their routes existed are gone, so there is no cell where
+// /api/v1/kv or /api/v1/timers is absent (see the header of `switches.rs`).
 mod kv;
 mod timers;
 mod queues;
@@ -444,10 +460,7 @@ mod static_files;
 mod analytics;
 
 pub use data::*;
-// `unused_imports` until main.rs registers the routes that call these handlers.
-#[allow(unused_imports)]
 pub use kv::*;
-#[allow(unused_imports)]
 pub use timers::*;
 pub use queues::*;
 pub use messages::*;

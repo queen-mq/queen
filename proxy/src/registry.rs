@@ -77,6 +77,10 @@ struct ClusterRegistry {
     /// Consecutive reconcile passes that returned an empty queue inventory.
     /// Gates the deleted-queue sweep (`note_inventory`).
     empty_inventory_streak: u32,
+    /// Has this cluster's cell already been reported as not sending the
+    /// kv/timer usage fields? One line per cluster per proxy lifetime — see
+    /// `kv_timer_bytes`.
+    warned_missing_kv_usage: bool,
 }
 
 pub struct Registry {
@@ -396,6 +400,44 @@ async fn reconcile_cluster(
         cr.db_partition_floor.insert(name, partitions);
     }
 
+    // PLAN_KV_TIMERS.md §9.8 P2. `queen.kv` and `queen.log_timers` have no
+    // queue, so their bytes cannot ride on any per-queue entry above — and
+    // without them they are the one place in the product where a tenant
+    // occupies disk that no quota can see. The four fields are TOP-LEVEL on
+    // this same response and come from the broker's cached measurement (the
+    // sweeper's five-minute rollup), never from a count run for this poll.
+    {
+        let mut map = known.write().unwrap();
+        let cr = map.entry(target.cluster_id).or_default();
+        match kv_timer_bytes(&body) {
+            Some(extra) => {
+                total_bytes += extra;
+                // A cell that answers with the fields IS a measurement, even
+                // when every queue is gone. Without this a cluster whose only
+                // occupancy is KV would never be evaluated at all: `bytes_found`
+                // is set by the per-queue loop, which such a cluster never
+                // enters. It also fixes a pre-existing corner by construction —
+                // a blocked cluster that deletes ALL its queues used to leave
+                // `bytes_found` false forever and so could never release.
+                bytes_found = true;
+            }
+            None => {
+                if !cr.warned_missing_kv_usage {
+                    cr.warned_missing_kv_usage = true;
+                    // ZERO, LOUDLY — never "measurement not found". `bytes_found`
+                    // stays true on account of the queues, so abstaining here
+                    // would leave an old cell producing a silent UNDER-COUNT of
+                    // the quota forever. A noisy zero is the honest failure.
+                    tracing::warn!(
+                        cluster = %target.cluster_id, cell = %target.base_url,
+                        "registry reconciler: cell sends no kv/timer usage fields; \
+                         counting them as ZERO toward the storage quota (PLAN_KV_TIMERS §9.8 P2)"
+                    );
+                }
+            }
+        }
+    }
+
     // Queues that disappeared from the broker's own listing: soft-delete.
     // queen_proxy.queues is a CACHE (ownership is broker-side, PLAN §5), so a
     // false sweep never touches broker data. It isn't free either: the swept
@@ -430,6 +472,30 @@ async fn reconcile_cluster(
                 over.remove(&target.cluster_id);
             }
         }
+    }
+}
+
+/// The KV + timer bytes a cell reports for this tenant, or `None` when the cell
+/// does not report them at all (PLAN_KV_TIMERS.md §9.8 P2).
+///
+/// `None` means "this cell is older than the feature", and the caller turns it
+/// into a zero plus one warning per cluster. It is NOT the same as a cell that
+/// reports zero, which is a real measurement of an empty pair of tables.
+///
+/// Only the two BYTE fields are summed. `kvRows` / `timerRows` are the row-count
+/// quotas of §9.2, which are enforced broker-side against a local delta (§9.3)
+/// and are F8 P3 here — reading them into the storage total would double-count a
+/// tenant against a cap denominated in bytes.
+///
+/// Negative values are ignored rather than subtracted: a byte count is not
+/// allowed to make a cluster's total go DOWN, or a single malformed field turns
+/// into a quota bypass.
+fn kv_timer_bytes(body: &serde_json::Value) -> Option<i64> {
+    let kv = body.get("kvBytes").and_then(|v| v.as_i64());
+    let tm = body.get("timerBytes").and_then(|v| v.as_i64());
+    match (kv, tm) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(0).max(0).saturating_add(b.unwrap_or(0).max(0))),
     }
 }
 
@@ -641,6 +707,78 @@ mod tests {
         assert!(decide_over_storage(false, 1, 0));
         assert!(decide_over_storage(true, 1, 0));
         assert!(!decide_over_storage(true, 0, 0));
+    }
+
+    // ---- PLAN_KV_TIMERS.md §9.8 P2: the bytes with no queue ----
+
+    fn body(json: &str) -> serde_json::Value {
+        serde_json::from_str(json).expect("test body")
+    }
+
+    #[test]
+    fn kv_and_timer_bytes_are_summed_into_the_storage_total() {
+        assert_eq!(
+            kv_timer_bytes(&body(r#"{"queues":[],"kvBytes":700,"timerBytes":300}"#)),
+            Some(1_000)
+        );
+        // A real cell with the feature switched off reports a real zero.
+        assert_eq!(
+            kv_timer_bytes(&body(r#"{"queues":[],"kvRows":0,"kvBytes":0,"timerRows":0,"timerBytes":0}"#)),
+            Some(0)
+        );
+    }
+
+    /// The distinction the whole design of this field rests on: a cell that
+    /// cannot answer is NOT a cell that answers zero. Both count as zero
+    /// bytes, but only the first one warns — and `None` is what tells the
+    /// caller to warn.
+    #[test]
+    fn a_cell_that_predates_the_feature_is_none_not_zero() {
+        assert_eq!(kv_timer_bytes(&body(r#"{"queues":[{"name":"orders"}]}"#)), None);
+        // Half an answer is still an answer: the missing half is zero.
+        assert_eq!(kv_timer_bytes(&body(r#"{"kvBytes":42}"#)), Some(42));
+        assert_eq!(kv_timer_bytes(&body(r#"{"timerBytes":42}"#)), Some(42));
+        // A non-numeric field is not a number.
+        assert_eq!(kv_timer_bytes(&body(r#"{"kvBytes":"42","timerBytes":null}"#)), None);
+    }
+
+    /// A byte count must never make the total smaller — that would be a quota
+    /// bypass hidden in one malformed field.
+    #[test]
+    fn negative_usage_never_credits_the_tenant() {
+        assert_eq!(kv_timer_bytes(&body(r#"{"kvBytes":-5000,"timerBytes":10}"#)), Some(10));
+        assert_eq!(
+            kv_timer_bytes(&body(&format!(r#"{{"kvBytes":{max},"timerBytes":{max}}}"#, max = i64::MAX))),
+            Some(i64::MAX),
+            "saturating, not wrapping: two huge counts must not become a small one"
+        );
+    }
+
+    /// The reason this feeds the SAME `total_bytes` rather than a quota of its
+    /// own: the gate it has to reach already exists and already has hysteresis.
+    #[test]
+    fn kv_bytes_alone_can_block_a_cluster_with_no_queues() {
+        let extra = kv_timer_bytes(&body(r#"{"queues":[],"kvBytes":1500,"timerBytes":0}"#))
+            .expect("measured");
+        assert!(decide_over_storage(false, extra, 1_000));
+    }
+
+    /// A byte-for-byte capture of what the broker actually answers on
+    /// `GET /api/v1/resources/queues` after the P2 change (queen 1.0.2, both
+    /// feature flags OFF, one tenant measured). Field NAMES are the contract
+    /// between two repositories' worth of code and nothing else checks them:
+    /// a rename on either side is a silent under-count, which is precisely the
+    /// failure §9.8 P2 exists to prevent.
+    #[test]
+    fn the_real_broker_body_parses() {
+        let captured =
+            r#"{"kvBytes":987654321,"kvRows":12345,"queues":[],"timerBytes":4096,"timerRows":42}"#;
+        assert_eq!(kv_timer_bytes(&body(captured)), Some(987_654_321 + 4_096));
+
+        // Same route, a tenant the rollup has never seen: a real zero, not an
+        // absence — the fields are there.
+        let never_measured = r#"{"kvBytes":0,"kvRows":0,"queues":[],"timerBytes":0,"timerRows":0}"#;
+        assert_eq!(kv_timer_bytes(&body(never_measured)), Some(0));
     }
 
     // ---- empty-inventory sweep guard ----

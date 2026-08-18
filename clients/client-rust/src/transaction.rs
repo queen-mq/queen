@@ -4,9 +4,11 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
+use queen_protocol::kv::KvOperation;
+use queen_protocol::timers::TimerOperation;
 use queen_protocol::{
-    AckStatus, Message, TransactionRequest, TransactionResponse, TxnAckOperation, TxnOperation,
-    TxnPushItem,
+    AckStatus, Expiry, Message, TransactionRequest, TransactionResponse, TxnAckOperation,
+    TxnOperation, TxnPushItem,
 };
 
 use crate::error::{Error, Result};
@@ -24,10 +26,45 @@ use crate::uuid;
 /// `requiredLeases`, so a lease that expired while the handler was running
 /// rolls the whole thing back instead of pushing stage two for a message
 /// somebody else has already re-claimed.
+///
+/// # KV and timers ride along
+///
+/// [`TransactionBuilder::kv`] and [`TransactionBuilder::timer`] put state
+/// writes and scheduled deliveries **in the same PostgreSQL transaction** as
+/// the ack and the push. That is what the KV surface is for: an idempotency
+/// marker written outside the transaction that acks the message it guards
+/// protects nothing, because the two can come apart.
+///
+/// The gate reads best as one sentence: *claim the work, do it, hand it on —
+/// all of it or none of it.*
+///
+/// ```no_run
+/// # use queen_mq::{Expiry, Message, Queen};
+/// # async fn example(queen: &Queen, msg: &Message) -> queen_mq::Result<()> {
+/// let resp = queen
+///     .transaction()
+///     .ack(msg)
+///     .push("invoices", serde_json::json!({ "order": 9137 }))?
+///     // If this marker is already there, somebody handled this delivery and
+///     // the whole bundle rolls back — the invoice is not pushed twice.
+///     .kv_put_if_absent("orders", "idem:9137", serde_json::json!(true), Expiry::seconds(86_400))?
+///     .commit()
+///     .await?;
+///
+/// if let Some(lost) = resp.lost_precondition() {
+///     // Expected, not exceptional: this delivery was a redelivery.
+///     let _ = lost.value;
+///     return Ok(());
+/// }
+/// # Ok(())
+/// # }
+/// ```
 pub struct TransactionBuilder {
     inner: Arc<Inner>,
     operations: Vec<TxnOperation>,
     leases: Vec<String>,
+    kv: Vec<KvOperation>,
+    timers: Vec<TimerOperation>,
 }
 
 impl TransactionBuilder {
@@ -36,6 +73,8 @@ impl TransactionBuilder {
             inner,
             operations: Vec::new(),
             leases: Vec::new(),
+            kv: Vec::new(),
+            timers: Vec::new(),
         }
     }
 
@@ -149,28 +188,143 @@ impl TransactionBuilder {
         Ok(self)
     }
 
-    /// How many operations are staged.
+    // ------------------------------------------------------- kv riders
+
+    /// Stage a KV operation, built with [`crate::kv`] or by hand.
+    ///
+    /// `getPrefix` is refused by the broker here — its cost is not bounded by
+    /// the caller, and this transaction holds the outermost lock space of the
+    /// product. `get` and `getMany` are allowed, because the caller fixes what
+    /// they cost.
+    pub fn kv(mut self, op: KvOperation) -> Self {
+        self.kv.push(op);
+        self
+    }
+
+    /// Stage a `putIfAbsent` that **rolls the bundle back** when the key is
+    /// already there.
+    ///
+    /// This is the gate, and it is the reason the riders exist. Its failure is
+    /// not an error: [`TransactionResponse::lost_precondition`] reports it on a
+    /// successful `commit()` call, because a redelivery meeting its own marker
+    /// is the system working.
+    pub fn kv_put_if_absent(
+        self,
+        ns: &str,
+        key: &str,
+        value: serde_json::Value,
+        expiry: Expiry,
+    ) -> Result<Self> {
+        let op = KvOperation::put_if_absent(ns, key, value, expiry)
+            .map_err(Error::Invalid)?
+            .required();
+        Ok(self.kv(op))
+    }
+
+    /// Stage an unconditional write of state alongside the ack.
+    pub fn kv_put(
+        self,
+        ns: &str,
+        key: &str,
+        value: serde_json::Value,
+        expiry: Expiry,
+    ) -> Result<Self> {
+        let op = KvOperation::put(ns, key, value, expiry).map_err(Error::Invalid)?;
+        Ok(self.kv(op))
+    }
+
+    /// Stage a delete alongside the ack.
+    pub fn kv_delete(self, ns: &str, key: &str) -> Self {
+        self.kv(KvOperation::delete(ns, key))
+    }
+
+    // ---------------------------------------------------- timer riders
+
+    /// Stage a timer operation, built with [`crate::timers`] or by hand.
+    pub fn timer(mut self, op: TimerOperation) -> Self {
+        self.timers.push(op);
+        self
+    }
+
+    /// Schedule a delivery in the same transaction as the ack.
+    pub fn schedule(
+        self,
+        queue: &str,
+        timer_key: &str,
+        delay: std::time::Duration,
+        payload: impl Into<Vec<u8>>,
+    ) -> Self {
+        let payload = payload.into();
+        self.timer(TimerOperation::schedule(
+            queue,
+            timer_key,
+            delay.as_millis().min(i64::MAX as u128) as i64,
+            uuid::uuidv7(),
+            &payload,
+        ))
+    }
+
+    /// Cancel a timer in the same transaction as the ack.
+    ///
+    /// A cancel sent this way inherits the transaction's authorization: on a
+    /// cluster over quota the whole bundle is refused. When a cancel must land
+    /// regardless, [`crate::timers::Timers::cancel`] has a route that is never
+    /// blocked.
+    pub fn cancel_timer(self, queue: &str, timer_key: &str) -> Self {
+        self.timer(TimerOperation::cancel(queue, timer_key))
+    }
+
+    /// How many operations are staged. Riders are not operations and are not
+    /// counted here — they occupy their own arrays, and their results sit after
+    /// the operations' in the response.
     pub fn len(&self) -> usize {
         self.operations.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.operations.is_empty()
+        self.operations.is_empty() && self.kv.is_empty() && self.timers.is_empty()
     }
 
     /// Send it.
     ///
-    /// A rolled-back transaction comes back as HTTP 200 with `success: false`;
-    /// this surfaces it as an error, since a caller who ignored it would
-    /// believe a handoff happened that did not.
+    /// A rolled-back transaction comes back as HTTP 200 with `success: false`,
+    /// and this surfaces it as an error — a caller who ignored it would believe
+    /// a handoff happened that did not.
+    ///
+    /// # With one exception, and it is the reason the riders exist
+    ///
+    /// A rollback whose reason is `kv_precondition` **returns** instead of
+    /// raising. It is not a failure: it is the answer to "has this work already
+    /// been done?", it is the expected outcome of every legitimate redelivery,
+    /// and raising would put the most frequent verdict of the feature inside
+    /// the caller's error handling and retry policy. Read it with
+    /// [`TransactionResponse::lost_precondition`], which is `None` on a commit
+    /// and on every other kind of rollback:
+    ///
+    /// ```no_run
+    /// # async fn example(tx: queen_mq::TransactionBuilder) -> queen_mq::Result<()> {
+    /// let resp = tx.commit().await?;
+    /// match resp.lost_precondition() {
+    ///     Some(lost) => { /* somebody already did it; `lost.value` is theirs */ }
+    ///     None => { /* committed */ }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// So `commit().await?` alone is no longer proof that the bundle landed.
+    /// `resp.success` is.
     pub async fn commit(self) -> Result<TransactionResponse> {
-        if self.operations.is_empty() {
+        if self.is_empty() {
             return Err(Error::Invalid(
                 "a transaction needs at least one operation".into(),
             ));
         }
 
-        let req = TransactionRequest::new(self.operations).with_required_leases(self.leases);
+        let req = TransactionRequest::new(self.operations)
+            .with_required_leases(self.leases)
+            .with_kv(self.kv)
+            .with_timers(self.timers);
         let resp: Option<TransactionResponse> = self
             .inner
             .http
@@ -179,7 +333,7 @@ impl TransactionBuilder {
         let resp =
             resp.ok_or_else(|| Error::Decode("transaction returned an empty body".into()))?;
 
-        if !resp.success {
+        if !resp.success && resp.lost_precondition().is_none() {
             return Err(Error::Invalid(format!(
                 "transaction rolled back: {}",
                 resp.error.as_deref().unwrap_or("no reason given")

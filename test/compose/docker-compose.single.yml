@@ -46,6 +46,49 @@ services:
       QUEEN_POP_FUSION: "${QUEEN_POP_FUSION:-0}"
       DB_POOL_SIZE: "32"          # small test PG — stay well under max_connections
       QUEEN_TENANCY_HEADER: "${QUEEN_TEST_TENANCY:-false}"
+      # There is nothing here to turn kv and timers ON. Both surfaces are part of
+      # the engine, like push and pop, and the two boot flags that used to gate
+      # them are gone (PLAN_KV_TIMERS.md §16 superseded). A broker that answers
+      # 404 on /api/v1/kv or /api/v1/timers is a bug, not a lane running with a
+      # feature off, and every suite below may assume the surfaces exist.
+      # To PAUSE them on a running broker an operator uses the runtime kill
+      # switch (POST /api/v1/system/kv-timers), which is not a boot knob.
+      #
+      # Required by the broker's boot interlock whenever the tenant header is on
+      # — no kv term in it any more: with the header on the tenant is opaque and
+      # validated against nothing, so any caller could address another tenant's
+      # key space BY NAME. The affirmation is truthful here — the runner is the
+      # only client on this network and sends no header, so the default tenant is
+      # the only one in play — and without it the `tenanted` topology would fail
+      # to boot. Harmless on the `single` lane, where the header is off.
+      QUEEN_KV_TRUSTED_PROXY: "1"
+      # §9.4: with QUEEN_TENANCY_HEADER on, QUEEN_KV_REQUIRE_GRANT DERIVES to true,
+      # and then the ABSENCE of a queen.kv_quota row is a 403 `feature_gated`. That
+      # rule is correct for a cloud cell, where granting a tenant is provisioning
+      # the control plane does before the tenant ever calls. It cannot be satisfied
+      # HERE, and the reason is a bring-up order, not a policy: queen.kv_quota is
+      # created by the broker itself at boot (QUEEN_APPLY_SCHEMA=1), so there is no
+      # moment before the listener opens at which anything could have inserted the
+      # row, and a grant written afterwards is a race against the runner's first kv
+      # call. Left derived, every kv test in every SDK suite answers 403 on the
+      # `tenanted` lane -- which is exactly what happened -- and the lane can never
+      # meet the invariant it exists to assert, that its results are IDENTICAL to
+      # `single`. So the rule is turned off for the test stack and not weakened for
+      # the product: the affirmation is true on this network (one runner, one
+      # default tenant, all granted), the derivation itself is covered by
+      # tests_unit/quota_gate.rs, and the 403 is covered by tests_unit/switch_levels.rs
+      # rung 3. Set it to `true` to bring the denial back for a one-off check.
+      QUEEN_KV_REQUIRE_GRANT: "${QUEEN_TEST_KV_REQUIRE_GRANT:-false}"
+      # Timer delivery latency in a TEST stack. A broker whose timer table is
+      # empty backs its sweep off progressively up to
+      # QUEEN_SWEEPER_IDLE_MAX_SLEEP_MS (30 s in production), and what would cut
+      # that short is the local in-process wake, which PLAN_KV_TIMERS.md §7.4
+      # declares and the broker has not implemented yet. So the first timer
+      # scheduled on an otherwise idle broker waits out most of that sleep --
+      # measured at 17 s for one asked to fire in 500 ms. Every suite that
+      # asserts a timer actually arrived would pay it. This is a harness knob,
+      # not a product default: the production ceiling stays where it is.
+      QUEEN_SWEEPER_IDLE_MAX_SLEEP_MS: "1000"
       FILE_BUFFER_DIR: /var/lib/queen/buffers
     tmpfs:
       - /var/lib/queen/buffers

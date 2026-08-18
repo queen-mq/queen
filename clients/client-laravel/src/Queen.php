@@ -15,6 +15,8 @@ class Queen
     private BufferManager $bufferManager;
     private array $config;
     private ?Admin $admin = null;
+    private ?Kv $kv = null;
+    private ?Timers $timers = null;
 
     /**
      * @param string|array $config Single URL string, array of URLs, or config array
@@ -45,6 +47,43 @@ class Queen
             $this->admin = new Admin($this->httpClient);
         }
         return $this->admin;
+    }
+
+    // ===========================
+    // Key/Value API
+    // ===========================
+
+    /**
+     * Transactional key/value state. Present on every broker, like push and
+     * pop: there is nothing to switch on first and nothing to probe for. The
+     * one thing that can take it away is an operator pulling the runtime kill
+     * switch during an incident, which answers 503 `kv_disabled` with a
+     * Retry-After and is a temporary condition, not a configuration.
+     */
+    public function kv(): Kv
+    {
+        if ($this->kv === null) {
+            $this->kv = new Kv($this->httpClient);
+        }
+        return $this->kv;
+    }
+
+    // ===========================
+    // Timers API
+    // ===========================
+
+    /**
+     * Scheduled messages. Always present, like the KV surface. The operator's
+     * runtime kill switch can pause the SCHEDULE half (503 `timers_disabled`);
+     * cancel and the reads are never blocked by it, so a caller can always stop
+     * a timer it has already promised.
+     */
+    public function timers(): Timers
+    {
+        if ($this->timers === null) {
+            $this->timers = new Timers($this->httpClient);
+        }
+        return $this->timers;
     }
 
     // ===========================

@@ -92,14 +92,34 @@ mounted the wrong one" without putting key material into a log shipper.
 ## What kills the boot
 
 The broker prefers to die at startup over serving in a state you did not ask
-for. All four of these exit 1:
+for. All five of these exit 1:
 
 - an unparseable boolean, as above;
 - `JWT_ENABLED=true` with no usable key material for the configured algorithm,
   or an algorithm outside `HS256`, `HS384`, `HS512`, `RS256`, `RS384`, `RS512`,
   `EdDSA`, `auto`;
+- `QUEEN_TENANCY_HEADER=1` with no `QUEEN_KV_TRUSTED_PROXY=1`;
 - a schema apply failure (unless `QUEEN_APPLY_SCHEMA=0`);
 - failure to bind `0.0.0.0:$PORT`.
+
+The third is a safety interlock rather than a validation, and it is keyed on the
+tenancy mode alone. The tenant header is opaque and validated against nothing, so
+the trust boundary is the network in front of the broker. That is tolerable for
+queues, where an ack still has an ownership gate on an id the caller cannot
+guess, and it is not tolerable for key/value state, which has no opaque id at
+all: the only gate is the tenant in the `WHERE` clause, and the tenant comes from
+the header. Setting `QUEEN_KV_TRUSTED_PROXY=1` is the operator asserting that a
+proxy supplies that header and strips the client's. An interlock that defaulted
+to permissive would be no interlock.
+
+The unsafe thing there is not the key/value surface, it is an opaque tenant
+identity that nothing validates; the KV only made it visible, by being the first
+surface addressable purely by name. So the requirement is unconditional: there is
+no flag that switches the KV off to make an unvalidated tenant header safe, and
+there should not be one, because a fleet where the engine is missing on some
+cells is worse than a boot that names the variable to set. An operator who has to
+take the KV down on a running cell wants the runtime kill switch instead, which is
+a different instrument for a different problem. See [KV and timers](/deploy/state).
 
 One important omission from that list: a malformed `QUEEN_ENCRYPTION_KEY` (not
 64 hex characters, or not hex) logs a single warning and **disables
@@ -131,6 +151,7 @@ practice a deployment sets variables from these groups only.
 | Shape the logs | `LOG_LEVEL`, `QUEEN_LOG_JSON`, `QUEEN_LOG_RATES_MS` |
 | Let a privileged role own the DDL | `QUEEN_APPLY_SCHEMA` |
 | Scope queues by tenant behind a proxy | `QUEEN_TENANCY_HEADER`. See [Self-hosting](/deploy/) |
+| Shape the KV and timer surfaces | Nothing turns them on: every broker serves them. The forty-odd `QUEEN_KV_*`, `QUEEN_TIMERS_*` and `QUEEN_SWEEPER*` knobs are ceilings and cadences that should be left alone, and pausing a live surface is a runtime call rather than a variable. See [kv](/reference/http/kv), [timers](/reference/http/timers) and [KV and timers](/deploy/state) |
 
 Two conventions in that list are worth stating explicitly.
 
@@ -180,6 +201,18 @@ environment is the only record of whether it is on.
 Defaults below are the ones the code applies, extracted from `config.rs` at
 build time. Where a variable has an alias, both names read the same setting and
 the newer name wins.
+
+A handful of rows carry a **derivation** rather than a literal, because that is
+what the code applies. `QUEEN_ADMISSION_INIT` and `QUEEN_ADMISSION_MIN` come from
+the pool size; `QUEEN_HOTLIST_RESEED_WINDOW_MS` is rewritten before `load()`
+returns; `QUEEN_KV_POOL_SIZE` is `DB_POOL_SIZE / 10` clamped to 4..32;
+`QUEEN_KV_REQUIRE_GRANT` takes the value of `QUEEN_TENANCY_HEADER`; and
+`QUEEN_TIMERS_MAX_PAYLOAD_BYTES` is the smaller of its own literal and the
+plan's message payload ceiling, since a timer becomes a message and an
+independent ceiling would be a way around the plan's. The extractor reads the
+call site, which for these is an expression rather than a number, so each of them
+is stated here with its derivation instead of published as whatever the
+expression happened to look like.
 
 <Render file="generated/broker-config" />
 

@@ -4,7 +4,7 @@ description: "Every log table with its columns and purpose, and every log-engine
 type: reference
 tier: internals
 sidebar:
-  order: 12
+  order: 15
 sourceOfTruth:
   - server/sql/schema.sql
   - server/sql/procedures/001_log_schema.sql
@@ -18,11 +18,13 @@ sourceOfTruth:
   - server/sql/procedures/013_analytics.sql
   - server/sql/procedures/019_worker_metrics.sql
   - server/sql/procedures/020_log_partition_counters.sql
+  - server/sql/procedures/024_kv.sql
+  - server/sql/procedures/025_log_timers.sql
   - server/src/schema.rs
 ---
 
 Everything here lives in the PostgreSQL schema `queen`, created by `server/sql/schema.sql`. That
-file plus exactly 23 files under `server/sql/procedures/` (`001`–`023`) are embedded in the binary
+file plus exactly 27 files under `server/sql/procedures/` (`001`–`027`) are embedded in the binary
 with `include_str!` and applied at every boot in lexical order under session advisory lock
 `778120010`. All of it is idempotent (`CREATE OR REPLACE`, `IF NOT EXISTS`,
 `ADD COLUMN IF NOT EXISTS`), so re-apply is a no-op, and `QUEEN_APPLY_SCHEMA=0` skips the
@@ -43,9 +45,20 @@ The file map: `001_log_schema` and `002_streams_schema` are the DDL, `003_log_pu
 admin and stats surface, and `012`–`023` (minus `020`) are the shared management plane: configure,
 queue deletion, consumer groups, status, messages, traces, stats readers, metrics, Prometheus.
 `020_log_partition_counters` is a special case: it only attaches triggers, and its position after
-both `001` (the table) and `019` (the trigger functions) is the point of it. The ordering is not
-cosmetic anywhere: SQL-language function bodies resolve tables at creation time, so the DDL files
-must land before every procedure body that names them.
+both `001` (the table) and `019` (the trigger functions) is the point of it. `024`–`027` are the
+[KV](/internals/kv) and [timer](/internals/timers) surfaces, applied on every boot like the rest:
+`024` and `025`
+carry their tables and their request-path procedures, `026` the [sweeper](/internals/sweeper)'s two
+slow phases, and `027` the read-only quota poll every broker runs whether or not it sweeps. The
+ordering is not cosmetic anywhere: SQL-language function bodies resolve tables at creation time, so
+the DDL files must land before every procedure body that names them.
+
+That last rule is why `024` and `025` are last rather than early. `005_log_ack` applies before them and
+calls both of their apply procedures, which works only because the transaction wire's body is
+`plpgsql` and resolves names at run time. In the other direction it is a free mechanical guard:
+nothing applied before `024` can name those tables from a `LANGUAGE sql` body without failing the
+boot, which is what keeps `log_partition_dead_v1` in `006` from ever growing a veto leg on them, and
+with it the per-partition scan it fronts.
 
 <Aside type="note">
 The SQL is `include_str!`-embedded at compile time. Editing a `.sql` file and restarting is not
@@ -347,19 +360,82 @@ on restart, since `CREATE OR REPLACE FUNCTION` rebinds it without touching the t
 
 ## The one global lock order
 
-Every multi-row locker follows it, which is what makes the write paths deadlock-free by
-construction:
+There are **six** lock spaces, not two, and a proof written over a subset of them is not a proof. The
+inventory below is the complete one, read off every `FOR UPDATE`, every `UPDATE` and every advisory
+lock in the engine's procedure files.
 
-1. provisioning inserts, each `ORDER BY` its own unique key;
-2. `queen.log_partitions` rows, ascending by `id`;
-3. `queen.log_consumers` rows, ascending by `(partition_id, consumer_group)`.
+| Space | Granularity | Who takes it |
+| --- | --- | --- |
+| `queen.kv` | one row, `(tenant, namespace, key)` | the transaction wire's KV step, the standalone KV apply, the sweeper's prune (`SKIP LOCKED`) |
+| `queen.log_timers` | one row, `(tenant, queue, timer_key)` | the wire's timer step, the standalone timer apply, the sweeper's claim (`SKIP LOCKED`), the fire |
+| advisory | a hashed key | the streams cycle (blocking), first-contact consumer creation in `log_pop_v1` (try, never blocking) |
+| `queen.queues` | one row, plus the wait on the unique index's transaction id | lazy provisioning, in the push and in the wire |
+| `queen.log_partitions` | one row | push, the wire's pre-lock, multi push, streams sinks, retention, partition cleanup (`SKIP LOCKED`) |
+| `queen.log_consumers` | one row, `(partition_id, group)` | pop (`SKIP LOCKED`), every ack, streams, cleanup by cascade |
 
-Consumer-row locks are only ever taken after all partition-row locks, so the two lock spaces cannot
-form a cross-space cycle. The ack path takes only consumer locks and never a partition lock; the
-per-partition retention steps take exactly one partition lock each, so they cannot deadlock against a
-multi-partition locker regardless of iteration order.
+Leaf tables, which are insert-only or have a single writer, sit below all of them: `log_segments`,
+`log_txns`, `log_dlq`, `retention_history`, `kv_usage`, `kv_quota`.
+
+The declared total order is:
+
+```text
+queen.kv → queen.log_timers → advisory → queen.queues
+         → queen.log_partitions → queen.log_consumers → leaves
+```
+
+And the rule that makes it a proof fits on one line:
+
+> **No actor may ACQUIRE a lock on `queen.kv` or `queen.log_timers` after acquiring a lock on
+> `queen.queues`, `queen.log_partitions` or `queen.log_consumers`.**
+
+**Acquire** is the load-bearing word, and the distinction it draws is what makes the rule falsifiable
+rather than merely severe. Writing again to a row **this same transaction already holds** is not an
+acquisition: it adds no edge to the wait-for graph. The precedent is in the house already, in the
+multi-push pre-lock, which re-locks rows it holds on purpose. Without the distinction the rule reads
+as a ban on the timer fire, whose last step deletes exactly the rows it locked in its first step, and
+the first person to apply it literally rewrites the one procedure that is correct.
+
+Each actor that takes more than one row in a space also takes them in a declared order within that
+space: `(namespace, key)` ascending for `queen.kv` and `(queue, timer_key)` ascending for
+`queen.log_timers`, both with an explicit `COLLATE "C"`; `name` ascending for provisioning inserts;
+`id` ascending for `queen.log_partitions`; `(partition_id, consumer_group)` ascending for
+`queen.log_consumers`.
+
+Those two conditions together are the whole argument, and both are needed: the first orders the
+spaces, the second orders the rows inside a space, which is where the first says nothing. Given both,
+the wait-for graph is acyclic by resource ordering.
+
+Three actors never appear in that graph at all, whatever they visit: the pop, the sweeper's timer
+claim and the sweeper's KV prune all take their rows with `SKIP LOCKED`, so they never wait, and a
+vertex that never waits cannot be an edge.
 
 `log_partition_cleanup_step_v1` is the one maintenance step that holds **many** partition locks at
-once, so it is bound by rule 2 like any other multi-partition writer: it takes them ascending by `id`
-in a single statement, with `SKIP LOCKED` so it steps over a partition a pusher is holding instead of
-queueing in front of the write path.
+once, so it is bound like any other multi-partition writer: it takes them ascending by `id` in a
+single statement, with `SKIP LOCKED` so it steps over a partition a pusher is holding instead of
+queueing in front of the write path. The ack path takes only consumer locks and never a partition
+lock; the per-partition retention steps take exactly one partition lock each.
+
+### The residue, stated honestly
+
+No cycle survives the rule, but two costs do, and both are accepted rather than absent.
+
+A fire holds timer rows while it waits for a partition lock, because `T → P` is the direction the
+order prescribes. If a `cancel` for one of those rows arrives in that window it **waits**. It does not
+fail, it is not lost, and it does not deadlock: the chain ends when the fire commits. The user's
+cancel returns late, and what it returns then depends on whether the fire got there first.
+
+The transaction wire holds a `queen.kv` row from its first step until its own commit, which is the
+outermost space held for the longest time in the system. It can spend that time waiting on a partition
+held by a fusion flush, and the flush never asks for a KV row, so the chain terminates. A chain is not
+a cycle, but the holding time is real and it is the price of putting the KV step first. It is first
+because the common case is a **failed** precondition, and failing there costs one insert and one
+raise, before a single partition lock has been taken, instead of an entire bundle written and thrown
+away.
+
+<Aside type="caution">
+Nothing in the database enforces any of this. The order is held up by the headers of the procedure
+files and by a concurrency test that fails on `40P01` rather than retrying it. That matters because a
+broken order does not announce itself: a deadlock in production surfaces as a retried transaction that
+then succeeds, and the count of `40P01` by SQLSTATE is the only signal that separates "the order is
+broken" from "the cluster is busy".
+</Aside>

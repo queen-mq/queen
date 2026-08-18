@@ -333,6 +333,14 @@ contend at all. The multi-partition lockers order among *themselves*, which is w
 argument actually lives. Phase 4 is the one step that can hold more than one lock, and it is the one
 phase that stays serial.
 
+The [sweeper](/internals/sweeper) is the second reaper in the product and it is built the opposite way
+on both axes, which is worth naming here because the two are easy to reason about as if they were the
+same shape. Retention is interval-driven and elects a leader on `737001`; the sweeper is due-driven and
+takes no advisory lock at all, so it consumes no number and cannot close a cycle through the advisory
+space. Where retention shares work by having one replica do it, the sweeper shares it with
+`FOR UPDATE ... SKIP LOCKED` and has every replica drain in parallel, because an ownership scheme
+orphans the work of a broker that dies and an orphaned timer never fires.
+
 ## What retention does not touch
 
 - **`queen.log_dlq`.** Nothing in the retention cycle purges it. Dead-lettered rows accumulate until
@@ -341,6 +349,9 @@ phase that stays serial.
 - **Partitions that still hold something.** Phase 4 deletes only empty ones, and only after
   `PARTITION_CLEANUP_DAYS` of silence: a partition with segments, dead-letter rows, streams state or a
   live lease is never touched by it.
+- **`queen.kv` and `queen.log_timers`.** Neither table appears anywhere in the retention cycle. A KV
+  key is removed by its own mandatory expiry and a timer row by its own fire or cancel, both of them
+  the work of the [sweeper](/internals/sweeper) rather than of this loop.
 - **Queues.** Removing a queue is an explicit operation, and it is **one call**:
   `queen.delete_queue_v1` (013_analytics) first deletes the queue's `log_txns` and `log_dlq` rows
   explicitly (both tables are foreign-key-less by design, so no cascade can reach them), then

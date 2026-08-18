@@ -85,6 +85,84 @@ macro_rules! broker {
     };
 }
 
+// There is no second fixture for KV and timers, and there is deliberately no
+// `QUEEN_TEST_KVT`.
+//
+// There used to be both: the surfaces were gated at boot by `QUEEN_KV_ENABLED`
+// and `QUEEN_TIMERS_ENABLED`, a cell with them off did not register the routes
+// at all, and `kvt_broker!()` probed for a 404 so the suite could skip. Those
+// flags are gone (Alice, 2026-08-18): kv and timers are part of the engine, like
+// push and pop, and every broker that answers `QUEEN_TEST_URL` has them. So the
+// kv/timer tests take `broker!()` like everything else and simply run.
+//
+// This is not merely one env var fewer. A skipping test asserts nothing while
+// reporting green, and that was tolerable only while a 404 was a legitimate
+// configuration. It no longer is, so a kv call that fails is now a failure —
+// including the runtime kill switch (503 `kv_disabled`), which is an operator
+// having paused a live surface on the cell under test, not a shape of broker the
+// suite is expected to tiptoe around.
+
+/// The prefix every key written by this suite carries, so [`purge_kv`] can
+/// enumerate them with the one read that is allowed to.
+pub const TEST_KEY_PREFIX: &str = "t:";
+
+/// Purge every key of a namespace.
+///
+/// **Mandatory, and not cosmetic.** Without it a `putIfAbsent` test is green on
+/// its first run and red for ever after — the marker it was checking is still
+/// there — and an `incr` test accumulates across runs until it crosses whatever
+/// ceiling it was asserting. Best-effort throughout: the namespace may not
+/// exist, the surface may not exist, and neither may mask the test's own result.
+///
+/// There is deliberately no `deletePrefix` on this product (the TTL is
+/// mandatory, so the sweeper does that work), which is why this enumerates.
+///
+/// `prefix` is not optional and cannot be empty: a namespace is not a table to
+/// enumerate, and the broker refuses an empty prefix rather than scanning. Every
+/// test in this suite therefore names its keys under [`TEST_KEY_PREFIX`].
+pub async fn purge_kv(queen: &Queen, ns: &str, prefix: &str) {
+    let mut after: Option<String> = None;
+    for _ in 0..50 {
+        let mut q = queen.kv().get_prefix(ns, prefix).limit(1000).keys_only();
+        if let Some(a) = &after {
+            q = q.after(a);
+        }
+        let page = match q.send().await {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        if page.rows().is_empty() {
+            return;
+        }
+        for row in page.rows() {
+            let _ = queen.kv().delete(ns, &row.key).send().await;
+        }
+        match page.next_after.clone() {
+            Some(cursor) if page.truncated() => after = Some(cursor),
+            _ => return,
+        }
+    }
+}
+
+/// Cancel every pending timer of a queue, so a rerun does not meet its own.
+pub async fn purge_timers(queen: &Queen, queue: &str) {
+    for _ in 0..50 {
+        let page = match queen.timers().list(queue).limit(1000).send().await {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        if page.rows.is_empty() {
+            return;
+        }
+        for row in &page.rows {
+            let _ = queen.timers().cancel(queue, &row.timer_key).await;
+        }
+        if !page.truncated {
+            return;
+        }
+    }
+}
+
 /// A queue name no other test (or run) will collide with.
 pub fn unique(prefix: &str) -> String {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);

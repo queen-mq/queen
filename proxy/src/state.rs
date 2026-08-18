@@ -34,10 +34,15 @@ pub struct EffectiveLimits {
     pub max_retention_seconds: Option<i64>,
 }
 
+/// Plan feature flags, read out of `plans.features` (open JSONB). The rule is
+/// "missing key = false" for every one of them, which is what makes a cell that
+/// has never been told about a feature deny it (PLAN_KV_TIMERS.md §9.8 P1).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Features {
     pub streams: bool,
     pub traces: bool,
+    pub kv: bool,
+    pub timers: bool,
 }
 
 /// Everything the data plane needs to know about a cluster, cached hot.

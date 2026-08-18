@@ -34,6 +34,14 @@
 -- (push, whose log_push_one_v1 is the single allocator code path the
 -- transaction wire reuses) / 004_log_pop (pop, which creates the leases acked
 -- here).
+--
+-- log_transaction_wire_v1 also carries the optional "kv" and "timers" arrays of
+-- PLAN_KV_TIMERS, calling queen.kv_apply_v1 (024_kv.sql) and
+-- queen.log_timers_apply_v1 (025_log_timers.sql). BOTH FILES APPLY *AFTER* THIS
+-- ONE, and that is fine only because this body is plpgsql: the callees resolve
+-- at RUNTIME, not at CREATE time. It is also a free mechanical guard in the
+-- other direction — nothing applied before 024/025 can reference those tables
+-- from a LANGUAGE sql body without killing the boot (§1.2).
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------
@@ -859,7 +867,11 @@ $$;
 --                 "verified"?}, ...],
 --     "acks":   [  {"partitionId","group","worker","uptoOff","ok","count"}
 --                | {"partitionId","group","worker",
---                   "acks":[{"h":"<hex32>","status":...}, ...]} , ...]
+--                   "acks":[{"h":"<hex32>","status":...}, ...]} , ...],
+--     "kv":     [ <kv op>, ... ],        -- optional, PLAN_KV_TIMERS §5/§6.1
+--     "timers": [ <timer op>, ... ],     -- optional, PLAN_KV_TIMERS §4/§6.2
+--     "_tenant": "<uuid>",               -- broker-injected, never client-spellable
+--     "_producerSub": "<subject>"        -- broker-injected, timers only
 --   }
 --
 --   * hashesHex: 32 hex chars per frame (xxh3_128 big-endian, §3), frame
@@ -870,6 +882,9 @@ $$;
 --     the pop was answered by another broker process — no LeaseRegistry);
 --     otherwise the positional form addressed by uptoOff. Hash elements also
 --     tolerate the legacy {"ok":bool} in place of "status" (seg parity).
+--   * "kv" and "timers" are handed WHOLE to queen.kv_apply_v1 /
+--     queen.log_timers_apply_v1; this file neither parses nor validates an
+--     element of either (one owner per contract — see "The two new arrays").
 --
 -- All-or-nothing by construction: one call = one transaction, every failure
 -- path RAISEs, so a duplicate push or a rejected ack rolls back every other
@@ -880,21 +895,210 @@ $$;
 --     callers, and taking every OTHER push of the batch down with it (§1).
 --   * ack soft failures (ok:false — invalid or expired lease, position beyond
 --     leased batch, ...) escalate to an exception likewise.
+--   * a KV precondition marked "required":true raises 23514 out of
+--     kv_apply_v1 and rolls the bundle back the same way. A precondition NOT
+--     marked required is a VERDICT (applied:false) and rolls back nothing:
+--     that asymmetry is the whole of PLAN_KV_TIMERS §6.1 point 5.
 --
--- Deadlock discipline (the one total order every multi-partition locker uses):
---   1. set-based provisioning (only when something is missing — no per-call
---      ShareLock churn on queen.queues),
---   2. ONE set-based pre-lock over the bundle's push partitions in ascending
---      log_partitions.id order — shared with log_push_multi_v1 (003_log_push)
---      and retention (006_log_maintenance),
---   3. pushes (partition row locks already held; pid/window pre-resolved and
---      passed down so log_push_one_v1 never re-resolves — the nested-lookup
---      CPU regression the seg v2 rework eliminated),
---   4. acks in ascending (partition_id, group) order — each ack locks its
---      queen.log_consumers row until commit, so concurrent transactions acking
---      overlapping sets take those locks in one total order. Consumer-row
---      locks are only ever taken AFTER all partition-row locks, so the two
---      lock spaces can never form a cross-space cycle.
+-- ----------------------------------------------------------------------------
+-- DEADLOCK DISCIPLINE — SIX lock spaces, one total order (PLAN_KV_TIMERS §2)
+-- ----------------------------------------------------------------------------
+-- This header used to document two spaces. It documents six, because the wire
+-- now touches queen.kv and queen.log_timers, and a proof over four spaces is a
+-- fiction when six exist. The declared total order for the WHOLE product:
+--
+--   queen.kv -> queen.log_timers -> ADV -> queen.queues
+--            -> queen.log_partitions -> queen.log_consumers -> leaves
+--
+-- (ADV = xact advisory locks: the streams cycle takes one BLOCKING, pop takes
+-- one with try_ and therefore never waits. Leaves are insert-only or
+-- single-writer: log_segments, log_txns, log_dlq, retention_history, kv_usage,
+-- kv_quota.)
+--
+-- THE RULE, and the one word that makes it falsifiable:
+--
+--   *** No actor may ACQUIRE a lock on queen.kv or queen.log_timers after it
+--   *** has acquired a lock on queen.queues, queen.log_partitions or
+--   *** queen.log_consumers.
+--
+-- ACQUIRE is load-bearing, and is NOT the same as RE-TOUCHING. Writing again to
+-- a row THIS transaction already holds is a no-op on the wait-for graph — the
+-- precedent is explicit in-house, in the multi pre-lock note of
+-- 003_log_push.sql:132-134. Without that distinction the rule is unfalsifiable,
+-- and the first person to apply it literally rewrites log_timers_fire_v1, whose
+-- final step DELETEs timer rows it locked in its own step 2 (§2.4 C1/C2).
+--
+-- Two corollaries that belong to whoever edits next, not to this call:
+--   * Anyone adding a BLOCKING advisory lock to a path that touches kv or
+--     timers must take the advisory FIRST, or not at all. The sweeper takes
+--     none in v1 precisely so this cannot be got wrong by accident.
+--   * The fire NEVER takes a lock that WAITS in the queen.log_timers space: its
+--     claim verification is FOR UPDATE SKIP LOCKED. That is what keeps it out
+--     of every cycle, and it is why the "pre-lock before the DELETE" idea was
+--     cancelled rather than implemented (§2.4 C2).
+--
+-- Actor-by-actor, the sequences that exist today. Every one of them reads left
+-- to right on the SAME total order, so the wait-for graph is acyclic by the
+-- resource-ordering theorem; the actors that never wait cannot even be an edge:
+--
+--   this wire         KV(0) -> T(0b) -> Q -> P -> C          waits everywhere
+--   push / push multi / fusion flush     Q -> P              waits
+--   ack, ack-registry flush              C                   waits, singleton
+--   pop and variants  (ADV try) -> C SKIP LOCKED             NEVER waits
+--   sweeper claim     T SKIP LOCKED                          NEVER waits
+--   sweeper fire      T(verify, SKIP LOCKED) -> Q -> P
+--                     -> T(delete of rows already held)      waits on Q and P, never on T
+--   sweeper KV prune  KV SKIP LOCKED                         NEVER waits
+--   retention         P, one row                             waits, singleton
+--   partition cleanup P (many, ascending id, SKIP LOCKED) -> C by CASCADE
+--   streams cycle     ADV -> Q -> P -> C                     the only BLOCKING advisory;
+--                                                            touches neither KV nor T (§18.9)
+--   kv standalone     KV                                     waits, singleton
+--   timers standalone T                                      waits, singleton, and NEVER
+--                                                            touches queen.queues (§2.4 C6)
+--   DLQ from a timer  T -> Q -> P -> leaf                    never touches C
+--
+-- Intra-space order, needed wherever an actor takes more than one row of the
+-- same space (the ordering rule alone says nothing about that case):
+--   queen.kv              ascending (namespace, key) COLLATE "C"  — inside kv_apply_v1
+--   queen.log_timers      ascending (queue, timer_key) COLLATE "C" — inside timers_apply_v1
+--   queen.queues          ascending name (ORDER BY 2, below)
+--   queen.log_partitions  ascending log_partitions.id (the pre-lock, below)
+--   queen.log_consumers   ascending (partition_id, group) (the ack loop, below)
+-- The collation is pinned EXPLICITLY on the two new spaces because a JSONB
+-- extraction does NOT inherit the column's collation, and two pods with
+-- different lc_collate would otherwise order the same two keys oppositely and
+-- deadlock on some installations only (§2.4 C3). This file must therefore NEVER
+-- pre-sort those arrays: the order is a property of the callee, in one place.
+--
+-- The case that looks like a cycle and is not: this wire holds a queen.kv row
+-- while waiting for a partition held by a fusion flush. The flush never asks
+-- for KV, so the chain wire -> fusion TERMINATES when the flush commits. A
+-- chain is not a cycle. It IS the declared cost of §18.2, and the mitigation is
+-- documentary: gate keys are per message, never shared.
+--
+-- The case that looks wrong under multi-tenancy and is not: the sweeper orders
+-- (tenant_id, queue, timer_key) because its batch is multi-tenant, while this
+-- wire orders (queue, timer_key) at a fixed tenant. Restricted to the rows the
+-- two can actually contend for — which by definition share a tenant_id — the
+-- two orders coincide. Written down because it is exactly the kind of asymmetry
+-- the next reader "fixes".
+--
+-- Execution order inside this body, and why step 0 is FIRST:
+--   0.  KV ops (queen.kv row locks) — see below,
+--   0b. timer ops (queen.log_timers row locks) — see below,
+--   1.  set-based provisioning (only when something is missing — no per-call
+--       ShareLock churn on queen.queues),
+--   2.  ONE set-based pre-lock over the bundle's push partitions in ascending
+--       log_partitions.id order — shared with log_push_multi_v1 (003_log_push)
+--       and retention (006_log_maintenance),
+--   3.  pushes (partition row locks already held; pid/window pre-resolved and
+--       passed down so log_push_one_v1 never re-resolves — the nested-lookup
+--       CPU regression the seg v2 rework eliminated),
+--   4.  acks in ascending (partition_id, group) order — each ack locks its
+--       queen.log_consumers row until commit, so concurrent transactions acking
+--       overlapping sets take those locks in one total order. Consumer-row
+--       locks are only ever taken AFTER all partition-row locks, so the two
+--       lock spaces can never form a cross-space cycle.
+--
+-- Steps 0 and 0b sit immediately AFTER the ack tenancy guard and BEFORE the
+-- provisioning. That is not tuning. The guard is a pure read (LEFT JOINs, no
+-- FOR UPDATE), so it takes no row lock in any ordered space and cannot invert
+-- anything; the provisioning is the first ACQUISITION, so anything that must
+-- precede queen.queues has to be above it.
+--
+-- Against ourselves: step 0 is the WORST position for hold time. A queen.kv row
+-- locked here stays locked through provisioning, the partition pre-lock, every
+-- push with its blob and every ack, until fsync. Two reasons it is right
+-- anyway, and one reason the attractive middle way is unsound:
+--   * failure is the COMMON path. An idempotency marker loses on every
+--     legitimate redelivery; at step 0 that costs one INSERT ... ON CONFLICT and
+--     a RAISE before a single partition lock is taken. At the bottom it costs
+--     the whole bundle written and thrown away — WAL, allocator, blobs — which
+--     would make the product's number-one use case its most expensive.
+--   * timers have no choice: the fire is T -> P, so timers at the bottom would
+--     deadlock against the fire immediately. And kv and timers on opposite ends
+--     would be two rules instead of one; the next person applies one of them.
+--   * THE MIDDLE WAY IS UNSOUND, and this is the part that matters. "Ops with a
+--     precondition at step 0, unconditional ones at the bottom" builds a cycle:
+--     T1 takes kv:a at step 0, takes P at step 2, asks for kv:b at step 5; T2
+--     takes kv:b at step 0 and asks for P at step 2, held by T1. Both wait.
+--     The split introduces P -> KV and C -> KV arcs INSIDE ONE protocol, and
+--     each fragment looks correct on its own in review. ALL AT STEP 0 OR ALL AT
+--     THE BOTTOM, NEVER SPLIT.
+--
+-- ----------------------------------------------------------------------------
+-- The two new arrays: byte-identity when they are absent
+-- ----------------------------------------------------------------------------
+-- THE MECHANICAL RULE: the kv and timers work lives in SEPARATE STATEMENTS
+-- BEHIND AN `IF`, and NEVER enters an existing statement. The temptation to
+-- refuse explicitly is folding the counts into the provisioning query, or
+-- UNIONing a FROM jsonb_array_elements(COALESCE(p->'kv','[]')) into the push
+-- scan: both add a Function Scan and a nested loop to the plan of a statement
+-- that runs ALWAYS, including when the array is empty. A bundle without the two
+-- arrays must behave byte-identically to the version before them.
+--
+-- What a bundle without them pays, in full: two binary lookups on the key index
+-- of a JSONB object already detoasted by the first p->>'_tenant', two
+-- jsonb_typeof calls, four IFs not taken (two type guards short-circuited on a
+-- NULL, two step gates), and one now(). Zero statements added,
+-- zero plans prepared (plpgsql plans LAZILY on first execution, so in a broker
+-- that never uses KV the statements inside kv_apply_v1 are never planned at
+-- all), zero nodes added to existing plans, and zero locks added — queen.kv
+-- appears in no executed plan, so not even its ACCESS SHARE is taken.
+--
+-- jsonb_typeof and NOT jsonb_array_length(COALESCE(...)) is not pedantry:
+-- jsonb_array_length RAISES on a non-array, so "kv": null — which is what every
+-- serializer emits for an absent optional field — would break a transaction
+-- that works today. But `null` is the ONLY non-array tolerated: an object, a
+-- string or a number in that slot raises 22023 rather than being skipped,
+-- because skipping it commits the pushes and silently drops the kv/timer work
+-- that was supposed to be atomic with them.
+--
+-- One instant per call: v_now := now() is the TRANSACTION timestamp, already in
+-- memory, no syscall. It is NOT clock_timestamp(), which is the push's and must
+-- not be confused with it. Both callees receive it, so a bundle cannot see a
+-- key alive in one op and expired in the next.
+--
+-- getPrefix is FORBIDDEN here, and the enforcement is the fourth argument:
+-- kv_apply_v1(..., p_in_wire => TRUE) raises 22023 for it, and drops the per-
+-- call ceilings from 256/4096 to 64/256. The check is NOT duplicated in this
+-- file — two copies of a limit are two limits that diverge. The boundary is
+-- COST, not operation type: get and getMany are allowed because the caller
+-- fixes their cost up front, while an unbounded prefix scan inside the
+-- transaction that holds the OUTERMOST lock space is not something the caller
+-- has bounded (§5.5).
+--
+-- Timers here never write queen.queues, and that is a correctness requirement,
+-- not an omission (§2.4 C6): a second statement writing queen.queues in this
+-- same transaction, with a DIFFERENT row set from the push provisioning below,
+-- would let two overlapping bundles wait on each other on the (tenant_id, name)
+-- unique index xid — and the ORDER BY 2 of each statement does not prevent it,
+-- because they are DIFFERENT statements. No destination-queue validation at
+-- schedule time; the queue is born at fire time.
+--
+-- DO NOT WRAP EITHER CALL IN BEGIN/EXCEPTION. A lost "required" precondition
+-- arrives as 23514 with the verdict (index, op, ns, key, reason, version, value)
+-- in the error DETAIL, and the broker reads db_error.detail() — it never string-
+-- matches the message, which is deliberately opaque because namespace and key
+-- names would otherwise reach shared logs. An EXCEPTION block here would
+-- swallow the DETAIL and force exactly the string matching this codebase bans.
+-- The broker translates that 23514 into HTTP 200 with
+-- {"ok":false,"reason":"kv_precondition",...} (§8.3): the SQL transaction really
+-- does abort, but a legitimate redelivery must not pollute error metrics or
+-- trip a retry policy.
+--
+-- Index alignment: each result array is aligned to ITS OWN input array. Mapping
+-- those two index spaces onto the FLAT results[] the clients read — and the
+-- failedIndex of a precondition error, which must be flat — is the broker's
+-- job (§8.2), and the "every flat ordinal has exactly one result" guard has to
+-- be re-expressed there; it is not expressible across two index spaces here.
+--
+-- Version skew, declared: a new broker against an old database booted with
+-- QUEEN_APPLY_SCHEMA=0 resolves queen.kv_apply_v1 at RUNTIME (plpgsql), so a
+-- bundle WITHOUT kv still works and one WITH kv fails 42883 undefined_function
+-- — class 42, configuration, permanent, not retried. That is the right
+-- behaviour and it is the only price of the always-virgin model here.
 --
 -- The old mixed-engine guard (storage <> 'segments') is gone with the storage
 -- column itself: the rows engine no longer exists, every queue is log-backed,
@@ -923,6 +1127,24 @@ DECLARE
     -- the (JSONB) signature is unchanged (the broker binds by signature).
     -- Absent ⇒ default tenant (byte-identical to pre-Track-B).
     v_tenant UUID := COALESCE((p->>'_tenant')::uuid, '00000000-0000-0000-0000-000000000001');
+    -- PLAN_KV_TIMERS §6.3. The signature does NOT change: two optional arrays on
+    -- the same JSONB payload that already carries `_tenant`, which is exactly the
+    -- mechanism that makes adding them free for the Rust wrapper.
+    v_now      TIMESTAMPTZ := now();   -- ONE instant for the whole call
+    v_kv       JSONB := p->'kv';
+    v_timers   JSONB := p->'timers';
+    -- jsonb_typeof, NOT jsonb_array_length(COALESCE(...)): the latter RAISES on a
+    -- non-array, so a serializer emitting "kv": null for an absent optional field
+    -- would break a bundle that works today.
+    -- (DECLARE initializers evaluate in order, so v_kv/v_timers are in scope
+    -- here: the two binary lookups above are the only ones performed.)
+    v_kv_n     INT := CASE WHEN jsonb_typeof(v_kv) = 'array'
+                           THEN jsonb_array_length(v_kv) ELSE 0 END;
+    v_timer_n  INT := CASE WHEN jsonb_typeof(v_timers) = 'array'
+                           THEN jsonb_array_length(v_timers) ELSE 0 END;
+    v_kv_res     JSONB;
+    v_timer_res  JSONB;
+    v_ret        JSONB;
 BEGIN
     -- (The old storage <> 'segments' mixed-engine guards are deleted: the
     -- storage column is gone with the rows engine.)
@@ -938,6 +1160,70 @@ BEGIN
     LIMIT 1;
     IF v_bad IS NOT NULL THEN
         RAISE EXCEPTION 'QTXN ack references partition % not owned by this tenant', v_bad;
+    END IF;
+
+    -- Absent and JSON null both mean "no work", and must: null is what every
+    -- serializer emits for an absent optional field. ANY OTHER non-array type is
+    -- a client bug, and it RAISES instead of being skipped — the alternative is a
+    -- bundle that commits its pushes while silently dropping the kv/timer work
+    -- that was supposed to be atomic with them, which is the same silent-drop
+    -- class the index-alignment guards fail loudly on. Two scalar tests,
+    -- short-circuited on a NULL when the key is absent; no statement, no plan.
+    IF v_kv IS NOT NULL AND jsonb_typeof(v_kv) NOT IN ('array', 'null') THEN
+        RAISE EXCEPTION 'QTXN wire "kv" must be a JSON array, got %', jsonb_typeof(v_kv)
+            USING ERRCODE = '22023';
+    END IF;
+    IF v_timers IS NOT NULL AND jsonb_typeof(v_timers) NOT IN ('array', 'null') THEN
+        RAISE EXCEPTION 'QTXN wire "timers" must be a JSON array, got %', jsonb_typeof(v_timers)
+            USING ERRCODE = '22023';
+    END IF;
+
+    -- --------------------------------------------------------------- step 0
+    -- KV (PLAN_KV_TIMERS §5, §6.1). FIRST acquisition of the call, and the
+    -- outermost space of the declared total order. Separate statement behind an
+    -- IF; it is never folded into anything below (see the header).
+    --
+    -- p_in_wire => TRUE is the enforcement, not a hint: getPrefix raises 22023
+    -- from inside kv_apply_v1, and the per-call ceilings drop to 64 ops / 256
+    -- keys. Not duplicated here — one limit, one owner.
+    --
+    -- The array is handed over WHOLE and UNSORTED. Ordering by
+    -- (namespace, key) COLLATE "C" is kv_apply_v1's job and must stay in one
+    -- place: if this file sorted "to help", one differing libc between two pods
+    -- would reopen the cycle §2.4 C3 closes.
+    --
+    -- No BEGIN/EXCEPTION: a lost "required" precondition must reach the broker
+    -- as 23514 with its DETAIL intact (header, and §8.3).
+    IF v_kv_n > 0 THEN
+        v_kv_res := queen.kv_apply_v1(v_kv, v_tenant, v_now, TRUE);
+    END IF;
+
+    -- -------------------------------------------------------------- step 0b
+    -- Timers (PLAN_KV_TIMERS §4, §6.2). Second space of the total order, still
+    -- above queen.queues, so the sweeper's fire (T -> Q -> P) and this wire
+    -- (KV -> T -> Q -> P -> C) read on the same order.
+    --
+    -- p_producer_sub is a SEPARATE ARGUMENT and comes from the request, never
+    -- from an op — the same discipline auth.rs:31-36 states for push (one
+    -- source; a client-supplied value is never honoured). Without it, a timer
+    -- would be the only way in the whole product to forge the provenance of a
+    -- frame, and producer_sub is the one non-repudiable field a frame carries.
+    -- It rides the payload as `_producerSub` for the same reason `_tenant` does:
+    -- the (JSONB) signature must not change. NULL when the request had no
+    -- authenticated subject.
+    --
+    -- What this step deliberately does NOT do: write queen.queues (§2.4 C6, see
+    -- the header), and validate the destination queue. The queue is born at fire
+    -- time, exactly as a lazily provisioned push queue is.
+    --
+    -- The broker MUST have injected `_messageId` into each schedule op before
+    -- getting here, and MUST have rejected a client-spelled one: the SP cannot
+    -- tell the two apart, so the rejection has no other place to live (§8.2
+    -- point 5). Same for the `_tenant`/`producerSub` family, which
+    -- log_timers_apply_v1 does reject inside an op.
+    IF v_timer_n > 0 THEN
+        v_timer_res := queen.log_timers_apply_v1(
+            v_timers, v_tenant, NULLIF(p->>'_producerSub', ''), v_now);
     END IF;
 
     -- Set-based provisioning with the steady-state skip (003_log_push pattern): one
@@ -1085,6 +1371,17 @@ BEGIN
         v_acks := v_acks || jsonb_build_array(v_res);
     END LOOP;
 
-    RETURN jsonb_build_object('ok', true, 'pushes', v_pushes, 'acks', v_acks);
+    -- Composed CONDITIONALLY, so a bundle without the two arrays returns the
+    -- object it returned before they existed — byte-identical, since the keys
+    -- are neither present nor null. JSONB normalizes key order, so `||` here and
+    -- one wide jsonb_build_object produce the same text either way.
+    v_ret := jsonb_build_object('ok', true, 'pushes', v_pushes, 'acks', v_acks);
+    IF v_kv_n > 0 THEN
+        v_ret := v_ret || jsonb_build_object('kv', v_kv_res);
+    END IF;
+    IF v_timer_n > 0 THEN
+        v_ret := v_ret || jsonb_build_object('timers', v_timer_res);
+    END IF;
+    RETURN v_ret;
 END;
 $$;

@@ -148,7 +148,10 @@ impl ClusterCache {
             cell_token: d.cell_token.clone(),
             status: ClusterStatus::Active,
             limits: EffectiveLimits::default(),
-            features: Features { streams: true, traces: true },
+            // dev-static has no plans table to read, so every feature is on —
+            // it is a single-developer loopback mode, and the cloud path never
+            // reaches this branch.
+            features: Features { streams: true, traces: true, kv: true, timers: true },
         });
         ClusterCache {
             dev_static,
@@ -752,6 +755,12 @@ fn parse_features(json: &str) -> Features {
     Features {
         streams: v.get("streams").and_then(|b| b.as_bool()).unwrap_or(false),
         traces: v.get("traces").and_then(|b| b.as_bool()).unwrap_or(false),
+        // PLAN_KV_TIMERS.md §9.8 P1. Same "missing = false" rule as its
+        // neighbours, and here it is load-bearing rather than tidy: the cell
+        // where these are wanted is the one whose plan row is updated to say
+        // so, and nowhere else. No migration, no default-on.
+        kv: v.get("kv").and_then(|b| b.as_bool()).unwrap_or(false),
+        timers: v.get("timers").and_then(|b| b.as_bool()).unwrap_or(false),
     }
 }
 
@@ -919,5 +928,24 @@ mod tests {
         let f = parse_features(r#"{"streams":true}"#);
         assert!(f.streams);
         assert!(!f.traces);
+    }
+
+    /// PLAN_KV_TIMERS.md §9.8 P1: a plan that has never heard of kv/timers —
+    /// which is every plan row on every cell today — denies both.
+    #[test]
+    fn kv_and_timers_default_off_and_are_independent() {
+        let f = parse_features(r#"{"streams":true,"traces":true}"#);
+        assert!(!f.kv, "a plan that does not mention kv does not have kv");
+        assert!(!f.timers);
+
+        let f = parse_features(r#"{"timers":true}"#);
+        assert!(f.timers);
+        assert!(!f.kv, "the two features ship and sell separately (§16)");
+
+        // Junk in the JSONB is not a yes.
+        let f = parse_features(r#"{"kv":"true","timers":1}"#);
+        assert!(!f.kv);
+        assert!(!f.timers);
+        assert!(!parse_features("not json").kv);
     }
 }

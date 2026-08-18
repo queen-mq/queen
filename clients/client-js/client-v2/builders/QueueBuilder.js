@@ -374,22 +374,14 @@ export class QueueBuilder {
     throw new Error('Must specify queue, namespace, or task for pop operation')
   }
 
-  #buildPopParams() {
-    const params = new URLSearchParams({
-      batch: this.#batch.toString(),
-      wait: this.#wait.toString(),
-      timeout: this.#timeoutMillis.toString()  // Server expects 'timeout', not 'timeoutMillis'
-    })
-
-    if (this.#group) params.append('consumerGroup', this.#group)
-    if (this.#namespace) params.append('namespace', this.#namespace)
-    if (this.#task) params.append('task', this.#task)
-    if (this.#autoAck) params.append('autoAck', 'true')
-    if (this.#subscriptionMode) params.append('subscriptionMode', this.#subscriptionMode)
-    if (this.#subscriptionFrom) params.append('subscriptionFrom', this.#subscriptionFrom)
-
-    return params
-  }
+  // NOTE: a second, DEAD copy of the pop parameter builder lived here and was
+  // deleted with the kv/timers work (PLAN_KV_TIMERS.md §10.4). pop() builds its
+  // own params inline, above, because it has to override autoAck with the POP
+  // defaults; the dead copy did not. Anyone adding a parameter by looking for
+  // the method whose name says "build pop params" would have added it to the
+  // copy nobody calls: the pop would keep working and the parameter would
+  // simply never arrive, which reads as a server-side mystery and not as a
+  // client bug.
 
   // ===========================
   // Buffer Management Methods

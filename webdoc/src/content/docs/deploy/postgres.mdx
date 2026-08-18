@@ -117,7 +117,19 @@ removed an entire class of periodic latency spike seen across every high-rate ru
 `log_segments` carries a different set, including matching parameters on its TOAST table, chosen
 after stock scale factors were measured re-firing vacuum every 13 seconds at 1M msg/s. All of it is
 storage parameters only: no table rewrite, idempotent at every boot. Do not strip them in a tuning
-pass. The tables these parameters exist for, and why each one is shaped the way it is, are in
+pass.
+
+Two tables are the exception to "measured", and they say so themselves. `queen.kv` and
+`queen.log_timers` take the same threshold-based autovacuum and the same `vacuum_truncate = off`, on
+the same reasoning, but their `fillfactor = 70` is set **by analogy** and has no dated measurement
+behind it. On `queen.log_timers` the analogy is weak by construction, because the claim updates an
+indexed column and is therefore never HOT, so the headroom buys page locality rather than HOT chains.
+Two more numbers are missing for the same reason: how many timers a second a machine sustains before
+autovacuum on that table enters the profile, and how many of the global `autovacuum_max_workers`
+(default 3) the pair occupies in steady state. If that budget bites, the first symptom is the log
+slowing down with no visible culprit, which is why the dead-tuple ratio from `pg_stat_user_tables` is
+the indicator to watch on those two specifically: `vacuum_truncate = off` removes the acute symptom and
+leaves only the slow one. The tables these parameters exist for, and why each one is shaped the way it is, are in
 [the storage model](/internals/storage-model).
 
 ## Size it in commits, not messages

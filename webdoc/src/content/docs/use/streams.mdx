@@ -4,7 +4,7 @@ description: "Windowed aggregation, event time and per-message gating over a que
 type: concept
 tier: use
 sidebar:
-  order: 10
+  order: 5
 sourceOfTruth:
   - server/src/handlers/streams.rs
   - server/sql/procedures/007_log_streams.sql
@@ -21,12 +21,13 @@ digest: >-
   window onto a sink queue, one ordinary message per window and per key; open windows are readable
   through `POST /streams/v1/state/get`. The chain runs in your process; state is rows in the same
   PostgreSQL. Windows are `windowTumbling`, `windowSliding`, `windowSession` and `windowCron`.
-  Bucketing uses the broker's commit time unless an `eventTime` extractor is given, which switches
-  the runtime to watermarks, `allowedLateness` and `onLate`. One cycle commits state writes, sink
-  pushes and the leased batch's ack in one PostgreSQL transaction, all or none, the sink push
-  taking the ordinary push path. `foreach` acks after the function returns, so an effect outside
-  PostgreSQL is at-least-once. `.gate()` replaces the window and reducer with a per-message allow
-  or deny that keeps the denied tail leased and in order. Retention never touches stream state.
+  Bucketing uses commit time unless an `eventTime` extractor switches the runtime to watermarks,
+  `allowedLateness` and `onLate`. One cycle commits state writes, sink pushes and the leased
+  batch's ack in one PostgreSQL transaction, all or none. `foreach` acks after the function
+  returns, so an effect outside PostgreSQL is at-least-once. `.gate()` replaces the window and
+  reducer with a per-message allow or deny that keeps the denied tail leased and in order. Inside a
+  stream the state primitive is `state_ops`, not the KV, and a cycle carries no KV or timer
+  operations. Retention never touches stream state.
 ---
 
 A streaming query reads a queue, decides something per message or per time bucket, and pushes the
@@ -199,6 +200,58 @@ Closed windows delete their own rows, and nothing else does: retention never tou
 state. It is reclaimed by dropping the query, or by rerunning the chain with `reset` on. `reset`
 is also the answer to the **HTTP 409** you get when you redeploy a changed chain under a name
 already registered, because old accumulators and a new fold shape do not mix.
+
+## Two things are called state, and the order between them is not a preference
+
+`ctx.state` in an operator and [KV state](/use/kv) are both state in the same PostgreSQL, and only one
+of them is atomic with the cycle.
+
+| | `state_ops`, reached as `ctx.state` | `queen.kv` |
+| --- | --- | --- |
+| Rows in | `queen_streams.state`, keyed `(query, partition, key)` | `queen.kv`, keyed `(tenant, namespace, key)` |
+| Commits with | The cycle: state, sink push and ack, one transaction | The transaction wire, when a write rides a bundle |
+| Reachable from another partition or query | No | Yes |
+| Expiry | None. A closed window deletes its own row | Mandatory on every write |
+
+> **Inside a stream, the state primitive is `state_ops`.**
+
+The atomicity you get from `state_ops` is free: `queen.log_streams_cycle_v1` commits the state writes,
+the sink pushes and the ack together, and there is nothing to configure and nothing to get wrong. The
+KV is newer and more visible, so it is the one that gets reached for by default, and reaching for it
+silently gives up the only guarantee streaming already handed you.
+
+The KV earns a place inside a stream for one job, and it is the job `state_ops` cannot do: **state that
+crosses partitions or queries.** `queen_streams.state` is keyed by query and partition, so a marker on
+a business id whose events fall on different partitions, or a budget shared across every partition of a
+query, is not expressible in it. Those are the cases, and there are no others.
+
+The naming is part of the defence. The handle is `queen.kv` and `tx.kv`, deliberately never `state`, so
+that the two things cannot be confused at the call site: `ctx.state` is the row the cycle owns, and
+anything spelled `kv` is not.
+
+A KV call made from inside an operator is an ordinary call. It has the guarantees of the standalone KV
+and none in addition, so if the cycle rolls back and replays, that write has already happened. Anything
+that must be atomic with the ack belongs in `state_ops`, which is why the rule above comes first rather
+than last.
+
+## Pacing is not expressible inside an operator
+
+This is the thing somebody will try, so it is written here rather than discovered.
+
+A cycle carries no `kv` and no `timers` array. A stream cycle is the one actor in the product that takes
+a **blocking** advisory lock, and the total lock order puts `queen.kv` and `queen.log_timers` outside
+it, so a cycle that touched them would hold the two outermost spaces while blocking on an advisory
+lock. The rule that forbids it is the same one that makes the whole order acyclic, and it is not an
+omission that a later array would fix.
+
+The consequence is concrete. The inverse rate limiter, an `incr` with a `max` deciding admission and a
+[timer](/use/timers) moving the rejected work later instead of dropping it, is written in a **flat
+consumer**, not in an operator. From a stream you emit onto a queue and the timer goes in the consumer
+of that queue. That is one extra line of architecture and no loss of any guarantee, but found on your
+own it looks like an arbitrary limit, so here it is with its reason.
+
+Gating remains the shape a stream does have for pacing: `.gate()` denies in place, keeps the denied tail
+leased and in order, and needs no second queue. It discards or defers by lease. It does not reschedule.
 
 One operator chain, four kinds of window or one gate, one transaction per cycle, and results that
 arrive on a queue like any other message.

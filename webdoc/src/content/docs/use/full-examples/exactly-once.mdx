@@ -1,0 +1,137 @@
+---
+title: Exactly-once charging
+description: "Charging N orders exactly N times under a forced redelivery, with the idempotency marker written in the same transaction as the acknowledgement, and an honest account of where that guarantee stops."
+type: example
+tier: use
+sidebar:
+  order: 5
+verifiedBy:
+  - examples/apps/js/exactly-once.mjs
+  - examples/apps/py/exactly_once.py
+  - examples/apps/http/exactly-once.sh
+---
+
+A billing run double-charged nineteen customers on a Tuesday afternoon. Nothing had crashed and
+nothing was lost. A consumer took a batch, charged the cards, and was still writing its "done"
+flag to a key/value store on the side when its lease expired. The broker did what a broker must
+do and handed the batch to somebody else, and the somebody else found no flag.
+
+The flag was not written too slowly. It was in the wrong place. Living in a second data system, it
+could not commit with the acknowledgement, so there was always an interval in which one of the two
+existed and the other did not, and that interval is where the work happens twice. The correction is
+structural: put the marker in the database that already holds the queue, and write it in the same
+transaction as the ack. A marker without its acknowledgement, and an acknowledgement without its
+marker, then stop being representable.
+
+The program builds that, five orders at a time. One consumer group charges them, with one order
+scripted to fail before it charges anything so the redelivery is forced rather than hoped for, and a
+second consumer group reads the same five orders from the beginning, which is a redelivery with the
+cause removed. It measures three things: five orders produce exactly five charges, every order on
+the second pass reports that it did not run, and the handler that failed before its commit left no
+marker behind to block its own retry.
+
+The last of those is the one that is easy to get wrong in the other direction. A marker written
+early, before the work, turns a transient failure into a permanent skip: the order is marked, the
+charge never happened, and nothing will ever try again. That is why the marker is not a flag you
+set when you start.
+
+<Tabs>
+  <TabItem label="JavaScript">
+    <Render file="snippets/app-js-exactly-once" />
+  </TabItem>
+  <TabItem label="Python">
+    <Render file="snippets/app-py-exactly-once" />
+  </TabItem>
+  <TabItem label="HTTP">
+    <Render file="snippets/app-http-exactly-once" />
+  </TabItem>
+</Tabs>
+
+## Four steps, and the order is the design
+
+Read the marker first. If it is there, this delivery has nothing to do, and the only remaining job
+is to take the message off this group's cursor so it stops coming back. The read reports `found` as
+a field of its own rather than returning an empty value, because `null` is a legal stored value and
+absence has to be distinguishable from it.
+
+Then do everything that can fail without touching the outside world. The scripted failure in the
+program sits exactly here, and that placement is the advice: a handler that validates, resolves and
+prepares before it charges is a handler whose failures cost nothing.
+
+Then the external effect, once.
+
+Then the marker and the acknowledgement, together, in one call to
+[`/api/v1/transaction`](/reference/http/transaction). `kv` is a top-level field of that request,
+beside `operations` and never inside it, and the two arrays commit or roll back as one thing. The
+write is a `putIfAbsent` carrying `required: true`, which is what turns it from a verdict into a
+gate: without it a lost race would come back `applied: false` and the acknowledgement would still
+commit, which is precisely the divergence this page exists to remove.
+
+Two properties of that call are worth stating on their own, because they are the ones people are
+surprised by.
+
+A lost gate is **returned, not thrown**. It arrives as HTTP 200 with `success: false` and
+`reason: "kv_precondition"`, and the clients hand it back rather than raising. It is the expected
+outcome of every legitimate redelivery, which makes it one of the most frequent answers this
+product gives, and an outcome that frequent does not belong inside a catch block where the natural
+reflex is to retry.
+
+And the expiry is **mandatory**. Every KV write declares exactly one of `ttlSeconds` and
+`forever: true`, with zero being the same error as two, because a marker with no expiry is a row
+nothing will ever delete. Pick a TTL comfortably longer than the window in which a redelivery is
+still possible, which means longer than the lease times the retry budget, and long enough to answer
+a support question afterwards. The programs here use an hour. They never use `forever`: an example
+that runs in CI and writes an immortal row is one bad assertion away from leaving state in a shared
+database that nothing removes.
+
+## Where the guarantee stops
+
+The atomic pair is the marker and the acknowledgement. It is not the marker and the card.
+
+If the process dies after the charge and before the commit, the money moved and no marker exists,
+so the redelivery charges again. Nothing in a broker can close that window, because the effect is
+outside the database that would have to roll it back. What the pattern does is make the window as
+small as one commit, and make every failure on either side of it consistent: before the commit
+nothing happened, after the commit both things happened.
+
+That leaves one job for you, and it is one line: give the payment provider the same idempotency key
+you used for the marker. The order id is already the natural one. Then the residual window closes
+against the provider's own ledger rather than against a hope.
+
+The exception, and it is the only one, is the case where the effect is itself a row in this
+PostgreSQL: a push onto another queue, an acknowledgement, another KV write. Those go inside the
+same bundle and inherit its atomicity exactly, and for them the phrase "exactly once" is literal
+rather than aspirational. The related caveat about a lost **response** rather than a lost commit,
+and the deterministic `transactionId` that answers it, is on
+[the transaction reference](/reference/http/transaction#it-is-not-exactly-once-end-to-end).
+
+## What each failure does
+
+| what happens | what the program does about it |
+|---|---|
+| the handler fails before the commit | nothing was written, so no marker exists and the retry is not blocked. The program asserts this at the only moment it can be observed, right after the failing acknowledgement |
+| the handler fails after the commit | the marker is there, so the redelivery finds it, does nothing, and acknowledges. This is the second pass, and it is what `ran === false` reports |
+| the lease expired while the handler worked | the acknowledgement is refused and the KV write is refused with it, so the state stays consistent at "not done" and the order is charged by whoever holds the lease now. A compare-and-swap cannot give this: an `expect` on a version that still matches succeeds even from a worker that no longer owns the message |
+| two workers race for the same order | one wins the `putIfAbsent`, the other gets `success: false` with `reason: "kv_precondition"` and its whole bundle rolls back, acknowledgement included, so only the winner's acknowledgement lands |
+| the response is lost after a successful commit | the redelivery reads the marker and skips, which is the same end state |
+| the marker expires while a redelivery is still possible | the order is charged twice, and it is the TTL that was wrong. This is the failure the mandatory expiry makes you think about instead of discovering |
+
+## Run it
+
+The key/value surface is served by every broker, so there is nothing to turn on and no flag to pass.
+Each program probes once at the start anyway, because a `503` from [an operator's kill
+switch](/deploy/state) or a `403` from a quota is worth naming before the first real call fails with
+something that reads like a bug.
+
+Against a broker from [the quickstart](/start/quickstart):
+
+```bash
+QUEEN_URL=http://localhost:6632 examples/apps/run.sh
+```
+
+Every program on this page asserts the property it exists to demonstrate and exits
+non-zero if it does not hold. The runner takes a language name to run one of them on its
+own, for example `examples/apps/run.sh js`. Each phase ends on a **count** with a deadline behind
+it rather than on a quiet interval, because a program that stops when nothing has arrived for a
+while passes on a broker that delivered nothing at all. And each run purges what it wrote, markers
+included: they are rows in their own table, so deleting the queue does not take them along.

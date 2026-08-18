@@ -1049,7 +1049,22 @@ async fn a_gate_lets_a_prefix_through_and_holds_the_rest_in_order() {
 
     // Only the budget passes; the tail is denied and keeps its lease.
     let out = drain_until(&q, &sink, Duration::from_secs(12), |m| m.len() >= 3).await;
-    let metrics = handle.metrics();
+
+    // The gate can only deny what it has SEEN, and the six pushes above race the
+    // stream's first cycle. On a loaded machine that cycle claims only the three
+    // messages pushed so far, the whole batch fits the budget, and nothing is
+    // denied — observed as `cycles: 2, messages: 3, gate_denied: 0`. Sampling the
+    // counter the instant the allowed prefix lands therefore fails for a reason
+    // this test is not about. The denied tail keeps its lease and returns every
+    // 2 s, so the counter is reached by WAITING for the gate to have evaluated
+    // the tail rather than by assuming it already did. The assertion below is
+    // unchanged and still fails if the budget is genuinely not enforced.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let mut metrics = handle.metrics();
+    while metrics.gate_denied == 0 && std::time::Instant::now() < deadline {
+        sleep_ms(200).await;
+        metrics = handle.metrics();
+    }
     handle.stop().await.unwrap();
 
     assert!(out.len() >= 3, "the allowed prefix never arrived");

@@ -187,7 +187,30 @@ queues on PostgreSQL, instead of N copies of the same WAL wait. The claim leg it
 in [life of a pop](/internals/life-of-a-pop).
 
 Background jobs run in the Maint lane rather than bypassing admission, which is what lets the wake
-order keep them behind request traffic without starving them outright.
+order keep them behind request traffic without starving them outright. The
+[sweeper](/internals/sweeper) is one of them: a timer fire is a writing transaction holding partition
+locks, and it takes a Maint slot **before** its connection like every other job here.
+
+## The one path that has no lane
+
+[KV state](/use/kv) is the exception, and it is deliberate on both halves. Neither KV reads nor KV
+writes take a lane. They have their own connection pool, `QUEEN_KV_POOL_SIZE`, derived as
+`clamp(DB_POOL_SIZE / 10, 4, 32)`, and that pool **is** the semaphore.
+
+Writes were the tempting half to put on the Push lane, and doing so would have been a defect. Thirty
+tenants each inside their own limit of a hundred writes a second are three thousand Push slots a
+second, on a small stack whose measured commit-bound ceiling is around 480 messages a second. No tenant
+would have violated anything, the message path would be starved, and the weigher could not tell the
+two kinds of work apart because they would be the same lane.
+
+What the dedicated pool gives that a lane would not is the shape of its failure. At roughly 1 ms a
+read it is worth about 16,000 reads a second, so it never binds in normal operation; when the database
+slows to 100 ms a read it is worth 160 a second, and the excess takes a `503` instead of taking
+connections away from the log. `queen_kv_pool` exports its size, availability and waiters.
+
+The exception to the exception: a KV write that rides **inside** a push or an ack inherits the slot the
+handler already took and does not take another. That is a bundle of messages, and it belongs in the
+message lane.
 
 ## Degraded signal
 

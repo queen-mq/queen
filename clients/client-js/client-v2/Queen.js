@@ -8,6 +8,8 @@ import { LoadBalancer } from './http/LoadBalancer.js'
 import { BufferManager } from './buffer/BufferManager.js'
 import { QueueBuilder } from './builders/QueueBuilder.js'
 import { TransactionBuilder } from './builders/TransactionBuilder.js'
+import { TimerBuilder } from './builders/TimerBuilder.js'
+import { Kv } from './kv/Kv.js'
 import { StreamBuilder } from './stream/StreamBuilder.js'
 import { StreamConsumer } from './stream/StreamConsumer.js'
 import { Admin } from './admin/Admin.js'
@@ -57,6 +59,7 @@ export class Queen {
   #config
   #shutdownHandlers = []
   #admin = null
+  #kv = null
 
   constructor(config = {}) {
     // Configure custom logger before anything else.
@@ -214,6 +217,57 @@ export class Queen {
       this.#admin = new Admin(this.#httpClient)
     }
     return this.#admin
+  }
+
+  // ===========================
+  // KV API Entry Point
+  // ===========================
+
+  /**
+   * Transactional key/value state, alongside the log
+   * (PLAN_KV_TIMERS.md §5).
+   *
+   *     const { won } = await queen.kv.once('idem', orderId, { ttl: '24h' })
+   *     const row = await queen.kv.get('saga', sagaId)   // {found, value, version, ...}
+   *
+   * Two things to carry into every use of it:
+   *   * every write returns an OBJECT, and objects are always truthy --
+   *     `if (await queen.kv.delete(ns, key))` is always true. Read `.applied`.
+   *   * an expiry is MANDATORY on every write: exactly one of `ttlSeconds`
+   *     (or the sugar `ttl` / `until`) and `forever: true`. There is no
+   *     default, because a default is how a marker becomes immortal.
+   *
+   * Lazily initialized, singleton, like `admin`.
+   * @returns {Kv}
+   */
+  get kv() {
+    if (!this.#kv) {
+      this.#kv = new Kv(this.#httpClient)
+    }
+    return this.#kv
+  }
+
+  // ===========================
+  // Timers API Entry Point
+  // ===========================
+
+  /**
+   * Scheduled messages for one queue (PLAN_KV_TIMERS.md §4).
+   *
+   *     await queen.timer('orders').key(orderId).delay('30m')
+   *                .payload({ orderId }).schedule()
+   *     await queen.timer('orders').key(orderId).cancel()
+   *
+   * `deliverAt` is "not before", never "exactly at". A cancel that answers
+   * `absent` means "no longer pending" and MAY MEAN ALREADY DELIVERED -- there
+   * is no tombstone, and the authority is the log.
+   *
+   * @param {string} queueName - destination queue (mandatory)
+   * @returns {TimerBuilder}
+   */
+  timer(queueName) {
+    logger.log('Queen.timer', { queue: queueName })
+    return new TimerBuilder(this.#httpClient, queueName)
   }
 
   // ===========================

@@ -273,3 +273,25 @@ its worst case (an interleave it did not observe) degrades it to `-1`, which is 
 The `/configure` row is the one that catches people. Omitting a key does not leave it alone; it
 resets it to its default. A queue deliberately created with deduplication off will silently get a
 one-hour window back the next time someone calls `/configure` without naming it.
+
+## The fire of a timer does not probe the window
+
+A [timer](/use/timers) carries a fixed `txn`, minted when it was scheduled, and it is tempting to read
+that as a deduplication net across the fire. It is not one, and the distinction matters because it
+decides where the guarantee actually comes from.
+
+The exactly-once property of a fire is that the `DELETE` of the staging row and the push of the frame
+are **one transaction**. If it commits, the row is gone and the message is in the log; if it rolls
+back, neither happened. Nothing about that argument mentions a window, a hash or a probe, which is why
+correctness never depends on how `dedupWindowSeconds` is configured on the destination queue.
+
+The fixed `txn` is at most a secondary net, and today it is not even that. The fire calls the allocator
+with the partition's own last-verified marker rather than with `-1`, so the probe described above does
+not run for it: `queen.log_txns` keeps its hashes in a `BYTEA` column with no index, so looking for one
+`txn` costs the same unrolling of the partition's retained window as looking for all of them, and
+paying that inside the serializer would charge it to ordinary producers.
+
+The consequence is stated rather than hidden. **Re-scheduling or re-publishing a timer whose fire has
+already committed produces a second message in the log**, and no layer below you stops it. A cancel
+that answers `absent` may mean exactly that case, which is why `absent` is documented as "no longer
+pending" and never as "not delivered".

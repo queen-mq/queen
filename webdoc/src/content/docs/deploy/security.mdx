@@ -4,7 +4,7 @@ description: "One plaintext listener and five trust boundaries: what the broker 
 type: how-to
 tier: operate
 sidebar:
-  order: 8
+  order: 9
 sourceOfTruth:
   - server/src/main.rs
   - server/src/auth.rs
@@ -28,7 +28,8 @@ digest: >-
   error. On `QUEEN_MESH_PORT`, frames after the replayable HMAC `HELLO` handshake are
   unauthenticated JSON; firewalling is mandatory. `002_streams_schema.sql` grants
   `queen_streams.queries` and `queen_streams.state` to `PUBLIC`. With native tenancy on,
-  `x-queen-tenant` is checked for shape, never authority.
+  `x-queen-tenant` is checked for shape, never authority, and `QUEEN_TENANCY_HEADER=1` refuses to
+  boot unless `QUEEN_KV_TRUSTED_PROXY=1` is set with it.
 ---
 
 The broker is one process with one plaintext listener. It binds `0.0.0.0:PORT`, serves the HTTP API
@@ -58,6 +59,24 @@ The boundaries, and who defends each one:
 - The mesh between brokers, on `QUEEN_MESH_PORT`: an HMAC handshake and then nothing, so the firewall is yours and not optional.
 - Payloads at rest: optional AES-256-GCM on flagged queues, with key management yours.
 - `x-queen-tenant`, where native tenancy is on: checked for shape and never for authority, so the gateway that sets it is yours.
+
+<Aside type="danger">
+The last of those is the one boundary the broker refuses to let you leave undeclared.
+**`QUEEN_TENANCY_HEADER=1` exits 1 unless `QUEEN_KV_TRUSTED_PROXY=1` is set with it**, with no
+exception and nothing to switch off instead.
+
+The reason is that [key/value state](/use/kv) is addressable purely by name. For queues a forged
+header is bad and bounded: a caller still has to name a queue, and an ack carries a lease id the
+broker minted and a caller cannot guess. In the KV there is no such id, so the only gate is the
+tenant in the `WHERE` clause and the tenant is the header, which makes a forged one a read and a
+write of another tenant's state knowing only its name. The KV is part of the engine on every cell,
+so there is no longer any flag that could take it away to make an unvalidated header safe: choosing
+the header mode is itself the assertion that something in front sets it and strips the client's, and
+`QUEEN_KV_TRUSTED_PROXY=1` is where you write that assertion down. If you cannot make it, do not run
+with the header. An operator who needs to stop KV traffic on a live cell wants the runtime kill
+switch instead, which is a different instrument for a different problem
+([KV and timers](/deploy/state)).
+</Aside>
 
 One more surface has no switch at all: `/metrics/prometheus` is public, broker authentication
 cannot protect it, and its per-queue series carry no tenant label, so keep it off any network a

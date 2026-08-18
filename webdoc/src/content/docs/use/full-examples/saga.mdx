@@ -1,0 +1,156 @@
+---
+title: Saga with a compensating timer
+description: "A booking whose hold, compensation timer, payment request and acknowledgement commit as one thing, and a compensating consumer that checks the saga's state before it unwinds anything."
+type: example
+tier: use
+sidebar:
+  order: 6
+verifiedBy:
+  - examples/apps/js/saga.mjs
+  - examples/apps/py/saga.py
+  - examples/apps/go/saga/main.go
+  - examples/apps/http/saga.sh
+---
+
+A hotel was sold out on paper for nine nights it had spent empty. The booking system held inventory
+when a reservation started and released it when the payment either settled or failed, and the
+release was a sleeping task inside the worker process. A rolling deploy replaced the workers. Every
+hold in flight lost its release, and nobody noticed for a fortnight, because a hold that is never
+released looks exactly like a room that was sold.
+
+The release was not slow. It was in the wrong place. A compensation is not a timeout, it is an
+obligation, and an obligation has to outlive the process that took it on. The correction is to make
+it a row in the same database as the queue, written in the same transaction as the work it
+compensates for. Then the deploy is irrelevant: if the room is held, the compensation exists, and if
+the room is not held, nothing else happened either.
+
+The program builds that as five things in one commit: a gate that refuses a booking already held,
+the saga's first state, the compensation timer, the payment request, and the acknowledgement of the
+submission that started it. It measures four properties. A duplicate submission produces exactly one
+payment, one timer and one state row. A compensation cancelled inside a confirming bundle is never
+delivered. The one booking whose card was declined is unwound by its timer, with no process awake to
+do it. And the booking whose cancel was deliberately skipped is compensated by nobody, because the
+consumer refused.
+
+That last one is the mistake this page exists to prevent, and it runs the opposite way to the one
+people expect. The cancel is not the safety mechanism. A fired timer leaves no tombstone, so a cancel
+that arrives a millisecond after the fire answers `absent` with `ok: false`, which means "no longer
+pending" and may mean "already delivered". A design that trusts the cancel unwinds a reservation that
+has already shipped, and reports success while doing it. The compensating consumer has to read the
+saga's state and decide for itself.
+
+The other application of these two primitives together, a counter that admits and a timer that moves
+the refused work to the next window, is already written up on
+[the rate limiter page](/use/full-examples/rate-limiter): this one takes the same pair down the
+longer axis, where the state is a workflow with steps and the timer is the deadline on it.
+
+<Tabs>
+  <TabItem label="JavaScript">
+    <Render file="snippets/app-js-saga" />
+  </TabItem>
+  <TabItem label="Python">
+    <Render file="snippets/app-py-saga" />
+  </TabItem>
+  <TabItem label="Go">
+    <Render file="snippets/app-go-saga" />
+  </TabItem>
+  <TabItem label="HTTP">
+    <Render file="snippets/app-http-saga" />
+  </TabItem>
+</Tabs>
+
+## One bundle, and nothing left to order
+
+The reserving handler makes one call to [`/api/v1/transaction`](/reference/http/transaction) carrying
+four kinds of work: a `kv` write, a `timers` schedule, a push and an ack. `kv` and `timers` are
+top-level fields of that request, beside `operations` and never inside it, and everything in the
+request commits or rolls back together.
+
+What that removes is the ordering question. Written as four calls there are permutations to pick
+between and every one of them is wrong somewhere: schedule the timer first and a crash before the
+push leaves a compensation for work that was never started, push first and a crash before the
+schedule leaves work with no compensation at all. As one commit there is no first and no second.
+
+The `putIfAbsent` at the front carries `required: true`, which is what makes it a gate rather than a
+verdict. Without it, a duplicate submission would come back `applied: false` while the payment and
+the timer went out anyway. With it, the whole bundle rolls back, acknowledgement included, and the
+answer is HTTP 200 with `success: false` and `reason: "kv_precondition"`. That is **returned, not
+thrown**: it is the ordinary outcome of every legitimate redelivery, so it belongs in an `if` and not
+in a catch block where the reflex is to retry. The duplicate is then acknowledged on its own, because
+a message that has nothing to do still has to leave the cursor.
+
+Every KV write in the program carries `ttlSeconds`, spelled as an hour in each client's own idiom.
+The expiry is mandatory: exactly one of `ttlSeconds` and `forever`, with zero being the same error as
+two. None of these programs uses `forever`, which would leave rows in a shared database that nothing
+removes if a run failed.
+
+## The cancel is not the guarantee
+
+The confirming bundle cancels the compensation timer in the same commit that writes `step:
+"confirmed"` and acknowledges the payment. That is the right thing to do and it is not sufficient,
+for a reason that is structural rather than a race you can shrink.
+
+A timer's row is deleted when it fires. There is no completed-timer history, which is what makes the
+fire exactly-once and leaves nothing to reconcile after a crash. The cost is that a cancel arriving
+after the fire has nothing to find, and answers `absent`. The response carries the `txn` of the
+message the timer was going to deliver, so the authority is available without a second API: look for
+that `txn` in the destination queue. But `absent` on its own never means "not delivered".
+
+So the compensation is written as a question rather than an instruction. The consumer reads the saga
+state first, and compensates only if the saga is still `held`. The program makes that path
+deterministic instead of hoping to hit it: one booking pays, is confirmed, and has its cancel
+deliberately skipped, so its compensation is delivered for real and has to be refused on arrival.
+It is the exact shape of the five-milliseconds-late cancel, made reproducible.
+
+## Two fences, and only one of them is optional
+
+Both writes after the first carry `expect` with the version the handler read. They are not the same
+assertion.
+
+In the payer, the key derives from the booking id, which is also the partition key of the payments
+queue. Every message about one booking lands in one lane, and a lane has one reader per consumer
+group, so the read-then-write is already serialised. `expect` there is a claim about that
+serialisation, made falsifiable. If it never fails it cost nothing, and the day it fails you have
+learned that two consumers are serving one partition, as a verdict rather than as a wrong total.
+
+In the compensator the key does not derive from the partition key at all. That message arrives on a
+different queue, in a lane that has nothing to do with the payments lane, so no partitioning could
+serialise the two writers. There `expect` is load-bearing: it is what stops a compensation computed
+from a stale read from overwriting a confirmation that landed in between. The transaction is still
+the primary fence, because an expired lease refuses the acknowledgement and takes the state write
+down with it, which a compare-and-swap cannot do. `expect` is the secondary one.
+
+## What each failure does
+
+| what happens | what the program does about it |
+|---|---|
+| the same booking is submitted twice | the second bundle loses the gate and rolls back whole: no second payment, no second timer, no second state row. The program asserts all three counts |
+| the reserving handler dies after the commit | everything happened, including the compensation. The redelivery loses the gate and acknowledges |
+| the reserving handler dies before the commit | nothing happened, including the timer. The redelivery reserves normally |
+| the lease expired while the handler worked | the acknowledgement is refused and the other four operations are refused with it, so no orphan timer and no orphan hold |
+| the payment settles and the cancel arrives in time | the timer's row is gone before it fires, and the compensation is never delivered. The program asserts this with a `peek` and with a second delivery pass that finds nothing |
+| the payment settles and the cancel arrives too late | the compensation is delivered anyway, reads the state, finds `confirmed` and refuses. This is the case the program scripts on purpose |
+| the payment is declined | the state stays `held`, nobody is awake to release the room, and the timer does it at the hold's expiry |
+| a broker dies holding the timer's claim | the lease expires and another broker fires it. Worst case, delivery is late by `QUEEN_SWEEPER_LEASE_MS`. A cancel in that window answers `too_late`, which is a verdict and not a failure |
+
+## Run it
+
+Both surfaces this needs are served by every broker, so there is nothing to turn on and no flag to
+pass. Each program probes once at the start anyway, because a `503` from [an operator's kill
+switch](/deploy/state) or a `403` from a quota is worth naming before the first real call fails with
+something that reads like a bug.
+
+Against a broker from [the quickstart](/start/quickstart):
+
+```bash
+QUEEN_URL=http://localhost:6632 examples/apps/run.sh
+```
+
+Every program on this page asserts the property it exists to demonstrate and exits non-zero if it
+does not hold. The runner takes a language name to run one of them on its own, for example
+`examples/apps/run.sh go`. Each phase ends on a **count** with a deadline behind it rather than on a
+quiet interval, because a program that stops when nothing has arrived for a while passes on a broker
+that delivered nothing at all. The compensation phase gets the longest deadline of the three, since a
+timer is delivered no earlier than its delay plus one sweep. And each run purges what it wrote:
+the queues, the saga rows, and any timer still armed, because a pending timer is keyed by name in a
+table of its own and deleting the queue does not reach it.

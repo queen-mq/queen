@@ -21,8 +21,13 @@ function collect(text, families) {
     if (!families.has(name)) families.set(name, { name, help, type });
   };
 
-  // ht(&mut s, "name", "help", "type")
-  for (const m of text.matchAll(/ht\(\s*&mut\s+\w+\s*,\s*"([^"]+)"\s*,\s*"([^"]*)"\s*,\s*"(\w+)"\s*\)/g)) {
+  // ht(&mut s, "name", "help", "type"), and the `ht(s, …)` spelling used where
+  // the emitter is a closure parameter rather than a free function. Requiring
+  // the `&mut` was not a stricter parse, it was a blind spot: 24 families of the
+  // kv/timers/sweeper block are emitted through a `&dyn Fn(&mut String, …)`
+  // argument already named `ht`, so they parsed as nothing and were published
+  // with empty Type and Help cells.
+  for (const m of text.matchAll(/\bht\(\s*(?:&mut\s+)?\w+\s*,\s*"([^"]+)"\s*,\s*"([^"]*)"\s*,\s*"(\w+)"\s*\)/g)) {
     put(m[1], m[2], m[3]);
   }
 
@@ -52,8 +57,20 @@ function collect(text, families) {
   }
 }
 
+/**
+ * Every `queen_*` literal in the file, minus the ones that are not family names.
+ *
+ * A literal ending in `_` is a PREFIX, not a family. The broker used to carry
+ * three of them, `queen_kv_`, `queen_timers_` and `queen_sweeper_`, to probe its
+ * own exposition and assert that a switched-off feature emitted nothing at all;
+ * those probes went with the boot flags. The filter stays because a prefix
+ * published as a family is an invented metric with no type and no help, on the
+ * reference page that exists so nobody has to invent one.
+ */
 function universe(text) {
-  return new Set([...text.matchAll(/"(queen_[a-z_]+)"/g)].map((m) => m[1]));
+  return new Set(
+    [...text.matchAll(/"(queen_[a-z_]+)"/g)].map((m) => m[1]).filter((n) => !n.endsWith("_")),
+  );
 }
 
 const GROUPS = [
@@ -61,6 +78,10 @@ const GROUPS = [
   ["Cluster lifetime totals (from PostgreSQL)", (n) => n.startsWith("queen_cluster_")],
   ["Per-queue rates and depth", (n) => n.startsWith("queen_queue_") || n.startsWith("queen_dlq_")],
   ["Engine internals", (n) => n.startsWith("queen_seg_") || n.startsWith("queen_batch") || n.startsWith("queen_fusion") || n.startsWith("queen_pop_")],
+  // Emitted by every broker, including one that has never seen a key or a timer:
+  // the exposition gates that used to hide this block are gone with the boot flags.
+  ["Key/value state, timers and the sweeper", (n) =>
+    n.startsWith("queen_kv_") || n.startsWith("queen_timers_") || n.startsWith("queen_sweeper_")],
 ];
 
 function groupOf(n) {
@@ -78,10 +99,21 @@ function main() {
   const all = new Set();
   for (const t of texts) for (const n of universe(t)) all.add(n);
 
+  // A family whose HELP/TYPE did not parse used to be published with empty
+  // cells behind a `console.warn` and an exit status of zero, which is a silent
+  // failure by any definition: the reference kept its row count and lost its
+  // content, and nothing in CI noticed for as long as anyone cared to look. It
+  // is a hard stop now. The remedy is never to add a row here by hand — it is to
+  // declare the family the way its neighbours do, or to teach `collect()` the
+  // new shape and say in a comment which shape that is.
   const undocumented = [...all].filter((n) => !families.has(n));
-  for (const n of undocumented) families.set(n, { name: n, help: "", type: "" });
   if (undocumented.length) {
-    console.warn(`  note: ${undocumented.length} families found as literals without a parsable HELP/TYPE: ${undocumented.join(", ")}`);
+    throw new Error(
+      `${undocumented.length} metric famil${undocumented.length === 1 ? "y is" : "ies are"} ` +
+        `emitted as a literal but expose no parsable HELP/TYPE, so the reference would publish ` +
+        `${undocumented.length === 1 ? "it" : "them"} with empty cells: ${undocumented.join(", ")}. ` +
+        `Declare the family the way the others in metrics.rs are declared, or extend collect().`,
+    );
   }
 
   if (families.size < 25) {
@@ -101,6 +133,13 @@ function main() {
       `\`queen_process_*\` counts what this one broker instance did since it started; ` +
       `\`queen_cluster_*\` are lifetime totals read back out of PostgreSQL, so every ` +
       `instance reports the same value.`,
+    "",
+    `The \`queen_kv_*\`, \`queen_timers_*\` and \`queen_sweeper_*\` families are exposed by ` +
+      `**every** broker, at zero on one that has never seen a key or a timer, because those ` +
+      `surfaces are part of the engine rather than a feature a cell opts into. A dashboard ` +
+      `panel or an alert built on them can therefore be written before the first tenant ` +
+      `arrives, and a family that goes missing is a broker that is gone, not a feature that ` +
+      `is off.`,
     "",
   );
 

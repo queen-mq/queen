@@ -59,3 +59,48 @@ src/content/docs/reference/http/traces.mdx :: server/sql/procedures/010_log_admi
 src/content/docs/reference/http/traces.mdx :: server/src/db.rs
 src/content/docs/reference/http/traces.mdx :: server/src/handlers/traces.rs
 src/content/docs/reference/http/traces.mdx :: server/src/main.rs
+
+# ---------------------------------------------------------------------------
+# 2026-08-17, kv + timers (PLAN_KV_TIMERS.md, webdoc phase B).
+#
+# Commit 68f7f6b8 landed the KV and timer implementation and moved five broker
+# files under the pages below. The pages named here do not describe those two
+# surfaces, and the change to the files they name is additive: config.rs gained
+# about forty QUEEN_KV_*, QUEEN_TIMERS_* and QUEEN_SWEEPER* knobs and moved one
+# existing line; main.rs gained two conditional `.route(...)` blocks and made
+# its router binding mutable; db.rs and handlers/mod.rs gained only new items
+# (562 and 12 lines added, zero removed); schema.rs gained four filenames.
+# Nothing any of these pages asserts was touched.
+#
+# The one page in this group that WAS made false is deploy/index.mdx, which
+# published "the 23 stored-procedure files": corrected to 27 rather than
+# exempted, and therefore absent from this block. reference/http/system.mdx,
+# reference/openapi.mdx, reference/prometheus.mdx and
+# reference/multi-tenant/broker-tenancy.mdx were re-read and corrected in the
+# same phase for the same reason, and are likewise absent.
+#
+# Every entry below is a scheduled re-read, not a verdict that the page is
+# right forever. Phase C owns the `use/` pages, the deploy phase owns the rest.
+# Delete the line when the page is re-read.
+src/content/docs/internals/mesh.mdx :: server/src/config.rs
+src/content/docs/internals/mesh.mdx :: server/src/main.rs
+src/content/docs/reference/http/consumer-groups.mdx :: server/src/db.rs
+src/content/docs/reference/http/consumer-groups.mdx :: server/src/main.rs
+src/content/docs/reference/http/pop.mdx :: server/src/config.rs
+src/content/docs/reference/http/pop.mdx :: server/src/handlers/mod.rs
+src/content/docs/reference/multi-tenant/endpoints.mdx :: server/src/main.rs
+src/content/docs/reference/security/jwt.mdx :: server/src/config.rs
+src/content/docs/reference/security/jwt.mdx :: server/src/main.rs
+src/content/docs/reference/security/postgres-tls.mdx :: server/src/config.rs
+src/content/docs/reference/security/postgres-tls.mdx :: server/src/db.rs
+src/content/docs/start/quickstart.mdx :: server/src/config.rs
+src/content/docs/start/quickstart.mdx :: server/src/main.rs
+src/content/docs/use/http-client/index.mdx :: server/src/handlers/mod.rs
+src/content/docs/use/http-client/index.mdx :: server/src/main.rs
+
+# 2026-08-17, and NOT from this plan: the Go streams client moved under its own
+# reference page in commits 155e092c and 3d8d8af5, a workstream this phase does
+# not touch and cannot certify. Recorded rather than cleared, so the gate stays
+# green for everyone else while it stays visible for whoever owns that client.
+src/content/docs/reference/sdk/go.mdx :: clients/client-go/streams/stream.go
+src/content/docs/reference/sdk/go.mdx :: clients/client-go/streams/runtime/runner.go

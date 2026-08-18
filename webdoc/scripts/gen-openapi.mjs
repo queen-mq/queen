@@ -213,7 +213,21 @@ function queryParams(handler, structs) {
   }
 
   // `Query<HashMap<String, String>>`: the keys the handler actually reads.
-  const keys = [...handler.body.matchAll(/\b\w+\.get\(\s*"([a-zA-Z_][\w]*)"\s*\)/g)].map((m) => m[1]);
+  //
+  // Bound to the extractor's OWN binding name (`Query(q): Query<HashMap<…>>`
+  // gives `q`) instead of any identifier, and tolerant of the receiver and the
+  // `.get` sitting on different lines. Both halves are corrections, and the
+  // second is the one that was losing parameters: rustfmt breaks
+  // `q.get("limit").and_then(…)` across lines whenever the chain is long, and a
+  // pattern anchored to `\w+\.get\(` then matches the short accesses and misses
+  // the long ones — so `GET /api/v1/timers/:queue` published `after` and
+  // silently dropped `limit`. A spec that lists three of a route's four
+  // parameters is worse than one that lists none, because it reads complete.
+  const binding = handler.args.match(/Query\(\s*(\w+)\s*\)\s*:\s*Query</)?.[1];
+  const access = binding
+    ? new RegExp(`\\b${binding}\\s*\\.\\s*get\\(\\s*"([a-zA-Z_][\\w]*)"\\s*\\)`, "g")
+    : /\b\w+\s*\.\s*get\(\s*"([a-zA-Z_][\w]*)"\s*\)/g;
+  const keys = [...handler.body.matchAll(access)].map((m) => m[1]);
   const uniq = [...new Set(keys)];
   if (uniq.length) {
     return {
@@ -221,11 +235,25 @@ function queryParams(handler, structs) {
       params: uniq.map((k) => ({ name: k, in: "query", required: false, schema: { type: "string" } })),
     };
   }
+  // A handler that takes the map only to REFUSE it. The KV path routes do this
+  // on purpose (a prefix in a URL is recorded by every access log between the
+  // client and the database), and the "forwarded" note below — "parameters are
+  // forwarded to a stored procedure" — would be the opposite of the truth on
+  // exactly the routes where the rule is a privacy boundary.
+  if (/\breject_query\s*\(/.test(handler.body)) return { mode: "rejected", params: [] };
   return { mode: "forwarded", params: [] };
 }
 
 function requestBody(handler, structs) {
   if (!/body:\s*Bytes/.test(handler.args)) return null;
+
+  // A handler that branches on `body.is_empty()` accepts no body at all, so the
+  // body is optional. Every route that had one until now required it, which is
+  // why `required: true` could be a constant; `DELETE /api/v1/kv/:ns/*key` is
+  // the first where an empty body is the ordinary case and `{"expect":N}` the
+  // exception, and publishing that as required would tell a generated client to
+  // send `{}` on every unconditional delete.
+  const required = !/\bbody\s*\.\s*is_empty\(\)/.test(handler.body);
 
   // `let x: T = serde_json::from_slice(&body)` or `from_slice::<T>(&body)`
   const typed =
@@ -235,7 +263,7 @@ function requestBody(handler, structs) {
 
   if (name && structs.has(name)) {
     return {
-      required: true,
+      required,
       content: {
         "application/json": {
           schema: structSchema(name, structs),
@@ -251,7 +279,7 @@ function requestBody(handler, structs) {
   const properties = {};
   for (const k of [...new Set(keys)]) properties[k] = { description: "See the reference page for this route." };
   return {
-    required: true,
+    required,
     content: {
       "application/json": {
         schema: Object.keys(properties).length
@@ -434,7 +462,13 @@ function brokerSpec(handlers, structs) {
     const level = accessLevel(r.method, r.path);
     const tenantScoped = /tenant::Tenant|Extension<Tenant>/.test(h.args);
     const q = queryParams(h, structs);
-    const body = r.method === "get" || r.method === "delete" ? null : requestBody(h, structs);
+    // GET is excluded by rule; DELETE is not any more. `requestBody` already
+    // gates on the handler taking `body: Bytes`, and until now no DELETE handler
+    // did, so excluding the method was free — it is not free now. `DELETE
+    // /api/v1/kv/:ns/*key` reads an optional `{"expect":N}`, which is the
+    // difference between an unconditional delete and a compare-and-delete, and
+    // suppressing it by method would drop the only way to express the second.
+    const body = r.method === "get" ? null : requestBody(h, structs);
     if (body?.["x-queen-schema"] === "derived") derivedBodies++;
     else if (body) opaqueBodies++;
 
@@ -479,6 +513,12 @@ function brokerSpec(handlers, structs) {
       op["x-queen-note"] =
         "Query parameters are forwarded to a stored procedure without being read by name in " +
         "Rust, so they are not recoverable from the handler. See the reference page for this route.";
+    }
+    if (q.mode === "rejected") {
+      op["x-queen-note"] =
+        "This route takes no query parameters and refuses any query string outright, rather " +
+        "than ignoring one: a prefix or key in a URL is recorded by every access log, proxy " +
+        "sample and tracing span between the client and the database.";
     }
 
     paths[oapiPath] ??= {};

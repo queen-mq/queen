@@ -4,7 +4,7 @@ description: "How this site is built: the content tree, the strict frontmatter c
 type: how-to
 tier: internals
 sidebar:
-  order: 16
+  order: 19
   label: Documentation
 sourceOfTruth:
   - webdoc/package.json
@@ -329,7 +329,7 @@ build stops until a human has compared the two implementations.
 | `pnpm lint:docs:fix` | the same, applying the fixable rules |
 | `pnpm build` | static build into `dist/`, including the Pagefind index |
 | `pnpm typecheck` | `astro check` |
-| `pnpm verify` | `gen:check`, then `build`, then `lint:docs` (what to run before pushing) |
+| `pnpm verify` | the whole chain, in order: `gen:check`, `build`, `check:markdown`, `check:brief`, `lint:docs`, `check:prose`, `check:sourceoftruth` (what to run before pushing) |
 
 Run them from `webdoc/`, or with `pnpm --dir webdoc <script>` from the repository root.
 

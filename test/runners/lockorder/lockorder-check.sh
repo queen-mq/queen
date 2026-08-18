@@ -141,34 +141,51 @@ req() { # method path [body]  -> RC, BODY
 jv() { printf '%s' "${BODY:-}" | jq -r "($1) | tostring" 2>/dev/null || echo "?"; }
 
 # --- op builders ------------------------------------------------------------
-# The wire shapes these build ARE the contract this gate pins (PLAN §6.3, §8.2):
-#   kv op    {"type":"kv","op":...,"ns":...,"key":...,"value":...,
-#             "ttlSeconds":N|"forever":true,"expect":N?,"required":bool?}
-#   timer op {"type":"timer","op":"schedule"|"cancel","queue":...,"timerKey":...,
-#             "partition":...,"delayMs":N,"txn":...,"payload":...}
+# The wire shapes these build ARE the contract this gate pins (PLAN §6.3, §8.2,
+# §10.4):
+#
+#   {"operations":[ push/ack, ... ],          <- unchanged, `type`-discriminated
+#    "kv":      [ {"op":...,"ns":...,"key":...}, ... ],
+#    "timers":  [ {"op":"schedule"|"cancel","queue":...,"timerKey":...}, ... ]}
+#
+# KV and timer ops are TOP-LEVEL SIBLING ARRAYS, never elements of operations[]
+# with a `type` field. §10.4 decides it and the reason is Go: two struct fields
+# sharing one JSON key at one level are BOTH silently dropped by encoding/json,
+# so an inline shape would ship bundles whose gate simply is not there, with no
+# error anywhere. 005_log_ack.sql agrees from the other end — it reads `p->'kv'`
+# and `p->'timers'` off the payload root.
+#
+# A timer `payload` is BASE64 TEXT, not a JSON object: it is opaque bytes end to
+# end (it may be zstd-compressed, it may be encrypted §13.4), so there is no
+# point on the wire at which it is a JSON value.
+#
 # delayMs (not delaySeconds) per §20.6 as ratified: sub-second durations are ms.
 # ttlSeconds (never ttlMillis) per §20.1.
+#
+# base64 of {"lo":1} — a constant, so the storm does not fork a `base64` per op.
+LO_PAYLOAD_B64='eyJsbyI6MX0='
 kv_put() { # ns key value ttl
-  printf '{"type":"kv","op":"put","ns":"%s","key":"%s","value":%s,"ttlSeconds":%s}' "$1" "$2" "$3" "$4"
+  printf '{"op":"put","ns":"%s","key":"%s","value":%s,"ttlSeconds":%s}' "$1" "$2" "$3" "$4"
 }
 kv_incr() { # ns key delta ttl
-  printf '{"type":"kv","op":"incr","ns":"%s","key":"%s","delta":%s,"ttlSeconds":%s}' "$1" "$2" "$3" "$4"
+  printf '{"op":"incr","ns":"%s","key":"%s","delta":%s,"ttlSeconds":%s}' "$1" "$2" "$3" "$4"
 }
 timer_sched() { # queue timerKey partition delayMs txn
-  printf '{"type":"timer","op":"schedule","queue":"%s","timerKey":"%s","partition":"%s","delayMs":%s,"txn":"%s","payload":{"lo":1}}' \
-    "$1" "$2" "$3" "$4" "$5"
+  printf '{"op":"schedule","queue":"%s","timerKey":"%s","partition":"%s","delayMs":%s,"txn":"%s","payload":"%s"}' \
+    "$1" "$2" "$3" "$4" "$5" "$LO_PAYLOAD_B64"
 }
 timer_cancel() { # queue timerKey
-  printf '{"type":"timer","op":"cancel","queue":"%s","timerKey":"%s"}' "$1" "$2"
+  printf '{"op":"cancel","queue":"%s","timerKey":"%s"}' "$1" "$2"
 }
 push_op() { # queue partition txn
   printf '{"type":"push","queue":"%s","partition":"%s","payload":{"lo":1},"transactionId":"%s"}' "$1" "$2" "$3"
 }
 
 # --- preflight --------------------------------------------------------------
-# With QUEEN_KV_ENABLED / QUEEN_TIMERS_ENABLED false the routes are not even
-# registered (§0 deployment stance) and every bundle below would be a 400 from
-# the demux fallthrough — a green run that tested nothing. Refuse to run.
+# Every broker of this build has the kv and timer routes; no flag can withhold
+# them. What this preflight still catches is a URL that reaches something else —
+# the proxy, an older image — against which every bundle below would be a 400
+# from the demux fallthrough, a green run that tested nothing. Refuse to run.
 say "== preflight =="
 export QUEEN_WAIT_URLS="${QUEEN_WAIT_URLS:-$URL/health}"
 if command -v wait-for-broker >/dev/null 2>&1; then wait-for-broker; fi
@@ -199,14 +216,29 @@ KVRC="$RC"
 # Timer surface present?
 req POST /api/v1/timers "{\"operations\":[$(timer_sched "$TQ" "preflight:$RID" Default 60000 "pre-$RID")]}"
 TMRC="$RC"
+# And the RIDER shape on the transaction wire, which is what the storm actually
+# drives. A 2xx on the two standalone routes above does not imply the wire
+# accepts the sibling arrays — that is a different code path (§6.3's graft into
+# 005_log_ack.sql plus §8.2's demux), and if it 400s every lane below degenerates
+# into a plain push storm that tests nothing about the kv/timer lock spaces.
+req POST /api/v1/transaction "{\"operations\":[],\
+\"kv\":[$(kv_put "$NS" "preflight-wire:$RID" '{"p":1}' 60)],\
+\"timers\":[$(timer_sched "$TQ" "preflight-wire:$RID" Default 60000 "prew-$RID")]}"
+WIRERC="$RC"; WIREOK=$(jv '.success')
 if [ "$KVRC" = "404" ] || [ "$TMRC" = "404" ]; then
-  say "!! kv=$KVRC timers=$TMRC — the routes are not registered."
-  say "!! This gate needs QUEEN_KV_ENABLED=true AND QUEEN_TIMERS_ENABLED=true."
+  say "!! kv=$KVRC timers=$TMRC — these routes exist on every broker of this"
+  say "!! build, so a 404 means \$QUEEN_HTTP_URL is not one: check for the proxy"
+  say "!! or an older image before looking at the broker."
   say "!! Refusing to report a vacuous pass."
   say "LOCKORDER: FAIL"; exit 1
 fi
 case "$KVRC" in 2??) ok "kv surface answers ($KVRC)";; *) bad "kv surface answered $KVRC: $(head -c 300 "$BODYF" 2>/dev/null)";; esac
 case "$TMRC" in 2??) ok "timers surface answers ($TMRC)";; *) bad "timers surface answered $TMRC";; esac
+if [ "$WIRERC" = "200" ] && [ "$WIREOK" = "true" ]; then
+  ok "the transaction wire accepts the kv/timers rider arrays"
+else
+  bad "the wire rider was refused (HTTP $WIRERC, success=$WIREOK): $(head -c 300 "$BODYF" 2>/dev/null)"
+fi
 if [ "$FAIL" != "0" ]; then
   say "!! the kv/timer surfaces do not answer; the storm below would be vacuous."
   say "LOCKORDER: FAIL"; exit 1
@@ -262,18 +294,20 @@ worker() {
 
     case "$lane" in
       0)  # kv ascending, partitions descending. The SP must sort; we do not.
+          # The crossing lives INSIDE each array (kv keys a,b vs b,a and
+          # partitions pb,pa vs pa,pb), which is where it has to be now that the
+          # riders are their own arrays: §2.4 C3 point 3 forbids the broker from
+          # pre-sorting, so the permuted array IS the adversarial input.
           req POST /api/v1/transaction "{\"operations\":[\
-$(kv_put "$NS" "k$a" "{\"w\":$w}" 120),\
-$(kv_put "$NS" "k$b" "{\"w\":$w}" 120),\
 $(push_op "$q_b" "p$pb" "$tag-x"),\
-$(push_op "$q_a" "p$pa" "$tag-y")]}"
+$(push_op "$q_a" "p$pa" "$tag-y")],\
+\"kv\":[$(kv_put "$NS" "k$a" "{\"w\":$w}" 120),$(kv_put "$NS" "k$b" "{\"w\":$w}" 120)]}"
           ;;
       1)  # mirror of lane 0: the inverted input order on the same key set.
           req POST /api/v1/transaction "{\"operations\":[\
 $(push_op "$q_a" "p$pa" "$tag-y"),\
-$(push_op "$q_b" "p$pb" "$tag-x"),\
-$(kv_put "$NS" "k$b" "{\"w\":$w}" 120),\
-$(kv_put "$NS" "k$a" "{\"w\":$w}" 120)]}"
+$(push_op "$q_b" "p$pb" "$tag-x")],\
+\"kv\":[$(kv_put "$NS" "k$b" "{\"w\":$w}" 120),$(kv_put "$NS" "k$a" "{\"w\":$w}" 120)]}"
           ;;
       2)  # kv + timer + ack: the only lane that reaches log_consumers (space 6)
           # while holding kv rows. C4 seen from the wire side.
@@ -282,19 +316,22 @@ $(kv_put "$NS" "k$a" "{\"w\":$w}" 120)]}"
           pid=$(jv '.messages[0].partitionId'); txn=$(jv '.messages[0].transactionId'); lease=$(jv '.messages[0].leaseId')
           if [ "$pid" != "?" ] && [ -n "$pid" ] && [ "$pid" != "null" ]; then
             req POST /api/v1/transaction "{\"operations\":[\
-$(kv_incr "$NS" "k$a" 1 120),\
-$(timer_sched "$TQ" "t$t1" "p$pa" "$d" "$tag-t1"),\
-{\"type\":\"ack\",\"transactionId\":\"$txn\",\"partitionId\":\"$pid\",\"consumerGroup\":\"$GRP\",\"leaseId\":\"$lease\",\"status\":\"completed\"}],\"requiredLeases\":[\"$lease\"]}"
+{\"type\":\"ack\",\"transactionId\":\"$txn\",\"partitionId\":\"$pid\",\"consumerGroup\":\"$GRP\",\"leaseId\":\"$lease\",\"status\":\"completed\"}],\
+\"kv\":[$(kv_incr "$NS" "k$a" 1 120)],\
+\"timers\":[$(timer_sched "$TQ" "t$t1" "p$pa" "$d" "$tag-t1")],\
+\"requiredLeases\":[\"$lease\"]}"
           else
-            req POST /api/v1/transaction "{\"operations\":[\
-$(kv_incr "$NS" "k$a" 1 120),\
-$(timer_sched "$TQ" "t$t1" "p$pa" "$d" "$tag-t1")]}"
+            req POST /api/v1/transaction "{\"operations\":[],\
+\"kv\":[$(kv_incr "$NS" "k$a" 1 120)],\
+\"timers\":[$(timer_sched "$TQ" "t$t1" "p$pa" "$d" "$tag-t1")]}"
           fi
           ;;
       3)  # timers only, two keys per bundle in crossed order. The bundle holds
           # T rows across the whole commit while the fire wants the same rows.
-          req POST /api/v1/transaction "{\"operations\":[\
-$(timer_sched "$TQ" "t$t2" "p$pb" "$d" "$tag-t2"),\
+          # NB: a timers-only bundle is NOT routed off the wire (only KV-only is,
+          # §2.5), so this really does exercise the wire's sequence.
+          req POST /api/v1/transaction "{\"operations\":[],\
+\"timers\":[$(timer_sched "$TQ" "t$t2" "p$pb" "$d" "$tag-t2"),\
 $(timer_sched "$TQ" "t$t1" "p$pa" "$d" "$tag-t1")]}"
           ;;
       4)  # standalone kv on the fully specified path routes (§8.1). Actor 12:
@@ -338,10 +375,19 @@ say ""
 say "== drain: the fire path must have participated =="
 # A run where nothing fired has not exercised actor 6 (T -> Q -> P), i.e. it has
 # not tested C1 at all. Waiting for the table to drain is how we know it did.
+#
+# The preflight rows are EXCLUDED, and that exclusion is load-bearing rather than
+# cosmetic: the preflight schedules its probes 60 s out (deliberately far enough
+# that they cannot fire and confuse the fired-count), while this deadline is 45 s.
+# Counting them makes the drain assertion fail on a perfectly drained table, and
+# the failure text ("still holds 2 rows") points at the fire path instead of at
+# the clock. Only the STORM's rows — timer_key 't<N>' — are the population under
+# test; they are scheduled 0..LO_TIMER_MAX_DELAY_MS out precisely so they mature
+# during the storm.
 DEADLINE=$(( $(date +%s) + DRAIN_DEADLINE_S ))
 PENDING=-1
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-  PENDING=$(sql "SELECT count(*) FROM queen.log_timers WHERE queue = '$TQ';")
+  PENDING=$(sql "SELECT count(*) FROM queen.log_timers WHERE queue = '$TQ' AND timer_key NOT LIKE 'preflight%';")
   case "$PENDING" in ''|*[!0-9]*) PENDING=-1; break;; esac
   [ "$PENDING" = "0" ] && break
   sleep 1
@@ -360,7 +406,7 @@ if [ "$PENDING" = "0" ]; then
 elif [ "$PENDING" = "-1" ]; then
   bad "queen.log_timers could not be queried (does the table exist?)"
 else
-  bad "queen.log_timers still holds $PENDING row(s) for $TQ after ${DRAIN_DEADLINE_S}s"
+  bad "queen.log_timers still holds $PENDING storm row(s) for $TQ after ${DRAIN_DEADLINE_S}s"
 fi
 
 KVROWS=$(sql "SELECT count(*) FROM queen.kv WHERE namespace = '$NS';")

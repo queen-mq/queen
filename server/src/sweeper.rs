@@ -355,8 +355,6 @@ pub fn hint_in_ms(delay_ms: i64) {
 /// plain values instead of a `&Config`.
 #[derive(Clone)]
 struct Knobs {
-    kv: bool,
-    timers: bool,
     sleep: SleepKnobs,
     lease_ms: i32,
     claim_batch: i32,
@@ -377,6 +375,13 @@ struct Knobs {
     kv_expire_every: Duration,
     kv_expire_batch: i32,
     usage_every: Duration,
+    /// The cadence the usage rollup drops to once ANY tenant is above the
+    /// watermark (§9.3). It is the quota REFRESH period, and the equality is the
+    /// point rather than a coincidence: the published overrun bound is
+    /// `rate x (rollup + refresh + duration)`, and no reader can be fresher than
+    /// its writer — so for the tenants that are actually near a limit, the writer
+    /// is made as fast as the reader and the first term stops dominating.
+    usage_hot_every: Duration,
     parallelism: usize,
 }
 
@@ -385,29 +390,24 @@ struct Knobs {
 /// boot sequence (§7.1); `main.rs` ignores it, as it does for every other
 /// background loop.
 ///
-/// **`None` means the task was not spawned at all**, which is the point. With
-/// `QUEEN_SWEEPER=true` by default and both feature flags `false`, every
-/// existing installation would otherwise pay, forever, one `log_timers_due_v1`
-/// per second per broker (a LATERAL of 64 seeks plus a count), one
-/// `kv_expire_step_v1` per second, one `Lane::Maint` slot and one pooled
-/// connection per cycle — on two empty tables. On a free-tier 2-core cell whose
-/// measured ceiling is around 480 msg/s that is measurable noise no customer
-/// asked for.
-pub fn spawn(pool: Pool, metrics: Arc<Metrics>, cfg: &Config) -> Option<tokio::task::JoinHandle<()>> {
+/// **`None` means the task was not spawned at all**, and now only
+/// `QUEEN_SWEEPER=false` can produce it. It used to also return `None` when both
+/// kv/timers boot flags were off, so that an installation which would never use
+/// either paid nothing for them; those flags are gone (see the header of
+/// `switches.rs`), the surfaces are live on every cell, and a surface with expiry
+/// and a due time without its reaper only accumulates.
+pub fn spawn(
+    pool: Pool,
+    metrics: Arc<Metrics>,
+    cfg: &Config,
+    switches: Arc<crate::switches::Switches>,
+    quotas: Arc<crate::quota::Quotas>,
+) -> Option<tokio::task::JoinHandle<()>> {
     if !cfg.sweeper_enabled {
         tracing::info!(target: "sweeper", "disabled by QUEEN_SWEEPER=false");
         return None;
     }
-    if !cfg.kv_enabled && !cfg.timers_enabled {
-        tracing::debug!(
-            target: "sweeper",
-            "not spawned: QUEEN_KV_ENABLED and QUEEN_TIMERS_ENABLED are both off"
-        );
-        return None;
-    }
     let knobs = Knobs {
-        kv: cfg.kv_enabled,
-        timers: cfg.timers_enabled,
         // The plan's numbers live in exactly one place, `SleepKnobs::defaults()`,
         // and are the env defaults here rather than being written twice.
         sleep: {
@@ -449,12 +449,16 @@ pub fn spawn(pool: Pool, metrics: Arc<Metrics>, cfg: &Config) -> Option<tokio::t
         kv_expire_every: Duration::from_millis(env_u64("QUEEN_KV_EXPIRE_EVERY_MS", 1000).max(1)),
         kv_expire_batch: clamp_i32(env_u64("QUEEN_KV_EXPIRE_BATCH", 1000).max(1) as i64),
         usage_every: Duration::from_millis(cfg.kv_usage_every_ms.max(1000)),
+        // Never SLOWER than the cold cadence: `min` and not the raw refresh
+        // period, so an operator who sets a refresh interval longer than the
+        // rollup interval does not accidentally make the hot path the slow one.
+        usage_hot_every: Duration::from_millis(
+            cfg.kv_quota_refresh_ms.max(1000).min(cfg.kv_usage_every_ms.max(1000)),
+        ),
         parallelism: cfg.sweeper_parallelism.clamp(1, MAX_PARALLELISM),
     };
     tracing::info!(
         target: "sweeper",
-        kv = knobs.kv,
-        timers = knobs.timers,
         sleep_ms = %format!("{}..{} (idle {})", knobs.sleep.min_ms, knobs.sleep.max_ms, knobs.sleep.idle_max_ms),
         lease_ms = knobs.lease_ms,
         claim_batch = knobs.claim_batch,
@@ -467,7 +471,9 @@ pub fn spawn(pool: Pool, metrics: Arc<Metrics>, cfg: &Config) -> Option<tokio::t
         leaderless = true,
         "service started"
     );
-    Some(tokio::spawn(async move { run_loop(pool, metrics, knobs).await }))
+    Some(tokio::spawn(
+        async move { run_loop(pool, metrics, knobs, switches, quotas).await },
+    ))
 }
 
 /// `config.rs` owns the env parsers and keeps them private; three knobs of §7
@@ -503,7 +509,14 @@ impl Gate {
         Gate { last: None, every }
     }
     fn due(&self, now: Instant) -> bool {
-        self.last.is_none_or(|at| now.duration_since(at) >= self.every)
+        self.due_every(now, self.every)
+    }
+    /// Same gate against a cadence supplied by the caller, for the one phase
+    /// whose period is not constant: the usage rollup runs on its slow clock
+    /// normally and on the quota refresh clock once any tenant is above the
+    /// watermark (§9.3).
+    fn due_every(&self, now: Instant, every: Duration) -> bool {
+        self.last.is_none_or(|at| now.duration_since(at) >= every)
     }
     fn mark(&mut self, now: Instant) {
         self.last = Some(now);
@@ -529,7 +542,13 @@ static PRUNE_ERR: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
 static USAGE_ERR: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
 static POISON_WARN: crate::obs::Sampler = crate::obs::Sampler::new(30_000);
 
-async fn run_loop(pool: Pool, metrics: Arc<Metrics>, k: Knobs) {
+async fn run_loop(
+    pool: Pool,
+    metrics: Arc<Metrics>,
+    k: Knobs,
+    switches: Arc<crate::switches::Switches>,
+    quotas: Arc<crate::quota::Quotas>,
+) {
     let mut idle_cycles: u32 = 0;
     // Consecutive cycles in which the fire pass hit a ceiling. This is the ONLY
     // input to the degradation ladder, and the ladder only ever sheds phases
@@ -558,8 +577,23 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, k: Knobs) {
         let mut fired_rows: u64 = 0;
 
         // ------------------------------------------------------------- A + B
-        // The fire. Never shed automatically, whatever the pressure.
-        if k.timers {
+        // The fire. NEVER shed automatically, whatever the pressure — under load
+        // it takes smaller batches and sleeps longer, and `fire_lag` rising is
+        // the visible result. The ONE thing that stops it is an operator's
+        // `timers_fire_enabled`, and that switch is separate from
+        // `timers_schedule_enabled` because the two halves have opposite costs:
+        // pausing the schedule promises nothing new, while pausing the fire
+        // accumulates work already promised, which a customer reads as loss.
+        //
+        // No lost timer: `deliverAt` is "not before", so the backlog drains from
+        // the oldest when the switch goes back on. The visible cost is
+        // `queen_timers_due_backlog`, and that is exactly what an operator who
+        // flipped this switch should be watching.
+        // The transition is logged by `Switches::flip`, at the instant of the
+        // flip and on every broker including those that do not sweep — so this
+        // loop deliberately does NOT log it again. Two lines for one event is how
+        // a log stops being read.
+        if switches.fire_allowed() {
             let t0 = Instant::now();
             match fire_pass(&pool, &metrics, &k, &shards, cycle_budget(&k, pressure)).await {
                 Ok(pass) => {
@@ -622,7 +656,32 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, k: Knobs) {
             "fire pass hit its ceiling on consecutive cycles",
         );
 
-        if k.kv && usage_phase == PhaseState::On && usage_gate.due(cycle_start) {
+        // §9.3: "la cadenza del rollup scende a quella del rinfresco per i tenant
+        // sopra l'80%". A tenant near a cap is exactly the tenant whose headroom
+        // decides how far the whole cell can overrun before the block lands —
+        // `(brokers - 1) x headroom`, `quota_overshoot.rs` case 6 — so a fresher
+        // measurement there is worth the scan, and nowhere else is.
+        //
+        // The rollup is NOT filtered to those tenants, deliberately. `queen.kv`
+        // has one partial secondary index and no access path for "every row of a
+        // tenant" (§3.4), so restricting the aggregate would not restrict the
+        // SCAN, which is the whole cost — it would only duplicate a sixty-line
+        // query for a saving of nothing. What the watermark buys is the CADENCE,
+        // and the cadence is what §9.3 asks for.
+        let hot = quotas.hot();
+        let usage_every = if hot { k.usage_hot_every } else { k.usage_every };
+        static USAGE_HOT: crate::obs::OnChange<bool> = crate::obs::OnChange::new();
+        if let Some(Some(prev)) = USAGE_HOT.changed(hot) {
+            if prev != hot {
+                tracing::info!(
+                    target: "sweeper",
+                    hot,
+                    every_ms = usage_every.as_millis() as u64,
+                    "usage rollup cadence changed: a tenant crossed the quota watermark"
+                );
+            }
+        }
+        if usage_phase == PhaseState::On && usage_gate.due_every(cycle_start, usage_every) {
             if stage >= 4 {
                 metrics.kvt.sweeper_phase_skipped(SweepPhase::Usage);
             } else {
@@ -657,7 +716,7 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, k: Knobs) {
             }
         }
 
-        if k.kv && kv_phase == PhaseState::On && kv_gate.due(cycle_start) {
+        if kv_phase == PhaseState::On && kv_gate.due(cycle_start) {
             if stage >= 3 {
                 metrics.kvt.sweeper_phase_skipped(SweepPhase::KvExpire);
             } else {
@@ -1740,8 +1799,6 @@ mod tests {
     #[test]
     fn the_cycle_budget_shrinks_but_never_below_one_batch() {
         let k = Knobs {
-            kv: true,
-            timers: true,
             sleep: SleepKnobs::defaults(),
             lease_ms: 30_000,
             claim_batch: 200,
@@ -1759,6 +1816,7 @@ mod tests {
             kv_expire_every: Duration::from_millis(1000),
             kv_expire_batch: 1000,
             usage_every: Duration::from_millis(300_000),
+            usage_hot_every: Duration::from_millis(30_000),
             parallelism: 1,
         };
         assert_eq!(cycle_budget(&k, 0), 5000);

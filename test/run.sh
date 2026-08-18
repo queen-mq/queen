@@ -4,11 +4,13 @@
 # runs each (suite x topology) as an isolated docker-compose project in parallel
 # and prints a pass/fail matrix.
 #
-#   suites:  js go py cli cpp rust-client
+#   suites:  js go py cli cpp laravel rust-client
 #                               -> run on `single`, `ha` and `tenanted` stacks
 #            rust               -> in-process broker unit tests, no stack (`unit`)
 #            mesh               -> HA mesh assertion, `ha` stack only
 #            tenancy            -> two-tenant isolation, `ha-tenanted` stack only
+#            http               -> the kv/timer wire with no SDK in the way
+#                                  (PLAN_KV_TIMERS.md §10.2), `single` only
 #
 #   topologies:
 #     single       1 PG + 1 broker                       (QUEEN_TENANCY_HEADER off)
@@ -31,6 +33,7 @@
 #   test/run.sh --suite py --topo single
 #   test/run.sh --suite js --topo tenanted     # flag-ON default-tenant lane
 #   test/run.sh --suite tenancy        # two-tenant isolation over the HA pair
+#   test/run.sh --suite http           # every kv/timer route, no SDK in the way
 #   test/run.sh --no-build-broker      # reuse an existing queen:test
 #   test/run.sh -j 3                   # cap parallelism (default: 4)
 #   test/run.sh --keep                 # leave stacks up for debugging
@@ -38,8 +41,8 @@
 # Env: QUEEN_TEST_MAX_PARALLEL overrides -j.
 set -uo pipefail
 
-ALL_SUITES="js go py cli cpp rust-client rust mesh tenancy"
-CLIENT_SUITES="js go py cli cpp rust-client"
+ALL_SUITES="js go py cli cpp laravel rust-client rust mesh tenancy http"
+CLIENT_SUITES="js go py cli cpp laravel rust-client"
 
 SUITES="$ALL_SUITES"
 TOPOS="single ha tenanted"
@@ -130,6 +133,15 @@ for s in $SUITES; do
     add_job mesh ha            # mesh is inherently an HA-stack check
   elif [ "$s" = "tenancy" ]; then
     add_job tenancy ha-tenanted  # two tenants over the mesh pair, flag ON
+  elif [ "$s" = "http" ]; then
+    # `single` and nothing else, and the reason is a product rule rather than a
+    # cost: with QUEEN_TENANCY_HEADER on, `kv_require_grant` follows it, so the
+    # ABSENCE of a per-tenant quota row is a 403 `feature_gated` (§9.4). Granting
+    # the default tenant would mean writing to the database, and this suite has
+    # no database access on purpose — every assertion it makes is at the HTTP
+    # wire. The wire shape it pins is topology-independent anyway: the same
+    # bodies, the same routes and the same result layout on any stack.
+    add_job http single
   elif [ "$s" = "rust" ]; then
     add_job rust unit          # no stack
   fi
@@ -153,6 +165,11 @@ run_job() {
       echo ">> FAIL ${suite}/${topo} rc=2 (unknown topology)"; return
     fi
     tflag="$(tenancy_for "$topo")"
+    # No per-suite kv/timer knob here any more. The http suite's whole subject IS
+    # the kv/timer surface, and it used to need the two boot flags pinned on for
+    # its lane; those flags are gone and every broker this harness starts has both
+    # surfaces, so the suite needs nothing special and no other lane can lose them
+    # by accident.
     QUEEN_RUNNER_IMAGE="queen-test-runner-$suite" QUEEN_TEST_TENANCY="$tflag" \
       docker compose -p "$proj" -f "$compose" up \
         --abort-on-container-exit --exit-code-from runner >"$log" 2>&1

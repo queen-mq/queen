@@ -1,0 +1,207 @@
+---
+title: Timers
+description: "A message you promise now and the broker delivers later, into a real queue through the real log: what makes it cancellable, the three semantics that decide how it behaves, and how it differs from a queue-wide visibility delay."
+type: concept
+tier: use
+sidebar:
+  order: 4
+sourceOfTruth:
+  - server/sql/procedures/025_log_timers.sql
+  - server/src/handlers/timers.rs
+  - server/src/sweeper.rs
+  - server/src/config.rs
+  - clients/client-js/client-v2/builders/TimerBuilder.js
+verifiedBy:
+  - server/tests/timers_fault_injection.rs
+  - clients/client-js/test-v2/timers.js
+---
+
+A timer is a message you promise now and the broker delivers later, into an ordinary queue, through
+the ordinary log. Until the delivery instant it is a row you can cancel or reprogram. At the delivery
+instant one PostgreSQL transaction pushes the frame and deletes the row, so the message either exists
+in the log or the timer is still pending, and never both.
+
+```js
+// Illustrative, not extracted from a test.
+await queen.timer('reminders')
+  .key(`trial-ending:${accountId}`)
+  .delay('72h')
+  .payload({ accountId })
+  .schedule()
+
+// Later, if the customer converts before the reminder is due.
+const { ok, status } = await queen.timer('reminders').key(`trial-ending:${accountId}`).cancel()
+```
+
+## Why the timer is not just a message with a future timestamp
+
+The obvious implementation is to write the frame into the log now and hide it until its time. That
+implementation is not available here, and the reason is structural rather than a matter of taste.
+
+A pop is a contiguous offset scan from `committed + 1`. A frame with a future delivery time sitting in
+the middle of that scan either blocks the cursor for every consumer of the partition or is skipped and
+never delivered. A frame already inside a solid zstd segment cannot be removed by any statement, so it
+could not be cancelled. And a pending future frame would pin its own segment against `log_start` for
+the whole wait, which for a ninety-day timer means ninety days of segments kept alive behind it.
+
+So a timer waits outside the log, in `queen.log_timers`, and the log sees it only at the fire.
+[Timer internals](/internals/timers) has the table column by column.
+
+## What makes a timer cancellable
+
+Its identity is `(queue, timerKey)`, a name you chose, inside the tenant. Not an opaque id the broker
+handed back, which means a cancel needs nothing but the name you already have, and a process that
+crashed between scheduling and recording the id can still cancel.
+
+Because the identity is the key, **schedule and reschedule are the same upsert**. Sending the same
+schedule twice is not two timers, and a retry after a client crash is safe by construction. The answer
+tells you which happened, `status: "scheduled"` or `status: "rescheduled"`. A reschedule also resets
+the failure budget: a rescheduled timer is a new timer under an old name, and a payload you just
+corrected must not inherit the attempts consumed by the one that was failing.
+
+A cancel is a `DELETE`. It is idempotent, and cancelling a timer that never existed is not an error.
+
+## The three semantics
+
+**`deliverAt` is a floor, never an appointment.** The contract is "no earlier than". The measured floor
+on this stack is a single hop, p50 around 10 ms with an fsync around 4 ms, plus one sweep cycle. A
+healthy timer lands within a few milliseconds above `QUEEN_SWEEPER_MIN_SLEEP_MS`; a timer consistently
+later than `QUEEN_SWEEPER_MAX_SLEEP_MS` (1000 ms) has a wake-up problem rather than a load problem, and
+`queen_timers_fire_lag_seconds` is what measures it. This is not a high-frequency
+scheduler. It is a durable one, and under a burst of a million due timers the delivery lag rises
+linearly while the backlog drains rather than anything being lost.
+
+**The order of two timers is decided at the fire, not at the schedule.** Two timers on the same queue
+and partition that come due in the same batch enter the log in the order the claim returned them,
+which is `ORDER BY visible_at`, the order of expiry. Scheduling order does not survive, and nothing
+about a timer promises it would.
+
+**`too_late` is a verdict, not a failure.** Once a broker has claimed a timer it has already
+decompressed and packed that payload and is about to commit it, so a cancel or a reschedule arriving
+in that window answers `{"ok": false, "status": "too_late"}` with **HTTP 200**. Granting the cancel
+would leave "did it go out?" without an answer, and granting the reschedule would deliver the old
+payload after you believed you had replaced it. The window is bounded by the sweeper lease, at most
+`QUEEN_SWEEPER_LEASE_MS` (30 s), which is also the longest a cancel can answer `too_late` after the
+broker holding the claim has died. The remedy is a new key, or waiting for the delivery and acting on
+the message.
+
+## `absent` is the answer that hurts
+
+The fire deletes the row. There is no tombstone, no completed-timer history, and nothing to reconcile
+after a crash. That is what makes the fire exactly-once, and it has one consequence you have to design
+around.
+
+> **`absent` means "no longer pending". It may mean the timer has already been delivered. It never
+> means "not delivered". The authority is the log: look for the timer's `txn` in the destination
+> queue.**
+
+Two things follow, and both are obligations on your code rather than notes.
+
+The cancel response echoes the `txn` you supplied, so the check costs no second API call. And any saga
+that cancels a compensation timer must have **the compensating consumer verify the saga's state before
+compensating**. Without that check, the case where the timer went out five milliseconds before your
+cancel unwinds a booking that has already shipped, and the cancel answered `absent` while doing so.
+[KV state](/use/kv) is where that saga state belongs, in the same transaction as the ack.
+
+A cancel aimed at another tenant's timer also answers `absent`. Not revealing whose it is is correct;
+answering `ok: true` would not be, which is why `absent` carries `ok: false`.
+
+## Durations, and the rule behind them
+
+Only relative durations travel on the wire, as `delayMs`, and never an absolute instant. `deliver_at`
+is computed inside PostgreSQL from a single clock, so no broker's clock skew can enter the feature
+anywhere. A delay in the past is legal and fires on the first cycle.
+
+The product has one rule for this and it is worth stating once, because Queen otherwise speaks seconds
+everywhere: **durations that can be sub-second are in milliseconds, and the ones that cannot are in
+seconds**. A 250 ms retry backoff is a real and central use of a timer, so timers are the millisecond
+side. A TTL below one second is not a real case for anybody, so [KV state](/use/kv) takes
+`ttlSeconds`.
+
+An SDK may accept `'30m'` or `'72h'` and convert; the wire stays `delayMs`.
+
+## Timers and `delayedProcessing` are not the same tool
+
+Half the readers of this page want the other one. The difference is not a nuance.
+
+| | `delayedProcessing` | A timer |
+| --- | --- | --- |
+| Scope | The queue. Every message in it | One message |
+| Set by | `POST /api/v1/configure`, once | The call that schedules it |
+| Cancellable | No | Yes, until a broker claims it |
+| Reprogrammable | Changing the option moves **every** message at once | Per timer, by re-sending the schedule |
+| Where the message is | Already in the log, hidden by a visibility cut | Not in the log yet |
+| Delay per message | Identical for all | Whatever each one asked for |
+
+Use `delayedProcessing` when the queue itself has a settling period: every event of this kind should be
+seen a minute after it happened. Use a timer when one particular thing has to happen at one particular
+later moment and you may change your mind about it.
+
+## Inside a transaction
+
+A timer can ride the same bundle as your pushes and acks, which is the point of having it in the
+broker at all. `timers` is a **top-level array** of the transaction request, beside `operations`, not
+an element inside it.
+
+```js
+// Illustrative, not extracted from a test.
+await queen.transaction()
+  .ack(message)
+  .push('audit', { event: 'booking.held', bookingId })
+  .kv.put('saga', bookingId, { step: 'held' }, { ttlSeconds: 86400 })
+  .timer('bookings.expire').key(bookingId).delay('15m').payload({ bookingId }).schedule()
+  .commit()
+```
+
+Either the ack, the push, the state write and the timer all commit, or none of them does. There is no
+ordering of separate calls that buys the same thing, and this is the case a scheduler outside the
+database cannot serve: it would have to be told about a transaction that may still roll back.
+
+The cancel is the one asymmetry. On its own it uses `DELETE /api/v1/timers/:queue/*timerKey`, a route
+that is deliberately never blocked by a quota or a storage gate, because the fire never switches itself
+off and a tenant that cannot cancel keeps producing messages it cannot stop. Inside a bundle a cancel
+necessarily rides the bundle and shares its fate.
+
+## The limits worth knowing before you design
+
+- **No recurrence and no cron.** The hard part of recurrence is recovering missed windows, and that is
+  a different product. Here the concept of a missed window does not exist.
+- **A finite horizon.** `QUEEN_TIMERS_MAX_HORIZON_S` defaults to 7,776,000 seconds, ninety days. It is
+  finite rather than unlimited so that the worst case of the table is calculable as schedule rate times
+  horizon.
+- **The payload ceiling is derived, not independent.** `QUEEN_TIMERS_MAX_PAYLOAD_BYTES` is the smaller
+  of 1 MiB and the plan's own message ceiling. A timer becomes a message, so a separate ceiling would
+  be a side door around the message one.
+- **No tenant-wide list.** `peek` and `list` are scoped to a queue. A list of every timer of a tenant
+  is a scan that an end user of your service could trigger.
+- **No deduplication net on the fire.** The guarantee is the delete and the push sharing one
+  transaction. Rescheduling or republishing a timer that has already gone out produces a second message
+  in the log, and nothing below you stops it.
+- **A repeatedly failing timer is dead-lettered.** Permanent failures spend a budget of
+  `QUEEN_SWEEPER_MAX_ATTEMPTS` (5); transient database trouble spends none, or five minutes of
+  infrastructure trouble would turn into product loss. Past the budget the frame lands in the
+  destination queue's dead-letter table under the consumer group `__timer__`, and a replay of that row
+  is refused by name, because that frame never had a group and its offset is not a position.
+
+<CardGrid>
+  <LinkCard
+    href="/use/kv"
+    title="KV state"
+    description="The transactional key/value store a saga's state belongs in, and the store a cancel that answered absent has to be checked against."
+  />
+  <LinkCard
+    href="/internals/timers"
+    title="Timer internals"
+    description="queen.log_timers column by column, keyed by names, and the two lease columns that keep a broken timer cancellable."
+  />
+  <LinkCard
+    href="/internals/sweeper"
+    title="The sweeper"
+    description="The background component that fires them: two clocks, leaderless, and a wake whose net is the sleep ceiling."
+  />
+  <LinkCard
+    href="/deploy/state"
+    title="Operating it"
+    description="The runtime kill switches, what each refusal answers, and what a shared cell has to meet."
+  />
+</CardGrid>

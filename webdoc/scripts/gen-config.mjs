@@ -151,6 +151,11 @@ const GROUPS = [
   ["Background jobs", (n) => n.startsWith("RETENTION") || n.startsWith("STATS_") || n.startsWith("PARTITION_CLEANUP") || n === "QUEEN_PARTITION_CLEANUP_ENABLED" || n.startsWith("METRICS_")],
   ["Durability spool", (n) => n.startsWith("FILE_BUFFER")],
   ["Security", (n) => n.startsWith("QUEEN_ENCRYPTION") || n === "QUEEN_TENANCY_HEADER"],
+  // Roughly forty knobs, and without this group every one of them lands under
+  // "Other" next to the pool gauges. `QUEEN_SWEEPER` has no underscore suffix
+  // and would fall out of a prefix-only test.
+  ["Key/value state, timers and the sweeper", (n) =>
+    n.startsWith("QUEEN_KV_") || n.startsWith("QUEEN_TIMERS_") || n === "QUEEN_SWEEPER" || n.startsWith("QUEEN_SWEEPER_")],
   ["Logging", (n) => n === "LOG_LEVEL" || n === "RUST_LOG" || n.startsWith("QUEEN_LOG")],
 ];
 
@@ -216,6 +221,42 @@ const EXTRA_VARS = [
     def: "96 (two thirds of DB_POOL_SIZE minus QUEEN_ADMISSION_POOL_RESERVE)",
     aliases: [],
     // Same derived floor as QUEEN_ADMISSION_INIT.
+  },
+  {
+    name: "QUEEN_KV_POOL_SIZE",
+    type: "integer",
+    def: "16 (DB_POOL_SIZE / 10, clamped to 4..32)",
+    aliases: [],
+    // config.rs :: kv_pool_default — the call site's second argument is a
+    // function call, so the parser read back `kv_pool_default(pool_size` (an
+    // unbalanced fragment, which is what a truncated expression looks like when
+    // it reaches a table cell). Derived on purpose, with the same precedent as
+    // admission_floor: this pool IS the bulkhead, and a bulkhead sized
+    // independently of the pool it protects stops protecting it the moment
+    // DB_POOL_SIZE moves.
+  },
+  {
+    name: "QUEEN_KV_REQUIRE_GRANT",
+    type: "boolean",
+    def: "the value of QUEEN_TENANCY_HEADER (so: false)",
+    aliases: [],
+    // config.rs binds the default to the resolved `tenancy_header`, and the
+    // parser published the binding NAME as the default. Derived so that turning
+    // tenancy on makes a missing quota row a denial rather than a permission,
+    // while a self-hosted operator — who is their own customer — configures
+    // nothing.
+  },
+  {
+    name: "QUEEN_TIMERS_MAX_PAYLOAD_BYTES",
+    type: "integer",
+    def: "1048576 (1 MiB), further narrowed to the plan's max_payload_bytes",
+    aliases: [],
+    // The literal in config.rs is only the absolute half of
+    // min(1 MiB, plan.max_payload_bytes); the plan half is applied in the proxy.
+    // Publishing the literal alone would read as a ceiling a tenant can rely on,
+    // and the whole reason the value is a minimum is that a timer becomes a
+    // message: an independent ceiling here would be a service entrance past the
+    // plan's own payload limit.
   },
   {
     name: "QUEEN_HOTLIST_RESEED_WINDOW_MS",

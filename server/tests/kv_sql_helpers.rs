@@ -30,11 +30,11 @@
 //! written yet", a single `42601 syntax_error` in the middle would say "the test
 //! itself is wrong". The two are distinguishable without editing anything.
 //!
-//! FLAG-INDEPENDENT ON PURPOSE. `QUEEN_KV_ENABLED` is `false` by default (§20.4)
-//! and the test does not set it: §0 says the tables and functions are created at
-//! every boot whatever the flags say, because a deployment model with two
-//! possible schemas is not a deployment model. If these assertions ever need the
-//! flag on, that decision changed without anyone writing it down.
+//! NO FLAG TO SET, AND THAT WAS ALREADY TRUE. This file never read
+//! `QUEEN_KV_ENABLED` because §0 created the tables and functions at every boot
+//! whatever the flags said — a deployment model with two possible schemas is not
+//! a deployment model. The flag has since been removed entirely (kv is the
+//! default, not a feature), so the schema and the surface finally agree.
 
 use queen::{Broker, BrokerConfig};
 

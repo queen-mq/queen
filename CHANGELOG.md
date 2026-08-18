@@ -3,6 +3,59 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## 1.1.0 (unreleased)
+
+**Key/value state and timers are part of the engine, not features to switch on.** There is no
+`QUEEN_KV_ENABLED` and no `QUEEN_TIMERS_ENABLED` — the broker reads neither, and setting them
+does nothing. The reason is the one that governs every other surface: there is no
+`QUEEN_PUSH_ENABLED` either. A boot flag is the claim that a thing is optional, and a cell where
+`/api/v1/kv` might or might not exist is a cell no client can be written against. From the moment
+this binary lands, both surfaces are live and the sweeper is running on every cell.
+
+**Upgrading breaks a broker started with `QUEEN_TENANCY_HEADER=1` unless you also set
+`QUEEN_KV_TRUSTED_PROXY=1`.** This is the one change that needs an edit before the upgrade, and
+the failure is loud: the process exits at boot with the reason in its last log line, so a
+Kubernetes rollout crash-loops rather than serving. Add the variable wherever the tenancy header
+is on:
+
+```
+QUEEN_TENANCY_HEADER=1
+QUEEN_KV_TRUSTED_PROXY=1     # new, and now mandatory alongside the line above
+```
+
+Set it only where the claim it makes is true: **a proxy in front sets `x-queen-tenant` and strips
+whatever the client sent.** The interlock is not about KV being dangerous. With the header on, the
+tenant identity is opaque and validated against nothing, and any caller who can reach the broker
+directly can name another tenant — KV was simply the first surface addressable purely *by name*,
+which is what made it visible. The requirement existed before; it was conditional on the KV flag,
+and with that flag gone it is unconditional for anyone running with the header. If you cannot make
+that affirmation truthfully, the answer is to stop running with `QUEEN_TENANCY_HEADER=1`, not to
+set the new variable: there is no longer a flag that could withhold the surface, and there should
+not be — a fleet where the engine is missing on some cells is worse than a boot that names the
+variable to set.
+
+**Nothing ships dark any more.** The rollout plan for these surfaces used to begin by installing
+the complete broker with both flags false, so the routes were not even registered, and enabling
+them later cell by cell. That step no longer exists. Anything to be watched has to be watched on a
+cell that already answers. The instrument for a cell in trouble is the runtime kill switch —
+`POST /api/v1/system/kv-timers` with `kvEnabled`, `timersScheduleEnabled` or `timersFireEnabled`
+set false — which pauses a surface that exists, answers 503 with `Retry-After` while paused, takes
+effect on the next call rather than the next restart, and is expected to be flipped back. Same
+class as maintenance mode. It is not a rollout gate and does not make an unvalidated tenant header
+safe.
+
+**Wire and metric consequences of the flags being gone.** A kv or timer route can no longer answer
+`404 not_found` with reason `kv_not_enabled` or `timers_not_enabled`, and a transaction carrying a
+`kv` or `timers` rider can no longer be refused with `400 bad_request` for reaching a cell without
+the surface — a 404 from those routes now means a wrong URL or an older image. `GET`/`POST
+/api/v1/system/kv-timers` no longer return `kvEnabledByConfig` and `timersEnabledByConfig`; every
+other field, including the three switch states, the mirror status and the quotas, is unchanged.
+The `queen_kv_*`, `queen_timers_*` and `queen_sweeper_*` metric families are now exported by a
+broker that has never served a kv call, so a dashboard can be built before any traffic exists.
+`queen_kv_read_rejected_total{reason="disabled"}` now means the operator's kill switch and nothing
+else; refusals that used to land in `reason="pool"` because they were classified from the HTTP
+status are attributed correctly.
+
 ## 1.0.2
 
 **A new logo.** The duck gives way to a geometric mark — a ring with an exit port and the piece

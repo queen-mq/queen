@@ -14,6 +14,12 @@ pub enum Error {
     ///
     /// `code` is the proxy's machine-readable reason when there was one;
     /// branch on it rather than on `message`, which is prose and changes.
+    ///
+    /// The broker does not fill it. Its own closed taxonomy rides the `error`
+    /// field, which lands in `message` — so `kv_disabled` and `timers_disabled`,
+    /// the two an operator's runtime kill switch produces, arrive there and
+    /// leave `code` empty. Two vocabularies in two fields; the status plus the
+    /// call you made is usually the cheaper thing to branch on.
     Http {
         status: u16,
         message: String,
@@ -65,7 +71,18 @@ impl Error {
     }
 
     /// A refusal that will not resolve by retrying — a suspended cluster, an
-    /// exhausted storage quota, a gated feature.
+    /// exhausted storage quota, a plan that does not include the endpoint, or a
+    /// KV/timer rider inside a transaction on a cell where an operator has
+    /// pulled the runtime kill switch.
+    ///
+    /// That last one is the only case where a bare 403 means "come back later",
+    /// and it is 403 on purpose: the routes answer a paused surface with 503 and
+    /// `Retry-After`, but a transaction carries messages, and a bundle retried
+    /// in a loop against a deliberately paused cell is a storm on the hot path.
+    /// Surface it to a human rather than looping.
+    ///
+    /// It is never a missing feature. KV and timers ship with the broker like
+    /// push and pop; no cell answers "not here" for them.
     pub fn is_terminal_refusal(&self) -> bool {
         self.status() == Some(403)
     }

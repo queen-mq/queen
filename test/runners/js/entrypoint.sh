@@ -13,7 +13,19 @@ cd /suite
 # Broker-free unit suites first, including the proxy 429/Retry-After contract
 # (test-v2/http-unit). They live behind `npm test`, which the harness does not
 # use, so they ran nowhere.
-node --test test-v2/http-unit/retry429.test.js
+#
+# The kv-unit suites are here for the same reason: they assert the EXACT JSON
+# body of every kv and timer operation against a scripted plan server, which is
+# the only check that catches a wrong wire shape without a broker. They used to
+# carry a second justification -- that the kv/timer integration tests SKIPPED
+# themselves on a cell with the features off, leaving these three files as the
+# only guard. There is no such cell any more: `QUEEN_KV_ENABLED` and
+# `QUEEN_TIMERS_ENABLED` are gone and every broker has both surfaces, so the
+# integration suites below run unconditionally and a 404 from them is a bug.
+node --test test-v2/http-unit/retry429.test.js \
+             test-v2/kv-unit/kvWire.test.js \
+             test-v2/kv-unit/timerWire.test.js \
+             test-v2/kv-unit/txnWire.test.js
 
 # No argument = human + stream in one process; run.js calls process.exit(fail?1:0).
 exec node test-v2/run.js

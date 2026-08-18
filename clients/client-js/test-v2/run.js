@@ -17,6 +17,8 @@ import * as watermarkTests from './watermark.js'
 import * as authTests from './auth.js'
 import * as semanticsTests from './semantics.js'
 import * as ackWindowTests from './ackwindow.js'
+import * as kvTests from './kv.js'
+import * as timerTests from './timers.js'
 import * as streamTests from './stream/index.js'
 import * as docsTests from './docs.js'
 import { LoadBalancer } from '../client-v2/http/LoadBalancer.js';
@@ -128,7 +130,29 @@ export const cleanupTestData = async () => {
 
       await dbPool.query(`DELETE FROM queen.queues WHERE name LIKE ANY($1::text[])`, [patterns]);
 
-      log(true, 'Test data cleaned up (rows + segments)');
+      // KV keys and pending timers (PLAN_KV_TIMERS.md §10.4). NOT cosmetic:
+      // without this purge a putIfAbsent test is green on its first run and red
+      // forever after, an incr test accumulates between runs, and a timer left
+      // pending by an earlier run fires into a later one and shows up as a
+      // phantom message in an unrelated test. Neither table has a foreign key
+      // to queen.queues -- log_timers is keyed by NAMES on purpose -- so the
+      // queue delete above does not reach them.
+      //
+      // Both are deleted across every tenant: a test rig may run with
+      // QUEEN_TENANCY_HEADER on, and the rows to purge are identified by the
+      // test naming convention, never by tenant.
+      //
+      // These two used to be wrapped in a swallowing try/catch, on the grounds
+      // that a broker booted with the kv/timer flags off had never applied
+      // 024_kv.sql / 025_timers.sql. There are no such flags: schema.rs applies
+      // both on every boot, so a missing `queen.kv` or `queen.log_timers` is a
+      // broken rig and must be loud. Swallowing it would leave the purge silently
+      // undone, which is exactly the failure the purge exists to prevent -- a
+      // putIfAbsent test green on its first run and red forever after.
+      await dbPool.query(`DELETE FROM queen.kv WHERE namespace LIKE ANY($1::text[])`, [patterns]);
+      await dbPool.query(`DELETE FROM queen.log_timers WHERE queue LIKE ANY($1::text[])`, [patterns]);
+
+      log(true, 'Test data cleaned up (rows + segments + kv + timers)');
     } catch (error) {
       log(false, `Cleanup error: ${error.message}`);
     }
@@ -160,6 +184,8 @@ async function main() {
         authTests,
         semanticsTests,
         ackWindowTests,
+        kvTests,
+        timerTests,
         docsTests
     ]
     

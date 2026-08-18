@@ -30,10 +30,6 @@
 //! tenant is bound by the wrappers in `db.rs` and comes from the middleware, not
 //! from a body. `tests/kv_handler_isolation.rs` enforces it mechanically.
 
-// See kv.rs: nothing here has a caller until main.rs registers the timer routes.
-// REMOVE once they are wired.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
@@ -49,19 +45,14 @@ use crate::db;
 use crate::tenant::Tenant;
 
 // ---------------------------------------------------------------------------
-// Feature gate and edge ceilings.
+// Edge ceilings.
 //
-// The gate reads the RESOLVED CONFIG through the metrics latch, for the reason
-// spelled out in kv.rs: an env read here would answer `false` for an embedded
-// broker that turned the feature on through its builder. main.rs decides whether
-// these routes exist at all (§16 step 1 — flag off means "not even registered",
-// hence 404 and not 403); this is the second lock on that door.
+// No feature gate here either: `QUEEN_TIMERS_ENABLED` is gone and main.rs
+// registers these routes unconditionally, so a timer call cannot land on a cell
+// that "does not have timers". The rungs that survive — the operator's runtime
+// kill switch and the quota gate — are in `gated()`, which needs the tenant.
+// See the header of `switches.rs` for the gate/kill-switch distinction.
 // ---------------------------------------------------------------------------
-
-#[inline]
-pub(crate) fn timers_enabled(st: &AppState) -> bool {
-    st.metrics.kvt.timers_on()
-}
 
 /// Same seam, and the same caveat, as the block in kv.rs: `Config` already
 /// carries `timers_max_payload_bytes`, `timers_max_horizon_s` and
@@ -142,17 +133,6 @@ fn json_retry(status: StatusCode, body: String, secs: u32) -> Response {
         .into_response()
 }
 
-fn disabled_404() -> Response {
-    json(
-        StatusCode::NOT_FOUND,
-        err(
-            "not_found",
-            Some("timers_not_enabled"),
-            Some("the timer surface is not enabled on this cell"),
-        ),
-    )
-}
-
 fn bad_request(reason: &str, detail: &str) -> Response {
     json(
         StatusCode::BAD_REQUEST,
@@ -176,6 +156,14 @@ fn unavailable(reason: &str) -> Response {
 /// that is refused is not a schedule and is not counted here.
 fn note_schedule_reject(st: &AppState, resp: &Response) {
     use crate::metrics::ScheduleReject::*;
+    // A refusal the ladder already classified counts ONCE, with the reason it
+    // actually had. Without this marker the funnel below would map every 403 to
+    // `horizon` — which is right for the horizon and wrong for the two other
+    // things that answer 403, `quota` and `gated`, and those are precisely the
+    // two an operator needs to tell apart.
+    if resp.extensions().get::<Counted>().is_some() {
+        return;
+    }
     let why = match resp.status() {
         StatusCode::BAD_REQUEST => Shape,
         StatusCode::PAYLOAD_TOO_LARGE => PayloadTooLarge,
@@ -186,6 +174,53 @@ fn note_schedule_reject(st: &AppState, resp: &Response) {
         _ => return,
     };
     st.metrics.kvt.timers_schedule_rejected(why);
+}
+
+/// Marker put on a response the ladder has already counted (see above).
+#[derive(Clone, Copy)]
+struct Counted;
+
+/// THE LADDER (§9.5, §12.1) for the timer surfaces, in one place.
+///
+/// The surface parameter is doing real work here, more than on the KV side:
+///
+///   * `TimerSchedule` passes every rung;
+///   * `TimerCancel` passes ONLY the env rung. §9.6 — the fire never switches
+///     itself off, so a tenant that cannot cancel keeps producing messages it
+///     cannot stop until the horizon or an operator, and a block would produce
+///     the exact opposite of its purpose. That is also why `DELETE
+///     /api/v1/timers/:queue/*timerKey` is its own route with its own class:
+///     `POST /api/v1/timers` carries cancels in the same array as schedules, so
+///     a cancel sent there inherits the schedule's authorization;
+///   * `TimerRead` likewise, so a caller can always find out whether a timer it
+///     can no longer schedule is still pending.
+fn gated(
+    st: &AppState,
+    tenant: &str,
+    surface: crate::switches::Surface,
+    n: i64,
+) -> Option<Response> {
+    use crate::metrics::ScheduleReject::*;
+    use crate::switches::{decide, Origin};
+    let a = decide(&st.switches, &st.quota, tenant, surface, n, 0);
+    let h = a.http(Origin::Route, surface)?;
+    if surface == crate::switches::Surface::TimerSchedule {
+        st.metrics.kvt.timers_schedule_rejected(match h.code {
+            "timers_quota_exceeded" => Quota,
+            "feature_gated" => Gated,
+            "rate_limited" => RateLimited,
+            "not_found" => Disabled,
+            _ => Unavailable,
+        });
+    }
+    let status = StatusCode::from_u16(h.status).unwrap_or(StatusCode::FORBIDDEN);
+    let body = err(h.code, Some(h.code), None);
+    let mut resp = match h.retry_after {
+        Some(secs) => json_retry(status, body, secs),
+        None => json(status, body),
+    };
+    resp.extensions_mut().insert(Counted);
+    Some(resp)
 }
 
 fn db_error_response(st: &AppState, e: &tokio_postgres::Error) -> Response {
@@ -328,16 +363,24 @@ async fn prepare_schedule(
     };
     // A past delay is legal (§4.2). A delay beyond the horizon is 403 and not
     // 400: it is a plan/configuration verdict, and §9.5 gives it its own code.
-    if delay > max_horizon_ms() as f64 {
+    //
+    // The horizon in force is the CELL's, narrowed by the tenant's if the tenant
+    // has one — never widened (§9.2). `max_timer_horizon_s` on a quota row is a
+    // plan limit, and a plan limit that a cell default could silently widen would
+    // not be a limit at all. The horizon is also what makes the row quota cyclic
+    // rather than permanent: with an infinite one a tenant fills `max_timers` and
+    // never frees it, and with a finite one the worst case is computable,
+    // `rows <= schedule_rate * horizon`.
+    let horizon_ms = st.quota.horizon_ms(tenant, max_horizon_ms());
+    if delay > horizon_ms as f64 {
         return Err(json(
             StatusCode::FORBIDDEN,
             err(
                 "timer_horizon_exceeded",
                 Some("timers_horizon"),
                 Some(&format!(
-                    "op at index {index}: delayMs {} is beyond the {} ms horizon of this cell",
-                    delay as i64,
-                    max_horizon_ms()
+                    "op at index {index}: delayMs {} is beyond the {} ms horizon in force here",
+                    delay as i64, horizon_ms
                 )),
             ),
         ));
@@ -431,11 +474,17 @@ async fn prepare_schedule(
 // The one path to the database.
 // ---------------------------------------------------------------------------
 
+/// `charged` is how many timers the ladder billed to this tenant's local delta
+/// before the call (§9.3), so that this function — the only one that knows
+/// whether anything committed — can give it back. The refund is not symmetric,
+/// and each arm below says why: the safe direction is to over-count, because
+/// over-counting blocks a tenant early and under-counting blocks it late.
 async fn apply_ops(
     st: &Arc<AppState>,
     tenant: &str,
     producer_sub: Option<&str>,
     ops: Vec<Value>,
+    charged: i64,
 ) -> Result<Vec<Value>, Response> {
     if ops.is_empty() {
         return Ok(Vec::new());
@@ -456,6 +505,8 @@ async fn apply_ops(
         Ok(c) => c,
         Err(_) => {
             st.metrics.record_db_error();
+            // Never reached the database: the charge goes back in full.
+            st.quota.refund(tenant, 0, 0, charged);
             return Err(unavailable("timers_pool_exhausted"));
         }
     };
@@ -481,7 +532,14 @@ async fn apply_ops(
                 ))
             }
         },
-        Err(Some(e)) => Err(db_error_response(st, &e)),
+        // The transaction raised, so it rolled back and nothing was scheduled.
+        Err(Some(e)) => {
+            st.quota.refund(tenant, 0, 0, charged);
+            Err(db_error_response(st, &e))
+        }
+        // NOT refunded: a broker-side timeout does not say whether the statement
+        // committed — the cancel is best-effort — so the charge stands until the
+        // next refresh corrects it against the true measurement.
         Err(None) => Err(unavailable("timers_timeout")),
     }
 }
@@ -538,9 +596,6 @@ async fn timers_batch_inner(
     tenant: &Tenant,
     body: Bytes,
 ) -> Response {
-    if !timers_enabled(st) {
-        return disabled_404();
-    }
     let root: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return bad_request("timers_bad_body", &e.to_string()),
@@ -601,7 +656,46 @@ async fn timers_batch_inner(
     // body (§4.2) — the same rule the push handler follows.
     let producer_sub = authed.0.filter(|s| !s.is_empty());
 
-    match apply_ops(st, tenant.as_str(), producer_sub.as_deref(), ops).await {
+    // THE LADDER, charged for the schedules this batch carries and NOT for its
+    // cancels: the metering unit is the op and not the call (§9.7 — at a cap of
+    // 256 ops, charging per call would under-count by up to 256x), and a cancel
+    // is worth zero and is never refused.
+    //
+    // §9.6: a MIXED batch is refused WHOLE, explicitly, rather than having half
+    // of it blocked in silence. A caller that needs its cancels to land on a
+    // blocked cluster has a route that always takes them — DELETE
+    // /api/v1/timers/:queue/*timerKey — and the error says so.
+    let schedules = ops
+        .iter()
+        .filter(|o| {
+            matches!(
+                o.get("op").and_then(|v| v.as_str()),
+                Some("schedule") | Some("reschedule")
+            )
+        })
+        .count() as i64;
+    if schedules > 0 {
+        if let Some(mut resp) = gated(st, tenant.as_str(), crate::switches::Surface::TimerSchedule, schedules) {
+            if schedules < ops.len() as i64 {
+                tracing::debug!(
+                    target: "timers",
+                    schedules,
+                    ops = ops.len(),
+                    "mixed batch refused whole; cancels have their own route (§9.6)"
+                );
+                resp.headers_mut().insert(
+                    "x-queen-timers-hint",
+                    axum::http::HeaderValue::from_static(
+                        "mixed batch refused whole; use DELETE /api/v1/timers/:queue/*timerKey \
+                         for cancels, which is never blocked",
+                    ),
+                );
+            }
+            return resp;
+        }
+    }
+
+    match apply_ops(st, tenant.as_str(), producer_sub.as_deref(), ops, schedules).await {
         Ok(results) => {
             // SEAM (§7.4): the local, in-process sweeper wake goes HERE, AFTER
             // the commit and never before — a wake for a transaction that then
@@ -629,9 +723,6 @@ pub async fn handle_timer_cancel(
     Path((queue, timer_key)): Path<(String, String)>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    if !timers_enabled(&st) {
-        return disabled_404();
-    }
     let mut op = Map::new();
     op.insert("op".to_string(), Value::String("cancel".to_string()));
     op.insert("queue".to_string(), Value::String(queue));
@@ -644,8 +735,18 @@ pub async fn handle_timer_cancel(
         op.insert("txn".to_string(), Value::String(txn.clone()));
     }
 
-    // A cancel carries no producer identity: it produces nothing.
-    match apply_ops(&st, tenant.as_str(), None, vec![Value::Object(op)]).await {
+    // §9.6 — this route is the one that is guaranteed to work. The ladder is
+    // still consulted, and still answers 404 when the feature does not exist on
+    // this cell, but nothing below that rung may refuse a cancel: not the
+    // operator's schedule pause, not a missing grant, not a full quota. A tenant
+    // that cannot cancel keeps producing messages it cannot stop, because the
+    // fire never switches itself off (§12).
+    if let Some(resp) = gated(&st, tenant.as_str(), crate::switches::Surface::TimerCancel, 0) {
+        return resp;
+    }
+    // A cancel carries no producer identity: it produces nothing. It is charged
+    // ZERO and never refunded (§9.7: the cancel counts zero and does not refund).
+    match apply_ops(&st, tenant.as_str(), None, vec![Value::Object(op)], 0).await {
         Ok(results) => single_response(results),
         Err(resp) => resp,
     }
@@ -660,8 +761,8 @@ pub async fn handle_timer_peek(
     Extension(tenant): Extension<Tenant>,
     Path((queue, timer_key)): Path<(String, String)>,
 ) -> Response {
-    if !timers_enabled(&st) {
-        return disabled_404();
+    if let Some(resp) = gated(&st, tenant.as_str(), crate::switches::Surface::TimerRead, 0) {
+        return resp;
     }
     let client = match st.pool.get().await {
         Ok(c) => c,
@@ -703,8 +804,8 @@ pub async fn handle_timers_list(
     Path(queue): Path<String>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    if !timers_enabled(&st) {
-        return disabled_404();
+    if let Some(resp) = gated(&st, tenant.as_str(), crate::switches::Surface::TimerRead, 0) {
+        return resp;
     }
     // `after` is an EXCLUSIVE keyset cursor, not an offset, and it is stable
     // because timer_key carries COLLATE "C". `limit` is CLAMPED by the SP and
@@ -774,11 +875,13 @@ mod tests {
     /// never block it.
     #[test]
     fn the_four_routes_accept_these_handlers() {
-        use axum::routing::{delete, get, post};
+        use axum::routing::{get, post};
         let _: axum::Router<Arc<AppState>> = axum::Router::new()
             .route("/api/v1/timers", post(handle_timers_batch))
             .route("/api/v1/timers/:queue", get(handle_timers_list))
-            .route("/api/v1/timers/:queue/*timerKey", get(handle_timer_peek))
-            .route("/api/v1/timers/:queue/*timerKey", delete(handle_timer_cancel));
+            .route(
+                "/api/v1/timers/:queue/*timerKey",
+                get(handle_timer_peek).delete(handle_timer_cancel),
+            );
     }
 }

@@ -1,0 +1,441 @@
+---
+params: []
+description: "Verified snippet extracted from examples/apps/http/exactly-once.sh."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Extracted from examples/apps/http/exactly-once.sh by webdoc/scripts/gen-snippets.mjs
+    Regenerate with: pnpm --dir webdoc gen
+*/}
+
+```bash title="examples/apps/http/exactly-once.sh"
+#!/usr/bin/env bash
+#
+# Charging an order exactly once, under redelivery, with nothing but curl.
+#
+# The war story is a billing run that double-charged nineteen customers on a
+# Tuesday afternoon. Nothing had crashed and nothing was lost: a consumer took a
+# batch, charged the cards, and was still writing its "done" flag to a side
+# store when its lease expired. The broker did what a broker must do and gave
+# the batch to somebody else, and the somebody else found no flag.
+#
+# The flag was in the wrong place. It was in a second data system, so it could
+# not commit with the acknowledgement, and any window between the two is a
+# window in which the work happens twice.
+#
+# Here the marker is a row in the same PostgreSQL as the queue, written in the
+# same transaction as the ack. There is no window. Either the order is marked
+# and acknowledged, or neither, and a redelivery finds the marker and does
+# nothing.
+#
+#   orders
+#     ├── group "charger"  marker + ack in ONE transaction
+#     └── group "replay"   reads the same orders again, charges nothing
+#
+# There is no client library here and none is needed, and this file is worth
+# reading even if you use one: an SDK's `kv.putIfAbsent(...)` inside a
+# transaction is the `kv` array below, and the array is a key of the ROOT of the
+# request beside `operations`, never an element of it. Everything an SDK hides
+# is written out.
+#
+# Run it:
+#   QUEEN_URL=http://localhost:6632 bash exactly-once.sh
+
+set -euo pipefail
+
+QUEEN_URL="${QUEEN_URL:-http://localhost:6632}"
+
+# Two suffixes, not one. The queue name needs it because delete-then-recreate
+# leaves stale partition state for up to 30 seconds; the KV namespace needs it
+# for the same reason in reverse -- a marker outlives the run that wrote it, so a
+# second run under the same namespace would find every order already charged and
+# pass without charging anything. $$ is the process id, which keeps two runs in
+# the same second apart.
+RUN="$(date +%s)-$$"
+ORDERS="app-http-exactly-once-$RUN"
+NS="app-http-exactly-once-$RUN"
+
+# The consumer groups. A group's cursor lives on the queue, and the queue name is
+# already unique per run, so these need no suffix.
+CHARGER=app-http-charger
+REPLAY=app-http-replay
+
+# Five orders. ORD-3 is scripted to fail once, before it charges anything and
+# before it commits, which is the interesting failure: the one that must leave
+# no trace at all.
+ORDER_IDS="ORD-1 ORD-2 ORD-3 ORD-4 ORD-5"
+ORDER_COUNT=5
+CRASHING_ORDER=ORD-3
+
+# Every pop long-polls for this many milliseconds and no longer.
+POLL_MS=1000
+
+# The bound that keeps a stall from becoming a hang. A phase that has not made
+# every decision by then stops, and the count check that follows reports what was
+# missing. Never wait for silence; wait for a total, with a deadline.
+PHASE_MS=30000
+
+command -v jq >/dev/null 2>&1 || { echo "FAIL: jq is not installed"; exit 1; }
+
+CHECKS=0
+TMP="$(mktemp -d)"
+
+# The external effect. Every line is a real charge against a real card, which is
+# the whole reason this program exists: the ledger is what the customer's
+# statement would show.
+LEDGER="$TMP/ledger"
+: > "$LEDGER"
+
+# One line per delivery handled: "<group> <order> <ran>". `ran` is the whole
+# point -- true when THIS delivery performed the charge, false when it found the
+# marker and did nothing.
+OBSERVED="$TMP/observed"
+: > "$OBSERVED"
+
+# One line per delivery attempt, so the redelivery of the failed order can be
+# counted rather than assumed.
+ATTEMPTS="$TMP/attempts"
+: > "$ATTEMPTS"
+
+# One exit path for everything. A failed check calls fail(), which records the
+# reason and exits 1; any other command that fails under `set -e` arrives here
+# too, with its own status. FAIL is printed exactly once, and only on failure.
+#
+# It also purges, and there are two things to remove: the queue, and the markers.
+# The second is the one that is easy to forget, because the markers are rows in
+# their own table and deleting the queue does not take them with it. They would
+# expire on their own -- that is what the mandatory ttlSeconds below bought --
+# but only once the sweeper gets to them, and an example that needs a background
+# task to tidy up after itself is not one.
+#
+# The purge is UNCONDITIONAL, because a run that failed is exactly the run whose
+# leftovers matter: markers surviving into the next run of the same namespace
+# would make the next run pass without charging anything. And it is best effort,
+# with `|| true` throughout, so a purge that fails cannot overwrite the verdict.
+cleanup() {
+  local status=$?
+  purge || true
+  rm -rf "$TMP"
+  if [ "$status" -ne 0 ]; then
+    echo
+    echo "FAIL: ${FAILURE:-a command exited with status $status}"
+  fi
+  exit "$status"
+}
+
+purge() {
+  local keys body
+  keys="$(printf '%s\n' $ORDER_IDS | jq -R 'sub("^"; "charge:")' | jq -sc .)" || return 0
+  body="$(jq -cn --arg ns "$NS" --argjson keys "$keys" \
+    '{operations: [$keys[] | {op: "delete", ns: $ns, key: .}]}')" || return 0
+  request POST /api/v1/kv "$body" || true
+  request DELETE "/api/v1/resources/queues/$ORDERS" || true
+}
+trap cleanup EXIT
+
+fail() { FAILURE="$*"; exit 1; }
+
+# check <actual> <expected> <description>
+check() {
+  [ "$1" = "$2" ] || fail "$3 (expected [$2], got [$1])"
+  CHECKS=$((CHECKS + 1))
+  echo "  ok: $3"
+}
+
+# ok <description>: records a check whose condition was already tested, for the
+# assertions that are not an equality.
+ok() {
+  CHECKS=$((CHECKS + 1))
+  echo "  ok: $1"
+}
+
+# A millisecond clock. GNU date spells it %3N; BSD date (macOS) has no %N and
+# leaves the unconverted tail in the output, so a probe for anything that is not
+# a digit tells the two apart, and perl, whose Time::HiRes is core, is the
+# fallback.
+if [ -z "$(date +%s%3N 2>/dev/null | tr -d '0-9')" ]; then
+  now_ms() { date +%s%3N; }
+else
+  command -v perl >/dev/null 2>&1 \
+    || { echo "FAIL: need GNU date or perl for a millisecond clock"; exit 1; }
+  now_ms() { perl -MTime::HiRes -e 'printf "%d", Time::HiRes::time() * 1000'; }
+fi
+
+# Sets $STATUS to the HTTP status code and writes the response body to $OUT.
+# There is no --fail: Queen reports outcomes in the body and several of the
+# interesting ones arrive as 200, so read the status, then the body.
+OUT="$TMP/body"
+request() {
+  local method="$1" path="$2" body="${3:-}"
+  if [ -n "$body" ]; then
+    STATUS="$(curl -sS -o "$OUT" -w '%{http_code}' \
+      -X "$method" "$QUEEN_URL$path" \
+      -H 'content-type: application/json' -d "$body")"
+  else
+    STATUS="$(curl -sS -o "$OUT" -w '%{http_code}' -X "$method" "$QUEEN_URL$path")"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# The KV surface, in the two shapes this program needs.
+#
+# Everything goes through POST /api/v1/kv, including the single-key read. The
+# path routes (GET|PUT|DELETE /api/v1/kv/:ns/*key) exist and are correct, but the
+# batch route keeps the key out of the access log, the proxy's samples and any
+# tracing span, which is the same reason a prefix may not travel in a query
+# string. A marker names a customer's order; it is not URL material.
+# ---------------------------------------------------------------------------
+
+# kv_get <key>: prints the whole row as JSON, `{"found":false,...}` when absent.
+#
+# `found` is a field of its own because null is a legal stored value: absence is
+# never inferred from the value being empty.
+kv_get() {
+  local body
+  body="$(jq -cn --arg ns "$NS" --arg key "$1" \
+    '{operations: [{op: "get", ns: $ns, key: $key}]}')"
+  request POST /api/v1/kv "$body"
+  [ "$STATUS" = 200 ] || fail "kv get returned HTTP $STATUS"
+  jq -c '.results[0]' "$OUT"
+}
+
+# marker_key <order>: the name of the row that says this order has been charged.
+marker_key() { printf 'charge:%s' "$1"; }
+
+echo "broker $QUEEN_URL"
+
+# Every broker serves /api/v1/kv: there is no flag that turns it on. What can
+# still refuse is an operator's runtime kill switch (503) or a quota (403), so
+# probe once here and name that, rather than letting the first real call fail
+# with something that reads like a bug.
+request POST /api/v1/kv '{"operations":[{"op":"get","ns":"probe","key":"probe"}]}'
+[ "$STATUS" = 200 ] \
+  || fail "the kv probe returned HTTP $STATUS: $(cat "$OUT") (503 is an operator's kill switch, 403 a quota; see /deploy/state)"
+
+# ---------------------------------------------------------------------------
+# Leases are what make a crashed worker safe: a message whose handler dies is
+# redelivered once the lease expires. retryLimit bounds how many times that can
+# happen before the message is dead-lettered instead.
+#
+# /configure is a full replace rather than a patch, so what is not named here is
+# reset to its default.
+# ---------------------------------------------------------------------------
+configure_body="$(jq -n --arg queue "$ORDERS" \
+  '{queue: $queue, options: {leaseTime: 30, retryLimit: 5}}')"
+request POST /api/v1/configure "$configure_body"
+[ "$STATUS" = 200 ] || fail "configure returned HTTP $STATUS"
+check "$(jq -r .configured "$OUT")" true 'the queue was created with a 30 second lease'
+
+# ---------------------------------------------------------------------- queuing
+echo
+echo "queuing orders"
+cents=1000
+for order in $ORDER_IDS; do
+  body="$(jq -n --arg queue "$ORDERS" --arg order "$order" --argjson cents "$cents" \
+    '{items: [{queue: $queue, transactionId: ("order-" + $order),
+               payload: {orderId: $order, cents: $cents}}]}')"
+  request POST /api/v1/push "$body"
+  [ "$STATUS" = 201 ] || fail "push of $order returned HTTP $STATUS"
+  # HTTP 201 is not proof the message was stored: "buffered" and "failed" also
+  # come back 201. The per-item status is the only answer.
+  [ "$(jq -r '.[0].status' "$OUT")" = queued ] \
+    || fail "push of $order came back $(jq -r '.[0].status' "$OUT")"
+  cents=$((cents + 1))
+done
+echo "  $ORDER_COUNT orders queued"
+
+# ---------------------------------------------------------------------------
+# handle <group>: one delivery, from the pop response in $TMP/pop.
+#
+# Four steps in a fixed order, and the order is the design.
+# ---------------------------------------------------------------------------
+handle() {
+  local group="$1" order cents txn partition lease marker charge_id body
+
+  order="$(jq -r '.messages[0].data.orderId' "$TMP/pop")"
+  cents="$(jq -r '.messages[0].data.cents' "$TMP/pop")"
+  txn="$(jq -r '.messages[0].transactionId' "$TMP/pop")"
+  partition="$(jq -r '.messages[0].partitionId' "$TMP/pop")"
+  # The lease minted for THIS pop. It is what says the worker still owns the
+  # message, and it is the reason the acknowledgement below can refuse.
+  lease="$(jq -r '.leaseId' "$TMP/pop")"
+
+  printf '%s\n' "$order" >> "$ATTEMPTS"
+
+  # 1. Has this order already been charged?
+  marker="$(kv_get "$(marker_key "$order")")"
+  if [ "$(printf '%s' "$marker" | jq -r '.found')" = true ]; then
+    # Nothing to do, but the message still has to be taken off this group's
+    # cursor, or it comes back forever.
+    ack_body="$(jq -cn --arg txn "$txn" --arg pid "$partition" --arg grp "$group" --arg lease "$lease" \
+      '{transactionId: $txn, partitionId: $pid, consumerGroup: $grp, leaseId: $lease, status: "completed"}')"
+    request POST /api/v1/ack "$ack_body"
+    [ "$STATUS" = 200 ] || fail "ack returned HTTP $STATUS"
+    printf '%s %s false\n' "$group" "$order" >> "$OBSERVED"
+    echo "  $order: already charged, skipped"
+    return 0
+  fi
+
+  # 2. The scripted failure. It happens BEFORE the charge and before the commit,
+  #    which is the ordering a real handler should aim for: whatever can fail
+  #    without an external effect should fail there.
+  if [ "$order" = "$CRASHING_ORDER" ] \
+     && [ "$(grep -c "^$CRASHING_ORDER$" "$ATTEMPTS")" -eq 1 ]; then
+    # The negative acknowledgement is explicit. It clamps the cursor below this
+    # message and charges one unit of the retry budget, which is what brings the
+    # order back.
+    ack_body="$(jq -cn --arg txn "$txn" --arg pid "$partition" --arg grp "$group" --arg lease "$lease" \
+      '{transactionId: $txn, partitionId: $pid, consumerGroup: $grp, leaseId: $lease,
+        status: "failed", error: "card network timed out"}')"
+    request POST /api/v1/ack "$ack_body"
+    [ "$STATUS" = 200 ] || fail "the failing ack returned HTTP $STATUS"
+    echo "  $order: card network timed out (will be redelivered)"
+
+    # The claim this example exists to prove, checked at the only moment it can
+    # be checked: right after a handler failed before its commit.
+    marker="$(kv_get "$(marker_key "$order")")"
+    check "$(printf '%s' "$marker" | jq -r '.found')" false \
+      "$order failed before committing and left no marker behind"
+    return 0
+  fi
+
+  # 3. The external effect.
+  charge_id="ch_${order}_$(wc -l < "$LEDGER" | tr -d ' ')"
+  printf '%s %s %s\n' "$order" "$charge_id" "$cents" >> "$LEDGER"
+
+  # 4. The marker and the acknowledgement, in ONE transaction.
+  #
+  #    `kv` is a key of the ROOT of this body, beside `operations` and not inside
+  #    it. That is not a style choice: the two arrays are separate top-level
+  #    fields precisely so that no client can send them under one key by
+  #    accident.
+  #
+  #    `required: true` is what makes putIfAbsent a GATE rather than a verdict.
+  #    Without it a lost race would come back applied:false and the ack would
+  #    still commit; with it, a lost race rolls the whole bundle back, ack
+  #    included, so a concurrent worker that got there first is the only one
+  #    whose ack lands.
+  #
+  #    ttlSeconds is mandatory on every KV write. A marker with no expiry is a
+  #    row nothing will ever delete.
+  #
+  #    The lease travels with the ack. If this worker's lease had expired while
+  #    it was charging -- the exact failure in the war story -- the ack is
+  #    refused and the marker write is refused with it. That is the guarantee a
+  #    compare-and-swap cannot give: an `expect` on a version that still matches
+  #    succeeds even from a worker that no longer owns the message.
+  body="$(jq -cn --arg ns "$NS" --arg key "$(marker_key "$order")" \
+    --arg charge "$charge_id" --argjson cents "$cents" \
+    --arg txn "$txn" --arg pid "$partition" --arg grp "$group" --arg lease "$lease" '
+    {operations: [{type: "ack", transactionId: $txn, partitionId: $pid,
+                   consumerGroup: $grp, leaseId: $lease, status: "completed"}],
+     kv: [{op: "putIfAbsent", ns: $ns, key: $key,
+           value: {chargeId: $charge, cents: $cents},
+           ttlSeconds: 3600, required: true}]}')"
+  request POST /api/v1/transaction "$body"
+
+  # A lost gate is an HTTP 200 with success:false and reason "kv_precondition".
+  # It is the most frequent legitimate outcome of this shape, so it does not
+  # belong in an error path, a retry policy or an error metric -- which is
+  # exactly why it is not a 409.
+  [ "$STATUS" = 200 ] || fail "the commit for $order returned HTTP $STATUS: $(cat "$OUT")"
+  if [ "$(jq -r '.success' "$OUT")" != true ]; then
+    [ "$(jq -r '.reason' "$OUT")" = kv_precondition ] \
+      || fail "the commit for $order failed: $(jq -r '.error' "$OUT")"
+    printf '%s %s false\n' "$group" "$order" >> "$OBSERVED"
+    echo "  $order: lost the gate to a concurrent worker"
+    return 0
+  fi
+
+  printf '%s %s true\n' "$group" "$order" >> "$OBSERVED"
+  echo "  $order: charged"
+}
+
+# ---------------------------------------------------------------------------
+# drain <group> <decisions>: pop and handle until this group has made that many
+# decisions, or the phase deadline passes. The count is the bound and the
+# deadline is the net; neither is a wait for silence.
+# ---------------------------------------------------------------------------
+drain() {
+  local group="$1" wanted="$2" deadline
+  deadline=$(( $(now_ms) + PHASE_MS ))
+
+  while [ "$(grep -c "^$group " "$OBSERVED" || true)" -lt "$wanted" ]; do
+    [ "$(now_ms)" -lt "$deadline" ] || break
+
+    # subscriptionMode=all is what makes a group created now read what was
+    # pushed before it existed: a new cursor is seeded at the TAIL unless you say
+    # otherwise. batch=1 keeps one message in flight, so the failure below is a
+    # single message's failure and not a batch's.
+    request GET "/api/v1/pop/queue/$ORDERS?consumerGroup=$group&subscriptionMode=all&batch=1&wait=true&timeout=$POLL_MS"
+    # 204 is an empty pop, with no body at all. Go round again until the
+    # deadline.
+    [ "$STATUS" != 204 ] || continue
+    [ "$STATUS" = 200 ] || fail "pop returned HTTP $STATUS"
+    cp "$OUT" "$TMP/pop"
+    handle "$group"
+  done
+}
+
+# --------------------------------------------------------------------- charging
+echo
+echo "charging"
+drain "$CHARGER" "$ORDER_COUNT"
+
+check "$(grep -c "^$CHARGER " "$OBSERVED" || true)" "$ORDER_COUNT" \
+  'the charger reached a decision on every order'
+
+# ---------------------------------------------------------------------- replay
+#
+# A second consumer group with subscriptionMode=all reads the same orders from
+# the beginning. This is a redelivery with the cause removed: the messages are
+# identical, the handler is identical, and the only thing standing between them
+# and a second charge is the marker.
+echo
+echo "replaying"
+drain "$REPLAY" "$ORDER_COUNT"
+
+# --------------------------------------------------------------------- checking
+echo
+echo "checking"
+
+check "$(wc -l < "$LEDGER" | tr -d ' ')" "$ORDER_COUNT" \
+  "$ORDER_COUNT orders produced exactly $ORDER_COUNT charges"
+check "$(awk '{print $1}' "$LEDGER" | sort -u | wc -l | tr -d ' ')" "$ORDER_COUNT" \
+  'every order was charged exactly once, none twice and none not at all'
+
+[ "$(grep -c "^$CRASHING_ORDER$" "$ATTEMPTS")" -ge 2 ] \
+  || fail "$CRASHING_ORDER was never redelivered after it failed"
+ok "$CRASHING_ORDER was delivered again after it failed"
+
+check "$(grep -c "^$REPLAY " "$OBSERVED" || true)" "$ORDER_COUNT" \
+  "the replay group received all $ORDER_COUNT orders again"
+check "$(awk -v g="$REPLAY" '$1 == g && $3 == "false"' "$OBSERVED" | wc -l | tr -d ' ')" \
+  "$ORDER_COUNT" 'every order on the second pass reported that it did not run'
+check "$(wc -l < "$LEDGER" | tr -d ' ')" "$ORDER_COUNT" \
+  "the replay charged nothing: the ledger is still $ORDER_COUNT rows"
+
+# The markers are readable state, not an internal detail: each one carries the id
+# of the charge it stands for, so a support engineer can answer "was this order
+# billed, and under which charge" without a second system. getMany reports
+# `missing` explicitly, because absence is a datum and not a hole computed by
+# difference.
+keys="$(printf '%s\n' $ORDER_IDS | jq -R 'sub("^"; "charge:")' | jq -sc .)"
+many_body="$(jq -cn --arg ns "$NS" --argjson keys "$keys" \
+  '{operations: [{op: "getMany", ns: $ns, keys: $keys}]}')"
+request POST /api/v1/kv "$many_body"
+[ "$STATUS" = 200 ] || fail "kv getMany returned HTTP $STATUS"
+check "$(jq -r '.results[0].rows | length' "$OUT")" "$ORDER_COUNT" \
+  "all $ORDER_COUNT markers exist"
+check "$(jq -r '.results[0].missing | length' "$OUT")" 0 \
+  'no order is missing its marker'
+check "$(jq -r '[.results[0].rows[].value.chargeId] | sort | join(",")' "$OUT")" \
+  "$(awk '{print $2}' "$LEDGER" | sort | paste -sd, -)" \
+  'each marker names the charge that was actually made'
+
+echo
+echo "  ledger: $(awk '{printf "%s=%s ", $1, $2}' "$LEDGER")"
+
+echo
+echo "PASS: $CHECKS checks"
+```

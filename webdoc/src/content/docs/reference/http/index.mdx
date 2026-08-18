@@ -13,18 +13,19 @@ sourceOfTruth:
   - server/src/handlers/status.rs
   - server/src/tenant.rs
 digest: >-
-  One HTTP API version, v1, with the path itself as the version, no Accept-header negotiation and
-  no version query parameter. The broker binds 0.0.0.0 on PORT, default 6632, so a local base URL
-  is http://localhost:6632. It has no TLS listener and no CORS layer and expects to sit behind
-  something that terminates TLS, so port 6632 must not be exposed to a browser or to the internet
-  directly. The broker never returns 429, because it has no per-client rate limiter: its adaptive
-  admission arbiter makes a request wait for a slot rather than rejecting it, and 429 responses
-  come from the multi-tenant gateway instead. Retry safety differs per route: a push is safe to
-  retry blindly only when the caller sends its own transactionId, in which case the retry returns
-  a status of duplicate and writes nothing; ack and lease extend are safe, and an ack landing
-  below the cursor is reported as a noop rather than double-committing; a transaction is safe only
-  with deterministic transactionIds; a pop is never safe to retry blindly, because a retry is a
-  new claim rather than a repeat. Every 204 has no body at all, deliberately.
+  One HTTP API version, v1, the path itself being the version, with no negotiation. The broker
+  binds 0.0.0.0 on PORT, default 6632, so a local base URL is http://localhost:6632. It has no TLS
+  listener and no CORS layer, so 6632 must sit behind something that terminates TLS and must never
+  face a browser or the internet. On the message plane the broker never returns 429: its adaptive
+  admission arbiter makes a request wait for a slot rather than rejecting it, and 429 comes from
+  the multi-tenant gateway. The kv and timer routes are the exception, with a per-tenant
+  rate limiter in the broker itself. Retry safety differs per route: a push is safe to retry
+  blindly only when the caller sends its own transactionId, in which case the retry returns a
+  status of duplicate and writes nothing; ack and lease extend are safe, and an ack landing below
+  the cursor is reported as a noop rather than double-committing; a transaction is safe only with
+  deterministic transactionIds; a pop never is, because a retry is a new claim rather than a
+  repeat; and a kv incr never is, because it has no precondition and counts twice. Every 204 has
+  no body at all, deliberately.
 ---
 
 Queen's broker speaks plain HTTP/1.1 with JSON bodies. There is no binary protocol, no
@@ -221,9 +222,18 @@ disk for replay) or `failed` (not stored anywhere).
 | `500` | no PostgreSQL connection available (`{"error":"pool"}`), a pop that failed at the transport level, a failed lease renewal, or a stored-procedure error that is not a not-found |
 | `503` | `/health` only, when the database round-trip fails |
 
-The broker never returns **429**: it has no per-client rate limiter. Its internal admission arbiter
-is adaptive and makes a request *wait* for a slot rather than rejecting it. Rate limiting and 429 responses come from the multi-tenant gateway, not from the
+On the message plane the broker never returns **429**: it has no per-client rate limiter there. Its
+internal admission arbiter is adaptive and makes a request *wait* for a slot rather than rejecting
+it, and rate limiting on those routes comes from the multi-tenant gateway rather than from the
 broker.
+
+The [kv](/reference/http/kv) and [timer](/reference/http/timers) routes are the exception, and they
+are the exception on purpose. They are the first surfaces whose call rate is decided by an end user
+of the customer rather than by a volume of messages, so a defence that lived only in the gateway
+would not be a defence of the product: self-hosted and dedicated deployments without a gateway are
+real. Those routes carry a per-tenant token bucket in the broker itself and answer `429` with
+`Retry-After`. They also answer `403` and `503` where the message plane has no equivalent, and
+[their pages](/reference/http/kv) carry the one sentence that separates the three.
 
 ## Retrying safely
 
@@ -234,6 +244,25 @@ broker.
 | `POST /api/v1/ack` | yes | an ack that lands below the cursor is reported `noop:true` rather than double-committing |
 | `POST /api/v1/lease/:leaseId/extend` | yes | renewal never shortens a lease |
 | `POST /api/v1/transaction` | only with deterministic `transactionId`s | the whole bundle re-runs; dedup is what makes the pushes idempotent |
+| `POST /api/v1/timers` | yes | schedule and reschedule are the same upsert on `(queue, timerKey)`, so a repeat replaces rather than duplicating |
+| `DELETE /api/v1/timers/:queue/*timerKey` | yes | the second cancel answers `absent`, which is `ok:false` and not an error |
+
+The KV operations differ from each other, which is the part that catches people out.
+
+| Operation | Safe to retry blindly | Why |
+| --- | --- | --- |
+| `putIfAbsent` | yes | the second attempt loses the race against its own first attempt and reports `applied:false, reason:"exists"` |
+| `delete` | yes | a delete that matched nothing is `applied:false`, not an error |
+| `put` | only with `expect` | without a precondition it is an unconditional upsert, so a retry overwrites a value another writer put there in between |
+| `get`, `getMany`, `getPrefix` | yes | reads |
+| `incr` | **no** | it is the one operation with no precondition, by design, and a blind retry counts twice |
+
+The exception under `incr` is worth stating exactly, because it is the case that makes a counter
+wrong rather than an operation fail: a retry counts twice **unless the transaction that carried it
+failed**. Inside `POST /api/v1/transaction` a rolled-back bundle wrote nothing, so re-sending it is
+safe; standalone on `POST /api/v1/kv`, a timeout leaves you unable to tell whether the increment
+committed, and there is no `expect` to make the second attempt conditional. Either put the `incr`
+in a transaction whose failure you can observe, or accept that a retry may double it.
 
 ## The tenant-scoped column
 

@@ -10,6 +10,15 @@ class HttpException extends \RuntimeException
      *                                       integer $code, which \Exception owns.
      * @param float|null  $retryAfterSeconds Parsed Retry-After response header, only ever set on a 429
      *                                       and null when the header is absent or non-numeric.
+     * @param string|null $reason            The kv/timers surfaces answer {error, reason, detail}: `error` is the
+     *                                       branchable code, `reason` a finer STABLE identifier
+     *                                       (kv_expiry_not_specified, kv_bad_ttl, timers_horizon, …) and `detail`
+     *                                       the human half, naming the offending operation index. Both are carried
+     *                                       here because $message alone would say "kv_bad_request" and leave the
+     *                                       caller with nothing to act on. Branch on $errorCode or $reason, never
+     *                                       on the prose — string matching on a message is forbidden throughout
+     *                                       this product.
+     * @param string|null $detail            See $reason.
      */
     public function __construct(
         string $message,
@@ -18,6 +27,8 @@ class HttpException extends \RuntimeException
         ?\Throwable $previous = null,
         public readonly ?string $errorCode = null,
         public readonly ?float $retryAfterSeconds = null,
+        public readonly ?string $reason = null,
+        public readonly ?string $detail = null,
     ) {
         parent::__construct($message, $code, $previous);
     }

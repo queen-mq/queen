@@ -20,6 +20,8 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | read | Listings, status, analytics, DLQ and message reads, all tenant-scoped. |
 | gated (streams) | Available when the plan enables the streams feature. |
 | gated (traces) | Writing a trace is available when the plan enables the traces feature. |
+| gated (kv) | Available when the plan enables the KV feature, which a plan that has never heard of it does not. A `PUT` is the half a storage quota blocks; a `GET` is read level; a `DELETE` is how a tenant at its cap gets back under it and is never quota-blocked. The batch `POST` carries both halves in one array, so a quota refuses the whole call with a named reason rather than dropping part of it. |
+| gated (timers) | Available when the plan enables the timers feature. Scheduling is quota-blockable; cancelling is not, and has its own route for that reason, since a tenant blocked from cancelling would keep producing messages it can no longer stop. |
 | operator | Cell-wide surfaces. Not tenant-scopable, so a tenant credential gets the same 404 a blocked route returns. |
 | blocked | Never exposed to a tenant, whatever the credential. Returns 404. |
 
@@ -98,6 +100,24 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | --- | --- |
 | `POST` | `/api/v1/traces` |
 
+### gated (kv)
+
+| Method | Path |
+| --- | --- |
+| `POST` | `/api/v1/kv` |
+| `DELETE` | `/api/v1/kv/:ns/*key` |
+| `GET` | `/api/v1/kv/:ns/*key` |
+| `PUT` | `/api/v1/kv/:ns/*key` |
+
+### gated (timers)
+
+| Method | Path |
+| --- | --- |
+| `POST` | `/api/v1/timers` |
+| `GET` | `/api/v1/timers/:queue` |
+| `DELETE` | `/api/v1/timers/:queue/*timerKey` |
+| `GET` | `/api/v1/timers/:queue/*timerKey` |
+
 ### operator
 
 | Method | Path |
@@ -117,21 +137,15 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 
 | Method | Path |
 | --- | --- |
-| `POST` | `/api/v1/kv` |
-| `DELETE` | `/api/v1/kv/:ns/*key` |
-| `GET` | `/api/v1/kv/:ns/*key` |
-| `PUT` | `/api/v1/kv/:ns/*key` |
 | `GET` | `/api/v1/pop` |
 | `POST` | `/api/v1/stats/refresh` |
+| `GET` | `/api/v1/system/kv-timers` |
+| `POST` | `/api/v1/system/kv-timers` |
 | `GET` | `/api/v1/system/shared-state` |
-| `POST` | `/api/v1/timers` |
-| `GET` | `/api/v1/timers/:queue` |
-| `DELETE` | `/api/v1/timers/:queue/*timerKey` |
-| `GET` | `/api/v1/timers/:queue/*timerKey` |
 | `GET` | `/internal/api/inter-instance/stats` |
 | `POST` | `/internal/api/notify` |
 | `GET` | `/internal/api/shared-state/stats` |
 | `GET` | `/metrics` |
 | `GET` | `/status` |
 
-45 of the broker's 71 method + path pairs are reachable with a tenant credential; the rest are operator or blocked surfaces.
+53 of the broker's 73 method + path pairs are reachable with a tenant credential; the rest are operator or blocked surfaces.

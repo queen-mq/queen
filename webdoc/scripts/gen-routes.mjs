@@ -61,7 +61,10 @@ function parseRoutes(text) {
 // ---------------------------------------------------------------------------
 
 // Bump this after re-reading the Rust when the guard trips.
-const ACCESS_FINGERPRINT = "479566289425dc1a";
+// 2026-08-17: re-read for PLAN_KV_TIMERS.md §8.1. The KV and timer families were
+// answering read-write on every route including the GETs, because the Rust named
+// none of them and they reached the fallthrough at the bottom of the function.
+const ACCESS_FINGERPRINT = "eace69501e32bd14";
 
 function accessLevel(method, path) {
   const m = method;
@@ -86,12 +89,19 @@ function accessLevel(method, path) {
     if (path.startsWith("/api/v1/consumer-groups")) return "read-only";
     if (path.startsWith("/api/v1/dlq")) return "read-only";
     if (path.startsWith("/api/v1/traces")) return "read-only";
+    // PLAN_KV_TIMERS.md §8.1: inside the GET block, never outside it.
+    if (path.startsWith("/api/v1/kv")) return "read-only";
+    if (path.startsWith("/api/v1/timers")) return "read-only";
   }
 
   if (path === "/streams/v1/state/get") return "read-only";
   if (path.startsWith("/streams/")) return "read-write";
 
   if (path === "/api/v1/push") return "write-only";
+  // Scheduling a timer is a produce operation; cancelling one is not.
+  if (m === "POST" && path === "/api/v1/timers") return "write-only";
+
+  if (path.startsWith("/api/v1/kv") || path.startsWith("/api/v1/timers")) return "read-write";
 
   return "read-write";
 }
@@ -128,6 +138,10 @@ const GROUPS = [
     /^\/api\/v1\/(status|analytics|stats)/.test(p) ||
     ["/health", "/status", "/metrics", "/metrics/prometheus"].includes(p)],
   ["Streams", (p) => p.startsWith("/streams/")],
+  // These eight are registered unconditionally, like every other row here: the
+  // boot flags that used to gate them are gone. Without this entry they land in
+  // "Ungrouped".
+  ["Key/value state and timers", (p) => /^\/api\/v1\/(kv|timers)(\/|$)/.test(p)],
   ["Operator surfaces", (p) => p.startsWith("/api/v1/system")],
   ["Dashboard identity (broker-direct)", (p) => p.startsWith("/auth/")],
   ["Internal (broker-to-broker)", (p) => p.startsWith("/internal/")],

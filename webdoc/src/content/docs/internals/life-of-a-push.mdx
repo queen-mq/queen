@@ -184,9 +184,13 @@ Inside, in order:
    `ON CONFLICT DO NOTHING` takes speculative locks in row order and two bundles creating
    overlapping partition sets in different orders would convoy exactly as unordered row locks do.
 3. **One set-based pre-lock.** A single statement locks every partition row in the bundle,
-   `ORDER BY p.id FOR UPDATE OF p`. Ascending `log_partitions.id` is the one global lock order,
-   shared with the transaction wire and the retention steps, and it is why no combination of
-   those three can deadlock.
+   `ORDER BY p.id FOR UPDATE OF p`. Ascending `log_partitions.id` is the intra-space order of the
+   partition space, shared with the transaction wire and the retention steps, and it is why no
+   combination of those three can deadlock. It is one space of
+   [six](/internals/schema#the-one-global-lock-order): the transaction wire acquires `queen.kv` and
+   `queen.log_timers` **before** it reaches this pre-lock, and nothing that holds a partition lock
+   ever waits for either of them. This path takes neither, which is why nothing here changed when
+   they arrived.
 4. **A bundle timestamp**, taken once after the locks.
 5. **Per segment, in ascending partition id order**, a call to `queen.log_push_one_v1` with the
    partition id, deduplication window and tenant already resolved (the callee must not re-resolve

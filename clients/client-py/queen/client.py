@@ -15,6 +15,8 @@ from .builders.queue_builder import QueueBuilder
 from .builders.transaction_builder import TransactionBuilder
 from .http.http_client import HttpClient
 from .http.load_balancer import LoadBalancer
+from .kv.kv import KV
+from .timers.timers import TimerBuilder, Timers
 from .utils import logger
 from .utils.defaults import CLIENT_DEFAULTS
 from .utils.validation import validate_url, validate_urls
@@ -104,6 +106,10 @@ class Queen:
 
         # Admin API (lazily initialized)
         self._admin: Optional[Admin] = None
+
+        # KV and timer surfaces (lazily initialized, same discipline as Admin)
+        self._kv: Optional[KV] = None
+        self._timers: Optional[Timers] = None
 
         # Setup graceful shutdown
         self._shutdown_handlers: List[Any] = []
@@ -269,6 +275,52 @@ class Queen:
         if self._admin is None:
             self._admin = Admin(self._http_client)
         return self._admin
+
+    # ===========================
+    # KV and Timer API Entry Points
+    # ===========================
+
+    @property
+    def kv(self) -> KV:
+        """
+        Transactional key/value state (PLAN_KV_TIMERS.md §5).
+
+        Read the note in ``queen/kv/kv.py`` once: read-modify-write across two
+        calls is safe ONLY when the key derives from the partition key.
+        Otherwise use ``incr`` or ``expect``.
+
+        Returns:
+            KV API instance (lazily initialized, singleton)
+        """
+        if self._kv is None:
+            self._kv = KV(self._http_client)
+        return self._kv
+
+    @property
+    def timers(self) -> Timers:
+        """
+        Scheduled messages (PLAN_KV_TIMERS.md §4).
+
+        ``deliverAt`` is "not before", never "exactly at".
+
+        Returns:
+            Timers API instance (lazily initialized, singleton)
+        """
+        if self._timers is None:
+            self._timers = Timers(self._http_client)
+        return self._timers
+
+    def timer(self, queue: str) -> TimerBuilder:
+        """
+        Fluent timer builder for a destination queue, mirroring ``queue()``.
+
+        Args:
+            queue: Destination queue the timer will be delivered to
+
+        Returns:
+            TimerBuilder, terminated by schedule()/reschedule()/cancel()
+        """
+        return self.timers.timer(queue)
 
     # ===========================
     # Transaction API

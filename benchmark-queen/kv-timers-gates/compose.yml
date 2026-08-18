@@ -65,11 +65,11 @@ services:
       QUEEN_TENANCY_HEADER: "false"
       FILE_BUFFER_DIR: /var/lib/queen/buffers
       LOG_LEVEL: "${GATE_LOG_LEVEL:-warn}"
-      # The two feature flags and the sweeper knobs, passed straight through so a gate can flip
-      # them per condition without a second compose file. Empty means "let the binary decide",
-      # which for a pre-F1 image is the same as absent.
-      QUEEN_KV_ENABLED: "${GATE_KV_ENABLED:-false}"
-      QUEEN_TIMERS_ENABLED: "${GATE_TIMERS_ENABLED:-false}"
+      # The sweeper knobs, passed straight through so a gate can flip them per condition without
+      # a second compose file. There is no kv or timers flag here to pair them with: both
+      # surfaces are part of the engine on every build this measures, so the only condition a
+      # gate can still construct is a broker with no sweep loop.
+      QUEEN_SWEEPER: "${GATE_SWEEPER:-true}"
       QUEEN_SWEEPER_PARALLELISM: "${GATE_SWEEPER_PARALLELISM:-1}"
     ports:
       - "${GATE_BROKER_PORT:-16644}:6632"

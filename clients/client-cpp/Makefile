@@ -49,7 +49,7 @@ else
 endif
 
 # Targets
-.PHONY: all test retry429 run-retry429 clean help
+.PHONY: all test retry429 run-retry429 kvtimers run-kvtimers unit run-unit clean help
 
 all: test
 
@@ -77,6 +77,27 @@ bin/test_retry429: test_retry429.cpp queen_client.hpp ../server/vendor/json.hpp 
 # Run proxy contract tests (no server required)
 run-retry429: bin/test_retry429
 	./bin/test_retry429
+
+# Build the KV / timers wire-contract suite (PLAN_KV_TIMERS.md §5, §4, §6.3,
+# §8.1/§8.3, §9.6). Like retry429 it serves its own responses in-process, so it
+# needs neither a broker nor Postgres -- it asserts the exact JSON body, method
+# and path the client puts on the wire, which is the only thing that catches a
+# wrong wire shape before production.
+kvtimers: bin/test_kv_timers
+	@echo "KV/timers wire test suite built successfully!"
+	@echo "Run with: ./bin/test_kv_timers"
+
+bin/test_kv_timers: test_kv_timers.cpp queen_client.hpp ../server/vendor/json.hpp ../server/include/threadpool.hpp
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) $(INCLUDES) test_kv_timers.cpp -o bin/test_kv_timers $(LIBS)
+
+run-kvtimers: bin/test_kv_timers
+	./bin/test_kv_timers
+
+# Every suite that needs no broker, in one command.
+unit: retry429 kvtimers
+
+run-unit: run-retry429 run-kvtimers
 
 # Run tests (requires Queen server running)
 run-test: bin/test_client
@@ -128,6 +149,10 @@ help:
 	@echo "  make run-test     - Build and run tests (server must be running)"
 	@echo "  make retry429     - Build proxy contract tests (bearer/429/403)"
 	@echo "  make run-retry429 - Build and run proxy contract tests (no server needed)"
+	@echo "  make kvtimers     - Build KV/timer wire contract tests"
+	@echo "  make run-kvtimers - Build and run KV/timer wire tests (no server needed)"
+	@echo "  make unit         - Build every suite that needs no broker"
+	@echo "  make run-unit     - Build and run every suite that needs no broker"
 	@echo "  make clean        - Remove build artifacts"
 	@echo "  make help         - Show this help message"
 	@echo ""

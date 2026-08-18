@@ -11,6 +11,7 @@ sourceOfTruth:
   - server/src/handlers/status.rs
   - server/src/auth.rs
   - server/src/syscollect.rs
+  - server/src/sweeper.rs
   - server/sql/procedures/023_prometheus.sql
 ---
 
@@ -120,8 +121,10 @@ per-queue count of parked long-poll pops on this instance.
 
 ## Per-queue series are not tenant-scoped
 
-No series on this endpoint carries a tenant label. When `QUEEN_TENANCY_HEADER`
-is on and two tenants hold the same queue name, their series collide:
+No **per-queue** series carries a tenant label, and exactly one series on the
+whole endpoint does: `queen_timers_fire_lag_seconds`, described under the
+cardinality rule below. When `QUEEN_TENANCY_HEADER` is on and two tenants hold
+the same queue name, their series collide:
 
 - `queen_dlq_depth_by_queue` groups dead-letter rows by queue **name**, so the
   count is the sum across tenants;
@@ -136,6 +139,68 @@ is on and two tenants hold the same queue name, their series collide:
 leaks other tenants' queue names and volumes. The proxy classifies it as an
 operator route for exactly this reason.
 </Aside>
+
+## The rule about the `tenant` label
+
+Every label on this endpoint is a fixed enumeration in Rust, so no call site can
+mint a new label value. That is not an accident of style, it is the rule:
+
+> The `tenant` label is allowed **only** on occupancy gauges, where it is one
+> series per tenant written by a background job and bounded by the control
+> plane. It is **forbidden** on per-operation counters, where it would be tenant
+> times operation times outcome, that is, a cardinality chosen by whoever calls
+> the API.
+
+The key/value routes are the first surface in this product whose call rate is
+decided by somebody else's web traffic, so they are the first place that rule
+could really have been broken. The per-tenant view of a hot path lives in the
+broker's top-N log lines and in the JSON status endpoint, not here.
+
+There is one motivated exception. `queen_timers_fire_lag_seconds` carries
+`tenant` alongside `quantile`, because it is an occupancy gauge and because a
+timer backlog that does not name its culprit puts every tenant on the same
+alert. It is capped at 1024 distinct tenants, and past the cap it **denies the
+new tenant rather than evicting an old one**: the tenant id is opaque and
+validated against nothing, so an evicting map is an unbounded map with extra
+steps. `queen_timers_fire_lag_tenants_dropped_total` says when the cap is
+biting, and a non-zero value means the gauge is no longer complete.
+
+## The two alarm gauges
+
+Both are emitted only while the feature that owns them is on, and both report a
+condition that is invisible in every other series.
+
+**`queen_kv_expired_not_pruned`**, with `queen_kv_expiry_lag_seconds` beside it.
+An expired key is never returned and never counts as existing, whether or not the
+sweeper has deleted its row: expiry is a predicate, not the physical absence of a
+row. So a sweeper that falls behind produces a failure mode that **disguises
+itself as success**. Reads stay perfectly correct while the table grows, table
+bloat follows, and nothing else on this endpoint moves. Alert on 50 000 rows
+**or** an expiry lag above 600 seconds, whichever comes first.
+
+**`queen_timers_oldest_late_seconds`**, with `queen_timers_due` beside it. A
+timer backlog is promised work that has not been delivered, and a customer reads
+it as a lost message rather than as a late one. Warn on a minute of sustained
+lateness, page on five.
+
+Both `queen_kv_expired_not_pruned` and `queen_timers_due` are **capped at the SQL
+level**, and each has a `_capped` companion gauge that is `1` when the cap was
+hit. When the companion is `1`, the value is a **floor and not a count**: an
+exact count is proportional to the backlog precisely in the failure it exists to
+detect. Alert on the value, then read the companion before quoting the number.
+
+A third signal is worth a panel even though it is not a fault:
+`queen_kv_read_rejected_total{reason="rate_limited"}` becoming non-zero for a
+tenant that was at zero. It is the earliest warning of the one new failure mode
+these features introduce, a customer who has just put key/value reads on their
+own end users' request path. Panel it as a **list of tenants** rather than a
+total, because a total does not say who to call.
+
+The `reason` label on that counter is read from the verdict rather than from the
+status code, which matters for one value: `disabled` is the operator's runtime
+kill switch and nothing else. Classifying it from the status would file it under
+`pool`, and an operator who had just pulled the lever would be told the cell was
+out of database connections.
 
 ## Two families you cannot alert on
 

@@ -10,6 +10,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ack::AckStatus;
+use crate::kv::{KvOperation, KvReason, KvResult};
+use crate::timers::{TimerOperation, TimerResult};
 
 /// One message pushed inside a transaction.
 ///
@@ -108,6 +110,21 @@ pub enum TxnOperation {
 }
 
 /// Body of `POST /api/v1/transaction`.
+///
+/// # The two rider arrays are TOP-LEVEL, never operations
+///
+/// `kv` and `timers` sit beside `operations`, not inside it, and that is not a
+/// stylistic choice. Growing the operation enum a `kv` leg makes Go's
+/// `encoding/json` drop **both** struct fields that carry the same JSON key at
+/// the same level — with no error and no warning — so a bundle would go out
+/// with zero KV operations while the broker committed a transaction whose gate
+/// never ran. The `putIfAbsent` the bundle existed for would simply never have
+/// happened. This shape does not admit that failure, because the two arrays
+/// share no level with `operations`.
+///
+/// A bundle carrying neither array is **byte-identical** to what this type sent
+/// before they existed, and its `results` array has today's length and today's
+/// contents: the riders append, they never move a push or an ack.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TransactionRequest {
     pub operations: Vec<TxnOperation>,
@@ -119,6 +136,21 @@ pub struct TransactionRequest {
     /// somebody else has already re-claimed.
     #[serde(rename = "requiredLeases", default)]
     pub required_leases: Vec<String>,
+
+    /// KV operations applied in the same PostgreSQL transaction as the pushes
+    /// and acks. `getPrefix` is refused here — its cost is not bounded by the
+    /// caller, and this transaction holds the outermost lock space of the
+    /// product.
+    ///
+    /// An operation marked `required` that loses its precondition **rolls the
+    /// whole bundle back**. That is the point: the ack and the push do not
+    /// happen if the gate says the work was already done.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kv: Vec<KvOperation>,
+
+    /// Timer schedules and cancels applied in the same transaction.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub timers: Vec<TimerOperation>,
 }
 
 impl TransactionRequest {
@@ -126,7 +158,27 @@ impl TransactionRequest {
         Self {
             operations,
             required_leases: Vec::new(),
+            kv: Vec::new(),
+            timers: Vec::new(),
         }
+    }
+
+    pub fn with_kv(mut self, kv: Vec<KvOperation>) -> Self {
+        self.kv = kv;
+        self
+    }
+
+    pub fn with_timers(mut self, timers: Vec<TimerOperation>) -> Self {
+        self.timers = timers;
+        self
+    }
+
+    /// Where each rider's results start in the flat `results` array.
+    ///
+    /// The layout is append-only: `operations` first (one slot per push item
+    /// and one per ack, exactly as today), then `kv`, then `timers`.
+    pub fn rider_bases(&self, ops_flat: usize) -> (usize, usize) {
+        (ops_flat, ops_flat + self.kv.len())
     }
 
     /// Deduplicate the required leases, preserving first-seen order. A
@@ -144,20 +196,36 @@ impl TransactionRequest {
 
 /// One entry of a successful transaction's `results` array.
 ///
-/// Push and ack entries carry different fields; both are flattened into this
-/// one struct because the broker builds them as free-form JSON objects rather
-/// than from a typed enum.
+/// Push, ack, kv and timer entries carry different fields; all four are
+/// flattened into this one struct because the broker builds them as free-form
+/// JSON objects rather than from a typed enum. Read the rider entries with
+/// [`TxnResultItem::kv`] and [`TxnResultItem::timer`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TxnResultItem {
     pub index: usize,
 
-    /// `"push"` or `"ack"`.
+    /// `"push"`, `"ack"`, `"kv"` or `"timer"`.
     #[serde(rename = "type")]
     pub op_type: String,
 
+    /// Push and ack entries only. Rider entries report their own outcome —
+    /// `applied` for KV, `ok` for a timer — because "did it apply" and "did it
+    /// succeed" are different questions there.
+    #[serde(default)]
     pub success: bool,
 
-    #[serde(rename = "transactionId")]
+    /// A rider's ordinal inside **its own** array, alongside `index` which is
+    /// the flat one. Absent on pushes and acks.
+    #[serde(rename = "opIndex", default, skip_serializing_if = "Option::is_none")]
+    pub op_index: Option<usize>,
+
+    /// Empty on a rider entry: a KV write and a timer cancel have no
+    /// transaction id of their own.
+    ///
+    /// Defaulted rather than `Option` so that existing callers keep compiling —
+    /// but note that a rider entry reaching code that assumes this is set would
+    /// read an empty string, which is why the accessors below exist.
+    #[serde(rename = "transactionId", default)]
     pub transaction_id: String,
 
     /// Push results only.
@@ -180,6 +248,14 @@ pub struct TxnResultItem {
     /// Ack results only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dlq: Option<bool>,
+
+    /// Everything the four entry kinds do not share, kept verbatim.
+    ///
+    /// This is what carries a rider's own body — `applied`, `reason`, `value`,
+    /// `status`, `messageId` — and it is also why a result from a newer broker
+    /// survives the decode instead of losing fields.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl TxnResultItem {
@@ -190,9 +266,58 @@ impl TxnResultItem {
     pub fn is_dlq(&self) -> bool {
         self.dlq.unwrap_or(false)
     }
+
+    /// This entry as a KV result, when it is one.
+    ///
+    /// `index` on the returned value is the rider's **array-local** ordinal, so
+    /// it lines up with the `kv` array that was sent; `self.index` stays the
+    /// flat one.
+    pub fn kv(&self) -> Option<KvResult> {
+        if self.op_type != "kv" {
+            return None;
+        }
+        let mut m = self.extra.clone();
+        m.insert(
+            "index".to_string(),
+            serde_json::Value::from(self.op_index.unwrap_or(0)),
+        );
+        serde_json::from_value(serde_json::Value::Object(m)).ok()
+    }
+
+    /// This entry as a timer result, when it is one.
+    pub fn timer(&self) -> Option<TimerResult> {
+        if self.op_type != "timer" {
+            return None;
+        }
+        let mut m = self.extra.clone();
+        // `messageId` is the one key a timer result shares with a push result,
+        // so it lands on the named field above rather than in `extra` — put it
+        // back, or a scheduled timer would lose the id the broker promised it.
+        if let Some(mid) = &self.message_id {
+            m.insert(
+                "messageId".to_string(),
+                serde_json::Value::String(mid.clone()),
+            );
+        }
+        serde_json::from_value(serde_json::Value::Object(m)).ok()
+    }
 }
 
 /// Response of `POST /api/v1/transaction`, both on commit and on rollback.
+///
+/// # The failure body carries a code now, and it is the only thing to branch on
+///
+/// Until the riders existed, a rolled-back transaction carried nothing but a
+/// prose `error`, which left every client string-matching on a message — banned
+/// everywhere else in this codebase. [`TransactionResponse::reason`] is a code
+/// from a closed taxonomy: `bad_request`, `duplicate`, `ack_rejected`,
+/// `kv_precondition`, `timer_horizon_exceeded`, `payload_too_large`,
+/// `misaligned`, `db_error`.
+///
+/// The status stays **200** for every verdict the database itself returned. A
+/// lost KV precondition is the expected outcome of any legitimate redelivery —
+/// it is the idempotency marker doing its job — and it must pollute neither the
+/// error metrics nor the retry policy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TransactionResponse {
     #[serde(rename = "transactionId")]
@@ -208,6 +333,89 @@ pub struct TransactionResponse {
     /// `QTXN ...` for an ack that referenced an unknown message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+
+    /// The machine-readable half of a failure. Absent on a commit, and absent
+    /// from brokers older than the riders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+
+    /// Emitted alongside `success: false` on a lost precondition, so the shape
+    /// reads the same whether the verdict arrived from `/api/v1/transaction` or
+    /// from `/api/v1/kv`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ok: Option<bool>,
+
+    /// The operation that lost, in the **flat** index space — the same space
+    /// `results` uses, so it points at the request's own operation and not at
+    /// somebody else's.
+    #[serde(
+        rename = "failedIndex",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub failed_index: Option<usize>,
+
+    /// Why it lost.
+    #[serde(rename = "kvReason", default, skip_serializing_if = "Option::is_none")]
+    pub kv_reason: Option<KvReason>,
+
+    /// The winner's version. Advisory: read outside the row lock, so it is not
+    /// a fencing token to reuse blindly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<i64>,
+
+    /// The winner's value, so the loser needs no second round trip. `null` is a
+    /// legal stored value, so a present `"value": null` stays `Some(Null)`.
+    #[serde(
+        default,
+        deserialize_with = "crate::kv::present_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub value: Option<serde_json::Value>,
+}
+
+/// A transaction that rolled back because a `required` KV gate lost.
+///
+/// This is the shape of "somebody else already did this work", and it is the
+/// **expected** outcome of a redelivery rather than an error.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KvPrecondition {
+    /// The losing operation, in the flat index space.
+    pub failed_index: Option<usize>,
+    pub reason: Option<KvReason>,
+    pub version: Option<i64>,
+    pub value: Option<serde_json::Value>,
+}
+
+impl TransactionResponse {
+    /// The precondition verdict, when that is why this transaction did not
+    /// commit.
+    ///
+    /// `None` for a commit and for every other kind of failure — a duplicate
+    /// push and a rejected ack are still errors, and only this one is a
+    /// verdict the caller is expected to handle in the normal course of
+    /// business.
+    pub fn lost_precondition(&self) -> Option<KvPrecondition> {
+        if self.success || self.reason.as_deref() != Some("kv_precondition") {
+            return None;
+        }
+        Some(KvPrecondition {
+            failed_index: self.failed_index,
+            reason: self.kv_reason,
+            version: self.version,
+            value: self.value.clone(),
+        })
+    }
+
+    /// The KV results of a committed bundle, in the order they were sent.
+    pub fn kv_results(&self) -> Vec<KvResult> {
+        self.results.iter().filter_map(|r| r.kv()).collect()
+    }
+
+    /// The timer results of a committed bundle, in the order they were sent.
+    pub fn timer_results(&self) -> Vec<TimerResult> {
+        self.results.iter().filter_map(|r| r.timer()).collect()
+    }
 }
 
 #[cfg(test)]
@@ -255,6 +463,15 @@ mod tests {
         /// The flat index the broker assigns each operation. Result entries are
         /// slotted by it, so it is what lines a result up with its request.
         flat: usize,
+        /// The two TOP-LEVEL rider arrays, read the way the demux reads them:
+        /// `root.get("kv")`, never from inside `operations`. `null` counts as
+        /// absent, which is what every serializer emits for an unset optional.
+        kv: Vec<serde_json::Value>,
+        timers: Vec<serde_json::Value>,
+        /// Where each rider's results begin in the flat space. Append-only, so
+        /// a push or an ack never changes index because a rider is present.
+        kv_base: usize,
+        timers_base: usize,
     }
 
     fn read_push_like_the_broker(item: &serde_json::Value) -> SeenPush {
@@ -369,6 +586,24 @@ mod tests {
                 }
             }
         }
+
+        // The riders, AFTER the operations: the flat layout is
+        // [0, ops_flat) operations, then kv, then timers.
+        let rider = |key: &str| -> Vec<serde_json::Value> {
+            match root.get(key) {
+                None | Some(serde_json::Value::Null) => Vec::new(),
+                Some(serde_json::Value::Array(a)) => a.clone(),
+                // Anything else is a named 400 from the demux; represented here
+                // as "the broker read nothing", which is what the test asserts
+                // must never happen for a well-formed request.
+                Some(_) => Vec::new(),
+            }
+        };
+        view.kv = rider("kv");
+        view.timers = rider("timers");
+        view.kv_base = view.flat;
+        view.timers_base = view.flat + view.kv.len();
+        view.flat += view.kv.len() + view.timers.len();
         view
     }
 
@@ -733,5 +968,220 @@ mod tests {
         assert!(!got.success);
         assert!(got.error.unwrap().starts_with("QDUP"));
         assert!(got.results.is_empty());
+    }
+
+    // =====================================================================
+    // The kv and timers riders (PLAN_KV_TIMERS.md §6.3, §8.2, §8.3)
+    // =====================================================================
+
+    use crate::kv::{Expiry, KvOperation, KvReason};
+    use crate::timers::{TimerOperation, TimerStatus};
+
+    #[test]
+    fn a_bundle_with_no_riders_is_byte_identical_to_what_it_always_was() {
+        // The whole compatibility claim of §6.3 in one assertion: adding two
+        // fields to this type must not add two keys to a body that does not use
+        // them, or every existing bundle changes shape at once.
+        let req = TransactionRequest::new(vec![TxnOperation::Ack(TxnAckOperation {
+            transaction_id: "t1".into(),
+            partition_id: "p1".into(),
+            status: AckStatus::Completed,
+            consumer_group: Some("g".into()),
+            lease_id: Some("L1".into()),
+            error: None,
+        })])
+        .with_required_leases(["L1".to_string()]);
+
+        let body = serde_json::to_string(&req).unwrap();
+        assert!(!body.contains("\"kv\""), "{body}");
+        assert!(!body.contains("\"timers\""), "{body}");
+
+        let seen = read_like_the_broker(&body);
+        assert_eq!(seen.flat, 1, "the flat space is unchanged");
+        assert!(seen.kv.is_empty() && seen.timers.is_empty());
+    }
+
+    #[test]
+    fn the_riders_are_top_level_fields_and_never_operations() {
+        // If these ever became `{"type":"kv"}` operations, the broker's demux
+        // would drop them into its `_ =>` arm and answer a 400 — and in Go the
+        // body would have gone out with the ops silently missing instead.
+        let req = TransactionRequest::new(vec![TxnOperation::Push {
+            items: vec![TxnPushItem::new("stage2", serde_json::json!({"n": 1}))],
+        }])
+        .with_kv(vec![KvOperation::put_if_absent(
+            "orders",
+            "idem:9137",
+            serde_json::json!(true),
+            Expiry::seconds(86_400),
+        )
+        .unwrap()
+        .required()])
+        .with_timers(vec![TimerOperation::schedule(
+            "compensations",
+            "saga:9137",
+            900_000,
+            "comp-9137",
+            b"{}",
+        )]);
+
+        let body = serde_json::to_string(&req).unwrap();
+        let root: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(root["kv"].is_array(), "kv must be top-level: {body}");
+        assert!(root["timers"].is_array(), "timers must be top-level: {body}");
+        for op in root["operations"].as_array().unwrap() {
+            let ty = op.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            assert!(
+                ty == "push" || ty == "ack",
+                "a rider leaked into operations as type {ty}"
+            );
+        }
+
+        let seen = read_like_the_broker(&body);
+        assert_eq!(seen.unknown_ops, 0);
+        assert_eq!(seen.kv.len(), 1);
+        assert_eq!(seen.timers.len(), 1);
+        assert_eq!(seen.kv[0]["required"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn the_flat_layout_is_append_only() {
+        // A push at flat 0 stays at flat 0 whatever rides along, and the two
+        // bases follow the arrays' own lengths. Getting this wrong points a
+        // failedIndex at somebody else's operation.
+        let req = TransactionRequest::new(vec![
+            TxnOperation::Push {
+                items: vec![
+                    TxnPushItem::new("a", serde_json::json!(1)),
+                    TxnPushItem::new("a", serde_json::json!(2)),
+                ],
+            },
+            TxnOperation::Ack(TxnAckOperation {
+                transaction_id: "t".into(),
+                partition_id: "p".into(),
+                status: AckStatus::Completed,
+                consumer_group: None,
+                lease_id: None,
+                error: None,
+            }),
+        ])
+        .with_kv(vec![
+            KvOperation::get("ns", "a"),
+            KvOperation::get("ns", "b"),
+        ])
+        .with_timers(vec![TimerOperation::cancel("q", "k")]);
+
+        let seen = read_like_the_broker(&serde_json::to_string(&req).unwrap());
+        // 2 push items + 1 ack = 3 operation slots, then 2 kv, then 1 timer.
+        assert_eq!(seen.kv_base, 3);
+        assert_eq!(seen.timers_base, 5);
+        assert_eq!(seen.flat, 6);
+        assert_eq!(req.rider_bases(3), (3, 5), "the type agrees with the broker");
+    }
+
+    #[test]
+    fn a_committed_bundle_reports_each_rider_under_its_own_type() {
+        // Transcribed from `txn_scatter_rider`: the procedure's element, plus
+        // `index` overwritten with the FLAT ordinal, plus `opIndex` carrying the
+        // array-local one, plus `type`.
+        let wire = concat!(
+            r#"{"transactionId":"T","success":true,"results":["#,
+            r#"{"index":0,"type":"ack","success":true,"transactionId":"t0","error":null,"dlq":false},"#,
+            r#"{"index":1,"opIndex":0,"type":"kv","op":"put","applied":true,"key":"idem:9137",
+                "value":true,"version":1},"#,
+            r#"{"index":2,"opIndex":0,"type":"timer","ok":true,"status":"scheduled",
+                "queue":"compensations","timerKey":"saga:9137","txn":"comp-9137",
+                "messageId":"0198f0aa-0000-7000-8000-000000000001",
+                "deliverAt":"2026-08-17T10:15:00.000000Z"}"#,
+            r#"]}"#,
+        );
+        let got: TransactionResponse =
+            serde_json::from_str(wire).expect("a bundle with riders must decode");
+        assert!(got.success);
+        assert_eq!(got.results.len(), 3);
+
+        // A rider entry carries no transactionId. Before the riders this field
+        // was required, so an entry like this failed the whole decode — and a
+        // client that cannot decode the reply has no way to know whether its
+        // pushes committed.
+        assert_eq!(got.results[1].transaction_id, "");
+
+        let kv = got.kv_results();
+        assert_eq!(kv.len(), 1);
+        assert!(kv[0].applied());
+        assert_eq!(kv[0].key.as_deref(), Some("idem:9137"));
+        assert_eq!(
+            kv[0].index, 0,
+            "a KV result's index is its ordinal in the kv array, not the flat one"
+        );
+        assert_eq!(got.results[1].index, 1, "the flat ordinal stays on the entry");
+
+        let timers = got.timer_results();
+        assert_eq!(timers.len(), 1);
+        assert_eq!(timers[0].status, TimerStatus::Scheduled);
+        assert_eq!(
+            timers[0].message_id.as_deref(),
+            Some("0198f0aa-0000-7000-8000-000000000001"),
+            "messageId is the one key a timer shares with a push result"
+        );
+        assert_eq!(timers[0].deliver_at.as_deref(), Some("2026-08-17T10:15:00.000000Z"));
+    }
+
+    #[test]
+    fn a_lost_precondition_is_a_verdict_with_everything_needed_to_act_on_it() {
+        // `txn_precondition_json`: HTTP 200, success:false, ok:false, and the
+        // winner's value and version so the loser needs no second round trip.
+        let wire = concat!(
+            r#"{"transactionId":"T","success":false,"reason":"kv_precondition","#,
+            r#""error":"kv_precondition_failed","results":[],"ok":false,"#,
+            r#""failedIndex":4,"kvReason":"exists","version":90101,"value":{"by":"worker-2"}}"#,
+        );
+        let got: TransactionResponse = serde_json::from_str(wire).unwrap();
+        assert!(!got.success);
+
+        let lost = got
+            .lost_precondition()
+            .expect("this is the outcome the gate exists to produce");
+        assert_eq!(lost.failed_index, Some(4), "the index is in the FLAT space");
+        assert_eq!(lost.reason, Some(KvReason::Exists));
+        assert_eq!(lost.version, Some(90101));
+        assert_eq!(lost.value.unwrap()["by"], "worker-2");
+    }
+
+    #[test]
+    fn every_other_failure_is_not_a_precondition() {
+        // The distinction the client's commit() branches on: only this one
+        // reason is an expected outcome; the rest stay errors.
+        for reason in [
+            "duplicate",
+            "ack_rejected",
+            "bad_request",
+            "timer_horizon_exceeded",
+            "payload_too_large",
+            "misaligned",
+            "db_error",
+        ] {
+            let wire = format!(
+                r#"{{"transactionId":"T","success":false,"reason":"{reason}","error":"x","results":[]}}"#
+            );
+            let got: TransactionResponse = serde_json::from_str(&wire).unwrap();
+            assert_eq!(got.reason.as_deref(), Some(reason));
+            assert!(
+                got.lost_precondition().is_none(),
+                "{reason} must not read as a lost precondition"
+            );
+        }
+    }
+
+    #[test]
+    fn an_older_broker_answers_without_a_reason_and_still_parses() {
+        // Old broker, new client: the failure body has no `reason` at all, and
+        // that must stay a plain error rather than a decode failure.
+        let got: TransactionResponse = serde_json::from_str(
+            r#"{"transactionId":"T","success":false,"error":"QTXN ack references unknown transactionId","results":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(got.reason, None);
+        assert!(got.lost_precondition().is_none());
     }
 }

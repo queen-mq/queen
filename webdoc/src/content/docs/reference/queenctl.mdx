@@ -705,6 +705,25 @@ Writes a completion script to stdout. Exactly one argument, from that list.
 Prints a list of documentation links, with `--open` to launch the site in the default browser and
 `--topic <name>` to deep-link.
 
+## No `kv` and no `timers` commands
+
+There is no `queenctl kv` and no `queenctl timers`, and their absence is a
+decision rather than an oversight.
+
+The CLI's value for those two surfaces is **inspection**: peek a timer, list a
+queue's pending timers, read a key. That is exactly the part of them that a
+`curl` against [the kv routes](/reference/http/kv) and [the timer
+routes](/reference/http/timers) already covers, and the writing part, the part a
+CLI would make convenient, is the part that belongs in an application's own
+transaction rather than at a prompt. A `queenctl kv put` next to a `queenctl
+timers schedule` would also make both surfaces look like operator tools, which
+they are not: they are application state, and the operator's controls over them
+are the grants, the quotas and the runtime kill switches described under
+[Self-hosting](/deploy/).
+
+Those controls do have a place at a prompt, and they already have one: they are
+`POST /api/v1/system/kv-timers` and rows in `queen.kv_quota`, not a `kv put`.
+
 ## Related
 
 <CardGrid>

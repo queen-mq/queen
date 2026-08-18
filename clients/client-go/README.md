@@ -340,6 +340,108 @@ if result.Success {
 }
 ```
 
+## Key/Value
+
+Transactional state on the same Postgres, and on the same commit as your
+messages. Every write states its lifetime: exactly one of a TTL and `Forever`,
+never neither.
+
+```go
+kv := client.KV()
+
+// putIfAbsent is the idempotency marker: applied answers "did I win?", and the
+// LOSER gets the winner's value in the same answer, with no second round trip.
+res, err := kv.PutIfAbsent(ctx, "saga", "order-7", map[string]any{"owner": "worker-1"}, queen.TTLSeconds(3600))
+if err != nil {
+    return err
+}
+if !res.Applied {
+    // res.Reason == queen.KVReasonExists, res.Value is the winner's
+    return nil // somebody else owns this order
+}
+
+// Reads. KVGetAs is the only generic function of the package.
+type state struct{ Step string `json:"step"` }
+s, found, err := queen.KVGetAs[state](ctx, kv, "saga", "order-7")
+
+// A rate limiter in ONE call: with Max, Applied IS the admission decision, and
+// a refused request has consumed no budget.
+hit, err := kv.Incr(ctx, "quota", "acme:2026-08-17", 1, queen.TTL(time.Hour), queen.KVIncrOptions{Max: queen.Int64(1000)})
+if !hit.Applied {
+    return errTooManyRequests
+}
+```
+
+**`applied:false` is not an error.** A lost race, a missing key, a delete that
+hit nothing and an incr over its ceiling are all successful calls with an
+explicit field in the body: check `Applied`/`Found`, not `err`.
+
+The whole point is the transaction: the write and the messages commit together.
+
+```go
+resp, err := client.Transaction().
+    Ack(msg, queen.AckStatusCompleted, queen.AckOptions{}).
+    Queue("emails").Push(email).
+    KV(queen.KVPutIfAbsentOp("sent", msg.TransactionID, true, queen.TTLSeconds(86400),
+        queen.KVWriteOptions{Required: true})).
+    Commit(ctx)
+
+if err != nil {
+    return err // the bundle did not commit
+}
+if resp.IsKVPrecondition() {
+    // A redelivery: somebody already sent this email, so nothing was pushed and
+    // nothing was acked. This is RETURNED, not raised -- it is the expected
+    // outcome of a legitimate redelivery, not a failure.
+}
+```
+
+`Required: true` is what makes it a gate: without it a lost precondition is only
+a verdict in the results and the messages still go out.
+
+## Timers
+
+A message you schedule now and the broker delivers later, into a real queue.
+
+```go
+timers := client.Timers()
+
+_, err := timers.Schedule(ctx, queen.TimerSchedule{
+    Queue:    "compensations",
+    TimerKey: "order-7",          // identity: scheduling it again is an upsert
+    Delay:    30 * time.Minute,   // milliseconds on the wire; DeliverAt is sugar
+    Payload:  map[string]any{"orderId": 7},
+})
+
+// Cancel goes through its own route, the one that is never blocked.
+res, err := timers.Cancel(ctx, "compensations", "order-7")
+```
+
+Three things the API cannot hide from you:
+
+- **`deliverAt` is "no earlier than", never "exactly at".**
+- **`absent` on a cancel may mean ALREADY DELIVERED.** There is no tombstone: a
+  fired timer has no row. The answer carries the `txn` of the message, so the
+  authority is the destination queue. Any saga that cancels a compensation timer
+  must have the compensation consumer check the saga's KV state before acting.
+- **`too_late` is a verdict**, not a failure: a broker is already committing that
+  payload. Bounded by the lease.
+
+Both surfaces are **always there**. There is no flag to turn on first: KV and
+timers are part of the engine, the way push and pop are, and every broker that
+answers has them.
+
+What an operator can still do, live and during an incident, is **pause** one of
+them (`kv_enabled`, `timers_schedule_enabled`, `timers_fire_enabled` in
+`queen.system_state`). That is a **503** with `Retry-After` and the code
+`kv_disabled` / `timers_disabled` on `/api/v1/kv` and `/api/v1/timers` — back off
+and come back — and a **403** on a `kv`/`timers` rider inside
+`POST /api/v1/transaction`, permanent on purpose, because a bundle carries
+messages and retrying it in a loop against a paused cell is a storm on the hot
+path. Both arrive as `*queen.SurfaceError` (the transaction also hands back its
+`TransactionResponse`, whose `Reason` carries the code): branch on `Code` or
+`Reason`, never on the prose.
+
 ## Dead Letter Queue
 
 ```go
@@ -463,6 +565,9 @@ go test ./tests/... -v
 - `PushBuilder` - Fluent API for push operations
 - `ConsumeBuilder` - Fluent API for consume operations
 - `TransactionBuilder` - Fluent API for transactions
+- `KV` - Key/value API (`client.KV()`), plus `Expiry`, `KVOp`, `KVResult` and `KVGetAs[T]`
+- `Timers` - Timer API (`client.Timers()`), plus `TimerSchedule`, `TimerOp`, `TimerResult`
+- `SurfaceError` - Error envelope of the kv/timer surfaces (`Code`, `Reason`, `Detail`)
 - `Admin` - Administrative API
 - `Message` - Message structure
 - `ClientConfig` - Client configuration

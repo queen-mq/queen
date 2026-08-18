@@ -95,48 +95,32 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
         // on is the only thing that makes the class reachable at all.
         return errors::err_404(errors::CODE_ROUTE_BLOCKED, "not available");
     }
-    if let RouteClass::Gated(f) = class {
+    if let RouteClass::Gated(f, op) = class {
         let on = match f {
             crate::routes::Feature::Streams => ctx.features.streams,
             crate::routes::Feature::Traces => ctx.features.traces,
+            crate::routes::Feature::Kv => ctx.features.kv,
+            crate::routes::Feature::Timers => ctx.features.timers,
         };
         if !on {
             return errors::err_403(errors::CODE_FEATURE_GATED, "not in your plan");
         }
+        // PLAN_KV_TIMERS.md §9.5: the growing half of a gated family answers
+        // the push blocks exactly like Produce, because it is the half that
+        // consumes the disk the storage quota bounds. `Read` and `Open` never
+        // do — a tenant that cannot read or delete cannot get back under its
+        // own quota, and a tenant that cannot cancel cannot stop a fire.
+        // `Mixed` is decided against the body, further down, because it is the
+        // only class where both halves arrive in one array (§9.6).
+        if op == crate::routes::GatedOp::Grow {
+            if let Some(resp) = push_block_response(&st, &ctx) {
+                return resp;
+            }
+        }
     }
     if class == RouteClass::Produce {
-        // Three causes, three codes — Track C clients switch on the code and
-        // treat `storage_quota_exceeded` as terminal. Each live flag is written
-        // by exactly one thing (storage: the pump in main.rs off registry
-        // over_storage; monthly: the rollup task off plans.monthly_msgs_quota),
-        // so when one is set the cause is unambiguous; ctx.status is the DB
-        // lifecycle one (tenant `grace` or cluster `push_blocked` —
-        // cache.rs::merge_status) and never says *why* it was set, so it keeps
-        // the generic code. Live flags first: they are the more specific claim.
-        //
-        // Both live flags are HARD gates — checked and enforced regardless of
-        // `limits.enforcing()`, unlike every rate decision below. That is
-        // deliberate (a quota that only warns protects neither the cell's disk
-        // nor the bill) and it is the surprising part: a misconfigured
-        // monthly_msgs_quota blocks production pushes even on a cell deployed
-        // in shadow mode.
-        match st.limits.push_block_reason(ctx.cluster_id) {
-            Some(crate::limits::PushBlock::Storage) => {
-                return errors::err_403(
-                    errors::CODE_STORAGE_QUOTA,
-                    "storage quota exceeded; pushes blocked",
-                );
-            }
-            Some(crate::limits::PushBlock::MonthlyQuota) => {
-                return errors::err_403(
-                    errors::CODE_QUOTA_EXCEEDED,
-                    "monthly message quota (monthly_msgs_quota) exhausted; pushes blocked until the next calendar month",
-                );
-            }
-            None => {}
-        }
-        if ctx.status == ClusterStatus::PushBlocked {
-            return errors::err_403(errors::CODE_PUSH_BLOCKED, "pushes blocked (billing hold)");
+        if let Some(resp) = push_block_response(&st, &ctx) {
+            return resp;
         }
     }
 
@@ -191,6 +175,14 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
         }
     }
 
+    // §9.6: a `Mixed` batch is only inspected when something is actually
+    // blocking. On an unblocked cluster — the overwhelming majority — the body
+    // is never buffered and never parsed, exactly like today.
+    let mixed_block = match class {
+        RouteClass::Gated(_, crate::routes::GatedOp::Mixed) => push_block_response(&st, &ctx),
+        _ => None,
+    };
+
     let (mut parts, body) = req.into_parts();
 
     // ----- 4b. Produce: buffer body, count items, per-item + batch caps,
@@ -228,6 +220,30 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
         bytes_in = buffered.len() as u64;
         if let Err(resp) = enforce_configure(&st, &ctx, &buffered, &rid).await {
             return resp;
+        }
+        Body::from(buffered)
+    } else if let Some(blocked) = mixed_block {
+        // 4b''. A kv/timers batch on a blocked cluster (PLAN_KV_TIMERS.md
+        // §9.6). Both halves of the family arrive in ONE array, so the class
+        // alone cannot decide: a `cancel`-only or read/delete-only batch must
+        // get through — it is how the tenant stops a fire and how it gets back
+        // under its own quota — while a batch that schedules or writes is
+        // refused whole, carrying the same code the equivalent push would.
+        //
+        // Refusing the WHOLE batch is the point. Dropping the growing ops and
+        // forwarding the rest would answer 200 for a request that was half
+        // applied, which no client can act on.
+        let buffered = match axum::body::to_bytes(body, st.cfg.max_body_bytes).await {
+            Ok(b) => b,
+            Err(_) => return errors::err_413("request body exceeds cap"),
+        };
+        bytes_in = buffered.len() as u64;
+        if mixed_batch_grows(&buffered) {
+            tracing::info!(
+                target: "limits", cluster = %ctx.slug, rid, path = %path_only,
+                "gated batch refused whole: cluster blocked and the batch grows state"
+            );
+            return blocked;
         }
         Body::from(buffered)
     } else {
@@ -268,6 +284,15 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
             parts.headers.insert(header::AUTHORIZATION, v);
         }
     }
+    // PLAN_KV_TIMERS.md §9.9. The removal is UNCONDITIONAL and comes BEFORE the
+    // `if`: with `send_tenant_header` off in front of a broker that has tenancy
+    // on, the tenant would otherwise be whatever the client typed. That is
+    // pre-existing, but KV is the first feature where it means "read and write
+    // someone else's state knowing only its name" instead of "address a queue
+    // whose acks are ownership-checked anyway". A KV key has no opaque id and
+    // therefore no equivalent gate: the gate IS the WHERE clause, and the WHERE
+    // takes the tenant from this header.
+    parts.headers.remove(crate::config::TENANT_HEADER);
     if st.cfg.send_tenant_header {
         if let Ok(v) = HeaderValue::from_str(&ctx.broker_tenant.to_string()) {
             parts.headers.insert(crate::config::TENANT_HEADER, v);
@@ -974,6 +999,86 @@ fn count_pop_messages(bytes: &[u8]) -> Option<u64> {
     Some(p.messages.len() as u64)
 }
 
+/// The push-block verdict, shared by `Produce` and by the growing half of a
+/// gated family (PLAN_KV_TIMERS.md §9.5). `None` = nothing is blocking.
+///
+/// Three causes, three codes — Track C clients switch on the code and treat
+/// `storage_quota_exceeded` as terminal. Each live flag is written by exactly
+/// one thing (storage: the pump in main.rs off registry over_storage; monthly:
+/// the rollup task off plans.monthly_msgs_quota), so when one is set the cause
+/// is unambiguous; ctx.status is the DB lifecycle one (tenant `grace` or
+/// cluster `push_blocked` — cache.rs::merge_status) and never says *why* it was
+/// set, so it keeps the generic code. Live flags first: they are the more
+/// specific claim.
+///
+/// Both live flags are HARD gates — checked and enforced regardless of
+/// `limits.enforcing()`, unlike every rate decision in `handle`. That is
+/// deliberate (a quota that only warns protects neither the cell's disk nor the
+/// bill) and it is the surprising part: a misconfigured monthly_msgs_quota
+/// blocks production pushes even on a cell deployed in shadow mode.
+fn push_block_response(st: &St, ctx: &ClusterCtx) -> Option<Response> {
+    match st.limits.push_block_reason(ctx.cluster_id) {
+        Some(crate::limits::PushBlock::Storage) => {
+            return Some(errors::err_403(
+                errors::CODE_STORAGE_QUOTA,
+                "storage quota exceeded; pushes blocked",
+            ));
+        }
+        Some(crate::limits::PushBlock::MonthlyQuota) => {
+            return Some(errors::err_403(
+                errors::CODE_QUOTA_EXCEEDED,
+                "monthly message quota (monthly_msgs_quota) exhausted; pushes blocked until the next calendar month",
+            ));
+        }
+        None => {}
+    }
+    if ctx.status == ClusterStatus::PushBlocked {
+        return Some(errors::err_403(errors::CODE_PUSH_BLOCKED, "pushes blocked (billing hold)"));
+    }
+    None
+}
+
+/// Does this `GatedOp::Mixed` batch contain an op that GROWS stored state?
+///
+/// PLAN_KV_TIMERS.md §9.6. `POST /api/v1/timers` carries `cancel` in the same
+/// array as `schedule`, and `POST /api/v1/kv` carries `get`/`delete` in the
+/// same array as `put`/`incr`. The batch is refused only when it really adds
+/// something, and then it is refused WHOLE — never half-applied, never
+/// silently trimmed — so the caller gets one unambiguous answer about one
+/// request.
+///
+/// Body shape, both endpoints: a bare array of ops, or `{"operations":[...]}`.
+/// The `op` field names the operation.
+///
+/// UNPARSEABLE IS NOT GROWING. A body this function cannot read is forwarded
+/// and the broker answers `400` with a named reason, which is a better error
+/// than a `403` about a quota. The blocked tenant gains nothing by it: the
+/// broker rejects the malformed body too, so no row is created either way.
+fn mixed_batch_grows(body: &[u8]) -> bool {
+    let root: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let ops = match &root {
+        serde_json::Value::Array(a) => a,
+        serde_json::Value::Object(o) => match o.get("operations") {
+            Some(serde_json::Value::Array(a)) => a,
+            _ => return false,
+        },
+        _ => return false,
+    };
+    // A CLOSED list of the ops that only free or read, so an op this proxy has
+    // never heard of counts as growing. The taxonomy is owned by the stored
+    // procedures; when it gains a member, the fail-safe direction is that a
+    // tenant over quota waits rather than that an unknown op slips the gate.
+    ops.iter().any(|o| {
+        !matches!(
+            o.get("op").and_then(|v| v.as_str()),
+            Some("get" | "getPrefix" | "delete" | "cancel")
+        )
+    })
+}
+
 fn content_length(headers: &HeaderMap) -> u64 {
     headers
         .get(header::CONTENT_LENGTH)
@@ -996,7 +1101,13 @@ fn op_for(path: &str, class: RouteClass) -> OpClass {
         RouteClass::Consume => OpClass::Read,
         RouteClass::QueueAdmin => OpClass::Configure,
         RouteClass::Read => OpClass::Read,
-        RouteClass::Gated(_) => OpClass::Read,
+        // Gated surfaces meter as reqs-only `Read`. That INCLUDES
+        // `POST /api/v1/timers`, and PLAN_KV_TIMERS.md §9.7 says it should not
+        // stay that way: a timer is a message that will never cross this proxy
+        // when it fires, so the promise has to be billed at schedule time, one
+        // message per `schedule` op. That is F8 P4 and is NOT implemented here
+        // — see the report. Until it is, timers are free.
+        RouteClass::Gated(_, _) => OpClass::Read,
         // Operator surfaces are reqs-only reads like any other GET. They still
         // meter — against the cluster the operator is acting on — because the
         // request really did cost the cell something; the volume is a
@@ -1039,6 +1150,65 @@ mod tests {
         assert_eq!(items[0].payload_len, r#"{"a":1}"#.len());
         assert_eq!(items[1].payload_len, r#""hello""#.len());
         assert_eq!(items[2].payload_len, "[1,2,3]".len());
+    }
+
+    // ---- PLAN_KV_TIMERS.md §9.6: the mixed batch, and why the cancel lives ----
+
+    #[test]
+    fn cancel_only_timer_batch_does_not_grow() {
+        // THE case the whole split exists for. A tenant over quota still has
+        // timers in flight; nothing stops a fire on its own; this batch is the
+        // only way to stop them. It must not be refused.
+        let body = br#"[{"op":"cancel","queue":"orders","timerKey":"a"},
+                        {"op":"cancel","queue":"orders","timerKey":"b"}]"#;
+        assert!(!mixed_batch_grows(body));
+        // ...and the `{"operations":[...]}` spelling of the same thing
+        let wrapped = br#"{"operations":[{"op":"cancel","queue":"q","timerKey":"a"}]}"#;
+        assert!(!mixed_batch_grows(wrapped));
+    }
+
+    #[test]
+    fn a_schedule_anywhere_in_the_batch_grows() {
+        // One schedule hiding behind 255 cancels still grows: the batch is
+        // refused whole rather than applied in part.
+        let body = br#"[{"op":"cancel","queue":"q","timerKey":"a"},
+                        {"op":"schedule","queue":"q","timerKey":"b","delayMs":1000},
+                        {"op":"cancel","queue":"q","timerKey":"c"}]"#;
+        assert!(mixed_batch_grows(body));
+        assert!(mixed_batch_grows(br#"[{"op":"reschedule","queue":"q","timerKey":"b"}]"#));
+    }
+
+    #[test]
+    fn kv_reads_and_deletes_do_not_grow_but_writes_do() {
+        // §9.5: reads and DELETEs are always permitted, over quota included,
+        // or a full tenant can never empty itself.
+        assert!(!mixed_batch_grows(br#"[{"op":"get","ns":"a","key":"k"}]"#));
+        assert!(!mixed_batch_grows(br#"[{"op":"getPrefix","ns":"a","prefix":"k"}]"#));
+        assert!(!mixed_batch_grows(br#"[{"op":"delete","ns":"a","key":"k"}]"#));
+
+        assert!(mixed_batch_grows(br#"[{"op":"put","ns":"a","key":"k","value":1}]"#));
+        assert!(mixed_batch_grows(br#"[{"op":"putIfAbsent","ns":"a","key":"k"}]"#));
+        assert!(mixed_batch_grows(br#"[{"op":"incr","ns":"a","key":"k","by":1}]"#));
+    }
+
+    #[test]
+    fn unknown_and_missing_ops_count_as_growing() {
+        // The op taxonomy is owned by the stored procedures. An op this proxy
+        // has never heard of must not be the way past a quota.
+        assert!(mixed_batch_grows(br#"[{"op":"somethingNew","ns":"a"}]"#));
+        assert!(mixed_batch_grows(br#"[{"ns":"a","key":"k"}]"#), "no op field");
+        assert!(mixed_batch_grows(br#"[{"op":123}]"#), "op is not a string");
+    }
+
+    #[test]
+    fn an_unreadable_body_is_left_to_the_broker() {
+        // Not "grows", because the answer a caller deserves for a malformed
+        // body is the broker's named 400, not a 403 about a quota — and the
+        // broker rejects it too, so no row is created either way.
+        assert!(!mixed_batch_grows(b"not json"));
+        assert!(!mixed_batch_grows(br#"{"nope":1}"#));
+        assert!(!mixed_batch_grows(br#"42"#));
+        assert!(!mixed_batch_grows(b"[]"), "an empty batch creates nothing");
     }
 
     #[test]

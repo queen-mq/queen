@@ -12,6 +12,8 @@ A comprehensive C++ client for Queen Message Queue, providing a fluent API match
 - ✅ **Consumer Groups** - Distributed message processing
 - ✅ **Partitions** - Ordered message processing per partition
 - ✅ **Atomic Transactions** - All-or-nothing operations
+- ✅ **Key/Value State** - `get`, `put`, `putIfAbsent`, `delete`, `incr`, standalone or inside a transaction
+- ✅ **Scheduled Messages** - `schedule` and `cancel` timers that push into a queue later
 - ✅ **Lease Renewal** - Keep message locks active
 - ✅ **Dead Letter Queue** - Query failed messages
 - ✅ **Concurrent Consumers** - Uses `astp::ThreadPool` for parallel processing
@@ -363,12 +365,22 @@ make test
 ### Run Tests
 
 ```bash
-# Make sure Queen server is running on localhost:6632
-./bin/test_client
+# No broker needed: these serve their own responses in-process.
+# retry429  = the proxy contract (bearer token, 429 backoff, terminal 403)
+# kvtimers  = the KV/timer wire contract (exact JSON body, method and path)
+make run-unit
 
-# Or specify custom server URL
+# Against a live broker (localhost:6632 by default)
+./bin/test_client
 ./bin/test_client http://my-server:6632
 ```
+
+The KV and timer HTTP tests inside `test_client` run against every broker,
+unconditionally: there is nothing to enable first, so a failure there is a real
+failure. The wire contract is covered separately by `./bin/test_kv_timers`, and
+that is where a wrong wire shape gets caught: a bundle whose KV riders sit in
+the wrong place still commits against a live broker -- it merely commits without
+the gate.
 
 ### Use in Your Project
 
@@ -524,7 +536,163 @@ Output:
 
 - `ack(message)` - Add ack operation
 - `queue(name).push(messages)` - Add push operation
-- `commit()` - Execute transaction atomically
+- `kv(ns).get|put|put_if_absent|del|incr(...)` - Add a KV rider
+- `timers().schedule|cancel(...)` - Add a timer rider
+- `commit()` - Execute transaction atomically. **Returns** on a lost KV precondition, throws on everything else
+
+### KvBuilder -- `client.kv(ns)`
+
+- `get(key)` - `{found, key, value, version, expiresAt, updatedAt}`
+- `put(key, value, ttl, options)` - upsert, or a compare-and-set with `options.expect`
+- `put_if_absent(key, value, ttl, options)` - claim, exactly one winner
+- `del(key, options)` - delete
+- `incr(key, delta, ttl, options)` - atomic counter with an optional ceiling
+
+`ttl` is a `KvTtl`: `KvTtl::seconds(n)`, `KvTtl::forever()`, or
+`KvTtl::until(time_point)`. It is **mandatory** on every write and it is exactly
+one thing -- the type makes "both" and "neither" inexpressible.
+
+### TimersBuilder -- `client.timers()`
+
+- `schedule(TimerSchedule)` - `{ok, status, queue, timerKey, txn, messageId, deliverAt}`
+- `cancel(queue, timerKey, txn)` - `{ok, status, queue, timerKey, txn}`
+
+## Key/Value state and scheduled messages
+
+Both surfaces are **always there**. They are part of the engine, like push and
+pop: there is no flag to turn on before the first call, and nothing to probe
+for. An operator can still **pause** either one during an incident, through the
+runtime kill switch on `/api/v1/system/kv-timers` -- and that is a different
+thing from an absent feature. A paused surface answers **503** with
+`Retry-After` on its own routes, and refuses a transaction rider permanently
+with **403**; both arrive as an `HttpError`. Nothing answers 404 for being
+switched off, and neither answer means "the key is missing".
+
+### The rules that bite
+
+**Status codes are never verdicts.** An absent key, a lost `put_if_absent` race
+and a delete that hit nothing are all HTTP 200 with an explicit field. They
+arrive as **values**, never as exceptions. Read `found` on a read and `applied`
+on a write:
+
+```cpp
+auto claimed = client.kv("saga").put_if_absent("order-1", {{"state","open"}},
+                                               KvTtl::seconds(600));
+if (claimed["applied"].get<bool>()) {
+    // we won; do the external effect
+} else {
+    // somebody else won. Their value is right here -- no second round trip.
+    json winner = claimed["value"];
+}
+```
+
+**Every write carries an expiry, and it never inherits one.** A `put` with no
+TTL is not expressible. A key that expired is never returned and never counts as
+existing, whether or not the sweeper has pruned the row yet.
+
+**`put_if_absent` plus a TTL is not a distributed lock.** An expiry revokes
+nothing: the old holder keeps working, it simply no longer has the row. Carry
+the `version` you were given as `expect` on every later write so a lapsed holder
+fails with `reason:"version"` instead of overwriting the new one.
+
+**With `max`, `applied` is the admission decision.** `incr` does not saturate and
+does not truncate -- the call that would break the ceiling does not apply and
+returns the current value, so a rate limiter never spends budget it then has to
+un-spend:
+
+```cpp
+KvIncrOptions limited;
+limited.max = 1000;
+auto out = client.kv("quota").incr("acme:2026-08", 1, KvTtl::seconds(3600), limited);
+bool admitted = out["applied"].get<bool>();
+long long used = kv_int64(out["value"]);   // throws rather than lose precision
+```
+
+### KV inside a transaction -- the gate
+
+The ack transaction is the primary fence; `expect` is the secondary assertion. A
+state write that shares the transaction with the ack is undone when an expired
+lease makes the ack fail, which a compare-and-set cannot do. `required` escalates
+a lost precondition into a rollback:
+
+```cpp
+KvWriteOptions gate;
+gate.required = true;
+
+json result = client.transaction()
+    .queue("orders-out").push({{{"data", {{"id", 1}}}}})
+    .ack(message)
+    .kv("saga").put_if_absent("order-1", {{"claimed", true}}, KvTtl::seconds(600), gate)
+    .commit();
+
+if (!result.value("success", false)) {
+    // reason == "kv_precondition": a redelivery we have already handled.
+    // NOT an exception, NOT a retry -- failedIndex, kvReason, version and value
+    // say exactly what lost and to whom.
+}
+```
+
+`commit()` **returns** that verdict instead of throwing, because it is the
+expected outcome of every legitimate redelivery. Every other failure still
+throws, and a 403/429 from the gateway still arrives as an `HttpError`.
+
+### Timers
+
+```cpp
+TimerSchedule timer;
+timer.queue = "compensation";
+timer.timer_key = "saga-1";
+timer.payload = {{"undo", "order-1"}};
+timer.delay_millis = 30000;                  // RELATIVE, in milliseconds
+
+auto out = client.timers().schedule(timer);  // status: scheduled | rescheduled | too_late
+client.timers().cancel("compensation", "saga-1", out["txn"]);
+```
+
+- `delayMs`, never an absolute instant: one clock, and it is the database's.
+  Durations that can be sub-second are in milliseconds; the ones that cannot
+  (a TTL) are in seconds. A delay in the past is legal and fires immediately.
+- `deliverAt` is **not before**, never **exactly at**.
+- There is no separate `reschedule()`. `schedule()` is the upsert; `status` tells
+  you which happened, and a rescheduled timer gets a **new** `txn` and a reset
+  retry budget.
+- `cancel()` uses `DELETE /api/v1/timers/{queue}/{timerKey}`, its own route,
+  which is the one guaranteed never to be blocked by a quota. A cancel sent
+  inside a bundle inherits the bundle's authorization instead -- use the bundle
+  form only when the cancel must be atomic with the ack.
+- **`status:"absent"` carries `ok:false` and does not mean "never existed".**
+  There is no tombstone: a delivered timer has no row left, so `absent` means
+  "no longer pending", which **includes already delivered**. The authority is
+  the log -- look for the returned `txn` in the destination queue. A compensation
+  consumer must therefore check the saga's KV state before compensating: the
+  timer may have fired five milliseconds before your cancel arrived.
+- Billing follows the promise: a schedule counts one message, a reschedule
+  counts another, a cancel counts zero and is not refunded.
+
+### What this client does not have
+
+Stated rather than implied. The broker has all of these; this client does not
+wrap them, so use the HTTP routes directly if you need them.
+
+| Missing here | Where it lives on the broker |
+|---|---|
+| `getMany` | `POST /api/v1/kv`, op `getMany` |
+| `getPrefix` | `POST /api/v1/kv`, op `getPrefix` -- body only, never a query string, and refused inside a transaction |
+| timer `peek` | `GET /api/v1/timers/{queue}/{timerKey}` |
+| timer `list` | `GET /api/v1/timers/{queue}` |
+| an `once(...)` helper | client-js and client-py; elsewhere it is `put_if_absent` plus `required` |
+| a streams SDK | client-js, client-go, client-py, client-rust. No client exposes `kv` on a stream operator: inside a cycle the state primitive is `state_ops`, which commits with the sink and the ack |
+
+Two smaller gaps against client-js, for the same honesty:
+
+- **No "explicitly undefined `expect`" guard.** In JavaScript, writing
+  `expect: undefined` means the caller intended to fence and computed nothing,
+  and that client treats it as a bug rather than a silent downgrade to upsert.
+  In C++ an unset `std::optional` is indistinguishable from never having asked,
+  so compute the version before you build the options.
+- **The KV path routes are not used**, so the `ETag` header they return is not
+  surfaced. Everything goes through `POST /api/v1/kv`, which is the only route
+  carrying `incr` anyway. The ETag saves bandwidth, never the round trip.
 
 ## Error Handling
 

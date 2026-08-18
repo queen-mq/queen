@@ -78,6 +78,8 @@ const HOME_FEATURES = [
   "Dead-letter queue",
   "Exact deduplication",
   "Transactional handoff",
+  "Key/value state",
+  "Cancellable timers",
   "Windowed aggregation",
   "A dashboard in the binary",
 ];
@@ -123,6 +125,10 @@ const differentiators = [
   {
     title: "Ack the input and push the output in one commit",
     body: "One transaction acknowledges batches leased from any number of partitions and pushes to any number of queues. A pipeline stage cannot lose its input or duplicate its output.",
+  },
+  {
+    title: "Key/value state and timers are part of the engine",
+    body: "A key/value write can share the transaction with a push and an ack, which a store standing beside the broker cannot give you at any price, because its commit and Queen's are two commits. A timer is a scheduled message you can cancel and reprogram until it fires, which an append-only log cannot express. Neither is a flag you turn on: they are on every cell that runs the binary.",
   },
   {
     title: "Windowed aggregation, in the same transaction",

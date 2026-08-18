@@ -42,12 +42,6 @@
 //!     out of four is not a mitigation. The GET route therefore rejects a
 //!     non-empty query string outright rather than ignoring it silently.
 
-// Every item here is reachable only through a route, and main.rs does not
-// register the KV routes yet (§8.1, and §16 step 1 keeps them unregistered while
-// the flag is false). Same annotation, and the same reason, as the `db.rs`
-// wrappers this file calls. REMOVE once the routes are wired.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
@@ -59,32 +53,96 @@ use serde_json::{Map, Value};
 
 use super::{json, AppState};
 use crate::db;
+use crate::switches::{decide, Origin, Surface};
 use crate::tenant::Tenant;
 
 // ---------------------------------------------------------------------------
-// Feature gate and edge ceilings.
+// Edge ceilings.
 //
-// §16 step 1 of the enable order: with the flag false "the routes are not even
-// registered", which is main.rs's job. The check here is the second lock on the
-// same door — a route wired by mistake, or the embedded broker growing a router
-// of its own, must not become a live surface. Answer 404 and not 403: §9.5 makes
-// the two mean different things, and "this surface does not exist on this cell"
-// is the truthful one when the feature is off. A 503 is reserved for the runtime
-// kill switch (enabled by config, turned off in `queen.system_state`), which is
-// F5 and has a seam below.
+// THERE IS NO FEATURE GATE IN THIS FILE any more, and no handler below opens
+// with one. `QUEEN_KV_ENABLED` is gone: the routes are registered
+// unconditionally in main.rs, so no call can arrive at a cell that "does not
+// have KV", and nothing here answers 404 for that reason. See the header of
+// `switches.rs` for why a boot gate and a runtime kill switch are different
+// instruments and only the second survived.
 //
-// The flag is read from the RESOLVED CONFIG, through the same latch the metrics
-// module uses (`Metrics::kvt.enable(kv, timers)` at boot), and NOT from the
-// environment here. Two readers of `QUEEN_KV_ENABLED` would be two things that
-// can disagree, and they would disagree exactly where it hurts: the embedded
-// broker resolves its configuration from a builder, not from the process
-// environment, so an env read in this file would answer `false` for an embedded
-// caller that switched the feature on in code.
+// The rungs that remain — the operator's runtime kill switch, the grant and the
+// occupancy — live in `apply_ops`, in ONE call to `switches::decide`, because
+// they need the tenant and because two call sites would be two places to get
+// the order of the rungs wrong.
 // ---------------------------------------------------------------------------
 
-#[inline]
-pub(crate) fn kv_enabled(st: &AppState) -> bool {
-    st.metrics.kvt.kv_on()
+/// Map a ladder refusal onto the reject counter of §14.2
+/// (`queen_kv_read_rejected_total{reason}` = rate_limited|quota|pool|disabled).
+///
+/// CLASSIFIED FROM THE ANSWER, NOT FROM THE STATUS, and that had to change with
+/// the boot flag. While the flag existed, `disabled` was fed by its 404 and the
+/// only 503 the ladder could produce was pool-shaped, so reading the status was
+/// good enough. Now the operator's kill switch is the ONLY thing that answers
+/// 503 from here — and a status-based map would file it under `pool`, i.e. tell
+/// whoever pulled the switch that their cell is out of connections. `disabled`
+/// would meanwhile have no producer left at all, which is how a label quietly
+/// becomes a lie in both directions at once.
+///
+/// NO new series and NO `tenant` label: §14.1 allows the tenant label only on
+/// the occupancy GAUGES, one series per tenant written by the rollup, and
+/// forbids it on per-operation counters where it would be tenant × op × outcome,
+/// i.e. a cardinality the user chooses — the same disease this endpoint is being
+/// defended against. Naming the tenant is the job of the top-N log line.
+fn note_reject(st: &AppState, answer: crate::switches::Answer) {
+    use crate::metrics::KvReject;
+    use crate::quota::Verdict;
+    use crate::switches::Answer;
+    st.metrics.kvt.kv_read_rejected(match answer {
+        // An operator pulled the lever. This is the surface being off, which is
+        // exactly and only what `disabled` has ever meant.
+        Answer::Paused => KvReject::Disabled,
+        Answer::Refused(Verdict::RateLimited(_)) => KvReject::RateLimited,
+        // A cell condition, not the tenant's doing (§9.4 point 2) — same bucket
+        // as the standalone shed below, which is the other way to run out of the
+        // cell's own room.
+        Answer::Refused(Verdict::NoRoom) => KvReject::Pool,
+        _ => KvReject::Quota,
+    });
+}
+
+/// Render a ladder answer, or `None` when the call may proceed.
+fn gated(st: &AppState, tenant: &str, surface: Surface, rows: i64, bytes: i64) -> Option<Response> {
+    let a = decide(&st.switches, &st.quota, tenant, surface, rows, bytes);
+    let h = a.http(Origin::Route, surface)?;
+    note_reject(st, a);
+    let status = StatusCode::from_u16(h.status).unwrap_or(StatusCode::FORBIDDEN);
+    // `reason` carries the same stable identifier the code does when the taxonomy
+    // has nothing finer to say: clients branch on `error`, never on prose (§13.5).
+    let body = err(h.code, Some(h.code), None);
+    Some(match h.retry_after {
+        Some(secs) => json_retry(status, body, secs),
+        None => json(status, body),
+    })
+}
+
+/// What a batch could ADD, as an upper bound (§9.3: the delta is a majorant).
+///
+/// Every op that can CREATE a key counts one row; `delete` counts none, which is
+/// what makes "deletes are always allowed" structural rather than a special case
+/// (§9.5). `incr` is included because its first call on an absent key creates
+/// one. The byte figure is the serialized value, the same number the edge
+/// ceiling measures — deliberately not the canonical JSONB length the stored
+/// procedure would compute, since the gate runs BEFORE a connection is taken and
+/// over-counting is the safe direction.
+pub(super) fn write_footprint(ops: &[Value]) -> (i64, i64) {
+    let mut rows = 0i64;
+    let mut bytes = 0i64;
+    for o in ops {
+        match o.get("op").and_then(|v| v.as_str()) {
+            Some("put" | "putIfAbsent" | "incr") => {
+                rows += 1;
+                bytes += o.get("value").map(|v| v.to_string().len() as i64).unwrap_or(0);
+            }
+            _ => {}
+        }
+    }
+    (rows, bytes)
 }
 
 /// Read a positive integer env knob once. These four ceilings are the HTTP-edge
@@ -164,18 +222,44 @@ fn kv_pool(st: &AppState) -> &deadpool_postgres::Pool {
     &st.pool
 }
 
-/// SEAM (§8.4 point 3): the per-tenant token bucket, evaluated BEFORE a
-/// connection is taken, because the point of the bucket is to not spend one.
-/// Returns the number of seconds to advertise in `Retry-After` when the tenant
-/// is over its rate. Defaults 200 reads/s burst 400, 100 writes/s — a read on the
-/// PK costs 0.3-1 ms of backend, so 200/s is about 20% of a core, and the rule
-/// being defended is that KV reads must not be able to consume more than ~10% of
-/// the CPU of the backend serving the log. On dedicated the limits go DOWN but
-/// never away: this one protects the tenant from itself, because the competitor
-/// is not another tenant, it is its own message path on the same Postgres.
-#[inline]
-fn rate_check(_st: &AppState, _tenant: &str, _write: bool) -> Option<u32> {
-    None
+/// RUNG 5 of the degradation ladder (§12.1): "scritture KV standalone rifiutate
+/// … le scritture KV DENTRO il wire continuano: la transazione e' il valore del
+/// prodotto, la POST e' la comodita'."
+///
+/// The trigger is sustained refusal by the pool, which is the cell telling us the
+/// database is slow — not the tenant telling us anything, which is why the answer
+/// is 503 and not 429 or 403. It is a streak and not a single miss: one refusal
+/// under a burst is normal, `kv_standalone_shed_after` in a row is a condition.
+///
+/// This rung exists ONLY on this file's surface. The in-wire KV path in
+/// `data.rs` never consults it, and that asymmetry is the whole content of the
+/// rung: shedding the convenience keeps the transaction working.
+fn standalone_shed(st: &AppState) -> bool {
+    use std::sync::atomic::Ordering;
+    let shed = st.kv_pressure.load(Ordering::Relaxed) >= st.kv_standalone_shed_after;
+    static SHED: crate::obs::OnChange<bool> = crate::obs::OnChange::new();
+    crate::obs::sweeper_stage(
+        &SHED,
+        "kv_standalone_writes",
+        shed,
+        "the KV pool refused consecutive standalone writes",
+    );
+    shed
+}
+
+fn note_pool(st: &AppState, ok: bool) {
+    use std::sync::atomic::Ordering;
+    if ok {
+        st.kv_pressure.store(0, Ordering::Relaxed);
+    } else {
+        // Saturating, so a long outage cannot wrap the counter back under the
+        // threshold and silently un-shed the rung.
+        let _ = st
+            .kv_pressure
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                Some(n.saturating_add(1))
+            });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -215,18 +299,6 @@ fn json_retry(status: StatusCode, body: String, secs: u32) -> Response {
         body,
     )
         .into_response()
-}
-
-fn disabled_404(st: &AppState) -> Response {
-    st.metrics.kvt.kv_read_rejected(crate::metrics::KvReject::Disabled);
-    json(
-        StatusCode::NOT_FOUND,
-        err(
-            "not_found",
-            Some("kv_not_enabled"),
-            Some("the key/value surface is not enabled on this cell"),
-        ),
-    )
 }
 
 fn bad_request(reason: &str, detail: &str) -> Response {
@@ -465,19 +537,42 @@ async fn apply_ops(st: &Arc<AppState>, tenant: &str, ops: Vec<Value>, write: boo
         }
     }
 
-    // §8.4 point 3: the bucket is evaluated BEFORE the pool, because the whole
-    // point is to not spend a connection on a request that is over its rate.
+    // Rung 5 (§12.1), before everything else this function does with a
+    // connection: a cell whose pool is refusing sheds the CONVENIENCE surface and
+    // keeps the transaction working. Reads are not shed — they are the cheap half
+    // and the one an idempotency marker cannot do without.
+    if write && standalone_shed(st) {
+        st.metrics.kvt.kv_read_rejected(crate::metrics::KvReject::Pool);
+        return Err(json_retry(
+            StatusCode::SERVICE_UNAVAILABLE,
+            err(
+                "kv_unavailable",
+                Some("kv_standalone_paused"),
+                Some(
+                    "standalone KV writes are shed while the cell is under pressure; KV \
+                     operations inside POST /api/v1/transaction continue",
+                ),
+            ),
+            1,
+        ));
+    }
+
+    // THE LADDER (§9.5, §12.1), in one call, and evaluated BEFORE `pool.get()`
+    // because the entire point of a rate limit is not to spend a connection on a
+    // request that is over it (§8.4 point 3).
+    //
     // `rate_limited` on a tenant that was previously at zero is the EARLIEST of
     // the six pre-incident signals (§14.3.1) — not a fault, but the advance
     // warning of the one new failure mode this feature introduces: a customer
     // who has just put KV reads on their own end users' request path.
-    if let Some(retry_after) = rate_check(st, tenant, write) {
-        st.metrics.kvt.kv_read_rejected(crate::metrics::KvReject::RateLimited);
-        return Err(json_retry(
-            StatusCode::TOO_MANY_REQUESTS,
-            err("rate_limited", Some("kv_rate_limited"), None),
-            retry_after,
-        ));
+    let (add_rows, add_bytes) = if write {
+        write_footprint(&ops)
+    } else {
+        (0, 0)
+    };
+    let surface = if write { Surface::KvWrite } else { Surface::KvRead };
+    if let Some(resp) = gated(st, tenant, surface, add_rows, add_bytes) {
+        return Err(resp);
     }
 
     // The op kinds are kept for the metrics: on failure the SP tells us nothing
@@ -500,9 +595,16 @@ async fn apply_ops(st: &Arc<AppState>, tenant: &str, ops: Vec<Value>, write: boo
         Err(_) => {
             st.metrics.record_db_error();
             st.metrics.kvt.kv_read_rejected(crate::metrics::KvReject::Pool);
+            note_pool(st, false);
+            // The call never reached the database, so the charge it took must go
+            // back. Without this, a slow database inflates every delta until the
+            // tenant answers 403 — turning a cell fault ("not your fault", 503)
+            // into a plan verdict ("yours", 403), which §12 forbids.
+            st.quota.refund(tenant, add_rows, add_bytes, 0);
             return Err(unavailable("kv_pool_exhausted"));
         }
     };
+    note_pool(st, true);
     // Captured BEFORE the query: on a broker-side timeout the still-running
     // statement is cancelled server-side and this connection is quarantined
     // rather than abandoned (§8.4 point 4).
@@ -550,10 +652,18 @@ async fn apply_ops(st: &Arc<AppState>, tenant: &str, ops: Vec<Value>, write: boo
                 crate::metrics::KvResult::Error
             };
             record_all(st, &kinds, outcome, ms);
+            // The transaction aborted, so nothing was written — including on the
+            // 23514 verdict path, where the RAISE is what rolled it back.
+            st.quota.refund(tenant, add_rows, add_bytes, 0);
             Err(db_error_response(st, &e))
         }
         Err(None) => {
             record_all(st, &kinds, crate::metrics::KvResult::Error, ms);
+            // NOT refunded, deliberately. A broker-side timeout does not say
+            // whether the statement committed; the cancel is best-effort. Keeping
+            // the charge over-counts for at most one refresh period, and
+            // over-counting blocks early while under-counting blocks late — only
+            // the second is unsafe (§9.3).
             Err(unavailable("kv_timeout"))
         }
     }
@@ -655,9 +765,6 @@ pub async fn handle_kv_batch(
     Extension(tenant): Extension<Tenant>,
     body: Bytes,
 ) -> Response {
-    if !kv_enabled(&st) {
-        return disabled_404(&st);
-    }
     let root: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return bad_request("kv_bad_body", &e.to_string()),
@@ -742,9 +849,6 @@ pub async fn handle_kv_get(
     Path((ns, key)): Path<(String, String)>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    if !kv_enabled(&st) {
-        return disabled_404(&st);
-    }
     if let Some(r) = reject_query(&q) {
         return r;
     }
@@ -766,9 +870,6 @@ pub async fn handle_kv_put(
     Query(q): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Response {
-    if !kv_enabled(&st) {
-        return disabled_404(&st);
-    }
     if let Some(r) = reject_query(&q) {
         return r;
     }
@@ -811,9 +912,6 @@ pub async fn handle_kv_delete(
     Query(q): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Response {
-    if !kv_enabled(&st) {
-        return disabled_404(&st);
-    }
     if let Some(r) = reject_query(&q) {
         return r;
     }
@@ -936,12 +1034,13 @@ mod tests {
     /// the two do not conflict.
     #[test]
     fn the_four_routes_accept_these_handlers() {
-        use axum::routing::{delete, get, post, put};
+        use axum::routing::{get, post};
         let _: axum::Router<Arc<AppState>> = axum::Router::new()
             .route("/api/v1/kv", post(handle_kv_batch))
-            .route("/api/v1/kv/:ns/*key", get(handle_kv_get))
-            .route("/api/v1/kv/:ns/*key", put(handle_kv_put))
-            .route("/api/v1/kv/:ns/*key", delete(handle_kv_delete));
+            .route(
+                "/api/v1/kv/:ns/*key",
+                get(handle_kv_get).put(handle_kv_put).delete(handle_kv_delete),
+            );
     }
 
     /// WHAT THE CATCH-ALL ACTUALLY HANDS THE HANDLER.

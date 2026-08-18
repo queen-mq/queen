@@ -81,6 +81,11 @@ lane; a message's position is a single monotone `BIGINT` offset; a segment is on
 messages packed together and zstd-compressed. [The storage model](/internals/storage-model) has the
 row-by-row detail.
 
+Two further tables hang off nothing at all. `queen.kv` and `queen.log_timers` are created at every
+boot like the rest, and stay empty unless an operator switches their surfaces on. Neither names a
+partition, deliberately, which is what keeps them out of the per-partition maintenance scan; see
+[KV internals](/internals/kv) and [timer internals](/internals/timers).
+
 All of that DDL is `include_str!`-embedded in the binary and re-applied idempotently at every
 boot, under an advisory lock and with no migrations, because the deployment model is
 always-virgin; the [schema catalogue](/internals/schema) has the apply order and its rules.
@@ -103,9 +108,16 @@ shared state elects a leader with an advisory lock so replicas never double-work
 | Reconcile | `QUEEN_CACHE_REFRESH_INTERVAL_MS`, 60000 ms | none | re-reads maintenance flags, drops per-queue caches, applies the hot-list repair markers a seek or a group delete published |
 | Idle sweep | `QUEEN_HOTLIST_IDLE_SWEEP_MS`, 300000 ms | none | drops rings and wake gates for queues nobody touched |
 | Spool drain | `FILE_BUFFER_FLUSH_MS`, 100 ms | none | replays disk-spooled pushes once the database is reachable |
+| Sweeper | due-driven, 5 ms to 1000 ms | none, by design | fires due timers into the log and prunes expired KV rows ([the sweeper](/internals/sweeper)) |
 
 The metrics collector is deliberately un-gated: every replica records its own rows, keyed by
 hostname and worker id, and the dashboard aggregates across them.
+
+The sweeper is un-gated for a stronger reason, and it is the opposite of retention's. Any ownership
+scheme orphans the work of a broker that dies, and an orphaned timer never fires, which is the worst
+failure this component can have. So every replica drains in parallel and the sharing mechanism is
+`FOR UPDATE ... SKIP LOCKED` rather than an election. It is spawned on every replica, because the two
+surfaces it serves are on every replica; `QUEEN_SWEEPER=false` is the only thing that stops it.
 
 ## The mesh
 
@@ -198,6 +210,21 @@ that derive this site's fact tables from `server/`, and what a release actually 
     href="/internals/mesh"
     title="The mesh"
     description="Framed TCP, the HMAC HELLO handshake, the frame set, and the security reality."
+  />
+  <LinkCard
+    href="/internals/timers"
+    title="Timer internals"
+    description="Why a scheduled message cannot live in the log, the staging table keyed by names, and the two lease columns."
+  />
+  <LinkCard
+    href="/internals/kv"
+    title="KV internals"
+    description="The identity with no partition id, a version that is not monotonic, and one predicate as the only definition of existence."
+  />
+  <LinkCard
+    href="/internals/sweeper"
+    title="The sweeper"
+    description="One component with two clocks, leaderless, and the livelock a claim-then-fire loop walks into."
   />
   <LinkCard
     href="/internals/schema"

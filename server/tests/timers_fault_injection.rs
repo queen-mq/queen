@@ -303,15 +303,41 @@ async fn timers_survive_every_declared_fault() {
     assert!(timer_row(c, t, &q_ok, &k4).await.is_none(), "delivered ⇒ deleted");
 
     // ========================================================================
-    section("the DUPLICATE branch releases the same way (§6.2 point 3, second half)");
+    section("the fire does NOT dedup against the log — the ratified cost of p_verified = v_last");
     //
-    // CONTRACT TENSION, flagged rather than hidden: §6.2 also decides the fire passes
-    // `p_verified = v_last`, which makes `log_push_one_v1` skip the window probe entirely
-    // (003_log_push.sql:129-135 gates the probe on `v_last > v_from`). If that decision
-    // stands as written, a duplicate verdict is unreachable from the fire and this
-    // scenario is the proof; if the duplicate verdict is real (§4.1, §12), it must release
-    // exactly like the stale one. Either the SP satisfies this, or `duplicate` comes out
-    // of the fire's taxonomy — it cannot stay in the taxonomy untested.
+    // CONTRACT TENSION, RESOLVED IN FAVOUR OF THE PLAN'S DECISION, and pinned here so the
+    // consequence is a written assertion instead of a production discovery.
+    //
+    // §6.2 ratifies `p_verified = v_last` for the fire (never -1), with measured hot-path
+    // reasoning: -1 makes log_push_one_v1 unroll the whole retained `log_txns` window of the
+    // destination partition, AFTER the FOR UPDATE on log_partitions, i.e. inside the push
+    // serializer shared with ordinary producers — the work the 1.0.0 bloom front-dedup took
+    // from 60% to 3.7%. The symptom would be "push got worse" with nothing in the fire's own
+    // telemetry to explain it.
+    //
+    // But 003_log_push.sql:129-135 gates the dedup probe on `v_last > v_from` where
+    // `v_from := GREATEST(p_verified, txns_start - 1)`. With p_verified = v_last the probe
+    // NEVER runs, so `log_push_one_v1` can never hand this caller a `duplicate` — and
+    // 025_log_timers.sql closes the one remaining route on purpose, raising
+    // `QFIRE two live segments target the same (tenant, queue, partition)` (the stale-
+    // last_offset case) rather than letting a packer bug reach it.
+    //
+    // So: a timer whose fixed `txn` is ALREADY in the log is appended a SECOND time. The
+    // fixed txn is NOT the safety net for the fire; the net is delete-and-push in one
+    // transaction, which the first section of this file proves. That is the whole exactly-once
+    // story, and this assertion is what stops someone from believing there are two.
+    //
+    // `duplicate` therefore stays in the fire's taxonomy (§4.1/§12/§14.2) as defence in depth
+    // for a SHARED allocator — 025_log_timers.sql implements the arm in full, and the arm
+    // feeds the same release statement as the stale arm ("written once, used by BOTH") — but
+    // it is unreachable from this caller and cannot be exercised end to end. The release
+    // symmetry it shares is covered by the stale section immediately above; what is NOT
+    // covered, and cannot be until §6.2 changes, is the duplicate arm's own row bookkeeping.
+    //
+    // ALICE: this is the one open item. Either p_verified stays v_last and `duplicate` is
+    // documented as unreachable-by-construction in §4.1/§12/§14.2, or the fire probes the
+    // fixed txn itself and pays the cost §6.2 rejected. Do not "fix" this test to make
+    // `duplicate` appear — that would mean quietly reverting the hot-path decision.
     // ========================================================================
     let q_dup = unique("tfi-dup");
     let txn_dup = unique("txn-dup");
@@ -344,20 +370,59 @@ async fn timers_survive_every_declared_fault() {
         0.0,
     )
     .await
-    .expect("a duplicate is a verdict");
-    assert_eq!(seg_result(&res, 0), "duplicate", "the fixed txn is already in the log");
-    assert!(
-        timer_row(c, t, &q_dup, &kd1).await.is_none(),
-        "a timer whose message is already in the log is done: delete it, do not push (§12)"
+    .expect("the fire is a verdict either way");
+    assert_eq!(
+        seg_result(&res, 0),
+        "fired",
+        "with p_verified = v_last the window probe is skipped, so a txn already in the log is \
+         NOT detected. If this ever reads `duplicate`, someone changed p_verified back to -1 \
+         and put the retained-window unroll back inside the push serializer (§6.2)."
     );
-    let row = timer_row(c, t, &q_dup, &kd2)
-        .await
-        .expect("the rest of the group survives to be repacked without the duplicate");
-    assert!(row.claim_token.is_none() && !row.visible_in_future, "released, not orphaned");
+    for (k, why) in [
+        (&kd1, "delivered (a second copy) ⇒ deleted"),
+        (&kd2, "delivered ⇒ deleted"),
+    ] {
+        assert!(
+            timer_row(c, t, &q_dup, k).await.is_none(),
+            "{why}: the whole live segment is pushed and its timers removed in one transaction"
+        );
+    }
     let p = partition_state(c, t, &q_dup, "pdup").await.expect("partition");
     assert_eq!(
-        p.messages_in_segments, 1,
-        "nothing appended: the duplicate verdict means the message is ALREADY there"
+        p.messages_in_segments, 3,
+        "1 pre-existing + 2 fired: the duplicated txn IS appended again. The fire's guarantee \
+         is delete+push atomicity, not log-wide deduplication"
+    );
+
+    // The packer bug that WOULD reach the duplicate arm is closed loudly rather than
+    // silently, and that is itself a contract: two live segments on one destination would
+    // hand the second a stale last_offset for p_verified.
+    let (kd3, kd4) = (unique("k-d3"), unique("k-d4"));
+    seed(c, &Seed::new(t, &q_dup, &kd3).partition("pdup2").delay_s(-1.0)).await;
+    seed(c, &Seed::new(t, &q_dup, &kd4).partition("pdup2").delay_s(-1.0)).await;
+    let _ = claim(c, 0.0, LEASE_MS, 100, 100).await;
+    let (td3, td4) = (
+        token_of(c, t, &q_dup, &kd3).await,
+        token_of(c, t, &q_dup, &kd4).await,
+    );
+    let err = fire(
+        c,
+        &[Seg::new(t, &q_dup, "pdup2"), Seg::new(t, &q_dup, "pdup2")],
+        &[
+            Framed::new(&kd3, 1, &kd3, &td3),
+            Framed::new(&kd4, 2, &kd4, &td4),
+        ],
+        0.0,
+    )
+    .await
+    .expect_err("two live segments on one destination must be loud, never silently wrong");
+    let msg = err
+        .as_db_error()
+        .map(|d| d.message().to_string())
+        .unwrap_or_else(|| err.to_string());
+    assert!(
+        msg.contains("two live segments target the same"),
+        "the packer bug must name itself; got: {msg}"
     );
 
     // Earlier sections deliberately leave RELEASED rows behind (that is what they
@@ -386,8 +451,30 @@ async fn timers_survive_every_declared_fault() {
     seed(c, &Seed::new(t, &q_poison, &k_poison).delay_s(-1.0)).await;
     segs.push(Seg::new(t, &q_poison, "Default"));
 
-    let claimed = claim(c, 0.0, 60_000, 500, 500).await;
-    assert_eq!(claimed.len(), 200, "the whole batch is claimed in one pass");
+    // DRAIN, not one pass. §6.2 pins the per-shard floor at
+    // `GREATEST(ceil(p_max_rows / n_shards), 8)`, which with max_rows=500 over 64 shards is
+    // exactly 8 — and 200 keys hash across the shards Poisson(~3.1), so a shard holding 9+ due
+    // rows is common. Asserting "all 200 in one pass" is therefore a ~30% flake, not a
+    // property: measured on a rig, 40 trials returned 194..200 with 12 short. The behaviour is
+    // correct — §7.2's loop takes the remainder on the next pass — so the test drains the same
+    // way the sweeper does, and asserts on the FIXED POINT instead of on one iteration.
+    let mut claimed: Vec<String> = Vec::new();
+    for _ in 0..64 {
+        let batch = claim(c, 0.0, 60_000, 500, 500).await;
+        if batch.is_empty() {
+            break;
+        }
+        claimed.extend(batch);
+        if claimed.len() >= 200 {
+            break;
+        }
+    }
+    assert_eq!(
+        claimed.len(),
+        200,
+        "every due row is claimed by a bounded drain; a short FIXED POINT means rows are \
+         invisible, which is a real defect (the per-shard floor is not one)"
+    );
     for (i, k) in keys.iter().enumerate() {
         let tok = token_of(c, t, &q_batch, k).await;
         frames.push(Framed::new(k, (i + 1) as i32, k, &tok));

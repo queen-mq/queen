@@ -287,6 +287,135 @@ $queen->transaction()
     ->commit();
 ```
 
+### With key/value state and timers
+
+`kv()` and `timers()` commit **with** the acks and pushes, in one transaction.
+This is the idempotency idiom: `required: true` escalates a lost precondition
+into a refusal of the whole bundle, so a redelivery neither re-pushes nor
+re-acks.
+
+```php
+$result = $queen->transaction()
+    ->ack($message)
+    ->kv('saga')->putIfAbsent($orderId, ['step' => 'reserved'], [
+        'ttlSeconds' => 86400,
+        'required'   => true,
+    ])
+    ->queue('payments')->push([['data' => $charge]])
+    ->timers('payments.timeout')->schedule($orderId, 900_000, ['orderId' => $orderId])
+    ->commit();
+
+if (($result['reason'] ?? null) === 'kv_precondition') {
+    // Somebody already did this one. Nothing was pushed, nothing was acked.
+    // $result carries failedIndex, kvReason, version and value.
+}
+```
+
+`commit()` **returns** that verdict instead of throwing. A lost precondition is
+the expected outcome of every legitimate redelivery, so it belongs in an `if`
+and not in a `catch`, and it must not land in your error metrics. Every other
+failure still throws.
+
+The transaction is the **primary fence**: a write here shares its fate with the
+ack, which compare-and-swap cannot do: an `expect` on a still-matching version
+succeeds even from a consumer whose lease has already expired.
+
+## Key/Value State
+
+Part of every broker, like push and pop. There is no flag to turn on and nothing
+to probe before the first call.
+
+```php
+$kv = $queen->kv();
+
+// Every write declares exactly one of ttlSeconds and forever:true. There is no
+// default, deliberately: a put that inherited a TTL is how a marker becomes
+// immortal.
+$kv->put('saga', 'order-1', ['step' => 'reserved'], ['ttlSeconds' => 3600]);
+
+$got = $kv->get('saga', 'order-1');
+if ($got['found']) { /* $got['value'], $got['version'], $got['expiresAt'] */ }
+
+// "Did I win?". Exactly one caller does, and the loser is handed the winner's
+// value and version without a second round trip.
+$claim = $kv->putIfAbsent('lock', 'job-7', ['owner' => $me], ['ttlSeconds' => 30]);
+if (!$claim['applied']) { /* $claim['reason'] === 'exists', $claim['value'] */ }
+
+// Compare-and-swap. expect:0 means "must not exist"; expect:N is a pure update
+// that never creates.
+$kv->put('saga', 'order-1', ['step' => 'charged'], [
+    'ttlSeconds' => 3600,
+    'expect'     => $got['version'],
+]);
+
+// The way out of CAS. With max, `applied` IS the admission decision: the
+// ceiling does not saturate, so a call that would overshoot does not apply and
+// hands back the current value.
+$rate = $kv->incr('quota', "acme:" . date('Y-m-d-H'), 1, ['ttlSeconds' => 3600, 'max' => 1000]);
+if (!$rate['applied']) { /* refuse the request; nothing was spent */ }
+
+$kv->delete('saga', 'order-1');
+$kv->getMany('saga', ['a', 'b']);          // {rows, missing}: absence is a datum
+$kv->getPrefix('saga', 'order-', ['limit' => 100]);  // keyset page
+```
+
+Things worth knowing before they surprise you:
+
+- **Check `applied` and `found`, not the return value.** Every array is truthy
+  in PHP, so `if ($kv->delete(...))` is always true. An exception from this API
+  means the CALL failed; a lost race is a 200 with `applied:false`.
+- **An expired key is never returned and never counts as existing**, even before
+  the sweeper prunes its row.
+- **`version` is an opaque monotonic token, not a count of writes on that key.**
+  It comes from one sequence shared by every key, so consecutive writes jump by
+  whatever else drew from it. `expect => $version + 1` is never right.
+- **`putIfAbsent` plus a TTL is not a distributed lock.** A lock that expires is
+  not revoked: the old holder keeps working, it just no longer has the row. The
+  defence is fencing: carry your `version` as `expect` on every later write.
+- **The version handed to a loser is advisory**, never a fencing token to reuse
+  blindly.
+- `getPrefix` lives only in the request body, never in a URL: a prefix in a query
+  string is recorded by every access log between you and the database.
+
+## Timers
+
+Part of every broker, like the KV surface.
+
+A timer is a message the broker holds and pushes into a real queue when its
+delay elapses, delivered to whatever already consumes that queue, with the
+message id the schedule call promised.
+
+```php
+$timers = $queen->timers();
+
+// Milliseconds from now. A delay in the past is legal and fires immediately.
+$t = $timers->schedule('payments.retry', "order-{$id}", 250, ['orderId' => $id]);
+// $t['status'] === 'scheduled', plus messageId, txn and deliverAt
+
+$timers->reschedule('payments.retry', "order-{$id}", 60_000, $payload);
+$timers->cancel('payments.retry', "order-{$id}", $t['txn']);
+$timers->peek('payments.retry', "order-{$id}");
+$timers->list('payments.retry', ['limit' => 100]);
+```
+
+- **`deliverAt` is "not before", never "exactly at".** Two timers on the same
+  queue and partition maturing together enter the log in EXPIRY order, not in
+  the order they were scheduled.
+- **Durations that can be sub-second are in milliseconds** (`delayMs`); the ones
+  that cannot are in seconds (`ttlSeconds`). An absolute instant is not
+  expressible: there is one clock, the database's.
+- **`cancel()` has its own route, and it is the one a full or throttled cluster
+  is required never to refuse.** A cancel placed inside a transaction shares the
+  bundle's fate instead.
+- **`absent` means "no longer pending" and may mean ALREADY DELIVERED.** There
+  is no tombstone. The authority is the log: look for the `txn` the cancel hands
+  back in the destination queue. Any saga that cancels a compensation timer must
+  have the compensation consumer check the saga's KV state before compensating,
+  or "the timer fired 5 ms before the cancel" unwinds a reservation that already
+  shipped, while the cancel answered `absent` and looked like a success.
+- `too_late` means the timer is already claimed and about to be delivered. The
+  remedy is a new key, or waiting for the delivery and acting on the message.
+
 ## Direct ACK
 
 ```php
@@ -526,6 +655,36 @@ try {
 
 `$e->statusCode`, `$e->retryAfterSeconds` (429 only) and the helpers
 `$e->isRateLimited()` / `$e->isClusterSuspended()` are available too.
+
+### When an operator pauses KV or timers
+
+KV and timers exist on every broker, so there is no "is it on?" to ask. What an
+operator still has is a **runtime kill switch**, same class as maintenance mode:
+pulled during an incident on a surface that is already running, and expected to
+be pulled back. A call made while it is down answers
+
+- **503** `kv_disabled` / `timers_disabled` with `Retry-After` on the KV and
+  timer routes: temporary, come back;
+- **403** with the same code for a `kv`/`timers` rider inside a transaction,
+  deliberately permanent: a bundle carries messages, and retrying it in a loop
+  against a cell somebody has just paused is a storm on the hot path.
+
+Read it off `$e->reason` (`$e->errorCode` stays null: these come from the broker
+envelope, not the proxy contract, and `$e->retryAfterSeconds` is parsed for 429s
+only). Timer **cancel** and the timer reads are never on the switch, so a timer
+you have already promised can always be stopped.
+
+```php
+try {
+    $kv->put('saga', 'order-1', ['step' => 'reserved'], ['ttlSeconds' => 3600]);
+} catch (HttpException $e) {
+    if ($e->statusCode === 503 && $e->reason === 'kv_disabled') {
+        // Somebody pulled the lever. Back off and come back, or shed this work.
+        // Not a capability check: the surface has not gone away.
+    }
+    throw $e;
+}
+```
 
 ## Graceful Shutdown
 

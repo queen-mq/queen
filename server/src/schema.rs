@@ -70,6 +70,18 @@ const PROCEDURES: &[(&str, &str)] = &[
     ("023_prometheus.sql", include_str!("../sql/procedures/023_prometheus.sql")),
     ("024_kv.sql", include_str!("../sql/procedures/024_kv.sql")),
     ("025_log_timers.sql", include_str!("../sql/procedures/025_log_timers.sql")),
+    // The sweeper's two slow phases (§7.5). Separate from 024 because these are
+    // the only KV functions no request calls, and the only two the broker is
+    // designed to run WITHOUT: sweeper.rs degrades each to OffConfig on SQLSTATE
+    // class 42 and keeps serving, which is what made their earlier absence a
+    // pair of startup WARNs instead of a boot failure.
+    ("026_kv_sweeper.sql", include_str!("../sql/procedures/026_kv_sweeper.sql")),
+    // The quota/measurement read (§9.3). A third actor again: not the request
+    // path (024) and not the sweeper (026), but a read-only poll that EVERY
+    // broker runs — including one with QUEEN_SWEEPER=false, which still has to
+    // enforce quotas. Read-only, so it takes no lock-order argument and writes
+    // nothing.
+    ("027_kv_quota.sql", include_str!("../sql/procedures/027_kv_quota.sql")),
 ];
 
 /// Minimum PostgreSQL this schema can be applied to, as `server_version_num`

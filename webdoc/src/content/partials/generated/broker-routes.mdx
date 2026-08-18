@@ -11,7 +11,7 @@ description: "Every HTTP route the broker registers, with its access level and w
       - server/src/handlers/*.rs (Tenant extension)
 */}
 
-Queen's broker registers **71 method + path pairs**. Every row below is read out of the router and the authorization table at build time.
+Queen's broker registers **73 method + path pairs**. Every row below is read out of the router and the authorization table at build time.
 
 ### Message plane
 
@@ -95,10 +95,25 @@ Queen's broker registers **71 method + path pairs**. Every row below is read out
 | `POST` | `/streams/v1/queries` | read-write | no |
 | `POST` | `/streams/v1/state/get` | read-only | no |
 
+### Key/value state and timers
+
+| Method | Path | Access level | Tenant-scoped |
+| --- | --- | --- | --- |
+| `POST` | `/api/v1/kv` | read-write | yes |
+| `DELETE` | `/api/v1/kv/:ns/*key` | read-write | yes |
+| `GET` | `/api/v1/kv/:ns/*key` | read-only | yes |
+| `PUT` | `/api/v1/kv/:ns/*key` | read-write | yes |
+| `POST` | `/api/v1/timers` | write-only | yes |
+| `GET` | `/api/v1/timers/:queue` | read-only | yes |
+| `DELETE` | `/api/v1/timers/:queue/*timerKey` | read-write | yes |
+| `GET` | `/api/v1/timers/:queue/*timerKey` | read-only | yes |
+
 ### Operator surfaces
 
 | Method | Path | Access level | Tenant-scoped |
 | --- | --- | --- | --- |
+| `GET` | `/api/v1/system/kv-timers` | admin | no |
+| `POST` | `/api/v1/system/kv-timers` | admin | no |
 | `GET` | `/api/v1/system/maintenance` | admin | no |
 | `POST` | `/api/v1/system/maintenance` | admin | no |
 | `GET` | `/api/v1/system/maintenance/pop` | admin | no |
@@ -121,17 +136,4 @@ Queen's broker registers **71 method + path pairs**. Every row below is read out
 | `POST` | `/internal/api/notify` | admin | yes |
 | `GET` | `/internal/api/shared-state/stats` | admin | no |
 
-### Ungrouped
-
-| Method | Path | Access level | Tenant-scoped |
-| --- | --- | --- | --- |
-| `POST` | `/api/v1/kv` | read-write | yes |
-| `DELETE` | `/api/v1/kv/:ns/*key` | read-write | yes |
-| `GET` | `/api/v1/kv/:ns/*key` | read-write | yes |
-| `PUT` | `/api/v1/kv/:ns/*key` | read-write | yes |
-| `POST` | `/api/v1/timers` | read-write | yes |
-| `GET` | `/api/v1/timers/:queue` | read-write | yes |
-| `DELETE` | `/api/v1/timers/:queue/*timerKey` | read-write | yes |
-| `GET` | `/api/v1/timers/:queue/*timerKey` | read-write | yes |
-
-48 of these handlers resolve a tenant from the request; 11 `/api/v1/*` routes do not and are therefore cell-wide reads or operator surfaces.
+48 of these handlers resolve a tenant from the request; 13 `/api/v1/*` routes do not and are therefore cell-wide reads or operator surfaces.

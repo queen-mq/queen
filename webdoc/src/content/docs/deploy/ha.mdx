@@ -39,6 +39,13 @@ That also says what replicas cover. A broker process dying, a rolling restart, o
 yes. Losing PostgreSQL: no. The database is the failure domain, and keeping it alive is
 PostgreSQL's own tooling.
 
+Timers add one bounded cost to a rolling restart and no risk. A broker that is stopped while it holds
+claimed timer rows does not hand them back: in-flight HTTP requests drain, the sweeper task is aborted
+with the runtime, and those rows become claimable again only when their lease expires, up to
+`QUEEN_SWEEPER_LEASE_MS` (30 s) later. Nothing is lost and nothing is delivered twice, because the
+fire was never committed. A 30 second worst case on a deploy is cheaper than a second shutdown path to
+maintain.
+
 Two brokers, condensed from `test/compose/docker-compose.ha.yml`:
 
 ```yaml
@@ -80,6 +87,18 @@ Messages, offsets, acks, leases and deduplication state never cross it. They bel
 which is why deduplication stays exact across replicas with no coordination at all, and why leader
 election is an advisory lock rather than a protocol: the retention sweep and the statistics
 reconciler each run on exactly one replica per cycle.
+
+The [sweeper](/internals/sweeper) is the one background component that elects nothing. Every replica
+fires timers and prunes expired KV rows in parallel, sharing the work with `FOR UPDATE ... SKIP LOCKED`
+instead of a lock id, because any ownership scheme orphans the shards of a broker that dies and an
+orphaned timer never fires. Two brokers doing a little redundant scanning is a cost; a promised message
+that silently never arrives is a defect.
+
+There is deliberately no mesh frame for a due timer either. The wake that a schedule rings is
+in-process only, so a timer scheduled on broker A and fired by broker B waits out B's sleep ceiling,
+`QUEEN_SWEEPER_MAX_SLEEP_MS`, one second by default. That is correct rather than merely tolerable,
+because `deliverAt` is a floor and never an appointment, and it is the reason nobody may make the
+correctness of timers depend on the mesh being up.
 
 Frames are dropped, not queued, when a peer is slow or down, and a dropped frame costs latency and
 nothing else, because every accelerated path has a periodic floor that re-reads the database. A

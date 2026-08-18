@@ -62,9 +62,11 @@ pub mod consumer;
 pub mod error;
 mod http;
 mod inner;
+pub mod kv;
 pub mod lb;
 pub mod queue;
 pub mod streams;
+pub mod timers;
 pub mod transaction;
 pub mod uuid;
 
@@ -75,16 +77,19 @@ pub use buffer::{BufferOptions, BufferStats};
 pub use config::{Config, HostHeader, Retry429, RetryKind};
 pub use consumer::{Cancel, ConsumeSummary, StopReason};
 pub use error::{Error, Result};
+pub use kv::{Kv, KvOutcome};
 pub use lb::Strategy;
 pub use queue::QueueBuilder;
+pub use timers::Timers;
 pub use transaction::TransactionBuilder;
 
 // Re-exported so callers do not need a direct dependency on the protocol crate
 // for the types that appear in this client's signatures.
 pub use queen_protocol::{
-    AckResult, AckStatus, DlqParams, DlqResponse, Message, PushItem, PushResult, PushStatus,
-    QueueOptions, SeekRequest, SubscriptionMode, TraceRequest, TransactionResponse, TxnPushItem,
-    TxnResultItem,
+    AckResult, AckStatus, DlqParams, DlqResponse, Expiry, KvOpKind, KvOperation, KvPrecondition,
+    KvReason, KvResult, KvRow, Message, PushItem, PushResult, PushStatus, QueueOptions,
+    SeekRequest, SubscriptionMode, TimerListRow, TimerOpKind, TimerOperation, TimerPage, TimerPeek,
+    TimerResult, TimerStatus, TraceRequest, TransactionResponse, TxnPushItem, TxnResultItem,
 };
 
 use crate::buffer::BufferManager;
@@ -134,6 +139,20 @@ impl Queen {
     /// Administrative and observability endpoints.
     pub fn admin(&self) -> Admin {
         Admin::new(Arc::clone(&self.inner))
+    }
+
+    /// Key/value state, in the same database as the queue.
+    ///
+    /// Standalone calls; to write state **atomically with an ack**, which is
+    /// what this primitive is for, use the riders on
+    /// [`Queen::transaction`].
+    pub fn kv(&self) -> Kv {
+        Kv::new(Arc::clone(&self.inner))
+    }
+
+    /// Scheduled deliveries: a message that becomes real later.
+    pub fn timers(&self) -> Timers {
+        Timers::new(Arc::clone(&self.inner))
     }
 
     /// Begin an atomic push + ack.

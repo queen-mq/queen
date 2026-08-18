@@ -41,8 +41,8 @@ changes, the document changes with it.
 | --- | --- |
 | Paths and methods | the `Router::new()` chain: the broker's in `server/src/main.rs`, the proxy's in `proxy/src/main.rs` plus the nested console and auth routers |
 | Path parameters | the `:name` segments of the registered path |
-| Query parameters | the handler's `Query<T>` extractor: the fields of `T` with their serde renames and optionality. For a handler taking `Query<HashMap<..>>`, the literal keys it reads out of the map |
-| Request bodies | the struct the handler passes to `serde_json::from_slice`, walked recursively into nested structs |
+| Query parameters | the handler's `Query<T>` extractor: the fields of `T` with their serde renames and optionality. For a handler taking `Query<HashMap<..>>`, the literal keys it reads out of the map, **through that extractor's own binding name** |
+| Request bodies | the struct the handler passes to `serde_json::from_slice`, walked recursively into nested structs. Required unless the handler branches on an empty body, in which case the body is optional |
 | Response status codes | every `StatusCode` variant reachable in the handler body |
 | Authorization | `auth::route_access_level`, which also fills `x-queen-access-level` |
 | Tenant scoping | whether the handler takes the `Tenant` request extension, which also adds the `x-queen-tenant` header parameter |
@@ -66,7 +66,27 @@ pages.
 
 Request bodies that a handler parses as a dynamic JSON document, rather than into a struct,
 carry `"x-queen-schema": "opaque"` too, with the keys the handler does read by name listed as
-properties.
+properties. The KV and timer routes are the largest group in that state: their handlers read the
+body as a dynamic document and forward it to a stored procedure, which is where the shape rules
+live, so their operations describe the request as an open object and the field-by-field contract
+is on [kv](/reference/http/kv) and [timers](/reference/http/timers). A schema derived from those
+handlers would describe the JavaScript-visible surface of the parser rather than the contract.
+
+**A route that refuses query strings.** The KV path routes take a query map only to reject a
+non-empty one, which is a privacy boundary rather than a parsing habit. They carry
+`"x-queen-query-params": "rejected"` and a note saying so, because publishing them as `forwarded`
+would say the opposite of the truth about exactly the routes where the rule matters.
+
+<Aside type="caution">
+Two derivation gaps were found and closed on 2026-08-17, and both had shipped a document that
+read as complete. A query-map key was recovered by matching any identifier followed by `.get("…")`,
+which picked up the handler's reads of a stored procedure's **response** and published three
+fabricated query parameters across four operations, while missing any access rustfmt had broken
+across two lines, which dropped a real `limit` parameter. And `DELETE` operations were excluded
+from carrying a request body by method rather than by what the handler takes, which was invisible
+until a delete route grew an optional precondition body. Both were silent: the spec lost nothing a
+validator could catch, it just stopped being true.
+</Aside>
 
 ## Extensions
 
@@ -79,7 +99,7 @@ derived facts from undeclared ones.
 | `x-queen-tenant-scoped` | the handler resolves a tenant, so the request is scoped when `QUEEN_TENANCY_HEADER` is on |
 | `x-queen-handler` | the file and function that serves the operation |
 | `x-queen-schema` | `derived` when the schema comes from a Rust type, `opaque` when it could not |
-| `x-queen-query-params` | `typed`, `adhoc`, `forwarded` or `none`: how the query parameters were recovered |
+| `x-queen-query-params` | `typed`, `adhoc`, `forwarded`, `rejected` or `none`: how the query parameters were recovered, or that the route refuses them |
 | `x-queen-catch-all` | the path is an axum catch-all segment, which OpenAPI cannot express |
 | `x-queen-note` | a caveat about this operation specifically |
 
@@ -95,6 +115,12 @@ Generating a client is a reasonable use for the request side: paths, parameters 
 are all derived. Be careful with generated *response* types: wherever
 `x-queen-schema` is `opaque`, the generator will produce an untyped value, and the real shape
 is the one documented on the route page.
+
+The broker document describes every route the **router declares**, and for the data plane that is
+also every route a broker answers: the router is not conditional, so the eight KV and timer
+operations are registered on every cell and a client generated from this document finds them there.
+What configuration still changes is the *verdict* a route gives, not its existence, so a generated
+method can meet a `403` from a quota or a `503` from an operator's kill switch.
 
 <Aside type="note">
 The proxy document describes only what the proxy itself serves. Every other path is forwarded

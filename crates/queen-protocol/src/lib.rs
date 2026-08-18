@@ -26,12 +26,22 @@
 pub mod ack;
 pub mod admin;
 pub mod error;
+pub mod kv;
 pub mod pop;
 pub mod push;
 pub mod streams;
+pub mod timers;
 pub mod transaction;
 
 pub use ack::{AckBatchItem, AckBatchRequest, AckRequest, AckResult, AckStatus};
+pub use kv::{
+    Expiry, KvDeleteBody, KvOpKind, KvOperation, KvPutBody, KvReason, KvRequest, KvResponse,
+    KvResult, KvRow,
+};
+pub use timers::{
+    TimerListRow, TimerOpKind, TimerOperation, TimerPage, TimerPeek, TimerRequest, TimerResponse,
+    TimerResult, TimerStatus,
+};
 pub use admin::{
     ConfigureRequest, ConfigureResponse, DlqMessage, DlqParams, DlqResponse, MaintenanceRequest,
     MaintenanceResponse, QueueOptions, RenewLeaseRequest, RenewLeaseResponse, SeekRequest,
@@ -46,8 +56,8 @@ pub use streams::{
     StateGetResponse, StateKeyParts, StateOp, StateRow, STATE_KEY_SEP, WATERMARK_STATE_KEY,
 };
 pub use transaction::{
-    TransactionRequest, TransactionResponse, TxnAckOperation, TxnOperation, TxnPushItem,
-    TxnResultItem,
+    KvPrecondition, TransactionRequest, TransactionResponse, TxnAckOperation, TxnOperation,
+    TxnPushItem, TxnResultItem,
 };
 
 /// Default partition name when a push does not name one. The broker applies the

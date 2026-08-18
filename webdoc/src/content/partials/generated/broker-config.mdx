@@ -10,7 +10,7 @@ description: "Every environment variable the broker reads, with the default the 
       - server/src/fusion.rs (fusion-only overrides)
 */}
 
-The broker is configured entirely through environment variables: 134 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
+The broker is configured entirely through environment variables: 136 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
 
 Two columns record what a variable falls back to. **Also read as** is an older name for the same setting: either name configures the same thing, and the row's name wins when both are set. **Default inherited from** is a different knob whose value this one starts at when it is unset: setting that knob moves this variable and everything else that inherits from it, while setting this variable moves only this one.
 
@@ -157,33 +157,26 @@ Two columns record what a variable falls back to. **Also read as** is an older n
 | `QUEEN_ENCRYPTION_KEY` | string | `(empty)` |  |  |
 | `QUEEN_TENANCY_HEADER` | boolean | `false` |  |  |
 
-### Logging
-
-| Variable | Type | Default | Default inherited from | Also read as |
-| --- | --- | --- | --- | --- |
-| `LOG_LEVEL` | string | `info` |  |  |
-| `QUEEN_LOG_JSON` | boolean | `false` |  |  |
-| `QUEEN_LOG_RATES_MS` | integer | `10000` |  |  |
-| `QUEEN_LOG_TOPN_QUEUES` | integer | `10` |  |  |
-| `RUST_LOG` | string | `&env_str("LOG_LEVEL", "info` |  |  |
-
-### Other
+### Key/value state, timers and the sweeper
 
 | Variable | Type | Default | Default inherited from | Also read as |
 | --- | --- | --- | --- | --- |
 | `QUEEN_KV_CELL_RATE` | integer | `2000` |  |  |
-| `QUEEN_KV_ENABLED` | boolean | `false` |  |  |
 | `QUEEN_KV_MAX_KEY_BYTES` | integer | `512` |  |  |
 | `QUEEN_KV_MAX_KEYS_PER_CALL` | integer | `1024` |  |  |
 | `QUEEN_KV_MAX_OPS_PER_CALL` | integer | `256` |  |  |
 | `QUEEN_KV_MAX_READ_BYTES` | integer | `4 * 1024 * 1024` |  |  |
 | `QUEEN_KV_MAX_TENANTS` | integer | `10_000` |  |  |
 | `QUEEN_KV_MAX_VALUE_BYTES` | integer | `65536` |  |  |
-| `QUEEN_KV_POOL_SIZE` | integer | `kv_pool_default(pool_size` |  |  |
+| `QUEEN_KV_POOL_SIZE` | integer | `16 (DB_POOL_SIZE / 10, clamped to 4..32)` |  |  |
 | `QUEEN_KV_PREFIX_LIMIT` | integer | `1000` |  |  |
+| `QUEEN_KV_QUOTA_HOT_PERCENT` | integer | `80` |  |  |
+| `QUEEN_KV_QUOTA_REFRESH_MS` | integer | `30_000` |  |  |
+| `QUEEN_KV_QUOTA_RELEASE_PERCENT` | integer | `90` |  |  |
 | `QUEEN_KV_READ_BURST` | integer | `400` |  |  |
 | `QUEEN_KV_READ_RATE` | integer | `200` |  |  |
-| `QUEEN_KV_REQUIRE_GRANT` | boolean | `tenancy_header` |  |  |
+| `QUEEN_KV_REQUIRE_GRANT` | boolean | `the value of QUEEN_TENANCY_HEADER (so: false)` |  |  |
+| `QUEEN_KV_STANDALONE_SHED_AFTER` | integer | `5` |  |  |
 | `QUEEN_KV_TRUSTED_PROXY` | boolean | `false` |  |  |
 | `QUEEN_KV_USAGE_EVERY_MS` | integer | `300_000` |  |  |
 | `QUEEN_KV_WRITE_BURST` | integer | `200` |  |  |
@@ -203,10 +196,19 @@ Two columns record what a variable falls back to. **Also read as** is an older n
 | `QUEEN_SWEEPER_MAX_SLEEP_MS` | integer | `1000` |  |  |
 | `QUEEN_SWEEPER_MIN_SLEEP_MS` | integer | `5` |  |  |
 | `QUEEN_SWEEPER_PARALLELISM` | integer | `1` |  |  |
-| `QUEEN_TIMERS_ENABLED` | boolean | `false` |  |  |
 | `QUEEN_TIMERS_MAX_HORIZON_S` | integer | `7_776_000` |  |  |
 | `QUEEN_TIMERS_MAX_OPS_PER_CALL` | integer | `256` |  |  |
-| `QUEEN_TIMERS_MAX_PAYLOAD_BYTES` | integer | `1024 * 1024` |  |  |
+| `QUEEN_TIMERS_MAX_PAYLOAD_BYTES` | integer | `1048576 (1 MiB), further narrowed to the plan's max_payload_bytes` |  |  |
+
+### Logging
+
+| Variable | Type | Default | Default inherited from | Also read as |
+| --- | --- | --- | --- | --- |
+| `LOG_LEVEL` | string | `info` |  |  |
+| `QUEEN_LOG_JSON` | boolean | `false` |  |  |
+| `QUEEN_LOG_RATES_MS` | integer | `10000` |  |  |
+| `QUEEN_LOG_TOPN_QUEUES` | integer | `10` |  |  |
+| `RUST_LOG` | string | `&env_str("LOG_LEVEL", "info` |  |  |
 
 ### Experiment-only
 
