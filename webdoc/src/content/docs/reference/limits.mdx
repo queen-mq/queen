@@ -147,7 +147,8 @@ instead of buffered. Use `/health` as a readiness signal.
 Retention is **opt-in**: it requires `retentionEnabled` plus a positive window.
 Without both, segments live forever and the disk grows monotonically. When it is
 on, it runs as bounded autocommitting steps every `RETENTION_INTERVAL`
-milliseconds (default 5000), with one replica elected by advisory lock 737001.
+milliseconds (default 5000), on whichever replica claims the `retention` row in
+`queen.maintenance_leases` for that period.
 
 Granularity is a **whole segment**, one row holding many frames. So:
 

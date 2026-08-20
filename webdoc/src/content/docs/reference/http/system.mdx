@@ -252,12 +252,17 @@ list and the frame counters.
 ## POST /api/v1/stats/refresh
 
 Access level **admin**. Runs `queen.log_refresh_all_stats_v1()` (the same reconciler the
-broker's own loop runs every `STATS_INTERVAL_MS` under advisory lock `737002`) and returns
+broker's own loop runs every `STATS_INTERVAL_MS`, scheduled through the `stats_refresh`
+claim row in `queen.maintenance_leases`) and returns
 its summary JSON verbatim, labelled `engine: "segments"` with a `segPartitions` count.
+The route does not touch the schedule: forcing a refresh never delays or doubles the
+background cadence.
 
 Use it to force a refresh instead of waiting out the interval. If the dashboard's numbers
 are stale rather than merely late, check whether that loop is running at all (a large
-`statsAge` on the status routes).
+`statsAge` on the status routes). It refreshes the counters only: `retainedBytes` is owned
+by the retained-bytes lane (`RETAINED_BYTES_INTERVAL_MS`, advisory lock `737003`) and keeps
+its last value here.
 
 <Aside type="caution">
 Before 2026-07-30 this route ran `queen.refresh_all_stats_v1(true)`, the rows-engine

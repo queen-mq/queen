@@ -2048,6 +2048,40 @@ pub async fn handle_pop_partition(
 
     let mut backoff_count: u32 = 0;
     loop {
+        // ── Pending gate (mirrors the wildcard gate in handle_pop): every
+        // parked re-poll used to take an admission permit, a pooled connection
+        // and run the FULL pop_specific SP — at Gate-style 5s windows that is
+        // ~9 full SP calls per idle runner per window. The probe is one indexed
+        // row read (log_partition_has_pending_v1), takes no permit, and a
+        // `false` is definitive: park without popping. `true` on first contact
+        // of a (partition, group) is deliberate — the full pop is what seeds
+        // the subscription cursor, and for subscriptionMode=new the seed is the
+        // tail AT SEED TIME, so the gate must never defer it (004_log_pop).
+        // When the wait window is over (or wait=false) fall through to the full
+        // pop once: the SP response builder stays the single authority on the
+        // empty wire shape. QUEEN_POP_PENDING_GATE=false disables.
+        if st.pop_pending_gate && wait && Instant::now() < deadline {
+            let pending = match st.pool.get().await {
+                Ok(c) => db::partition_has_pending(&c, &queue, &partition, &group, tenant.as_str())
+                    .await
+                    .unwrap_or(true),
+                Err(_) => true, // probe unavailable → fall back to the full pop (safe)
+            };
+            if !pending {
+                // Same park as the post-SP branch below: backoff re-poll,
+                // push-wake resets it, parked gauge held for the window.
+                backoff_count += 1;
+                let interval = st.pop_backoff_interval(backoff_count);
+                let waitd = deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(interval);
+                let _parked = st.metrics.parked.enter(tenant.as_str(), &queue);
+                if st.notifier.wait_queue(&qkey, waitd).await {
+                    backoff_count = 0;
+                }
+                continue;
+            }
+        }
         let mut slot = st.admission.acquire(Lane::Pop).await;
         let client = match st.pool.get().await {
             Ok(c) => c,
@@ -2203,6 +2237,32 @@ pub async fn handle_pop_discover(
 
     let mut backoff_count: u32 = 0;
     loop {
+        // ── Pending gate, discovery flavor (see handle_pop_specific above):
+        // namespace/task-scoped probe (log_discover_has_pending_v1). The probe
+        // stays TRUE while the group is unregistered on any matched queue —
+        // the first discovery pop is what stamps the durable subscription
+        // timestamp, and deferring that past a push would skip it under
+        // subscriptionMode=new (004_log_pop). Falls through to the full pop
+        // when the wait window is over, same single-authority empty shape.
+        if st.pop_pending_gate && wait && Instant::now() < deadline {
+            let pending = match st.pool.get().await {
+                Ok(c) => db::discover_has_pending(&c, &namespace, &task, &group, tenant.as_str())
+                    .await
+                    .unwrap_or(true),
+                Err(_) => true, // probe unavailable → fall back to the full pop (safe)
+            };
+            if !pending {
+                backoff_count += 1;
+                let interval = st.pop_backoff_interval(backoff_count);
+                let waitd = deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(interval);
+                if st.notifier.wait_any(tenant.as_str(), waitd).await {
+                    backoff_count = 0;
+                }
+                continue;
+            }
+        }
         let mut slot = st.admission.acquire(Lane::Pop).await;
         let client = match st.pool.get().await {
             Ok(c) => c,

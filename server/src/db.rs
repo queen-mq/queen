@@ -592,6 +592,46 @@ pub async fn has_pending(
     Ok(row.get(0))
 }
 
+// Single-partition sibling of has_pending, for the PINNED pop's gate
+// (handle_pop_specific). One indexed row read; EXACT for a seeded cursor
+// (log_start participates), conservative TRUE on first contact so the full
+// pop's subscription seeding keeps today's timing (004_log_pop header).
+pub async fn partition_has_pending(
+    client: &deadpool_postgres::Client,
+    queue: &str,
+    partition: &str,
+    group: &str,
+    tenant: &str,
+) -> Result<bool, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached("SELECT queen.log_partition_has_pending_v1($1, $2, $3, $4::text::uuid)")
+        .await?;
+    let row = client
+        .query_one(&stmt, &[&queue, &partition, &group, &tenant])
+        .await?;
+    Ok(row.get(0))
+}
+
+// Namespace/task sibling of has_pending, for the DISCOVERY pop's gate
+// (handle_pop_discover). Conservative TRUE while the group is unregistered on
+// any matched queue, so the first discovery pop still stamps the durable
+// subscription timestamp at first-request time (004_log_pop header).
+pub async fn discover_has_pending(
+    client: &deadpool_postgres::Client,
+    namespace: &str,
+    task: &str,
+    group: &str,
+    tenant: &str,
+) -> Result<bool, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached("SELECT queen.log_discover_has_pending_v1($1, $2, $3, $4::text::uuid)")
+        .await?;
+    let row = client
+        .query_one(&stmt, &[&namespace, &task, &group, &tenant])
+        .await?;
+    Ok(row.get(0))
+}
+
 // Phase 2 first-contact safety: does the group-first-contact bulk-seed MARKER
 // exist for (queue, group)? The marker is the single partition_name='' row that
 // queen.log_pop_wildcard_*_v1 / log_pop_discover_wire_v1 (004_log_pop) insert on a
@@ -708,6 +748,22 @@ pub async fn get_queue(
 ) -> Result<String, tokio_postgres::Error> {
     let stmt = "SELECT (queen.get_queue_v2($1, $2::text::uuid))::text";
     let row = client.query_one(stmt, &[&queue, &tenant]).await?;
+    Ok(row.get(0))
+}
+
+// Minimal per-partition backlog read (011_log_stats log_queue_depth_v1):
+// (partition, pending) via the watermark arithmetic only — no segments, no
+// timestamps, no DLQ. `group` None = the queue-level worst-cursor precedence
+// the dashboard publishes; Some = that group's own backlog. Returns None when
+// the queue does not exist (the SP yields SQL NULL).
+pub async fn queue_depth(
+    client: &deadpool_postgres::Client,
+    queue: &str,
+    group: Option<&str>,
+    tenant: &str,
+) -> Result<Option<String>, tokio_postgres::Error> {
+    let stmt = "SELECT (queen.log_queue_depth_v1($1, $2, $3::text::uuid))::text";
+    let row = client.query_one(stmt, &[&queue, &group, &tenant]).await?;
     Ok(row.get(0))
 }
 
@@ -1295,6 +1351,19 @@ pub async fn seg_refresh_all_stats(
 ) -> Result<String, tokio_postgres::Error> {
     let row = client
         .query_one("SELECT (queen.log_refresh_all_stats_v1())::text", &[])
+        .await?;
+    Ok(row.get(0))
+}
+
+// Retained-bytes slow lane (028_retained_bytes): recompute
+// queen.stats.retained_bytes ('queue' rows) from live segments — the one
+// O(segments) scan in the stats family, moved out of the refresh above.
+// Returns the SP summary JSON.
+pub async fn seg_refresh_retained_bytes(
+    client: &deadpool_postgres::Client,
+) -> Result<String, tokio_postgres::Error> {
+    let row = client
+        .query_one("SELECT (queen.log_refresh_retained_bytes_v1())::text", &[])
         .await?;
     Ok(row.get(0))
 }

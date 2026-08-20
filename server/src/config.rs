@@ -255,6 +255,12 @@ pub struct Config {
     pub pop_wait_backoff_threshold: u32,
     pub pop_wait_backoff_multiplier: f64,
     pub pop_wait_max_interval_ms: u64,
+    // Long-poll pending gate on the pinned and discovery pop paths: each
+    // backoff re-poll probes a cheap indexed has_pending sibling (no admission
+    // permit) and parks on `false` instead of running the full pop SP — the
+    // same structure the wildcard path has carried since 2026-07-24. Kill
+    // switch only; the wildcard gate is not governed by it.
+    pub pop_pending_gate: bool,
     // cross-request fusion
     pub fusion_shards: usize,
     pub fusion_frames: usize,
@@ -339,6 +345,14 @@ pub struct Config {
     // stats reconciler cadence (ms) — segments-native queen.stats refresh
     // (server/src/stats.rs). Mirrors the C++ StatsService STATS_INTERVAL_MS.
     pub stats_interval_ms: u64,
+    // retained-bytes slow-lane cadence (ms) — queen.stats.retained_bytes
+    // refresh (server/src/stats.rs::spawn_retained_bytes, 028_retained_bytes).
+    // The one O(segments) heap scan in the stats family, deliberately on its
+    // own much slower loop; feeds only the proxy storage-quota gauge, which is
+    // hysteretic by contract. Per-replica like every loop knob (the advisory
+    // lock serializes runs, it does not deduplicate them — x3-replica
+    // arithmetic, see helm_v1/broker/prod.yaml).
+    pub retained_bytes_interval_ms: u64,
     // worker/system metrics flush cadence (ms) — server/src/syscollect.rs writes
     // one queen.worker_metrics + queen.system_metrics row per replica per window.
     pub metrics_flush_ms: u64,
@@ -851,6 +865,7 @@ pub fn log_effective(cfg: &Config) {
     tracing::info!(
         target: "boot",
         pop_default_timeout_ms = cfg.pop_default_timeout_ms,
+        pop_pending_gate = cfg.pop_pending_gate,
         pop_wait_initial_ms = cfg.pop_wait_initial_interval_ms,
         pop_wait_backoff_threshold = cfg.pop_wait_backoff_threshold,
         pop_wait_backoff_multiplier = cfg.pop_wait_backoff_multiplier,
@@ -891,6 +906,7 @@ pub fn log_effective(cfg: &Config) {
         partition_cleanup = cfg.partition_cleanup_enabled,
         partition_cleanup_days = cfg.partition_cleanup_days,
         stats_interval_ms = cfg.stats_interval_ms,
+        retained_bytes_interval_ms = cfg.retained_bytes_interval_ms,
         metrics_flush_ms = cfg.metrics_flush_ms,
         apply_schema = env_bool("QUEEN_APPLY_SCHEMA", true),
         "config: jobs"
@@ -1111,6 +1127,7 @@ pub fn load() -> Config {
             "DEFAULT_SUBSCRIPTION_MODE",
             "new",
         )),
+        pop_pending_gate: env_bool("QUEEN_POP_PENDING_GATE", true),
         pop_wait_initial_interval_ms: env_int("POP_WAIT_INITIAL_INTERVAL_MS", 100).max(1) as u64,
         pop_wait_backoff_threshold: env_int("POP_WAIT_BACKOFF_THRESHOLD", 3).max(0) as u32,
         pop_wait_backoff_multiplier: env_f64("POP_WAIT_BACKOFF_MULTIPLIER", 2.0),
@@ -1158,6 +1175,8 @@ pub fn load() -> Config {
         partition_cleanup_days: env_int("PARTITION_CLEANUP_DAYS", 30).max(1) as i32,
         partition_cleanup_enabled: env_bool("QUEEN_PARTITION_CLEANUP_ENABLED", true),
         stats_interval_ms: env_int("STATS_INTERVAL_MS", 10000).max(1000) as u64,
+        retained_bytes_interval_ms: env_int("RETAINED_BYTES_INTERVAL_MS", 600000).max(1000)
+            as u64,
         metrics_flush_ms: env_int("METRICS_FLUSH_MS", 60000).max(1000) as u64,
         auth: AuthConfig::from_env(),
         sync: SyncConfig::from_env(),

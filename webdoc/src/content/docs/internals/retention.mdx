@@ -1,6 +1,6 @@
 ---
 title: Retention internals
-description: "The retention loop as bounded autocommitting steps: no wrapping transaction, one partition lock per step, an advisory lock to elect a leader, the eviction watermarks, and empty-partition cleanup."
+description: "The retention loop as bounded autocommitting steps: no wrapping transaction, one partition lock per step, a durable claim row for the schedule, the eviction watermarks, and empty-partition cleanup."
 type: concept
 tier: internals
 sidebar:
@@ -29,24 +29,34 @@ follows from not doing that.
 retired engine used) on one dedicated pooled connection.
 
 ```text
+claim queen.maintenance_leases row 'retention' (due? not leased? enabled?)
+  → if not claimed: sleep one poll, retry
 try session advisory lock 737001
-  → if not acquired: skip this cycle
+  → if not acquired: another writer is sweeping; count the period served
   → phase 1: retention rules 1 and 2, per partition, looped until done
   → phase 2: log_txns hash-sidecar purge, per partition, looped until done
   → phase 3: maxWaitTimeSeconds eviction, per eligible partition
   → phase 4: empty-partition cleanup, batched, at most once a minute
   → phase 5: metrics purge
 release advisory lock 737001 on every exit path
+release the claim: advance next_due_at by exactly one period (on error: leave it due)
 ```
 
-The cadence is measured from cycle start (`sleep = interval − elapsed`, clamped at zero), so a cycle
-that overruns does not compound.
+The schedule is the claim row, so `RETENTION_INTERVAL` is the true cluster cadence whatever the
+replica count, and it survives restarts: `next_due_at` lives in the table, not in a pod's timer. A
+cycle that overruns does not compound; an overdue task re-fires after one poll interval (a tenth of
+the period), never in a zero-sleep spin.
 
-### The leader gate
+### The schedule and the leader gate
 
-`pg_try_advisory_lock(737001)`: session-scoped, non-blocking. Behind a load balancer only one replica
-sweeps per cycle; a replica that cannot take the lock skips the cycle entirely, so replicas never
-double-delete.
+The row in `queen.maintenance_leases` decides who sweeps: one atomic `UPDATE` claims the task when
+`next_due_at` has passed and no lease is held, stamping a lease and a fencing token. A holder that
+dies mid-cycle stalls the task for at most the lease; its later release is fenced off as a no-op.
+Setting `enabled = false` on the row pauses the task cluster-wide.
+
+`pg_try_advisory_lock(737001)`: session-scoped, non-blocking, and since the claim row it is belt
+rather than scheduler. It exists for the mixed-fleet window where an old-image pod still sweeps on
+its own timer: whoever holds it is sweeping, so the two schemes never double-delete.
 
 The lock is session-scoped rather than transaction-scoped because there is no cycle transaction to
 scope it to. That makes releasing it explicit, and the code releases it on every exit path including
@@ -335,7 +345,8 @@ phase that stays serial.
 
 The [sweeper](/internals/sweeper) is the second reaper in the product and it is built the opposite way
 on both axes, which is worth naming here because the two are easy to reason about as if they were the
-same shape. Retention is interval-driven and elects a leader on `737001`; the sweeper is due-driven and
+same shape. Retention is schedule-driven (one `queen.maintenance_leases` claim per period, `737001`
+kept as belt); the sweeper is due-driven per shard and
 takes no advisory lock at all, so it consumes no number and cannot close a cycle through the advisory
 space. Where retention shares work by having one replica do it, the sweeper shares it with
 `FOR UPDATE ... SKIP LOCKED` and has every replica drain in parallel, because an ownership scheme

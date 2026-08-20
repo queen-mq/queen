@@ -64,8 +64,9 @@ protection against that is the boot block below, not the parser.
 </Aside>
 
 Several numeric knobs are also clamped after parsing. Interval and size knobs
-are floored at 1, and `STATS_INTERVAL_MS` and `METRICS_FLUSH_MS` are floored at
-1000 ms: a value below the floor is raised without comment.
+are floored at 1, and `STATS_INTERVAL_MS`, `RETAINED_BYTES_INTERVAL_MS` and
+`METRICS_FLUSH_MS` are floored at 1000 ms: a value below the floor is raised
+without comment.
 
 One clamp does comment, because the value it protects is a correctness
 invariant rather than a sanity floor. `QUEEN_HOTLIST_RESEED_WINDOW_MS` is held

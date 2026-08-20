@@ -203,13 +203,23 @@ CREATE TABLE IF NOT EXISTS queen.stats (
     -- octet_length(log_segments.blob) over the queue's LIVE (retained) segments,
     -- i.e. the compressed (zstd) on-the-wire payload bytes as stored — TOAST
     -- bookkeeping, indexes, WAL and the log_txns hash sidecar are NOT counted.
-    -- Populated at the stats-refresh cadence by log_refresh_all_stats_v1
-    -- (011_log_stats), so it lags one refresh interval (the proxy storage
-    -- quota is hysteretic).
+    -- Populated by log_refresh_retained_bytes_v1 (028_retained_bytes) on its
+    -- own slow cadence (RETAINED_BYTES_INTERVAL_MS, default 10 min per
+    -- replica), NOT by the counters refresh — 011's log_refresh_all_stats_v1
+    -- self-assigns this column and never writes it. It therefore lags up to one
+    -- slow-lane period (the proxy storage quota is hysteretic by contract),
+    -- and a NEWLY created queue reads the DDL default 0 until the lane's first
+    -- pass over it (the accepted blind window).
     retained_bytes BIGINT NOT NULL DEFAULT 0,
 
     -- Time bounds (for lag calculations)
     oldest_pending_at TIMESTAMPTZ,
+    -- DEAD (2026-08-20, PLAN_STATS_REFRESH.md T1.1): no writer since the stats
+    -- refresh dropped its per-partition tail LATERAL (011 now SETs it NULL),
+    -- and no reader anywhere — the wire's newestMessage is computed live per
+    -- request. The column stays: this file is CREATE TABLE IF NOT EXISTS, so a
+    -- dropped column would never be re-created, while any older image's 011
+    -- body still names it and would fail its boot re-apply at runtime (42703).
     newest_message_at TIMESTAMPTZ,
     
     -- Lag metrics (pre-computed during roll-up)

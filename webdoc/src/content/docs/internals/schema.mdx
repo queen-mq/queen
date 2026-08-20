@@ -195,6 +195,7 @@ to carry a queue name, so a deleted queue cascades its shared rows away.
 | `queen.retention_history` | one audit row per retention step that deleted something, plus one `__partition_deleted__` row per partition the cleanup phase reclaimed. The `__%__` prefix keeps partition events out of the messages-evicted timeseries. `partition_id` has no FK: the audit row is written by the very step that deletes the partition |
 | `queen.message_traces`, `queen.message_trace_names` | tracing; `partition_id` and `message_id` carry log-engine ids with no FK, because a trace must outlive the segment it describes |
 | `queen.system_state` | the two maintenance flags, as `{"enabled": bool}` JSONB rows |
+| `queen.maintenance_leases` | the durable schedule for the cluster-singleton loops (`stats_refresh`, `retained_bytes`, `retention`): one row per task with `next_due_at`, a lease, a fencing token and per-task run history. `enabled = false` pauses a task cluster-wide; the DB clock arbitrates, so pod clocks and replica counts do not shape the cadence |
 | `queen.worker_metrics`, `queen.worker_metrics_summary`, `queen.system_metrics` | the metrics collector's output |
 | `queen.queue_lag_metrics` | per-queue ops counters and lifecycle events. `queue_id UUID NOT NULL` FK to `queues(id)`, cascading; `UNIQUE (bucket_time, queue_id)`. Readers join `queues` for display names; a deleted queue's metric rows cascade away |
 | `queen_streams.queries`, `queen_streams.state` | streaming query registry and state |

@@ -244,6 +244,14 @@ consecutive empty waits by `POP_WAIT_BACKOFF_MULTIPLIER` 2.0, capped at
 PostgreSQL connection** (the connection is released before parking), so thousands of idle
 long-poll consumers do not consume pool capacity.
 
+Each re-check is gated: instead of running the full pop procedure, a parked pop first asks a
+cheap indexed pending probe (one watermark comparison, no admission permit) and keeps parking on
+a definitive "nothing to deliver". This holds on all three routes: the wildcard scan, the
+single-partition route, and discovery. The probe deliberately answers "maybe" on a consumer
+group's first contact, so subscription registration and `subscriptionMode=new` seeding keep
+their exact timing. An idle parked consumer therefore costs point lookups, not full pop calls;
+`QUEEN_POP_PENDING_GATE=false` disables the gate on the single-partition and discovery routes.
+
 A long poll that times out returns 204, not an error.
 
 ## Visibility delays

@@ -187,10 +187,14 @@ BEGIN
         median_lag_seconds = EXCLUDED.median_lag_seconds,
         avg_offset_lag = EXCLUDED.avg_offset_lag,
         max_offset_lag = EXCLUDED.max_offset_lag,
+        -- >= 3 s elapsed floor on the rate window, matching 011's queue-row
+        -- arms (staggered replica writers can land near-simultaneously; a
+        -- sub-second denominator makes a garbage spike). ELSE arm untouched:
+        -- this writer's historical semantics keep the previous value.
         ingested_per_second = CASE
             WHEN queen.stats.prev_snapshot_at IS NOT NULL
                 AND NOW() > queen.stats.prev_snapshot_at
-                AND EXTRACT(EPOCH FROM (NOW() - queen.stats.prev_snapshot_at)) > 0
+                AND EXTRACT(EPOCH FROM (NOW() - queen.stats.prev_snapshot_at)) >= 3
             THEN ((EXCLUDED.total_messages - queen.stats.prev_total_messages)::numeric /
                   EXTRACT(EPOCH FROM (NOW() - queen.stats.prev_snapshot_at)))
             ELSE queen.stats.ingested_per_second
@@ -198,7 +202,7 @@ BEGIN
         processed_per_second = CASE
             WHEN queen.stats.prev_snapshot_at IS NOT NULL
                 AND NOW() > queen.stats.prev_snapshot_at
-                AND EXTRACT(EPOCH FROM (NOW() - queen.stats.prev_snapshot_at)) > 0
+                AND EXTRACT(EPOCH FROM (NOW() - queen.stats.prev_snapshot_at)) >= 3
             THEN ((EXCLUDED.completed_messages - queen.stats.prev_completed_messages)::numeric /
                   EXTRACT(EPOCH FROM (NOW() - queen.stats.prev_snapshot_at)))
             ELSE queen.stats.processed_per_second

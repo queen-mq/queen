@@ -1,8 +1,11 @@
 //! Background retention + eviction service for the log engine (18-log-engine.md §8).
 //!
-//! Keeps the cadence of the old seg-engine service (every `RETENTION_INTERVAL`
-//! ms — now defaulting to 5000 — on ONE dedicated pooled connection, gated by
-//! advisory lock 737001), but the shape of the work is inverted: instead of one
+//! Runs every `RETENTION_INTERVAL` ms — now defaulting to 5000, and since the
+//! claim-row scheduler (crate::lease, 029_maintenance_leases, task
+//! 'retention') that value is the TRUE cluster cadence, independent of the
+//! replica count — on ONE dedicated pooled connection, with advisory lock
+//! 737001 kept inside the cycle as belt. The shape of the work is inverted
+//! from the old seg-engine service: instead of one
 //! `seg_retention_sweep_v1()` call = one giant transaction over EVERY partition,
 //! each cycle loops the bounded STEP functions of 006_log_maintenance.sql:
 //!
@@ -54,9 +57,10 @@
 //! there is no cycle transaction to scope it to; it is explicitly released with
 //! `pg_advisory_unlock` on every exit path. If the connection dies mid-cycle the
 //! backend session dies with it and PostgreSQL releases the lock anyway (and
-//! deadpool recycles the broken connection), so the lock cannot leak. Behind a
-//! load balancer only one replica sweeps per cycle; a replica that can't take
-//! the lock skips the cycle, so replicas never double-delete.
+//! deadpool recycles the broken connection), so the lock cannot leak. Since the
+//! claim-row scheduler the lock is BELT, not scheduler: the lease row decides
+//! who sweeps each period, and the lock only excludes overlap against
+//! old-image pods (mixed-fleet window) so replicas never double-delete.
 //!
 //! A failing cycle is logged and swallowed so the loop survives — a transient DB
 //! error must not kill background maintenance.
@@ -148,8 +152,16 @@ pub fn spawn(pool: Pool, cfg: &Config) {
         partition_cleanup_days = ?knobs.partition_cleanup_days,
         "service started"
     );
-    tokio::spawn(async move { run_loop(pool, interval, knobs).await });
+    let holder = crate::lease::holder_id(cfg);
+    tokio::spawn(async move { run_loop(pool, interval, knobs, holder).await });
 }
+
+/// Lease-table task name for the whole maintenance cycle
+/// (029_maintenance_leases). One row for the cycle, not one per phase: the
+/// phases share a work list, one consistent now(), and the session belt lock,
+/// and phase ordering (steps before txns purge before cleanup) is load-bearing.
+/// Phase 4 keeps its own sub-cadence inside the cycle (PARTITION_SWEEP_EVERY).
+const TASK: &str = "retention";
 
 /// Cfg values the maintenance cycle needs. A small Copy struct so the values
 /// move cleanly into the detached task. `batch_size` = p_max_rows per step call
@@ -174,18 +186,54 @@ impl Knobs {
     }
 }
 
-async fn run_loop(pool: Pool, interval: Duration, knobs: Knobs) {
+async fn run_loop(pool: Pool, period: Duration, knobs: Knobs, holder: String) {
+    let period_ms = period.as_millis() as u64;
+    let poll = crate::lease::poll_interval(period);
+    let lease_ms = crate::lease::lease_ms(period_ms);
+    // The schedule row must exist before the first claim; the DB may still be
+    // coming up at boot, so retry on the poll cadence rather than dying.
+    while let Err(e) = crate::lease::ensure_row(&pool, TASK, period_ms).await {
+        if let Some(suppressed) = CYCLE_ERR.tick_now() {
+            tracing::error!(target: "retention", error = %e, suppressed, "lease row upsert failed");
+        }
+        tokio::time::sleep(poll).await;
+    }
     // Phase 4's own clock (see PARTITION_SWEEP_EVERY). Starts elapsed so the
     // first cycle after boot sweeps; only advanced when the phase actually ran,
-    // so cycles skipped by the leader gate don't consume the interval.
+    // so cycles this replica did not win don't consume the interval.
     let mut partitions_swept_at: Option<Instant> = None;
     loop {
+        // Durable schedule (029_maintenance_leases): RETENTION_INTERVAL is the
+        // TRUE cluster cadence — whoever wins the claim sweeps this period.
+        let fence = match crate::lease::claim(&pool, TASK, lease_ms, &holder).await {
+            Ok(Some(fence)) => fence,
+            Ok(None) => {
+                tokio::time::sleep(poll).await;
+                continue;
+            }
+            Err(e) => {
+                if let Some(suppressed) = CYCLE_ERR.tick_now() {
+                    tracing::error!(target: "retention", error = %e, suppressed, "lease claim error");
+                }
+                tokio::time::sleep(poll).await;
+                continue;
+            }
+        };
         let start = Instant::now();
         let sweep_partitions = partitions_swept_at
             .is_none_or(|at| start.duration_since(at) >= PARTITION_SWEEP_EVERY);
         match run_cycle(&pool, knobs, sweep_partitions).await {
             Ok(Outcome::Skipped) => {
-                // Another replica holds the cleanup lock this cycle — nothing to do.
+                // Belt session lock busy: an old-image pod's own timer is
+                // sweeping right now (mixed-fleet window). Count the period
+                // served rather than churning the claim against its lock.
+                tracing::info!(
+                    target: "retention",
+                    "claimed but advisory lock busy; period served by another replica"
+                );
+                let elapsed_ms = start.elapsed().as_millis() as i32;
+                crate::lease::release(&pool, TASK, fence, crate::lease::Release::Advance { elapsed_ms })
+                    .await;
             }
             Ok(Outcome::Ran {
                 queues,
@@ -221,18 +269,26 @@ async fn run_loop(pool: Pool, interval: Duration, knobs: Knobs) {
                 } else {
                     tracing::debug!(target: "retention", queues, elapsed_ms, "idle cycle");
                 }
+                crate::lease::release(
+                    &pool,
+                    TASK,
+                    fence,
+                    crate::lease::Release::Advance { elapsed_ms: elapsed_ms as i32 },
+                )
+                .await;
             }
             Err(e) => {
                 // A sustained DB outage must not emit one ERROR every 5s.
                 if let Some(suppressed) = CYCLE_ERR.tick_now() {
                     tracing::error!(target: "retention", error = %e, suppressed, "cycle error");
                 }
+                crate::lease::release(&pool, TASK, fence, crate::lease::Release::Retry).await;
             }
         }
-        // Fixed cadence measured from cycle start (matches the C++ services:
-        // sleep = interval - elapsed, clamped at 0).
-        let sleep = interval.checked_sub(start.elapsed()).unwrap_or(Duration::ZERO);
-        tokio::time::sleep(sleep).await;
+        // The poll doubles as the anti-spin floor when the cycle overruns the
+        // period (lease::poll_interval — the exact failure that produced the
+        // 60s -> 300s -> 900s interval escalation at 26k partitions).
+        tokio::time::sleep(poll).await;
     }
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "queen-mq"
-version = "1.0.3"
+version = "1.0.4"
 edition = "2021"
 # Measured, not aspirational: 1.75 was declared and never checked, and was
 # wrong by eleven releases. The lockfile alone (v4) rules out anything before
@@ -17,7 +17,7 @@ keywords = ["queue", "message-queue", "postgresql", "broker", "mq"]
 categories = ["asynchronous", "database", "api-bindings"]
 
 [dependencies]
-queen-protocol = { path = "../../crates/queen-protocol", version = "1.0.3" }
+queen-protocol = { path = "../../crates/queen-protocol", version = "1.0.4" }
 
 tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 serde = { version = "1", features = ["derive"] }

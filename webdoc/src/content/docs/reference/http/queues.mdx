@@ -217,7 +217,8 @@ these numbers:
   `messages.total` is the count of **retained** frames, not the backlog.
 - `messages.pending` and `messages.processing` come from `queen.stats`, which a
   background reconciler refreshes every `STATS_INTERVAL_MS` (default `10000` ms)
-  on whichever replica wins advisory lock `737002`. They are the same watermark
+  on whichever replica claims the `stats_refresh` row in
+  `queen.maintenance_leases`. They are the same watermark
   values the overview sums, so the list agrees with the rest of the dashboard
   rather than with a fresher count.
 
@@ -262,7 +263,32 @@ Notes that follow from the log engine: `pending` is measured against the **worst
 (lowest) committed cursor across the queue's consumer groups, so a single lagging
 group holds the number up; `failed` is always `null` because there is no
 per-message failure state; and `retainedBytes` is a `queen.stats` value, refreshed
-on the stats cadence. A queue with no `queen.queues` row answers `404` with
+by the retained-bytes lane (`RETAINED_BYTES_INTERVAL_MS`, default 10 minutes per
+replica), so it can lag by up to one lane period and reads `0` on a queue created
+since the lane's last pass. A queue with no `queen.queues` row answers `404` with
+`{"error":"Queue not found"}`.
+
+## GET /api/v1/resources/queues/:queue/depth
+
+Access level **read**. The minimal backlog read for relays and schedulers: one call to
+`queen.log_queue_depth_v1` (`011_log_stats`), which computes per-partition pending with the
+watermark arithmetic only. No `log_segments` scan, no timestamps, no DLQ join: against the
+console-grade detail route above this is one index-only read, computed live per request (never
+stale by the stats cadence).
+
+```json
+{
+  "queue": "orders",
+  "group": null,
+  "pending": 310,
+  "partitions": [ { "partition": "Default", "pending": 310 } ]
+}
+```
+
+Without `group`, `pending` uses the same worst-cursor precedence the detail route and the
+dashboard publish, so the numbers agree. With `?group=<name>` each partition reports that
+group's own backlog against its committed cursor; a group with no cursor on a partition owes
+the partition's whole retained range. A queue with no `queen.queues` row answers `404` with
 `{"error":"Queue not found"}`.
 
 ## DELETE /api/v1/resources/queues/:queue

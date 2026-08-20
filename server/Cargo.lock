@@ -981,7 +981,7 @@ dependencies = [
 
 [[package]]
 name = "queen-engine"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -1012,7 +1012,7 @@ dependencies = [
 
 [[package]]
 name = "queen-protocol"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "serde",
  "serde_json",

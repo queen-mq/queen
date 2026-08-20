@@ -11,6 +11,9 @@
 --   queen.log_pop_discover_wire_v1  namespace/task discovery pop (across
 --                                   queues)
 --   queen.log_has_pending_v1        cheap pending probe for long-poll wakeups
+--                                   (queue+group scope, the wildcard gate)
+--   queen.log_partition_has_pending_v1  single-partition sibling (pinned gate)
+--   queen.log_discover_has_pending_v1   namespace/task sibling (discovery gate)
 --
 -- Semantics are the retired seg engine's pop family's verbatim — per-batch claim,
 -- lease pop→ack, no assignment — re-addressed on single per-partition BIGINT
@@ -1292,6 +1295,109 @@ AS $$
         WHERE p.last_offset > COALESCE(c.committed, -1)
     );
 $$;
+
+-- ----------------------------------------------------------------------------
+-- log_partition_has_pending_v1: the single-partition sibling of the probe
+-- above, for the PINNED pop's long-poll gate (handlers/data.rs
+-- handle_pop_specific). One indexed row read; no admission permit broker-side.
+--
+-- Semantics differ from the queue-wide probe in two deliberate ways:
+--   * `log_start` participates: `last_offset > GREATEST(committed, log_start-1)`
+--     is "retained undelivered frames exist" — exact, so a group that abandoned
+--     a partition whose backlog retention already deleted probes FALSE instead
+--     of paying the full pop on every re-poll forever (the queue-wide probe is
+--     a deliberate superset and keeps its shape).
+--   * a MISSING consumer row probes TRUE unconditionally. First contact of a
+--     (partition, group) is when log_pop_v1 registers subscription intent and
+--     seeds the cursor — and for sub_mode='new' the seed is the partition tail
+--     AT SEED TIME, so deferring that first call until data appears would move
+--     the seed past the push that woke us and silently skip it. TRUE forces
+--     the full pop immediately (exactly today's first-contact timing); the
+--     call creates the row even when it delivers nothing, so every later
+--     re-poll takes the cheap exact branch.
+--
+-- A missing partition (or queue) probes TRUE: the full pop owns those
+-- semantics (404 shape, provisioning), the gate must never preempt them.
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION queen.log_partition_has_pending_v1(
+    p_queue TEXT, p_partition TEXT, p_group TEXT,
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001')
+RETURNS BOOLEAN
+LANGUAGE sql STABLE
+AS $$
+    SELECT COALESCE((
+        SELECT c.partition_id IS NULL
+               OR p.last_offset > GREATEST(c.committed, p.log_start - 1)
+        FROM queen.log_partitions p
+        JOIN queen.queues q ON q.id = p.queue_id
+             AND q.name = p_queue AND q.tenant_id = p_tenant
+        LEFT JOIN queen.log_consumers c
+          ON c.partition_id = p.id AND c.consumer_group = p_group
+        WHERE p.name = p_partition
+    ), TRUE);
+$$;
+
+GRANT EXECUTE ON FUNCTION queen.log_partition_has_pending_v1(TEXT, TEXT, TEXT, UUID) TO PUBLIC;
+
+-- ----------------------------------------------------------------------------
+-- log_discover_has_pending_v1: the namespace/task-scoped sibling, for the
+-- DISCOVERY pop's long-poll gate (handlers/data.rs handle_pop_discover, which
+-- spans every queue matching the namespace/task filter). Index-only walk of
+-- the matched queues' partitions joined to the group's cursors.
+--
+-- Two arms, both required:
+--   * retained undelivered frames under the worst case of a missing cursor row
+--     (COALESCE -1, the queue-wide probe's superset semantics — a registered
+--     group's unseeded partition seeds from its stored subscription timestamp,
+--     so one eager full pop per partition is the worst cost);
+--   * an UNREGISTERED group (no consumer_groups_metadata row for that queue)
+--     probes TRUE even on a fully-empty queue: the first discovery pop is what
+--     writes the durable registration timestamp, and that timestamp is the
+--     seed anchor for every partition the group meets later — deferring it
+--     until data exists would stamp the subscription AFTER the push that woke
+--     us and skip it (sub_mode='new'). Group-less '__QUEUE_MODE__' skips this
+--     arm: its cursors always seed at the head, which is deferral-safe.
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION queen.log_discover_has_pending_v1(
+    p_namespace TEXT, p_task TEXT, p_group TEXT,
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001')
+RETURNS BOOLEAN
+LANGUAGE sql STABLE
+AS $$
+    -- Arm 1: any matched queue where the group holds no durable registration
+    -- yet — INDEPENDENT of partitions, so a matched queue with zero partitions
+    -- (subscribe-before-first-push) still forces the registering pop through.
+    SELECT EXISTS (
+        SELECT 1
+        FROM queen.queues q
+        WHERE q.tenant_id = p_tenant
+          AND (p_namespace = '' OR q.namespace = p_namespace)
+          AND (p_task = '' OR q.task = p_task)
+          AND p_group <> '__QUEUE_MODE__'
+          AND NOT EXISTS (
+              SELECT 1 FROM queen.consumer_groups_metadata m
+              WHERE m.queue_id = q.id
+                AND m.consumer_group = p_group
+                AND m.partition_name = '')
+    )
+    -- Arm 2: retained undelivered frames, worst-case on a missing cursor row
+    -- (a registered group's unseeded partition seeds from its stored
+    -- subscription timestamp, so one eager full pop per partition is the
+    -- worst cost of the superset).
+    OR EXISTS (
+        SELECT 1
+        FROM queen.queues q
+        JOIN queen.log_partitions p ON p.queue_id = q.id
+        LEFT JOIN queen.log_consumers c
+          ON c.partition_id = p.id AND c.consumer_group = p_group
+        WHERE q.tenant_id = p_tenant
+          AND (p_namespace = '' OR q.namespace = p_namespace)
+          AND (p_task = '' OR q.task = p_task)
+          AND p.last_offset > GREATEST(COALESCE(c.committed, -1), p.log_start - 1)
+    );
+$$;
+
+GRANT EXECUTE ON FUNCTION queen.log_discover_has_pending_v1(TEXT, TEXT, TEXT, UUID) TO PUBLIC;
 
 -- ============================================================================
 -- 19-wildcard-hotlist §7/§9 — candidate-list pop (broker hot-list serve path).

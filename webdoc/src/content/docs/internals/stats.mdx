@@ -20,16 +20,17 @@ cadence and persisted into `queen.stats`. Understanding that is enough to predic
 this page: why a number can be a few seconds stale, why it dips after a retention sweep, and why
 the manual refresh route does not help.
 
-There are three independent sources of numbers, and they answer different questions.
+There are four independent sources of numbers, and they answer different questions.
 
 | Source | Cadence | Writes | Answers |
 | --- | --- | --- | --- |
 | Stats reconciler | `STATS_INTERVAL_MS`, 10000 ms | `queen.stats` | how much data exists and how far behind consumers are |
+| Retained-bytes lane | `RETAINED_BYTES_INTERVAL_MS`, 600000 ms | `queen.stats.retained_bytes` only | how many payload bytes each queue retains, for the storage quota |
 | Metrics collector | `METRICS_FLUSH_MS`, 60000 ms | `queen.worker_metrics`, `queen.system_metrics`, `queen.queue_lag_metrics` | what this replica did, per minute |
 | In-process counters | live | nothing | `/metrics/prometheus` gauges and `queen_process_*` totals |
 | KV and timer usage rollup | `QUEEN_KV_USAGE_EVERY_MS`, 300000 ms | `queen.kv_usage` | how much state each tenant holds |
 
-The fourth row is not this page's subject and is listed so nobody looks for it here. The KV and timer
+The last row is not this page's subject and is listed so nobody looks for it here. The KV and timer
 usage numbers are the [sweeper](/internals/sweeper)'s third and slowest clock, not the reconciler's
 work: they write `queen.kv_usage`, they are what the quota gauges and the `403` release decision read,
 and they are deliberately allowed to go stale under pressure, because they are precision rather than
@@ -38,10 +39,16 @@ growing means the refresh is failing while the local write delta keeps enforcing
 
 ## The stats reconciler
 
-`stats.rs` runs one cycle every `STATS_INTERVAL_MS` on one pooled connection, inside a transaction,
-gated by `pg_try_advisory_xact_lock(737002)`. The lock id is deliberately distinct from retention's
-`737001` so the two never serialize against each other. A replica that cannot take it skips the
-cycle, so only one replica refreshes per interval.
+`stats.rs` runs one cycle every `STATS_INTERVAL_MS` on one pooled connection, inside a transaction.
+The schedule is a durable claim row (`queen.maintenance_leases`, task `stats_refresh`): each replica
+polls the row and runs only when it wins the claim, so the configured interval is the true cluster
+cadence whatever the replica count, `next_due_at` survives restarts, a dead holder stalls the task
+for at most its lease, and `enabled = false` on the row pauses the loop cluster-wide. Inside the
+cycle, `pg_try_advisory_xact_lock(737002)` is kept as belt against writers that do not know the
+row: an old-image pod during a rollout, and the unlocked manual refresh route below. The lock id is
+deliberately distinct from retention's `737001` so the two never serialize against each other. The
+transaction also sets `SET LOCAL statement_timeout` and `idle_in_transaction_session_timeout`, so an
+abandoned cycle can no longer pin the lock and an open snapshot until TCP keepalive gives up.
 
 The cycle is one call: `queen.log_refresh_all_stats_v1()`.
 
@@ -66,21 +73,31 @@ refresher summed a message count over every live segment on every cycle.
 `processing` is the leased-but-unacked span, summed only over leases that are still live, and it is
 capped at `pending` when written.
 
-Two timestamps cannot be derived from offsets, so they are the only `log_segments` touches the
-refresh makes, and both are bounded primary-key probes rather than scans:
+One timestamp cannot be derived from offsets, so it is the only `log_segments` touch the refresh
+makes, and it is a bounded primary-key probe rather than a scan:
 
-- **`newest_message_at`**: one backward step to the highest `base_offset`.
 - **`oldest_pending_at`**: `queen.log_oldest_pending_at_v1(pid, wanted)`, which probes the segment
   covering the oldest pending offset and, if the cursor sits in a retention gap, the first segment
   past it. It runs only when something is actually pending. It is written as two probes rather than
   one filtered `LIMIT 1` precisely so a miss cannot walk the partition's dead prefix.
 
-One more `log_segments` touch exists for a different purpose: `retained_bytes` is
-`SUM(octet_length(blob))` over the queue's live segments. Because `blob` is `STORAGE EXTERNAL`,
-`octet_length` reads the length from the TOAST pointer without detoasting, so this is a bounded heap
-scan at refresh cadence. It measures the **compressed bytes as stored** (TOAST bookkeeping,
-indexes, WAL and the `log_txns` hash sidecar are all excluded), and it lags one refresh interval,
-which is why the proxy's storage quota is hysteretic rather than exact.
+The stored `newest_message_at` column is dead: the refresh used to probe every partition's tail for
+it on every cycle, but nothing reads the stored value (the `newestMessage` the wire reports is
+computed live per request), so the refresh now writes `NULL` and the probe is gone.
+
+### The retained-bytes lane
+
+`retained_bytes` is `SUM(octet_length(blob))` over the queue's live segments. Because `blob` is
+`STORAGE EXTERNAL`, `octet_length` reads the length from the TOAST pointer without detoasting, but
+it is still a full heap scan of `log_segments`, and it feeds exactly one consequential reader: the
+proxy's storage quota, which is hysteretic by contract. So it does not run inside the reconciler
+cycle. A separate loop in `stats.rs` runs `queen.log_refresh_retained_bytes_v1()` every
+`RETAINED_BYTES_INTERVAL_MS` (default 600000 ms per replica), gated by its own advisory lock
+(`737003`), and writes only that one column; the reconciler self-assigns it and never computes it.
+
+The value measures the **compressed bytes as stored** (TOAST bookkeeping, indexes, WAL and the
+`log_txns` hash sidecar are all excluded). It lags up to one slow-lane period, and a newly created
+queue reads `0` until the lane's first pass over it.
 
 ### Lag and rates
 
@@ -100,7 +117,9 @@ ingested_per_second  = (new total     - prev total)     / seconds since prev sna
 processed_per_second = (new completed - prev completed) / seconds since prev snapshot
 ```
 
-Both are floored at zero.
+Both are floored at zero, and both require the window to be at least 3 seconds wide: replica
+timers are staggered rather than phase-locked, and a near-zero denominator would turn a handful of
+frames into a spike. A narrower window writes `0`.
 
 <Aside type="caution">
 `total_messages` is the **retained** count, so `ingested_per_second` and `processed_per_second` dip
@@ -133,7 +152,8 @@ zeros. That is not a hypothetical: it was a real regression, and this loop is th
 ## POST /api/v1/stats/refresh
 
 The route forces the cycle above to run now instead of waiting out `STATS_INTERVAL_MS`. It calls the
-same `queen.log_refresh_all_stats_v1()` the loop calls, and returns its summary.
+same `queen.log_refresh_all_stats_v1()` the loop calls, and returns its summary. It refreshes the
+counters only: `retained_bytes` belongs to the slow lane and keeps its last value here.
 
 <Aside type="caution">
 Until 2026-07-30 it called `queen.refresh_all_stats_v1(true)` (the **rows-engine** reconciler), and
@@ -217,7 +237,8 @@ auto-acked consumption. And a push whose transaction failed is counted in the da
 ## Practical consequences
 
 - **Numbers are up to one interval stale.** Counters lag by up to `STATS_INTERVAL_MS`; per-queue
-  throughput lags by up to `METRICS_FLUSH_MS` and is bucketed by minute.
+  throughput lags by up to `METRICS_FLUSH_MS` and is bucketed by minute; `retained_bytes` lags by
+  up to `RETAINED_BYTES_INTERVAL_MS`, and a queue created between lane passes reads `0`.
 - **A rate dip right after a sweep is expected.** See the retained-count note above.
 - **Zeros everywhere mean the reconciler is not running** or, on an older build, something called
   the retired rows-engine refresh route.

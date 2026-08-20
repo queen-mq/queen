@@ -82,6 +82,19 @@ const PROCEDURES: &[(&str, &str)] = &[
     // enforce quotas. Read-only, so it takes no lock-order argument and writes
     // nothing.
     ("027_kv_quota.sql", include_str!("../sql/procedures/027_kv_quota.sql")),
+    // The retained-bytes slow lane (PLAN_STATS_REFRESH.md T1.0): the one
+    // O(segments) heap scan left in the stats family, moved out of 011's
+    // per-cadence refresh onto its own loop (stats.rs::spawn_retained_bytes).
+    // Ships in the SAME image as the 011 that stopped writing the column: a
+    // fleet where 011 self-assigns retained_bytes and this file is absent
+    // leaves the proxy's storage-quota gauge with no writer at all.
+    ("028_retained_bytes.sql", include_str!("../sql/procedures/028_retained_bytes.sql")),
+    // The durable per-task scheduler (PLAN_STATS_REFRESH.md T2.1): cadence for
+    // the cluster-singleton loops (stats, retained-bytes, retention) as one row
+    // per task, DB-clock arbitrated, lease-bounded, fenced. The 737_00x
+    // advisory locks stay in the loops as belt until every deployment
+    // schedules through this table.
+    ("029_maintenance_leases.sql", include_str!("../sql/procedures/029_maintenance_leases.sql")),
 ];
 
 /// Minimum PostgreSQL this schema can be applied to, as `server_version_num`

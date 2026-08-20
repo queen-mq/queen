@@ -212,6 +212,39 @@ pub async fn handle_get_queue(
     json(StatusCode::OK, v.to_string())
 }
 
+// GET /api/v1/resources/queues/:queue/depth?group=... — minimal per-partition
+// backlog read (queen.log_queue_depth_v1, 011_log_stats). Built for relay/
+// scheduler pollers that read exactly one number per partition: the watermark
+// arithmetic only, no segments scan, no timestamps, no DLQ join — against the
+// console-grade GET /resources/queues/:queue this is one index-only read.
+// `group` absent = queue-level pending under the same worst-cursor precedence
+// the dashboard publishes; `group=<name>` = that group's own backlog (the ETA
+// ingredient). 404 shape matches handle_get_queue.
+#[derive(Deserialize)]
+pub struct QueueDepthParams {
+    group: Option<String>,
+}
+
+pub async fn handle_queue_depth(
+    State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
+    Path(queue): Path<String>,
+    Query(p): Query<QueueDepthParams>,
+) -> Response {
+    let client = match st.pool.get().await {
+        Ok(c) => c,
+        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+    };
+    match db::queue_depth(&client, &queue, p.group.as_deref(), tenant.as_str()).await {
+        Ok(Some(txt)) => json(StatusCode::OK, txt),
+        Ok(None) => json(StatusCode::NOT_FOUND, "{\"error\":\"Queue not found\"}".to_string()),
+        Err(e) => json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json_err("depth failed: ", &e),
+        ),
+    }
+}
+
 // ------------------------------------------------------- resources LIST API
 // GET /api/v1/resources/queues — queue list via get_queues_v2, enriched with
 // segment counts. get_queues_v2 reads its partitions/messages from queen.stats,

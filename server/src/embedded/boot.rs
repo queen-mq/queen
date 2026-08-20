@@ -276,6 +276,10 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
     }
     if bc.stats_refresh {
         stats::spawn(pool.clone(), &cfg);
+        // Retained-bytes slow lane rides the same flag: it is the other half of
+        // the queen.stats refresh (011 no longer writes retained_bytes), and an
+        // embedded broker that opts out of stats has no reader for the gauge.
+        stats::spawn_retained_bytes(pool.clone(), &cfg);
     }
     if bc.system_metrics {
         syscollect::spawn(pool.clone(), metrics.clone(), &cfg);
@@ -394,6 +398,7 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
         stmt_timeout: cfg.stmt_timeout,
         pop_default_timeout_ms: cfg.pop_default_timeout_ms,
         default_subscription_mode: cfg.default_subscription_mode.clone(),
+        pop_pending_gate: cfg.pop_pending_gate,
         pop_wait_initial_interval_ms: cfg.pop_wait_initial_interval_ms,
         pop_wait_backoff_threshold: cfg.pop_wait_backoff_threshold,
         pop_wait_backoff_multiplier: cfg.pop_wait_backoff_multiplier,

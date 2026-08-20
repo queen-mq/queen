@@ -16,6 +16,7 @@ mod handlers;
 mod hotlist;
 mod httpget;
 mod internal;
+mod lease;
 mod mesh;
 mod metrics;
 mod migrate;
@@ -207,6 +208,11 @@ async fn main() {
     // zero. Advisory-locked -> one replica refreshes per cycle.
     stats::spawn(pool.clone(), &cfg);
 
+    // Retained-bytes slow lane: the O(segments) heap scan that feeds the proxy
+    // storage-quota gauge (queen.stats.retained_bytes), on its own much slower
+    // cadence — the counters refresh above no longer writes that column.
+    stats::spawn_retained_bytes(pool.clone(), &cfg);
+
     // Background metrics collector: per-minute worker throughput -> queen.worker_metrics
     // (+ summary trigger) and host/process gauges -> queen.system_metrics. Feeds the
     // System view and the dashboard throughput / lifetime totals.
@@ -379,6 +385,7 @@ async fn main() {
         stmt_timeout: cfg.stmt_timeout,
         pop_default_timeout_ms: cfg.pop_default_timeout_ms,
         default_subscription_mode: cfg.default_subscription_mode.clone(),
+        pop_pending_gate: cfg.pop_pending_gate,
         pop_wait_initial_interval_ms: cfg.pop_wait_initial_interval_ms,
         pop_wait_backoff_threshold: cfg.pop_wait_backoff_threshold,
         pop_wait_backoff_multiplier: cfg.pop_wait_backoff_multiplier,
@@ -842,6 +849,13 @@ async fn main() {
         .route(
             "/api/v1/resources/queues/:queue",
             get(handlers::handle_get_queue).delete(handlers::handle_delete_queue),
+        )
+        // Minimal depth read for relay/scheduler pollers: (partition, pending)
+        // via watermark arithmetic only — the cheap sibling of the console-grade
+        // :queue detail above.
+        .route(
+            "/api/v1/resources/queues/:queue/depth",
+            get(handlers::handle_queue_depth),
         )
         // ---------------------------------------------------- management surface
         .route("/api/v1/messages", get(handlers::handle_list_messages))

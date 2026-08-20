@@ -40,6 +40,10 @@ pub struct AppState {
     /// from DEFAULT_SUBSCRIPTION_MODE). Group-less "queue mode" pops ignore this —
     /// the SQL hard-pins them to `all`.
     pub default_subscription_mode: String,
+    // Long-poll pending gate on the pinned/discovery pop paths (see
+    // config.rs): park on a cheap probe instead of running the full pop SP on
+    // every backoff re-poll. QUEEN_POP_PENDING_GATE=false disables.
+    pub pop_pending_gate: bool,
     // RUSTFIX item 19: exponential-backoff knobs for the long-poll re-query interval.
     pub pop_wait_initial_interval_ms: u64,
     pub pop_wait_backoff_threshold: u32,

@@ -13,6 +13,8 @@
 --                                    (former db.rs::seg_queue_message_stats)
 --   queen.log_queue_stats_all_v1     broker-wide per-queue counters (former
 --                                    db.rs::seg_queue_stats_all)
+--   queen.log_queue_depth_v1         minimal (partition, pending) depth read
+--                                    for relays/schedulers (…/:queue/depth)
 --
 -- THE O(partitions) CONTRACT (§9): pending per (queue, group) is pure
 -- watermark arithmetic —
@@ -23,9 +25,14 @@
 -- refresh; offsets make every count a subtraction:
 --     retained (live) frames = last_offset - log_start + 1
 -- which is EXACT, not an estimate, because deletes are prefix-contiguous
--- (001_log_schema header: no mid-log gaps, ever). The only log_segments touches left in
--- the refresh are per-partition O(log n) PK probes for two timestamps
--- (oldest pending / newest) that offsets cannot carry.
+-- (001_log_schema header: no mid-log gaps, ever). The only log_segments touch
+-- left in the refresh is a CASE-guarded per-partition O(log n) PK probe for ONE
+-- timestamp (oldest pending) that offsets cannot carry. The two former
+-- violations of this contract are gone (2026-08-20, PLAN_STATS_REFRESH.md
+-- T1.0/T1.1): the retained-bytes heap scan lives in
+-- queen.log_refresh_retained_bytes_v1 (028_retained_bytes, its own slow
+-- cadence) and the per-partition newest_message_at LATERAL was deleted (the
+-- stored column had no reader).
 --
 -- Queue identity: queen.stats rows key off queen.queues.id, reached DIRECTLY
 -- via log_partitions.queue_id (queues is the only queue table now; the wire
@@ -86,7 +93,7 @@ GRANT EXECUTE ON FUNCTION queen.log_oldest_pending_at_v1(UUID, BIGINT) TO PUBLIC
 -- Per-partition math (worst = most-behind cursor that still matters:
 -- MIN(committed) across the partition's NAMED groups, falling back to the
 -- group-less '__QUEUE_MODE__' cursor only when the partition has no named group
--- — see the `worst` CTE below for why the plain MIN was wrong; no consumer rows
+-- — see the `cons` CTE below for why the plain MIN was wrong; no consumer rows
 -- => committed -1 => the whole retained range is pending, matching the seg-era
 -- refresh's COALESCE(next_seq, 0)):
 --   total    = last_offset - log_start + 1          (retained frames, exact)
@@ -123,12 +130,26 @@ BEGIN
     -- with every named group fully caught up and nothing left to deliver.
     -- COALESCE = precedence: the named-group MIN when it exists, the queue-mode
     -- cursor otherwise. Partitions with no named group compute exactly as before.
-    WITH worst AS (
+    --
+    -- ONE pass over log_consumers for BOTH quantities (this CTE absorbed the
+    -- old lease_agg — two unqualified GROUP BY passes over the same O(P×groups)
+    -- table were the #2 term of the refresh). It must carry NO WHERE clause:
+    -- `committed` aggregates EVERY row (restricting the scan to live-lease rows
+    -- would drop idle partitions' watermarks and report the whole retained
+    -- range as pending, broker-wide). The lease predicate lives ONLY in the
+    -- FILTER on the processing SUM — `NULL > v_now` is NULL, so the old
+    -- `IS NOT NULL AND > v_now` collapses into the one comparison. processing =
+    -- in-flight (leased-but-unacked) span (committed, batch_end]; batch_end
+    -- NULL means no lease, and committed can only move up to batch_end, so the
+    -- span is never negative — GREATEST guards a torn read anyway.
+    WITH cons AS (
         SELECT c.partition_id,
                COALESCE(
                    MIN(c.committed) FILTER (WHERE c.consumer_group <> '__QUEUE_MODE__'),
                    MIN(c.committed) FILTER (WHERE c.consumer_group =  '__QUEUE_MODE__')
-               ) AS committed
+               ) AS committed,
+               (SUM(GREATEST(0, COALESCE(c.batch_end, c.committed) - c.committed))
+                    FILTER (WHERE c.lease_expires_at > v_now))::bigint AS processing
         FROM queen.log_consumers c
         GROUP BY c.partition_id
     ),
@@ -139,34 +160,22 @@ BEGIN
                GREATEST(p.last_offset
                         - GREATEST(COALESCE(w.committed, -1), p.log_start - 1),
                         0)::bigint AS pending,
-               -- Timestamps: two bounded PK probes per partition (see header);
-               -- the oldest-pending probe only runs when something IS pending.
+               -- Timestamp: ONE bounded PK probe per partition, and only when
+               -- something IS pending (CASE-guarded). The unconditional
+               -- newest_message_at LATERAL that used to sit here (a backward
+               -- descent + a random heap fetch per partition, ~30% of the
+               -- refresh at 54k partitions) is GONE: the stored column it fed
+               -- has no reader — the wire's newestMessage is computed live per
+               -- request (get_queue_detail_v2 / log_queue_message_stats_v1).
                CASE WHEN p.last_offset
                          > GREATEST(COALESCE(w.committed, -1), p.log_start - 1)
                     THEN queen.log_oldest_pending_at_v1(
                              p.id,
                              GREATEST(COALESCE(w.committed, -1), p.log_start - 1) + 1)
                END AS oldest_pending_at,
-               tail.created_at AS newest_at
+               COALESCE(w.processing, 0)::bigint AS processing
         FROM queen.log_partitions p
-        LEFT JOIN worst w ON w.partition_id = p.id
-        LEFT JOIN LATERAL (
-            SELECT s.created_at
-            FROM queen.log_segments s
-            WHERE s.partition_id = p.id
-            ORDER BY s.base_offset DESC LIMIT 1
-        ) tail ON true
-    ),
-    -- in-flight (leased-but-unacked) frames per partition. batch_end NULL
-    -- means no lease; committed can only move up to batch_end, so the span
-    -- is never negative — GREATEST guards a torn read anyway.
-    lease_agg AS (
-        SELECT c.partition_id,
-               SUM(GREATEST(0, COALESCE(c.batch_end, c.committed) - c.committed))::bigint
-                   AS processing
-        FROM queen.log_consumers c
-        WHERE c.lease_expires_at IS NOT NULL AND c.lease_expires_at > v_now
-        GROUP BY c.partition_id
+        LEFT JOIN cons w ON w.partition_id = p.id
     ),
     -- dead-letter frames per queue (log DLQ, 005_log_ack). Queue identity is the id:
     -- log_partitions.queue_id references queen.queues directly, so keying by
@@ -177,39 +186,47 @@ BEGIN
         JOIN queen.log_partitions p ON p.id = d.partition_id
         GROUP BY p.queue_id
     ),
-    -- Storage quota (§6.1): retained payload bytes per (queue, tenant) =
-    -- SUM(octet_length(blob)) over live segments. octet_length on STORAGE
-    -- EXTERNAL blobs reads the length from the TOAST pointer (no chunk
-    -- detoast), so this is a bounded heap scan of the LIVE segments at refresh
-    -- cadence — the one O(segments) touch this reader makes, for the bytes
-    -- gauge only (the §9 no-scan contract governs the hot watermark counters).
-    -- Measures the compressed (zstd) on-the-wire bytes AS STORED; TOAST/index/
-    -- WAL overhead and the log_txns hash sidecar are excluded.
-    seg_bytes AS (
-        SELECT lp.queue_id,
-               COALESCE(SUM(octet_length(s.blob)), 0)::bigint AS retained_bytes
-        FROM queen.log_segments s
-        JOIN queen.log_partitions lp ON lp.id = s.partition_id
-        GROUP BY lp.queue_id
-    ),
+    -- NOTE: the retained-bytes CTE (seg_bytes, the 1 GB unqualified heap scan
+    -- of log_segments) moved to queen.log_refresh_retained_bytes_v1
+    -- (028_retained_bytes) on its own slow cadence. This function no longer
+    -- touches queen.stats.retained_bytes except to self-assign it below.
+    --
+    -- Per-queue rollup driven from part_agg — NOT from a re-scan of
+    -- log_partitions: part_agg is strictly 1:1 with log_partitions (its LEFT
+    -- JOIN is on the unique partition_id, no fan-out possible), so the row set
+    -- is identical, and COUNT(*) counts exactly what COUNT(DISTINCT lp.id) did
+    -- (lp.id is the PK) without the DISTINCT that blocked HashAggregate and
+    -- forced a 54k-row Sort. processing rides THROUGH part_agg so `cons` is
+    -- referenced exactly once (a CTE referenced twice is materialised —
+    -- one scan would become a scan plus a 54k-row tuplestore plus two probes).
+    -- Queues with no partitions produce no row here; the driving SELECT below
+    -- LEFT JOINs and COALESCEs to 0 — do NOT fold queen.queues into this CTE
+    -- (COUNT(*) would count the NULL-extended row and report 1 partition for
+    -- every empty queue, moving get_queues_v2's `partitions` and the proxy's
+    -- db_partition_floor with it).
     per_queue AS (
-        SELECT lp.queue_id,
-               COUNT(DISTINCT lp.id)::bigint                    AS child_count,
+        SELECT pa.queue_id,
+               COUNT(*)::bigint                                 AS child_count,
                COALESCE(SUM(pa.total_frames), 0)::bigint        AS total_messages,
                COALESCE(SUM(pa.pending), 0)::bigint             AS pending_messages,
-               COALESCE(SUM(la.processing), 0)::bigint          AS processing_messages,
-               MIN(pa.oldest_pending_at)                        AS oldest_pending_at,
-               MAX(pa.newest_at)                                AS newest_message_at
-        FROM queen.log_partitions lp
-        LEFT JOIN part_agg  pa ON pa.partition_id = lp.id
-        LEFT JOIN lease_agg la ON la.partition_id = lp.id
-        GROUP BY lp.queue_id
+               COALESCE(SUM(pa.processing), 0)::bigint          AS processing_messages,
+               MIN(pa.oldest_pending_at)                        AS oldest_pending_at
+        FROM part_agg pa
+        GROUP BY pa.queue_id
     )
+    -- retained_bytes and newest_message_at are ABSENT from the column list on
+    -- purpose:
+    --   * retained_bytes is owned by log_refresh_retained_bytes_v1
+    --     (028_retained_bytes) on its own slow cadence. A NEW queue therefore
+    --     inserts at the DDL default 0 until that lane's next pass — the
+    --     accepted blind window; the proxy storage quota is hysteretic by
+    --     contract (schema.sql).
+    --   * newest_message_at has no reader anywhere; new rows get NULL.
     INSERT INTO queen.stats (
         stat_type, stat_key, queue_id, partition_id, consumer_group,
         child_count, total_messages, pending_messages, processing_messages,
-        completed_messages, dead_letter_messages, retained_bytes,
-        oldest_pending_at, newest_message_at,
+        completed_messages, dead_letter_messages,
+        oldest_pending_at,
         avg_lag_seconds, max_lag_seconds, avg_offset_lag, max_offset_lag,
         ingested_per_second, processed_per_second,
         last_computed_at
@@ -228,9 +245,7 @@ BEGIN
                     - COALESCE(pq.pending_messages, 0)
                     - COALESCE(da.dlq, 0)),
         COALESCE(da.dlq, 0),
-        COALESCE(sb.retained_bytes, 0),
         pq.oldest_pending_at,
-        pq.newest_message_at,
         COALESCE(EXTRACT(EPOCH FROM (v_now - pq.oldest_pending_at))::integer, 0),
         COALESCE(EXTRACT(EPOCH FROM (v_now - pq.oldest_pending_at))::integer, 0),
         COALESCE(pq.pending_messages, 0)::integer,
@@ -243,7 +258,13 @@ BEGIN
     -- tenant separation is inherent (ids never collide across tenants).
     LEFT JOIN per_queue pq ON pq.queue_id = q.id
     LEFT JOIN dlq_agg   da ON da.queue_id = q.id
-    LEFT JOIN seg_bytes sb ON sb.queue_id = q.id
+    -- Deterministic upsert order: lock the 'queue' stat rows in q.id order —
+    -- the same order log_refresh_retained_bytes_v1's FOR UPDATE pre-lock takes.
+    -- Unordered upsert lock order is plan-dependent (the deadlock class
+    -- 003_log_push measured), and this statement now shares its target rows
+    -- with the bytes lane's second writer and with the UNLOCKED manual refresh
+    -- (POST /api/v1/stats/refresh, handlers/status.rs).
+    ORDER BY q.id
     ON CONFLICT (stat_type, stat_key) DO UPDATE SET
         queue_id             = EXCLUDED.queue_id,
         child_count          = EXCLUDED.child_count,
@@ -252,9 +273,24 @@ BEGIN
         processing_messages  = EXCLUDED.processing_messages,
         completed_messages   = EXCLUDED.completed_messages,
         dead_letter_messages = EXCLUDED.dead_letter_messages,
-        retained_bytes       = EXCLUDED.retained_bytes,
+        -- NOT EXCLUDED.retained_bytes: the column is absent from the INSERT
+        -- list above, so EXCLUDED here would carry the DDL default and write a
+        -- literal 0 over every queue's gauge each cycle — silently turning the
+        -- proxy's hard-403 storage gate off fleet-wide. The self-assignment
+        -- keeps log_refresh_retained_bytes_v1 (028) the only writer. It is
+        -- deliberately EXPLICIT (omitting the arm is value-identical but
+        -- invisible in a SET-list diff, which is how the fatal EXCLUDED
+        -- variant would ship by accident).
+        retained_bytes       = queen.stats.retained_bytes,
         oldest_pending_at    = EXCLUDED.oldest_pending_at,
-        newest_message_at    = EXCLUDED.newest_message_at,
+        -- Dead column: no reader anywhere (the wire's newestMessage is computed
+        -- live per request), no writer since the LATERAL was deleted. NULL is
+        -- kept EXPLICITLY in the SET list — dropping the arm would freeze
+        -- existing rows at their last value forever while new queues get NULL.
+        -- Do not drop the COLUMN either: schema.sql is CREATE TABLE IF NOT
+        -- EXISTS (a dropped column is never re-created) and an old image's 011
+        -- body still names it, failing at runtime as 42703 on re-apply.
+        newest_message_at    = NULL,
         avg_lag_seconds      = EXCLUDED.avg_lag_seconds,
         max_lag_seconds      = EXCLUDED.max_lag_seconds,
         avg_offset_lag       = EXCLUDED.avg_offset_lag,
@@ -266,10 +302,17 @@ BEGIN
         -- after a retention sweep shrinks the retained window — same class of
         -- artifact the seg-era numbers had (its SUM(msg_count) shrank on sweep
         -- too), not a regression.
+        -- >= 3 s elapsed floor on the rate window: replicas are staggered, not
+        -- phase-locked, so two writers can land near-simultaneously and a
+        -- sub-second denominator turns a handful of frames into a garbage
+        -- spike. Below the floor the ELSE arm writes 0, exactly as before —
+        -- these two columns reach no wire surface (the overview reads
+        -- queue_lag_metrics instead), so preserving the previous value would
+        -- be a behaviour change with no reader.
         ingested_per_second = CASE
             WHEN queen.stats.prev_snapshot_at IS NOT NULL
                 AND v_now > queen.stats.prev_snapshot_at
-                AND EXTRACT(EPOCH FROM (v_now - queen.stats.prev_snapshot_at)) > 0
+                AND EXTRACT(EPOCH FROM (v_now - queen.stats.prev_snapshot_at)) >= 3
             THEN GREATEST(0, ((EXCLUDED.total_messages - queen.stats.prev_total_messages)::numeric /
                   EXTRACT(EPOCH FROM (v_now - queen.stats.prev_snapshot_at))))
             ELSE 0
@@ -277,7 +320,7 @@ BEGIN
         processed_per_second = CASE
             WHEN queen.stats.prev_snapshot_at IS NOT NULL
                 AND v_now > queen.stats.prev_snapshot_at
-                AND EXTRACT(EPOCH FROM (v_now - queen.stats.prev_snapshot_at)) > 0
+                AND EXTRACT(EPOCH FROM (v_now - queen.stats.prev_snapshot_at)) >= 3
             THEN GREATEST(0, ((EXCLUDED.completed_messages - queen.stats.prev_completed_messages)::numeric /
                   EXTRACT(EPOCH FROM (v_now - queen.stats.prev_snapshot_at))))
             ELSE 0
@@ -380,7 +423,7 @@ BEGIN
     ),
     -- Named groups first, '__QUEUE_MODE__' only in their absence — same
     -- precedence, and the same abandoned-group-less-cursor failure, as
-    -- log_refresh_all_stats_v1's `worst` above (see that comment); this reader
+    -- log_refresh_all_stats_v1's `cons` above (see that comment); this reader
     -- must agree with the queue's stats row, not contradict it.
     worst AS (
         SELECT c.partition_id,
@@ -527,7 +570,7 @@ BEGIN
     ),
     -- Named groups first, '__QUEUE_MODE__' only in their absence — same
     -- precedence, and the same abandoned-group-less-cursor failure, as
-    -- log_refresh_all_stats_v1's `worst` above (see that comment); this reader
+    -- log_refresh_all_stats_v1's `cons` above (see that comment); this reader
     -- must agree with the queue's stats row, not contradict it.
     worst AS (
         SELECT c.partition_id,
@@ -760,3 +803,72 @@ AS $$
 $$;
 
 GRANT EXECUTE ON FUNCTION queen.log_queue_stats_all_v1(UUID) TO PUBLIC;
+
+-- ----------------------------------------------------------------------------
+-- log_queue_depth_v1: minimal per-partition backlog read for relays and
+-- schedulers (GET /api/v1/resources/queues/:queue/depth). The console-grade
+-- get_queue_detail_v2 above pays for timestamps, DLQ counts and a LATERAL over
+-- log_segments per pending partition; a depth poller reads exactly one number
+-- per partition, so this is the §9 watermark arithmetic and NOTHING else:
+--     pending = GREATEST(last_offset - GREATEST(committed, log_start-1), 0)
+-- touching only log_partitions ⋈ log_consumers (index-only on the consumer
+-- PK), no segments, no timestamps.
+--
+-- p_group NULL = queue-level pending under the same worst-cursor precedence
+-- as the stats refresh (`cons` above — named groups win, '__QUEUE_MODE__'
+-- speaks only when no named group exists), so the number agrees with what
+-- get_queue_v2 and the dashboard publish. A named p_group = that group's own
+-- backlog per partition (a group with no cursor row on a partition owes the
+-- whole retained range, committed -1 — same convention as everywhere else).
+-- The per-group form is also the ETA ingredient: (partition, pending) against
+-- a consumer's own cursor.
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION queen.log_queue_depth_v1(
+    p_queue  TEXT,
+    p_group  TEXT DEFAULT NULL,
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001')
+RETURNS JSONB
+LANGUAGE sql STABLE
+AS $$
+    -- No matching queue → no row → SQL NULL, which the handler turns into the
+    -- same 404 shape as GET /resources/queues/:queue.
+    SELECT jsonb_build_object(
+        'queue', q.name,
+        'group', p_group,
+        'pending', COALESCE(d.total, 0),
+        'partitions', COALESCE(d.parts, '[]'::jsonb))
+    FROM queen.queues q
+    LEFT JOIN LATERAL (
+        SELECT SUM(t.pending)::bigint AS total,
+               jsonb_agg(jsonb_build_object('partition', t.pname,
+                                            'pending', t.pending)
+                         ORDER BY t.pname) AS parts
+        FROM (
+            SELECT p.name AS pname,
+                   GREATEST(p.last_offset
+                            - GREATEST(COALESCE(c.committed, -1), p.log_start - 1),
+                            0)::bigint AS pending
+            FROM queen.log_partitions p
+            LEFT JOIN LATERAL (
+                SELECT CASE
+                           WHEN p_group IS NOT NULL THEN
+                               (SELECT lc.committed FROM queen.log_consumers lc
+                                WHERE lc.partition_id = p.id
+                                  AND lc.consumer_group = p_group)
+                           ELSE
+                               (SELECT COALESCE(
+                                    MIN(lc.committed) FILTER
+                                        (WHERE lc.consumer_group <> '__QUEUE_MODE__'),
+                                    MIN(lc.committed) FILTER
+                                        (WHERE lc.consumer_group = '__QUEUE_MODE__'))
+                                FROM queen.log_consumers lc
+                                WHERE lc.partition_id = p.id)
+                       END AS committed
+            ) c ON true
+            WHERE p.queue_id = q.id
+        ) t
+    ) d ON true
+    WHERE q.name = p_queue AND q.tenant_id = p_tenant
+$$;
+
+GRANT EXECUTE ON FUNCTION queen.log_queue_depth_v1(TEXT, TEXT, UUID) TO PUBLIC;

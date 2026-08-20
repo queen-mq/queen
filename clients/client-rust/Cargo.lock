@@ -631,7 +631,7 @@ dependencies = [
 
 [[package]]
 name = "queen-mq"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "queen-protocol",
  "rand 0.8.7",
@@ -645,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "queen-protocol"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "serde",
  "serde_json",

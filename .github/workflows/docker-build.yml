@@ -9,6 +9,21 @@ name: Docker Images
 #
 # A package is PRIVATE the first time it is published. Flip it once by hand at
 # https://github.com/orgs/queen-mq/packages -> package -> Package settings.
+#
+# Docker Hub is a MIRROR of the same build, not a second build: buildx pushes
+# one manifest to every tag listed below, so the images are bit-identical
+# across the two registries. It is opt-in and stays off until both exist:
+#
+#   vars.DOCKERHUB_NAMESPACE        the Docker Hub account/org that owns the
+#                                   repos, e.g. `queenmq` -> queenmq/queen.
+#                                   Falls back to the C++-era DOCKER_REGISTRY
+#                                   secret (with any `docker.io/` prefix
+#                                   stripped) so nothing breaks if it is unset.
+#   secrets.DOCKER_USERNAME         Docker ID
+#   secrets.DOCKER_PASSWORD         Docker Hub access token (Read & Write)
+#
+# Without them the job still builds and still publishes to GHCR — which is what
+# keeps pull requests and forks green.
 
 on:
   push:
@@ -54,8 +69,16 @@ jobs:
     # The two images version independently: the broker from server.json (the
     # same file build.rs reads), the proxy from its own crate manifest. Forcing
     # a shared number would mean bumping one of them for no reason.
-    - name: Resolve version and commit
+    - name: Resolve version, commit and tags
       id: meta
+      env:
+        # A namespace is not a secret, so it lives in a repo VARIABLE and the
+        # tag list below stays readable in the log. Read through the fallback
+        # instead and Actions masks it: every tag prints as ***/queen:1.0.3.
+        HUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
+        HUB_NAMESPACE_FALLBACK: ${{ secrets.DOCKER_REGISTRY }}
+        HUB_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+        IS_PR: ${{ github.event_name == 'pull_request' }}
       run: |
         case "${{ matrix.image }}" in
           queen)
@@ -67,9 +90,43 @@ jobs:
             ;;
         esac
         test -n "$VERSION" || { echo "could not resolve version for ${{ matrix.image }}"; exit 1; }
+        SHA=$(git rev-parse --short HEAD)
         echo "version=$VERSION" >> $GITHUB_OUTPUT
-        echo "sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-        echo "Building ${{ matrix.image }}:$VERSION"
+        echo "sha=$SHA" >> $GITHUB_OUTPUT
+
+        # The C++ workflow stored the namespace as `docker.io/<ns>` and passed
+        # that whole string to docker login, which worked only because the CLI
+        # strips the path off a server address. Strip it here instead, so the
+        # value means one thing.
+        HUB_NS="$HUB_NAMESPACE"
+        if [ -z "$HUB_NS" ]; then
+          HUB_NS="${HUB_NAMESPACE_FALLBACK#docker.io/}"
+        fi
+
+        # Mirroring needs a namespace AND a login, and a pull request has no
+        # access to either — secrets are not exposed to forked PRs.
+        DOCKERHUB=false
+        if [ -n "$HUB_NS" ] && [ -n "$HUB_USERNAME" ] && [ "$IS_PR" != "true" ]; then
+          DOCKERHUB=true
+        fi
+        echo "dockerhub=$DOCKERHUB" >> $GITHUB_OUTPUT
+
+        REGISTRIES="ghcr.io/${{ github.repository_owner }}"
+        if [ "$DOCKERHUB" = true ]; then
+          REGISTRIES="$REGISTRIES docker.io/$HUB_NS"
+        fi
+
+        {
+          echo "tags<<TAGS_EOF"
+          for reg in $REGISTRIES; do
+            echo "$reg/${{ matrix.image }}:$VERSION"
+            echo "$reg/${{ matrix.image }}:sha-$SHA"
+            echo "$reg/${{ matrix.image }}:latest"
+          done
+          echo "TAGS_EOF"
+        } >> $GITHUB_OUTPUT
+
+        echo "Building ${{ matrix.image }}:$VERSION (docker hub mirror: $DOCKERHUB)"
 
     - name: Log in to GHCR
       if: github.event_name != 'pull_request'
@@ -78,6 +135,15 @@ jobs:
         registry: ghcr.io
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
+
+    # No `registry:` here — the action defaults to docker.io, which is the only
+    # value that authenticates a Docker Hub push.
+    - name: Log in to Docker Hub
+      if: steps.meta.outputs.dockerhub == 'true'
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
 
     - name: Build and push
       uses: docker/build-push-action@v5
@@ -88,10 +154,9 @@ jobs:
         file: ${{ matrix.dockerfile }}
         platforms: linux/amd64,linux/arm64
         push: ${{ github.event_name != 'pull_request' }}
-        tags: |
-          ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ steps.meta.outputs.version }}
-          ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:sha-${{ steps.meta.outputs.sha }}
-          ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:latest
+        # GHCR always, Docker Hub when the mirror is configured. One build, one
+        # manifest, pushed to every tag in the list.
+        tags: ${{ steps.meta.outputs.tags }}
         labels: |
           org.opencontainers.image.source=https://github.com/${{ github.repository }}
           org.opencontainers.image.revision=${{ github.sha }}
@@ -109,15 +174,18 @@ jobs:
         cache-to: type=gha,scope=${{ matrix.image }},mode=max
 
     - name: Summary
+      env:
+        TAGS: ${{ steps.meta.outputs.tags }}
       run: |
         {
           echo "### ${{ matrix.image }}"
           echo ""
           echo '```'
-          echo "ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ steps.meta.outputs.version }}"
+          echo "$TAGS"
           echo '```'
           echo ""
           echo "- platforms: linux/amd64, linux/arm64"
           echo "- revision: ${{ steps.meta.outputs.sha }}"
           echo "- pushed: ${{ github.event_name != 'pull_request' }}"
+          echo "- docker hub mirror: ${{ steps.meta.outputs.dockerhub }}"
         } >> $GITHUB_STEP_SUMMARY

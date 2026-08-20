@@ -259,14 +259,15 @@ them at the proxy.
 ## Where the numbers come from
 
 Nothing on this page is computed at scrape time except the process gauges and the
-`status/analytics` series. Three background loops fill the tables the rest of the
+`status/analytics` series. Four background loops fill the tables the rest of the
 routes read, and each has its own clock:
 
 | Loop | Cadence | Writes | Read by |
 | --- | --- | --- | --- |
-| Stats reconciler (`server/src/stats.rs`) | `STATS_INTERVAL_MS`, default `10000` ms, on whichever replica wins advisory lock `737002` | `queen.stats` (queue / namespace / task / system rows), from the log tables with watermark arithmetic | `/api/v1/status`, `/api/v1/status/queues`, `/api/v1/status/queues/:queue`, `/api/v1/resources/*` |
+| Stats reconciler (`server/src/stats.rs`) | `STATS_INTERVAL_MS`, default `10000` ms, on whichever replica claims the `stats_refresh` row in `queen.maintenance_leases` | `queen.stats` (queue / namespace / task / system rows), from the log tables with watermark arithmetic | `/api/v1/status`, `/api/v1/status/queues`, `/api/v1/status/queues/:queue`, `/api/v1/resources/*` |
+| Retained-bytes lane (`server/src/stats.rs`) | `RETAINED_BYTES_INTERVAL_MS`, default `600000` ms, on whichever replica claims the `retained_bytes` row | `queen.stats.retained_bytes` only (queue rows), from a full `log_segments` scan | the `retainedBytes` fields on the queue routes, and through them the proxy storage quota |
 | Metrics collector (`server/src/syscollect.rs`) | `METRICS_FLUSH_MS`, default `60000` ms, on **every** replica | `queen.worker_metrics`, `queen.system_metrics`, `queen.queue_lag_metrics`, `queen.queue_parked_replica` | `/api/v1/status` throughput, `/api/v1/analytics/*`, the `queen_cluster_*` and per-queue Prometheus families |
-| Retention / maintenance (`server/src/retention.rs`) | `RETENTION_INTERVAL`, default `5000` ms, under advisory lock `737001` | Deletes expired segments; also ages the metrics tables out at `METRICS_RETENTION_DAYS`, default `90` | none |
+| Retention / maintenance (`server/src/retention.rs`) | `RETENTION_INTERVAL`, default `5000` ms, on whichever replica claims the `retention` row | Deletes expired segments; also ages the metrics tables out at `METRICS_RETENTION_DAYS`, default `90` | none |
 
 Two consequences to plan around. First, a freshly started broker reports zeros on
 the analytics routes until the first collector flush a minute later. Second,

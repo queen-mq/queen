@@ -40,6 +40,7 @@ mod handlers;
 mod hotlist;
 mod httpget;
 mod internal;
+mod lease;
 mod mesh;
 mod metrics;
 mod migrate;

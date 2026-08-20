@@ -93,13 +93,16 @@ always-virgin; the [schema catalogue](/internals/schema) has the apply order and
 ## Background jobs
 
 Several loops run alongside the HTTP server. Each is spawned before `axum::serve`, each
-swallows its own errors so a transient database failure cannot kill it, and each that mutates
-shared state elects a leader with an advisory lock so replicas never double-work.
+swallows its own errors so a transient database failure cannot kill it. The cluster-singleton loops
+schedule through one durable claim row each in `queen.maintenance_leases`, so their cadence is the
+configured value whatever the replica count; the advisory locks stay inside those cycles as belt
+against old-image pods.
 
 | Loop | Cadence | Leader gate | What it does |
 | --- | --- | --- | --- |
-| Retention | `RETENTION_INTERVAL`, 5000 ms | session lock `737001` | bounded autocommitting delete steps ([Retention](/internals/retention)) |
-| Stats reconciler | `STATS_INTERVAL_MS`, 10000 ms | transaction lock `737002` | recomputes `queen.stats` from the log tables ([Stats](/internals/stats)) |
+| Retention | `RETENTION_INTERVAL`, 5000 ms | claim row `retention` + session lock `737001` as belt | bounded autocommitting delete steps ([Retention](/internals/retention)) |
+| Stats reconciler | `STATS_INTERVAL_MS`, 10000 ms | claim row `stats_refresh` + transaction lock `737002` as belt | recomputes `queen.stats` from the log tables ([Stats](/internals/stats)) |
+| Retained-bytes lane | `RETAINED_BYTES_INTERVAL_MS`, 600000 ms | claim row `retained_bytes` + transaction lock `737003` as belt | recomputes `queen.stats.retained_bytes` from live segments ([Stats](/internals/stats)) |
 | Metrics collector | `METRICS_FLUSH_MS`, 60000 ms | none, by design | per-replica rows in `worker_metrics` and `system_metrics` |
 | Hot-list wheel tick | 50 ms | none | promotes due deferred and lease-parked ring entries |
 | Hot-list wake tick | 5 ms | none | one coalesced wake per queue that received pushes |

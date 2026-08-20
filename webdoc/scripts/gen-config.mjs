@@ -148,7 +148,7 @@ const GROUPS = [
   // nothing at all. Admission is what governs concurrency now, and its twelve
   // knobs were landing in the unclassified "Other" bucket.
   ["Admission and flow control", (n) => n.startsWith("QUEEN_ADMISSION")],
-  ["Background jobs", (n) => n.startsWith("RETENTION") || n.startsWith("STATS_") || n.startsWith("PARTITION_CLEANUP") || n === "QUEEN_PARTITION_CLEANUP_ENABLED" || n.startsWith("METRICS_")],
+  ["Background jobs", (n) => n.startsWith("RETENTION") || n.startsWith("STATS_") || n === "RETAINED_BYTES_INTERVAL_MS" || n.startsWith("PARTITION_CLEANUP") || n === "QUEEN_PARTITION_CLEANUP_ENABLED" || n.startsWith("METRICS_")],
   ["Durability spool", (n) => n.startsWith("FILE_BUFFER")],
   ["Security", (n) => n.startsWith("QUEEN_ENCRYPTION") || n === "QUEEN_TENANCY_HEADER"],
   // Roughly forty knobs, and without this group every one of them lands under

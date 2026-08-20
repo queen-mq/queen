@@ -6,10 +6,22 @@ use serde::{Deserialize, Serialize};
 
 /// Queue options accepted by `POST /api/v1/configure`.
 ///
-/// Every field is optional and omitted when `None`: the stored procedure
-/// `COALESCE`s each key to its own default, so sending a partial object is
-/// well-defined and leaves the rest untouched. The documented default for each
-/// field below is the *SQL* default, which is the one that actually applies.
+/// **`/configure` is a full replace, not a patch.** Every field is optional and
+/// omitted when `None`, but omitting one does *not* leave the queue's current
+/// value alone. `queen.configure_queue_v1` never reads the existing row: it
+/// `COALESCE`s each key to a hard-coded default and then writes *every* config
+/// column from `EXCLUDED` on `ON CONFLICT (tenant_id, name) DO UPDATE`. So a
+/// partial object resets each key it leaves out to that key's default —
+/// reconfiguring with only `lease_time` clears `retention_enabled` and puts
+/// `dedup_window_seconds` back to `3600`. Always send the complete option set
+/// the queue should end up with.
+///
+/// The corollary holds for anything else kept on the queue row: a value only
+/// survives a later `/configure` if that call sends it again.
+///
+/// The documented default for each field below is the *SQL* default, which is
+/// the one that actually applies — and therefore also the value the queue
+/// reverts to whenever the key is omitted.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct QueueOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -150,6 +162,11 @@ pub struct QueueOptions {
 /// The broker also accepts the options spread across the top level instead of
 /// nested under `options`; this type always sends the nested form, which is
 /// what every SDK does.
+///
+/// `namespace` and `task` are part of the same full replace as the rest of
+/// [`QueueOptions`]: the handler folds these top-level fields into the options
+/// bag only when they are a non-empty string, and `configure_queue_v1` resets
+/// each to `""` when the key is absent. Resend them on every reconfigure.
 ///
 /// An empty string is a valid queue name — the broker deliberately allows it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

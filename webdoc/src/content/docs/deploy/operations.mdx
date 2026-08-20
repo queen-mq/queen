@@ -8,6 +8,8 @@ sidebar:
 sourceOfTruth:
   - server/src/obs.rs
   - server/src/retention.rs
+  - server/src/sweeper.rs
+  - server/src/switches.rs
   - server/src/schema.rs
   - server/src/file_buffer.rs
   - server/src/handlers/status.rs
@@ -47,18 +49,25 @@ tenant one. The full family list is in [Prometheus](/reference/prometheus).
 Do not alert on `/health` answering 503 as "the broker is down": it is a database check, and
 [the probe wiring](/deploy/kubernetes#the-probes) is where that matters.
 
-## Maintenance mode suspends the timer fire
+## Maintenance mode does not hold the timer fire
 
 <Aside type="danger">
-While push maintenance mode is on, pushes are diverted to the broker's disk spool, and **a timer fire
-cannot be diverted**. The fire is a `DELETE` of the staging row and a push of the frame in the *same*
-transaction, and that shared commit is the whole of its exactly-once guarantee; putting the push half
-on the spool would break it. So the fire suspends for the duration of the window.
+While push maintenance mode is on, pushes are diverted to the broker's disk spool, and **the timer
+fire is not on that path**. The fire is a `DELETE` of the staging row and a push of the frame in the
+*same* transaction, and that shared commit is the whole of its exactly-once guarantee; putting the
+push half on the spool would break it. So the fire is not spooled, and it is not held back either:
+the sweeper reads only `timers_fire_enabled`, never the maintenance flag, and no stored procedure
+reads that flag on its behalf.
 
-Nothing is lost and nothing is duplicated. The timers stay in `queen.log_timers`, the backlog drains
-oldest first when the window closes, and the visible symptom in the meantime is
-`queen_timers_oldest_late_seconds` climbing. Read that as a delay, not as message loss, and check
-`GET /api/v1/system/maintenance` before concluding the sweeper is broken.
+A maintenance window therefore does not make the log static. Ordinary pushes wait on disk and land
+when the window closes, while every timer that comes due inside it commits into `queen.seg_segments`
+throughout, which also reverses their order: a push accepted early in the window is appended after a
+timer that fired later in it. If the window is open because the database is going away, the fires
+fail transiently instead, spend no delivery attempt, and drain oldest first when it returns.
+
+To hold delivery for the length of a window, pause it deliberately with the `timersFire` kill switch
+and turn it back on when the window closes. Nothing is lost while it is off, but promised messages
+are not being delivered, so it is a lever to leave a clock on.
 </Aside>
 
 The sweeper is also the component an operator kill switch acts on, separately from maintenance mode

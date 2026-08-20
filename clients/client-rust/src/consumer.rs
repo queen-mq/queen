@@ -50,10 +50,19 @@ impl Cancel {
 
     /// Resolves once cancelled.
     pub async fn cancelled(&self) {
-        if self.is_cancelled() {
-            return;
+        loop {
+            // Register BEFORE checking the flag. `notify_waiters` wakes only
+            // futures that already exist, so check-then-register loses a
+            // cancel() that lands between the two — a waiter parked for its
+            // full timeout on a token that was already fired. Registered
+            // first, a cancel after the check still wakes this future; the
+            // loop re-checks because a `Notify` wake alone proves nothing.
+            let notified = self.0.notify.notified();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
         }
-        self.0.notify.notified().await;
     }
 }
 

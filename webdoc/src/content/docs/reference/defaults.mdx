@@ -90,12 +90,14 @@ each of them sits where it does.
 | `DEFAULT_TIMEOUT` / `POP_DEFAULT_TIMEOUT_MS` | `30000` | How long a `wait=true` pop parks when the client sends no `timeout`. |
 | `DEFAULT_SUBSCRIPTION_MODE` | `new` | Where a consumer group starts when its first pop sends no `subscriptionMode`: `new` at the partition's tail, `all` at the oldest retained offset. Only consulted on a group's first contact, and ignored entirely by group-less pops, which are always `all`. |
 | `POP_WAIT_INITIAL_INTERVAL_MS` | `100` | First re-query interval of a parked pop; grows past `POP_WAIT_BACKOFF_THRESHOLD` (3) by `POP_WAIT_BACKOFF_MULTIPLIER` (2.0) up to `POP_WAIT_MAX_INTERVAL_MS` (1000). A push-wake resets it. |
-| `RETENTION_INTERVAL` | `5000` | Maintenance cycle cadence, leader-gated by one advisory lock, so only one instance sweeps per cycle. |
+| `QUEEN_POP_PENDING_GATE` | on | Parked re-polls on the single-partition and discovery pop routes probe a cheap pending check and skip the full pop procedure when nothing is deliverable. Kill switch only; the wildcard route's gate is unconditional. |
+| `RETENTION_INTERVAL` | `5000` | Maintenance cycle cadence. Scheduled through the `queen.maintenance_leases` claim row, so the value is the true cluster cadence: exactly one instance sweeps per period, whatever the replica count. |
 | `RETENTION_BATCH_SIZE` | `1000` | Maximum segment rows deleted per bounded step, and partitions deleted per cleanup batch. |
 | `RETENTION_PARALLELISM` | `1` | Concurrent per-partition step workers in retention phases 1 to 3, clamped to 16. `1` is the historical serial cycle, so an upgrade changes nothing until you raise it. Each worker holds one maintenance-lane admission slot and one pooled connection while it runs, so raise `QUEEN_ADMISSION_SHARE_MAINT` with it. |
 | `PARTITION_CLEANUP_DAYS` | `30` | How long a partition must be empty *and* idle before the cleanup phase deletes the row. `QUEEN_PARTITION_CLEANUP_ENABLED=false` keeps every partition forever. |
 | `METRICS_FLUSH_MS` | `60000` | How often per-queue counters reach PostgreSQL, and therefore how stale a per-queue Prometheus series can be. |
-| `STATS_INTERVAL_MS` | `10000` | Cadence of the stats reconciler that feeds the dashboard's pending and total counts. |
+| `STATS_INTERVAL_MS` | `10000` | Cadence of the stats reconciler that feeds the dashboard's pending and total counts. A true cluster cadence: scheduled through the `queen.maintenance_leases` claim row, one refresh per period. |
+| `RETAINED_BYTES_INTERVAL_MS` | `600000` | Cadence of the retained-bytes lane, the one `log_segments` scan in the stats family; feeds the `retainedBytes` gauge the proxy storage quota reads. Scheduled through the claim row like the two above. |
 | `QUEEN_CACHE_REFRESH_INTERVAL_MS` | `60000` | How long a lost peer notification can leave a stale per-queue cache in place. |
 | `QUEEN_HOTLIST` | on | Broker-side candidate selection for wildcard pops. |
 | `QUEEN_HOTLIST_RESEED_FULL_MS` | `300000` | How often a ring is re-derived from *every* partition of its queue instead of only the recently written ones. It bounds how long a partition wrongly missing from a ring can stay missing. `0` is the kill switch: every reseed is a full walk again, and the repair paths that exist only because a windowed pass cannot see a cursor move are switched off with it. |
@@ -185,7 +187,9 @@ accepted there and rejected on the queue-wide form.
 | `00000000-0000-0000-0000-000000000001` | The default tenant. Used for every request when `QUEEN_TENANCY_HEADER` is off, and when it is on but the header is absent or empty. |
 | `60` s | The lease floor used when the queue's configuration row cannot be read (the lookup could not reach the database, or the row is somehow absent). It equals the `queen.queues.lease_time` column default on purpose. |
 | `30` s | How long the broker caches a queue's `delayedProcessing`, `windowBuffer` and `minPopWaitTime` for its in-memory scheduler, so a `/configure` change to those three takes effect within that window rather than instantly. |
-| `737001` | The advisory lock that elects one instance per maintenance cycle. |
+| `737001` | The advisory lock inside the retention cycle. Belt, not scheduler: cadence comes from the `retention` row in `queen.maintenance_leases`, and the lock only excludes overlap against instances that predate the claim row. |
+| `737002` | Same role for the stats reconciler (`stats_refresh` row); also excludes the manual refresh route. |
+| `737003` | Same role for the retained-bytes lane (`retained_bytes` row). |
 | `778120010` | The advisory lock that serialises the boot-time schema apply across instances. |
 
 ## Related pages
