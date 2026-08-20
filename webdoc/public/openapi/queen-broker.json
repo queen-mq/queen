@@ -1403,6 +1403,85 @@
         ]
       }
     },
+    "/api/v1/resources/queues/{queue}/depth": {
+      "get": {
+        "operationId": "queue_depth",
+        "tags": [
+          "Queues"
+        ],
+        "summary": "GET /api/v1/resources/queues/:queue/depth",
+        "parameters": [
+          {
+            "name": "queue",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "group",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/queues.rs::handle_queue_depth",
+        "x-queen-query-params": "typed",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/api/v1/messages": {
       "get": {
         "operationId": "list_messages",
