@@ -1342,6 +1342,31 @@ BEGIN
                 v_op->>'worker',
                 COALESCE(v_hashes, '{}'::bytea[]),
                 COALESCE(v_statuses, '{}'::text[]));
+
+            -- Bogus-ack atomicity (2026-08-20; moved here from the broker's
+            -- pre-check in handlers/data.rs). log_ack_by_hash_v1 deliberately
+            -- treats an unresolvable hash as not-acked (redelivery over loss —
+            -- the right call on the plain /ack route, where nothing rides
+            -- along). On THIS route pushes/kv/timers ride in the same call, so
+            -- an ack that resolves NOWHERE (not in the ackable span, not below
+            -- the cursor: the txn never existed, or its log_txns row is past
+            -- the txns window) must abort the whole wire — the RAISE rolls
+            -- back every leg atomically, which is the contract the route
+            -- exists to provide. Below-cursor duplicates are NOT here: they
+            -- land in noop/stale and stay tolerated, so a replayed relay
+            -- (Gate's ack+push retried after a timeout) keeps resolving as a
+            -- duplicate instead of a rollback. The broker used to enforce this
+            -- with a SEPARATE per-hash probe over the partition's whole
+            -- log_txns history before calling the wire — measured at 68% of
+            -- all DB time under Gate relay load (144ms/call at 24k txn rows);
+            -- by_hash already computes the same fact in its one bounded pass,
+            -- so the answer is read from its result instead of re-derived.
+            -- The QTXN prefix maps to 'ack_rejected' broker-side
+            -- (txn_reason_for), the same failure kind the pre-check emitted.
+            IF jsonb_array_length(COALESCE(v_res->'unresolvedHashes', '[]'::jsonb)) > 0 THEN
+                RAISE EXCEPTION 'QTXN ack references unknown transactionId; transaction rolled back'
+                    USING DETAIL = (v_res->'unresolvedHashes')::text;
+            END IF;
         ELSE
             -- Positional form: resolve the partition uuid back to names for
             -- log_ack_v1 (which validates lease + batch_end clamp itself).

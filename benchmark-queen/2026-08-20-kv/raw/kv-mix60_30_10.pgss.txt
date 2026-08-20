@@ -1,0 +1,18 @@
+ total_ms |  calls  | mean_ms | pct |                              query                               
+----------+---------+---------+-----+------------------------------------------------------------------
+  1349039 | 4489983 |   0.300 | 100 | SELECT (queen.kv_apply_v1($1::text::jsonb, $2::text::uuid, now()
+     6185 |     276 |  22.409 |   0 | SELECT (queen.kv_expire_step_v1($1::int2[], now(), $2::int))::te
+      230 |     121 |   1.898 |   0 | SELECT (SELECT xact_commit FROM pg_stat_database WHERE datname=$
+       74 |      12 |   6.200 |   0 | SELECT (queen.log_refresh_all_stats_v1())::text
+       64 |      57 |   1.117 |   0 | SELECT (queen.log_timers_due_v1($1::int2[], now(), $2::int))::te
+       33 |      25 |   1.333 |   0 | SELECT (queen.cleanup_worker_metrics_v1($1::int))::text
+        5 |     246 |   0.019 |   0 | UPDATE queen.maintenance_leases t SET lease_until = now() + $2::
+        5 |       4 |   1.188 |   0 | SELECT (queen.kv_quota_refresh_v1($1::int))::text
+        2 |       2 |   0.819 |   0 | SELECT (queen.log_partition_cleanup_step_v1($1::text::timestampt
+        1 |       2 |   0.726 |   0 | INSERT INTO queen.worker_metrics (hostname, worker_id, pid, buck
+        1 |      37 |   0.031 |   0 | UPDATE queen.maintenance_leases t SET next_due_at = GREATEST(t.n
+        1 |       2 |   0.399 |   0 | INSERT INTO queen.system_metrics (timestamp, hostname, port, wor
+        1 |      25 |   0.021 |   0 | DELETE FROM queen.system_metrics WHERE ctid IN ( SELECT ctid FRO
+        0 |      25 |   0.018 |   0 | SELECT p.id::text, qq.id::text, CASE WHEN qq.retention_enabled A
+(14 rows)
+

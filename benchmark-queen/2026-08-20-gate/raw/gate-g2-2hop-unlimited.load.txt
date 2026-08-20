@@ -1,0 +1,1 @@
+declare failed: declare 422: {"error":"[budgets] `term` declares no budget and has no out-edge: it would admit everything straight to a consumer, which is a queue with extra steps; [budgets] node `term`: a target with no budget does not limit anything"}

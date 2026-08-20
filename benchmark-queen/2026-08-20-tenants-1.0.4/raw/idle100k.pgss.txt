@@ -1,0 +1,24 @@
+ total_ms |  calls  | mean_ms  | pct |                                query                                 
+----------+---------+----------+-----+----------------------------------------------------------------------
+   213176 |     154 | 1384.263 |  36 | SELECT (queen.log_refresh_all_stats_v1())::text
+    77653 | 3416684 |    0.023 |  13 | SELECT r_id::text, r_name, r_write::text, r_cutoff::text FROM queen.
+    67015 |  100000 |    0.670 |  11 | SELECT (queen.configure_queue_v1($1, $2::text::jsonb, $3::text::uuid
+    60049 | 2601400 |    0.023 |  10 | SELECT EXISTS(SELECT $4 FROM queen.consumer_groups_metadata m JOIN q
+    49341 | 2759160 |    0.018 |   8 | SELECT COALESCE(delayed_processing,$3), COALESCE(window_buffer,$4), 
+    42232 | 2429518 |    0.017 |   7 | SELECT lease_time FROM queen.queues WHERE name = $1 AND tenant_id = 
+    39176 |  100000 |    0.392 |   7 | SELECT (t.meta)::text, t.blobs FROM queen.log_pop_wildcard_bin_v1($1
+    19796 |  242035 |    0.082 |   3 | INSERT INTO queen.queue_lag_metrics (bucket_time, queue_id, pop_coun
+    12640 |  474059 |    0.027 |   2 | SELECT r_id::text, r_name FROM queen.log_hotlist_reseed_v1($1,$2,$3:
+     8013 |  224611 |    0.036 |   1 | INSERT INTO queen.queue_parked_replica (bucket_time, queue_name, hos
+     3017 |    1544 |    1.954 |   1 | SELECT (SELECT xact_commit FROM pg_stat_database WHERE datname=$1),(
+      950 |       2 |  474.852 |   0 | SELECT (queen.log_refresh_retained_bytes_v1())::text
+      286 |     306 |    0.936 |   0 | SELECT (queen.cleanup_worker_metrics_v1($1::int))::text
+       96 |      57 |    1.677 |   0 | SELECT (queen.kv_expire_step_v1($1::int2[], now(), $2::int))::text
+       76 |      57 |    1.342 |   0 | SELECT (queen.log_timers_due_v1($1::int2[], now(), $2::int))::text
+       57 |    2414 |    0.023 |   0 | UPDATE queen.maintenance_leases t SET lease_until = now() + $2::bigi
+       47 |      51 |    0.930 |   0 | SELECT (queen.kv_quota_refresh_v1($1::int))::text
+       29 |       5 |    5.881 |   0 | SELECT (queen.kv_usage_step_v1($1::int2[], now(), $2::int))::text
+(18 rows)
+
+--- xact/s over the window ---
+12922203

@@ -1,0 +1,24 @@
+ total_ms |  calls  | mean_ms | pct |                                query                                 
+----------+---------+---------+-----+----------------------------------------------------------------------
+  5827113 | 3591973 |   1.622 |  84 | SELECT (t.meta)::text, t.blobs, (t.states)::text FROM queen.log_pop_
+   654491 |  577118 |   1.134 |   9 | SELECT (queen.log_push_multi_v1($1, $2, $3, $4, $5, $6, $7::text[]::
+   351556 |  910718 |   0.386 |   5 | SELECT (queen.log_ack_multi_v1($1::text[], $2::text[], $3::int8[], $
+    35391 |  203549 |   0.174 |   1 | SELECT (queen.log_retention_step_v1($1::text::uuid, $2::text::timest
+    12541 |      56 | 223.944 |   0 | SELECT (queen.log_refresh_all_stats_v1())::text
+    12402 |  196836 |   0.063 |   0 | SELECT (queen.log_txns_purge_step_v1($1::text::uuid, $2::text::times
+     9506 |  180078 |   0.053 |   0 | SELECT r_id::text, r_name, r_write::text, r_cutoff::text FROM queen.
+     7536 |  196792 |   0.038 |   0 | SELECT q.dedup_window_seconds, p.id::text, p.last_offset FROM queen.
+     5853 |   10000 |   0.585 |   0 | SELECT (t.meta)::text, t.blobs FROM queen.log_pop_wildcard_bin_v1($1
+     5134 |   50995 |   0.101 |   0 | INSERT INTO queen.queue_lag_metrics (bucket_time, queue_id, pop_coun
+     5057 |  200000 |   0.025 |   0 | SELECT COALESCE(delayed_processing,$3), COALESCE(window_buffer,$4), 
+     3643 |  120000 |   0.030 |   0 | SELECT EXISTS(SELECT $4 FROM queen.consumer_groups_metadata m JOIN q
+     2562 |  105786 |   0.024 |   0 | SELECT lease_time FROM queen.queues WHERE name = $1 AND tenant_id = 
+     2496 |   50994 |   0.049 |   0 | INSERT INTO queen.queue_parked_replica (bucket_time, queue_name, hos
+     2314 |   10000 |   0.231 |   0 | SELECT (queen.configure_queue_v1($1, $2::text::jsonb, $3::text::uuid
+     1902 |     606 |   3.138 |   0 | SELECT (SELECT xact_commit FROM pg_stat_database WHERE datname=$1),(
+      950 |   20000 |   0.048 |   0 | SELECT r_id::text, r_name FROM queen.log_hotlist_reseed_v1($1,$2,$3:
+      724 |       1 | 724.274 |   0 | SELECT (queen.log_refresh_retained_bytes_v1())::text
+(18 rows)
+
+--- xact/s over the window ---
+6545311

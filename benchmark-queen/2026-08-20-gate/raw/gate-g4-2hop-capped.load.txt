@@ -1,0 +1,1 @@
+declare failed: declare 422: {"error":"[batch-fits] node `mid`: batch 250 is below the 1500 items a lease of 5s allows: the batch would limit, not the budget; [batch-fits] node `term`: batch 250 is below the 1000 items a lease of 5s allows: the batch would limit, not the budget"}

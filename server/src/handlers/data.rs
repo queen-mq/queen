@@ -4932,62 +4932,16 @@ pub async fn handle_transaction(
         }
     }
 
-    // Bogus-ack pre-check (atomic rollback). log_ack_by_hash_v1 resolves acked
-    // hashes through queen.log_txns and SILENTLY treats an unresolvable hash as
-    // not-acked (redelivery over loss). So a transaction that acks a
-    // non-existent transactionId — the transactionRollback test acks
-    // {transactionId:'non-existent-id'} alongside a real ack on the same
-    // partition — would otherwise have its pushes committed and report
-    // success:true, because the merged ack call still returns ok. The SP cannot
-    // surface that within one call, so reject it HERE, before running the SP: if
-    // any acked txn's hash appears in NO surviving log_txns row of its
-    // partition, we return a v1-shaped failure and never touch the DB, so the
-    // pushes roll back too. Hashes are computed broker-side (spec §3) and bound
-    // as bytea[]; the probe explodes each row's 16B-stride hash blob via
-    // queen.log_unnest_hashes (exact compare — no substring false positives).
-    for ag in &ack_groups {
-        if ag.partition_id.is_empty() || ag.items.is_empty() {
-            continue;
-        }
-        let hashes: Vec<Vec<u8>> = ag
-            .items
-            .iter()
-            .map(|it| crate::util::txn_hash128(&it.txn).to_vec())
-            .collect();
-        let stmt = match client
-            .prepare_cached(
-                "SELECT 1 FROM unnest($2::bytea[]) AS a(h) \
-                 WHERE NOT EXISTS ( \
-                   SELECT 1 FROM queen.log_txns t \
-                   WHERE t.partition_id = $1::text::uuid \
-                     AND EXISTS (SELECT 1 FROM queen.log_unnest_hashes(t.hashes) th \
-                                 WHERE th.h = a.h)) \
-                 LIMIT 1",
-            )
-            .await
-        {
-            Ok(s) => s,
-            Err(e) => {
-                st.metrics.record_db_error();
-                return txn_fail_body(&txn_id, "db_error", &e.to_string(), StatusCode::OK);
-            }
-        };
-        match client.query_opt(&stmt, &[&ag.partition_id, &hashes]).await {
-            Ok(Some(_)) => {
-                return txn_fail_body(
-                    &txn_id,
-                    "ack_rejected",
-                    "QTXN ack references unknown transactionId; transaction rolled back",
-                    StatusCode::OK,
-                )
-            }
-            Err(e) => {
-                st.metrics.record_db_error();
-                return txn_fail_body(&txn_id, "db_error", &e.to_string(), StatusCode::OK);
-            }
-            Ok(None) => {}
-        }
-    }
+    // Bogus-ack atomicity is enforced INSIDE the wire SP now (2026-08-20;
+    // 005_log_ack, the unresolvedHashes check after the by_hash leg). The
+    // per-hash probe that used to sit here re-derived, over the partition's
+    // WHOLE log_txns history and once per acked hash, a fact the ack SP
+    // already computes in one bounded pass — measured at 68% of all DB time
+    // under Gate relay load (every relay is ack+push on this route). An acked
+    // txn that resolves nowhere makes the SP RAISE 'QTXN ...', which rolls the
+    // whole wire back atomically (pushes included) and maps to the same
+    // 'ack_rejected' failure body via txn_reason_for. Below-cursor duplicates
+    // (replayed relays) keep resolving as duplicates, exactly as before.
 
     // RUSTFIX item 8: encrypt each group's frame payloads for a queue with
     // encryption_enabled (parity with the normal push path). Warn + keep plaintext

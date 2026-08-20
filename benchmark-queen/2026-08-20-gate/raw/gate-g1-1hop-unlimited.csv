@@ -1,0 +1,3 @@
+epoch_ms,pg_cpu_pct,pg_mem_mb,queen_cpu_pct,queen_mem_mb,xact_commit_cum,wal_records_cum,wal_bytes_cum,wal_fsyncs_cum,wal_fsync_time_ms_cum,db_size_bytes,active_backends,top_wait
+1787228529899,9.3,11644.4,1.6,48.9,9192730,336899676,26728049604,27846193,0,1179948735,0,
+1787228530900,2.2,11642.5,1.7,49.2,9192741,336904402,26732748086,27846195,0,1179948735,1,

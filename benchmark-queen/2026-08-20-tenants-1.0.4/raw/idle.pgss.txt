@@ -1,0 +1,24 @@
+ total_ms | calls  | mean_ms | pct |                                query                                 
+----------+--------+---------+-----+----------------------------------------------------------------------
+    21885 |    180 | 121.582 |  29 | SELECT (queen.log_refresh_all_stats_v1())::text
+    13880 | 260000 |   0.053 |  18 | INSERT INTO queen.queue_lag_metrics (bucket_time, queue_id, pop_coun
+     7702 | 600000 |   0.013 |  10 | SELECT COALESCE(delayed_processing,$3), COALESCE(window_buffer,$4), 
+     6562 | 544487 |   0.012 |   9 | SELECT r_id::text, r_name, r_write::text, r_cutoff::text FROM queen.
+     5885 | 260000 |   0.023 |   8 | INSERT INTO queen.queue_parked_replica (bucket_time, queue_name, hos
+     4791 | 320000 |   0.015 |   6 | SELECT EXISTS(SELECT $4 FROM queen.consumer_groups_metadata m JOIN q
+     4362 | 300647 |   0.015 |   6 | SELECT lease_time FROM queen.queues WHERE name = $1 AND tenant_id = 
+     4143 |  10000 |   0.414 |   5 | SELECT (t.meta)::text, t.blobs FROM queen.log_pop_wildcard_bin_v1($1
+     3159 |   1806 |   1.749 |   4 | SELECT (SELECT xact_commit FROM pg_stat_database WHERE datname=$1),(
+     2366 |  10000 |   0.237 |   3 | SELECT (queen.configure_queue_v1($1, $2::text::jsonb, $3::text::uuid
+     1041 |  55538 |   0.019 |   1 | SELECT r_id::text, r_name FROM queen.log_hotlist_reseed_v1($1,$2,$3:
+      262 |    361 |   0.726 |   0 | SELECT (queen.cleanup_worker_metrics_v1($1::int))::text
+      124 |      3 |  41.169 |   0 | SELECT (queen.log_refresh_retained_bytes_v1())::text
+       87 |     67 |   1.293 |   0 | SELECT (queen.kv_expire_step_v1($1::int2[], now(), $2::int))::text
+       79 |   3612 |   0.022 |   0 | UPDATE queen.maintenance_leases t SET lease_until = now() + $2::bigi
+       66 |     70 |   0.942 |   0 | SELECT (queen.log_timers_due_v1($1::int2[], now(), $2::int))::text
+       46 |     60 |   0.774 |   0 | SELECT (queen.kv_quota_refresh_v1($1::int))::text
+       23 |    544 |   0.043 |   0 | UPDATE queen.maintenance_leases t SET next_due_at = GREATEST(t.next_
+(18 rows)
+
+--- xact/s over the window ---
+2908101
