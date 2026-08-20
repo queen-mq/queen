@@ -207,6 +207,58 @@ var queueDeleteCmd = &cobra.Command{
 	},
 }
 
+var queueDepthGroup string
+
+var queueDepthCmd = &cobra.Command{
+	Use:   "depth <queue>",
+	Short: "Per-partition backlog (watermark arithmetic, no segments)",
+	Long: `The cheap sibling of 'queue describe': one pending count per partition
+via offset arithmetic only — no segment scans, no timestamps. Without
+--group the number is queue-level pending under the same worst-cursor
+precedence the dashboard publishes; with --group it is that group's own
+backlog. Requires broker >= 1.0.4.
+
+The table view prints the total and the non-empty partition count; use
+-o json for the full per-partition array.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		c, cleanup, err := newClient()
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		data, err := c.A.GetQueueDepth(context.Background(), args[0], queueDepthGroup)
+		if err != nil {
+			return clierr.Server(err)
+		}
+		r, err := rendererFor(output.View{}, stdout())
+		if err != nil {
+			return err
+		}
+		if r.Format == output.FormatTable {
+			// A queue can hold a hundred thousand partitions; the table view
+			// is the summary, the full array stays behind -o json.
+			parts, _ := data["partitions"].([]interface{})
+			nonEmpty := 0
+			for _, p := range parts {
+				if m, ok := p.(map[string]interface{}); ok {
+					if n, ok := m["pending"].(float64); ok && n > 0 {
+						nonEmpty++
+					}
+				}
+			}
+			return r.Render(map[string]interface{}{
+				"queue":              data["queue"],
+				"group":              data["group"],
+				"pending":            data["pending"],
+				"partitions":         len(parts),
+				"partitionsNonEmpty": nonEmpty,
+			})
+		}
+		return r.Render(data)
+	},
+}
+
 var queueStatsCmd = &cobra.Command{
 	Use:   "stats",
 	Short: "Aggregate queue statistics by namespace/task",
@@ -255,7 +307,9 @@ func init() {
 	queueStatsCmd.Flags().StringVar(&queueListNamespace, "namespace", "", "filter by namespace")
 	queueStatsCmd.Flags().StringVar(&queueListTask, "task", "", "filter by task")
 
+	queueDepthCmd.Flags().StringVar(&queueDepthGroup, "group", "", "consumer group (default: queue-level worst cursor)")
+
 	queueCmd.AddCommand(queueListCmd, queueDescribeCmd, queueConfigureCmd,
-		queueDeleteCmd, queueStatsCmd)
+		queueDeleteCmd, queueStatsCmd, queueDepthCmd)
 	rootCmd.AddCommand(queueCmd)
 }

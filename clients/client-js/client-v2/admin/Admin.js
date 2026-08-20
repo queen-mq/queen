@@ -69,6 +69,24 @@ export class Admin {
   }
 
   /**
+   * Per-partition backlog for a queue — the cheap sibling of getQueue:
+   * watermark arithmetic only, no segments, no timestamps. Shape:
+   * {queue, group, pending, partitions: [{partition, pending}]}.
+   * Omitting group gives queue-level pending under the same worst-cursor
+   * precedence the dashboard publishes; a named group is that group's own
+   * backlog per partition. Requires broker >= 1.0.4 — an older broker
+   * answers 404 no_such_route, so fall back to getQueue there.
+   * @param {string} name - Queue name
+   * @param {string|null} [group] - Consumer group (optional)
+   * @returns {Promise<object>}
+   */
+  async getQueueDepth(name, group = null) {
+    logger.log('Admin.getQueueDepth', { name, group })
+    const queryString = group ? `?group=${encodeURIComponent(group)}` : ''
+    return this.#httpClient.get(`/api/v1/resources/queues/${encodeURIComponent(name)}/depth${queryString}`)
+  }
+
+  /**
    * Clear all messages from a queue
    * @param {string} name - Queue name
    * @param {string} [partition] - Optional partition to clear

@@ -80,6 +80,29 @@ class Admin:
         logger.log("Admin.get_queue", {"name": name})
         return await self._http_client.get(f"/api/v1/resources/queues/{quote(name)}")
 
+    async def get_queue_depth(self, name: str, group: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Per-partition backlog for a queue - the cheap sibling of get_queue:
+        watermark arithmetic only, no segments, no timestamps.
+
+        Shape: {queue, group, pending, partitions: [{partition, pending}]}.
+
+        Args:
+            name: Queue name
+            group: Consumer group; None = queue-level pending under the same
+                worst-cursor precedence the dashboard publishes, a named group
+                = that group's own backlog per partition
+
+        Returns:
+            Depth report. Requires broker >= 1.0.4 - an older broker answers
+            404 no_such_route, so fall back to get_queue there.
+        """
+        logger.log("Admin.get_queue_depth", {"name": name, "group": group})
+        query_string = f"?group={quote(group)}" if group else ""
+        return await self._http_client.get(
+            f"/api/v1/resources/queues/{quote(name)}/depth{query_string}"
+        )
+
     async def clear_queue(self, name: str, partition: Optional[str] = None) -> Dict[str, Any]:
         """
         Clear all messages from a queue

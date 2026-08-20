@@ -46,6 +46,21 @@ class Admin
         return $this->httpClient->get('/api/v1/resources/queues/' . urlencode($name));
     }
 
+    /**
+     * Per-partition backlog for a queue — the cheap sibling of getQueue:
+     * watermark arithmetic only, no segments, no timestamps. Shape:
+     * {queue, group, pending, partitions: [{partition, pending}]}.
+     * A null group is queue-level pending under the same worst-cursor
+     * precedence the dashboard publishes; a named group is that group's own
+     * backlog per partition. Requires broker >= 1.0.4 — an older broker
+     * answers 404 no_such_route, so fall back to getQueue there.
+     */
+    public function getQueueDepth(string $name, ?string $group = null): mixed
+    {
+        $query = $group !== null ? '?group=' . urlencode($group) : '';
+        return $this->httpClient->get('/api/v1/resources/queues/' . urlencode($name) . '/depth' . $query);
+    }
+
     public function clearQueue(string $name, ?string $partition = null): mixed
     {
         $query = $partition !== null ? '?partition=' . urlencode($partition) : '';

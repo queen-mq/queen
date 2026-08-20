@@ -77,6 +77,27 @@ impl Admin {
             .await
     }
 
+    /// Per-partition backlog for one queue — the cheap sibling of
+    /// [`Admin::queue`]: watermark arithmetic only, no segments, no
+    /// timestamps. Shape: `{queue, group, pending, partitions: [{partition,
+    /// pending}]}`. `group: None` is queue-level pending under the same
+    /// worst-cursor precedence the dashboard publishes; `Some(g)` is that
+    /// group's own backlog per partition (a group with no cursor on a
+    /// partition owes its whole retained range). Requires broker >= 1.0.4 —
+    /// an older broker answers 404 `no_such_route`, so a caller that must run
+    /// against both falls back to [`Admin::queue`] on that error.
+    pub async fn queue_depth(
+        &self,
+        name: &str,
+        group: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let path = format!("/api/v1/resources/queues/{}/depth", urlencode(name));
+        match group {
+            Some(g) => self.get(&with_query(&path, &[("group", g.to_string())])).await,
+            None => self.get(&path).await,
+        }
+    }
+
     /// # This broker does not route it
     ///
     /// `/api/v1/resources/partitions` is registered nowhere in the broker, so

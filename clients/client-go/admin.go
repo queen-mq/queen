@@ -72,6 +72,23 @@ func (a *Admin) GetQueue(ctx context.Context, name string) (map[string]interface
 	return a.httpClient.Get(ctx, path, 0, "")
 }
 
+// GetQueueDepth returns the per-partition backlog of a queue — the cheap
+// sibling of GetQueue: watermark arithmetic only, no segments, no timestamps.
+// Shape: {queue, group, pending, partitions: [{partition, pending}]}.
+// An empty group means queue-level pending under the same worst-cursor
+// precedence the dashboard publishes; a named group is that group's own
+// backlog per partition (a group with no cursor on a partition owes its whole
+// retained range). Requires broker >= 1.0.4: an older broker answers 404
+// no_such_route, so a caller that must run against both falls back to
+// GetQueue on that error.
+func (a *Admin) GetQueueDepth(ctx context.Context, name string, group string) (map[string]interface{}, error) {
+	path := fmt.Sprintf("/api/v1/resources/queues/%s/depth", url.PathEscape(name))
+	if group != "" {
+		path += "?group=" + url.QueryEscape(group)
+	}
+	return a.httpClient.Get(ctx, path, 0, "")
+}
+
 // ClearQueue clears all messages from a queue (or one partition).
 //
 // NOTE: there is no server-side endpoint for this operation today. The

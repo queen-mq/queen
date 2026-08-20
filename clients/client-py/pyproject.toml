@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "queen-mq"
-version = "1.0.3"
+version = "1.0.5"
 description = "High-performance message queue client + fluent streaming SDK for Python, backed by PostgreSQL"
 readme = "README.md"
 authors = [
