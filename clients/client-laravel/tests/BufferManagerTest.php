@@ -46,23 +46,46 @@ class BufferManagerTest extends TestCase
         $this->assertSame(1, $stats['flushesPerformed']);
     }
 
+    /**
+     * A failed flush restores its batch AND retries it now, instead of handing
+     * the messages back after a single attempt. So the expectation changed on
+     * two counts: post() is called more than once, and the raise only happens
+     * once the maxWaitMillis deadline is spent. The knobs are set to
+     * millisecond values here purely to keep the suite fast — the production
+     * defaults (250ms between retries, 5s deadline) would park this test for
+     * five seconds on its own.
+     */
     public function testFlushBufferRestoresOnFailure(): void
     {
+        $attempts = 0;
         $httpClient = $this->createStub(HttpClient::class);
         $httpClient->method('post')
-            ->willThrowException(new \RuntimeException('Server error'));
+            ->willReturnCallback(function () use (&$attempts) {
+                $attempts++;
+                throw new \RuntimeException('Server error');
+            });
 
         $manager = new BufferManager($httpClient);
+        $options = [
+            'messageCount' => 100,
+            'timeMillis' => 99999,
+            'retryDelayMillis' => 1,
+            'maxWaitMillis' => 20,
+        ];
 
-        $manager->addMessage('queue/Default', ['payload' => 'msg1'], ['messageCount' => 100, 'timeMillis' => 99999]);
-        $manager->addMessage('queue/Default', ['payload' => 'msg2'], ['messageCount' => 100, 'timeMillis' => 99999]);
+        $manager->addMessage('queue/Default', ['payload' => 'msg1'], $options);
+        $manager->addMessage('queue/Default', ['payload' => 'msg2'], $options);
 
         try {
             $manager->flushBuffer('queue/Default');
             $this->fail('Should have thrown');
         } catch (\RuntimeException $e) {
+            // The original transport error, not a wrapper: callers branch on it.
             $this->assertSame('Server error', $e->getMessage());
         }
+
+        // Retried, not given up on after the first failure.
+        $this->assertGreaterThan(1, $attempts);
 
         // Messages should be restored
         $stats = $manager->getStats();

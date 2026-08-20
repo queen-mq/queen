@@ -101,7 +101,7 @@ working under a single virtual Host.
 | `renew(&Message, Option<i32>)` | `Result<bool>` | Errors when the message holds no lease. |
 | `flush_all_buffers()` | `Result<Vec<PushResult>>` | |
 | `buffer_stats()` | `BufferStats` | |
-| `close()` | `Result<()>` | Flushes buffers. |
+| `close()` | `Result<()>` | Flushes buffers, bounded at 30 s; on timeout the error carries how many messages were never sent. |
 | `shutdown_on_signal()` | `Result<()>` | Feature `signals`. Resolves on `SIGINT` or `SIGTERM`, then flushes. |
 
 The consumer group and lease for an ack are read from the `Message`, not passed separately.
@@ -134,7 +134,7 @@ The partition defaults to `Default`, which the broker treats as the absence of a
 | `subscription_mode(SubscriptionMode)` | none | `New` or `All`, applied only when seeding a new cursor. |
 | `subscription_from(String)` | none | `now` or an ISO-8601 timestamp. |
 | `cancel(Cancel)` | none | Cooperative shutdown. |
-| `buffer(BufferOptions)` | off | Client-side push batching. |
+| `buffer(BufferOptions)` | off | Client-side push batching. `{message_count, time, max_size, retry_delay}`, defaults `100` / `1 s` / `4 * message_count` / `250 ms`. |
 
 ### Producing
 
@@ -150,7 +150,12 @@ Push a JSON payload:
 <Render file="snippets/rust-push" />
 
 With a buffer configured, `push` returns an empty vector: the messages are queued locally and
-the per-item verdict arrives with the flush.
+the per-item verdict arrives with the flush. The buffer is bounded and lossless under errors.
+At `max_size` messages waiting or in flight, `push` waits for the flusher to drain below the
+bound (wrap it in `tokio::time::timeout` for a deadline). A batch whose POST fails goes back to
+the front of the buffer, in order, and is retried every `retry_delay` until it lands or the
+client closes; it is never dropped. A broker outage therefore shows up as parked producers and
+a full buffer, not as silent loss.
 
 Deduplication is keyed on the transaction id; a `PushItem` carrying a deterministic id makes a
 retried push write nothing:

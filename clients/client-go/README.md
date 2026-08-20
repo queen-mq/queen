@@ -176,7 +176,10 @@ client.Queue("my-queue").Push(data).TransactionID("custom-id").Execute(ctx)
 // Push multiple messages
 client.Queue("my-queue").Push([]interface{}{msg1, msg2, msg3}).Execute(ctx)
 
-// Buffered push (batches messages)
+// Buffered push (batches messages). The buffer is bounded: at MaxSize waiting
+// messages (default 4 x MessageCount) Execute blocks, honoring ctx, until the
+// flusher drains. A failed flush batch is re-queued at the front and retried
+// every RetryDelayMillis — never dropped.
 client.Queue("my-queue").Buffer(queen.BufferConfig{
     MessageCount: 100,  // flush after 100 messages
     TimeMillis:   1000, // or after 1 second
@@ -588,6 +591,8 @@ go test ./tests/... -v
 | Wait (long poll) | true (consume), false (pop) |
 | Buffer count | 100 |
 | Buffer time | 1 second |
+| Buffer max size (backpressure bound) | 400 (4 x MessageCount) |
+| Buffer flush retry delay | 250 ms |
 
 ## License
 

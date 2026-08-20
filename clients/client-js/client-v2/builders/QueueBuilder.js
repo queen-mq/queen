@@ -138,6 +138,21 @@ export class QueueBuilder {
     return this
   }
 
+  /**
+   * Batch pushes client-side instead of sending each one.
+   *
+   * @param {object} options
+   * @param {number} [options.messageCount=100] - flush once this many messages are waiting
+   * @param {number} [options.timeMillis=1000] - flush this long after the first message arrives
+   * @param {number} [options.maxSize] - backpressure bound: past this many buffered
+   *   messages `push()` WAITS for the flusher instead of growing the heap.
+   *   Defaults to 4 x messageCount, floored at messageCount. There is no
+   *   unbounded setting: unbounded is what lost 20.9M messages in the
+   *   2026-08-20 measurement.
+   * @param {number} [options.retryDelayMillis=250] - delay before retrying a batch
+   *   whose POST failed. Failed batches are re-queued at the front of the
+   *   buffer and retried, never dropped.
+   */
   buffer(options) {
     this.#bufferOptions = options
     return this
@@ -622,20 +637,42 @@ class PushBuilder {
   async #execute() {
     logger.log('PushBuilder.execute', { queue: this.#queueName, partition: this.#partition, count: this.#formattedItems.length, buffered: !!this.#bufferOptions })
     
-    // Client-side buffering
+    // Client-side buffering. Awaited, one message at a time: addMessage is
+    // where the maxSize backpressure bound is applied, so a buffered push
+    // resolves only once every item is actually IN the buffer. Firing these
+    // off without awaiting would report success for messages the buffer never
+    // accepted -- the exact failure this bound exists to remove.
     if (this.#bufferOptions) {
-      for (const item of this.#formattedItems) {
-        const queueAddress = `${this.#queueName}/${this.#partition}`
-        this.#bufferManager.addMessage(queueAddress, item, this.#bufferOptions)
+      const queueAddress = `${this.#queueName}/${this.#partition}`
+      const accepted = []
+
+      try {
+        for (const item of this.#formattedItems) {
+          await this.#bufferManager.addMessage(queueAddress, item, this.#bufferOptions)
+          accepted.push(item)
+        }
+      } catch (error) {
+        // The buffer refused this message (the client is closing, or the wait
+        // for capacity was aborted). Report the items that did NOT make it, the
+        // same way the immediate push below reports rejected items -- counting
+        // them as buffered would be the false success this bound removes.
+        const unbuffered = this.#formattedItems.slice(accepted.length)
+        logger.error('PushBuilder.execute', { status: 'not-buffered', count: unbuffered.length, error: error.message })
+        if (this.#onErrorCallback) {
+          await this.#onErrorCallback(unbuffered, error)
+          return null
+        }
+        throw error
       }
-      const result = { buffered: true, count: this.#formattedItems.length }
-      
-      logger.log('PushBuilder.execute', { status: 'buffered', count: this.#formattedItems.length })
-      
+
+      const result = { buffered: true, count: accepted.length }
+
+      logger.log('PushBuilder.execute', { status: 'buffered', count: accepted.length })
+
       if (this.#onSuccessCallback) {
-        await this.#onSuccessCallback(this.#formattedItems)
+        await this.#onSuccessCallback(accepted)
       }
-      
+
       return result
     }
 

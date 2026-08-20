@@ -197,7 +197,7 @@ even though it is not in the defaults object. Two things follow:
 
 | Method | Default | Notes |
 | --- | --- | --- |
-| `buffer(options)` | off | `{ messageCount, timeMillis }`, defaults `100` / `1000`. Turns `push()` into an enqueue. |
+| `buffer(options)` | off | `{ messageCount, timeMillis, maxSize, retryDelayMillis }`, defaults `100` / `1000` / `4 * messageCount` / `250`. Turns `push()` into a bounded enqueue. |
 | `push(payload)` | n/a | Returns a `PushBuilder`. `payload` is one item or an array. |
 
 Each item may be `{ data }`, `{ payload }`, or a bare object used as the payload itself. The
@@ -230,8 +230,10 @@ Awaiting a non-buffered push resolves to the broker's per-item array. The four p
 statuses are described on the [push route page](/reference/http/push/). With no `onError` callback
 registered, at
 least one `failed` item makes the await throw; with one registered, it does not throw. Awaiting a
-buffered push resolves to `{ buffered: true, count }` immediately. The messages have not been
-sent yet.
+buffered push resolves to `{ buffered: true, count }` once the buffer has accepted every item.
+While the buffer sits at `maxSize` the await parks until the flusher drains below the bound, so
+under overload a buffered push is no longer instantaneous: the producer degrades to the flush
+rate instead of growing the heap. Accepted is not sent; the messages still leave with the flush.
 
 ### Consuming
 
@@ -337,11 +339,17 @@ message, whichever comes first. `flushBuffer()` cancels the timer and drains in 
 batches. Buffers are keyed on `"<queue>/<partition>"`, so two builders on the same
 queue and partition share one buffer.
 
+The buffer is bounded and lossless under errors. At `maxSize` waiting messages (default
+`4 * messageCount`), further pushes await the flusher instead of growing the heap. A batch whose
+POST fails goes back to the front of the buffer, in order, and is retried every
+`retryDelayMillis` until it lands or the client closes; it is never dropped. A broker outage
+therefore shows up as parked producers and a full buffer, not as silent loss.
+
 <Aside type="caution">
 A buffered push resolves before the data leaves the process. If the process dies before the
 flush, those messages were never sent: nothing on disk, nothing to replay. `close()` and the
-signal handlers flush first, which is why disabling `handleSignals` without calling `close()`
-loses buffered messages on `SIGTERM`.
+signal handlers flush first (bounded at 30 s, then the unsent count is logged), which is why
+disabling `handleSignals` without calling `close()` loses buffered messages on `SIGTERM`.
 </Aside>
 
 ### Dead-letter queue

@@ -58,8 +58,10 @@ var PopDefaults = PopOptions{
 
 // BufferDefaults contains default values for buffer configuration.
 var BufferDefaults = BufferConfig{
-	MessageCount: 100,  // Flush after 100 messages
-	TimeMillis:   1000, // Or flush after 1 second
+	MessageCount:     100,  // Flush after 100 messages
+	TimeMillis:       1000, // Or flush after 1 second
+	MaxSize:          400,  // Backpressure: Add blocks past this (4 x MessageCount)
+	RetryDelayMillis: 250,  // Wait between retries of a failed flush batch
 }
 
 // DefaultPartition is the default partition name.

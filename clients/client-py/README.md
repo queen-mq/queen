@@ -296,6 +296,29 @@ await queen.flush_all_buffers()
 # Result: 10x-100x faster than individual pushes
 ```
 
+Buffer options:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `message_count` | 100 | Flush once this many messages are buffered (also the batch size of one POST) |
+| `time_millis` | 1000 | Flush this long after the first buffered message |
+| `max_size` | `4 * message_count` | Backpressure bound: `push()` BLOCKS while this many messages are waiting |
+| `retry_delay_millis` | 250 | Wait before retrying a batch whose POST failed |
+
+The buffer is bounded and `push()` blocks at the bound, so a producer that
+outruns the flush pipeline is slowed down to the drain rate instead of growing
+the process until it dies with every unflushed message inside it. `max_size` of
+0 means the default bound, not unbounded. A buffered `push()` therefore either
+returns `{'buffered': True, ...}` or raises: cancel it (`asyncio.wait_for`) if
+your producer needs a deadline, and treat the exception as "not buffered".
+
+A batch whose POST fails goes back to the front of the buffer and is retried
+after `retry_delay_millis`, in order, until it lands. Nothing is dropped, so a
+broker outage shows up as blocked producers rather than as missing messages.
+`flush_all_buffers()` keeps retrying while the broker is down (cancel it if you
+need a bounded wait); `close()` already bounds it at 30 seconds and logs how
+many messages were left unsent, so a shutdown ends loudly instead of hanging.
+
 ### Dead Letter Queue
 
 ```python

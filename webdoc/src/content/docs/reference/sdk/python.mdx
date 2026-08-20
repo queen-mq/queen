@@ -178,7 +178,7 @@ complete intended configuration every time ([Queue options](/reference/queue-opt
 
 | Method | Default | Notes |
 | --- | --- | --- |
-| `buffer(options)` | off | `{"message_count": 100, "time_millis": 1000}`. Turns `push()` into an enqueue. |
+| `buffer(options)` | off | `{"message_count", "time_millis", "max_size", "retry_delay_millis"}`, defaults `100` / `1000` / `4 * message_count` / `250`. Turns `push()` into a bounded enqueue. |
 | `push(payload)` | none | Returns a `PushBuilder`; `payload` is one dict or a list of dicts. Raises `ValueError` with no queue name. |
 
 Each item may carry `data`, `payload`, or be used as the payload itself. The client mints a
@@ -195,8 +195,10 @@ with `traceId: null`. Push inside a transaction when a trace id has to survive. 
 
 Awaitable: `await` executes the push. `on_success(cb)`, `on_error(cb)` and `on_duplicate(cb)`
 register callbacks and return the builder. Awaiting a non-buffered push resolves to the broker's
-per-item array; a buffered push resolves immediately to a buffered marker without sending
-anything.
+per-item array; a buffered push resolves to a buffered marker once the buffer has accepted the
+messages, without sending anything. While the buffer sits at `max_size` the await parks until
+the flusher drains below the bound, so under overload the producer degrades to the flush rate
+instead of growing the heap.
 
 ### Consuming
 
@@ -282,9 +284,16 @@ A buffer flushes at `message_count` messages or `time_millis` after its first me
 comes first. Buffers are keyed on `"<queue>/<partition>"`, so builders addressing the same queue
 and partition share one.
 
+The buffer is bounded and lossless under errors. At `max_size` waiting messages (default
+`4 * message_count`), further adds await the flusher instead of growing the heap. A batch whose
+POST fails goes back to the front of the buffer, in order, and is retried every
+`retry_delay_millis` until it lands or the client closes; it is never dropped. A broker outage
+therefore shows up as parked producers and a full buffer, not as silent loss.
+
 <Aside type="caution">
 A buffered push returns before the data leaves the process. If the process dies before the flush,
-those messages were never sent.
+those messages were never sent. `close()` flushes first, bounded at 30 s, then logs what was
+left unsent.
 </Aside>
 
 ### Dead-letter queue

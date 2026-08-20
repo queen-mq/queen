@@ -324,6 +324,21 @@ await queen.flushAllBuffers()
 // Result: 10x-100x faster than individual pushes
 ```
 
+The buffer is **bounded and lossless**, and both properties are why `push()` must
+be awaited:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `messageCount` | `100` | Flush once this many messages are waiting |
+| `timeMillis` | `1000` | Or this long after the first message arrives |
+| `maxSize` | `4 x messageCount` | Backpressure bound: past this many buffered messages, `push()` WAITS for the flusher instead of growing the heap. There is no unbounded setting |
+| `retryDelayMillis` | `250` | Delay before retrying a batch whose POST failed. Failed batches go back to the front of the buffer, in order, and are retried — never dropped |
+
+A producer that outruns the flush pipeline is therefore paced down to the drain
+rate, and a broker outage shows up as slow pushes with bounded memory rather
+than as messages that quietly disappeared. `close()` flushes with a 30 second
+deadline and logs how many messages were left unsent if it expires.
+
 ### Dead Letter Queue
 
 ```javascript

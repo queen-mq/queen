@@ -631,7 +631,7 @@ dependencies = [
 
 [[package]]
 name = "queen-mq"
-version = "1.0.5"
+version = "1.0.6"
 dependencies = [
  "queen-protocol",
  "rand 0.8.7",

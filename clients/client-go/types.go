@@ -163,6 +163,22 @@ type BufferConfig struct {
 	MessageCount int
 	// TimeMillis is the time in milliseconds to wait before flushing
 	TimeMillis int
+	// MaxSize is the backpressure bound: once this many messages are waiting
+	// in the buffer, Add BLOCKS (honoring its context) until the flusher
+	// drains below it, instead of growing process memory without limit.
+	// 0 means 4 x MessageCount. Measured motivation (2026-08-20): without a
+	// bound, a producer filling at 1.46M msg/s against a 1.0M msg/s flush
+	// pipeline accumulated 20.9M messages (11.7 GB) in 45 seconds and lost
+	// every one of them at process exit, with zero client-side errors.
+	// The bound is approximate: a flush batch that fails is re-queued, so
+	// occupancy can briefly overshoot by up to one MessageCount.
+	MaxSize int
+	// RetryDelayMillis is how long the flusher waits after a failed flush
+	// before retrying THE SAME batch. A failed batch is re-queued at the
+	// front of the buffer, never dropped: combined with MaxSize this turns a
+	// broker outage into blocked producers (bounded memory, no loss) instead
+	// of silent message loss. 0 means 250ms.
+	RetryDelayMillis int
 }
 
 // ConsumeOptions contains options for consuming messages.

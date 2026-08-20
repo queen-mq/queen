@@ -71,6 +71,7 @@ pub mod transaction;
 pub mod uuid;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 pub use admin::Admin;
 pub use buffer::{BufferOptions, BufferStats};
@@ -95,6 +96,13 @@ pub use queen_protocol::{
 use crate::buffer::BufferManager;
 use crate::http::HttpClient;
 use crate::inner::Inner;
+
+/// How long [`Queen::close`] keeps retrying a push batch the broker will not
+/// take before it gives up, reports how many messages were never sent, and
+/// returns. Matches the default request timeout and the usual 30s SIGTERM
+/// grace: long enough to ride out a broker restart, short enough that shutdown
+/// actually ends.
+const CLOSE_FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A connected client.
 ///
@@ -237,9 +245,38 @@ impl Queen {
     ///
     /// Call this before exiting when push buffering is in use: buffered
     /// messages live in this process's memory and are lost otherwise.
+    ///
+    /// A failing batch is retried here, because dropping it is the loss this
+    /// client stopped doing — but only for [`CLOSE_FLUSH_TIMEOUT`]. Retrying
+    /// forever is right for the background flusher and wrong on the way out: a
+    /// SIGTERM grace period is finite. When the deadline passes, the buffers
+    /// are stopped (which releases any producer parked on a full buffer) and
+    /// the error says how many messages never reached the broker, rather than
+    /// letting them disappear quietly.
     pub async fn close(&self) -> Result<()> {
-        self.inner.buffers.flush_all().await?;
-        Ok(())
+        let flushed =
+            tokio::time::timeout(CLOSE_FLUSH_TIMEOUT, self.inner.buffers.flush_all_retrying())
+                .await;
+
+        // Dropping the flush future above is cancel-safe: an in-flight batch
+        // goes back into its buffer, so `stop`'s count is the true tally.
+        let unsent = self.inner.buffers.stop();
+
+        match flushed {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(_) => {
+                tracing::error!(
+                    unsent,
+                    timeout_ms = CLOSE_FLUSH_TIMEOUT.as_millis() as u64,
+                    "close() gave up flushing buffered messages"
+                );
+                Err(Error::Invalid(format!(
+                    "close() could not flush {unsent} buffered message(s) within {:?}",
+                    CLOSE_FLUSH_TIMEOUT
+                )))
+            }
+        }
     }
 
     /// Flush buffers when SIGINT or SIGTERM arrives, then resolve.

@@ -22,6 +22,15 @@ from .utils.defaults import CLIENT_DEFAULTS
 from .utils.validation import validate_url, validate_urls
 
 
+# How long close() keeps retrying a push batch the broker will not take before
+# it gives up, reports how many messages were never sent, and lets the process
+# exit. The drain retries forever by design -- dropping a batch is the loss this
+# buffer was rewritten to remove -- but a SIGTERM grace period is finite, so the
+# shutdown path is the one place that must put a bound on it. 30s matches the
+# default request timeout and the usual Kubernetes grace period.
+CLOSE_FLUSH_TIMEOUT_SECONDS = 30.0
+
+
 class Queen:
     """Queen Message Queue Client - Version 2"""
 
@@ -641,17 +650,39 @@ class Queen:
         logger.log("Queen.close", "Starting shutdown")
         print("Closing Queen client...")
 
-        # Flush all buffers
+        # Flush all buffers, under a deadline. The drain retries a failed batch
+        # for as long as it is alive rather than dropping it, so an unreachable
+        # broker would otherwise keep this coroutine here forever; the timeout
+        # cancels the drains (each one re-queues its in-flight batch on the way
+        # out) and the count below says what never made it.
         try:
-            await self._buffer_manager.flush_all_buffers()
+            await asyncio.wait_for(
+                self._buffer_manager.flush_all_buffers(), CLOSE_FLUSH_TIMEOUT_SECONDS
+            )
             logger.log("Queen.close", "All buffers flushed")
             print("All buffers flushed")
+        except asyncio.TimeoutError:
+            unsent = self._buffer_manager.get_stats()["totalBufferedMessages"]
+            logger.error(
+                "Queen.close",
+                {
+                    "phase": "buffer-flush",
+                    "status": "timed-out",
+                    "timeout_seconds": CLOSE_FLUSH_TIMEOUT_SECONDS,
+                    "unsent_messages": unsent,
+                },
+            )
+            print(f"Gave up flushing buffers after {CLOSE_FLUSH_TIMEOUT_SECONDS}s: {unsent} message(s) not sent")
         except Exception as error:
             logger.error("Queen.close", {"error": str(error), "phase": "buffer-flush"})
             print(f"Error flushing buffers: {error}")
 
-        # Cleanup buffer manager
-        self._buffer_manager.cleanup()
+        # Cleanup buffer manager. Awaited: stopping a buffer has to wake the
+        # producers parked on its backpressure bound, and that wake needs the
+        # event loop (asyncio.Condition.notify_all is only callable while
+        # holding the condition's lock). Skipping the await would leave a
+        # blocked push hanging forever on a client that is already closed.
+        await self._buffer_manager.cleanup()
 
         # Close HTTP client
         await self._http_client.close()

@@ -138,6 +138,7 @@ async fn buffered_pushes_reach_the_broker_on_flush() {
     let b = q.queue(&queue).buffer(BufferOptions {
         message_count: 100,
         time: Duration::from_secs(60),
+        ..Default::default()
     });
     for n in 0..10 {
         let out = b.push(serde_json::json!({ "n": n })).await.unwrap();
@@ -169,6 +170,7 @@ async fn a_size_threshold_flushes_without_being_asked() {
     let b = q.queue(&queue).buffer(BufferOptions {
         message_count: 5,
         time: Duration::from_secs(60),
+        ..Default::default()
     });
     for n in 0..5 {
         b.push(serde_json::json!({ "n": n })).await.unwrap();
@@ -211,6 +213,7 @@ async fn a_time_threshold_flushes_the_buffer_and_then_re_arms() {
     let b = q.queue(&queue).buffer(BufferOptions {
         message_count: 1_000,
         time: Duration::from_millis(400),
+        ..Default::default()
     });
 
     b.push(serde_json::json!({ "n": 1 }))
@@ -268,6 +271,7 @@ async fn flush_buffer_sends_only_the_partition_it_was_asked_for() {
     let opts = BufferOptions {
         message_count: 1_000,
         time: Duration::from_secs(60),
+        ..Default::default()
     };
     let eu = q.queue(&queue).partition("eu").buffer(opts);
     let us = q.queue(&queue).partition("us").buffer(opts);
@@ -349,6 +353,7 @@ async fn close_flushes_whatever_the_buffers_still_hold() {
     let b = q.queue(&queue).buffer(BufferOptions {
         message_count: 1_000,
         time: Duration::from_secs(60),
+        ..Default::default()
     });
     for n in 0..3 {
         b.push(serde_json::json!({ "n": n }))

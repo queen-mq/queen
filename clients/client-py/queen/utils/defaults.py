@@ -56,5 +56,19 @@ POP_DEFAULTS: Dict[str, Any] = {
 BUFFER_DEFAULTS: Dict[str, Any] = {
     "message_count": 100,  # Flush after 100 messages
     "time_millis": 1000,  # Or flush after 1 second
+    # Backpressure bound: once this many messages are waiting, the add path
+    # BLOCKS until the flusher drains below it (4 x message_count).
+    # Measured motivation (2026-08-20): with no bound at all, a producer
+    # filling at 1.46M msg/s against a 1.0M msg/s flush pipeline accumulated
+    # 20.9M messages (11.7 GB RSS) in 45 seconds and lost every one of them at
+    # process exit, with zero client-side errors reported. 0 or absent resolves
+    # to this default, NOT to infinity: unbounded was the defect, so it is not
+    # expressible. See queen/buffer/message_buffer.py:resolve_buffer_options.
+    "max_size": 400,
+    # How long the flusher waits before retrying THE SAME batch after a failed
+    # POST. A failed batch is re-queued at the front of the buffer and never
+    # dropped, so with max_size above, a broker outage degrades into blocked
+    # producers and bounded memory instead of silent loss.
+    "retry_delay_millis": 250,
 }
 

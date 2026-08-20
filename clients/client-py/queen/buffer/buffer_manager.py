@@ -1,12 +1,21 @@
 """
 Buffer manager for client-side message buffering across queues
+
+Owns the registry of per-queue buffers and the drain loop that empties them
+into the broker. The two properties that matter, both explained at length in
+message_buffer.py:
+
+  - producers BLOCK at the buffer's max_size bound instead of growing the
+    process without limit, and
+  - a batch that fails to POST goes back at the front of its buffer and is
+    retried after retry_delay_millis; nothing is dropped on a failed flush.
 """
 
 import asyncio
-from typing import Any, Dict, Set
+from typing import Any, Dict, List, Optional, Set
 
+from ..errors import QueenError
 from ..utils import logger
-from ..utils.defaults import BUFFER_DEFAULTS
 from .message_buffer import MessageBuffer
 
 
@@ -22,169 +31,154 @@ class BufferManager:
         """
         self._http_client = http_client
         self._buffers: Dict[str, MessageBuffer] = {}  # queueAddress -> MessageBuffer
-        self._pending_flushes: Set[asyncio.Task[None]] = set()
+        self._pending_flushes: Set["asyncio.Task[None]"] = set()
         self._flush_count = 0
+        self._stopped = False
+        # Guards MUTATION of the _buffers registry only, and is never held
+        # across an await -- not the network, and above all not a buffer's
+        # backpressure gate. Holding it across a blocking add() would deadlock
+        # the client outright: the add cannot return until a drain frees
+        # capacity, and every other producer (and every other queue) would be
+        # queued behind the same lock in the meantime.
         self._lock = asyncio.Lock()
 
-    def add_message(
+    async def add_message(
         self, queue_address: str, formatted_message: Dict[str, Any], buffer_options: Dict[str, Any]
     ) -> None:
         """
-        Add message to buffer
+        Add message to buffer, BLOCKING while that buffer is at its max_size.
+
+        Awaitable, and every caller must await it: a dropped coroutine here is a
+        silent no-push, which is the same class of lie as the unbounded buffer
+        this replaced.
 
         Args:
             queue_address: Queue address (queue/partition)
             formatted_message: Formatted message dict
-            buffer_options: Buffer options
+            buffer_options: Buffer options (resolved by MessageBuffer; the
+                options of the FIRST push to an address configure the buffer for
+                its lifetime)
+
+        Raises:
+            QueenError: if the client has been closed
+            asyncio.CancelledError: if the caller cancels while blocked
         """
-        options = {**BUFFER_DEFAULTS, **buffer_options}
+        async with self._lock:
+            # A push after cleanup() would otherwise create a fresh buffer that
+            # nothing will ever drain: messages accepted into a client that is
+            # already closed, which is the same false success as the unbounded
+            # buffer. cleanup() only runs from close(), so this cannot fire on a
+            # live client.
+            if self._stopped:
+                raise QueenError(
+                    f"client is closed: message not buffered for {queue_address}"
+                )
 
-        if queue_address not in self._buffers:
-            logger.log("BufferManager.createBuffer", {"queue_address": queue_address, "options": options})
-            self._buffers[queue_address] = MessageBuffer(
-                queue_address, options, lambda addr: self._schedule_flush(addr)
-            )
+            buffer = self._buffers.get(queue_address)
+            if buffer is None:
+                buffer = MessageBuffer(queue_address, buffer_options, self._schedule_flush)
+                self._buffers[queue_address] = buffer
+                logger.log(
+                    "BufferManager.createBuffer",
+                    {"queue_address": queue_address, "options": buffer.options},
+                )
 
-        buffer = self._buffers[queue_address]
-        buffer.add(formatted_message)
-        logger.log("BufferManager.addMessage", {"queue_address": queue_address, "message_count": buffer.message_count})
+        # Outside the registry lock, deliberately: this call can park.
+        await buffer.add(formatted_message)
+        logger.log(
+            "BufferManager.addMessage",
+            {"queue_address": queue_address, "message_count": buffer.message_count},
+        )
 
-    def _schedule_flush(self, queue_address: str) -> asyncio.Task[None]:
+    def _schedule_flush(self, queue_address: str) -> Optional["asyncio.Task[None]"]:
         """
-        Schedule a flush (called from MessageBuffer timer)
+        Schedule a drain (called from MessageBuffer's timer, count threshold and
+        backpressure paths -- all of which are synchronous, so this must only
+        create the task and never await it).
 
         Args:
             queue_address: Queue address to flush
 
         Returns:
-            Task for the flush operation
+            The drain task, or None if the address has no buffer
         """
-        task = asyncio.create_task(self._flush_buffer(queue_address))
+        buffer = self._buffers.get(queue_address)
+        if buffer is None:
+            return None
+
+        task = asyncio.create_task(self._drain(queue_address, buffer))
+        # Keep a strong reference until it finishes. asyncio holds only a weak
+        # reference to a running task, so a fire-and-forget flush can be
+        # garbage collected mid-POST; _pending_flushes is also what
+        # flush_buffer/close wait on.
+        self._pending_flushes.add(task)
+        task.add_done_callback(self._pending_flushes.discard)
         return task
 
-    async def _flush_buffer(self, queue_address: str) -> None:
+    async def _drain(self, queue_address: str, buffer: MessageBuffer) -> None:
         """
-        Flush buffer for a queue address
+        Drain a buffer to the broker, batch by batch, until it is empty.
 
-        Args:
-            queue_address: Queue address to flush
-        """
-        async with self._lock:
-            buffer = self._buffers.get(queue_address)
-            if not buffer or buffer.message_count == 0:
-                logger.log("BufferManager.flushBuffer", {"queue_address": queue_address, "status": "empty"})
-                print(f"No buffer or empty buffer for {queue_address}")
-                return
-
-            logger.log("BufferManager.flushBuffer", {"queue_address": queue_address, "message_count": buffer.message_count})
-            print(f"Flushing {buffer.message_count} messages for {queue_address}")
-            buffer.set_flushing(True)
-
-        # Create a promise for this flush and track it
-        flush_promise = asyncio.create_task(self._do_flush(queue_address, buffer))
-        self._pending_flushes.add(flush_promise)
-
-        # Remove from pending when done
-        flush_promise.add_done_callback(lambda t: self._pending_flushes.discard(t))
-
-        await flush_promise
-
-    async def _do_flush(self, queue_address: str, buffer: MessageBuffer) -> None:
-        """
-        Actually perform the flush
+        One drain per buffer at a time (begin_flush is the claim). A batch that
+        fails to POST is re-queued at the front and retried after the buffer's
+        retry_delay_millis, for as long as the buffer is alive and this task is
+        not cancelled: an unreachable broker therefore shows up as blocked
+        producers and a bounded buffer, never as messages that quietly
+        disappeared.
 
         Args:
             queue_address: Queue address
-            buffer: MessageBuffer instance
+            buffer: The buffer to drain
         """
+        if not buffer.begin_flush():
+            return
+
         try:
-            messages = buffer.extract_messages()
+            while True:
+                batch = buffer.take_batch()
+                if not batch:
+                    return
 
-            print(f"Extracted {len(messages)} messages, sending to server...")
+                try:
+                    await self._http_client.post("/api/v1/push", {"items": batch})
+                except asyncio.CancelledError:
+                    # Cancellation is not delivery. Put the batch back before
+                    # unwinding, or a cancelled shutdown loses precisely what
+                    # the re-queue path exists to protect.
+                    buffer.requeue_front(batch)
+                    raise
+                except Exception as error:
+                    logger.error(
+                        "BufferManager.flushBuffer",
+                        {
+                            "queue_address": queue_address,
+                            "count": len(batch),
+                            "error": str(error),
+                            "action": "requeued",
+                        },
+                    )
+                    buffer.requeue_front(batch)
+                    if buffer.is_stopped:
+                        return
+                    # Sleep OUTSIDE any lock, then retake from the front: the
+                    # re-queued batch is at the head, so the retry sends the
+                    # same messages in the same order.
+                    await asyncio.sleep(buffer.retry_delay_seconds)
+                    continue
 
-            if not messages:
-                return
-
-            # Send to server
-            result = await self._http_client.post("/api/v1/push", {"items": messages})
-            print(f"Server responded: {len(result) if result else 'N/A'} items")
-
-            self._flush_count += 1
-            logger.log(
-                "BufferManager.flushBuffer",
-                {"queue_address": queue_address, "status": "success", "messages_sent": len(messages)},
-            )
-
-            # Remove empty buffer
-            async with self._lock:
-                if queue_address in self._buffers and self._buffers[queue_address].message_count == 0:
-                    del self._buffers[queue_address]
-
-        except Exception as error:
-            logger.error("BufferManager.flushBuffer", {"queue_address": queue_address, "error": str(error)})
-            print(f"Flush error for {queue_address}: {error}")
-            buffer.set_flushing(False)
-            raise
-
-    async def _flush_buffer_batch(self, queue_address: str, batch_size: int) -> None:
-        """
-        Flush a batch of messages from buffer
-
-        Args:
-            queue_address: Queue address
-            batch_size: Number of messages to flush
-        """
-        async with self._lock:
-            buffer = self._buffers.get(queue_address)
-            if not buffer or buffer.message_count == 0:
-                return
-
-            buffer.set_flushing(True)
-
-        # Create a promise for this flush and track it
-        flush_promise = asyncio.create_task(self._do_flush_batch(queue_address, buffer, batch_size))
-        self._pending_flushes.add(flush_promise)
-
-        # Remove from pending when done
-        flush_promise.add_done_callback(lambda t: self._pending_flushes.discard(t))
-
-        await flush_promise
-
-    async def _do_flush_batch(self, queue_address: str, buffer: MessageBuffer, batch_size: int) -> None:
-        """
-        Actually perform the batch flush
-
-        Args:
-            queue_address: Queue address
-            buffer: MessageBuffer instance
-            batch_size: Number of messages to flush
-        """
-        try:
-            messages = buffer.extract_messages(batch_size)
-
-            print(f"Extracted {len(messages)} messages, sending to server...")
-
-            if not messages:
-                return
-
-            # Send to server
-            result = await self._http_client.post("/api/v1/push", {"items": messages})
-            print(f"Server responded: {len(result) if result else 'N/A'} items")
-
-            self._flush_count += 1
-
-            # Remove empty buffer if no more messages
-            async with self._lock:
-                if queue_address in self._buffers:
-                    if self._buffers[queue_address].message_count == 0:
-                        del self._buffers[queue_address]
-                    else:
-                        self._buffers[queue_address].set_flushing(False)
-
-        except Exception as error:
-            print(f"Flush error for {queue_address}: {error}")
-            buffer.set_flushing(False)
-            raise
+                self._flush_count += 1
+                logger.log(
+                    "BufferManager.flushBuffer",
+                    {
+                        "queue_address": queue_address,
+                        "status": "success",
+                        "messages_sent": len(batch),
+                    },
+                )
+                # Capacity freed: wake the producers parked on max_size.
+                await buffer.notify_drained()
+        finally:
+            await buffer.end_flush()
 
     async def flush_buffer(self, queue_address: str) -> None:
         """
@@ -201,65 +195,57 @@ class BufferManager:
                 "pending_flushes": len(self._pending_flushes),
             },
         )
-        print(f"flushBuffer called for address: {queue_address}")
-        print(f"Active buffers: {list(self._buffers.keys())}")
-        print(f"Pending flushes: {len(self._pending_flushes)}")
 
-        async with self._lock:
-            buffer = self._buffers.get(queue_address)
-            if not buffer:
-                logger.log("BufferManager.flushBuffer", {"queue_address": queue_address, "status": "not-found"})
-                print(f"No buffer found for {queue_address}")
-                await self._wait_for_pending_flushes()
+        buffer = self._buffers.get(queue_address)
+        if buffer is None:
+            logger.log(
+                "BufferManager.flushBuffer",
+                {"queue_address": queue_address, "status": "not-found"},
+            )
+            await self._wait_for_pending_flushes()
+            return
+
+        buffer.cancel_timer()
+
+        while True:
+            # If a drain was already in flight, _drain returns immediately (it
+            # cannot claim the buffer) and the wait below is what actually
+            # blocks until that drain is done. Re-check afterwards, because
+            # messages added while it was finishing are still ours to flush.
+            await self._drain(queue_address, buffer)
+            await self._wait_for_pending_flushes()
+            if buffer.message_count == 0 or buffer.is_stopped:
                 return
 
-            # Cancel timer to prevent time-based flush
-            buffer.cancel_timer()
-
-            # Get the batch size from buffer options
-            batch_size = buffer.options["message_count"]
-
-        # Flush all messages in batches
-        while True:
-            async with self._lock:
-                buffer = self._buffers.get(queue_address)
-                if not buffer or buffer.message_count == 0:
-                    break
-
-            print(f"Flushing batch of up to {batch_size} messages ({buffer.message_count} remaining)")
-            await self._flush_buffer_batch(queue_address, batch_size)
-
-        # Wait for all pending flushes to complete
-        await self._wait_for_pending_flushes()
-
-        print(f"flushBuffer completed for {queue_address}")
-
     async def flush_all_buffers(self) -> None:
-        """Flush all buffers"""
-        async with self._lock:
-            queue_addresses = list(self._buffers.keys())
+        """
+        Flush all buffers.
+
+        With an unreachable broker this retries until it is cancelled -- the
+        drain never gives up on a batch, since the alternative is the silent
+        loss this module was rewritten to remove. Callers that need a bounded
+        shutdown wrap it in asyncio.wait_for; Queen.close() does exactly that
+        (CLOSE_FLUSH_TIMEOUT_SECONDS) and reports what was left unsent, so a
+        dead broker ends a shutdown loudly instead of hanging it.
+        """
+        queue_addresses = list(self._buffers.keys())
 
         logger.log(
             "BufferManager.flushAllBuffers",
             {"buffer_count": len(queue_addresses), "pending_flushes": len(self._pending_flushes)},
         )
-        print(f"flushAllBuffers called, pending flushes: {len(self._pending_flushes)}")
 
-        # Flush each buffer
         for queue_address in queue_addresses:
             await self.flush_buffer(queue_address)
 
         logger.log("BufferManager.flushAllBuffers", {"status": "completed"})
-        print("flushAllBuffers completed")
 
     async def _wait_for_pending_flushes(self) -> None:
         """Wait for all pending flush tasks"""
-        if not self._pending_flushes:
+        pending = list(self._pending_flushes)
+        if not pending:
             return
-
-        print(f"Waiting for {len(self._pending_flushes)} pending flushes...")
-        await asyncio.gather(*list(self._pending_flushes), return_exceptions=True)
-        print("All pending flushes completed")
+        await asyncio.gather(*pending, return_exceptions=True)
 
     def get_stats(self) -> Dict[str, Any]:
         """
@@ -286,10 +272,30 @@ class BufferManager:
         logger.log("BufferManager.getStats", stats)
         return stats
 
-    def cleanup(self) -> None:
-        """Cleanup all buffers"""
-        logger.log("BufferManager.cleanup", {"buffer_count": len(self._buffers)})
-        for buffer in self._buffers.values():
-            buffer.cleanup()
-        self._buffers.clear()
+    async def cleanup(self) -> None:
+        """
+        Stop and discard every buffer.
 
+        Awaitable because stopping a buffer has to WAKE the producers parked on
+        its bound (asyncio.Condition.notify_all needs the lock, so the wake must
+        come from a coroutine). Shutdown that left a parked add hanging would
+        turn a bounded buffer into a hung client.
+        """
+        logger.log("BufferManager.cleanup", {"buffer_count": len(self._buffers)})
+        self._stopped = True
+
+        buffers: List[MessageBuffer] = list(self._buffers.values())
+        self._buffers.clear()
+        for buffer in buffers:
+            await buffer.cleanup()
+
+        # Stopped buffers make the drain loops unwind at their next check, but a
+        # drain sitting in a POST (or in its retry sleep) would outlive the
+        # client; cancel them and let the CancelledError handler in _drain put
+        # its batch back into a buffer that is being discarded anyway.
+        pending = list(self._pending_flushes)
+        self._pending_flushes.clear()
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)

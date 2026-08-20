@@ -17,6 +17,12 @@ import { CLIENT_DEFAULTS } from './utils/defaults.js'
 import { validateUrl, validateUrls } from './utils/validation.js'
 import * as logger from './utils/logger.js'
 
+// How long close() keeps retrying a push batch the broker will not take before
+// it gives up, logs how many messages were never sent, and lets the process
+// exit. Matches CLIENT_DEFAULTS.timeoutMillis and the usual 30s SIGTERM grace:
+// long enough to ride out a broker restart, short enough that shutdown ends.
+const CLOSE_FLUSH_DEADLINE_MILLIS = 30000
+
 // Both /api/v1/ack and /api/v1/ack/batch respond with a top-level JSON array,
 // one item per acknowledgment in request order:
 //   [{index, transactionId, success, error, queueName, partitionName, leaseReleased, dlq}]
@@ -596,9 +602,13 @@ export class Queen {
   async close() {
     logger.log('Queen.close', 'Starting shutdown')
 
-    // Flush all buffers
+    // Flush all buffers, with a deadline. The flusher retries a failed batch
+    // forever rather than dropping it, which is right while the process is
+    // running and wrong on the way out: a SIGTERM grace period is finite, so
+    // shutdown stops retrying after CLOSE_FLUSH_DEADLINE_MILLIS and reports
+    // what is left instead of hanging until the runtime is killed.
     try {
-      await this.#bufferManager.flushAllBuffers()
+      await this.#bufferManager.flushAllBuffers({ deadlineMillis: CLOSE_FLUSH_DEADLINE_MILLIS })
       logger.log('Queen.close', 'All buffers flushed')
     } catch (error) {
       logger.error('Queen.close', { error: error.message, phase: 'buffer-flush' })

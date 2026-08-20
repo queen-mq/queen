@@ -154,7 +154,7 @@ configuration every time ([Queue options](/reference/queue-options/)).
 
 | Method | Notes |
 | --- | --- |
-| `buffer(array $options)` | `['messageCount' => 100, 'timeMillis' => 1000]`. Turns `push()` into an enqueue. |
+| `buffer(array $options)` | `messageCount` / `timeMillis` / `maxSize` / `retryDelayMillis` / `maxWaitMillis`, defaults `100` / `1000` / `4 * messageCount` / `250` / `5000`. Turns `push()` into a bounded enqueue. |
 | `push(array $payload): PushBuilder` | One item array or a list of them. Throws `RuntimeException` with no queue name. |
 
 Each item may carry `data`, `payload`, or be the payload itself. The client mints a UUIDv7
@@ -167,7 +167,10 @@ a UUID. A malformed value is sent as-is and rejected by the broker.
 
 `PushBuilder` exposes `onSuccess(Closure)`, `onError(Closure)`, `onDuplicate(Closure)` and
 `execute(): mixed`. `execute()` returns the broker's per-item array for a direct push; a buffered
-push returns immediately without sending.
+push returns without sending once the buffer accepts the message. At `maxSize` waiting messages
+the add flushes inline and keeps retrying under a `maxWaitMillis` deadline; if the deadline
+expires it throws `RuntimeException` and the message was **not** accepted. PHP has no background
+flusher to wait on, which is why the bound is a deadline here rather than an open-ended park.
 
 ```php
 $queen->queue('orders')
@@ -259,6 +262,12 @@ $message['trace'](['traceName' => 'tenant-acme', 'eventType' => 'info', 'data' =
 with no queue name. Buffers are keyed on `"<queue>/<partition>"`, so builders addressing the same
 pair share one. A buffer flushes at `messageCount` messages or `timeMillis` after its first
 message.
+
+The buffer is bounded and lossless under errors. A batch whose POST fails is restored to the
+front of the buffer, in order, and retried after `retryDelayMillis`; it is never dropped. At
+`maxSize` waiting messages an add flushes inline under the `maxWaitMillis` deadline and throws
+if it expires, so a broker outage surfaces as an exception with everything still queued, not as
+silent loss.
 
 ### Dead-letter queue
 

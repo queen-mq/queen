@@ -56,14 +56,33 @@ class PushBuilder
         // Client-side buffering
         if ($this->bufferOptions !== null) {
             $queueAddress = "{$this->queueName}/{$this->partition}";
-            foreach ($this->formattedItems as $item) {
-                $this->bufferManager->addMessage($queueAddress, $item, $this->bufferOptions);
+
+            // addMessage applies backpressure now: it can raise because the
+            // buffer is at its maxSize bound (the message was refused), or
+            // because the inline flush it triggered could not land inside
+            // maxWaitMillis (the message is buffered, but undelivered). Either
+            // way it is UNCONFIRMED, and reporting the whole batch as buffered
+            // would be exactly the false success this fix removes — so count
+            // only the adds that returned, and hand the rest to onError.
+            $accepted = [];
+            try {
+                foreach ($this->formattedItems as $item) {
+                    $this->bufferManager->addMessage($queueAddress, $item, $this->bufferOptions);
+                    $accepted[] = $item;
+                }
+            } catch (\Throwable $error) {
+                $unconfirmed = array_slice($this->formattedItems, count($accepted));
+                if ($this->onErrorCallback !== null) {
+                    ($this->onErrorCallback)($unconfirmed, $error);
+                    return null;
+                }
+                throw $error;
             }
 
-            $result = ['buffered' => true, 'count' => count($this->formattedItems)];
+            $result = ['buffered' => true, 'count' => count($accepted)];
 
             if ($this->onSuccessCallback !== null) {
-                ($this->onSuccessCallback)($this->formattedItems);
+                ($this->onSuccessCallback)($accepted);
             }
 
             return $result;

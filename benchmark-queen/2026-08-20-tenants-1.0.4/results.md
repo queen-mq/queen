@@ -230,3 +230,71 @@ paga 1 commit per messaggio: 29,5k req/s → 10k commit/s totali.
 Caveat: il loader (8 core) era al ~65% — questo e' un PAVIMENTO del broker, non
 il tetto (la VM broker aveva 15 core liberi). Disco 131 µs, WALWrite-bound: su
 disco classe-luglio (95 µs) il numero sale.
+
+## Extra 2 — il buffer del client (il "linger" di Kafka), misurato: 5 ms
+
+Stesso identico shape di chiamata del test req/s grezzi — `Push().Execute()` un
+messaggio alla volta, client Go in-tree — ma con `BufferConfig{MessageCount:
+200, TimeMillis: 5}` e 32 producer (una partizione ciascuno). `bufload/` in
+2026-08-20-gate/.
+
+| | grezzo (batch 1) | **buffer 5 ms / 200** |
+|---|--:|--:|
+| send() del client | 29.500/s | **556.380/s (19x)** |
+| messaggi totali (45-120 s) | 3,5M | **25.037.659** |
+| persi | 0 | **0 — verificato per CONTEGGIO: depth = 25.037.659 esatti** |
+| PG + broker CPU | 12,2 + 4,4 core | **1,8 + 1,8 core** |
+| commit/s | 10.043 | 2.815 (flush da ~200) |
+
+19x la portata a UN SETTIMO della CPU totale: il buffer trasforma il client
+non-batchante nel client batchato senza cambiare una riga del codice chiamante.
+E' l'equivalente del linger.ms di Kafka, gia' nel prodotto (JS/Rust/Go).
+
+Avvertenze: payload piccolo (~20 B contro i 256 B del test grezzo — il
+confronto e' sul CALL SHAPE, non byte-normalizzato); fire-and-forget — un crash
+del client perde fino a MessageCount messaggi per lane (qui la parita' esatta
+19x prova zero perdita in esercizio normale, non sotto crash); ttl/maxSize/
+retryDelay del buffer restano INERTI (difetto confermato 2026-08-05). Bonus: la
+parita' esatta a 25M messaggi e' anche una verifica live dell'endpoint /depth.
+
+### Loader a 32 core: 1,0M msg/s REALI di ingest — e un difetto vero del buffer client
+
+Rerun con il loader ridimensionato a 32c: `send()` del client **1.460.934/s**
+(66.089.164 in 45 s, zero errori), broker a **6,2 core totali** (PG 2,9 +
+queen 3,2), WALWrite 55%. MA il conteggio esatto via /depth dice **45.154.780**:
+il broker ha ingerito **~1,00M msg/s** — il resto (20,9M, il 31,7%) e' rimasto
+NEL BUFFER DEL CLIENT (RSS del loader: 12,4 GB) ed e' morto con il processo.
+
+Due letture, entrambe importanti:
+
+1. **Il milestone regge: un milione di messaggi al secondo di ingest reale,
+   sostenuto, su 6,2 core broker-side, zero errori.** Il collo non e' ancora il
+   broker (80% idle).
+2. **DIFETTO CLIENT CONFERMATO CON NUMERI**: il buffer Go non ha backpressure.
+   `Execute()` accoda sempre; quando il fill (1,46M/s) supera il drain (1,0M/s)
+   il buffer cresce senza limite (12,4 GB in 45 s) e i messaggi non flushati si
+   perdono all'uscita SENZA alcun errore client-side. E' l'item "maxSize
+   inerte" dell'audit difetti 2026-08-05, reso concreto: maxSize E' la
+   backpressure mancante. Il fix: Execute() deve bloccare (o rifiutare) quando
+   il buffer supera maxSize. La parita' esatta del run a 556k/s era
+   equilibrio fill≈drain, non una garanzia.
+
+### Il fix backpressure (client Go), verificato sotto lo stesso carico
+
+`MaxSize` = bound bloccante su Add (default 4x MessageCount, l'unbounded non e'
+piu' esprimibile) + batch falliti RI-ACCODATI in testa e ritentati dopo
+`RetryDelayMillis` (mai piu' scartati). Stesso identico carico di prima:
+
+| | rotto (unbounded) | **fixato (backpressure)** |
+|---|--:|--:|
+| send()/s del client | 1.460.934 (bugia: fill rate) | **881.148 (verita': blocca al bound)** |
+| conteggio broker | 45.154.780 su 66.089.164 (**-31,7%**) | **39.655.787 = 39.655.787 ESATTO** |
+| RSS del loader | 12,4 **GB** | **71 MB** |
+| CPU broker totale | 6,2 core | 5,0 core |
+| errori | 0 (e 20,9M persi in silenzio) | 0 (e zero persi, per conteggio) |
+
+**881k msg/s di ingest reale sostenuto, zero persi, memoria piatta.** Il ~12%
+sotto il drain teorico (1,0M) e' il costo di coordinamento del blocco/risveglio
+(Cond per batch); recuperabile con isteresi di wake (svegliare a meta' bound),
+rifinitura non bloccante. Design validato → da replicare su js/rust/py/php
+(rust ha in piu' da aggiungere il single-flight guard).

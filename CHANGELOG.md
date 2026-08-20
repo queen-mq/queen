@@ -3,6 +3,23 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## 1.0.6 (2026-08-20) — clients only
+
+**The client-side push buffer is now bounded, and a failed flush no longer loses messages.** In
+every SDK (Go, JavaScript, Rust, Python, PHP). Before this release the buffer grew without
+limit — a producer filling faster than the flush pipeline drains was measured accumulating 20.9M
+messages (11.7 GB of RSS) in 45 seconds and losing every one of them at process exit, with zero
+client-side errors reported — and a batch whose POST failed was dropped after a log line. Now
+`maxSize` (default `4 × messageCount`; unbounded is deliberately not expressible) makes the add
+path wait for the flusher in each language's idiom, and a failed batch is re-queued at the front
+of the buffer, in order, and retried every `retryDelay` until it lands. A broker outage shows up
+as blocked producers and bounded memory instead of silent loss. The formerly inert `maxSize` and
+`retryDelay` knobs now do exactly what they say; `close()` flushes under a 30 s deadline and
+reports anything left unsent. Same measured workload after the fix: 881k msg/s sustained with
+exact send/receive parity and 71 MB of RSS.
+
+The server stays at 1.0.5; this release bumps only the client packages.
+
 ## 1.0.3 (2026-08-18)
 
 **Key/value state and timers are part of the engine, not features to switch on.** There is no

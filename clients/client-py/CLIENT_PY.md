@@ -427,121 +427,26 @@ class LoadBalancer:
 
 ### 4. BufferManager & MessageBuffer
 
-**File:** `queen/buffer/buffer_manager.py`
+**Files:** `queen/buffer/buffer_manager.py`, `queen/buffer/message_buffer.py`
 
-```python
-import asyncio
-from typing import Dict, Any, Set
-from .message_buffer import MessageBuffer
-from ..utils.defaults import BUFFER_DEFAULTS
-from ..utils.logger import log, error as log_error
+The original plan sketched class skeletons here; the implementation has since moved past them
+(the 2026-08-20 backpressure rework changed the API surface), so the source files and their
+docstrings are the reference now. What the plan still owes you is the contract:
 
-class BufferManager:
-    """Buffer manager for client-side message buffering across queues"""
-    
-    def __init__(self, http_client: 'HttpClient'):
-        self._http_client = http_client
-        self._buffers: Dict[str, MessageBuffer] = {}  # queueAddress -> MessageBuffer
-        self._pending_flushes: Set[asyncio.Task] = set()
-        self._flush_count = 0
-        self._lock = asyncio.Lock()  # Protect buffer map
-        
-    def add_message(
-        self,
-        queue_address: str,
-        formatted_message: Dict[str, Any],
-        buffer_options: Dict[str, Any]
-    ) -> None:
-        """Add message to buffer"""
-        
-    async def _flush_buffer(self, queue_address: str) -> None:
-        """Flush buffer for a queue address"""
-        
-    async def _flush_buffer_batch(
-        self,
-        queue_address: str,
-        batch_size: int
-    ) -> None:
-        """Flush a batch of messages from buffer"""
-        
-    async def flush_buffer(self, queue_address: str) -> None:
-        """Flush all messages for a queue address"""
-        
-    async def flush_all_buffers(self) -> None:
-        """Flush all buffers"""
-        
-    async def _wait_for_pending_flushes(self) -> None:
-        """Wait for all pending flush tasks"""
-        
-    def get_stats(self) -> Dict[str, Any]:
-        """Get buffer statistics"""
-        
-    def cleanup(self) -> None:
-        """Cleanup all buffers"""
-```
-
-**File:** `queen/buffer/message_buffer.py`
-
-```python
-import asyncio
-from typing import List, Dict, Any, Callable, Optional
-import time
-
-class MessageBuffer:
-    """Message buffer for a single queue"""
-    
-    def __init__(
-        self,
-        queue_address: str,
-        options: Dict[str, Any],
-        flush_callback: Callable[[str], asyncio.Task]
-    ):
-        self._queue_address = queue_address
-        self._messages: List[Dict[str, Any]] = []
-        self._options = options
-        self._flush_callback = flush_callback
-        self._timer: Optional[asyncio.TimerHandle] = None
-        self._first_message_time: Optional[float] = None
-        self._flushing = False
-        
-    def add(self, formatted_message: Dict[str, Any]) -> None:
-        """Add message to buffer"""
-        
-    def extract_messages(self, batch_size: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Extract messages from buffer"""
-        
-    def set_flushing(self, value: bool) -> None:
-        """Set flushing state"""
-        
-    def force_flush(self) -> None:
-        """Force immediate flush"""
-        
-    def cancel_timer(self) -> None:
-        """Cancel the timer without triggering flush"""
-        
-    @property
-    def message_count(self) -> int:
-        """Get message count"""
-        
-    @property
-    def options(self) -> Dict[str, Any]:
-        """Get buffer options"""
-        
-    @property
-    def first_message_age(self) -> float:
-        """Get age of first message in milliseconds"""
-        
-    def cleanup(self) -> None:
-        """Cleanup buffer"""
-```
+- `MessageBuffer.add()` is **async** and applies backpressure: at `max_size` waiting messages
+  (default `4 * message_count`, unbounded not expressible) it parks on an `asyncio.Condition`
+  until the flusher drains below the bound. Cancellation propagates as `CancelledError`.
+- A batch whose POST fails is restored to the **front** of the buffer, in order, and retried
+  every `retry_delay_millis` (default 250 ms); it is never dropped.
+- Flushes are single-flight per buffer, and flush tasks are strongly referenced (asyncio keeps
+  only weak refs to fire-and-forget tasks, so an unreferenced flush could be collected mid-POST).
+- `close()` flushes with a 30 s deadline (`CLOSE_FLUSH_TIMEOUT_SECONDS` in `client.py`) and
+  reports what was left unsent.
 
 **Key Implementation Notes:**
-- Use `asyncio.TimerHandle` for time-based flush (not `setTimeout`)
-- Use `asyncio.Lock` to protect buffer map in BufferManager
-- Track pending flushes as `asyncio.Task` objects in a Set
+- Use `asyncio.Condition` for the backpressure bound (the direct `sync.Cond` analogue)
+- Timer callback: use `loop.call_later(seconds, callback)`; cancel with `timer_handle.cancel()`
 - Use `time.time()` for timestamps (seconds), convert to ms when needed
-- Timer callback: Use `loop.call_later(seconds, callback)`
-- Cancel timer: `timer_handle.cancel()`
 
 ---
 

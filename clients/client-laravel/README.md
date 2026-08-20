@@ -109,6 +109,25 @@ $queen->queue('orders')->flushBuffer();
 $queen->flushAllBuffers();
 ```
 
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `messageCount` | `100` | Flush once this many messages are waiting. Also the batch size of a flush. |
+| `timeMillis` | `1000` | Flush once the oldest waiting message is this old. Checked on the add path, since PHP has no background timer. |
+| `maxSize` | `4 * messageCount` | Backpressure bound. At the bound the add flushes inline instead of appending, and raises if it cannot. `0` means the default, not unbounded. |
+| `retryDelayMillis` | `250` | Wait before retrying a batch that failed to send. The batch goes back at the front of the buffer, in order — never dropped. |
+| `maxWaitMillis` | `5000` | Total deadline for the inline retry loop of one flush. On expiry the push raises with the messages still queued. |
+
+The buffer is bounded and pushes back: a producer that outruns the broker gets
+a slower push, then an exception, never a silently growing heap. Buffered
+pushes can therefore throw — `->onError(...)` receives the items that were not
+confirmed, and `['buffered' => true, 'count' => N]` reports only the messages
+the buffer actually took.
+
+`maxWaitMillis` exists in this SDK and not in the Go/JS/Rust ones because PHP
+has no background flusher to wait on: the flush runs inline in the caller's
+request, so the wait needs a deadline that stays inside `max_execution_time`.
+Lower it for web requests, raise it for CLI workers.
+
 ### Pop Messages
 
 ```php

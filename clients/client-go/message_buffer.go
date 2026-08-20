@@ -14,6 +14,10 @@ type MessageBuffer struct {
 	onFlushComplete func()
 
 	mu              sync.Mutex
+	// notFull is signalled by the flusher every time it drains a batch, so
+	// Adds blocked on the MaxSize backpressure bound can re-check. It shares
+	// mu, which Wait releases while parked.
+	notFull         *sync.Cond
 	items           []PushItem
 	firstAddTime    time.Time
 	timer           *time.Timer
@@ -36,20 +40,71 @@ func NewMessageBuffer(key string, config BufferConfig, flushFn FlushFunc, onFlus
 	if config.TimeMillis == 0 {
 		config.TimeMillis = BufferDefaults.TimeMillis
 	}
+	// MaxSize 0 = bounded DEFAULT, not unbounded: the unbounded buffer was
+	// the defect (see BufferConfig.MaxSize), so opting out of backpressure
+	// is not expressible. The floor keeps MaxSize sane when a caller sets a
+	// MessageCount above their MaxSize.
+	if config.MaxSize <= 0 {
+		config.MaxSize = 4 * config.MessageCount
+	}
+	if config.MaxSize < config.MessageCount {
+		config.MaxSize = config.MessageCount
+	}
+	if config.RetryDelayMillis <= 0 {
+		config.RetryDelayMillis = BufferDefaults.RetryDelayMillis
+	}
 
-	return &MessageBuffer{
+	mb := &MessageBuffer{
 		key:             key,
 		config:          config,
 		flushFn:         flushFn,
 		onFlushComplete: onFlushComplete,
 		items:           make([]PushItem, 0),
 	}
+	mb.notFull = sync.NewCond(&mb.mu)
+	return mb
 }
 
 // Add adds items to the buffer.
 // Triggers flush if count threshold is reached or timer expires.
+//
+// BACKPRESSURE: once the buffer holds MaxSize messages, Add blocks until the
+// flusher drains below the bound or ctx is cancelled. Without this, a producer
+// that fills faster than the flush pipeline drains grows process memory
+// without limit and every unflushed message dies with the process — measured
+// as 20.9M messages lost in 45s at 1.46M adds/s vs 1.0M flush/s, with zero
+// errors reported anywhere. Blocking the producer at the bound is the sound
+// behavior: the send rate degrades to the drain rate instead of lying.
 func (mb *MessageBuffer) Add(ctx context.Context, items []PushItem) error {
+	// Wake blocked Adds when the caller's context dies, so cancellation is
+	// honored even while parked on the condition variable.
+	stopWake := context.AfterFunc(ctx, func() {
+		mb.mu.Lock()
+		mb.mu.Unlock()
+		mb.notFull.Broadcast()
+	})
+	defer stopWake()
+
 	mb.mu.Lock()
+
+	for len(mb.items) >= mb.config.MaxSize && !mb.stopped {
+		if ctx.Err() != nil {
+			mb.mu.Unlock()
+			return ctx.Err()
+		}
+		// A blocked Add means producers outran the flusher; make sure one is
+		// actually running (the timer may be far away) before parking.
+		if !mb.flushing {
+			go func() {
+				if err := mb.Flush(context.Background()); err != nil {
+					logError("MessageBuffer.backpressureFlush", map[string]interface{}{
+						"key": mb.key, "error": err.Error(),
+					})
+				}
+			}()
+		}
+		mb.notFull.Wait()
+	}
 
 	if mb.stopped {
 		mb.mu.Unlock()
@@ -119,21 +174,27 @@ func (mb *MessageBuffer) Flush(ctx context.Context) error {
 		mb.timer = nil
 	}
 
-	// Extract items in batches
+	// Extract items in batches. A batch that fails to send is RE-QUEUED at
+	// the front and retried after RetryDelayMillis — never dropped. Before
+	// this, the batch was sliced off before the send and an error only
+	// logged: up to MessageCount messages silently vanished per failed POST.
+	// Combined with the MaxSize bound in Add, a broker outage now means
+	// blocked producers and bounded memory instead of silent loss.
 	var lastErr error
-	for len(mb.items) > 0 {
-		// Get batch
+	for len(mb.items) > 0 && !mb.stopped {
+		// Get batch — copied out, because re-queueing an aliased slice after
+		// mb.items has been re-sliced would corrupt the backing array.
 		batchSize := mb.config.MessageCount
 		if batchSize > len(mb.items) {
 			batchSize = len(mb.items)
 		}
-		batch := mb.items[:batchSize]
+		batch := make([]PushItem, batchSize)
+		copy(batch, mb.items[:batchSize])
 		mb.items = mb.items[batchSize:]
 
 		// Release lock during flush
 		mb.mu.Unlock()
 
-		// Flush batch
 		if err := mb.flushFn(ctx, batch); err != nil {
 			logError("MessageBuffer.Flush", map[string]interface{}{
 				"key":   mb.key,
@@ -141,16 +202,36 @@ func (mb *MessageBuffer) Flush(ctx context.Context) error {
 				"error": err.Error(),
 			})
 			lastErr = err
-		} else {
-			logDebug("MessageBuffer.Flush", map[string]interface{}{
-				"key":   mb.key,
-				"count": len(batch),
-			})
+
+			// Put the batch back at the head (ordering preserved), then wait
+			// out the retry delay OUTSIDE the lock. Occupancy may overshoot
+			// MaxSize by this one batch — documented on the config.
+			mb.mu.Lock()
+			mb.items = append(batch, mb.items...)
+			mb.mu.Unlock()
+
+			select {
+			case <-ctx.Done():
+				mb.mu.Lock()
+				mb.flushing = false
+				mb.mu.Unlock()
+				mb.notFull.Broadcast()
+				return ctx.Err()
+			case <-time.After(time.Duration(mb.config.RetryDelayMillis) * time.Millisecond):
+			}
+			mb.mu.Lock()
+			continue
 		}
 
+		logDebug("MessageBuffer.Flush", map[string]interface{}{
+			"key":   mb.key,
+			"count": len(batch),
+		})
 		if mb.onFlushComplete != nil {
 			mb.onFlushComplete()
 		}
+		// Capacity freed: wake producers parked on the MaxSize bound.
+		mb.notFull.Broadcast()
 
 		// Reacquire lock
 		mb.mu.Lock()
@@ -159,6 +240,7 @@ func (mb *MessageBuffer) Flush(ctx context.Context) error {
 	mb.flushing = false
 	mb.firstAddTime = time.Time{}
 	mb.mu.Unlock()
+	mb.notFull.Broadcast()
 
 	return lastErr
 }
@@ -179,16 +261,17 @@ func (mb *MessageBuffer) GetStats() bufferStats {
 	return stats
 }
 
-// Stop stops the buffer and prevents further operations.
+// Stop stops the buffer and prevents further operations. Wakes any Adds
+// parked on the backpressure bound so they return instead of hanging.
 func (mb *MessageBuffer) Stop() {
 	mb.mu.Lock()
-	defer mb.mu.Unlock()
-
 	mb.stopped = true
 	if mb.timer != nil {
 		mb.timer.Stop()
 		mb.timer = nil
 	}
+	mb.mu.Unlock()
+	mb.notFull.Broadcast()
 }
 
 // Count returns the number of items in the buffer.

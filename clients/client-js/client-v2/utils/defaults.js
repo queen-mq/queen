@@ -75,6 +75,20 @@ export const POP_DEFAULTS = {
 
 export const BUFFER_DEFAULTS = {
   messageCount: 100,                   // Flush after 100 messages
-  timeMillis: 1000                     // Or flush after 1 second
+  timeMillis: 1000,                    // Or flush after 1 second
+  // Backpressure bound: once this many messages are waiting, a buffered push
+  // WAITS for the flusher to drain below it instead of growing the heap. 0 (or
+  // absent) means 4 x messageCount -- "unbounded" is deliberately not
+  // expressible, because unbounded was the defect. Measured motivation
+  // (2026-08-20): without a bound, a producer filling at 1.46M msg/s against a
+  // 1.0M msg/s flush pipeline accumulated 20.9M messages (11.7 GB) in 45
+  // seconds and lost every one of them at process exit, with zero client-side
+  // errors. The bound is approximate: a batch that fails to send is put back,
+  // so occupancy can briefly overshoot by up to one messageCount.
+  maxSize: 400,
+  // How long the flusher waits before retrying a batch whose POST failed. The
+  // batch is re-queued at the front of the buffer and retried until it lands
+  // (or the buffer is stopped) -- never dropped. 0 means 250.
+  retryDelayMillis: 250
 }
 

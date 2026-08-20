@@ -76,18 +76,42 @@ class PushBuilder:
             },
         )
 
-        # Client-side buffering
+        # Client-side buffering.
+        #
+        # add_message is AWAITED, and must be: it blocks while the buffer sits
+        # at its max_size bound, which is the only thing standing between a
+        # producer that outruns the flush pipeline and a process that grows
+        # until it dies with every unflushed message inside it. Dropping the
+        # coroutine here instead of awaiting it would be a silent no-push.
+        #
+        # A cancelled or timed-out push therefore RAISES rather than reporting
+        # {"buffered": True}; because the items are handed over one at a time,
+        # an earlier prefix of this push may already be buffered when that
+        # happens (the Go reference appends a whole push atomically, this SDK's
+        # add_message is per message).
         if self._buffer_options:
-            for item in self._formatted_items:
-                queue_address = f"{self._queue_name}/{self._partition}"
-                self._buffer_manager.add_message(queue_address, item, self._buffer_options)
+            queue_address = f"{self._queue_name}/{self._partition}"
+            accepted: List[Dict[str, Any]] = []
+            try:
+                for item in self._formatted_items:
+                    await self._buffer_manager.add_message(queue_address, item, self._buffer_options)
+                    accepted.append(item)
+            except Exception as error:
+                # Report the items the buffer did NOT take, the same way the
+                # immediate push below reports rejected ones. Counting them as
+                # buffered would be the false success this bound removes.
+                unbuffered = self._formatted_items[len(accepted):]
+                if self._on_error_callback:
+                    await self._on_error_callback(unbuffered, error)
+                    return None
+                raise
 
-            result = {"buffered": True, "count": len(self._formatted_items)}
+            result = {"buffered": True, "count": len(accepted)}
 
-            logger.log("PushBuilder.execute", {"status": "buffered", "count": len(self._formatted_items)})
+            logger.log("PushBuilder.execute", {"status": "buffered", "count": len(accepted)})
 
             if self._on_success_callback:
-                await self._on_success_callback(self._formatted_items)
+                await self._on_success_callback(accepted)
 
             return result
 

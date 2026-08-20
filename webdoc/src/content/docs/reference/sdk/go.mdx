@@ -111,8 +111,9 @@ connections is never taken out of rotation, so the load balancer keeps handing i
 
 <Aside type="note">
 The Go client installs no signal handlers. `Close(ctx)` is the only thing that flushes buffers,
-so call it from your own shutdown path, and check its error, because a failed flush means the
-buffered messages were never sent.
+so call it from your own shutdown path, and check its error: a failed final flush leaves the
+batch in the buffer rather than dropping it, but a process that exits then loses it all the
+same, so an error from `Close` means the buffered messages were never sent.
 </Aside>
 
 ### `Ack`
@@ -185,7 +186,7 @@ is what you sent plus the broker's default for everything you did not.
 
 | Method | Notes |
 | --- | --- |
-| `Buffer(config BufferConfig)` | `{MessageCount, TimeMillis}`; `BufferDefaults` is `100` / `1000`. Turns `Push` into an enqueue. |
+| `Buffer(config BufferConfig)` | `{MessageCount, TimeMillis, MaxSize, RetryDelayMillis}`; `BufferDefaults` is `100` / `1000` / `400` / `250`. Turns `Push` into a bounded enqueue. |
 | `Push(payload interface{}) *PushBuilder` | `payload` is one value or a slice. |
 
 `*PushBuilder`:
@@ -285,6 +286,13 @@ than performing a request.
 exposes `Add`, `Flush(ctx, key)`, `FlushAll(ctx)`, `GetStats() BufferStats`, `GetBuffer(key)` and
 `Clear()`. `BufferStats` carries `ActiveBuffers`, `TotalBufferedMessages`, `OldestBufferAge` and
 `FlushesPerformed`.
+
+The buffer is bounded and lossless under errors. At `MaxSize` waiting messages (default
+`4 * MessageCount`), `Add` blocks, honoring its context, until the flusher drains below the
+bound. A batch whose POST fails goes back to the front of the buffer, in order, and is retried
+every `RetryDelayMillis`; it is never dropped, though occupancy can overshoot `MaxSize` by that
+one restored batch. A broker outage therefore shows up as blocked producers and a full buffer,
+not as silent loss.
 
 ### Dead-letter queue
 

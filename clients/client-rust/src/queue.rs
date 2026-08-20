@@ -253,7 +253,12 @@ impl QueueBuilder {
             let queue = self.require_queue()?;
             for item in items {
                 let addr = buffer::address(queue, &self.partition);
-                self.inner.buffers.add(addr, item, opts);
+                // Awaited: `add` is where the buffer's max_size backpressure is
+                // applied, so a buffered push resolves only once the message is
+                // actually IN the buffer. It returns an error instead of
+                // parking forever if the client is closing, and a caller that
+                // cannot afford to wait wraps this in `tokio::time::timeout`.
+                self.inner.buffers.add(addr, item, opts).await?;
             }
             // Buffered pushes have no per-item verdict yet — it arrives with the
             // flush. An empty result here means "accepted for batching", not
@@ -704,6 +709,7 @@ mod tests {
         let opts = BufferOptions {
             message_count: 100,
             time: Duration::from_secs(60),
+            ..Default::default()
         };
         let out = queen
             .queue("orders")
