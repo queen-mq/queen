@@ -202,13 +202,22 @@ kill switch and nothing else. Classifying it from the status would file it under
 `pool`, and an operator who had just pulled the lever would be told the cell was
 out of database connections.
 
-## Two families you cannot alert on
+## Two families that are gone
 
-`queen_queue_depth_total` and `queen_queue_depth_pending` appear in the
-exposition code, gated on a `queue_depth` key in the aggregator's JSON. No
-stored procedure in this tree produces that key, so neither family is present on
-a real scrape. Do not build a backlog alert on them; use
-`queen_queue_pop_lag_milliseconds` and the consumer-group lag endpoints instead.
+`queen_queue_depth_total` and `queen_queue_depth_pending` were formatted from a
+`queue_depth` key in the aggregator's JSON that no stored procedure in this tree
+has ever produced. Neither family was ever present on a real scrape, only in
+this reference, because the generator reads help strings out of the exposition
+code and cannot tell live code from dead. The exposition code was removed in
+1.1.0. Nothing an operator could see changes: a family with no samples is not in
+the exposition either way.
+
+There is no per-queue depth family to replace them with, and that is on purpose:
+depth under a delivery policy is a per-**group** number, not a per-queue one, and
+a conflating group's remaining work is not the queue's message count. Ask
+[`GET /api/v1/resources/queues/:queue/depth`](/reference/http/queues#get-apiv1resourcesqueuesqueuedepth) for
+it, per group, and alert on `queen_queue_pop_lag_milliseconds` and the
+consumer-group lag endpoints for backlog.
 
 `queen_dlq_depth` and `queen_dlq_depth_by_queue` do work: they count
 `queen.log_dlq` rows, cluster total and per queue name, with an index-only scan

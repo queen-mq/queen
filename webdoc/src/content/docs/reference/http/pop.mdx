@@ -53,6 +53,7 @@ query string, have access level **read-write**, and return the same response sha
 | `consumerGroup` | string | `__QUEUE_MODE__` | all three |
 | `subscriptionMode` | string | `new` (`DEFAULT_SUBSCRIPTION_MODE`) | all three |
 | `subscriptionFrom` | string | empty | all three |
+| `conflation` | boolean | `false` | all three |
 | `namespace` | string | empty | discovery only |
 | `task` | string | empty | discovery only |
 
@@ -86,6 +87,57 @@ over the pop-carried intent.
 The discovery route requires at least one of `namespace` and `task`. With neither, it returns
 `400` with `{"success":false,"error":"namespace or task is required","messages":[]}` rather than
 scanning every queue.
+
+## Conflation
+
+`conflation=true` asks for **last-value delivery**: a pop of a partition returns
+only that partition's newest visible message and commits everything below it when
+you ack. It is for command-style queues where one partition is one logical key and
+only the freshest "recompute X" matters. Under a backlog the handler runs once per
+partition instead of once per message, and nothing on disk is touched: retention
+still governs storage.
+
+The guarantee it keeps is the one that matters:
+
+> After the last push to a partition, at least one run of that partition's handler
+> **starts after that push commits**.
+
+The broker never commits past an offset it did not observe at pop time, so a
+message that becomes visible after the claim is still pending afterwards and the
+next pop delivers it.
+
+**It is a property of the consumer group, not of the call.** The first pop that
+registers the group on the queue persists the flag, and from then on the stored
+value wins for every consumer of that group. A later consumer that disagrees does
+not flip it: the stored policy is applied, and the response says so (see
+[the two conflation keys](#conflation-in-the-response)). Changing a group's policy
+means deleting and recreating the group. `/api/v1/configure` cannot set it: it is
+a group policy, which is exactly what lets `workers` conflate while `audit` on the
+same queue reads everything.
+
+`partitions` defaults to `1`, and a conflating pop yields at most one message per
+partition, so for a conflating group it is the partition cap, not `batch`, that
+sizes a call. The broker therefore reads `partitions` as `batch` when you leave it
+out, capped at **64**, which is the checkout width the engine is measured on. A
+conflating pop returns at most 64 messages per round trip whatever `batch` says.
+
+Two combinations are refused with `400` rather than warned about, because the
+silent version of each is unfixable in production:
+
+| Refused | Why |
+| --- | --- |
+| `conflation=true` with no `consumerGroup` | queue mode is a shared cursor with no group identity to hang a delivery policy on |
+| `conflation=true` with `autoAck=true` | auto-ack commits at delivery with no lease, so a failed handler loses the tail and the guarantee above degrades to at-most-once |
+
+Composition with `subscriptionMode` is deliberate in both directions: `all` plus
+conflation collapses the entire retained history to one message per partition
+("rebuild the world once, then stay current"), `new` plus conflation skips the
+history in the seed and delivers only live changes.
+
+Retries are unaffected. The retry budget lives on the `(partition, group)` row and
+is charged only by an explicit `failed` ack, so it survives supersession: a poison
+partition under a hot producer still dead-letters on schedule, and the message
+filed is the tail of the last attempt.
 
 One side effect to know about: a queue-scoped pop on a queue that does not exist **creates its
 `queen.queues` configuration row** (column defaults, `namespace` and `task` derived from the
@@ -135,6 +187,36 @@ consumer's queue name now leaves an empty queue behind rather than nothing.
 | `consumerGroup` | string | the group the pop used, `__QUEUE_MODE__` when you sent none |
 | `messages` | array | the delivered messages, in offset order within each partition |
 | `partitionsClaimed` | integer | how many partitions this call claimed |
+| `conflation` | boolean | present, and always `true`, only when this pop was served under [conflation](#conflation) |
+| `conflationConflict` | boolean | present, and always `true`, only when this request declared a conflation policy the group does not have |
+
+### Conflation in the response
+
+Both keys are emitted **only when true**, so a deployment that never asks for
+conflation gets byte-identical responses to a pre-1.1.0 broker's.
+
+`conflation` reports what the broker **applied**, never what the request asked
+for, and it rides every conflating response including empty ones. That is
+load-bearing: no SDK negotiates a version with the broker, so a client that sends
+`conflation=true` to an older broker has the parameter silently ignored and
+quietly drains the whole backlog one message at a time. The echo is the only
+evidence there is, and because it is present on empty pops the client can raise on
+its first round trip, before a single message is handled. Every SDK does exactly
+that: requested conflation, no echo, no explanation, and the consume loop stops
+with *"conflation was requested but this broker did not apply it, requires broker
+>= 1.1.0"*.
+
+`conflationConflict` is the explanation that keeps that check from firing on a
+disagreement. A group registered without conflation answers a `conflation=true`
+consumer with `conflationConflict` and no `conflation` echo: the request was
+understood, the stored policy won, the consumer keeps running and warns once. A
+reject would take down the already-correct half of a rolling deploy, which is why
+this is a warning and not an error.
+
+Because those keys have to reach the client, a response that has anything to say
+about conflation is a `200` with a body **even when it delivered nothing**: an
+empty conflating pop, and an empty conflicting pop, are both `200`. That is the
+steady state of a long-poll consumer on an idle queue, not an edge case.
 
 The top-level `partition` and `partitionId` describe only the first claimed partition. When a
 call claims several, they are **not** representative of the batch. Always ack using each
@@ -197,15 +279,29 @@ nothing to parse; check the status first. Three different situations all produce
    dropped along with the body. Consumers cannot distinguish a paused broker from an idle queue.
 3. The pop's stored procedure reported an error. The error text is discarded with the body.
 
+The one exception is a request that mentioned [conflation](#conflation). Dropping
+the body there would drop the echo the client uses to tell a 1.1.0 broker from an
+older one, and it would read the silence as a version mismatch and stop
+consuming, on an idle queue and on an operator's routine pop-maintenance pause.
+So a pop whose answer has anything to say about conflation keeps its `200` and its
+body:
+
+- an empty **conflating** pop: `{"messages":[],"conflation":true, ...}`
+- an empty **conflicting** pop: `{"messages":[],"conflationConflict":true, ...}`
+- pop maintenance, for a request that sent `conflation=true`:
+  `{"messages":[],"paused":true,"conflation":true}`, the only response where
+  `paused` reaches the client. It means "the pop never ran", not "the policy was
+  refused"
+
 Transport-level failures do come back with a body: `500` with `{"error":"pool"}` when no
 database connection is available, or `{"error":"pop failed"}` when the statement timed out and
 was cancelled.
 
 | Code | When |
 | --- | --- |
-| `200` | at least one message delivered |
+| `200` | at least one message delivered, or the answer carries a conflation key |
 | `204` | nothing delivered, pop maintenance, or a stored-procedure error (no body) |
-| `400` | discovery pop with neither `namespace` nor `task`; a query parameter that fails to deserialize |
+| `400` | discovery pop with neither `namespace` nor `task`; `conflation=true` without `consumerGroup` or with `autoAck=true`; a query parameter that fails to deserialize |
 | `403` | authentication is on and the token has no `read-write` role |
 | `500` | no pool connection, or a cancelled statement |
 

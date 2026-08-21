@@ -107,9 +107,25 @@ def check_pop_response(
     """Enforce the two rules above on one pop response.
 
     Raises ``ConflationUnsupportedError`` when conflation was requested and the
-    response does not carry the echo. A response that is not a dict at all
+    response says nothing about conflation at all. A response that is not a dict
     (empty body, 204) is treated the same way on purpose: absence of proof is
     not proof of application, and guessing here is what silence costs.
+
+    THE ORDER OF THE CHECKS IS THE CONTRACT, and it is the one every other SDK
+    keeps (Go ``checkConflationEcho``, PHP ``ConflationGuard``, JS
+    ``checkConflationResponse``, Rust ``check_conflation``): the CONFLICT key is
+    read first, because a conflict is a 1.1.0 broker answering "the group is
+    already registered the other way, my value wins" -- the opposite of an old
+    broker. The body a 1.1.0 broker sends for requested=true / stored=false is
+    ``{"messages": [...], "conflationConflict": true}`` with NO ``conflation``
+    key (it is emitted only when the effective policy IS conflating, §3.1), so
+    raising on the missing echo first would kill exactly the consumer §3.3 Q3
+    and §7.3 E2E-4 require to keep running -- and it would do it on that
+    consumer's first poll of an idle queue.
+
+    ``paused`` is likewise not a verdict: the broker refuses pops during pop
+    maintenance before the request ever reaches the claim path, so there is no
+    policy to echo and nothing to conclude from the absence of one.
 
     A no-op when ``requested`` is falsy -- the check keys off what THIS consumer
     asked for, never off the response alone, so a consumer that never opted in
@@ -119,8 +135,15 @@ def check_pop_response(
         return
 
     body: Dict[str, Any] = response if isinstance(response, dict) else {}
-    if body.get("conflation") is not True:
-        raise ConflationUnsupportedError(UNSUPPORTED_MESSAGE)
 
     if body.get("conflationConflict") is True:
         warn_conflict_once(queue, group)
+        return
+
+    if body.get("conflation") is True:
+        return
+
+    if body.get("paused") is True:
+        return
+
+    raise ConflationUnsupportedError(UNSUPPORTED_MESSAGE)

@@ -292,6 +292,36 @@ describe('conflation — declaration conflict', () => {
       assert.equal(messages.length, 1)
     })
   })
+
+  it('an EMPTY conflicting pop is answered 200-with-body and must not raise', async () => {
+    // The steady state of a disagreeing consumer, and the case the SDK cannot
+    // rescue on its own: this is a consumer's FIRST poll of an idle queue, so
+    // the knownConflicts memo below is empty and only the response can say what
+    // is going on. The broker keeps the 200 whenever the answer has anything to
+    // say about conflation (`pop_status`); if it ever regressed to a bodiless
+    // 204 here, every conflicting consumer would exit on its first poll.
+    const emptyConflict = ok({ messages: [], partitionsClaimed: 0, conflationConflict: true })
+    await withQueen([emptyConflict], emptyConflict, async (queen, hits) => {
+      const warnings = await captureWarnings(async () => {
+        const messages = await queen.queue(QUEUE).group(GROUP).conflation(true).pop()
+        assert.equal(messages.length, 0)
+      })
+      assert.equal(hits.length, 1)
+      assert.equal(warnings.filter(w => w.includes('Conflation.conflict')).length, 1)
+    })
+  })
+
+  it('pop maintenance is not a version skew', async () => {
+    // `{"messages":[],"paused":true}` means an operator turned pops off. The
+    // request never reached the claim path, so there is no echo to expect —
+    // raising here would stop every conflating consumer in the fleet on a
+    // routine operator action.
+    const paused = ok({ messages: [], paused: true })
+    await withQueen([paused], paused, async (queen) => {
+      const messages = await queen.queue(QUEUE).group(GROUP).conflation(true).pop()
+      assert.equal(messages.length, 0)
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------

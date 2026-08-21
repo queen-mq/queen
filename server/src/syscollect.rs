@@ -194,10 +194,10 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
                 ack_failed: cur.ack_failed.saturating_sub(prev.ack_failed),
                 lag_sum_ms: cur.lag_sum_ms.saturating_sub(prev.lag_sum_ms),
                 lag_count: cur.lag_count.saturating_sub(prev.lag_count),
-                // PLAN_CONFLATION §6.2: diffed like every other counter. Nothing
-                // reads it out of QueueSnap here yet — §6.3's Prometheus family
-                // is out of this slice's scope (the plan asks for the two DEAD
-                // depth families to be resolved before a third is added).
+                // PLAN_CONFLATION §6.2/§6.3: diffed like every other counter and
+                // flushed to queen.queue_lag_metrics.conflated_count below, where
+                // get_prometheus_metrics_v1 picks it up as
+                // queen_queue_conflated_per_minute.
                 conflated: cur.conflated.saturating_sub(prev.conflated),
             };
             let parked_avg = parked.remove(queue.as_str()).unwrap_or(0);
@@ -207,6 +207,12 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
                 && d.pop_empty == 0
                 && d.transactions == 0
                 && d.ack_requests == 0
+                // PLAN_CONFLATION §6.3: a bucket whose only content is conflated
+                // positions still has content. It cannot happen today (the
+                // counter is fed from the ack handler, so ack_requests is
+                // non-zero too) but leaving it out of the guard would make the
+                // family silently lossy the moment another path feeds it.
+                && d.conflated == 0
                 && parked_avg == 0
             {
                 continue;
@@ -228,6 +234,7 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
                 lag_max.get(queue.as_str()).copied().unwrap_or(0) as i64,
                 d.lag_count as i64,
                 parked_avg,
+                d.conflated as i64,
             )
             .await
             {
@@ -255,7 +262,7 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
             }
             let (q_tenant, q_name) = crate::handlers::split_tenant_queue(&queue);
             if let Err(e) = db::upsert_queue_lag_metrics(
-                &client, q_tenant, q_name, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, parked_avg,
+                &client, q_tenant, q_name, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, parked_avg, 0,
             )
             .await
             {

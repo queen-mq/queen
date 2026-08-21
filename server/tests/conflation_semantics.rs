@@ -1492,6 +1492,413 @@ async fn c18_transaction_wire(h: &Http, c: &Client) -> Case {
     Ok(())
 }
 
+// §2.3 step 2, the OTHER half of M4 — the durable row written by a pinned pop is
+// ALSO the group-first-contact bulk-seed marker (db::group_policy_lookup /
+// AppState::group_seeded), and the wildcard SPs seed only when THEIR insert
+// created it. A pinned pop that writes the row without seeding therefore disables
+// the bulk seed for ever while flipping the broker's targeted/ring fast-path gate
+// ON — unseeded cursors on the ring path being exactly the 51e50c4 empty-storm /
+// convoy condition. So: register through the PINNED route, then assert every
+// partition of the queue already carries a seeded log_consumers row.
+async fn c19_pinned_first_group_is_seeded(h: &Http, c: &Client) -> Case {
+    let q = unique("cfl-seed");
+    let g = "pinned-first";
+    configure(h, &q, json!({})).await?;
+    // Five partitions with data; the pinned pop below touches exactly ONE.
+    for part in ["A", "B", "C", "D", "E"] {
+        push_n(h, &q, part, 0, 3).await?;
+    }
+
+    let (code, v) = pop_part(
+        h,
+        &q,
+        "A",
+        &format!("consumerGroup={g}&subscriptionMode=all&conflation=true"),
+    )
+    .await?;
+    chk!(code == 200, "pinned pop -> {code}: {v}");
+    chk!(msgs(&v).len() == 1, "the tail of A is delivered: {v}");
+
+    let row = cgm_row(c, &q, g)
+        .await?
+        .ok_or("the pinned pop must write the durable group row (M4)")?;
+    chk!(
+        row.get("conflation") == Some(&Value::Bool(true)),
+        "carrying the declared policy: {row}"
+    );
+
+    // The marker now exists, so nothing will ever run the bulk seed again. It
+    // must therefore have run HERE, for every partition — not just the one the
+    // pop touched.
+    for part in ["A", "B", "C", "D", "E"] {
+        let r = consumer(c, &q, part, g).await?.ok_or_else(|| {
+            format!(
+                "partition {part} has no log_consumers row: the pinned-pop registration \
+                 claimed the group-first-contact SEED MARKER without running the seed. \
+                 The wildcard SPs seed only when their own insert creates that row, so \
+                 the seed is now disabled permanently while group_seeded reports true — \
+                 the ring path would run on unseeded cursors (the 51e50c4 convoy)"
+            )
+        })?;
+        // subscriptionMode=all ⇒ committed = GREATEST(log_start-1, -1) = -1 here,
+        // except on A where the conflating claim has since leased the tail.
+        if part != "A" {
+            chk!(
+                ci64(&r, "committed") == -1,
+                "{part}: seeded for mode=all (committed -1): {r}"
+            );
+        }
+    }
+
+    // And the wildcard route still delivers each remaining partition's tail.
+    let v = pop_ok(
+        h,
+        &q,
+        &format!("consumerGroup={g}&subscriptionMode=all&conflation=true&batch=100"),
+    )
+    .await?;
+    let m = msgs(&v);
+    chk!(
+        m.len() == 4,
+        "the four untouched partitions each yield their tail (M5 sizing), got {}: {v}",
+        m.len()
+    );
+    Ok(())
+}
+
+// §3.1 / §3.3 item 3 / §7.3 E2E-4 — a DISAGREEING consumer on an EMPTY queue.
+//
+// For a conflicting request (requested=true, stored=false) the effective policy
+// is false, so a status keyed only on "is conflation on" answers a bodiless 204
+// and the conflict echo never reaches the wire. That response is
+// indistinguishable from a pre-1.1.0 broker's, and every SDK's degrade-loudly
+// check turns it into "requires broker >= 1.1.0" and stops the consumer. It is
+// the steady state, not an edge: a long-poll consumer on an idle queue gets
+// exactly this response, on its FIRST poll.
+async fn c20_empty_conflict_still_echoes(h: &Http, c: &Client) -> Case {
+    let q = unique("cfl-empty-conflict");
+    let g = "workers";
+    configure(h, &q, json!({})).await?;
+    // Register the group NON-conflating, with no data anywhere.
+    let (code, v) = pop_queue(h, &q, &format!("consumerGroup={g}&subscriptionMode=all")).await?;
+    chk!(code == 200 || code == 204, "registering pop -> {code}: {v}");
+    let row = cgm_row(c, &q, g).await?.ok_or("the wildcard pop registers the group")?;
+    chk!(
+        row.get("conflation") == Some(&Value::Bool(false)),
+        "stored policy is OFF: {row}"
+    );
+
+    // Now the disagreeing consumer, against an empty queue.
+    let (code, v) = pop_queue(
+        h,
+        &q,
+        &format!("consumerGroup={g}&subscriptionMode=all&conflation=true"),
+    )
+    .await?;
+    chk!(
+        code == 200,
+        "a CONFLICTING pop must answer 200 with a body even when it delivered nothing — \
+         a 204 drops the body and the conflict echo with it, and the consumer reads that \
+         as an old broker and exits (§3.3 Q3, E2E-4); got {code}: {v}"
+    );
+    chk!(msgs(&v).is_empty(), "the queue is empty: {v}");
+    chk!(
+        v.get("conflationConflict") == Some(&Value::Bool(true)),
+        "and the body must carry \"conflationConflict\":true: {v}"
+    );
+    chk!(
+        v.get("conflation").is_none(),
+        "but NOT \"conflation\":true — the stored policy is off and the echo says what \
+         was APPLIED: {v}"
+    );
+
+    // The same pop on the pinned route.
+    let (code, v) = pop_part(
+        h,
+        &q,
+        "Default",
+        &format!("consumerGroup={g}&subscriptionMode=all&conflation=true"),
+    )
+    .await?;
+    chk!(code == 200, "pinned conflicting empty pop -> {code}: {v}");
+    chk!(
+        v.get("conflationConflict") == Some(&Value::Bool(true)),
+        "the pinned route echoes the conflict too: {v}"
+    );
+    Ok(())
+}
+
+// §3.3 on the DISCOVERY route — the echo must report what the SP APPLIED, never
+// what the request asked for. queen.log_pop_discover_wire_v1 resolves the durable
+// policy per matched queue (COALESCE(cgm.conflation, requested)); echoing the
+// request instead would tell an SDK "conflation is in force" while full batches
+// are being delivered, and the consumer would drain the whole backlog believing
+// it was seeing only the newest state — the failure §4 exists to prevent.
+async fn c21_discovery_echo_reports_what_was_applied(h: &Http, c: &Client) -> Case {
+    let ns = unique("cflns");
+    let q = unique("cfl-disc");
+    let g = "workers";
+    configure(h, &q, json!({"namespace": ns, "task": "work"})).await?;
+    push_n(h, &q, "Default", 0, 5).await?;
+
+    // Register the group NON-conflating through the discovery route itself.
+    let (code, v) = h
+        .req(
+            "GET",
+            &format!("/api/v1/pop?namespace={ns}&task=work&consumerGroup={g}&subscriptionMode=all&batch=100"),
+            None,
+        )
+        .await?;
+    chk!(code == 200, "registering discovery pop -> {code}: {v}");
+    let m = msgs(&v);
+    chk!(m.len() == 5, "a plain discovery pop delivers the full span, got {}: {v}", m.len());
+    chk!(
+        v.get("conflation").is_none() && v.get("conflationConflict").is_none(),
+        "a flag-off discovery response carries neither key (byte-identical, §3.1): {v}"
+    );
+    let acks: Vec<(String, String, String)> = m
+        .iter()
+        .map(|x| (s(x, "transactionId"), s(x, "partitionId"), s(x, "leaseId")))
+        .collect();
+    for r in ack_batch_completed(h, g, &acks).await? {
+        chk!(r.get("success") == Some(&Value::Bool(true)), "setup ack: {r}");
+    }
+    let row = cgm_row(c, &q, g).await?.ok_or("the discovery pop registers the group")?;
+    chk!(row.get("conflation") == Some(&Value::Bool(false)), "stored policy is OFF: {row}");
+
+    // The disagreeing consumer: asks for conflation on a group stored without it.
+    push_n(h, &q, "Default", 100, 5).await?;
+    let (code, v) = h
+        .req(
+            "GET",
+            &format!("/api/v1/pop?namespace={ns}&task=work&consumerGroup={g}&subscriptionMode=all&batch=100&conflation=true"),
+            None,
+        )
+        .await?;
+    chk!(code == 200, "conflicting discovery pop -> {code}: {v}");
+    let m = msgs(&v);
+    chk!(
+        m.len() == 5,
+        "the SP applies the STORED policy, so the FULL span is delivered, got {}: {v}",
+        m.len()
+    );
+    chk!(
+        v.get("conflation").is_none(),
+        "so the response must NOT claim \"conflation\":true — it would be a lie about a \
+         batch that was not conflated at all (§4): {v}"
+    );
+    chk!(
+        v.get("conflationConflict") == Some(&Value::Bool(true)),
+        "and it must say WHY, or the SDK cannot tell this from a pre-1.1.0 broker and \
+         kills the consumer: {v}"
+    );
+    let acks: Vec<(String, String, String)> = m
+        .iter()
+        .map(|x| (s(x, "transactionId"), s(x, "partitionId"), s(x, "leaseId")))
+        .collect();
+    for r in ack_batch_completed(h, g, &acks).await? {
+        chk!(r.get("success") == Some(&Value::Bool(true)), "cleanup ack: {r}");
+    }
+
+    // The agreeing case: a fresh group that DOES declare it gets the echo and one
+    // message, on the same route.
+    push_n(h, &q, "Default", 200, 5).await?;
+    let g2 = "conflaters";
+    let (code, v) = h
+        .req(
+            "GET",
+            &format!("/api/v1/pop?namespace={ns}&task=work&consumerGroup={g2}&subscriptionMode=all&batch=100&conflation=true"),
+            None,
+        )
+        .await?;
+    chk!(code == 200, "conflating discovery pop -> {code}: {v}");
+    chk!(
+        v.get("conflation") == Some(&Value::Bool(true)),
+        "a discovery pop that DID conflate echoes it: {v}"
+    );
+    chk!(
+        v.get("conflationConflict").is_none(),
+        "with no conflict on a group it just registered: {v}"
+    );
+    chk!(msgs(&v).len() == 1, "and delivers exactly the tail: {v}");
+    Ok(())
+}
+
+// §4 — pop maintenance is not version skew. The three pop routes answer a
+// maintenance pause with {"messages":[],"paused":true} on a 204, and a 204 drops
+// the body: neither `paused` nor the conflation echo reaches the client, so every
+// SDK's degrade-loudly check reads "no echo" as "broker older than 1.1.0" and
+// STOPS the consume loop. Turning pop maintenance on — a routine operator action
+// — would terminate every conflating consumer in the fleet.
+async fn c22_pop_maintenance_keeps_the_echo(h: &Http) -> Case {
+    let q = unique("cfl-maint");
+    configure(h, &q, json!({})).await?;
+    push_n(h, &q, "Default", 0, 3).await?;
+
+    let (code, v) = h
+        .req("POST", "/api/v1/system/maintenance/pop", Some(&json!({"enabled": true})))
+        .await?;
+    chk!((200..300).contains(&code), "enable pop maintenance -> {code}: {v}");
+
+    let mut out = Ok(());
+    for (label, path) in [
+        ("wildcard", format!("/api/v1/pop/queue/{q}?consumerGroup=g&conflation=true")),
+        ("pinned", format!("/api/v1/pop/queue/{q}/partition/Default?consumerGroup=g&conflation=true")),
+        ("discovery", format!("/api/v1/pop?namespace=nope&task=nope&consumerGroup=g&conflation=true")),
+    ] {
+        let (code, v) = h.req("GET", &path, None).await?;
+        if code != 200 {
+            out = Err(format!(
+                "{label}: a paused CONFLATING pop must answer 200 with a body — a 204 \
+                 strips it and the SDK sees neither `paused` nor the conflation echo, \
+                 concludes the broker predates 1.1.0 and stops the consumer; got {code}"
+            ));
+            break;
+        }
+        if v.get("paused") != Some(&Value::Bool(true)) {
+            out = Err(format!("{label}: the body must still say paused: {v}"));
+            break;
+        }
+        if v.get("conflation") != Some(&Value::Bool(true)) {
+            out = Err(format!(
+                "{label}: and carry the conflation echo, which is all the degrade-loudly \
+                 check needs to know that this broker understands the parameter: {v}"
+            ));
+            break;
+        }
+        if !msgs(&v).is_empty() {
+            out = Err(format!("{label}: a paused pop delivers nothing: {v}"));
+            break;
+        }
+    }
+
+    // Flag-off requests keep the byte-identical bodiless 204.
+    let off = h
+        .req("GET", &format!("/api/v1/pop/queue/{q}?consumerGroup=g2"), None)
+        .await?;
+    if out.is_ok() && off.0 != 204 {
+        out = Err(format!(
+            "a paused pop that never mentioned conflation must stay a bodiless 204: got {} / {}",
+            off.0, off.1
+        ));
+    }
+
+    let (code, v) = h
+        .req("POST", "/api/v1/system/maintenance/pop", Some(&json!({"enabled": false})))
+        .await?;
+    chk!((200..300).contains(&code), "disable pop maintenance -> {code}: {v}");
+    out
+}
+
+// §1.1/§3.3 — the STORED policy wins on the wildcard SPs too, including for a
+// partition that is already seeded.
+//
+// This is the one pop path where a request-side flag could override a stored
+// policy: queen.log_pop_v1 re-reads the durable row on ITS first contact with a
+// partition, but a partition that already has a log_consumers row skips that
+// branch entirely and applies whatever the caller forwarded. The broker normally
+// forwards the stored value (it resolves through its cache first), so the hole
+// only opens when that cache is wrong — a delete+recreate handled by a peer
+// broker, up to one reconcile interval, or a first-contact registration race.
+// Which is why this case calls the SP DIRECTLY with the wrong flag: that is
+// exactly the state a stale cache produces, and it is not reachable over HTTP.
+//
+// The dangerous direction is requested=true / stored=false: batch_end would jump
+// to the tail and the ack would retire the whole span, committing messages for a
+// group that was never meant to skip them.
+async fn c23_wildcard_sp_reads_the_stored_policy(h: &Http, c: &Client) -> Case {
+    // -- direction 1: stored FALSE, the caller forwards TRUE ------------------
+    let q = unique("cfl-sp-stored-off");
+    let g = "plain";
+    configure(h, &q, json!({})).await?;
+    push_n(h, &q, "Default", 0, 5).await?;
+    // Register the group NON-conflating and retire one offset, so the partition
+    // has a seeded log_consumers row (the condition of the hole).
+    let v = pop_ok(h, &q, &format!("consumerGroup={g}&subscriptionMode=all&batch=1")).await?;
+    let m = msgs(&v);
+    chk!(m.len() == 1, "setup pop delivers 1: {v}");
+    let a = ack(h, &s(&m[0], "transactionId"), &s(&m[0], "partitionId"), "completed", g, &s(&m[0], "leaseId")).await?;
+    chk!(a.get("success") == Some(&Value::Bool(true)), "setup ack: {a}");
+    push_n(h, &q, "Default", 100, 5).await?;
+
+    let row = c
+        .query_one(
+            "SELECT queen.log_pop_wildcard_wire_v1($1, $2, 100, 60, 'w-c23-a', FALSE, 10,
+                                                   'all', '', $3::text::uuid, TRUE)::text",
+            &[&q, &g, &TENANT],
+        )
+        .await
+        .map_err(|e| format!("wildcard SP (stored off, asked on): {e}"))?;
+    let out: Value = serde_json::from_str(&row.get::<_, String>(0)).unwrap_or(Value::Null);
+    let took: i64 = out
+        .get("partitions")
+        .and_then(|p| p.as_array())
+        .map(|parts| {
+            parts
+                .iter()
+                .flat_map(|p| p.get("segments").and_then(|s| s.as_array()).cloned().unwrap_or_default())
+                .map(|s| s.get("take").and_then(|t| t.as_i64()).unwrap_or(0))
+                .sum()
+        })
+        .unwrap_or(0);
+    chk!(
+        took == 9,
+        "the wildcard SP must re-read the STORED policy (off) and deliver the FULL span of \
+         9 remaining offsets; it delivered {took}. Forwarding the caller's flag verbatim \
+         would conflate a group stored non-conflating, and the ack would retire the whole \
+         span for a group that was never meant to skip it: {out}"
+    );
+    let cr = consumer_must(c, &q, "Default", g).await?;
+    chk!(
+        cr.get("lease_conflated") == Some(&Value::Bool(false)),
+        "and the lease must not be marked conflating: {cr}"
+    );
+
+    // -- direction 2: stored TRUE, the caller forwards FALSE -------------------
+    let q2 = unique("cfl-sp-stored-on");
+    let g2 = "conflating";
+    configure(h, &q2, json!({})).await?;
+    push_n(h, &q2, "Default", 0, 5).await?;
+    let v = pop_ok(h, &q2, &format!("consumerGroup={g2}&subscriptionMode=all&conflation=true")).await?;
+    let m = msgs(&v);
+    chk!(m.len() == 1, "setup conflating pop delivers the tail: {v}");
+    let a = ack(h, &s(&m[0], "transactionId"), &s(&m[0], "partitionId"), "completed", g2, &s(&m[0], "leaseId")).await?;
+    chk!(a.get("success") == Some(&Value::Bool(true)), "setup ack: {a}");
+    push_n(h, &q2, "Default", 100, 5).await?;
+
+    let row = c
+        .query_one(
+            "SELECT queen.log_pop_wildcard_wire_v1($1, $2, 100, 60, 'w-c23-b', FALSE, 10,
+                                                   'all', '', $3::text::uuid, FALSE)::text",
+            &[&q2, &g2, &TENANT],
+        )
+        .await
+        .map_err(|e| format!("wildcard SP (stored on, asked off): {e}"))?;
+    let out: Value = serde_json::from_str(&row.get::<_, String>(0)).unwrap_or(Value::Null);
+    let took: i64 = out
+        .get("partitions")
+        .and_then(|p| p.as_array())
+        .map(|parts| {
+            parts
+                .iter()
+                .flat_map(|p| p.get("segments").and_then(|s| s.as_array()).cloned().unwrap_or_default())
+                .map(|s| s.get("take").and_then(|t| t.as_i64()).unwrap_or(0))
+                .sum()
+        })
+        .unwrap_or(0);
+    chk!(
+        took == 1,
+        "the mirror direction: a group stored CONFLATING keeps conflating however the \
+         caller spells it, so exactly the tail is delivered; got {took}: {out}"
+    );
+    let cr = consumer_must(c, &q2, "Default", g2).await?;
+    chk!(
+        cr.get("lease_conflated") == Some(&Value::Bool(true)),
+        "and the lease is marked conflating: {cr}"
+    );
+    Ok(())
+}
+
 // ======================================================================
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1522,6 +1929,19 @@ async fn conflation_semantics() {
     report.push(("window_buffer_gate_guard", c15_window_buffer_gate(&h, &c).await));
     report.push(("concurrency_one_worker_per_partition_guard", c16_concurrency_one_worker_per_partition(&h, &c).await));
     report.push(("transaction_wire", c18_transaction_wire(&h, &c).await));
+    report.push(("pinned_first_group_is_seeded", c19_pinned_first_group_is_seeded(&h, &c).await));
+    report.push(("empty_conflict_still_echoes", c20_empty_conflict_still_echoes(&h, &c).await));
+    report.push((
+        "discovery_echo_reports_what_was_applied",
+        c21_discovery_echo_reports_what_was_applied(&h, &c).await,
+    ));
+    report.push((
+        "wildcard_sp_reads_the_stored_policy",
+        c23_wildcard_sp_reads_the_stored_policy(&h, &c).await,
+    ));
+    // Toggles a GLOBAL broker flag, so it must not overlap another case: it runs
+    // after every case that pops, and restores the flag before returning.
+    report.push(("pop_maintenance_keeps_the_echo", c22_pop_maintenance_keeps_the_echo(&h).await));
     // Last on purpose: it kills and re-spawns the broker.
     report.push(("boot_idempotence", c17_boot_idempotence(&mut broker, &c).await));
 

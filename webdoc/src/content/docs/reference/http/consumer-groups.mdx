@@ -53,9 +53,10 @@ JSON array.
     "maxTimeLag": 42,
     "state": "Stable",
     "storage": "segments",
-    "subscriptionMode": null,
-    "subscriptionTimestamp": null,
-    "subscriptionCreatedAt": null
+    "subscriptionMode": "new",
+    "subscriptionTimestamp": "2026-07-30T08:00:00Z",
+    "subscriptionCreatedAt": "2026-07-30T08:00:00Z",
+    "conflation": false
   }
 ]
 ```
@@ -73,9 +74,19 @@ Read these fields carefully:
   one value that touches `queen.log_segments`.
 - `state` is derived, not stored: `Lagging` when `maxTimeLag > 300`, otherwise
   `Stable` when the group has ever consumed anything, otherwise `Dead`.
-- `subscriptionMode`, `subscriptionTimestamp` and `subscriptionCreatedAt` are
-  always `null` for log-engine queues: the log schema has no per-partition
-  subscription record.
+- `subscriptionMode`, `subscriptionTimestamp` and `subscriptionCreatedAt` are the
+  group's durable registration on this queue, read from
+  `queen.consumer_groups_metadata`. Before 1.1.0 all three were hard-coded `null`,
+  which is why a group's start position had no console surface at all. They are
+  still `null` for a group that has cursors but no registration row, i.e. a group
+  that only ever used the pinned single-partition route without declaring a
+  delivery policy, which is the one path that does not register.
+- `conflation` (1.1.0) is the group's stored delivery policy on this queue: `true`
+  means [last-value delivery](/reference/http/pop#conflation), where `totalLag`
+  and `partitionsWithLag` mean different things. For a conflating group `totalLag`
+  is **log lag**, the positions still to retire, most of which will be skipped;
+  `partitionsWithLag` is the number of handler runs actually outstanding, and it is
+  the figure to alert on.
 
 ## GET /api/v1/consumer-groups/lagging
 
@@ -115,6 +126,7 @@ queue name.
 ```json
 {
   "orders": {
+    "conflation": false,
     "partitions": [
       {
         "partition": "eu-1",
@@ -132,8 +144,12 @@ queue name.
 
 `leaseActive` is true only while `lease_expires_at` is in the future. That is the
 one in-flight leased batch this group holds on the partition. `totalConsumed` is
-the group's lifetime counter from `queen.log_consumers.total_consumed`. A group
-with no cursors returns `{}`.
+the group's lifetime counter from `queen.log_consumers.total_consumed`, and it
+counts **log positions retired**, not handler runs: under
+[conflation](/reference/http/pop#conflation) it keeps counting the skipped
+positions too, which is what the lag and state derivations want. `conflation`
+(1.1.0) is the group's stored delivery policy on that queue. A group with no
+cursors returns `{}`.
 
 ## POST /api/v1/consumer-groups/:group/subscription
 

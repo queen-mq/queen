@@ -274,6 +274,14 @@
             }
           },
           {
+            "name": "conflation",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
             "name": "x-queen-tenant",
             "in": "header",
             "required": false,
@@ -425,6 +433,14 @@
             }
           },
           {
+            "name": "conflation",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
             "name": "x-queen-tenant",
             "in": "header",
             "required": false,
@@ -571,6 +587,14 @@
             "required": false,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "conflation",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
             }
           },
           {

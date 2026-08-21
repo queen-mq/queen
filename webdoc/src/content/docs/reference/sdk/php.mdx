@@ -190,6 +190,7 @@ $queen->queue('orders')
 | `autoAck(bool $enabled)` | `false` | `true` | The two meanings differ. See the warning. |
 | `subscriptionMode(string $mode)` | `null` | `null` | `all` \| `new`. |
 | `subscriptionFrom(string $from)` | `null` | `null` | `'now'` or an ISO timestamp. |
+| `conflation(bool $enabled = true)` | `false` | `false` | Last-value delivery: the pop returns only each partition's newest visible message and retires the rest. Sent only when true. A property of the consumer GROUP, stored on its first registration; see [conflation](/reference/http/pop#conflation). Requires broker >= 1.1.0; against an older one the call raises rather than draining the backlog quietly. |
 | `concurrency(int $count)` | n/a | `1` | `consume()` only. |
 | `limit(int $count)` | n/a | `null` | `consume()` only. |
 | `idleMillis(int $millis)` | n/a | `null` | `consume()` only. |

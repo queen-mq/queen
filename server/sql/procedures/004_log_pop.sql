@@ -206,15 +206,22 @@ BEGIN
         -- a concurrent registrar's value wins, never the requested one.
         --
         -- DELIBERATE NARROWING vs the plan's literal text: this runs only for a
-        -- CONFLATING pop. That row doubles as the group-first-contact BULK SEED
-        -- marker (db::group_policy_lookup / AppState::group_seeded), and
-        -- this branch does NOT run that set-based seed — writing the marker
-        -- unconditionally would flip the broker's targeted/ring fast path on for
-        -- every pinned-pop-only group, ahead of the seed the marker exists to
-        -- prove (the 51e50c4 anti-convoy invariant). Gating on p_conflate keeps
-        -- every flag-off deployment byte-identical (§8 "default off"), which is
-        -- the stronger promise; the per-partition advisory-lock guard below is
-        -- still the correctness floor for a conflating group that mixes routes.
+        -- CONFLATING pop. Writing the marker unconditionally would change the
+        -- broker's targeted/ring fast-path gate for every pinned-pop-only group
+        -- on every deployment, conflating or not; gating on p_conflate keeps every
+        -- flag-off deployment byte-identical (§8 "default off").
+        --
+        -- THE ROW IS ALSO THE BULK-SEED MARKER (db::group_policy_lookup /
+        -- AppState::group_seeded), so this branch RUNS THE BULK SEED TOO. It has
+        -- to: the wildcard SPs seed only when THEIR insert created the row
+        -- (v_first_seen > 0), so a row created here would make them skip the seed
+        -- for ever, while the broker's group_seeded gate — flipped true by that
+        -- same row — sends the first wildcard pop straight down the ring path.
+        -- Unseeded cursors on the ring path is exactly the 51e50c4 empty-storm /
+        -- convoy condition (see the comment at the ring bootstrap in
+        -- handlers/data.rs). A marker that claims a seed that never ran re-opens
+        -- the hole the marker exists to close, so the two are written together,
+        -- in one transaction, or not at all.
         IF v_from_ts IS NULL AND v_conflate THEN
             -- Registration mode/timestamp: the SAME decision the wildcard path
             -- makes (:596-610), verbatim, so a group registered here and one
@@ -251,6 +258,41 @@ BEGIN
                   AND cgm.partition_name = ''
                 LIMIT 1;
                 v_conflate := COALESCE(v_conflate_stored, v_conflate);
+            ELSE
+                -- OUR insert created the marker, so OUR call owes the seed it
+                -- claims (see the block comment above). Same three-way statement
+                -- as log_pop_wildcard_*_v1, over this queue's partitions, decided
+                -- from the registration mode/timestamp just written — so a group
+                -- registered here and one registered there are indistinguishable
+                -- afterwards, cursors included. The per-partition claim below then
+                -- finds its row already present and agrees with it by
+                -- construction (same mode, same seed value).
+                IF v_reg_mode = 'timestamp' THEN
+                    INSERT INTO queen.log_consumers (partition_id, consumer_group, committed)
+                    SELECT p.id, p_group,
+                           COALESCE(
+                               (SELECT s.base_offset - 1 FROM queen.log_segments s
+                                WHERE s.partition_id = p.id
+                                  AND s.base_offset >= p.log_start
+                                  AND s.created_at >= v_reg_ts
+                                ORDER BY s.base_offset LIMIT 1),
+                               p.last_offset)
+                    FROM queen.log_partitions p
+                    WHERE p.queue_id = v_qid
+                    ON CONFLICT (partition_id, consumer_group) DO NOTHING;
+                ELSIF v_reg_mode = 'new' THEN
+                    INSERT INTO queen.log_consumers (partition_id, consumer_group, committed)
+                    SELECT p.id, p_group, p.last_offset
+                    FROM queen.log_partitions p
+                    WHERE p.queue_id = v_qid
+                    ON CONFLICT (partition_id, consumer_group) DO NOTHING;
+                ELSE
+                    INSERT INTO queen.log_consumers (partition_id, consumer_group, committed)
+                    SELECT p.id, p_group, GREATEST(p.log_start - 1, -1)
+                    FROM queen.log_partitions p
+                    WHERE p.queue_id = v_qid
+                    ON CONFLICT (partition_id, consumer_group) DO NOTHING;
+                END IF;
             END IF;
         ELSIF v_from_ts IS NOT NULL THEN
             -- Registered group: the STORED policy wins for every consumer of it
@@ -650,6 +692,9 @@ DECLARE
     v_has_pending BOOLEAN;
     -- RUSTFIX item 13: durable subscription mode written to consumer_groups_metadata.
     v_sub_mode_stored TEXT;
+    -- CONFLATION (§1.1/§3.3): the EFFECTIVE policy, resolved below. Never
+    -- p_conflate on an already-registered group.
+    v_conflate_eff BOOLEAN;
 BEGIN
     -- Queue identity is the queen.queues id (log_queues is gone). A group may
     -- legitimately subscribe BEFORE any push creates the queue: this pop writes
@@ -743,6 +788,29 @@ BEGIN
     ON CONFLICT (tenant_id, consumer_group, queue_id, partition_name, namespace, task) DO NOTHING;
     GET DIAGNOSTICS v_first_seen = ROW_COUNT;
 
+    -- CONFLATION (§1.1/§3.3): re-read the STORED policy whenever this call was
+    -- not the registrar. Without this, the wildcard SPs are the one pop path
+    -- where a request-side flag can override a stored policy: log_pop_v1
+    -- re-reads on its own first contact, but for a partition that ALREADY has a
+    -- log_consumers row it skips that branch entirely and simply applies whatever
+    -- the caller forwarded. A stale broker cache (delete+recreate of a group
+    -- handled by a peer broker — up to one reconcile interval) or a
+    -- first-contact registration race would then let a conflating claim run on a
+    -- group stored non-conflating: batch_end jumps to the tail and the ack
+    -- retires the whole span, committing messages for a group that was never
+    -- meant to skip them. One indexed point lookup on cgm_identity_uk, next to a
+    -- candidate scan that reads up to 512 rows.
+    IF v_first_seen > 0 THEN
+        v_conflate_eff := COALESCE(p_conflate, FALSE);   -- we registered it
+    ELSE
+        SELECT m.conflation INTO v_conflate_eff
+        FROM queen.consumer_groups_metadata m
+        WHERE m.consumer_group = p_group AND m.queue_id = v_qid
+          AND m.partition_name = ''
+        LIMIT 1;
+        v_conflate_eff := COALESCE(v_conflate_eff, COALESCE(p_conflate, FALSE));
+    END IF;
+
     IF v_first_seen > 0 THEN
         IF v_sub_mode_stored = 'timestamp' THEN
             -- timestamp seed: cursor just before the first segment at/after
@@ -834,7 +902,7 @@ BEGIN
         INTO v_segments, v_taken
         FROM queen.log_pop_v1(p_queue, v_p.name, p_group,
                               v_remaining, p_lease_seconds, p_worker, p_auto_ack,
-                              p_sub_mode, p_sub_from, FALSE, p_tenant, p_conflate);
+                              p_sub_mode, p_sub_from, FALSE, p_tenant, v_conflate_eff);
 
         IF v_taken > 0 THEN
             v_out := v_out || jsonb_build_object(
@@ -943,6 +1011,9 @@ DECLARE
     v_verified_at TIMESTAMPTZ;
     v_has_pending BOOLEAN;
     v_sub_mode_stored TEXT;
+    -- CONFLATION (§1.1/§3.3): the EFFECTIVE policy, resolved below. Never
+    -- p_conflate on an already-registered group.
+    v_conflate_eff BOOLEAN;
 BEGIN
     -- Queue resolve + subscription-before-queue provisioning — identical to
     -- log_pop_wildcard_wire_v1 (queue identity is the queen.queues id; the
@@ -994,6 +1065,29 @@ BEGIN
             COALESCE(p_conflate, FALSE))
     ON CONFLICT (tenant_id, consumer_group, queue_id, partition_name, namespace, task) DO NOTHING;
     GET DIAGNOSTICS v_first_seen = ROW_COUNT;
+
+    -- CONFLATION (§1.1/§3.3): re-read the STORED policy whenever this call was
+    -- not the registrar. Without this, the wildcard SPs are the one pop path
+    -- where a request-side flag can override a stored policy: log_pop_v1
+    -- re-reads on its own first contact, but for a partition that ALREADY has a
+    -- log_consumers row it skips that branch entirely and simply applies whatever
+    -- the caller forwarded. A stale broker cache (delete+recreate of a group
+    -- handled by a peer broker — up to one reconcile interval) or a
+    -- first-contact registration race would then let a conflating claim run on a
+    -- group stored non-conflating: batch_end jumps to the tail and the ack
+    -- retires the whole span, committing messages for a group that was never
+    -- meant to skip them. One indexed point lookup on cgm_identity_uk, next to a
+    -- candidate scan that reads up to 512 rows.
+    IF v_first_seen > 0 THEN
+        v_conflate_eff := COALESCE(p_conflate, FALSE);   -- we registered it
+    ELSE
+        SELECT m.conflation INTO v_conflate_eff
+        FROM queen.consumer_groups_metadata m
+        WHERE m.consumer_group = p_group AND m.queue_id = v_qid
+          AND m.partition_name = ''
+        LIMIT 1;
+        v_conflate_eff := COALESCE(v_conflate_eff, COALESCE(p_conflate, FALSE));
+    END IF;
 
     IF v_first_seen > 0 THEN
         IF v_sub_mode_stored = 'timestamp' THEN
@@ -1073,7 +1167,7 @@ BEGIN
         INTO v_segments, v_taken, v_part_blobs
         FROM queen.log_pop_v1(p_queue, v_p.name, p_group,
                               v_remaining, p_lease_seconds, p_worker, p_auto_ack,
-                              p_sub_mode, p_sub_from, FALSE, p_tenant, p_conflate);
+                              p_sub_mode, p_sub_from, FALSE, p_tenant, v_conflate_eff);
 
         IF v_taken > 0 THEN
             v_out := v_out || jsonb_build_object(
@@ -1200,6 +1294,20 @@ DECLARE
     v_has_pending BOOLEAN;
     -- RUSTFIX item 13: durable subscription mode written to consumer_groups_metadata.
     v_sub_mode_stored TEXT;
+    -- CONFLATION (§3.3), the discovery route's report back to the broker. This
+    -- route spans QUEUES, so the broker cannot cache one (queue, group) policy
+    -- and resolve the request against it the way handle_pop does — the SP is the
+    -- only place that knows what it applied, and the response echo has to say
+    -- what was applied, never what was asked (an echo of the request would tell
+    -- an SDK "conflation is in force" while the SP delivered full batches: the
+    -- backlog-draining failure §4 exists to prevent).
+    --
+    -- p_conflate is NULL when the request carried no flag at all, and that is the
+    -- byte-identical fast path: no resolution read, no report, nothing emitted.
+    -- FALSE is a real declaration and is checked for conflicts exactly like TRUE.
+    v_cfl_eff BOOLEAN := COALESCE(p_conflate, FALSE);  -- AND across matched queues
+    v_cfl_conflict BOOLEAN := FALSE;             -- any matched queue disagreed
+    v_cfl_stored BOOLEAN;
 BEGIN
     -- Group-first-contact bulk seed (mirrors log_pop_wildcard_wire_v1; see its
     -- header for the full convoy rationale). Extends RUSTFIX item 13 to the
@@ -1245,6 +1353,31 @@ BEGIN
                 COALESCE(p_conflate, FALSE))
         ON CONFLICT (tenant_id, consumer_group, queue_id, partition_name, namespace, task) DO NOTHING;
         GET DIAGNOSTICS v_first_seen = ROW_COUNT;
+
+        -- CONFLATION (§3.3): resolve what this queue's policy actually IS, once
+        -- per matched queue, and fold it into the report. Our own insert is known
+        -- to carry p_conflate, so only a pre-existing row costs a read — and the
+        -- whole block is skipped when the request carried no flag, which keeps
+        -- every flag-off discovery pop at exactly the statements it ran before.
+        IF p_conflate IS NOT NULL THEN
+            IF v_first_seen > 0 THEN
+                v_cfl_stored := p_conflate;      -- this call registered the group
+            ELSE
+                SELECT m.conflation INTO v_cfl_stored
+                FROM queen.consumer_groups_metadata m
+                WHERE m.consumer_group = p_group AND m.queue_id = v_q.qid
+                  AND m.partition_name = ''
+                LIMIT 1;
+                v_cfl_stored := COALESCE(v_cfl_stored, p_conflate);
+            END IF;
+            -- AND across queues: "conflation":true may only be reported when
+            -- EVERY queue this pop could have served conflates, or the SDK would
+            -- trust it for messages that arrived in full batches.
+            v_cfl_eff := v_cfl_eff AND v_cfl_stored;
+            IF v_cfl_stored <> p_conflate THEN
+                v_cfl_conflict := TRUE;
+            END IF;
+        END IF;
 
         IF v_first_seen > 0 THEN
             IF v_sub_mode_stored = 'timestamp' THEN
@@ -1417,7 +1550,15 @@ BEGIN
         END IF;
     END IF;
 
-    RETURN jsonb_build_object('partitions', v_out);
+    -- CONFLATION (§3.3): the report rides the result ONLY when the request
+    -- declared something. Absent ⇒ the broker keeps its own (off) resolution and
+    -- the response carries neither key — the byte-identical pre-1.1.0 shape.
+    IF p_conflate IS NULL THEN
+        RETURN jsonb_build_object('partitions', v_out);
+    END IF;
+    RETURN jsonb_build_object('partitions', v_out,
+                              'conflation', v_cfl_eff,
+                              'conflationConflict', v_cfl_conflict);
 END;
 $$;
 

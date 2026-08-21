@@ -263,6 +263,7 @@ One-shot pop, printed as NDJSON. The queue argument is optional: omit it and use
 | `--task <name>` | none | Filter the queue-less pop by task. |
 | `--from-mode <mode>` | none | Subscription mode: `all`, `new`, `new-only`. |
 | `--since <t>` | none | Subscription start: `now`, RFC3339, `5m ago`. |
+| `--conflation` | `false` | [Last-value delivery](/reference/http/pop#conflation): one message per partition, the newest. Requires `--cg`, refuses `--auto-ack`, and needs a broker >= 1.1.0. |
 
 Each emitted line carries `queue`, `partition`, `transactionId`, `partitionId`, `createdAt`,
 `retryCount` and `data`, plus `leaseId` and `producerSub` when present. An empty pop exits `4`.
@@ -288,6 +289,7 @@ Live-tail, always NDJSON on stdout regardless of `-o`.
 | `--auto-ack` | `false` | Ack server-side as messages are emitted. |
 | `--from <mode>` | none | Subscription mode: `all`, `new`, `new-only`. |
 | `--since <t>` | none | Subscription start. |
+| `--conflation` | `false` | [Last-value delivery](/reference/http/pop#conflation) on every round trip. It is the GROUP's policy, not the invocation's, so pointing it at a shared `--cg` changes that group for everyone. |
 | `--idle-millis <n>` | `0` | Stop after N ms with no messages. |
 | `--concurrency <n>` | `0` | Parallel handlers. |
 | `--timeout <dur>` | `0` → 30 s, or `--idle-millis` when smaller | Per-pop long-poll timeout. |
@@ -363,12 +365,23 @@ Renews one lease, `POST /api/v1/lease/:leaseId/extend`. No flags of its own.
 | --- | --- | --- |
 | `list` | `ls` | none |
 | `describe <queue>` | `get`, `show` | exactly one |
+| `depth <queue>` | none | exactly one |
 | `configure <queue>` | none | exactly one |
 | `delete <queue>` | `rm` | exactly one |
 | `stats` | none | none |
 
 `queue list` flags: `--namespace`, `--task`, `--limit` (`0`), `--offset` (`0`).
 `queue stats` flags: `--namespace`, `--task`.
+`queue depth` flags: `--group` (none). It is the cheap sibling of `queue describe`:
+one `GET /api/v1/resources/queues/:queue/depth`, watermark arithmetic only, no
+segment scan. The table view is a four-column summary (`pending`, `partitions`,
+`partitionsPending`, `effective`) while `-o json` prints the full per-partition
+array. `partitionsPending` comes from the broker on 1.1.0 and is
+derived client-side against older ones. `effective` appears only for a
+[conflating](/reference/http/pop#conflation) group, where `pending` is log depth
+and `effective` is the handler runs that remain; on any other group the two are
+equal by construction and printing both would only raise the question of which
+one is real.
 `queue delete` requires `--yes`.
 
 `queue configure` flags:

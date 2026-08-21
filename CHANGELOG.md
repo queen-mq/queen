@@ -3,6 +3,62 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## 1.1.0 (2026-08-21) — conflation
+
+**Last-value delivery, as a consumer-group policy.** `conflation=true` on any pop route makes a
+pop of a partition deliver exactly one message — the newest visible one — and commit everything
+behind it when the handler acks. It is for command-style queues where one partition is one
+logical key and only the freshest "recompute X" is worth running: under a backlog the handler
+runs once per partition instead of once per message. Nothing on disk is touched; retention still
+governs storage. The guarantee it keeps is that after the last push to a partition, at least one
+run of that partition's handler *starts* after that push commits — the broker never commits past
+an offset it did not observe at pop time.
+
+Conflation is a property of the **group on the queue**, not of the call: the first pop that
+registers the group persists it, and from then on the stored value wins for every consumer of
+that group. That is what lets `workers` conflate while `audit` on the same queue reads
+everything. A consumer that declares the opposite of the stored policy is not rejected — the
+stored policy is applied and the response says `"conflationConflict":true`, so the consumer keeps
+running and warns once. Rejecting would take down the already-correct half of a rolling deploy.
+Two combinations ARE refused, with a `400` that names the reason: `conflation=true` without a
+`consumerGroup`, and `conflation=true` with `autoAck=true`.
+
+**Degrade loudly, in every SDK.** No SDK negotiates a version with the broker, so a 1.1.0 client
+against an older one would have the unknown query parameter ignored and quietly drain the whole
+backlog message by message. Instead the broker echoes `"conflation":true` on every conflating
+response *including empty ones*, and an SDK that asked and did not get the echo raises on its
+first round trip, before a single message is handled: *"conflation was requested but this broker
+did not apply it — requires broker >= 1.1.0"*. Because those keys have to reach the client, a pop
+whose answer has anything to say about conflation is a `200` with a body even when it delivered
+nothing, pop maintenance included. Every response that never mentions conflation is byte-identical
+to 1.0.6, `204` included.
+
+Also in this release: `subscriptionMode`, `subscriptionTimestamp` and `subscriptionCreatedAt` are
+real values on `GET /api/v1/consumer-groups` instead of hard-coded `null`, next to the new
+`conflation` field; `GET /api/v1/resources/queues/:queue/depth` gains `partitionsPending`,
+`conflation` and `effectivePending`, where a conflating group's `pending` is log depth and
+`effectivePending` is the handler runs that remain (`pending: 4000000, effectivePending: 12` is
+healthy under conflation and an incident without it); and
+`queen_queue_conflated_per_minute{queue}` counts the positions conflation retired without a
+handler invocation. The dead `queen_queue_depth_total` and `queen_queue_depth_pending` families
+were removed: they read an aggregator key no stored procedure has ever produced, so they were
+never in the exposition, only in the generated reference.
+
+The C++ SDK's push buffer catches up to the 1.0.6 contract the other five SDKs got on
+2026-08-20: `max_size` is now a blocking backpressure bound (unbounded is deliberately not
+expressible), a batch whose POST fails is re-queued at the front of the buffer, in order, and
+retried until it lands or an explicit `flush_buffer`/`flush_all_buffers` deadline expires — at
+which point `BufferFlushError` says how many messages are still buffered, none of them dropped —
+and `close()` flushes under the same 30 s deadline and reports what is left. Before this, the C++
+buffer grew without limit and dropped a failed batch after a log line.
+
+**Rollout.** Default off: a group created without the flag behaves exactly as before, and there
+is deliberately no `QUEEN_CONFLATION_ENABLED`. Ship the broker first (the columns are additive
+and defaulted, old SDKs are unaffected), then the SDKs; no coordinated cutover and no migration
+for existing groups. The broker rolls back cleanly, with one caveat worth saying out loud: a
+group already registered with `conflation=true` is served full batches by an older binary, which
+ignores the column. Rolling back turns conflation off, it does not turn it into an error.
+
 ## 1.0.6 (2026-08-20) — clients only
 
 **The client-side push buffer is now bounded, and a failed flush no longer loses messages.** In

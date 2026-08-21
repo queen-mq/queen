@@ -93,9 +93,9 @@ queen::QueenClient client({"https://cell.example"}, config);
 | `transaction` | `transaction()` | `TransactionBuilder` |
 | `ack` | `ack(const json& message, bool status = true, const json& context = json::object())` | `json` |
 | `renew` | `renew(const json& message_or_lease_id)` | `json` |
-| `flush_all_buffers` | `flush_all_buffers()` | `void` |
+| `flush_all_buffers` | `flush_all_buffers(int deadline_millis = -1)` | `void`; throws `BufferFlushError` when the deadline expires with messages still buffered |
 | `get_buffer_stats` | `get_buffer_stats() const` | `json` |
-| `close` | `close()` | `void` (sets the shutdown flag, flushes buffers, cleans up) |
+| `close` | `close()` | `void` (sets the shutdown flag, flushes buffers under a 30 s deadline, cleans up) |
 | `is_shutdown_requested` | `is_shutdown_requested() const` | `bool` (consumer workers poll this) |
 | `get_http_client` | `get_http_client() const` | `std::shared_ptr<HttpClient>` |
 
@@ -176,7 +176,7 @@ through `config()`; post to `/api/v1/configure` yourself when you need one, reme
 
 | Method | Notes |
 | --- | --- |
-| `buffer(const BufferOptions&)` | `{message_count = 100, time_millis = 1000}`. Turns `push()` into an enqueue. |
+| `buffer(const BufferOptions&)` | `{message_count = 100, time_millis = 1000, max_size = 0, retry_delay_millis = 0}`, where `0` means the derived default: a `4 × message_count` bound and a 250 ms retry pause. Turns `push()` into an enqueue that BLOCKS at `max_size` waiting messages. |
 | `push(const std::vector<json>& payload)` | Returns `json`. Throws with no queue name. |
 
 Each item may carry `data`, `payload`, or be the payload itself. The client mints a UUIDv7
@@ -201,6 +201,7 @@ client.queue("orders")
 | `auto_ack(bool)` | `true` | `true` | See the warning. |
 | `subscription_mode(const std::string&)` | `""` | `""` | `all` \| `new`. |
 | `subscription_from(const std::string&)` | `""` | `""` | `"now"` or an ISO timestamp. |
+| `conflation(bool enabled = true)` | `false` | `false` | Last-value delivery: the pop returns only each partition's newest visible message and retires the rest. Sent only when true. A property of the consumer GROUP, stored on its first registration; see [conflation](/reference/http/pop#conflation). Requires broker >= 1.1.0; against an older one the call raises rather than draining the backlog quietly. |
 | `concurrency(int)` | n/a | `1` | `consume()` only. Thread-pool workers. |
 | `limit(int)` | n/a | `0` (unlimited) | `consume()` only. |
 | `idle_millis(int)` | n/a | `0` (no timeout) | `consume()` only. |
@@ -282,10 +283,23 @@ tracing.
 
 ### Buffering
 
-`flush_buffer()` flushes this builder's `queue/partition` buffer; throws with no queue name.
-`get_buffer_stats()` on the client returns the aggregate. Buffers are keyed on
+`flush_buffer(deadline_millis = -1)` flushes this builder's `queue/partition` buffer; throws with
+no queue name. `get_buffer_stats()` on the client returns the aggregate. Buffers are keyed on
 `"<queue>/<partition>"`, so builders addressing the same pair share one, and a buffer flushes at
 `message_count` messages or `time_millis` after its first message.
+
+The buffer is bounded and lossless under errors. At `max_size` waiting messages (default
+`4 * message_count`), further adds block on the flusher instead of growing the heap. A batch whose
+POST fails goes back to the front of the buffer, in order, and is retried every
+`retry_delay_millis` until it lands or the client closes; it is never dropped. A broker outage
+therefore shows up as blocked producers and a full buffer, not as silent loss.
+
+A flush with no deadline retries a failing batch until it lands. Pass `deadline_millis >= 0` to
+`flush_buffer` or `flush_all_buffers` to bound that: when it expires, a `BufferFlushError` reports
+how many messages are still buffered (still buffered, not dropped) via `unflushed_count()` and in
+`what()`. `close()` flushes under a 30 s deadline, prints what could not be sent, and only then
+discards; a buffered push after `close()` throws instead of being accepted by a client that will
+lose it.
 
 ### Dead-letter queue
 

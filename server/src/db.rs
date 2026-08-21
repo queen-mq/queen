@@ -1538,12 +1538,16 @@ pub async fn upsert_queue_lag_metrics(
     max_lag_ms: i64,
     lag_count: i64,
     parked_count: i32,
+    // PLAN_CONFLATION §6.3: log positions this queue's conflating acks retired
+    // without a handler invocation. Appended last, merged additively like every
+    // other counter, and 0 on every queue whose groups do not conflate.
+    conflated_count: i64,
 ) -> Result<(), tokio_postgres::Error> {
     let stmt = "INSERT INTO queen.queue_lag_metrics \
         (bucket_time, queue_id, pop_count, push_request_count, push_message_count, \
          pop_empty_count, transaction_count, ack_request_count, ack_success_count, \
-         ack_failed_count, avg_lag_ms, max_lag_ms, lag_count, parked_count) \
-        SELECT date_trunc('minute', NOW()), q.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13 \
+         ack_failed_count, avg_lag_ms, max_lag_ms, lag_count, parked_count, conflated_count) \
+        SELECT date_trunc('minute', NOW()), q.id, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $15 \
         FROM queen.queues q WHERE q.name = $1 AND q.tenant_id = $14::text::uuid \
         ON CONFLICT (bucket_time, queue_id) DO UPDATE SET \
             pop_count = queen.queue_lag_metrics.pop_count + EXCLUDED.pop_count, \
@@ -1562,7 +1566,8 @@ pub async fn upsert_queue_lag_metrics(
                 ELSE 0 END, \
             max_lag_ms = GREATEST(queen.queue_lag_metrics.max_lag_ms, EXCLUDED.max_lag_ms), \
             lag_count = queen.queue_lag_metrics.lag_count + EXCLUDED.lag_count, \
-            parked_count = COALESCE(queen.queue_lag_metrics.parked_count, 0) + EXCLUDED.parked_count";
+            parked_count = COALESCE(queen.queue_lag_metrics.parked_count, 0) + EXCLUDED.parked_count, \
+            conflated_count = COALESCE(queen.queue_lag_metrics.conflated_count, 0) + EXCLUDED.conflated_count";
     client
         .execute(
             stmt,
@@ -1581,6 +1586,7 @@ pub async fn upsert_queue_lag_metrics(
                 &lag_count,
                 &parked_count,
                 &tenant,
+                &conflated_count,
             ],
         )
         .await?;
@@ -1758,8 +1764,16 @@ pub async fn pop_discover(
     // Track B (§5): $11 = tenant, scopes the namespace/task queue set the discovery
     // pop wildcard-scans (default tenant when off).
     tenant: &str,
-    // PLAN_CONFLATION §3.2: $12 = the EFFECTIVE conflation policy (§3.3).
-    conflate: bool,
+    // PLAN_CONFLATION §3.2/§3.3: $12 = the REQUESTED conflation flag, and it is
+    // an Option because on THIS route the distinction matters. A discovery pop
+    // spans queues, so the broker has no single (queue, group) policy to cache
+    // and resolve against — the SP resolves the durable policy per matched queue
+    // and reports back what it applied. NULL means "the request said nothing":
+    // the SP then skips the resolution read entirely and omits the report, which
+    // is what keeps a flag-off deployment byte-identical and zero-cost. FALSE is
+    // NOT the same thing — an explicit `conflation=false` against a conflating
+    // group is a declaration conflict and has to be detected.
+    conflate: Option<bool>,
 ) -> Result<String, tokio_postgres::Error> {
     let stmt = client
         .prepare_cached(

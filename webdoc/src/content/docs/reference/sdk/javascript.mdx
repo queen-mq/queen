@@ -248,6 +248,7 @@ Both `pop()` and `consume()` read these; the defaults differ between the two.
 | `autoAck(enabled)` | `false` | `true` | See the warning below: the two mean different things. |
 | `subscriptionMode(mode)` | `null` | `null` | `all` \| `new`. |
 | `subscriptionFrom(from)` | `null` | `null` | `'now'` or an ISO timestamp. |
+| `conflation(enabled = true)` | `false` | `false` | Last-value delivery: the pop returns only each partition's newest visible message and retires the rest. Sent only when true. A property of the consumer GROUP, stored on its first registration; see [conflation](/reference/http/pop#conflation). Requires broker >= 1.1.0; against an older one the call raises rather than draining the backlog quietly. |
 | `concurrency(count)` | n/a | `1` | `consume()` only. Number of worker loops. Clamped to `≥ 1`. |
 | `limit(count)` | n/a | `null` | `consume()` only. Stop after N messages per worker. |
 | `idleMillis(ms)` | n/a | `null` | `consume()` only. Stop after N ms without a message. |
@@ -508,6 +509,7 @@ Two ready-made gate functions ship with the package:
 | `maxWaitMillis` | `1000` | Long-poll wait on the source pop. |
 | `subscriptionMode` | none | `'all'` \| `'new'`. |
 | `subscriptionFrom` | none | ISO timestamp or `'now'`. |
+| `conflation` | `false` | Requests last-value delivery on the source pop; the reducer only ever sees each partition's newest message, so messages conflation skips never reach it. See [conflation](/reference/http/pop#conflation). |
 | `consumerGroup` | `streams.<queryId>` | Override the source group. |
 | `reset` | `false` | Wipe state when the chain's config hash no longer matches. |
 | `onError` | none | `(err, ctx)` per-cycle error hook. |

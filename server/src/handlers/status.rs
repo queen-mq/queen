@@ -193,6 +193,20 @@ fn format_db_prometheus(txt: &str, out: &mut String) {
         }
     }
     // Per-queue minute-rate gauges (RUSTFIX item 24, prometheus.cpp:442-487).
+    //
+    // PLAN_CONFLATION §6.3 adds queen_queue_conflated_per_minute here: log
+    // positions retired by conflation WITHOUT a handler invocation, read from
+    // queen.queue_lag_metrics.conflated_count. It sits next to pop_messages on
+    // purpose — the pair is the whole story of a conflating queue, what was
+    // handled and what was skipped because something newer had already arrived.
+    // 0 on every queue whose groups do not conflate.
+    //
+    // KEEP THE COMMENTS OUT OF THE ARRAY BELOW. webdoc/scripts/gen-metrics.mjs
+    // attaches the templated `# HELP {fam}` line to the family names in the
+    // nearest preceding `[`, searching only 900 characters back; a comment
+    // inside the literal pushes the bracket out of that window and every family
+    // here lands in the reference with empty Help and Type cells (a hard error
+    // since the generator stopped warning and started failing).
     if let Some(arr) = v.get("per_queue_lag").and_then(|x| x.as_array()) {
         let fams = [
             ("queen_queue_pop_messages_per_minute", "pop_count"),
@@ -200,6 +214,7 @@ fn format_db_prometheus(txt: &str, out: &mut String) {
             ("queen_queue_push_messages_per_minute", "push_message_count"),
             ("queen_queue_pop_empty_per_minute", "pop_empty_count"),
             ("queen_queue_transactions_per_minute", "transaction_count"),
+            ("queen_queue_conflated_per_minute", "conflated_count"),
             ("queen_queue_parked_consumers", "parked_count"),
             ("queen_queue_metrics_age_seconds", "bucket_age_seconds"),
         ];
@@ -241,29 +256,26 @@ fn format_db_prometheus(txt: &str, out: &mut String) {
             }
         }
     }
-    // Queue depth (per-queue message counts, both engines).
-    if let Some(arr) = v.get("queue_depth").and_then(|x| x.as_array()) {
-        if !arr.is_empty() {
-            out.push_str("# HELP queen_queue_depth_total Total messages stored per queue\n# TYPE queen_queue_depth_total gauge\n");
-            out.push_str("# HELP queen_queue_depth_pending Pending (unconsumed) messages per queue\n# TYPE queen_queue_depth_pending gauge\n");
-        }
-        for e in arr {
-            let q = e.get("queue").and_then(|x| x.as_str()).unwrap_or("");
-            let storage = e.get("storage").and_then(|x| x.as_str()).unwrap_or("");
-            let total = e.get("total_messages").and_then(|x| x.as_i64()).unwrap_or(0);
-            let pending = e.get("pending_messages").and_then(|x| x.as_i64()).unwrap_or(0);
-            let ql = prom_label_escape(q);
-            let sl = prom_label_escape(storage);
-            out.push_str(&format!(
-                "queen_queue_depth_total{{queue=\"{}\",storage=\"{}\"}} {}\n",
-                ql, sl, total
-            ));
-            out.push_str(&format!(
-                "queen_queue_depth_pending{{queue=\"{}\",storage=\"{}\"}} {}\n",
-                ql, sl, pending
-            ));
-        }
-    }
+    // Queue depth: DELETED, deliberately — PLAN_CONFLATION §6.3's "caution found
+    // in passing", resolved here because §6.3 adds a family next to these two and
+    // the docs generator cannot tell live code from dead.
+    //
+    // `queen_queue_depth_total` and `queen_queue_depth_pending` read a
+    // `queue_depth` key that queen.get_prometheus_metrics_v1 (023_prometheus.sql)
+    // has never built — grep it: the SP returns system_totals / per_queue_lag /
+    // per_worker / dlq and nothing else. So the block never ran, not one sample
+    // was ever exposed, and not even the `# HELP` lines were emitted (they sit
+    // inside the same `if let Some(arr)`). What DID exist was the documentation:
+    // gen-metrics.mjs scrapes `# HELP` strings out of this file, so both families
+    // were published in the manual as if they worked.
+    //
+    // Removing them changes nothing an operator can observe — a family with no
+    // samples is not in the exposition — and it stops the generator from
+    // documenting a metric the broker cannot produce. Per-queue depth is not
+    // being dropped as an idea: it is per-GROUP work (a conflating group's
+    // pending is not the queue's), which is exactly what
+    // GET /api/v1/resources/queues/:q/depth answers (§2.5/§5.3). Making
+    // queen.stats conflation-aware is out of scope on purpose (§2.5, §9).
 }
 
 // -------------------------------------------------------- GET /metrics/prometheus

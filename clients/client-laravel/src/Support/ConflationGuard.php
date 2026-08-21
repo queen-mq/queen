@@ -80,7 +80,14 @@ final class ConflationGuard
             self::warnOnce($queue, $group, $namespace, $task, $applied);
         }
 
-        if (!$requested || $applied || $conflict) {
+        // Pop maintenance is not version skew: the broker refused the pop before
+        // it reached the claim path, so there is no policy to echo and nothing
+        // to conclude from the absence of one. Without this, an operator pausing
+        // pops would stop every conflating consumer in the fleet with a "broker
+        // too old" exception.
+        $paused = ($body['paused'] ?? false) === true;
+
+        if (!$requested || $applied || $conflict || $paused) {
             return;
         }
 

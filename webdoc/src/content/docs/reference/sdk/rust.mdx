@@ -133,6 +133,7 @@ The partition defaults to `Default`, which the broker treats as the absence of a
 | `lease_seconds(i32)` | queue default | Per-request lease override. |
 | `subscription_mode(SubscriptionMode)` | none | `New` or `All`, applied only when seeding a new cursor. |
 | `subscription_from(String)` | none | `now` or an ISO-8601 timestamp. |
+| `conflation(bool)` | `false` | Last-value delivery: the pop returns only each partition's newest visible message and retires the rest. Sent only when true. A property of the consumer GROUP, stored on its first registration; see [conflation](/reference/http/pop#conflation). Requires broker >= 1.1.0; against an older one the call raises rather than draining the backlog quietly. |
 | `cancel(Cancel)` | none | Cooperative shutdown. |
 | `buffer(BufferOptions)` | off | Client-side push batching. `{message_count, time, max_size, retry_delay}`, defaults `100` / `1 s` / `4 * message_count` / `250 ms`. |
 
@@ -371,6 +372,7 @@ A windowed aggregation from a source queue into a sink queue:
 | `max_partitions` | 4 | Partitions claimed per poll. |
 | `max_wait` | 1000 ms | Long-poll wait on the source. |
 | `subscription_mode`, `subscription_from` | none | Seed a new cursor. |
+| `conflation` | `false` | Requests last-value delivery on the source pop; the reducer only ever sees each partition's newest message, so messages conflation skips never reach it. See [conflation](/reference/http/pop#conflation). |
 | `reset` | `false` | Wipe state when the chain's shape changed. |
 | `consumer_group` | `streams.{query_id}` | |
 | `cancel` | none | |

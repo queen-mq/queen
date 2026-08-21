@@ -281,6 +281,9 @@ stale by the stats cadence).
   "queue": "orders",
   "group": null,
   "pending": 310,
+  "partitionsPending": 4,
+  "conflation": false,
+  "effectivePending": 310,
   "partitions": [ { "partition": "Default", "pending": 310 } ]
 }
 ```
@@ -290,6 +293,22 @@ dashboard publish, so the numbers agree. With `?group=<name>` each partition rep
 group's own backlog against its committed cursor; a group with no cursor on a partition owes
 the partition's whole retained range. A queue with no `queen.queues` row answers `404` with
 `{"error":"Queue not found"}`.
+
+`partitionsPending` counts the partitions with anything pending. It is useful for
+every group: `queenctl queue depth` used to compute it client-side and call it
+`partitionsNonEmpty`.
+
+`conflation` and `effectivePending` describe [last-value
+delivery](/reference/http/pop#conflation). `conflation` is the group's stored delivery
+policy (`false` without `?group=`, which addresses no group). `effectivePending`
+is `partitionsPending` for a conflating group and `pending` for every other, and
+the distinction is the one that decides whether you are looking at an incident:
+
+> For a conflating group, `pending` is **log depth**, the positions still to
+> retire, and `effectivePending` is **work depth**, the handler invocations that
+> remain.
+> A conflating queue at `pending: 4000000, effectivePending: 12` is healthy. The
+> same two numbers on a non-conflating group are a page.
 
 ## DELETE /api/v1/resources/queues/:queue
 

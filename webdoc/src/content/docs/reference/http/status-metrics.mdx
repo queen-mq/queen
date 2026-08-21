@@ -241,9 +241,18 @@ cannot express:
   table and were pinned at `0`). The lifetime counter `queen_cluster_dlq_total`
   is still the monotonic alternative: it is bumped on every dead-letter and never
   shrinks when DLQ rows are deleted or replayed.
-- `queen_queue_depth_total` and `queen_queue_depth_pending` are formatted from a
-  `queue_depth` block that `queen.get_prometheus_metrics_v1` does not currently
-  return, so those two series are absent from the exposition.
+- `queen_queue_depth_total` and `queen_queue_depth_pending` were formatted from a
+  `queue_depth` block that `queen.get_prometheus_metrics_v1` never returned, so
+  those two series were never in the exposition. The code that formatted them was
+  removed in 1.1.0. Per-group depth lives on
+  [`GET /api/v1/resources/queues/:queue/depth`](/reference/http/queues#get-apiv1resourcesqueuesqueuedepth),
+  which is the right shape for it: depth under a delivery policy is a per-group
+  number.
+- `queen_queue_conflated_per_minute` (1.1.0) counts the log positions
+  [conflation](/reference/http/pop#conflation) retired without a handler invocation,
+  per queue and per minute bucket. It is fed by the ack path, so it appears one
+  metrics flush after the acks that produced it, and it reads `0` on every queue
+  whose consumer groups do not conflate.
 - Per-queue series carry a bare `queue` label and no tenant label. The query behind
   them takes the most recent bucket per queue **name**, so on a cell where two
   tenants use the same queue name one tenant's numbers are published under that

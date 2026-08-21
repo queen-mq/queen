@@ -517,6 +517,36 @@ else
   bad "cg2 conflicting pop delivered nothing (HTTP $POP_RC)"
 fi
 
+# THE STEADY STATE OF A DISAGREEING CONSUMER: an EMPTY conflicting pop.
+#
+# Every assertion above pushes messages first, and that is exactly what hid the
+# hole: for a conflicting request the EFFECTIVE flag is the stored one, so a
+# status keyed only on "is conflation on" answers a bodiless 204 and the conflict
+# echo never reaches the wire. An SDK cannot tell that from a pre-1.1.0 broker, so
+# it raises "requires broker >= 1.1.0" and stops the consumer — on its FIRST poll
+# of an idle queue, which is what a long-poll consumer does all day. Both
+# directions of the disagreement are asserted, on a drained queue.
+# cg2 is drained (it just acked everything), so this pop delivers nothing.
+req GET "/api/v1/pop/queue/$Q_CONF?consumerGroup=$CG2&conflation=true&subscriptionMode=all"
+eq "empty conflicting pop keeps the 200 (cg2 stored false, asks true)" "200" "$QW_RC"
+eq "and still carries conflationConflict" "true" "$(jv '.conflationConflict')"
+eq "with no conflation echo (the stored policy is off)" "false" "$(jv '.conflation // false')"
+eq "and no messages" "0" "$(jv '.messages | length')"
+# The other direction, on a group seeded at the tail so it is empty by
+# construction: stored TRUE, request says false.
+CG3="cg3-$RUN"
+req GET "/api/v1/pop/queue/$Q_CONF?consumerGroup=$CG3&conflation=true&subscriptionMode=new"
+eq "cg3 registers conflating at the tail (empty, echoed)" "200" "$QW_RC"
+eq "empty registering pop carries the echo" "true" "$(jv '.conflation')"
+req GET "/api/v1/pop/queue/$Q_CONF?consumerGroup=$CG3&conflation=false"
+eq "empty conflicting pop, other direction (cg3 stored true, asks false)" "200" "$QW_RC"
+eq "carries conflationConflict" "true" "$(jv '.conflationConflict')"
+eq "and the EFFECTIVE (stored) flag" "true" "$(jv '.conflation')"
+# Control: a consumer that never mentioned conflation keeps the pre-1.1.0
+# bodiless 204 on the same drained queue.
+req GET "/api/v1/pop/queue/$Q_CONF?consumerGroup=$CG2&subscriptionMode=all"
+eq "a flag-less empty pop stays a bodiless 204" "204" "$QW_RC"
+
 # §3.3 refusals — the two consumer bugs that must be a 400, not a warning.
 # (Pins the plan's recommendation on §10 Q2; if the author resolves Q2 the
 # other way, THIS assertion is the one to change.)

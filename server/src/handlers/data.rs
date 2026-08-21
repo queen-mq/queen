@@ -666,28 +666,47 @@ async fn resolve_conflation(
     let on = stored.unwrap_or_else(|| requested.unwrap_or(false));
     let conflict = matches!(requested, Some(r) if r != on);
     if conflict {
-        // Group-setting-wins, LOUDLY (§3.3): a counter, a response echo, and a
-        // rate-limited line — never a per-request log line, which a mismatched
-        // fleet would turn into a flood (the POOL_SAT idiom, obs.rs).
-        st.metrics.per_queue.add_conflation_conflict(tenant, queue);
-        st.metrics
-            .conflation_conflicts
-            .fetch_add(1, Ordering::Relaxed);
-        static CFL_CONFLICT: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
-        if let Some(suppressed) = CFL_CONFLICT.tick(crate::util::now_epoch_ms()) {
-            tracing::warn!(
-                target: "conflation",
-                queue,
-                group,
-                stored = on,
-                requested = requested.unwrap_or(false),
-                suppressed,
-                "consumer declared a conflation policy the group does not have — \
-                 the STORED group setting wins"
-            );
-        }
+        note_conflation_conflict(st, tenant, Some(queue), queue, group, on, requested);
     }
     Conflation { on, conflict }
+}
+
+/// §3.3 items 2 and 4 — group-setting-wins, LOUDLY: the counters and a
+/// rate-limited line, never a per-request log line (a mismatched fleet would turn
+/// that into a flood — the `POOL_SAT` idiom in obs.rs). The third channel, the
+/// response echo, is `Conflation::conflict` and is rendered by the caller.
+///
+/// `queue` is `None` on the discovery route, which spans queues and so has no
+/// single per-queue counter to attribute to; `scope` is the label for the log
+/// line either way (a queue name, or the `namespace/task` pair).
+fn note_conflation_conflict(
+    st: &Arc<AppState>,
+    tenant: &str,
+    queue: Option<&str>,
+    scope: &str,
+    group: &str,
+    stored: bool,
+    requested: Option<bool>,
+) {
+    if let Some(q) = queue {
+        st.metrics.per_queue.add_conflation_conflict(tenant, q);
+    }
+    st.metrics
+        .conflation_conflicts
+        .fetch_add(1, Ordering::Relaxed);
+    static CFL_CONFLICT: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
+    if let Some(suppressed) = CFL_CONFLICT.tick(crate::util::now_epoch_ms()) {
+        tracing::warn!(
+            target: "conflation",
+            queue = scope,
+            group,
+            stored,
+            requested = requested.unwrap_or(false),
+            suppressed,
+            "consumer declared a conflation policy the group does not have — \
+             the STORED group setting wins"
+        );
+    }
 }
 
 /// §3.3 — the two refused combinations, rejected at the handler with a 400 that
@@ -729,6 +748,16 @@ struct PopResult {
     partitions: Vec<PopPart>,
     #[serde(default)]
     error: Option<String>,
+    // PLAN_CONFLATION §3.3, DISCOVERY ROUTE ONLY. queen.log_pop_discover_wire_v1
+    // resolves the durable policy per matched queue and reports here what it
+    // actually applied, plus whether any matched queue's stored policy disagreed
+    // with the request. Absent — which is every other SP and every request that
+    // did not carry the flag — leaves the caller's own resolution in place, so
+    // the wildcard path is byte-identical.
+    #[serde(default)]
+    conflation: Option<bool>,
+    #[serde(rename = "conflationConflict", default)]
+    conflation_conflict: Option<bool>,
 }
 #[derive(Deserialize)]
 struct PopPart {
@@ -796,20 +825,35 @@ pub async fn handle_pop(
     Path(queue): Path<String>,
     Query(p): Query<PopParams>,
 ) -> Response {
-    // Pop maintenance: consumers get an empty, paused result (204) — matches the
-    // C++ pop-maintenance behavior, but shaped so the client's empty-response
-    // handling (no messages) simply retries.
-    if st.pop_maintenance.load(Ordering::Relaxed) {
-        return json(StatusCode::NO_CONTENT, "{\"messages\":[],\"paused\":true}".to_string());
-    }
     let batch = p.batch.unwrap_or(200);
     let auto_ack = p.auto_ack.unwrap_or(false);
     let wait = p.wait.unwrap_or(false);
     let timeout_ms = p.timeout.unwrap_or(st.pop_default_timeout_ms);
     // PLAN_CONFLATION §3.3: refuse the two illegal combinations BEFORE anything
     // else — both are consumer bugs whose silent form is unfixable in production.
+    // Ahead of the maintenance gate too: an illegal request is illegal whether or
+    // not pops happen to be paused, and answering it 200/"paused" for the length
+    // of a maintenance window would hide the bug exactly while an operator is
+    // looking at the cell. Neither check touches the DB.
     if let Some(r) = conflation_refusal(p.conflation, p.consumer_group.is_some(), auto_ack) {
         return r;
+    }
+    // Pop maintenance: consumers get an empty, paused result (204) — matches the
+    // C++ pop-maintenance behavior, but shaped so the client's empty-response
+    // handling (no messages) simply retries. A conflating request gets the same
+    // answer WITH a body (see POP_PAUSED_CONFLATING).
+    //
+    // Written out in each of the three pop handlers rather than behind a helper:
+    // webdoc/scripts/gen-openapi.mjs derives a route's response codes from the
+    // `StatusCode::` variants reachable IN THE HANDLER BODY, so moving these two
+    // behind a call silently drops both 200 and 204 from the published OpenAPI
+    // for every pop route.
+    if st.pop_maintenance.load(Ordering::Relaxed) {
+        return if p.conflation == Some(true) {
+            json(StatusCode::OK, POP_PAUSED_CONFLATING.to_string())
+        } else {
+            json(StatusCode::NO_CONTENT, POP_PAUSED.to_string())
+        };
     }
     let group = p.consumer_group.unwrap_or_else(|| "__QUEUE_MODE__".to_string());
     let cfl = resolve_conflation(&st, &queue, &group, tenant.as_str(), p.conflation).await;
@@ -1009,14 +1053,45 @@ pub async fn handle_pop(
 /// round trip, before it processes a single message — so a CONFLATING pop answers
 /// 200 with a body even when it delivered nothing. Every flag-off response keeps
 /// the 204 byte for byte.
+///
+/// `conflict` counts for exactly the same reason and it is NOT an edge case: for
+/// a request that disagrees with the stored policy (requested=true, stored=false)
+/// `on` is FALSE, so keying only on `on` would send the disagreeing consumer a
+/// bodiless 204 — indistinguishable from a pre-1.1.0 broker — and every SDK's
+/// degrade-loudly check would kill it (§3.3 item 3, Q3, E2E-4: "both consumers
+/// keep working"). A long-poll on an idle queue is precisely that response, so
+/// the conflicting consumer would die on its FIRST empty poll. Emitting the 200
+/// whenever the response has anything to say about conflation keeps flag-off
+/// responses byte-identical (both fields false ⇒ 204, as before).
 #[inline]
 fn pop_status(count: usize, cfl: Conflation) -> StatusCode {
-    if count == 0 && !cfl.on {
+    if count == 0 && !cfl.on && !cfl.conflict {
         StatusCode::NO_CONTENT
     } else {
         StatusCode::OK
     }
 }
+
+/// The pop-maintenance answer, which predates conflation and has to keep
+/// predating it for every consumer that did not ask for conflation.
+const POP_PAUSED: &str = "{\"messages\":[],\"paused\":true}";
+
+/// PLAN_CONFLATION §4 — the pop-maintenance answer for a request that DID ask.
+///
+/// `handlers::json` drops the body on a 204, so a conflating consumer would
+/// receive a bodiless response carrying neither `paused` nor the conflation echo,
+/// and every SDK's degrade-loudly check reads "no echo" as "broker older than
+/// 1.1.0" and STOPS the consume loop. Turning on pop maintenance — a routine
+/// operator action — would therefore terminate every conflating consumer in the
+/// fleet with a version error, recoverable only by restarting them.
+///
+/// So the answer keeps its 200 and carries both keys: `paused` (this is not a
+/// verdict on the policy — the request never reached the claim path) and
+/// `conflation` (this broker understands the parameter, which is all the
+/// degrade-loudly check needs to know). Nothing was delivered, so no policy was
+/// applied to anything, and no DB is touched: maintenance means the pop path
+/// stays cold.
+const POP_PAUSED_CONFLATING: &str = "{\"messages\":[],\"paused\":true,\"conflation\":true}";
 
 // Phase 2: a woken long-poll drains its partition hints and pops each hinted
 // partition directly via the specific-partition SP (`db::pop_specific`), skipping
@@ -2166,17 +2241,24 @@ pub async fn handle_pop_partition(
     Path((queue, partition)): Path<(String, String)>,
     Query(p): Query<PopParams>,
 ) -> Response {
-    if st.pop_maintenance.load(Ordering::Relaxed) {
-        return json(StatusCode::NO_CONTENT, "{\"messages\":[],\"paused\":true}".to_string());
-    }
     let batch = p.batch.unwrap_or(200);
     let auto_ack = p.auto_ack.unwrap_or(false);
     let wait = p.wait.unwrap_or(false);
     let timeout_ms = p.timeout.unwrap_or(st.pop_default_timeout_ms);
     // PLAN_CONFLATION §3.3: the same two refusals as the wildcard route — a
-    // group-less pinned pop has no policy to hang conflation on either.
+    // group-less pinned pop has no policy to hang conflation on either. Ahead of
+    // the maintenance gate, same reasoning as handle_pop.
     if let Some(r) = conflation_refusal(p.conflation, p.consumer_group.is_some(), auto_ack) {
         return r;
+    }
+    // Same shape as handle_pop, written out for the same reason (the OpenAPI
+    // generator reads the StatusCode variants out of the handler body).
+    if st.pop_maintenance.load(Ordering::Relaxed) {
+        return if p.conflation == Some(true) {
+            json(StatusCode::OK, POP_PAUSED_CONFLATING.to_string())
+        } else {
+            json(StatusCode::NO_CONTENT, POP_PAUSED.to_string())
+        };
     }
     let group = p.consumer_group.unwrap_or_else(|| "__QUEUE_MODE__".to_string());
     // `max_parts` is irrelevant here (a pinned pop is one partition), so M5 does
@@ -2360,9 +2442,6 @@ pub async fn handle_pop_discover(
     Extension(tenant): Extension<crate::tenant::Tenant>,
     Query(p): Query<PopDiscoverParams>,
 ) -> Response {
-    if st.pop_maintenance.load(Ordering::Relaxed) {
-        return json(StatusCode::NO_CONTENT, "{\"messages\":[],\"paused\":true}".to_string());
-    }
     let namespace = p.namespace.unwrap_or_default();
     let task = p.task.unwrap_or_default();
     if namespace.is_empty() && task.is_empty() {
@@ -2375,24 +2454,42 @@ pub async fn handle_pop_discover(
     let auto_ack = p.auto_ack.unwrap_or(false);
     let wait = p.wait.unwrap_or(false);
     let timeout_ms = p.timeout.unwrap_or(st.pop_default_timeout_ms);
-    // PLAN_CONFLATION §3.3: same two refusals as the queue-scoped routes.
+    // PLAN_CONFLATION §3.3: same two refusals as the queue-scoped routes, ahead of
+    // the maintenance gate (see handle_pop).
     if let Some(r) = conflation_refusal(p.conflation, p.consumer_group.is_some(), auto_ack) {
         return r;
     }
+    // Same shape as handle_pop, written out for the same reason (the OpenAPI
+    // generator reads the StatusCode variants out of the handler body).
+    if st.pop_maintenance.load(Ordering::Relaxed) {
+        return if p.conflation == Some(true) {
+            json(StatusCode::OK, POP_PAUSED_CONFLATING.to_string())
+        } else {
+            json(StatusCode::NO_CONTENT, POP_PAUSED.to_string())
+        };
+    }
     let group = p.consumer_group.unwrap_or_else(|| "__QUEUE_MODE__".to_string());
     // A discovery pop spans QUEUES, so there is no single (queue, group) whose
-    // stored policy the broker could cache here. The requested flag is therefore
-    // the effective one broker-side, and queen.log_pop_discover_wire_v1 resolves
-    // the DURABLE per-queue policy itself (its candidate scan joins
-    // consumer_groups_metadata) — so a registered group still gets its stored
-    // policy, per queue, and the request flag only ever registers a new one.
-    // Deliberate deviation from §3.3's single-queue cache read; see the report.
-    let cfl = Conflation {
-        on: p.conflation.unwrap_or(false) && group != "__QUEUE_MODE__",
-        conflict: false,
-    };
+    // stored policy the broker could cache here — and the request flag must NEVER
+    // become the echo by default: queen.log_pop_discover_wire_v1 resolves the
+    // durable policy per matched queue (COALESCE(cgm.conflation, requested)) and
+    // applies THAT, so echoing the request would report a policy the SP may not
+    // have used — the dangerous direction (the SDK concludes conflation is in
+    // force and drains the backlog message by message, exactly what §4 forbids).
+    //
+    // So the SP resolves and REPORTS: its result JSON carries `conflation` (the
+    // policy every matched queue agreed on) and `conflationConflict` (some matched
+    // queue's stored policy disagreed with the request), and `cfl` below is built
+    // from the answer, after the call. `requested` only decides the M5 partition
+    // sizing — a budget knob, never a semantic one; the message budget still caps
+    // the response either way. Known wart, documented rather than fixed: a
+    // consumer that does NOT declare the flag against an already-conflating group
+    // is served conflated (the SP's stored policy wins, as it must) with
+    // max_parts=1, i.e. one message per round trip. Correct, just slow, and the
+    // broker cannot do better without a per-queue lookup it has no key for.
+    let requested = if group == "__QUEUE_MODE__" { None } else { p.conflation };
     // M5 (§3.2), as in handle_pop.
-    let max_parts = if cfl.on {
+    let max_parts = if requested == Some(true) {
         p.partitions.unwrap_or(batch).clamp(1, 64)
     } else {
         p.partitions.unwrap_or(1)
@@ -2458,7 +2555,7 @@ pub async fn handle_pop_discover(
             st.stmt_timeout,
             db::pop_discover(
                 &client, &namespace, &task, &group, batch, lease_seconds, &worker,
-                auto_ack, max_parts, &sub_mode, &sub_from, tenant.as_str(), cfl.on,
+                auto_ack, max_parts, &sub_mode, &sub_from, tenant.as_str(), requested,
             ),
         )
         .await;
@@ -2481,8 +2578,24 @@ pub async fn handle_pop_discover(
         // needs), and the top-level "queue" field is left empty. Per-queue lag /
         // cache attribution is skipped here for the same reason (acks on these
         // partitions attribute via the DB-lookup fallback).
-        let (body, count, meta) =
-            build_pop_response(&txt, None, "", &group, lease_id, &st.encryption, cfl);
+        // PLAN_CONFLATION §3.3: `cfl` comes out of the SP's own report, so the
+        // echo is what was APPLIED (see the `requested` comment above).
+        let (body, count, meta, cfl) =
+            build_pop_discover_response(&txt, &group, lease_id, &st.encryption);
+        // A conflict is reported once per response, exactly like the queue-scoped
+        // route does in resolve_conflation: counter + rate-limited line, never a
+        // per-request log (a mismatched fleet would flood).
+        if cfl.conflict {
+            // No per-queue counter: this route spans queues and has no single
+            // one to attribute to. The scope label is the namespace/task pair,
+            // the same identity the SDKs key their warn-once registry on.
+            let scope = format!(
+                "{}/{}",
+                if namespace.is_empty() { "*" } else { &namespace },
+                if task.is_empty() { "*" } else { &task }
+            );
+            note_conflation_conflict(&st, tenant.as_str(), None, &scope, &group, cfl.on, requested);
+        }
         if count == 0 && wait && Instant::now() < deadline {
             // Discovery pops span queues -> this tenant's discovery gate, woken by
             // any push of ITS OWN (another tenant's push cannot satisfy this query,
@@ -2594,6 +2707,44 @@ fn build_pop_response(
         return pop_error_body(&e);
     }
     render_pop_parts(&parsed.partitions, bin_blobs, queue, group, lease_id, enc, cfl)
+}
+
+// Discovery pop response (GET /api/v1/pop?namespace=&task=). Same SP result shape
+// as build_pop_response plus the conflation report queen.log_pop_discover_wire_v1
+// adds — which is why this route has its own builder: the effective policy is not
+// known until the SP answers, so it is returned here rather than passed in.
+//
+// PLAN_CONFLATION §3.3. The SP applies COALESCE(cgm.conflation, requested) per
+// matched queue; `conflation` is what every matched queue agreed on and
+// `conflationConflict` says some matched queue's stored policy disagreed with the
+// request. Both keys are absent whenever the request carried no flag (the SP does
+// not even look), in which case the response carries neither — byte-identical to
+// a pre-conflation broker.
+fn build_pop_discover_response(
+    txt: &str,
+    group: &str,
+    lease_id: &str,
+    enc: &crate::encryption::Encryption,
+) -> (String, usize, PopMeta, Conflation) {
+    let parsed: PopResult = match serde_json::from_str(txt) {
+        Ok(p) => p,
+        Err(_) => {
+            let (b, n, m) = pop_error_body("parse");
+            return (b, n, m, Conflation::OFF);
+        }
+    };
+    if let Some(e) = parsed.error {
+        let (b, n, m) = pop_error_body(&e);
+        return (b, n, m, Conflation::OFF);
+    }
+    let cfl = Conflation {
+        on: parsed.conflation.unwrap_or(false),
+        conflict: parsed.conflation_conflict.unwrap_or(false),
+    };
+    // Discovery spans queues: no single top-level queue name (see the caller).
+    let (body, count, meta) =
+        render_pop_parts(&parsed.partitions, None, "", group, lease_id, enc, cfl);
+    (body, count, meta, cfl)
 }
 
 // Specific-partition pop response: SP result is single-partition shaped

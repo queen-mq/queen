@@ -117,6 +117,14 @@ ALTER TABLE queen.queue_lag_metrics ADD COLUMN IF NOT EXISTS parked_count       
 -- cross-replica upsert merge avg_lag_ms as a weighted average (the same
 -- SUM(avg*count)/SUM(count) identity the worker_metrics readers use).
 ALTER TABLE queen.queue_lag_metrics ADD COLUMN IF NOT EXISTS lag_count          BIGINT DEFAULT 0;
+-- PLAN_CONFLATION §6.3. Log positions a conflating ack retired WITHOUT a handler
+-- invocation on this queue in this bucket — the ack SPs' `conflated` field,
+-- accumulated in metrics.rs and flushed here like every other counter. A COUNTER
+-- (SUMmed across replicas by the upsert, exposed as the per-minute
+-- queen_queue_conflated_per_minute gauge), and it is the honest second number
+-- next to pop_count: pop_count counts handler invocations, this counts the work
+-- that never became one. 0 on every queue whose groups do not conflate.
+ALTER TABLE queen.queue_lag_metrics ADD COLUMN IF NOT EXISTS conflated_count    BIGINT DEFAULT 0;
 -- (The Track-B tenant_id column + (bucket, name, tenant) unique key are gone:
 -- queue_id carries both halves of the old key, and two tenants sharing a queue
 -- NAME are distinct queue ids by construction.)

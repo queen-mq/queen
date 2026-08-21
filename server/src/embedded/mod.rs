@@ -830,6 +830,17 @@ fn pop_params<T: serde::de::DeserializeOwned>(
     if let Some(v) = &p.subscription_from {
         m.insert("subscriptionFrom".into(), v.clone().into());
     }
+    // PLAN_CONFLATION §3.1. Forwarded like every other pop parameter, and it has
+    // to be: this facade builds the handler's params by hand, so a field left out
+    // here is not a compile error — it is a `conflation: Some(true)` that the
+    // broker never sees, answering with full batches and no echo. There is no SDK
+    // in this path to raise the degrade-loudly error either (that check lives in
+    // the HTTP clients), so the silent backlog drain §4 forbids would have no
+    // remaining guard at all. Sent only when Some, so the flag-off call is
+    // byte-identical.
+    if let Some(v) = p.conflation {
+        m.insert("conflation".into(), v.into());
+    }
     if let Some(v) = namespace {
         m.insert("namespace".into(), v.into());
     }
@@ -886,6 +897,38 @@ mod tests {
 
         // A body that lost the load-bearing keys must NOT parse.
         assert!(serde_json::from_str::<DeleteQueueResult>(r#"{"queue":"q"}"#).is_err());
+    }
+
+    /// PLAN_CONFLATION §3.1 — every pop parameter this facade re-encodes by hand
+    /// must actually reach the handler. `pop_params` builds a JSON map field by
+    /// field, so an omission is not a compile error: it is a `conflation: true`
+    /// the broker never sees, answered with full batches and no echo, and with no
+    /// SDK in this path to raise the degrade-loudly error. Asserted against the
+    /// handler's OWN params structs so a rename on either side fails here.
+    #[test]
+    fn pop_params_forward_conflation_to_every_route() {
+        let mut p = qp::PopParams::default();
+        p.consumer_group = Some("workers".into());
+        p.conflation = Some(true);
+
+        // The handler structs keep their fields private, so assert on the JSON
+        // this function actually hands the extractor: same bytes, no accessors
+        // to add just for a test.
+        let queue_scoped: serde_json::Value = pop_params(&p, None, None).unwrap();
+        assert_eq!(queue_scoped["conflation"], serde_json::json!(true));
+        let discovery: serde_json::Value = pop_params(&p, Some("billing"), Some("invoice")).unwrap();
+        assert_eq!(discovery["conflation"], serde_json::json!(true));
+        // And it deserializes into the real params structs, so a rename on the
+        // handler side is a failure here rather than a silently ignored key.
+        let _: crate::handlers::PopParams = pop_params(&p, None, None).unwrap();
+        let _: crate::handlers::PopDiscoverParams =
+            pop_params(&p, Some("billing"), Some("invoice")).unwrap();
+
+        // Absent stays absent: a call that never asked must be byte-identical.
+        let mut off = qp::PopParams::default();
+        off.consumer_group = Some("workers".into());
+        let plain: serde_json::Value = pop_params(&off, None, None).unwrap();
+        assert!(plain.get("conflation").is_none(), "{plain}");
     }
 
     /// Default::default() and new() must configure the same broker — the

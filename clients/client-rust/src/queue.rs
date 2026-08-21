@@ -434,8 +434,13 @@ impl QueueBuilder {
         }
         let applied = resp.is_some_and(|r| r.conflation_applied());
         let conflict = resp.is_some_and(|r| r.has_conflation_conflict());
+        // Pop maintenance is not version skew either: the broker refused the pop
+        // before it reached the claim path, so there is no echo to expect. The
+        // caller already returns early on it; the guard is repeated here so the
+        // verdict cannot depend on which call site reached it.
+        let paused = resp.is_some_and(|r| r.is_paused());
 
-        if !applied && !conflict {
+        if !applied && !conflict && !paused {
             return Err(Error::Invalid(CONFLATION_UNSUPPORTED.to_string()));
         }
         // §3.3: the stored policy wins and this consumer keeps working — a

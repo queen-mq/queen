@@ -91,6 +91,13 @@ func checkConflationEcho(result map[string]interface{}, requested bool, queue, g
 	if applied, _ := result["conflation"].(bool); applied {
 		return nil
 	}
+	// Pop maintenance is not version skew: the broker refused the pop before it
+	// reached the claim path, so there is no echo to expect. Without this,
+	// turning maintenance on would stop every conflating consumer in the fleet
+	// with a "broker too old" error.
+	if paused, _ := result["paused"].(bool); paused {
+		return nil
+	}
 	return fmt.Errorf("%w (queue %q, group %q)", ErrConflationUnsupported, queue, group)
 }
 

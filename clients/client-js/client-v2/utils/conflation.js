@@ -40,9 +40,14 @@ const warnedConflicts = new Set()
 
 // A (queue, group) whose conflict the broker has ALREADY told us about. Proof
 // that this broker understands the parameter, so a later response without the
-// echo for that same pair is the same known conflict and not an old broker —
-// which matters because the conflict answer is itself lost on an empty pop
-// (a non-conflating empty pop is a bodiless 204, conflict or not).
+// echo for that same pair is the same known conflict and not an old broker.
+//
+// It is belt-and-braces now rather than the load-bearing part it once was: a
+// 1.1.0 broker keeps the 200 and the body whenever the answer has anything to
+// say about conflation (`pop_status`), so an EMPTY conflicting pop carries
+// `conflationConflict` too and the check above catches it on the first round
+// trip. Keeping the memo costs nothing and still covers a first contact whose
+// answer somehow arrives without either key.
 const knownConflicts = new Set()
 
 /**
@@ -87,6 +92,12 @@ export function checkConflationResponse(result, ctx) {
   }
 
   if (result && result.conflation === true) return
+
+  // Pop maintenance: the broker refused the pop before it reached the claim
+  // path, so there is no policy to echo and nothing to conclude from the
+  // absence of one. Reading it as "old broker" would stop every conflating
+  // consumer in the fleet the moment an operator pauses pops.
+  if (result && result.paused === true) return
 
   // The group is known to disagree with us; this response is that same
   // conflict, seen through a body that could not carry the flag.

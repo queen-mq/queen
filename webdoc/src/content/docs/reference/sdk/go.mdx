@@ -213,6 +213,7 @@ is what you sent plus the broker's default for everything you did not.
 | `AutoAck(enabled)` | not sent | `true` | The two meanings differ. See the warning. |
 | `SubscriptionMode(mode)` | `""` | `""` | `SubscriptionModeAll`, `SubscriptionModeNew`, `SubscriptionModeNewOnly`. |
 | `SubscriptionFrom(from)` | `""` | `""` | `SubscriptionFromNow` (`"now"`) or an ISO timestamp. |
+| `Conflation(enabled)` | `false` | `false` | Last-value delivery: the pop returns only each partition's newest visible message and retires the rest. Sent only when true. A property of the consumer GROUP, stored on its first registration; see [conflation](/reference/http/pop#conflation). Requires broker >= 1.1.0; against an older one the call raises rather than draining the backlog quietly. |
 | `Concurrency(count)` | n/a | `1` | `Consume` only. Worker goroutines. |
 | `Limit(count)` | n/a | `0` (unlimited) | `Consume` only. |
 | `IdleMillis(ms)` | n/a | `0` (no timeout) | `Consume` only. |
@@ -534,6 +535,7 @@ closes and what happens to whatever arrives after it did:
 | `MaxWaitMillis` | `1000` |
 | `SubscriptionMode` | `""` |
 | `SubscriptionFrom` | `""` |
+| `Conflation` | `false`. Requests last-value delivery on the source pop; the reducer only ever sees each partition's newest message, so messages conflation skips never reach it. See [conflation](/reference/http/pop#conflation) |
 | `Reset` | `false` (wipe state on a config-hash mismatch) |
 | `ConsumerGroup` | `streams.<QueryID>` |
 | `Logger` | `nil` |

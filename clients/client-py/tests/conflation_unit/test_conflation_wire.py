@@ -298,3 +298,92 @@ async def test_no_conflict_warning_when_the_response_agrees(capsys):
         await client.close()
 
     assert "conflation conflict" not in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# 3b. THE CONFLICT SHAPE THE BROKER ACTUALLY SENDS.
+#
+# Every fixture above pairs `conflationConflict` with `conflation`, and for a
+# REQUESTING consumer the broker can never send that pair: `conflation` is
+# emitted only when the EFFECTIVE policy is conflating (§3.1), and if the
+# effective policy agreed with a request for conflation there would be no
+# conflict. So the real body for requested=true / stored=false is
+# `{"messages": [...], "conflationConflict": true}` with no `conflation` key --
+# and that is the body §3.3 Q3 and §7.3 E2E-4 require the consumer to survive.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_conflict_without_the_echo_keeps_the_consumer_running(capsys):
+    """requested=true, stored=false: warn once, keep consuming, never raise."""
+    client, transport = make(default_pop=pop_body([message()], conflict=True))
+    try:
+        for _ in range(3):
+            msgs = await client.queue("orders").group("workers").conflation().pop()
+            assert len(msgs) == 1, "the messages are delivered, not dropped"
+    finally:
+        await client.close()
+
+    assert len(transport.pops) == 3
+    assert capsys.readouterr().err.count("conflation conflict") == 1
+
+
+@pytest.mark.asyncio
+async def test_conflict_without_the_echo_on_an_EMPTY_pop_does_not_raise(capsys):
+    """The steady state of a disagreeing consumer on an idle queue.
+
+    A conflicting pop that delivered nothing still answers 200 with a body
+    (`pop_status` keeps the 200 whenever the response has anything to say about
+    conflation), and the SDK must read it as "the group is registered the other
+    way", not as "this broker is older than 1.1.0". Getting this wrong kills the
+    consumer on its FIRST poll, before it has seen a single message.
+    """
+    client, _ = make(default_pop=pop_body(conflict=True))
+    try:
+        msgs = await client.queue("orders").group("workers").conflation().pop()
+    finally:
+        await client.close()
+
+    assert msgs == []
+    assert capsys.readouterr().err.count("conflation conflict") == 1
+
+
+@pytest.mark.asyncio
+async def test_consume_loop_survives_a_conflict_without_the_echo(capsys):
+    client, _ = make(pop_body([message()], conflict=True))
+    seen = []
+
+    async def handler(msg):
+        seen.append(msg)
+
+    try:
+        await consume_once(
+            client.queue("orders").group("workers").conflation().wait(False).limit(1),
+            handler,
+        )
+    finally:
+        await client.close()
+
+    assert len(seen) == 1
+    assert capsys.readouterr().err.count("conflation conflict") == 1
+
+
+# ---------------------------------------------------------------------------
+# 3c. Pop maintenance is not a version skew.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_paused_response_is_not_an_unsupported_broker():
+    """`{"messages":[],"paused":true}` means the operator turned pops off. The
+    request never reached the claim path, so there is no echo to expect: reading
+    its absence as "old broker" would have every conflating consumer in the
+    fleet exit the moment pop maintenance is switched on."""
+    paused = {"success": True, "messages": [], "paused": True}
+    client, _ = make(default_pop=paused)
+    try:
+        msgs = await client.queue("orders").group("workers").conflation().pop()
+    finally:
+        await client.close()
+
+    assert msgs == []

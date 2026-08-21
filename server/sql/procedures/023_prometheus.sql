@@ -62,6 +62,10 @@ BEGIN
                     qlm.ack_success_count,
                     qlm.ack_failed_count,
                     qlm.transaction_count,
+                    -- PLAN_CONFLATION §6.3: positions retired by conflation
+                    -- without a handler invocation. COALESCE because the column
+                    -- is younger than the rows already in the table.
+                    COALESCE(qlm.conflated_count, 0) AS conflated_count,
                     COALESCE(qlm.parked_count, 0) AS parked_count,
                     EXTRACT(EPOCH FROM (NOW() - qlm.bucket_time))::bigint
                                               AS bucket_age_seconds
