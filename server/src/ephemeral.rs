@@ -19,15 +19,22 @@
 //! its parking OUTSIDE these calls, on the notifier (§3.4).
 //!
 //! ---------------------------------------------------------------------------
-//! SINGLE-BROKER ONLY, DELIBERATELY (phase T1a)
+//! PLACEMENT: RENDEZVOUS, NO LEASES (§3.7)
 //!
-//! §3.7's rendezvous ownership, §3.6's forwarding and §3.5's mesh frames are a
-//! LATER phase. Here self is always the owner of every (queue, partition), which
-//! is exactly the short-circuit §3.7 already specifies for a broker with no
-//! peers — the free-tier cell and the embedded `queen::Broker` run this path
-//! unchanged when the rest lands. The one piece of the distributed design that
-//! is present from day one is `eph_epoch` (M4): it costs nothing, it is in every
-//! message id, and retrofitting it later would invalidate every id in flight.
+//! Every (queue, partition) has exactly ONE owner, chosen by a highest-random-
+//! weight hash over `eph_members() ∪ self`. There is no lease row, no heartbeat
+//! write and no fencing protocol: every broker computes the same answer from the
+//! same membership, and when membership changes the partitions that moved take
+//! their contents with them — which is already the §1.2 loss contract, so a
+//! membership flap costs CONTENT, never correctness. Stale acks die on the epoch
+//! (§3.1), which is the only fence this design needs.
+//!
+//! THE SINGLE-BROKER PATH IS UNCHANGED AND THAT IS LOAD-BEARING. `route`
+//! short-circuits to `Local` before it hashes anything whenever no mesh
+//! transport is attached — and one is attached only when `mesh_active()` (sync
+//! on AND at least one peer). Every free-tier cell and the embedded
+//! `queen::Broker` therefore execute exactly the instructions they executed
+//! before this phase existed: one `OnceLock::get` returning `None`.
 //!
 //! ---------------------------------------------------------------------------
 //! ONE RING, N GROUP CURSORS (§1.5)
@@ -365,6 +372,78 @@ impl Budget {
 // ===========================================================================
 // Message ids
 // ===========================================================================
+
+// ===========================================================================
+// §3.7 — rendezvous placement
+// ===========================================================================
+
+/// Where one (queue, partition) is served.
+///
+/// A THREE-STATE ANSWER COLLAPSED TO TWO: "I own it", "that broker owns it".
+/// There is deliberately no "nobody owns it yet" — the hash is total over a
+/// non-empty candidate set and self is always in that set, so the question
+/// always has an answer and no request ever has to wait for a placement
+/// decision. That is the whole reason placement is a hash and not a lease.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Route {
+    Local,
+    Remote {
+        server_id: String,
+        /// The peer's advertised base URL, e.g. `http://queen-b:6632`.
+        http_addr: String,
+    },
+}
+
+/// One node's weight for one key (§3.7).
+///
+/// HRW ("rendezvous") and not a modulo or a consistent-hashing ring, for the
+/// property that matters here: adding or removing ONE node moves only the keys
+/// that node wins or loses — roughly `1/n` of them — and moves nothing else. On
+/// this class a moved key is an emptied ring (§1.2), so "how many keys move" is
+/// literally "how much data is dropped", and a modulo (which reshuffles almost
+/// everything) would turn one broker joining into a cell-wide wipe.
+///
+/// The score is `xxh3_64(key, seed = xxh3_64(node))`: hashing the NODE into the
+/// seed and the KEY into the body means the per-node seed can be computed once
+/// per node and the key is walked once per candidate, and — unlike
+/// `hash(node ++ key)` — no concatenation buffer is allocated per candidate.
+pub fn hrw_score(node: &str, key: &str) -> u64 {
+    xxhash_rust::xxh3::xxh3_64_with_seed(key.as_bytes(), xxhash_rust::xxh3::xxh3_64(node.as_bytes()))
+}
+
+/// The winner of `key` among `nodes`. `None` only on an empty candidate set,
+/// which no caller here can produce (self is always a candidate).
+///
+/// The tie-break is the node NAME and never the iteration order: two brokers
+/// hashing the same key must agree, and the order a `Vec` happens to be in is
+/// not a fact they share. A 64-bit collision between two live node ids is
+/// vanishingly unlikely and the tie-break costs one comparison — the point is
+/// that the answer is a FUNCTION of the membership set, with no hidden inputs.
+pub fn hrw_pick<'a>(key: &str, nodes: &'a [String]) -> Option<&'a str> {
+    let mut best: Option<(&'a str, u64)> = None;
+    for n in nodes {
+        let s = hrw_score(n, key);
+        let take = match best {
+            None => true,
+            Some((bn, bs)) => s > bs || (s == bs && n.as_str() > bn),
+        };
+        if take {
+            best = Some((n.as_str(), s));
+        }
+    }
+    best.map(|(n, _)| n)
+}
+
+/// The rendezvous key of one (queue, partition): the engine's own composite key
+/// plus the partition, joined with the same `\x1f` (§3.7).
+///
+/// Built from `qkey` and not from the three parts, so the tenant/queue half is
+/// spelled EXACTLY as the map key it names — including the `eph:` prefix. A key
+/// that differed from the map key by one byte would place a partition on a
+/// broker that then looked it up under a different name.
+pub fn rendezvous_key(tenant: &str, name: &str, partition: &str) -> String {
+    format!("{}\x1f{}", Ephemeral::qkey(tenant, name), partition)
+}
 
 /// `e:<epoch_hex>:<partition>:<seq>` — opaque to clients, self-describing to
 /// the broker (§3.1).
@@ -1129,6 +1208,15 @@ pub struct Ephemeral {
     /// optimization for a loop that may not exist, and the on-touch sweep is the
     /// correctness floor either way. Same shape as `Notifier::attach_transport`.
     wake_hint: OnceLock<fn(i64)>,
+    /// §3.5/§3.7 — the mesh, for membership and for the admin broadcast.
+    ///
+    /// A `OnceLock` and not a constructor argument for the same reason the
+    /// notifier's is: the transport is built AFTER the state its inbound
+    /// handlers capture, so taking it at construction would be a cycle. NEVER
+    /// SET ⇒ single broker ⇒ `route` short-circuits to `Local` before it hashes
+    /// anything and `broadcast_admin` is a no-op — the pre-mesh behaviour, which
+    /// is what every free-tier cell and the embedded `queen::Broker` run.
+    mesh: OnceLock<Arc<crate::mesh::MeshTransport>>,
 }
 
 impl Ephemeral {
@@ -1147,12 +1235,19 @@ impl Ephemeral {
             knobs,
             metrics,
             wake_hint: OnceLock::new(),
+            mesh: OnceLock::new(),
         })
     }
 
     /// Wire the sweeper's waker. Only the first call wins; safe to never call.
     pub fn attach_wake_hint(&self, f: fn(i64)) {
         let _ = self.wake_hint.set(f);
+    }
+
+    /// Wire the mesh (§3.5/§3.7). Only the first call wins; safe to never call —
+    /// never calling it IS the single-broker configuration.
+    pub fn attach_mesh(&self, t: Arc<crate::mesh::MeshTransport>) {
+        let _ = self.mesh.set(t);
     }
 
     #[inline]
@@ -1387,6 +1482,209 @@ impl Ephemeral {
         match self.lookup(tenant, name, false) {
             Some(q) => q.config.lock().unwrap().window,
             None => Window::OFF,
+        }
+    }
+
+    // ------------------------------------------------- §3.7 rendezvous placement
+
+    /// The candidate set: every live, ephemeral-capable peer, plus self.
+    ///
+    /// `None` means THERE IS NO MESH — not "no members" — and is the
+    /// short-circuit of §3.7: with no transport attached, self owns everything
+    /// and no hash is computed at all.
+    /// ONE MEMBERSHIP SNAPSHOT PER DECISION. The members come back with their
+    /// addresses attached so the winner's `http_addr` is a lookup in a list
+    /// already in hand — asking the mesh twice would not only cost a second
+    /// clone of the list on every forwarded request, it would let the two reads
+    /// disagree and pick an address for a node the second read no longer has.
+    fn candidates(&self) -> Option<(String, Vec<String>, Vec<crate::mesh::EphMember>)> {
+        let mesh = self.mesh.get()?;
+        let members = mesh.eph_members();
+        if members.is_empty() {
+            // A mesh with no LIVE capable peer is a single broker for placement
+            // purposes, and taking the same early exit keeps the two cases one
+            // code path: a cell whose peer is down must behave exactly like a
+            // cell that never had one, or a rolling restart would answer
+            // differently from a fresh install.
+            return None;
+        }
+        let me = mesh.server_id().to_string();
+        let mut nodes: Vec<String> = Vec::with_capacity(members.len() + 1);
+        nodes.push(me.clone());
+        for m in &members {
+            // A peer announcing OUR server_id is a misconfiguration (two brokers
+            // sharing QUEEN_SERVER_ID); dedupe rather than let one key have two
+            // holders that each think they are it.
+            if m.server_id != me {
+                nodes.push(m.server_id.clone());
+            }
+        }
+        Some((me, nodes, members))
+    }
+
+    /// Who owns `(queue, partition)` — and, when that is not us, DROP whatever
+    /// this broker still holds for it (§3.7, the membership-change wipe).
+    ///
+    /// THE WIPE IS A SIDE EFFECT OF ASKING, and that is the design, not a
+    /// shortcut. Ownership moves when membership changes, and a ring left behind
+    /// on the old owner is memory nobody can reach: its messages are invisible to
+    /// every consumer (they all forward to the new owner) and its bytes still
+    /// count against three budgets. Doing it here means it happens on the next
+    /// TOUCH of that partition, with no watcher thread and no scan — and the
+    /// periodic `reap_foreign` below covers the partitions nobody touches again.
+    pub fn route(&self, tenant: &str, name: &str, partition: &str) -> Route {
+        match self.owner_of(tenant, name, partition) {
+            None => Route::Local,
+            Some((server_id, http_addr)) => {
+                self.wipe_ring(tenant, name, partition);
+                Route::Remote { server_id, http_addr }
+            }
+        }
+    }
+
+    /// The PURE half of `route`: who owns this partition, with no side effect.
+    /// `None` = this broker (including the no-mesh short-circuit).
+    ///
+    /// Split out so the periodic reap can ask about a partition and then decide
+    /// what to do, and so the decision itself is testable without a live ring.
+    fn owner_of(&self, tenant: &str, name: &str, partition: &str) -> Option<(String, String)> {
+        let c = self.candidates()?;
+        Self::owner_in(&c, tenant, name, partition)
+    }
+
+    /// `owner_of` against a candidate set the caller already holds.
+    ///
+    /// Split out for `reap_foreign`, which asks about EVERY partition on the
+    /// broker: a fresh membership snapshot per partition would make a cell with
+    /// ten thousand inboxes lock and clone the peer list ten thousand times per
+    /// refresh. Reusing one snapshot is also the more correct sweep — a pass that
+    /// re-read membership between partitions could act on two rings under two
+    /// different views of the cluster.
+    fn owner_in(
+        cands: &(String, Vec<String>, Vec<crate::mesh::EphMember>),
+        tenant: &str,
+        name: &str,
+        partition: &str,
+    ) -> Option<(String, String)> {
+        let (me, nodes, members) = cands;
+        let key = rendezvous_key(tenant, name, partition);
+        let owner = hrw_pick(&key, nodes)?;
+        if owner == me {
+            return None;
+        }
+        // The address is looked up on the WINNER rather than carried through the
+        // hash: the hash's input is the id set — the thing every broker agrees on
+        // — and an address is a local detail of how to reach it.
+        let addr = members
+            .iter()
+            .find(|x| x.server_id == owner)
+            .map(|x| x.http_addr.clone())
+            .filter(|a| !a.is_empty())?;
+        Some((owner.to_string(), addr))
+    }
+
+    /// The partition-less pop's placement rule (§3.7, v1).
+    ///
+    /// A pop that names no partition is asking about a QUEUE, and a queue's
+    /// partitions can hash to different owners — so there is no single right
+    /// answer and v1 picks the simple one:
+    ///
+    ///   * if ANY partition of this queue is owned here, serve LOCALLY and let
+    ///     the engine's existing partition-less pop visit the local rings. The
+    ///     pop sees this broker's share of the queue and nothing else.
+    ///   * otherwise route on the DEFAULT partition, which is the only partition
+    ///     a queue that has never been addressed by partition will ever have.
+    ///
+    /// The case this deliberately does not solve is a multi-partition queue
+    /// popped without a partition from a broker that owns some of it: the
+    /// consumer sees the local share only. Naming the partition is the complete
+    /// answer (it routes exactly), and fan-out over a multi-owner queue is what
+    /// §9's replicated local reads exist for. Scattering one pop across owners
+    /// would mean N forwarded long-polls per request, which is a distributed
+    /// query, not a queue read.
+    ///
+    /// The walk also WIPES: every partition it visits that no longer hashes here
+    /// is dropped by `route`, so a queue whose partitions all moved away cleans
+    /// itself up on the first pop rather than waiting for the periodic reap.
+    pub fn route_queue(&self, tenant: &str, name: &str) -> Route {
+        // Alone in the ring ⇒ everything is local and there is nothing to walk.
+        // The same early exit `route` takes, so the two cannot disagree.
+        if self.candidates().is_none() {
+            return Route::Local;
+        }
+        let mut any_local = false;
+        if let Some(q) = self.lookup(tenant, name, false) {
+            for p in q.partition_names() {
+                if self.route(tenant, name, &p) == Route::Local {
+                    any_local = true;
+                }
+            }
+        }
+        if any_local {
+            return Route::Local;
+        }
+        self.route(tenant, name, DEFAULT_PARTITION)
+    }
+
+    /// Drop one ring this broker no longer owns, refunding its budgets and
+    /// counting the move. `false` when there was nothing here.
+    ///
+    /// A push holding an `Arc` to this ring can still append to it after the
+    /// removal, and that message is lost — which is precisely the §1.2/§1.4
+    /// contract for an ownership move ("the few seconds of membership
+    /// disagreement may blur order and duplicate or lose messages"). Taking the
+    /// partitions lock for the whole of somebody else's append, on this class,
+    /// would be paying a convoy to protect data that is allowed to disappear.
+    fn wipe_ring(&self, tenant: &str, name: &str, partition: &str) -> bool {
+        let Some(q) = self.lookup(tenant, name, false) else { return false };
+        let ring = q.partitions.lock().unwrap().remove(partition);
+        let Some(ring) = ring else { return false };
+        let freed = ring.lock().unwrap().wipe();
+        self.release(tenant, &q, &freed);
+        self.metrics.eph_wipes.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    /// The periodic half of the membership-change wipe (§3.7): drop every ring
+    /// whose partition no longer hashes here, whether or not anyone touches it.
+    ///
+    /// Needed because the lazy wipe in `route` only fires on a request FOR that
+    /// partition, and after an ownership move the requests go somewhere else by
+    /// definition — so without this pass the memory of a moved partition would be
+    /// freed by nothing until the queue itself was idle-collected (and never, for
+    /// a declared queue). Runs on the config refresh's cadence, so the bound on
+    /// stranded memory is one refresh interval, the same bound §10 Q4 accepts for
+    /// a lost broadcast.
+    pub fn reap_foreign(&self) -> u64 {
+        // ONE membership snapshot for the whole pass (see `owner_in`), and the
+        // no-mesh short-circuit in the same line.
+        let Some(cands) = self.candidates() else { return 0 };
+        let snapshot: Vec<(String, Arc<EqQueue>)> = self
+            .queues
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let mut n = 0u64;
+        for (key, q) in &snapshot {
+            let (tenant, _) = crate::handlers::split_tenant_queue(key);
+            for p in q.partition_names() {
+                if Self::owner_in(&cands, tenant, &q.name, &p).is_some()
+                    && self.wipe_ring(tenant, &q.name, &p)
+                {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    /// §3.5 — broadcast one admin op to every peer, fire and forget. No-op with
+    /// no mesh, which is why the three admin verbs can call it unconditionally.
+    pub fn broadcast_admin(&self, op: &str, tenant: &str, queue: &str) {
+        if let Some(m) = self.mesh.get() {
+            m.send_eph_admin(op, tenant, queue);
         }
     }
 
@@ -2065,6 +2363,50 @@ impl Ephemeral {
         gone
     }
 
+    /// §10 Q4 — the ghost-queue backstop for a LOST `delete` broadcast.
+    ///
+    /// Given the complete set of queue names this tenant still has declared rows
+    /// for, forget every DECLARED queue of that tenant which is not in it. That
+    /// is the bound the plan promises for a dropped frame: a peer that missed a
+    /// `delete` keeps the queue for at most one refresh interval, not for ever.
+    ///
+    /// ONLY THE DECLARED TIER. An implicit queue has no row BY DEFINITION (§1.1),
+    /// so "absent from the row set" says nothing about it — dropping implicit
+    /// queues here would delete every live req/reply inbox on the cell twice a
+    /// minute. Their lifecycle is idle GC and nothing else.
+    ///
+    /// The caller must pass a set read in ONE successful list: a partial or
+    /// failed read must never reach this function, because "no rows" and "I could
+    /// not read the rows" would then be the same instruction.
+    ///
+    /// Race, stated rather than papered over: a `configure` that commits its row
+    /// between this tenant's list read and this call has its RAM half dropped
+    /// here and is re-vivified by the next refresh. It costs a declared-but-empty
+    /// queue its config for one interval — never a message, because a queue that
+    /// was declared moments ago has none.
+    pub fn drop_undeclared(&self, tenant: &str, present: &std::collections::HashSet<String>) -> u64 {
+        let prefix = crate::handlers::tenant_queue_key(tenant, EPH_PREFIX);
+        let doomed: Vec<String> = self
+            .queues
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(k, q)| {
+                k.starts_with(&prefix)
+                    && q.declared.load(Ordering::Relaxed)
+                    && !present.contains(&q.name)
+            })
+            .map(|(_, q)| q.name.clone())
+            .collect();
+        let mut n = 0u64;
+        for name in doomed {
+            if self.remove(tenant, &name) {
+                n += 1;
+            }
+        }
+        n
+    }
+
     /// The tenants a grant row exists for, plus whatever the caller adds. The
     /// config refresh uses it to decide WHOSE declared configs to load: the
     /// per-tenant list SP takes a tenant, and with `require_grant` on a tenant
@@ -2325,16 +2667,74 @@ pub async fn refresh_once(
         };
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else { continue };
         let Some(arr) = v.as_array() else { continue };
+        // §10 Q4 — the row set, for the ghost backstop below. Built from the
+        // SAME read that applies the configs, so the two can never disagree
+        // about what the table said.
+        let mut present: std::collections::HashSet<String> =
+            std::collections::HashSet::with_capacity(arr.len());
         for row in arr {
             let Some(queue) = row.get("queue").and_then(|x| x.as_str()) else { continue };
             let opts = row.get("options").map(parse_options).unwrap_or_default();
             // `declared = true` vivifies the queue EMPTY (§1.2): the
             // configuration is what survives a restart, never the contents.
             eph.set_config(&t, queue, opts, true);
+            present.insert(queue.to_string());
             n_configs += 1;
+        }
+        // The other direction, and the one the mesh phase needs: a `delete` whose
+        // broadcast this broker never received left a declared queue here whose
+        // row is gone. One refresh interval later it is gone here too (§10 Q4).
+        //
+        // BOUNDED READ CAVEAT: the list SP caps at `cap` rows. A tenant with more
+        // declared queues than that would see the overflow treated as deleted, so
+        // the cap is also the ceiling on declared queues per tenant — the same
+        // number `max_tenants` bounds the grant read by, and orders of magnitude
+        // above the tier this class is built for (implicit inboxes are the
+        // cardinality story, §1.1).
+        if arr.len() < cap as usize {
+            let dropped = eph.drop_undeclared(&t, &present);
+            if dropped > 0 {
+                tracing::info!(
+                    target: "ephemeral", tenant = %t, dropped,
+                    "dropped declared ephemeral queues whose row is gone (missed delete)"
+                );
+            }
         }
     }
     Ok((n_grants, n_configs))
+}
+
+/// §3.5 — apply a peer's `config_set` broadcast: re-read THAT queue's declared
+/// row and hand it to the engine.
+///
+/// One row, not the whole tenant's list: the frame names the queue, and a full
+/// list read per admin verb would make a script that declares a thousand queues
+/// into a thousand full scans on every broker. It is also the first caller of
+/// `db::eph_config_get`, which existed for exactly this.
+///
+/// A MISSING ROW IS A NO-OP and not a delete. `configure` writes the row before
+/// it broadcasts, so `None` here can only mean the row was removed in between —
+/// and the `delete` that removed it broadcasts its own frame. Treating an absent
+/// row as an instruction to drop would make this function a second, weaker
+/// delete path racing the real one; the refresh above is the backstop that
+/// converges either way.
+pub async fn reload_config(
+    eph: &Ephemeral,
+    pool: &deadpool_postgres::Pool,
+    tenant: &str,
+    queue: &str,
+) -> Result<bool, String> {
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let Some(txt) = crate::db::eph_config_get(&client, tenant, queue)
+        .await
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(false);
+    };
+    let v: serde_json::Value = serde_json::from_str(&txt).map_err(|e| e.to_string())?;
+    let opts = v.get("options").map(parse_options).unwrap_or_default();
+    eph.set_config(tenant, queue, opts, true);
+    Ok(true)
 }
 
 static EPH_REFRESH_ERR: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
@@ -2367,6 +2767,17 @@ pub fn spawn_refresh(
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(interval).await;
+            // §3.7 — the periodic half of the membership-change wipe, run BEFORE
+            // the database read and unconditionally: it needs no connection, and
+            // a cell whose pool is down must still stop holding rings it no
+            // longer owns. Zero work and zero allocation with no mesh.
+            let wiped = eph.reap_foreign();
+            if wiped > 0 {
+                tracing::info!(
+                    target: "ephemeral", rings = wiped,
+                    "dropped ephemeral rings whose partition moved to another broker"
+                );
+            }
             match refresh_once(&eph, &pool, max_tenants).await {
                 Ok((g, c)) => tracing::debug!(
                     target: "ephemeral", grants = g, configs = c, "ephemeral grants refreshed"
@@ -2395,3 +2806,9 @@ pub fn spawn_refresh(
 #[cfg(test)]
 #[path = "tests_unit/ephemeral_engine.rs"]
 mod ephemeral_engine_tests;
+
+// §3.7 — the placement half: the rendezvous hash, the single-broker
+// short-circuit, the ownership-move wipe and the ghost backstop.
+#[cfg(test)]
+#[path = "tests_unit/ephemeral_placement.rs"]
+mod ephemeral_placement_tests;

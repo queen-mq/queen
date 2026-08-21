@@ -107,6 +107,25 @@ pub struct Metrics {
     pub eph_dropped_bounds: AtomicU64,
     pub eph_dropped_ttl: AtomicU64,
     pub eph_dropped_retry: AtomicU64,
+    /// EPHEMERAL_QUEUES.md §3.6/§6 — requests this broker relayed to the
+    /// rendezvous OWNER of a (queue, partition) instead of serving locally.
+    ///
+    /// The number §7.6 is about: it is one extra intra-cell hop per request, and
+    /// a forwarded fraction that sits near 1.0 on a multi-broker cell is the
+    /// evidence that would justify the replicated local reads deferred in §9. It
+    /// is a REQUEST counter, not a message one, because the hop is paid per
+    /// request whatever the batch carries.
+    pub eph_forwarded: AtomicU64,
+    /// EPHEMERAL_QUEUES.md §3.7/§6 — rings dropped because their (queue,
+    /// partition) stopped hashing to this broker.
+    ///
+    /// RINGS and not messages: what an operator needs to see is how much
+    /// ownership CHURN a cell is living through, and one wipe is one ownership
+    /// move whether the ring held zero messages or ten thousand. Non-zero on a
+    /// stable cell means membership is flapping, which on this class costs
+    /// content (§1.2) — legal, and exactly the kind of legal loss that has to be
+    /// visible or nothing in the system will ever mention it.
+    pub eph_wipes: AtomicU64,
     /// Gauges, not counters: bytes held by the cell's ephemeral rings, and how
     /// many ephemeral queues exist (declared + live implicit). `AtomicI64`
     /// because a gauge goes down.
@@ -1168,6 +1187,8 @@ impl Metrics {
             eph_dropped_bounds: AtomicU64::new(0),
             eph_dropped_ttl: AtomicU64::new(0),
             eph_dropped_retry: AtomicU64::new(0),
+            eph_forwarded: AtomicU64::new(0),
+            eph_wipes: AtomicU64::new(0),
             eph_bytes: AtomicI64::new(0),
             eph_queues: AtomicI64::new(0),
             db_errors: AtomicU64::new(0),
@@ -1355,6 +1376,19 @@ impl Metrics {
         // 503 for every tenant on the cell (§1.6 rung 3), and unlike every other
         // occupancy number in this exposition it is EXACT — the broker is the
         // meter, so there is no rollup between the value and the truth.
+        // EPHEMERAL_QUEUES.md §3.6/§3.7 — the two multi-broker series. Their own
+        // families and not labels on the counters above, because they count
+        // different EVENTS (a relayed request, an ownership move) rather than
+        // alternative causes of one event, which is the same rule that split
+        // push/pop/ack from the three drop causes.
+        //
+        // On a single-broker cell both stay at 0 for ever and that is the correct
+        // reading, not a gap: the rendezvous short-circuits to self (§3.7), so
+        // nothing is ever forwarded and nothing ever moves.
+        ht(&mut s, "queen_ephemeral_forwarded_total", "Ephemeral requests relayed to the partition's rendezvous owner", "counter");
+        g(&mut s, "queen_ephemeral_forwarded_total", "", self.eph_forwarded.load(Ordering::Relaxed).to_string());
+        ht(&mut s, "queen_ephemeral_wipes_total", "Ephemeral rings dropped because their partition moved owner", "counter");
+        g(&mut s, "queen_ephemeral_wipes_total", "", self.eph_wipes.load(Ordering::Relaxed).to_string());
         ht(&mut s, "queen_ephemeral_bytes", "Bytes held by this broker's ephemeral rings", "gauge");
         g(&mut s, "queen_ephemeral_bytes", "", self.eph_bytes.load(Ordering::Relaxed).to_string());
         ht(&mut s, "queen_ephemeral_queues", "Ephemeral queues on this broker (declared + live implicit)", "gauge");

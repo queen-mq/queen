@@ -46,14 +46,15 @@ use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::{Extension, Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri};
 use axum::response::Response;
 use serde::Deserialize;
 use serde_json::value::RawValue;
 
 use super::{json, qbool, qint, AppState};
 use crate::db;
-use crate::ephemeral::{self, AckOutcome, AckStatus, Refusal};
+use crate::ephemeral::{self, AckOutcome, AckStatus, Refusal, Route};
+use crate::peerclient::FWD_HEADER;
 use crate::switches::{decide_ephemeral, Origin, Surface};
 use crate::tenant::Tenant;
 
@@ -201,6 +202,237 @@ fn with_retry_after(mut resp: Response, secs: u32) -> Response {
 // one engine key.
 // ---------------------------------------------------------------------------
 
+// ===========================================================================
+// FORWARDING TO THE RENDEZVOUS OWNER — §3.6/§3.7
+// ===========================================================================
+//
+// Placement is single-owner (§1.5): one ring per (queue, partition), on the
+// broker the rendezvous hash names. A request that lands anywhere else is
+// RELAYED rather than served, because the alternative — serving it locally —
+// would silently create a second ring for the same queue on a second broker,
+// and two rings mean two cursors, duplicate delivery for a competing group and
+// a depth read that is true nowhere.
+//
+// The proxy does not need to know any of this: a cell's `base_url` is one k8s
+// Service with no stickiness (§5.1), so a request lands on an arbitrary broker
+// and this is precisely what makes that correct.
+//
+// THE LOOP IS UNREPRESENTABLE, NOT MERELY UNLIKELY. A relayed request carries
+// `x-queen-eph-fwd: 1`; a broker that sees it and finds it is not the owner
+// answers 503 `owner_moved` instead of relaying again. Membership can disagree
+// for a few seconds (§1.4) and without that header two brokers with opposite
+// views would bounce a request between them until a timeout.
+
+/// Deadline for a relayed request that does not park: push, ack, and a pop with
+/// `wait=false`. Generous rather than tight — the peer is one hop away on the
+/// cell network, so anything approaching this is a peer in trouble, and the
+/// honest answer for that is a 503 the client can retry, not a truncated wait.
+const FORWARD_DEADLINE_MS: u64 = 30_000;
+
+/// Slack over a forwarded WAITING pop's own timeout (§3.6/§10 Q5).
+///
+/// The owner holds the pop open for the client's FULL timeout — that is the
+/// resolved decision, because a fast-empty answer would turn every remote inbox
+/// into a poll loop, which is the one thing this class must not reintroduce. An
+/// internal deadline equal to that timeout would therefore race the peer's own
+/// answer and turn a legitimately empty long-poll into a spurious 503; the slack
+/// is what makes the timeout mean "the peer is gone", not "the peer is about to
+/// reply".
+const FORWARD_SLACK_MS: u64 = 5_000;
+
+/// Was this request already relayed by another broker?
+fn is_forwarded(h: &HeaderMap) -> bool {
+    h.contains_key(FWD_HEADER)
+}
+
+/// §3.6 — the one answer a broker gives for a request it was handed but does not
+/// own. 503 and not a redirect: the client is not the one who got the placement
+/// wrong, and the peer that relayed it is the one that can fix it (by re-hashing
+/// once). `code` is what the relaying broker branches on.
+fn owner_moved() -> Response {
+    err(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "owner_moved",
+        "this ephemeral partition has moved to another broker; the request was not served",
+    )
+}
+
+fn forward_failed(detail: &str) -> Response {
+    err(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "ephemeral_forward_failed",
+        &format!("could not reach the broker that owns this ephemeral partition: {detail}"),
+    )
+}
+
+/// The headers a relayed request carries, and deliberately only these.
+///
+///   * the FORWARD MARK, so the owner never relays it again;
+///   * the TENANT, because the receiving broker's middleware reads it from the
+///     header and nothing else — the value comes from THIS broker's
+///     `Extension<Tenant>`, i.e. from a header its own trusted proxy set, never
+///     from a body (`kv.rs`'s rule);
+///   * `Authorization`, unchanged, when the inbound request had one. Re-presenting
+///     the caller's own credential means the peer applies the same policy to the
+///     same principal — the relay grants nothing the original request did not
+///     already carry, which is what keeps this off the list of ways to bypass
+///     `auth.rs`.
+///
+/// Everything else is dropped on purpose: copying an arbitrary header set from
+/// one broker's request into another's is how a hop-by-hop header becomes a bug.
+fn relay_headers(tenant: &str, inbound: &HeaderMap) -> Vec<(HeaderName, HeaderValue)> {
+    let mut out: Vec<(HeaderName, HeaderValue)> = Vec::with_capacity(3);
+    if let Ok(k) = HeaderName::from_bytes(FWD_HEADER.as_bytes()) {
+        out.push((k, HeaderValue::from_static("1")));
+    }
+    if let (Ok(k), Ok(v)) = (
+        HeaderName::from_bytes(crate::config::TENANT_HEADER.as_bytes()),
+        HeaderValue::from_str(tenant),
+    ) {
+        out.push((k, v));
+    }
+    if let Some(a) = inbound.get(axum::http::header::AUTHORIZATION) {
+        out.push((axum::http::header::AUTHORIZATION, a.clone()));
+    }
+    out
+}
+
+/// One relay attempt. `Ok(None)` means the peer answered `owner_moved` — a
+/// placement disagreement, which is the caller's business, not a failure.
+async fn relay_once(
+    st: &AppState,
+    tenant: &str,
+    inbound: &HeaderMap,
+    method: Method,
+    http_addr: &str,
+    path_and_query: &str,
+    body: Bytes,
+    deadline_ms: u64,
+) -> Result<Option<Response>, String> {
+    let url = format!("{}{}", http_addr.trim_end_matches('/'), path_and_query);
+    // Counted per HOP and not per request: a re-hash that relays twice really did
+    // pay two hops, and §7.6 is measuring hops.
+    st.metrics
+        .eph_forwarded
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let r = st
+        .peers
+        .call(
+            method,
+            &url,
+            &relay_headers(tenant, inbound),
+            body,
+            std::time::Duration::from_millis(deadline_ms),
+        )
+        .await?;
+    if r.status == StatusCode::SERVICE_UNAVAILABLE && body_code(&r.body) == Some("owner_moved") {
+        return Ok(None);
+    }
+    let mut resp = json(r.status, String::from_utf8_lossy(&r.body).into_owned());
+    // The one header worth carrying back: a 429 from the owner's rate bucket
+    // without its `Retry-After` would be a refusal the client cannot pace
+    // against, which is the exact thing `quota.rs` renders it for.
+    if let Some(ra) = r.retry_after {
+        resp.headers_mut()
+            .insert(axum::http::header::RETRY_AFTER, ra);
+    }
+    Ok(Some(resp))
+}
+
+/// Read the `code` out of an `{error, code}` envelope. Branching on the CODE and
+/// never on the message is the same rule this file states for its own clients.
+fn body_code(body: &[u8]) -> Option<&'static str> {
+    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    match v.get("code").and_then(|x| x.as_str()) {
+        Some("owner_moved") => Some("owner_moved"),
+        _ => None,
+    }
+}
+
+/// What the request addresses, for the single re-hash of §3.6.
+#[derive(Clone, Copy)]
+enum Target<'a> {
+    /// A named partition: the hash answers exactly.
+    Partition(&'a str),
+    /// A partition-less pop: `route_queue`'s v1 rule decides.
+    Queue,
+}
+
+/// §3.6 — relay to the owner, with the ONE re-hash the design allows.
+///
+/// `None` means "serve it here after all": the re-hash came back local, which is
+/// what happens when the owner died between the first hash and the answer and
+/// this broker won the partition. Every other outcome is a `Response`.
+///
+/// WHY EXACTLY ONE RE-HASH. A relay that got `owner_moved` proves the two
+/// brokers disagreed, and membership is converging by construction (a HELLO or a
+/// dead-threshold expiry). One retry catches the common case — a peer that just
+/// joined or just left — and a second would be a client-visible latency budget
+/// spent on a race that is already over. Beyond it the honest answer is 503:
+/// come back, the cell is mid-move, and the contents of this queue are legally
+/// gone anyway (§1.2).
+#[allow(clippy::too_many_arguments)]
+async fn forward_to_owner(
+    st: &AppState,
+    tenant: &str,
+    queue: &str,
+    target: Target<'_>,
+    first_owner: String,
+    first_addr: String,
+    inbound: &HeaderMap,
+    method: Method,
+    path_and_query: &str,
+    body: Bytes,
+    deadline_ms: u64,
+) -> Option<Response> {
+    match relay_once(
+        st,
+        tenant,
+        inbound,
+        method.clone(),
+        &first_addr,
+        path_and_query,
+        body.clone(),
+        deadline_ms,
+    )
+    .await
+    {
+        Ok(Some(resp)) => return Some(resp),
+        Ok(None) => { /* owner_moved — fall through to the single re-hash */ }
+        Err(e) => return Some(forward_failed(&e)),
+    }
+    let again = match target {
+        Target::Partition(p) => st.ephemeral.route(tenant, queue, p),
+        Target::Queue => st.ephemeral.route_queue(tenant, queue),
+    };
+    match again {
+        Route::Local => None,
+        Route::Remote { server_id, http_addr } => {
+            // The same answer as before means nothing has converged yet; a second
+            // call to the broker that just refused would get the same refusal.
+            if server_id == first_owner {
+                return Some(owner_moved());
+            }
+            match relay_once(
+                st,
+                tenant,
+                inbound,
+                method,
+                &http_addr,
+                path_and_query,
+                body,
+                deadline_ms,
+            )
+            .await
+            {
+                Ok(Some(resp)) => Some(resp),
+                Ok(None) => Some(owner_moved()),
+                Err(e) => Some(forward_failed(&e)),
+            }
+        }
+    }
+}
+
 fn check_name(what: &str, v: &str) -> Result<(), Response> {
     if v.is_empty() {
         return Err(bad_request(&format!("{what} must not be empty")));
@@ -248,6 +480,7 @@ pub async fn handle_ephemeral_push(
     State(st): State<Arc<AppState>>,
     Extension(_authed): Extension<crate::auth::AuthedSub>,
     Extension(tenant): Extension<Tenant>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     // PARSED BEFORE GATED, and that order is the `kv.rs::apply_ops` shape rather
@@ -273,8 +506,50 @@ pub async fn handle_ephemeral_push(
     if parsed.messages.len() > MAX_ITEMS_PER_CALL {
         return bad_request(&format!("at most {MAX_ITEMS_PER_CALL} messages per push"));
     }
-    if let Some(r) = gated(&st, tenant.as_str(), Surface::EphPush, parsed.messages.len() as i64) {
+    let forwarded = is_forwarded(&headers);
+    // RUNG 3 IS CHARGED ONCE PER REQUEST, AT THE BROKER THE CLIENT REACHED.
+    //
+    // A relayed push passes 0 messages here, which by `gate_push`'s own rule
+    // skips the token bucket while still running rungs 1 and 2. The rate bounds
+    // ARRIVAL into the cell, and a request that arrived at broker A already paid
+    // for its arrival; charging it again at the owner would make a tenant's
+    // effective ceiling depend on how its queue names happened to hash. Rung 1
+    // (this broker's kill switch) and rung 2 (is this tenant granted here at all)
+    // are properties of the RECEIVING broker and still apply to every hop.
+    let charge = if forwarded { 0 } else { parsed.messages.len() as i64 };
+    if let Some(r) = gated(&st, tenant.as_str(), Surface::EphPush, charge) {
         return r;
+    }
+
+    // §3.7 — placement, before any state is touched. A `Remote` verdict also
+    // DROPS whatever this broker still holds for that partition (the
+    // membership-change wipe), so an ownership move frees its memory on the first
+    // request that observes it rather than waiting for the periodic reap.
+    if let Route::Remote { server_id, http_addr } =
+        st.ephemeral.route(tenant.as_str(), &parsed.queue, partition)
+    {
+        // A forwarded request is NEVER re-forwarded (§3.6).
+        if forwarded {
+            return owner_moved();
+        }
+        if let Some(r) = forward_to_owner(
+            &st,
+            tenant.as_str(),
+            &parsed.queue,
+            Target::Partition(partition),
+            server_id,
+            http_addr,
+            &headers,
+            Method::POST,
+            "/api/v1/ephemeral/push",
+            body.clone(),
+            FORWARD_DEADLINE_MS,
+        )
+        .await
+        {
+            return r;
+        }
+        // `None` ⇒ the re-hash came back local ⇒ fall through and serve it here.
     }
 
     // COPY OUT of the request buffer, here and nowhere else. Holding a
@@ -320,6 +595,12 @@ pub async fn handle_ephemeral_pop(
     State(st): State<Arc<AppState>>,
     Extension(_authed): Extension<crate::auth::AuthedSub>,
     Extension(tenant): Extension<Tenant>,
+    headers: HeaderMap,
+    // The raw URI, purely so a relayed pop carries the caller's query string
+    // BYTE FOR BYTE (§3.6). Re-encoding it from the parsed map would risk
+    // changing a value the owner then parses differently — and the one thing a
+    // relay must not do is alter the request it is relaying.
+    uri: Uri,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     if let Some(r) = gated(&st, tenant.as_str(), Surface::EphPop, 0) {
@@ -351,6 +632,51 @@ pub async fn handle_ephemeral_pop(
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(st.pop_default_timeout_ms as i64)
         .clamp(0, MAX_TIMEOUT_MS);
+
+    // §3.7 — placement. A NAMED partition routes exactly; a partition-less pop
+    // takes the v1 rule of `route_queue` (serve this broker's share of the queue
+    // if it owns any of it, otherwise route on the default partition). Both wipe
+    // the rings this broker no longer owns as they go.
+    let route = match partition {
+        Some(p) => st.ephemeral.route(tenant.as_str(), queue, p),
+        None => st.ephemeral.route_queue(tenant.as_str(), queue),
+    };
+    if let Route::Remote { server_id, http_addr } = route {
+        if is_forwarded(&headers) {
+            return owner_moved();
+        }
+        // §10 Q5 — the owner holds a `wait=true` pop open for the client's FULL
+        // timeout, so the relay's own deadline has to outlive it.
+        let deadline_ms = if wait {
+            (timeout_ms.max(0) as u64).saturating_add(FORWARD_SLACK_MS)
+        } else {
+            FORWARD_DEADLINE_MS
+        };
+        let pq = match uri.query() {
+            Some(qs) => format!("/api/v1/ephemeral/pop?{qs}"),
+            None => "/api/v1/ephemeral/pop".to_string(),
+        };
+        if let Some(r) = forward_to_owner(
+            &st,
+            tenant.as_str(),
+            queue,
+            match partition {
+                Some(p) => Target::Partition(p),
+                None => Target::Queue,
+            },
+            server_id,
+            http_addr,
+            &headers,
+            Method::GET,
+            &pq,
+            Bytes::new(),
+            deadline_ms,
+        )
+        .await
+        {
+            return r;
+        }
+    }
 
     // Built once: the notifier's gate key and the parked gauge's queue half are
     // the same namespaced name, so an ephemeral queue and a durable queue of
@@ -486,6 +812,7 @@ pub async fn handle_ephemeral_ack(
     State(st): State<Arc<AppState>>,
     Extension(_authed): Extension<crate::auth::AuthedSub>,
     Extension(tenant): Extension<Tenant>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     if let Some(r) = gated(&st, tenant.as_str(), Surface::EphAck, 0) {
@@ -506,6 +833,45 @@ pub async fn handle_ephemeral_ack(
     if parsed.acks.len() > MAX_ITEMS_PER_CALL {
         return bad_request(&format!("at most {MAX_ITEMS_PER_CALL} acks per call"));
     }
+
+    // §3.7 — an ack must reach the ring that holds the LEASE, which is the
+    // owner's. The wire carries the partition inside each id (§3.1), so the
+    // routing key is the first id's partition; a batch that spans partitions of
+    // one queue is routed by its first, which is correct whenever those
+    // partitions share an owner and is the same v1 simplification the
+    // partition-less pop makes. An id this broker cannot parse routes on the
+    // default partition — the honest place to ask, and the answer for a
+    // garbage id is `unknown` wherever it lands.
+    let ack_partition = parsed
+        .acks
+        .first()
+        .and_then(|a| ephemeral::parse_id(&a.id).map(|(_, p, _)| p.to_string()))
+        .unwrap_or_else(|| ephemeral::DEFAULT_PARTITION.to_string());
+    if let Route::Remote { server_id, http_addr } =
+        st.ephemeral.route(tenant.as_str(), &parsed.queue, &ack_partition)
+    {
+        if is_forwarded(&headers) {
+            return owner_moved();
+        }
+        if let Some(r) = forward_to_owner(
+            &st,
+            tenant.as_str(),
+            &parsed.queue,
+            Target::Partition(&ack_partition),
+            server_id,
+            http_addr,
+            &headers,
+            Method::POST,
+            "/api/v1/ephemeral/ack",
+            body.clone(),
+            FORWARD_DEADLINE_MS,
+        )
+        .await
+        {
+            return r;
+        }
+    }
+
     let items: Vec<(String, AckStatus)> = parsed
         .acks
         .into_iter()
@@ -553,15 +919,24 @@ fn render_ack(results: &[(String, AckOutcome)]) -> Response {
 // THE MANAGEMENT HALF — configure / reset / delete / status (§3.1)
 // ===========================================================================
 //
-// CROSS-BROKER PROPAGATION IS NOT HERE, and its absence is deliberate rather
-// than forgotten. `configure`, `reset` and `delete` act on THIS broker's rings
-// and on the shared config rows; on a multi-broker cell the other brokers keep
-// their own rings until the config refresh reaches them (§10 Q4 accepts a ghost
-// ring for at most one refresh interval, and implicit rings die of idle GC
-// anyway). The mesh phase adds one `T_EPH_ADMIN` broadcast at each of the three
-// sites below and changes nothing else — see EPHEMERAL_QUEUES.md §3.5.
+// CROSS-BROKER PROPAGATION IS A BROADCAST, NOT A FORWARD (§3.5).
 //
-// MESH HOOK (§3.5): broadcast {op, tenant, queue} here when the frame lands.
+// The three hot verbs are relayed to ONE broker — the partition's rendezvous
+// owner — because there is exactly one ring to act on. These three are the
+// opposite: they act on state every broker holds a copy of (a declared config)
+// or might hold a ring for (after an ownership move), so each of them fans a
+// `T_EPH_ADMIN` frame out to every peer and each peer applies it locally.
+// Forwarding one of them to "the owner" would leave the other brokers' copies
+// untouched, which for `delete` is precisely the ghost this phase removes.
+//
+// FIRE AND FORGET, backstopped rather than acknowledged. A dropped frame leaves
+// a ghost for at most one config-refresh interval: `refresh_once` re-reads the
+// declared rows and `drop_undeclared` forgets any declared queue whose row is
+// gone (§10 Q4). That backstop is why none of the three waits for a peer, and
+// why a peer being down costs nothing here.
+//
+// The broadcast is sent AFTER the local effect in all three, so a broker never
+// tells its peers about a change it has not made itself.
 
 /// The CLOSED option list of §3.1. An option not in this array is a 400, not a
 /// silently ignored field.
@@ -698,6 +1073,13 @@ pub async fn handle_ephemeral_configure(
         }
     };
     st.ephemeral.set_config(tenant.as_str(), &parsed.queue, opts, true);
+    // §3.5 — tell the peers to re-read this one row. The frame carries no
+    // options: the TABLE is the authority (the row was written above, before
+    // this line), so a peer reads what was stored rather than what a frame
+    // claimed, and a frame that raced a second `configure` cannot apply the
+    // older of the two.
+    st.ephemeral
+        .broadcast_admin("config_set", tenant.as_str(), &parsed.queue);
     // The SP's own row, echoed verbatim: the broker must not re-render what it
     // just stored, or the echo and the table can disagree about what was saved.
     // The CLAMPED values the engine actually applied are what the status reads
@@ -735,6 +1117,12 @@ pub async fn handle_ephemeral_reset(
         return r;
     }
     let dropped = st.ephemeral.reset(tenant.as_str(), &parsed.queue).unwrap_or(0);
+    // §3.5 — every broker drops its own rings for this queue. `dropped` is
+    // therefore THIS broker's count and not the cell's, which is the honest
+    // number to report: a fire-and-forget broadcast cannot know what the peers
+    // dropped, and inventing a total would be a sum of unacknowledged frames.
+    st.ephemeral
+        .broadcast_admin("reset", tenant.as_str(), &parsed.queue);
     let mut out = String::with_capacity(64 + parsed.queue.len());
     out.push_str("{\"queue\":\"");
     crate::fusion::json_escape_into(&mut out, &parsed.queue);
@@ -767,6 +1155,13 @@ pub async fn handle_ephemeral_delete_queue(
         return r;
     }
     let removed = st.ephemeral.remove(tenant.as_str(), &queue);
+    // §3.5 — broadcast BEFORE the row is dropped, and that order is deliberate:
+    // a peer that acts on the frame drops its RAM copy, which is safe whether or
+    // not the row deletion below succeeds (a surviving row is re-vivified empty
+    // by the next refresh, §1.2). Broadcasting only on success would instead
+    // leave every peer holding rings for a queue this broker has already dropped
+    // whenever the database is the thing that failed.
+    st.ephemeral.broadcast_admin("delete", tenant.as_str(), &queue);
     let declared;
     match st.pool.get().await {
         Ok(c) => match db::eph_config_delete(&c, tenant.as_str(), &queue).await {

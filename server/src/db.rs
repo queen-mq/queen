@@ -2321,7 +2321,10 @@ pub async fn eph_config_set(
 /// answers SQL NULL for that case ON PURPOSE — an implicit queue is the NORMAL
 /// tier of this class, not a failure — so the `Option` here is the whole point
 /// of the wrapper and not a defensive habit.
-#[allow(dead_code)] // the mesh phase's config reconcile is its first caller
+// The `#[allow(dead_code)]` that used to sit here is gone: EPHEMERAL_QUEUES.md
+// §3.5's `config_set` broadcast is the caller it was waiting for
+// (`ephemeral::reload_config`), which is exactly what the mark existed to make
+// visible.
 pub async fn eph_config_get(
     client: &deadpool_postgres::Client,
     tenant: &str,

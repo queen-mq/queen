@@ -751,6 +751,12 @@ impl Broker {
                 State(self.inner.st.clone()),
                 Extension(crate::auth::AuthedSub(None)),
                 Extension(crate::tenant::Tenant::default_tenant()),
+                // EPHEMERAL_QUEUES.md §3.6 — no inbound headers here, and none
+                // are needed: the embedded broker has no mesh, so `route` always
+                // answers `Local` and the forwarding branch these carry is
+                // unreachable. An EMPTY map is the truthful value (this call
+                // arrived through no HTTP request at all), not a placeholder.
+                axum::http::HeaderMap::new(),
                 Bytes::from(body.to_string()),
             )
             .await,
@@ -772,6 +778,11 @@ impl Broker {
                 State(self.inner.st.clone()),
                 Extension(crate::auth::AuthedSub(None)),
                 Extension(crate::tenant::Tenant::default_tenant()),
+                axum::http::HeaderMap::new(),
+                // The URI the handler would relay: unreachable without a mesh
+                // (see the push above), so the route it names is the only thing
+                // that has to be right.
+                axum::http::Uri::from_static("/api/v1/ephemeral/pop"),
                 Query(q),
             )
             .await,
@@ -786,6 +797,7 @@ impl Broker {
                 State(self.inner.st.clone()),
                 Extension(crate::auth::AuthedSub(None)),
                 Extension(crate::tenant::Tenant::default_tenant()),
+                axum::http::HeaderMap::new(),
                 Bytes::from(body.to_string()),
             )
             .await,

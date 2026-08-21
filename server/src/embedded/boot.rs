@@ -460,6 +460,7 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
         partition_queue: std::sync::Mutex::new(std::collections::HashMap::new()),
         seeded_groups: std::sync::Mutex::new(std::collections::HashMap::new()),
         ephemeral: ephemeral.clone(),
+        peers: Arc::new(crate::peerclient::PeerClient::new()),
         hotlist: hotlist.clone(),
         hotlist_reseed_ms: cfg.hotlist_reseed_ms,
         hotlist_reseed_full_ms: cfg.hotlist_reseed_full_ms,

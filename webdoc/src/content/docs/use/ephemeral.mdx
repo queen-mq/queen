@@ -142,13 +142,6 @@ flushes its outstanding acks and learns what happened instead of retrying into a
 Membership flaps therefore cost content, never correctness. On a durable queue that trade would be
 a bug. Here it is the contract, and it is the deep reason distribution on this class is cheap.
 
-<Aside type="note">
-Cross-broker ownership and forwarding arrive with the mesh work of this release line. Until they
-land, a broker serves only the queues in its own memory, so a cell running more than one broker
-should send one ephemeral queue's traffic to one broker. The SDKs already key their pops for that,
-and a single-broker cell, a free-tier cell and the embedded engine are unaffected.
-</Aside>
-
 ## Bounds, and what pressure looks like
 
 Three budgets are checked on every push, from the narrowest outwards, and the first one to refuse

@@ -27,6 +27,9 @@ mod metrics;
 mod migrate;
 mod notify;
 mod obs;
+// EPHEMERAL_QUEUES.md §3.6 — the broker→broker forwarding client. Twin of the
+// `mod peerclient;` in lib.rs (the twin-list rule of lib.rs's header).
+mod peerclient;
 mod pgtls;
 mod quota;
 mod reconcile;
@@ -470,6 +473,7 @@ async fn main() {
         partition_queue: std::sync::Mutex::new(std::collections::HashMap::new()),
         seeded_groups: std::sync::Mutex::new(std::collections::HashMap::new()),
         ephemeral: ephemeral.clone(),
+        peers: Arc::new(crate::peerclient::PeerClient::new()),
         hotlist: hotlist.clone(),
         hotlist_reseed_ms: cfg.hotlist_reseed_ms,
         hotlist_reseed_full_ms: cfg.hotlist_reseed_full_ms,
@@ -855,10 +859,60 @@ async fn main() {
                     invalidate_queue_caches(&s, t, q);
                 })
             },
+            on_eph_admin: {
+                // EPHEMERAL_QUEUES.md §3.5 — a peer's admin verb, applied here.
+                // NO RE-BROADCAST: the originating broker fanned the frame out to
+                // every peer itself, and a re-broadcast on receipt is how a mesh
+                // of three becomes a storm of nine.
+                //
+                // The tenant arrives already validated as a UUID by `dispatch`
+                // (a destructive frame that cannot name its tenant is dropped
+                // there), so it is safe to build an engine key from it.
+                let eph = ephemeral.clone();
+                let pool = pool.clone();
+                Box::new(move |op: &str, t: &str, q: &str| match op {
+                    // Both are pure RAM and run inline on the inbound task —
+                    // they take a lock and a map removal, never a connection.
+                    "reset" => {
+                        eph.reset(t, q);
+                    }
+                    "delete" => {
+                        eph.remove(t, q);
+                    }
+                    // …and this one is the exception that must NOT run inline:
+                    // it re-reads one declared row, which awaits. Spawned, so a
+                    // slow database cannot stall the frame reader — and if the
+                    // read fails, the periodic refresh converges anyway (§10 Q4),
+                    // which is why the error is logged and dropped.
+                    "config_set" => {
+                        let eph = eph.clone();
+                        let pool = pool.clone();
+                        let t = t.to_string();
+                        let q = q.to_string();
+                        tokio::spawn(async move {
+                            if let Err(e) = ephemeral::reload_config(&eph, &pool, &t, &q).await {
+                                tracing::debug!(
+                                    target: "ephemeral", queue = %q, error = %e,
+                                    "peer config_set reload failed; the refresh will converge"
+                                );
+                            }
+                        });
+                    }
+                    // An op from a newer peer. Skipped for the same reason an
+                    // unknown FRAME TYPE is skipped (§11.2): a verb this build
+                    // does not implement is not a reason to stop reading.
+                    _ => {}
+                })
+            },
         };
-        match mesh::MeshTransport::bind(&cfg.sync, handlers).await {
+        match mesh::MeshTransport::bind(&cfg.sync, handlers, ephemeral.epoch()).await {
             Ok((t, bindings)) => {
                 notifier.attach_transport(t.clone());
+                // §3.5/§3.7 — the engine's own handle on the mesh: membership for
+                // the rendezvous hash, and the broadcast for the admin verbs.
+                // Attached here and not at construction because the transport's
+                // inbound handlers capture the state the engine is part of.
+                ephemeral.attach_mesh(t.clone());
                 t.start(bindings);
                 // 19-wildcard-hotlist §5: coalescing dirty-hint flusher. Drains
                 // the hot-list's local vuoto→pending transitions every ~20ms and

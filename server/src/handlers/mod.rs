@@ -124,6 +124,13 @@ pub struct AppState {
     // (`notifier`), and even that is namespaced (`eph:` in the queue half), so
     // the two can only ever cross-WAKE — which is a hint, never state.
     pub ephemeral: Arc<crate::ephemeral::Ephemeral>,
+    // EPHEMERAL_QUEUES.md §3.6 — the pooled broker→broker client, used ONLY to
+    // relay an ephemeral push/pop/ack to the partition's rendezvous owner. It is
+    // built on every broker, including single ones and the embedded facade, and
+    // costs a connection pool that never opens a connection there: the
+    // forwarding path is unreachable without a live mesh (§3.7), so a
+    // conditional field would be a second way to express the same "no peers".
+    pub peers: Arc<crate::peerclient::PeerClient>,
     pub hotlist: Arc<crate::hotlist::HotList>,
     // §8 reseed/cold-start interval (ms). QUEEN_HOTLIST_RESEED_MS (default 30s).
     pub hotlist_reseed_ms: i64,

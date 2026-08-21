@@ -117,6 +117,14 @@ tracing-subscriber = { version = "0.3", optional = true, default-features = fals
 # hand-rendered bytes to these types, so a field that drifts on either side
 # fails a test instead of silently reaching a client.
 queen-protocol = { path = "../crates/queen-protocol", version = "1.0.4" }
+# EPHEMERAL_QUEUES.md §3.6 (M2) — the broker→broker forwarding client
+# (src/peerclient.rs). Same crates and same versions as the proxy's upstream
+# client, which is the repository's ONE HTTP client pattern: "no reqwest by
+# design". hyper itself is not named here — the pooled client is reached through
+# hyper-util and the bodies are axum's, so a direct hyper dependency would only
+# be a second place for the major version to drift.
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
 
 [profile.release]
 opt-level = 3

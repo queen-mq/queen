@@ -321,9 +321,11 @@ pub fn spawn_reporter(h: ReporterHandles) {
                 m.eph_dropped_bounds.load(Ordering::Relaxed)
                     + m.eph_dropped_ttl.load(Ordering::Relaxed)
                     + m.eph_dropped_retry.load(Ordering::Relaxed),
+                m.eph_forwarded.load(Ordering::Relaxed),
             )
         };
-        let (mut p_eph_push, mut p_eph_pop, mut p_eph_ack, mut p_eph_drop) = eph(&h.metrics);
+        let (mut p_eph_push, mut p_eph_pop, mut p_eph_ack, mut p_eph_drop, mut p_eph_fwd) =
+            eph(&h.metrics);
         let (mut prev_visits, mut prev_cands, _, _) = h.hotlist.lap.snapshot();
         static POOL_SAT: Sampler = Sampler::new(10_000);
         let mut last = Instant::now();
@@ -403,7 +405,7 @@ pub fn spawn_reporter(h: ReporterHandles) {
             // gone, every cell has both surfaces, and the fields are now permanent
             // columns of `broker rates` — one field list, always the same shape, which
             // is what a log parser wanted in the first place.
-            let (eph_push, eph_pop, eph_ack, eph_drop) = eph(&h.metrics);
+            let (eph_push, eph_pop, eph_ack, eph_drop, eph_fwd) = eph(&h.metrics);
             let kvt = &h.metrics.kvt;
             let kv_ops = kvt.kv_ops_total();
             let kv_rej = kvt.kv_rejected_total();
@@ -470,6 +472,18 @@ pub fn spawn_reporter(h: ReporterHandles) {
                 // whose contract permits loss is still the signal that somebody
                 // has under-sized a queue or over-run a consumer.
                 eph_drop_s = format!("{:.1}", d(eph_drop, p_eph_drop)),
+                // §3.6 — requests relayed to a partition's rendezvous owner.
+                // A RATE, like its neighbours: what it is read against is
+                // `eph_push_s + eph_pop_s`, and a forwarded fraction near 1 on a
+                // multi-broker cell is the §7.6 evidence for replicated local
+                // reads (§9). Flat 0.0 on every single-broker cell.
+                eph_fwd_s = format!("{:.1}", d(eph_fwd, p_eph_fwd)),
+                // …and this one is CUMULATIVE where everything else on the line
+                // is a rate, on purpose: an ownership move is a rare event, so a
+                // per-second figure of it rounds to 0.0 exactly when it matters.
+                // The number an operator wants at 3am is "how many times has this
+                // cell moved a partition since boot", which is the total.
+                eph_wipes = h.metrics.eph_wipes.load(Ordering::Relaxed),
                 "broker rates"
             );
             prev_kv_ops = kv_ops;
@@ -479,6 +493,7 @@ pub fn spawn_reporter(h: ReporterHandles) {
             p_eph_pop = eph_pop;
             p_eph_ack = eph_ack;
             p_eph_drop = eph_drop;
+            p_eph_fwd = eph_fwd;
 
             // ---- rates (top-N hot queues) ----
             let cur_q = h.metrics.per_queue.snapshot();

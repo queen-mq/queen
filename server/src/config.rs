@@ -144,8 +144,25 @@ pub struct SyncConfig {
     /// within one interval after a lost UDP packet.
     pub cache_refresh_ms: u64,
     /// This node's identity in heartbeats/stats (env `QUEEN_SERVER_ID`, else a
-    /// short random id). Cosmetic — used only for peer identity/logging/stats.
+    /// short random id). Cosmetic for the mesh itself — but load-bearing for
+    /// EPHEMERAL_QUEUES.md §3.7, where it is the rendezvous hash's node key: two
+    /// brokers sharing one `QUEEN_SERVER_ID` would compute the same score and
+    /// disagree about which of them owns a partition.
     pub server_id: String,
+    /// This broker's dialable base URL FOR PEERS — the `http_addr` of HELLO v2
+    /// (EPHEMERAL_QUEUES.md §3.5) and the address a non-owner forwards an
+    /// ephemeral push/pop/ack to (§3.6). Scheme is always `http` (mesh traffic is
+    /// intra-cell) and the port is this broker's own `PORT`, so the only knob is
+    /// the HOST: `QUEEN_MESH_ADVERTISE_HOST`, defaulting to the OS hostname.
+    ///
+    /// The host is a knob because it is the one part a process cannot work out
+    /// for itself: the OS hostname is exactly right in Kubernetes (the pod's, and
+    /// resolvable through the headless service) and exactly wrong behind NAT or
+    /// on a laptop running two brokers under one hostname. It is advertised, not
+    /// probed: a peer never guesses our address from the socket it accepted,
+    /// because that is the DIAL side's ephemeral source address, not a port
+    /// anything listens on.
+    pub http_addr: String,
 }
 
 impl SyncConfig {
@@ -167,6 +184,20 @@ impl SyncConfig {
             .filter(|v| !v.is_empty())
             .or_else(|| std::env::var("HOSTNAME").ok().filter(|v| !v.is_empty()))
             .unwrap_or_else(|| format!("queen-{:08x}", rand::random::<u32>()));
+        // EPHEMERAL_QUEUES.md §3.5. Read from the SAME `PORT` variable the HTTP
+        // listener binds (below), and not from a second knob: an advertised port
+        // that could differ from the one this process listens on is a
+        // misconfiguration nobody would ever detect from the outside — peers
+        // would simply forward into a closed socket.
+        let advertise_host = {
+            let h = env_str("QUEEN_MESH_ADVERTISE_HOST", "");
+            if h.is_empty() {
+                os_hostname()
+            } else {
+                h
+            }
+        };
+        let http_addr = format!("http://{}:{}", advertise_host, env_str("PORT", "6632"));
         SyncConfig {
             enabled: env_bool("QUEEN_SYNC_ENABLED", true),
             mesh_port,
@@ -176,6 +207,7 @@ impl SyncConfig {
             dead_threshold_ms: env_int("QUEEN_SYNC_DEAD_THRESHOLD_MS", 5000).max(1) as u64,
             cache_refresh_ms: env_int("QUEEN_CACHE_REFRESH_INTERVAL_MS", 60000).max(1) as u64,
             server_id,
+            http_addr,
         }
     }
 
@@ -184,6 +216,33 @@ impl SyncConfig {
     pub fn mesh_active(&self) -> bool {
         self.enabled && !self.peers.is_empty()
     }
+}
+
+/// The OS hostname, for the default advertised address (§3.5).
+///
+/// `gethostname(2)` and not `$HOSTNAME`: the environment variable is set by
+/// interactive shells and by Docker, but NOT by every init that starts a broker,
+/// and an unset one would silently advertise the fallback to the whole cell. The
+/// env var is kept as the second source (a container that overrode it meant it),
+/// and loopback is the last resort — an address that resolves to this process is
+/// strictly better than one that resolves to nothing, because with a single
+/// broker the forwarding path is never taken anyway.
+fn os_hostname() -> String {
+    let mut buf = [0 as libc::c_char; 256];
+    // SAFETY: the pointer and length describe a live, correctly sized stack
+    // buffer; gethostname NUL-terminates within it or fails.
+    if unsafe { libc::gethostname(buf.as_mut_ptr(), buf.len()) } == 0 {
+        let bytes: Vec<u8> = buf.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
+        if let Ok(s) = String::from_utf8(bytes) {
+            if !s.is_empty() {
+                return s;
+            }
+        }
+    }
+    std::env::var("HOSTNAME")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "127.0.0.1".to_string())
 }
 
 /// Parse the peer list: comma-separated `host` or `host:port` entries (a bare host
@@ -887,6 +946,11 @@ pub fn log_effective(cfg: &Config) {
         mesh_active = cfg.sync.mesh_active(),
         server_id = %cfg.sync.server_id,
         mesh_port = cfg.sync.mesh_port,
+        // EPHEMERAL_QUEUES.md §3.5/§3.6: what peers are told to forward to. On
+        // the boot line because a wrong advertised address fails ONLY in the
+        // other direction — this broker works perfectly and its peers cannot
+        // reach it — which is the failure mode a boot line exists to pre-empt.
+        http_addr = %cfg.sync.http_addr,
         peers = ?cfg.sync.peers,
         secret = %mask(&cfg.sync.secret),
         heartbeat_ms = cfg.sync.heartbeat_ms,

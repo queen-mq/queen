@@ -50,6 +50,7 @@ mod metrics;
 mod migrate;
 mod notify;
 mod obs;
+mod peerclient;
 mod pgtls;
 mod quota;
 mod reconcile;
