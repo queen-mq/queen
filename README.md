@@ -4,20 +4,31 @@
 
 # Queen MQ
 
-**The queue that doesn't fall apart at the other end of your workload.**
+**The queue that doesn't fall apart at the far end of your workload.**
 
-Every entity gets its own FIFO lane, created on first push, so a slow consumer on one never
-stalls another. That design has two ends, and one broker holds both.
+Queen is a message broker written in Rust that uses PostgreSQL as its data store. Its main idea is to let you have an arbitrarily large number of FIFO partitions, created on demand at push time.
 
-**A million messages a second for 24 hours**: 86,369,975,300 messages with leases, explicit acks,
-deduplication and retention all on, zero restarts, broker memory flat at 4.1 GB. 
+Queen has:
 
-And **a million ordered partitions** in one PostgreSQL, none preallocated, created during the run at a thousand a
-second while serving 200,000 messages a second with zero push, pop or ack errors.
+- **High throughput** (1 million msg/s end to end on 200 partitions, verified in a 24-hour soak)
+- **High dynamic cardinality** (1 million partitions at 200k msg/s, verified end to end)
+- **Guaranteed order** within every partition
+- **Easy HTTP transport**: curl is a first-class client
+- **Transactional dedup at push**: part of the exactly-once guarantees on broker operations
+- **Transactional ack+KV+push**: the rest of the exactly-once guarantees
+- **KV**: a small but powerful key-value store alongside your queue operations
+- **Timers**: schedule messages ahead of time
+- **Consumer groups** with replay and seek
+- **DLQ**: no message lost, even in the worst cases
+- **Integrated stream processor**: three window types, with map and aggregation
+- **Conflation, window buffers, delayed delivery**
+- **HA**: multiple brokers with best-effort coordination and wake-ups on push and ack
+- **Durable by default, with synchronous commit**: not losing data is the whole point of Queen
+- **Ephemeral in-memory queues** for lighter jobs like signaling and request/reply
+- **Multi-tenant** with quotas, through the bundled Rust proxy
+- **Single binary**
 
-Consumer groups, replay and a dead-letter queue at both ends. Windowed aggregation that commits
-its state, its output and its acks in one transaction. One stateless binary on the
-PostgreSQL you already run. No cluster, no JVM.
+As far as we know, nothing else out there has all of this in one system. If you use Queen, you can offload to it a ton of logic you would otherwise have to write yourself.
 
 [Every number above, with the conditions that make it true →](https://queenmq.com/benchmarks/comparison)
 
