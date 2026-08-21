@@ -112,7 +112,13 @@ fi
 # "exec format error" — the same symptom as deploying the wrong arch, which
 # makes it worth naming here.
 if [ "$PLATFORMS" != "$HOST_PLATFORM" ] && [ "$MULTIARCH" != true ]; then
-    if ! docker buildx inspect --bootstrap 2>/dev/null | grep -q "$PLATFORMS"; then
+    # Capture, THEN grep. Piping straight into `grep -q` under `pipefail` is a
+    # race: grep exits on the first match, inspect catches SIGPIPE if it is
+    # still writing, and the pipeline reports failure on a builder that
+    # advertised the platform perfectly well. Bit two real builds before being
+    # caught (flaky only when inspect's output landed slower than grep's exit).
+    BUILDER_PLATFORMS=$(docker buildx inspect --bootstrap 2>/dev/null || true)
+    if ! printf '%s' "$BUILDER_PLATFORMS" | grep -q "$PLATFORMS"; then
         cat >&2 <<EOF
 build.sh: this builder does not advertise $PLATFORMS (host is $HOST_PLATFORM).
 
