@@ -1,0 +1,60 @@
+[final] hops=1 cap=500000/10s pushed=57452 admitted=52998 (442/s) backlog=4454
+[final] e2e p50=481.1 p90=836.7 p99=2395.6 ms (n=52998)
+[final] errors push=0 pop=0 ack=0
+[final] hops=1 cap=500000/10s pushed=57501 admitted=54855 (457/s) backlog=2646
+[final] e2e p50=516.6 p90=1053.8 p99=2187.5 ms (n=54855)
+[final] errors push=0 pop=0 ack=0
+[final] hops=1 cap=500000/10s pushed=48323 admitted=45888 (382/s) backlog=2435
+[final] e2e p50=434.5 p90=684.5 p99=1362.7 ms (n=45888)
+[final] errors push=0 pop=0 ack=0
+[final] hops=1 cap=500000/10s pushed=48074 admitted=44916 (374/s) backlog=3158
+[final] e2e p50=431.1 p90=896.5 p99=5146.1 ms (n=44916)
+[final] errors push=0 pop=0 ack=0
+[final] hops=1 cap=500000/10s pushed=47850 admitted=44282 (369/s) backlog=3568
+[final] e2e p50=408.8 p90=655.9 p99=1366.8 ms (n=44282)
+[final] errors push=0 pop=0 ack=0
+[final] hops=1 cap=500000/10s pushed=48343 admitted=47965 (400/s) backlog=378
+[final] e2e p50=466.8 p90=722.5 p99=1312.8 ms (n=47965)
+[final] errors push=0 pop=0 ack=0
+[final] hops=1 cap=500000/10s pushed=47406 admitted=45841 (382/s) backlog=1565
+[final] e2e p50=449.5 p90=898.2 p99=4810.7 ms (n=45841)
+[final] errors push=0 pop=0 ack=0
+[final] hops=1 cap=500000/10s pushed=47026 admitted=42943 (358/s) backlog=4083
+[final] e2e p50=393.3 p90=635.4 p99=1307.6 ms (n=42943)
+[final] errors push=0 pop=0 ack=0
+[final] hops=1 cap=500000/10s pushed=48089 admitted=45521 (379/s) backlog=2568
+[final] e2e p50=449.0 p90=714.0 p99=1394.4 ms (n=45521)
+[final] errors push=0 pop=0 ack=0
+[final] hops=1 cap=500000/10s pushed=57364 admitted=55301 (461/s) backlog=2063
+[final] e2e p50=530.7 p90=1143.8 p99=2821.1 ms (n=55301)
+[final] errors push=0 pop=0 ack=0
+gate.bench.gm10x1.entry.push 0
+gate.bench.gm10x1.entry.admitted.default 1431
+gate.bench.gm10x1.term.admitted.default 3023
+gate.bench.gm10x2.entry.push 0
+gate.bench.gm10x2.entry.admitted.default 0
+gate.bench.gm10x2.term.admitted.default 2435
+gate.bench.gm10x3.entry.push 0
+gate.bench.gm10x3.entry.admitted.default 0
+gate.bench.gm10x3.term.admitted.default 3158
+gate.bench.gm10x4.entry.push 0
+gate.bench.gm10x4.entry.admitted.default 0
+gate.bench.gm10x4.term.admitted.default 3568
+gate.bench.gm10x5.entry.push 0
+gate.bench.gm10x5.entry.admitted.default 0
+gate.bench.gm10x5.term.admitted.default 378
+gate.bench.gm10x6.entry.push 0
+gate.bench.gm10x6.entry.admitted.default 0
+gate.bench.gm10x6.term.admitted.default 1565
+gate.bench.gm10x7.entry.push 0
+gate.bench.gm10x7.entry.admitted.default 0
+gate.bench.gm10x7.term.admitted.default 4083
+gate.bench.gm10x8.entry.push 0
+gate.bench.gm10x8.entry.admitted.default 0
+gate.bench.gm10x8.term.admitted.default 2568
+gate.bench.gm10x9.entry.push 0
+gate.bench.gm10x9.entry.admitted.default 0
+gate.bench.gm10x9.term.admitted.default 2063
+gate.bench.gm10x10.entry.push 0
+gate.bench.gm10x10.entry.admitted.default 0
+gate.bench.gm10x10.term.admitted.default 2646

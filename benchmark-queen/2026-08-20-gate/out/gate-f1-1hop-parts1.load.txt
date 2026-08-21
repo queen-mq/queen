@@ -1,0 +1,26 @@
+declared gf1 hops=1 cap=500000/10s midCap=0 parts=1
+  -> {"ok":true,"resolved":{"consume":["term"],"edges":[{"from":"entry","priority":0,"to":"term"}],"nodes":[{"admittedQueues":["gate.bench.gf1.entry.admitted.default"],"consume":false,"entry":true,"name":"entry","pushQueue":"gate.bench.gf1.entry.push","shards":1,"target":"gf1.entry"},{"admittedQueues":["...
+[21:07:07] push=   3820/s admitted=    380/s | e2e p50=  3042.3 p99=   4772.8 ms | backlog=17205 | err push=0 pop=0 ack=0
+[21:07:12] push=   8016/s admitted=   2920/s | e2e p50=  6572.3 p99=   9329.7 ms | backlog=42678 | err push=0 pop=0 ack=0
+[21:07:17] push=  12776/s admitted=   2440/s | e2e p50=  5988.5 p99=   9694.0 ms | backlog=94357 | err push=0 pop=0 ack=0
+[21:07:22] push=  12971/s admitted=    996/s | e2e p50=  5921.4 p99=   9683.0 ms | backlog=154232 | err push=0 pop=0 ack=0
+[21:07:27] push=  13106/s admitted=    639/s | e2e p50=  6086.6 p99=  11234.8 ms | backlog=216568 | err push=0 pop=0 ack=0
+[21:07:32] push=  13010/s admitted=    557/s | e2e p50=  6316.8 p99=  15206.4 ms | backlog=278835 | err push=0 pop=0 ack=0
+[21:07:37] push=  12864/s admitted=    462/s | e2e p50=  6538.9 p99=  19197.5 ms | backlog=340849 | err push=0 pop=0 ack=0
+[21:07:42] push=  13087/s admitted=    447/s | e2e p50=  6639.7 p99=  23195.3 ms | backlog=404047 | err push=0 pop=0 ack=0
+[21:07:47] push=  12981/s admitted=    388/s | e2e p50=  6733.8 p99=  27432.0 ms | backlog=467011 | err push=0 pop=0 ack=0
+[21:07:52] push=  12937/s admitted=    365/s | e2e p50=  6823.6 p99=  31616.0 ms | backlog=529871 | err push=0 pop=0 ack=0
+[21:07:57] push=  12963/s admitted=    347/s | e2e p50=  6906.1 p99=  35870.0 ms | backlog=592953 | err push=0 pop=0 ack=0
+[21:08:02] push=  12329/s admitted=    553/s | e2e p50=  7107.9 p99=  40595.7 ms | backlog=651833 | err push=0 pop=0 ack=0
+[21:08:07] push=  12021/s admitted=    663/s | e2e p50=  8188.5 p99=  44400.1 ms | backlog=708625 | err push=0 pop=0 ack=0
+[21:08:12] push=  12100/s admitted=    613/s | e2e p50=  8639.4 p99=  48244.2 ms | backlog=766062 | err push=0 pop=0 ack=0
+[21:08:17] push=  12299/s admitted=    585/s | e2e p50=  8845.7 p99=  52027.3 ms | backlog=824629 | err push=0 pop=0 ack=0
+[21:08:22] push=  12476/s admitted=    574/s | e2e p50=  9065.6 p99=  56134.4 ms | backlog=884151 | err push=0 pop=0 ack=0
+[21:08:27] push=  12428/s admitted=    531/s | e2e p50=  9452.7 p99=  60007.5 ms | backlog=943628 | err push=0 pop=0 ack=0
+[21:08:32] push=  12494/s admitted=    512/s | e2e p50=  9679.4 p99=  63931.6 ms | backlog=1003541 | err push=0 pop=0 ack=0
+[21:08:37] push=  12423/s admitted=    498/s | e2e p50= 10776.7 p99=  68090.5 ms | backlog=1063169 | err push=0 pop=0 ack=0
+[21:08:42] push=  12303/s admitted=    489/s | e2e p50= 12478.5 p99=  72115.5 ms | backlog=1122239 | err push=0 pop=0 ack=0
+
+[final] hops=1 cap=500000/10s pushed=1197061 admitted=74929 (749/s) backlog=1122132
+[final] e2e p50=12596.1 p90=61264.4 p99=72380.4 ms (n=74929)
+[final] errors push=0 pop=0 ack=0

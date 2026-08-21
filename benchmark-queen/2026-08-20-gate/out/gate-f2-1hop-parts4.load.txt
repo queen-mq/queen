@@ -1,0 +1,3 @@
+declared gf2 hops=1 cap=500000/10s midCap=0 parts=4
+  -> {"ok":true,"resolved":{"consume":["term"],"edges":[{"from":"entry","priority":0,"to":"term"}],"nodes":[{"admittedQueues":["gate.bench.gf2.entry.admitted.default"],"consume":false,"entry":true,"name":"entry","pushQueue":"gate.bench.gf2.entry.push","shards":1,"target":"gf2.entry"},{"admittedQueues":["...
+[21:09:10] push=   3699/s admitted=   1600/s | e2e p50=  2650.5 p99=   4434.4 ms | backlog=10500 | err push=0 pop=0 ack=0

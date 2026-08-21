@@ -1,0 +1,26 @@
+declared gr3 hops=1 cap=2000/10s midCap=0 parts=16
+  -> {"ok":true,"resolved":{"consume":["term"],"edges":[{"from":"entry","priority":0,"to":"term"}],"nodes":[{"admittedQueues":["gate.bench.gr3.entry.admitted.default"],"consume":false,"entry":true,"name":"entry","pushQueue":"gate.bench.gr3.entry.push","shards":1,"target":"gr3.entry"},{"admittedQueues":["...
+[20:56:01] push=    141/s admitted=    118/s | e2e p50=   519.8 p99=   1068.2 ms | backlog=112 | err push=0 pop=0 ack=0
+[20:56:06] push=    144/s admitted=    150/s | e2e p50=   548.6 p99=   1064.5 ms | backlog=80 | err push=0 pop=0 ack=0
+[20:56:11] push=    144/s admitted=    150/s | e2e p50=   549.0 p99=   1070.7 ms | backlog=48 | err push=0 pop=0 ack=0
+[20:56:16] push=    144/s admitted=    150/s | e2e p50=   552.9 p99=   1068.3 ms | backlog=16 | err push=0 pop=0 ack=0
+[20:56:21] push=    144/s admitted=    125/s | e2e p50=   553.9 p99=   1069.4 ms | backlog=112 | err push=0 pop=0 ack=0
+[20:56:26] push=    134/s admitted=    150/s | e2e p50=   571.5 p99=   1104.8 ms | backlog=32 | err push=0 pop=0 ack=0
+[20:56:31] push=    125/s admitted=    106/s | e2e p50=   578.0 p99=   1215.8 ms | backlog=128 | err push=0 pop=0 ack=0
+[20:56:36] push=    141/s admitted=    154/s | e2e p50=   573.9 p99=   1215.7 ms | backlog=64 | err push=0 pop=0 ack=0
+[20:56:41] push=    141/s admitted=    150/s | e2e p50=   573.9 p99=   1198.4 ms | backlog=16 | err push=0 pop=0 ack=0
+[20:56:46] push=    141/s admitted=    122/s | e2e p50=   573.5 p99=   1188.4 ms | backlog=112 | err push=0 pop=0 ack=0
+[20:56:51] push=    144/s admitted=    160/s | e2e p50=   572.9 p99=   1184.7 ms | backlog=32 | err push=0 pop=0 ack=0
+[20:56:56] push=    144/s admitted=    131/s | e2e p50=   571.9 p99=   1105.0 ms | backlog=96 | err push=0 pop=0 ack=0
+[20:57:01] push=    122/s admitted=    118/s | e2e p50=   571.9 p99=   1337.1 ms | backlog=112 | err push=0 pop=0 ack=0
+[20:57:06] push=    128/s admitted=    122/s | e2e p50=   573.2 p99=   1327.0 ms | backlog=144 | err push=0 pop=0 ack=0
+[20:57:11] push=    144/s admitted=    163/s | e2e p50=   573.4 p99=   1326.9 ms | backlog=48 | err push=0 pop=0 ack=0
+[20:57:16] push=    128/s admitted=    118/s | e2e p50=   572.3 p99=   1316.8 ms | backlog=96 | err push=0 pop=0 ack=0
+[20:57:21] push=    144/s admitted=    147/s | e2e p50=   568.4 p99=   1253.1 ms | backlog=80 | err push=0 pop=0 ack=0
+[20:57:26] push=    144/s admitted=    138/s | e2e p50=   568.5 p99=   1251.1 ms | backlog=112 | err push=0 pop=0 ack=0
+[20:57:31] push=    144/s admitted=    150/s | e2e p50=   566.2 p99=   1226.3 ms | backlog=80 | err push=0 pop=0 ack=0
+[20:57:36] push=    144/s admitted=    154/s | e2e p50=   561.2 p99=   1226.2 ms | backlog=32 | err push=0 pop=0 ack=0
+
+[final] hops=1 cap=2000/10s pushed=13936 admitted=13888 (139/s) backlog=48
+[final] e2e p50=561.2 p90=1018.2 p99=1226.2 ms (n=13888)
+[final] errors push=0 pop=0 ack=0

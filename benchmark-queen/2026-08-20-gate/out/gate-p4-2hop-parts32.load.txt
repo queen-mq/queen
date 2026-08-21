@@ -1,0 +1,19 @@
+declared gp4 hops=2 cap=500000/10s midCap=0 parts=32
+  -> {"ok":true,"resolved":{"consume":["term"],"edges":[{"from":"entry","priority":0,"to":"mid"},{"from":"mid","priority":0,"to":"term"}],"nodes":[{"admittedQueues":["gate.bench.gp4.entry.admitted.default"],"consume":false,"entry":true,"name":"entry","pushQueue":"gate.bench.gp4.entry.push","shards":1,"ta...
+[21:04:54] push=   1286/s admitted=   1205/s | e2e p50=  3406.9 p99=   4197.2 ms | backlog=406 | err push=0 pop=0 ack=0
+[21:04:59] push=   1115/s admitted=   1063/s | e2e p50=  3141.2 p99=   4155.8 ms | backlog=667 | err push=0 pop=0 ack=0
+[21:05:04] push=   1971/s admitted=    731/s | e2e p50=  2831.0 p99=   4108.0 ms | backlog=6865 | err push=0 pop=0 ack=0
+[21:05:09] push=    431/s admitted=   1456/s | e2e p50=  3281.1 p99=   6539.0 ms | backlog=1741 | err push=0 pop=0 ack=0
+[21:05:14] push=   5158/s admitted=    942/s | e2e p50=  3038.6 p99=   6518.8 ms | backlog=22815 | err push=0 pop=0 ack=0
+[21:05:19] push=   3091/s admitted=    402/s | e2e p50=  2866.4 p99=   6505.6 ms | backlog=36261 | err push=0 pop=0 ack=0
+[21:05:24] push=   2020/s admitted=    842/s | e2e p50=  3162.8 p99=  13988.0 ms | backlog=42151 | err push=0 pop=0 ack=0
+[21:05:29] push=      0/s admitted=    538/s | e2e p50=  3314.7 p99=  15892.6 ms | backlog=39461 | err push=0 pop=0 ack=0
+[21:05:34] push=      0/s admitted=    740/s | e2e p50=  3491.8 p99=  22519.1 ms | backlog=35761 | err push=0 pop=0 ack=0
+[21:05:39] push=      0/s admitted=   1520/s | e2e p50=  4148.3 p99=  26386.8 ms | backlog=28161 | err push=0 pop=0 ack=0
+[21:05:44] push=      0/s admitted=   1636/s | e2e p50=  5739.4 p99=  28693.0 ms | backlog=19984 | err push=0 pop=0 ack=0
+[21:05:49] push=    432/s admitted=   1355/s | e2e p50= 12580.9 p99=  36813.8 ms | backlog=15370 | err push=0 pop=0 ack=0
+[21:05:54] push=    465/s admitted=   1153/s | e2e p50= 13813.4 p99=  39158.4 ms | backlog=11929 | err push=0 pop=0 ack=0
+[21:05:59] push=   4057/s admitted=    914/s | e2e p50= 14505.5 p99=  43474.9 ms | backlog=27645 | err push=0 pop=0 ack=0
+[21:06:04] push=    870/s admitted=    798/s | e2e p50= 14056.2 p99=  45241.6 ms | backlog=28004 | err push=0 pop=0 ack=0
+[21:06:09] push=      6/s admitted=    587/s | e2e p50= 13950.6 p99=  48182.2 ms | backlog=25099 | err push=0 pop=0 ack=0
+[21:06:14] push=   1343/s admitted=     76/s | e2e p50= 14006.1 p99=  48364.6 ms | backlog=31430 | err push=0 pop=0 ack=0

@@ -185,3 +185,131 @@ Tre lezioni, tutte e tre da documentazione:
 Riconciliazione con "queen regge 1M msg/s": quel numero e' push/pop batchati su
 centinaia di lane. La wire qui fa 34k item/s con SOLE 16 lane a batch 50 — scala
 con le lane esattamente come il resto del prodotto.
+
+---
+
+# Round 2 (sera) — Gate 0.1.5 "relay parallelo" contro broker 1.0.5
+
+**Rig identico al Round 1** (Gate accanto a broker e PG 18.6 sulla stessa VM 32c/62GB,
+gateload dalla VM 8c), DB azzerati a inizio campagna. Gate 0.1.5 = `eefdce6` "relay:
+one runner per source admitted partition": il relay non e' piu' UN loop seriale per
+destinazione ma un runner per OGNI partizione admitted della sorgente. Broker =
+`ghcr.io/queen-mq/queen:1.0.5` (l'ackfix rilasciato). Nota di build: la CI docker di
+gate ha compilato e FALLITO il push (`permission_denied: write_package`: il package
+ghcr e' nato da un push manuale e non e' collegato al repo — da sistemare nei package
+settings); l'immagine 0.1.5 e' stata buildata e pushata da locale, digest `42c1f391`.
+
+## La headline: il relay e' raddoppiato, ma l'e2e non lo mostra
+
+Stessi comandi del Round 1:
+
+| e2e [final] | 1.0.4 seriale | ackfix seriale | 0.1.5 parallelo |
+|---|--:|--:|--:|
+| 1 hop ceiling | 893/s | 1.384/s | 1.226/s |
+| 2 hop ceiling | 367/s | 1.238/s | 1.203/s |
+
+Piatto. Ma il numero [final] di gateload misura il SUO lato consumer, non Gate. La
+novita' metodologica di questo round: l'endpoint depth (1.0.4+) decompone il backlog
+residuo per stadio, e le rate per stadio raccontano un'altra storia (run 1-hop):
+
+| stadio | rate |
+|---|--:|
+| admission (entry.push → admitted) | ~6.100/s |
+| **relay (cio' che 0.1.5 ha cambiato)** | **~2.775/s — 2x il seriale** |
+| gli 8 consumer di gateload | ~1.226/s ← era QUESTO il tetto dell'e2e |
+
+Sul 2-hop le DUE leg girano in parallelo a ~2.65k/s CIASCUNA con la coda mid quasi
+vuota: la penalita' per hop sulla portata del relay (2,4x in 1.0.4, 1,12x post-ackfix)
+e' sostanzialmente sparita.
+
+E no, non basta "aggiungere consumer": con 32 consumer il terminal si svuota ma il
+relay DIMEZZA (1.231/s) e PG triplica (8,9 core) — la pressione di pop contende sulle
+stesse partizioni del relay. Su questo rig l'e2e single-target si ferma a ~1,2k/s
+comunque si configuri il loader; e' il sistema a essere contention-bound.
+
+## Perche' si ferma li': il contatore del nodo E' una partizione sola
+
+Dai depth: `term.push` ha UNA partizione (`default`); `term.admitted` ne ha 16. E' il
+design del budget: il conteggio esatto vuole una corsia sola, quindi ogni item che
+entra in un nodo passa da quella partizione — e aggiornarne la riga e' un lock. Sedici
+runner convergono su un lock solo: wait profile `tuple` al 96-100% in OGNI run di
+ceiling. Il commit stesso lo dichiara ("what bounds it is the destination's single
+push partition, which IS the node's counter").
+
+Scaling con le partizioni della sorgente (stato pulito): parts=1 → relay 764/s (un
+runner = il controllo); parts=16 → 2.775/s (3,6x, meglio del "flat dopo 4" misurato
+dal commit su laptop). Oltre, il collo e' la corsia di destinazione, non i runner.
+
+txnload (Round 1) fa 23-34k item/s con la STESSA forma perche' le sue 16 lane sono
+disgiunte ANCHE a destinazione: nessuna riga condivisa. Gate paga il conteggio esatto
+con un imbuto per nodo. Il broker non c'entra.
+
+## La prova: target multipli scalano
+
+Se il collo e' il contatore per-NODO, N nodi = N contatori = N corsie. Misurato con
+10 grafi 1-hop indipendenti in parallelo (reset completo, 120 s):
+
+| | single-target | 10 target (6 pusher/grafo) | 10 target (16 pusher/grafo) |
+|---|--:|--:|--:|
+| e2e aggregato | 1.226/s | **4.004/s** | **4.636/s** |
+| stato a fine run | backlog 400-600k | **TUTTO drenato** (entry.push=0, admitted~0) | entry.push=0 ovunque; residui piccoli (admitted ~51k tot) |
+| p50 / p99 e2e | (backlog-driven) | 393-531 / 1.308-5.146 ms | 647-755 / 1.675-7.476 ms |
+| PG core (mean/peak) | 2,4 / 3,1 | 13,8 / 19,2 | 9,8 / 18,5 |
+| container Gate | 4-8% di un core | 26% di un core | 36% di un core |
+
+Il run a 6 pusher/grafo NON ha saturato Gate: ogni coda e' finita vuota, cioe' il
+limite era il push del loader (4,2k/s), non la pipeline. Wait profile diversificato
+(tuple 75%, transactionid 13%, WALWrite 10%): commit paralleli veri, appare la WAL.
+
+Il rerun a 16 pusher/grafo (160 goroutine di push) ha alzato il feed solo del 28%
+(4,2k → 5,4k/s: i pusher sono latency-bound contro il broker sotto carico) e Gate ha
+continuato a mangiarsi tutto: entry.push a ZERO su tutti e dieci i grafi, relay
+aggregato ~4,9k/s con residui admitted di ~1 s di lavoro, consumer a 4.636/s. PG a 9,8
+core medi su 32: il tetto multi-target di Gate su questa VM NON e' stato raggiunto —
+per trovarlo serve un loader piu' grosso (o un secondo), non questa VM da 8 core.
+Quello che e' dimostrato: 1.226 → 4.636/s e2e (3,8x) aggiungendo target, con margine.
+
+**Lettura di prodotto**: il ~2,8k/s single-target e' il tetto PER PROVIDER, e un rate
+limiter esiste per pacare i provider ben sotto quel numero. Il numero commerciale e'
+l'aggregato su molti target contati indipendentemente — e scala.
+
+## Il costo delle forme cappate (da portare al team Gate)
+
+La forma cap 200/s brucia **6,5 core PG per ammettere 172-181/s**. Attribuzione
+pg_stat_statements su run dedicata:
+
+- `log_transaction_wire_v1`: 4.869 chiamate, **media 1.639 ms** — quasi tutto attesa
+  su tuple lock (convoy dei mini-batch paced dei 16 runner), non CPU;
+- `log_streams_cycle_v1`: 3.453 chiamate × 94 ms = **~3,2 core** — la macchina a stati
+  di Gate cavalca lo streams engine del broker anche quando ammette 172/s;
+- `log_txns_purge_step_v1`: ~1 core a ripulire i 5k/s di push dietro il cap.
+
+## Latenze paced: PEGGIORATE, ma il verdetto e' sporco
+
+| paced | ackfix p50/p99 | 0.1.5 p50/p99 (stato sporco) |
+|---|--:|--:|
+| 1 hop @150/s | 299 / 595 ms | 561 / 1.226 ms |
+| 2 hop @150/s | 573 / 2.031 ms | 1.104 / 2.985 ms |
+| 1 hop @600/s | 174 / 568 ms | 388 / 2.300 ms (a 493/s: il loader non ha retto 600) |
+
+~2x peggio, MA misurate su un DB che portava ~4M righe di detriti dei run di ceiling
+(lo stesso accumulo ha fatto collassare il primo tentativo di sweep: PG a 12,8 core di
+tuple wait e push rate in caduta run dopo run — da qui i reset per-run del Round 2).
+I run paced-150 a stato pulito non sono stati completati (sweep interrotto): il
+"2x paced" resta NON verificato. Indizio contro la regressione: nei 10 grafi a stato
+pulito il p50 a ~400/s per grafo era 393-531 ms con backlog ~0 sotto 14 core di
+carico aggregato. Da rimisurare pulito prima di parlarne come regressione.
+
+## Cosa direbbe questo round al team Gate
+
+1. **Shardare il contatore** (N partizioni su `.push` con budget a fette cap/N, o
+   contatori sharded sommati al roll della finestra): il relay diventa pinned
+   end-to-end = la forma txnload = ~20k+/s su questa VM anche single-target.
+2. In alternativa: **contare con l'aritmetica dei watermark** (la depth route da' gia'
+   le somme per partizione): ammessi-nella-finestra = delta dei watermark, e gli item
+   non devono piu' convergere fisicamente su una corsia.
+3. Guardare `log_streams_cycle_v1` nelle forme cappate: 3,2 core di stato per 172/s
+   ammessi e' il primo costo fisso che un cliente vede.
+
+Driver: `gatec.sh` (ceiling cons32), `gatef.sh` (sweep a stato pulito, interrotto),
+`gatem.sh` (multi-target). Raw in `out/`.
