@@ -560,6 +560,45 @@ pub struct Config {
     /// call would under-count by up to 256x (§9.7, ratified §20.3).
     pub timers_max_ops_per_call: usize,
 
+    // --- Ephemeral queues (EPHEMERAL_QUEUES.md §3.8). RAM-class queues whose
+    // contents survive nothing.
+    //
+    // THERE IS NO `QUEEN_EPHEMERAL_ENABLED`, and its absence is the same decision
+    // the KV and timer flags were removed for (see the header of `switches.rs`):
+    // the routes are registered unconditionally, so no client can ever have to ask
+    // whether a cell "has ephemeral queues". Pausing the surface at runtime is a
+    // kill switch, and cloud gating is a grant — neither is a boot flag.
+    //
+    // Every knob below is a CEILING on a resource in this process's heap, which is
+    // why they read differently from the durable ones: there is no database to
+    // absorb an overrun, so the bound is the only thing between a mispublishing
+    // producer and the cell's memory.
+    /// `QUEEN_EPHEMERAL_MAX_BYTES` (256 MiB). The cell's total ephemeral footprint;
+    /// crossing it answers 503 `ephemeral_unavailable` (§1.6 rung 3). ~3% of a
+    /// 2c/8 GB free cell at full burn (§10 Q2); dedicated cells raise it.
+    pub ephemeral_max_bytes: i64,
+    /// `QUEEN_EPHEMERAL_QUEUE_MAX_BYTES` (16 MiB) — the per-queue DEFAULT, and the
+    /// ceiling a `configure` may not exceed. Both roles, one number, deliberately:
+    /// a separate "max the tenant may ask for" is a knob nobody would ever set
+    /// differently and a second value to keep consistent.
+    pub ephemeral_queue_max_bytes: i64,
+    /// `QUEEN_EPHEMERAL_QUEUE_MAX_LENGTH` (10 000) — same dual role. A byte cap
+    /// alone does not bound the per-message bookkeeping (cursors, leases, attempt
+    /// counts), which is what a flood of tiny messages actually consumes.
+    pub ephemeral_queue_max_length: i64,
+    /// `QUEEN_EPHEMERAL_LEASE_S` (30). At-least-once holds only while the owning
+    /// incarnation lives (§1.3), so this is a redelivery latency, never a
+    /// durability window.
+    pub ephemeral_lease_s: i64,
+    /// `QUEEN_EPHEMERAL_RETRY_LIMIT` (5). Exhausted attempts DROP the message and
+    /// count `eph_dropped_retry` — there is no DLQ in this class (§9), and a
+    /// silent infinite retry would be a poison-message loop with no exit.
+    pub ephemeral_retry_limit: u32,
+    /// `QUEEN_EPHEMERAL_IMPLICIT_IDLE_S` (300). How long an IMPLICIT queue may sit
+    /// empty and unpolled before it is collected. Declared queues are never
+    /// collected: their configuration is durable and their emptiness is normal.
+    pub ephemeral_implicit_idle_s: i64,
+
     // --- Sweeper (§7). ONE background component, TWO clocks. The asymmetry is a
     // principle, not a convenience: a late fire is product latency and is visible,
     // while a late KV prune is invisible (the `kv_live_v1` predicate already hides the
@@ -960,6 +999,22 @@ pub fn log_effective(cfg: &Config) {
         timers_max_ops_per_call = cfg.timers_max_ops_per_call,
         "config: kv_timers"
     );
+    // EPHEMERAL_QUEUES.md §3.8. No `enabled=` field, for the same reason the block
+    // above has none: printing "ephemeral: true" on every boot would keep teaching
+    // operators that there is a state where it prints false (M9). What an operator
+    // needs from this line is the three CEILINGS — this is the only feature in the
+    // broker whose overrun is paid in RAM rather than in disk or latency.
+    tracing::info!(
+        target: "boot",
+        eph_max_bytes = cfg.ephemeral_max_bytes,
+        eph_queue = %format!(
+            "{}B/{}msgs",
+            cfg.ephemeral_queue_max_bytes, cfg.ephemeral_queue_max_length),
+        eph_lease_s = cfg.ephemeral_lease_s,
+        eph_retry_limit = cfg.ephemeral_retry_limit,
+        eph_implicit_idle_s = cfg.ephemeral_implicit_idle_s,
+        "config: ephemeral"
+    );
     tracing::info!(
         target: "boot",
         // `QUEEN_SWEEPER=false` is the one knob that still stops the task, and it is
@@ -1229,6 +1284,23 @@ pub fn load() -> Config {
             .max(1) as usize,
         timers_max_horizon_s: env_int("QUEEN_TIMERS_MAX_HORIZON_S", 7_776_000).max(1),
         timers_max_ops_per_call: env_int("QUEEN_TIMERS_MAX_OPS_PER_CALL", 256).max(1) as usize,
+        // ------------------------------------- ephemeral (EPHEMERAL_QUEUES.md §3.8)
+        // `.max(1)` and not `.max(0)` on the three budgets: 0 in this engine means
+        // UNLIMITED, and an operator who types `QUEEN_EPHEMERAL_MAX_BYTES=0`
+        // meaning "off" would get a cell with no memory ceiling at all. There is
+        // no way to spell "off" here on purpose (no boot gate — M9), so the floor
+        // makes the typo harmless instead of catastrophic.
+        ephemeral_max_bytes: env_int("QUEEN_EPHEMERAL_MAX_BYTES", 256 * 1024 * 1024).max(1),
+        ephemeral_queue_max_bytes: env_int("QUEEN_EPHEMERAL_QUEUE_MAX_BYTES", 16 * 1024 * 1024)
+            .max(1),
+        ephemeral_queue_max_length: env_int("QUEEN_EPHEMERAL_QUEUE_MAX_LENGTH", 10_000).max(1),
+        // Clamped to a day: a lease longer than that is indistinguishable from a
+        // lost message on a class whose contents do not survive a deploy.
+        ephemeral_lease_s: env_int("QUEEN_EPHEMERAL_LEASE_S", 30).clamp(1, 86_400),
+        ephemeral_retry_limit: env_int("QUEEN_EPHEMERAL_RETRY_LIMIT", 5).clamp(1, 1000) as u32,
+        // 0 IS legal here and means "never collect implicit queues" — unlike the
+        // budgets, an operator who wants that is asking for something coherent.
+        ephemeral_implicit_idle_s: env_int("QUEEN_EPHEMERAL_IMPLICIT_IDLE_S", 300).max(0),
         sweeper_enabled: env_bool("QUEEN_SWEEPER", true),
         sweeper_min_sleep_ms: env_int("QUEEN_SWEEPER_MIN_SLEEP_MS", 5).max(1) as u64,
         sweeper_max_sleep_ms: env_int("QUEEN_SWEEPER_MAX_SLEEP_MS", 1000).max(1) as u64,

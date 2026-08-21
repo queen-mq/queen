@@ -387,6 +387,25 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
     );
     hotlist.attach_notifier(notifier.clone());
 
+    // EPHEMERAL_QUEUES.md §3.2 — KEEP IN SYNC with main.rs (the embedded-API
+    // memory rule). The embedded broker is by definition single-broker, which is
+    // exactly the ownership topology the engine implements, so nothing about it
+    // is degraded here. The one difference is deliberate and stated: there is no
+    // sweeper embedded, so no `attach_wake_hint` — the opportunistic expiry
+    // sweep on every ring touch is the whole mechanism, and it is the
+    // correctness floor on the HTTP broker too.
+    let ephemeral = crate::ephemeral::Ephemeral::new(
+        crate::ephemeral::Knobs {
+            global_max_bytes: cfg.ephemeral_max_bytes,
+            queue_max_bytes: cfg.ephemeral_queue_max_bytes,
+            queue_max_length: cfg.ephemeral_queue_max_length,
+            lease_ms: cfg.ephemeral_lease_s * 1000,
+            retry_limit: cfg.ephemeral_retry_limit,
+            implicit_idle_ms: cfg.ephemeral_implicit_idle_s * 1000,
+        },
+        metrics.clone(),
+    );
+
     let st = Arc::new(AppState {
         pool: pool.clone(),
         fusion,
@@ -417,6 +436,7 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
         file_buffer: file_buffer.clone(),
         partition_queue: std::sync::Mutex::new(std::collections::HashMap::new()),
         seeded_groups: std::sync::Mutex::new(std::collections::HashMap::new()),
+        ephemeral: ephemeral.clone(),
         hotlist: hotlist.clone(),
         hotlist_reseed_ms: cfg.hotlist_reseed_ms,
         hotlist_reseed_full_ms: cfg.hotlist_reseed_full_ms,

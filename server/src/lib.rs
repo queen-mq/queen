@@ -33,6 +33,10 @@ mod config;
 mod db;
 mod dedup;
 mod encryption;
+// EPHEMERAL_QUEUES.md §3.2 — twin of the `mod ephemeral;` in main.rs. The
+// engine needs no pool, no mesh and no sweeper, so the library target compiles
+// and runs it unchanged.
+mod ephemeral;
 mod file_buffer;
 mod frames;
 mod fusion;

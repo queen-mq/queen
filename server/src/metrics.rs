@@ -90,6 +90,28 @@ pub struct Metrics {
     /// `rates` line as windowed deltas (§6.1); neither is per-message-logged.
     pub conflated: AtomicU64,
     pub conflation_conflicts: AtomicU64,
+    /// EPHEMERAL_QUEUES.md §6 — the RAM-class series, same shape and the same
+    /// reasoning as the conflation pair above: plain `AtomicU64` on this struct,
+    /// fed from `src/ephemeral.rs`, never a per-message log line.
+    ///
+    /// The three DROP counters are not one counter with a label, because the
+    /// three causes need different reactions and a single number hides which
+    /// one is happening: `bounds` says the queue is too small (or its producer
+    /// too fast), `ttl` says the consumer is too slow for the age limit, and
+    /// `retry` says handlers are failing. On this class a drop is legal (§1.2),
+    /// which is exactly why it has to be VISIBLE — nothing else in the system
+    /// will complain about it.
+    pub eph_pushed: AtomicU64,
+    pub eph_popped: AtomicU64,
+    pub eph_acked: AtomicU64,
+    pub eph_dropped_bounds: AtomicU64,
+    pub eph_dropped_ttl: AtomicU64,
+    pub eph_dropped_retry: AtomicU64,
+    /// Gauges, not counters: bytes held by the cell's ephemeral rings, and how
+    /// many ephemeral queues exist (declared + live implicit). `AtomicI64`
+    /// because a gauge goes down.
+    pub eph_bytes: AtomicI64,
+    pub eph_queues: AtomicI64,
     /// Database failures observed on the DATA paths (push/pop/ack/transaction):
     /// a statement error, a statement timeout, or a pool acquisition failure.
     /// Bump it ONLY through `record_db_error(s)` — the gauge is charted as
@@ -1140,6 +1162,14 @@ impl Metrics {
             dlq_moved: AtomicU64::new(0),
             conflated: AtomicU64::new(0),
             conflation_conflicts: AtomicU64::new(0),
+            eph_pushed: AtomicU64::new(0),
+            eph_popped: AtomicU64::new(0),
+            eph_acked: AtomicU64::new(0),
+            eph_dropped_bounds: AtomicU64::new(0),
+            eph_dropped_ttl: AtomicU64::new(0),
+            eph_dropped_retry: AtomicU64::new(0),
+            eph_bytes: AtomicI64::new(0),
+            eph_queues: AtomicI64::new(0),
             db_errors: AtomicU64::new(0),
             pop_targeted: AtomicU64::new(0),
             pop_wildcard: AtomicU64::new(0),

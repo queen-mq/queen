@@ -9,6 +9,11 @@ mod db;
 #[allow(dead_code)]
 mod dedup;
 mod encryption;
+// EPHEMERAL_QUEUES.md §3.2 — the in-RAM queue class. In BOTH crate roots (the
+// twin-list rule of lib.rs): the embedded `queen::Broker` is by definition a
+// single-broker deployment, which is exactly the topology this phase implements,
+// so it gets the engine for free.
+mod ephemeral;
 mod file_buffer;
 mod frames;
 mod fusion;
@@ -374,6 +379,37 @@ async fn main() {
         );
     }
 
+    // EPHEMERAL_QUEUES.md §3.2 — the RAM-class engine. No pool, no schema read,
+    // no mesh: it is ready the instant it is constructed, which is why it is
+    // built here and not behind any of the boot awaits above.
+    let ephemeral = ephemeral::Ephemeral::new(
+        ephemeral::Knobs {
+            global_max_bytes: cfg.ephemeral_max_bytes,
+            queue_max_bytes: cfg.ephemeral_queue_max_bytes,
+            queue_max_length: cfg.ephemeral_queue_max_length,
+            lease_ms: cfg.ephemeral_lease_s * 1000,
+            retry_limit: cfg.ephemeral_retry_limit,
+            implicit_idle_ms: cfg.ephemeral_implicit_idle_s * 1000,
+        },
+        metrics.clone(),
+    );
+    // The lease-expiry / ttl backstop rides the sweeper's existing waker rather
+    // than adding a second timer task to the process (M10). Injected instead of
+    // called directly because `sweeper` exists only in this crate root — the
+    // embedded broker has no sweeper, and there the on-touch sweep is the whole
+    // mechanism.
+    ephemeral.attach_wake_hint(sweeper::hint_in_ms);
+    tracing::info!(
+        target: "boot",
+        // The incarnation id every ephemeral message carries (M4). Logged
+        // because it is the ONLY way to read an id in a support ticket: an ack
+        // answering `stale` names an epoch, and this line is what says whether
+        // that epoch was this process.
+        eph_epoch = %format!("{:x}", ephemeral.epoch()),
+        max_bytes = cfg.ephemeral_max_bytes,
+        "ephemeral engine ready"
+    );
+
     let state = Arc::new(AppState {
         pool: pool.clone(),
         fusion,
@@ -404,6 +440,7 @@ async fn main() {
         file_buffer: file_buffer.clone(),
         partition_queue: std::sync::Mutex::new(std::collections::HashMap::new()),
         seeded_groups: std::sync::Mutex::new(std::collections::HashMap::new()),
+        ephemeral: ephemeral.clone(),
         hotlist: hotlist.clone(),
         hotlist_reseed_ms: cfg.hotlist_reseed_ms,
         hotlist_reseed_full_ms: cfg.hotlist_reseed_full_ms,
@@ -673,6 +710,11 @@ async fn main() {
         &cfg,
         switches.clone(),
         quota.clone(),
+        // EPHEMERAL_QUEUES.md §3.2 — one more sub-cadence on the SAME loop, not
+        // a second background task: the ephemeral backstop is due-driven work
+        // measured in microseconds, and a process that already runs a due-driven
+        // loop does not need a second one to run it in.
+        ephemeral.clone(),
     );
     if !cfg.sweeper_enabled {
         // The configuration that silently accumulates: live surfaces with their only
@@ -1040,6 +1082,22 @@ async fn main() {
     // cannot stop, up to the horizon or an operator's intervention. Blocking would
     // produce the opposite of its purpose, so cancel goes through a route the proxy
     // classifies as read/management and never blocks.
+    // ------------------------------------- ephemeral (EPHEMERAL_QUEUES.md §3.1)
+    //
+    // The RAM-class data path: contents live in this process's heap and survive
+    // nothing (§1.2). Three verbs in this phase; `configure`, `reset`, `delete`
+    // and the two status reads join the same block later.
+    //
+    // All three segments are STATIC, so the matchit ordering rule this file
+    // repeats five times does not bite yet — but `/queue/:queue` (delete) is
+    // coming, and it must be registered AFTER the static siblings when it does.
+    //
+    // Unconditional, like kv and timers above and for the same reason: no flag
+    // decides whether this surface exists, so a 404 here can only ever mean the
+    // broker predates the feature (which is exactly what the SDKs map it to).
+        .route("/api/v1/ephemeral/push", post(handlers::handle_ephemeral_push))
+        .route("/api/v1/ephemeral/pop", get(handlers::handle_ephemeral_pop))
+        .route("/api/v1/ephemeral/ack", post(handlers::handle_ephemeral_ack))
         .route("/api/v1/timers", post(handlers::handle_timers_batch))
         .route("/api/v1/timers/:queue", get(handlers::handle_timers_list))
         .route(

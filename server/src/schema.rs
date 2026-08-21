@@ -95,6 +95,14 @@ const PROCEDURES: &[(&str, &str)] = &[
     // advisory locks stay in the loops as belt until every deployment
     // schedules through this table.
     ("029_maintenance_leases.sql", include_str!("../sql/procedures/029_maintenance_leases.sql")),
+    // The ephemeral queue class's ENTIRE database footprint (EPHEMERAL_QUEUES.md
+    // §2): two cold tables (declared configs, grant rows) and their SPs. Position
+    // carries no ordering argument — nothing before it references these tables and
+    // nothing here references anything before it — so it sits last simply because
+    // it is newest. The load-bearing property is the opposite of 024/025's: this
+    // file is touched at boot, at `configure` and at `delete`, and NEVER by push,
+    // pop or ack, which construct no SQL at all.
+    ("030_ephemeral.sql", include_str!("../sql/procedures/030_ephemeral.sql")),
 ];
 
 /// Minimum PostgreSQL this schema can be applied to, as `server_version_num`
