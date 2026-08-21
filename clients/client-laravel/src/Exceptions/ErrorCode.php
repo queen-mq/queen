@@ -23,4 +23,12 @@ class ErrorCode
     public const STORAGE_QUOTA_EXCEEDED = 'storage_quota_exceeded';
     public const FEATURE_GATED = 'feature_gated';
     public const FORBIDDEN = 'forbidden';
+
+    /**
+     * Not a server code: the SDK's own verdict for a 404 on the
+     * /api/v1/ephemeral/* family, which means the routes are not there at all
+     * (EPHEMERAL_QUEUES.md §4). Carried on EphemeralUnsupportedException so the
+     * one condition no version negotiation can discover is still branchable.
+     */
+    public const EPHEMERAL_UNSUPPORTED = 'ephemeral_unsupported';
 }

@@ -328,6 +328,95 @@ pub async fn handle_set_kv_timers(State(st): State<Arc<AppState>>, body: Bytes) 
     json(StatusCode::OK, out.to_string())
 }
 
+// ===================================================== ephemeral kill switch
+// EPHEMERAL_QUEUES.md §3.8, on the SAME shape as the kv/timers pair above: an
+// in-process atomic that is authoritative on every call, plus a row in
+// queen.system_state as a best-effort mirror for propagation and restart, and a
+// FRESH read on the GET so a flip made on another node shows up here at once.
+//
+// ONE SWITCH AND NOT FOUR (push/pop/ack/admin). The timer pair is two because
+// its halves have OPPOSITE COSTS — pausing the schedule promises nothing, while
+// pausing the fire accumulates work that was already promised. Nothing on this
+// class is promised past the incarnation (§1.2), so there is no half whose pause
+// silently accrues a debt, and an operator holding a cell whose MEMORY is the
+// problem wants one lever rather than a decision tree.
+//
+// REGISTERED UNCONDITIONALLY, like every management route: an operator must be
+// able to read that a cell has the surface paused, and a route that existed only
+// while the feature was on would answer 404 for both "paused" and "no such
+// endpoint".
+
+/// GET /api/v1/system/ephemeral — the switch, plus the live cell gauges an
+/// operator needs in order to decide whether to pull it.
+pub async fn handle_get_ephemeral(State(st): State<Arc<AppState>>) -> Response {
+    use crate::switches::Switches;
+    // Fresh from the DB, same as the maintenance and kv-timers GETs, falling
+    // back to the in-process atomic so the endpoint never 500s on a busy pool.
+    if let Ok(c) = st.pool.get().await {
+        if let Ok(v) = db::get_system_flag_opt(&c, Switches::KEY_EPHEMERAL).await {
+            st.switches.adopt(Switches::KEY_EPHEMERAL, v);
+        }
+    }
+    let out = serde_json::json!({
+        "ephemeralEnabled": st.switches.eph_on(),
+        // The two numbers the decision is actually made on. Both are in-process
+        // gauges — this endpoint reads no queue table and counts nothing, which
+        // is what makes it safe to poll during the incident it exists for.
+        "cellBytes": st.ephemeral.global_bytes(),
+        "cellMaxBytes": st.ephemeral.global_cap(),
+        "queues": st.ephemeral.queue_count(),
+        // How many tenants the grant table currently authorises. 0 with
+        // `requireGrant` on means EVERY tenant is being refused, which is the
+        // single most confusing state to diagnose from the outside.
+        "grantedTenants": st.ephemeral.granted_count(),
+        "requireGrant": st.ephemeral.knobs().require_grant,
+        // The incarnation id in every message id (M4): an ack answering `stale`
+        // names an epoch, and this is how a support ticket resolves it.
+        "epoch": format!("{:x}", st.ephemeral.epoch()),
+    });
+    json(StatusCode::OK, out.to_string())
+}
+
+#[derive(Deserialize)]
+struct EphemeralBody {
+    enabled: bool,
+}
+
+/// POST /api/v1/system/ephemeral {enabled:bool}
+///
+/// In-process FIRST and the mirror second: the atomic is what every call reads,
+/// and an operator pulling a lever during an incident must not have the effect
+/// wait on a database that may be the thing going wrong. `mirrored:false` says
+/// out loud that the flip is in force HERE but will not survive a restart and
+/// will not reach the other replicas, which reconcile from the row.
+pub async fn handle_set_ephemeral(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
+    use crate::switches::Switches;
+    let b: EphemeralBody = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),
+    };
+    st.switches.set_ephemeral(b.enabled);
+    let mirrored = match st.pool.get().await {
+        Ok(c) => db::set_system_flag(&c, Switches::KEY_EPHEMERAL, b.enabled)
+            .await
+            .is_ok(),
+        Err(_) => false,
+    };
+    let out = serde_json::json!({
+        "ephemeralEnabled": st.switches.eph_on(),
+        "mirrored": mirrored,
+        "message": if st.switches.eph_on() {
+            "the ephemeral surface is live"
+        } else {
+            "THE EPHEMERAL SURFACE IS PAUSED. Every /api/v1/ephemeral route answers 503; \
+             consumers parked on an ephemeral queue stay parked until their own timeout, \
+             the rings keep their memory until the implicit collector reaches them, and \
+             nothing stored durably is affected."
+        },
+    });
+    json(StatusCode::OK, out.to_string())
+}
+
 // ================================================================= streams
 // Three handlers for the fat-JS-client stream engine (client-v2/streams). The
 // broker only serves these 3 endpoints + the normal pop path; all window/

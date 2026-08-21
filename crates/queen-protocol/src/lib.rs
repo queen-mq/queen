@@ -25,6 +25,7 @@
 
 pub mod ack;
 pub mod admin;
+pub mod ephemeral;
 pub mod error;
 pub mod kv;
 pub mod pop;
@@ -34,6 +35,14 @@ pub mod timers;
 pub mod transaction;
 
 pub use ack::{AckBatchItem, AckBatchRequest, AckRequest, AckResult, AckStatus};
+pub use ephemeral::{
+    EphemeralAck, EphemeralAckRequest, EphemeralAckResponse, EphemeralAckResult,
+    EphemeralConfigureRequest, EphemeralDeleteResponse, EphemeralDelivered, EphemeralMessage,
+    EphemeralOptions, EphemeralOutcome, EphemeralPolicy, EphemeralPopParams, EphemeralPopResponse,
+    EphemeralPushRequest, EphemeralPushResponse, EphemeralResetRequest, EphemeralResetResponse,
+    EphemeralStatus, EphemeralWindowBuffer, EPHEMERAL_DEFAULT_PARTITION,
+    EPHEMERAL_DEFAULT_WAIT_TIMEOUT_MILLIS, EPHEMERAL_KEY_PREFIX, EPHEMERAL_QUEUE_NOT_FOUND_CODE,
+};
 pub use kv::{
     Expiry, KvDeleteBody, KvOpKind, KvOperation, KvPutBody, KvReason, KvRequest, KvResponse,
     KvResult, KvRow,

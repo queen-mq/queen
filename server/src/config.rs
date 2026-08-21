@@ -144,8 +144,25 @@ pub struct SyncConfig {
     /// within one interval after a lost UDP packet.
     pub cache_refresh_ms: u64,
     /// This node's identity in heartbeats/stats (env `QUEEN_SERVER_ID`, else a
-    /// short random id). Cosmetic — used only for peer identity/logging/stats.
+    /// short random id). Cosmetic for the mesh itself — but load-bearing for
+    /// EPHEMERAL_QUEUES.md §3.7, where it is the rendezvous hash's node key: two
+    /// brokers sharing one `QUEEN_SERVER_ID` would compute the same score and
+    /// disagree about which of them owns a partition.
     pub server_id: String,
+    /// This broker's dialable base URL FOR PEERS — the `http_addr` of HELLO v2
+    /// (EPHEMERAL_QUEUES.md §3.5) and the address a non-owner forwards an
+    /// ephemeral push/pop/ack to (§3.6). Scheme is always `http` (mesh traffic is
+    /// intra-cell) and the port is this broker's own `PORT`, so the only knob is
+    /// the HOST: `QUEEN_MESH_ADVERTISE_HOST`, defaulting to the OS hostname.
+    ///
+    /// The host is a knob because it is the one part a process cannot work out
+    /// for itself: the OS hostname is exactly right in Kubernetes (the pod's, and
+    /// resolvable through the headless service) and exactly wrong behind NAT or
+    /// on a laptop running two brokers under one hostname. It is advertised, not
+    /// probed: a peer never guesses our address from the socket it accepted,
+    /// because that is the DIAL side's ephemeral source address, not a port
+    /// anything listens on.
+    pub http_addr: String,
 }
 
 impl SyncConfig {
@@ -167,6 +184,20 @@ impl SyncConfig {
             .filter(|v| !v.is_empty())
             .or_else(|| std::env::var("HOSTNAME").ok().filter(|v| !v.is_empty()))
             .unwrap_or_else(|| format!("queen-{:08x}", rand::random::<u32>()));
+        // EPHEMERAL_QUEUES.md §3.5. Read from the SAME `PORT` variable the HTTP
+        // listener binds (below), and not from a second knob: an advertised port
+        // that could differ from the one this process listens on is a
+        // misconfiguration nobody would ever detect from the outside — peers
+        // would simply forward into a closed socket.
+        let advertise_host = {
+            let h = env_str("QUEEN_MESH_ADVERTISE_HOST", "");
+            if h.is_empty() {
+                os_hostname()
+            } else {
+                h
+            }
+        };
+        let http_addr = format!("http://{}:{}", advertise_host, env_str("PORT", "6632"));
         SyncConfig {
             enabled: env_bool("QUEEN_SYNC_ENABLED", true),
             mesh_port,
@@ -176,6 +207,7 @@ impl SyncConfig {
             dead_threshold_ms: env_int("QUEEN_SYNC_DEAD_THRESHOLD_MS", 5000).max(1) as u64,
             cache_refresh_ms: env_int("QUEEN_CACHE_REFRESH_INTERVAL_MS", 60000).max(1) as u64,
             server_id,
+            http_addr,
         }
     }
 
@@ -184,6 +216,33 @@ impl SyncConfig {
     pub fn mesh_active(&self) -> bool {
         self.enabled && !self.peers.is_empty()
     }
+}
+
+/// The OS hostname, for the default advertised address (§3.5).
+///
+/// `gethostname(2)` and not `$HOSTNAME`: the environment variable is set by
+/// interactive shells and by Docker, but NOT by every init that starts a broker,
+/// and an unset one would silently advertise the fallback to the whole cell. The
+/// env var is kept as the second source (a container that overrode it meant it),
+/// and loopback is the last resort — an address that resolves to this process is
+/// strictly better than one that resolves to nothing, because with a single
+/// broker the forwarding path is never taken anyway.
+fn os_hostname() -> String {
+    let mut buf = [0 as libc::c_char; 256];
+    // SAFETY: the pointer and length describe a live, correctly sized stack
+    // buffer; gethostname NUL-terminates within it or fails.
+    if unsafe { libc::gethostname(buf.as_mut_ptr(), buf.len()) } == 0 {
+        let bytes: Vec<u8> = buf.iter().take_while(|&&c| c != 0).map(|&c| c as u8).collect();
+        if let Ok(s) = String::from_utf8(bytes) {
+            if !s.is_empty() {
+                return s;
+            }
+        }
+    }
+    std::env::var("HOSTNAME")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "127.0.0.1".to_string())
 }
 
 /// Parse the peer list: comma-separated `host` or `host:port` entries (a bare host
@@ -560,6 +619,60 @@ pub struct Config {
     /// call would under-count by up to 256x (§9.7, ratified §20.3).
     pub timers_max_ops_per_call: usize,
 
+    // --- Ephemeral queues (EPHEMERAL_QUEUES.md §3.8). RAM-class queues whose
+    // contents survive nothing.
+    //
+    // THERE IS NO `QUEEN_EPHEMERAL_ENABLED`, and its absence is the same decision
+    // the KV and timer flags were removed for (see the header of `switches.rs`):
+    // the routes are registered unconditionally, so no client can ever have to ask
+    // whether a cell "has ephemeral queues". Pausing the surface at runtime is a
+    // kill switch, and cloud gating is a grant — neither is a boot flag.
+    //
+    // Every knob below is a CEILING on a resource in this process's heap, which is
+    // why they read differently from the durable ones: there is no database to
+    // absorb an overrun, so the bound is the only thing between a mispublishing
+    // producer and the cell's memory.
+    /// `QUEEN_EPHEMERAL_MAX_BYTES` (256 MiB). The cell's total ephemeral footprint;
+    /// crossing it answers 503 `ephemeral_unavailable` (§1.6 rung 3). ~3% of a
+    /// 2c/8 GB free cell at full burn (§10 Q2); dedicated cells raise it.
+    pub ephemeral_max_bytes: i64,
+    /// `QUEEN_EPHEMERAL_QUEUE_MAX_BYTES` (16 MiB) — the per-queue DEFAULT, and the
+    /// ceiling a `configure` may not exceed. Both roles, one number, deliberately:
+    /// a separate "max the tenant may ask for" is a knob nobody would ever set
+    /// differently and a second value to keep consistent.
+    pub ephemeral_queue_max_bytes: i64,
+    /// `QUEEN_EPHEMERAL_QUEUE_MAX_LENGTH` (10 000) — same dual role. A byte cap
+    /// alone does not bound the per-message bookkeeping (cursors, leases, attempt
+    /// counts), which is what a flood of tiny messages actually consumes.
+    pub ephemeral_queue_max_length: i64,
+    /// `QUEEN_EPHEMERAL_LEASE_S` (30). At-least-once holds only while the owning
+    /// incarnation lives (§1.3), so this is a redelivery latency, never a
+    /// durability window.
+    pub ephemeral_lease_s: i64,
+    /// `QUEEN_EPHEMERAL_RETRY_LIMIT` (5). Exhausted attempts DROP the message and
+    /// count `eph_dropped_retry` — there is no DLQ in this class (§9), and a
+    /// silent infinite retry would be a poison-message loop with no exit.
+    pub ephemeral_retry_limit: u32,
+    /// `QUEEN_EPHEMERAL_IMPLICIT_IDLE_S` (300). How long an IMPLICIT queue may sit
+    /// empty and unpolled before it is collected. Declared queues are never
+    /// collected: their configuration is durable and their emptiness is normal.
+    pub ephemeral_implicit_idle_s: i64,
+    /// `QUEEN_EPHEMERAL_REQUIRE_GRANT`. With tenancy ON, the ABSENCE of a grant row
+    /// is a DENIAL (403 `feature_gated`) and not a permission — the identical
+    /// posture, and the identical derivation, as `kv_require_grant` above (§1.6
+    /// rung 2 / M7). The tenant header is opaque and unvalidated, so a client that
+    /// rotates it on every request would otherwise mint a fresh unlimited tenant —
+    /// and on THIS class an unlimited tenant is unlimited RAM.
+    pub ephemeral_require_grant: bool,
+    /// `QUEEN_EPHEMERAL_RATE` / `_BURST`: per-tenant token bucket over PUSHED
+    /// MESSAGES per second (§1.6 rung 2), evaluated before a single byte is
+    /// charged, answering 429 + `Retry-After`. A grant row's `max_msgs_per_sec`
+    /// overrides both. The default is deliberately an order of magnitude above the
+    /// durable commit-bound ceiling of a free cell: this class costs a `VecDeque`
+    /// push, so the rate is a runaway-producer guard and not a throughput policy.
+    pub ephemeral_rate: u32,
+    pub ephemeral_burst: u32,
+
     // --- Sweeper (§7). ONE background component, TWO clocks. The asymmetry is a
     // principle, not a convenience: a late fire is product latency and is visible,
     // while a late KV prune is invisible (the `kv_live_v1` predicate already hides the
@@ -833,6 +946,11 @@ pub fn log_effective(cfg: &Config) {
         mesh_active = cfg.sync.mesh_active(),
         server_id = %cfg.sync.server_id,
         mesh_port = cfg.sync.mesh_port,
+        // EPHEMERAL_QUEUES.md §3.5/§3.6: what peers are told to forward to. On
+        // the boot line because a wrong advertised address fails ONLY in the
+        // other direction — this broker works perfectly and its peers cannot
+        // reach it — which is the failure mode a boot line exists to pre-empt.
+        http_addr = %cfg.sync.http_addr,
         peers = ?cfg.sync.peers,
         secret = %mask(&cfg.sync.secret),
         heartbeat_ms = cfg.sync.heartbeat_ms,
@@ -959,6 +1077,29 @@ pub fn log_effective(cfg: &Config) {
         timers_max_horizon_s = cfg.timers_max_horizon_s,
         timers_max_ops_per_call = cfg.timers_max_ops_per_call,
         "config: kv_timers"
+    );
+    // EPHEMERAL_QUEUES.md §3.8. No `enabled=` field, for the same reason the block
+    // above has none: printing "ephemeral: true" on every boot would keep teaching
+    // operators that there is a state where it prints false (M9). What an operator
+    // needs from this line is the three CEILINGS — this is the only feature in the
+    // broker whose overrun is paid in RAM rather than in disk or latency.
+    tracing::info!(
+        target: "boot",
+        eph_max_bytes = cfg.ephemeral_max_bytes,
+        eph_queue = %format!(
+            "{}B/{}msgs",
+            cfg.ephemeral_queue_max_bytes, cfg.ephemeral_queue_max_length),
+        eph_lease_s = cfg.ephemeral_lease_s,
+        eph_retry_limit = cfg.ephemeral_retry_limit,
+        eph_implicit_idle_s = cfg.ephemeral_implicit_idle_s,
+        // The grant posture, printed with the value ACTUALLY in force rather than
+        // the formula (the `kv_require_grant` rule one block up): "on" here means
+        // a tenant with no row in the grant table is refused, which is the single
+        // most confusing line to reconstruct from the environment during an
+        // incident, because nothing in the environment spells it.
+        eph_require_grant = cfg.ephemeral_require_grant,
+        eph_rate = %format!("{}/{}burst msgs/s", cfg.ephemeral_rate, cfg.ephemeral_burst),
+        "config: ephemeral"
     );
     tracing::info!(
         target: "boot",
@@ -1229,6 +1370,29 @@ pub fn load() -> Config {
             .max(1) as usize,
         timers_max_horizon_s: env_int("QUEEN_TIMERS_MAX_HORIZON_S", 7_776_000).max(1),
         timers_max_ops_per_call: env_int("QUEEN_TIMERS_MAX_OPS_PER_CALL", 256).max(1) as usize,
+        // ------------------------------------- ephemeral (EPHEMERAL_QUEUES.md §3.8)
+        // `.max(1)` and not `.max(0)` on the three budgets: 0 in this engine means
+        // UNLIMITED, and an operator who types `QUEEN_EPHEMERAL_MAX_BYTES=0`
+        // meaning "off" would get a cell with no memory ceiling at all. There is
+        // no way to spell "off" here on purpose (no boot gate — M9), so the floor
+        // makes the typo harmless instead of catastrophic.
+        ephemeral_max_bytes: env_int("QUEEN_EPHEMERAL_MAX_BYTES", 256 * 1024 * 1024).max(1),
+        ephemeral_queue_max_bytes: env_int("QUEEN_EPHEMERAL_QUEUE_MAX_BYTES", 16 * 1024 * 1024)
+            .max(1),
+        ephemeral_queue_max_length: env_int("QUEEN_EPHEMERAL_QUEUE_MAX_LENGTH", 10_000).max(1),
+        // Clamped to a day: a lease longer than that is indistinguishable from a
+        // lost message on a class whose contents do not survive a deploy.
+        ephemeral_lease_s: env_int("QUEEN_EPHEMERAL_LEASE_S", 30).clamp(1, 86_400),
+        ephemeral_retry_limit: env_int("QUEEN_EPHEMERAL_RETRY_LIMIT", 5).clamp(1, 1000) as u32,
+        // 0 IS legal here and means "never collect implicit queues" — unlike the
+        // budgets, an operator who wants that is asking for something coherent.
+        ephemeral_implicit_idle_s: env_int("QUEEN_EPHEMERAL_IMPLICIT_IDLE_S", 300).max(0),
+        // DERIVED from the tenancy flag, exactly like `kv_require_grant` above: a
+        // self-hosted operator never has to discover why they should configure
+        // something, and a cloud cell is off until the plan grants it.
+        ephemeral_require_grant: env_bool("QUEEN_EPHEMERAL_REQUIRE_GRANT", tenancy_header),
+        ephemeral_rate: env_int("QUEEN_EPHEMERAL_RATE", 5000).max(1) as u32,
+        ephemeral_burst: env_int("QUEEN_EPHEMERAL_BURST", 10_000).max(1) as u32,
         sweeper_enabled: env_bool("QUEEN_SWEEPER", true),
         sweeper_min_sleep_ms: env_int("QUEEN_SWEEPER_MIN_SLEEP_MS", 5).max(1) as u64,
         sweeper_max_sleep_ms: env_int("QUEEN_SWEEPER_MAX_SLEEP_MS", 1000).max(1) as u64,

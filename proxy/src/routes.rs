@@ -16,6 +16,12 @@ pub enum Feature {
     /// false. A cell that has never heard of KV therefore denies it.
     Kv,
     Timers,
+    /// EPHEMERAL_QUEUES.md §5.1. Same posture as `Kv`/`Timers` and for the
+    /// same reason: the plan key is `ephemeral`, a missing key is false
+    /// (`parse_features`), so a cell whose plan has never heard of the RAM
+    /// class denies it. The broker's own grant row is the second lock — the
+    /// family is deliberately double-gated (§8).
+    Ephemeral,
 }
 
 /// Which half of PLAN_KV_TIMERS.md §9.5 a gated request sits on. The plan
@@ -227,6 +233,51 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
         };
     }
 
+    // --- ephemeral (EPHEMERAL_QUEUES.md §3.1 wire, §5.1 classification) ---
+    // The RAM class: one family, one feature flag, method-exact on every path.
+    // The broker registers exactly one method per path here, so any other
+    // shape fails closed rather than travelling to a 405 — the same rule the
+    // kv/timers blocks above state.
+    //
+    // `push` is the ONLY `Grow` half, and it is deliberate over-blocking:
+    // `Grow` also inherits the retained-storage push block, which bounds PG
+    // storage rather than the broker RAM this family spends (§5.1). Safe
+    // direction, and the refinement (a `GrowVolatile` that sees the message
+    // quota but not the storage one) is a later call, not a silent default.
+    // Everything else is `Open`: `reset`/`delete` are how a tenant at its cap
+    // gets its RAM back, and an ack a quota could refuse would strand its own
+    // messages in a lease until expiry. The two status reads are `Read` and
+    // are never quota-blocked.
+    if p.starts_with("/api/v1/ephemeral/") {
+        return match *m {
+            Method::POST => match p {
+                "/api/v1/ephemeral/push" => RouteClass::Gated(Feature::Ephemeral, GatedOp::Grow),
+                "/api/v1/ephemeral/ack"
+                | "/api/v1/ephemeral/configure"
+                | "/api/v1/ephemeral/reset" => RouteClass::Gated(Feature::Ephemeral, GatedOp::Open),
+                _ => RouteClass::Blocked,
+            },
+            Method::GET => match p {
+                "/api/v1/ephemeral/pop" => RouteClass::Gated(Feature::Ephemeral, GatedOp::Open),
+                "/api/v1/ephemeral/queues" => RouteClass::Gated(Feature::Ephemeral, GatedOp::Read),
+                // `/queues/:queue/depth` — one queue segment between two fixed
+                // ones. `:queue` is not a catch-all, so the tail is checked
+                // rather than assumed: `/queues/orders` alone is not a route.
+                _ if p.starts_with("/api/v1/ephemeral/queues/") && p.ends_with("/depth") => {
+                    RouteClass::Gated(Feature::Ephemeral, GatedOp::Read)
+                }
+                _ => RouteClass::Blocked,
+            },
+            // `DELETE /queue/:queue`. Prefix-matched like its durable sibling
+            // `/api/v1/resources/queues/`, and the `queues` listing above is a
+            // different path, not a longer one under this prefix.
+            Method::DELETE if p.starts_with("/api/v1/ephemeral/queue/") => {
+                RouteClass::Gated(Feature::Ephemeral, GatedOp::Open)
+            }
+            _ => RouteClass::Blocked,
+        };
+    }
+
     // --- reads ---
     if p.starts_with("/api/v1/resources")
         || p.starts_with("/api/v1/status")
@@ -248,8 +299,16 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
 }
 
 /// Does this request hold a parked-consumer slot? (long-poll pop)
+///
+/// Both pop families park the same way and cost the same thing: a connection
+/// held open at the cell for the client's timeout. The ephemeral one parks on
+/// an in-RAM gate rather than a DB re-query (EPHEMERAL_QUEUES.md §3.4), which
+/// makes it cheaper for the broker and changes nothing here — the proxy is
+/// counting held sockets, and a forwarded remote pop is held open at its owner
+/// for the full timeout (§3.6, Q5). Its query spells `wait`/`timeout` exactly
+/// as the durable wire does, so `poll_timeout_ms` needs no ephemeral arm.
 pub fn is_wait_pop(path: &str, query: Option<&str>) -> bool {
-    path.starts_with("/api/v1/pop/queue/")
+    (path.starts_with("/api/v1/pop/queue/") || path == "/api/v1/ephemeral/pop")
         && query
             .map(|q| {
                 q.split('&')
@@ -384,9 +443,89 @@ mod tests {
     fn kv_and_timer_prefixes_do_not_swallow_neighbours() {
         assert_eq!(classify(&Method::POST, "/api/v1/kvstore"), RouteClass::Blocked);
         assert_eq!(classify(&Method::POST, "/api/v1/timersets"), RouteClass::Blocked);
+        assert_eq!(classify(&Method::POST, "/api/v1/ephemerals"), RouteClass::Blocked);
         // and the families themselves never fall through to the open Read set
         assert_ne!(classify(&Method::GET, "/api/v1/kv/ns/k"), RouteClass::Read);
         assert_ne!(classify(&Method::GET, "/api/v1/timers/q"), RouteClass::Read);
+        assert_ne!(classify(&Method::GET, "/api/v1/ephemeral/queues"), RouteClass::Read);
+    }
+
+    // ---- EPHEMERAL_QUEUES.md §5.1: the RAM family ----
+
+    /// The §5.1 table, verbatim. Every row of it, and nothing else.
+    #[test]
+    fn ephemeral_routes_are_the_plan_table() {
+        use GatedOp::*;
+        for (m, p, op) in [
+            (Method::POST, "/api/v1/ephemeral/push", Grow),
+            (Method::GET, "/api/v1/ephemeral/pop", Open),
+            (Method::POST, "/api/v1/ephemeral/ack", Open),
+            (Method::POST, "/api/v1/ephemeral/configure", Open),
+            (Method::POST, "/api/v1/ephemeral/reset", Open),
+            (Method::DELETE, "/api/v1/ephemeral/queue/orders", Open),
+            (Method::GET, "/api/v1/ephemeral/queues", Read),
+            (Method::GET, "/api/v1/ephemeral/queues/orders/depth", Read),
+        ] {
+            assert_eq!(classify(&m, p), RouteClass::Gated(Feature::Ephemeral, op), "{m} {p}");
+        }
+    }
+
+    /// `push` is the only verb a quota may ever refuse. A `reset` or a queue
+    /// `DELETE` on the blockable half would lock a tenant out of the only way
+    /// to free the RAM it is over on — the §9.5 rule, on a class where the
+    /// bytes are even more finite.
+    #[test]
+    fn only_ephemeral_push_is_on_the_blockable_half() {
+        for (m, p) in [
+            (Method::GET, "/api/v1/ephemeral/pop"),
+            (Method::POST, "/api/v1/ephemeral/ack"),
+            (Method::POST, "/api/v1/ephemeral/configure"),
+            (Method::POST, "/api/v1/ephemeral/reset"),
+            (Method::DELETE, "/api/v1/ephemeral/queue/orders"),
+            (Method::GET, "/api/v1/ephemeral/queues"),
+            (Method::GET, "/api/v1/ephemeral/queues/orders/depth"),
+        ] {
+            assert_ne!(
+                classify(&m, p),
+                RouteClass::Gated(Feature::Ephemeral, GatedOp::Grow),
+                "{m} {p}"
+            );
+            // and no ephemeral route is Produce: it would inherit the durable
+            // storage blocks wholesale, which have no referent in RAM.
+            assert_ne!(classify(&m, p), RouteClass::Produce, "{m} {p}");
+        }
+        assert_ne!(classify(&Method::POST, "/api/v1/ephemeral/push"), RouteClass::Produce);
+    }
+
+    /// One method per path at the broker, so every other shape fails closed
+    /// here instead of travelling to a 405 — and an unknown verb in the family
+    /// is a 404, not a forwarded guess.
+    #[test]
+    fn ephemeral_family_is_method_exact_and_fails_closed() {
+        for (m, p) in [
+            (Method::GET, "/api/v1/ephemeral/push"),
+            (Method::PUT, "/api/v1/ephemeral/push"),
+            (Method::POST, "/api/v1/ephemeral/pop"),
+            (Method::DELETE, "/api/v1/ephemeral/pop"),
+            (Method::PUT, "/api/v1/ephemeral/ack"),
+            (Method::GET, "/api/v1/ephemeral/reset"),
+            (Method::POST, "/api/v1/ephemeral/queues"),
+            (Method::DELETE, "/api/v1/ephemeral/queues"),
+            (Method::GET, "/api/v1/ephemeral/queue/orders"),
+            (Method::POST, "/api/v1/ephemeral/queue/orders"),
+            // unknown members of the family, and the family root itself
+            (Method::POST, "/api/v1/ephemeral/bogus"),
+            (Method::GET, "/api/v1/ephemeral/bogus"),
+            (Method::DELETE, "/api/v1/ephemeral/bogus"),
+            (Method::GET, "/api/v1/ephemeral/"),
+            (Method::GET, "/api/v1/ephemeral"),
+            // the depth read needs its exact tail: a bare queue, or anything
+            // past `depth`, is not a route the broker registers
+            (Method::GET, "/api/v1/ephemeral/queues/orders"),
+            (Method::GET, "/api/v1/ephemeral/queues/orders/depth/extra"),
+        ] {
+            assert_eq!(classify(&m, p), RouteClass::Blocked, "{m} {p}");
+        }
     }
 
     /// Regression guard for the §9.6 trap in its original form: if anyone ever
@@ -477,5 +616,19 @@ mod tests {
         assert!(!is_wait_pop("/api/v1/pop/queue/q", Some("timeout=5000")));
         assert!(!is_wait_pop("/api/v1/push", Some("wait=true")));
         assert_eq!(poll_timeout_ms(Some("wait=true&timeout=5000")), Some(5000));
+    }
+
+    /// The RAM pop parks exactly like the durable one, so it must take the
+    /// long-poll upstream timeout and a `limits.parked_slot` — both of which
+    /// gateway.rs decides from this one predicate.
+    #[test]
+    fn ephemeral_wait_pop_parks_too() {
+        assert!(is_wait_pop("/api/v1/ephemeral/pop", Some("queue=inbox&wait=true&timeout=20000")));
+        assert!(!is_wait_pop("/api/v1/ephemeral/pop", Some("queue=inbox&batch=10")));
+        assert!(!is_wait_pop("/api/v1/ephemeral/pop", None));
+        // a push carrying the parameter is still not a parked consumer
+        assert!(!is_wait_pop("/api/v1/ephemeral/push", Some("wait=true")));
+        // same query vocabulary as the durable wire, so one parser serves both
+        assert_eq!(poll_timeout_ms(Some("queue=inbox&wait=true&timeout=20000")), Some(20_000));
     }
 }

@@ -434,6 +434,16 @@ pub fn route_access_level(method: &Method, path: &str) -> AccessLevel {
         if path.starts_with("/api/v1/timers") {
             return ReadOnly;
         }
+        // EPHEMERAL_QUEUES.md §3.9. The two STATUS reads only — `/queues` and
+        // `/queues/:queue/depth` — and they are inside this block for the exact
+        // reason the KV lines above are: a `starts_with` placed just outside it
+        // is the hurried version of this fix and hands WRITE access to every
+        // read-only token. `GET /api/v1/ephemeral/pop` is deliberately NOT here:
+        // a pop mutates (it moves a cursor and takes a lease), so it carries the
+        // same level the durable pop does, one arm further down.
+        if path.starts_with("/api/v1/ephemeral/queues") {
+            return ReadOnly;
+        }
     }
 
     // -------- Streams --------
@@ -457,6 +467,14 @@ pub fn route_access_level(method: &Method, path: &str) -> AccessLevel {
     if m == "POST" && path == "/api/v1/timers" {
         return WriteOnly;
     }
+    // An ephemeral push is a produce operation and nothing else, so it takes the
+    // same level as `/api/v1/push` — a produce-only token must be able to fill an
+    // inbox it can never read. Spelled with the method as well as the path: the
+    // route is POST-only today, and a future GET on it must not inherit
+    // write-only by accident.
+    if m == "POST" && path == "/api/v1/ephemeral/push" {
+        return WriteOnly;
+    }
 
     // -------- KV and timer writes: READ_WRITE, stated rather than inherited ---
     // These already land on the fallthrough, and the whole point of writing them
@@ -464,6 +482,17 @@ pub fn route_access_level(method: &Method, path: &str) -> AccessLevel {
     // mirrors this function behind a fingerprint and publishes the result, so an
     // access level nobody chose becomes an access level the site advertises.
     if path.starts_with("/api/v1/kv") || path.starts_with("/api/v1/timers") {
+        return ReadWrite;
+    }
+    // EPHEMERAL_QUEUES.md §3.9 — everything else on the family: pop, ack,
+    // configure, reset and the queue delete. They already land on the
+    // fallthrough, and the whole point of writing them is that the fallthrough
+    // is not a decision: `webdoc/scripts/gen-routes.mjs` mirrors this function
+    // behind a fingerprint and PUBLISHES the result, so a level nobody chose
+    // becomes a level the site advertises. The DELETE is ReadWrite and not Admin
+    // — unlike a durable queue delete, which destroys committed history — because
+    // here it destroys only what was already promised to be lost (§1.2).
+    if path.starts_with("/api/v1/ephemeral") {
         return ReadWrite;
     }
 

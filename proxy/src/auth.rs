@@ -1445,6 +1445,45 @@ mod tests {
         assert!(authorize(&producer, RouteClass::Gated(Feature::Timers, GatedOp::Mixed)).is_ok());
     }
 
+    /// EPHEMERAL_QUEUES.md §5.1: the RAM family's writes need a writing
+    /// credential (produce ‖ consume keys, users that are not Viewer) and its
+    /// two status reads are reads — the same matrix the existing gated
+    /// families already produce, inherited rather than re-invented.
+    #[test]
+    fn ephemeral_authorization_follows_the_gated_matrix() {
+        use crate::routes::{Feature, GatedOp};
+        let read_only =
+            Principal::ApiKey { key_id: Uuid::new_v4(), scopes: Scopes { read: true, ..Default::default() } };
+        // depth/queues listings
+        assert!(authorize(&read_only, RouteClass::Gated(Feature::Ephemeral, GatedOp::Read)).is_ok());
+        assert!(
+            authorize(&user(Role::Viewer, false), RouteClass::Gated(Feature::Ephemeral, GatedOp::Read))
+                .is_ok()
+        );
+        // push (Grow) and ack/configure/reset/delete (Open) are writes
+        for op in [GatedOp::Grow, GatedOp::Open] {
+            assert!(
+                authorize(&read_only, RouteClass::Gated(Feature::Ephemeral, op)).is_err(),
+                "{op:?} must not be reachable with a read-only key"
+            );
+            assert!(
+                authorize(&user(Role::Viewer, false), RouteClass::Gated(Feature::Ephemeral, op))
+                    .is_err()
+            );
+        }
+        // a consume-scoped key pops and acks; a produce-scoped one pushes
+        let consumer = Principal::ApiKey {
+            key_id: Uuid::new_v4(),
+            scopes: Scopes { consume: true, ..Default::default() },
+        };
+        assert!(authorize(&consumer, RouteClass::Gated(Feature::Ephemeral, GatedOp::Open)).is_ok());
+        let producer = Principal::ApiKey {
+            key_id: Uuid::new_v4(),
+            scopes: Scopes { produce: true, ..Default::default() },
+        };
+        assert!(authorize(&producer, RouteClass::Gated(Feature::Ephemeral, GatedOp::Grow)).is_ok());
+    }
+
     /// The pre-existing gated surfaces must come out of this change with the
     /// exact matrix they had: `Open` is what preserves it.
     #[test]

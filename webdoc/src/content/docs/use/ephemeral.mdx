@@ -1,0 +1,270 @@
+---
+title: Ephemeral queues
+description: "A storage class whose contents live in broker memory and survive nothing: what each class survives, what the ack mode still guarantees, the two tiers of existence, and why the age knob is not called retention."
+type: concept
+tier: use
+sidebar:
+  order: 6
+sourceOfTruth:
+  - server/src/ephemeral.rs
+  - server/src/handlers/ephemeral.rs
+  - server/sql/procedures/030_ephemeral.sql
+  - server/src/config.rs
+  - clients/client-js/client-v2/ephemeral/Ephemeral.js
+verifiedBy:
+  - server/tests/ephemeral_semantics.rs
+  - clients/client-js/test-v2/ephemeral-unit/ephemeralWire.test.js
+  - clients/client-go/ephemeral_wire_test.go
+---
+
+An ephemeral queue is a queue whose contents live in the broker's memory. The configuration of a
+declared one is durable. Everything in it is not: a clean exit, a crash, a deploy and a move to
+another broker each leave the queue empty, and none of those is a fault. That is the contract, and
+the whole of the trade.
+
+The durable engine writes every message to PostgreSQL, which is what pays for replay, retention,
+dead-lettering and a handoff that shares your transaction. A request/reply inbox, a presence
+fan-out or a cache invalidation uses none of that and pays for all of it: thousands of short-lived
+partitions, a serial claim transaction per pop, and a history nobody will ever read. On this class
+there is no database in the path at all, so a pop parks on a memory gate and answers in transport
+time.
+
+The two families share the broker process and nothing else. No table, no stored procedure, no code
+path, and no name: a durable queue and an ephemeral queue may both be called `inbox` and they are
+unrelated objects. [Ephemeral routes](/reference/http/ephemeral) is the wire, verb by verb.
+
+## What survives what
+
+"Everything" below means the messages, each consumer group's cursor, the retained history, the
+dead-letter rows and the queue's configuration.
+
+| Event | Durable queue | Ephemeral queue |
+| --- | --- | --- |
+| Clean process exit | everything | the declared configuration, and nothing else |
+| Crash | everything | the declared configuration, and nothing else |
+| Deploy or rolling restart | everything | the declared configuration, and nothing else |
+| Failover to another broker | everything | the declared configuration, and nothing else |
+| PostgreSQL restart | everything, and a push during the outage spools to disk and replays | nothing of it is in PostgreSQL except the declaration, so nothing changes |
+
+An implicit queue has no declared configuration, so it survives none of the first four rows in any
+form. It is re-created by the next push or pop that names it, with the tenant defaults, as a new
+and empty queue.
+
+## What can be lost, and what is still promised
+
+Two separate choices. The **class** decides what can be lost. The **ack mode** decides what you
+are promised about what is left.
+
+| | `autoAck: true` | Explicit ack (the default) |
+| --- | --- | --- |
+| Durable queue | at-most-once: the cursor commits at delivery | at-least-once, with no expiry on that promise |
+| Ephemeral queue | at-most-once: the cursor advances at delivery, and no lease is kept | at-least-once for as long as the owning broker lives |
+
+An ephemeral queue read with explicit acks **is at-least-once**. An unacknowledged message
+redelivers when its lease expires (`leaseSeconds`, 30 by default) with `attempts` incremented, and
+so does one acked `failed` or `retry`. A consumer therefore sees the same message more than once
+for exactly the reasons it does on a durable queue, and **needs to be idempotent for exactly the
+same reasons**. What the loss contract removes is the promise across a restart, not the redelivery
+that makes the promise mean something while the broker is up.
+
+When `attempts` reaches `retryLimit` (5 by default) the message is dropped and counted, under the
+`retry` cause on the queue's drop counters and in `queen_ephemeral_dropped_total`. There is no
+dead-letter queue on this family: a dead-letter row is durable storage, and a class that keeps
+nothing has nowhere honest to put it.
+
+## Consumption semantics come from the group
+
+They are the durable engine's, unchanged, and the pop's `group` parameter is the whole story.
+
+| What you want | How you ask for it |
+| --- | --- |
+| Competing consumers | every consumer pops with the **same** `group` |
+| Fan-out | every subscriber pops with **its own** `group`, and each one receives everything |
+| Queue mode | pop with **no** `group`, which is one shared cursor, as `__QUEUE_MODE__` is on a durable queue |
+
+There is no queue-level mode to configure, and that absence is deliberate. Fan-out against
+competing is consumption semantics, which is the group's job, and Queen already expresses it with
+groups everywhere else. A message lives in the ring exactly once however many groups read it, each
+group holds its own cursor over that one ring, and the message is reclaimed when the last cursor
+has passed it.
+
+Ordering is FIFO per `(queue, partition)`, as on a durable queue. Across a restart the question is
+empty, because the contents are gone.
+
+## Two tiers of existence
+
+| | Implicit | Declared |
+| --- | --- | --- |
+| Created by | the first `push` or `pop` that names it | `configure` |
+| Options | the tenant defaults | what you set, clamped to the broker's ceilings |
+| In PostgreSQL | never | the options, and only the options |
+| After a restart | it does not come back | it comes back as configured, and empty |
+| In the listing | while it is alive, as `tier: "implicit"` | always, as `tier: "declared"` |
+| Collected | after `QUEEN_EPHEMERAL_IMPLICIT_IDLE_S` (300 s) of being empty and unpolled | never, until you delete it |
+
+The implicit tier is not a convenience. A request/reply workload is thousands of short-lived
+per-client inboxes, and one PostgreSQL row per inbox would rebuild the per-partition cost this
+class exists to remove. An inbox that is created by the message naming it, and collected when it
+goes quiet, is the shape that makes the workload affordable.
+
+Declare a queue when you want bounds of your own, or when you want it visible before its first
+message.
+
+## `ttlSeconds` is not retention
+
+`ttlSeconds` drops messages older than the limit, **consumed or not**. It is not spelled
+`retention`, and the difference in the word is the difference in the thing:
+[retention](/reference/queue-options) on a durable queue removes history that consumers have
+already passed and never touches a pending message, because deleting a pending message on a
+durable queue would be data loss. Here dropping a pending message is inside the contract, so the
+knob does the one thing the other one must never do. One word per contract, and these are two
+contracts.
+
+Use it when a message that is late is also worthless: a presence event, a progress tick, a cache
+invalidation that a newer one has already superseded.
+
+## Failover is a Redis restart
+
+That is the framing to carry, and it is exact. When a broker holding an ephemeral queue goes away,
+the queue comes back empty, the same way a Redis instance comes back empty when it restarts
+without persistence. The messages that were in flight are gone, and the client that was waiting on
+them has to be written to survive that. Request/reply already is: it has a timeout for this exact
+class of failure, which is what makes it the right first tenant of a class that survives nothing.
+
+Across a cell of more than one broker, a request may land on any of them. Ownership of a
+`(queue, partition)` and the forwarding that follows from it are internal to the brokers: there is
+no lease to take, no rebalance to wait out and nothing for a client to configure. A membership
+change moves ownership and **empties the queues that moved**, which is the same row of the table
+above, reached a different way. An acknowledgement carrying an identifier minted by an incarnation
+that is gone answers `stale` rather than an error, so a client reconnecting after a restart
+flushes its outstanding acks and learns what happened instead of retrying into a wall.
+
+Membership flaps therefore cost content, never correctness. On a durable queue that trade would be
+a bug. Here it is the contract, and it is the deep reason distribution on this class is cheap.
+
+## Bounds, and what pressure looks like
+
+Three budgets are checked on every push, from the narrowest outwards, and the first one to refuse
+is the answer: the queue's own `maxBytes` and `maxLength`, then the tenant's allowance, then the
+broker's total ephemeral footprint (`QUEEN_EPHEMERAL_MAX_BYTES`, 256 MiB).
+
+The first of those is the one you design with, and its `policy` is the design decision:
+
+- **`reject`** (the default) refuses the push and answers `429`. It is backpressure, and it is the
+  shape every SDK's bounded push buffer already knows how to drain against.
+- **`dropOldest`** admits the push and drops from the head instead. These are feed semantics: the
+  newest presence event matters and the one it replaced does not.
+
+A group whose cursor sits below a range that was dropped skips forward, and the skip is counted
+per group. On this class that is legal, so the number is published: `skipped` on the depth read is
+the difference between a consumer that is slow and a consumer that has lost data.
+[Ephemeral routes](/reference/http/ephemeral) has every refusal with its code.
+
+## The whole surface in one program
+
+Six verbs and two status reads. This is the shape of `examples/35-ephemeral-basics.js`, which runs
+against a broker on its default port with nothing else set up.
+
+```js
+import { Queen } from 'queen-mq'
+
+const queen = new Queen('http://localhost:6632')
+
+const QUEUE = 'presence'
+const ROOM = 'room-7'
+
+// configure: declare the queue and its bounds. Optional, because a push or a pop
+// that names an unknown queue creates it. These options are durable; the contents
+// never are.
+await queen.ephemeral.configure(QUEUE, {
+  maxLength: 1000,
+  maxBytes: 1024 * 1024,
+  policy: 'dropOldest',
+  ttlSeconds: 30,
+  leaseSeconds: 15,
+  retryLimit: 3
+})
+
+// push: one queue per request, all or nothing, answering { pushed }.
+const { pushed } = await queen.ephemeral.push(QUEUE, [
+  { user: 'alice', typing: true },
+  { user: 'bob', typing: true }
+], { partition: ROOM })
+console.log('pushed', pushed)
+
+// queues and depth: gauges read out of the broker's own memory, with no database
+// behind them, so a dashboard can poll them every second for free.
+console.log(await queen.ephemeral.queues())
+console.log(await queen.ephemeral.depth(QUEUE))
+
+// pop: the group is the consumption semantics. `wait` is a real long poll parked
+// on a memory gate, with no polling interval anywhere behind it.
+const { messages } = await queen.ephemeral.pop(QUEUE, {
+  partition: ROOM,
+  group: 'widget',
+  batch: 10,
+  wait: true,
+  timeout: 2000
+})
+console.log('popped', messages.map(m => m.payload.user).join(', '))
+
+// ack: with the same group the pop used, because cursors are per group. An
+// unacknowledged message redelivers when its lease expires, with attempts+1.
+const { results } = await queen.ephemeral.ack(QUEUE, messages, { group: 'widget' })
+console.log('outcomes', results.map(r => r.outcome).join(', '))
+
+// A second group over the same ring receives everything the first one consumed.
+// Fan-out is another group name and nothing else.
+const audit = await queen.ephemeral.pop(QUEUE, { partition: ROOM, group: 'audit', batch: 10 })
+console.log('the audit group saw', audit.messages.length)
+
+// reset: drop every message, void every lease, rewind every cursor. A verb that
+// would be indefensible on a durable queue, and merely honest here.
+const { dropped } = await queen.ephemeral.reset(QUEUE)
+console.log('reset dropped', dropped)
+
+// delete: the contents, the cursors, and the declared configuration in PostgreSQL.
+await queen.ephemeral.delete(QUEUE)
+
+await queen.close()
+```
+
+`push` also takes `buffered`, which batches client-side through the same machinery the durable
+push uses, with the same option names and the same blocking backpressure. Buffering is a latency
+trade and not a durability change: a buffered message that has not flushed dies with your process,
+which is already inside this class's contract. That is what makes it a reasonable default here and
+a considered decision on a durable queue.
+
+`examples/36-ephemeral-reqreply.js` is the same surface as a request/reply pair: the requester
+mints an inbox name nobody declared, sends it with the request, and parks on it until the answer
+arrives.
+
+## What does not exist here
+
+No replay, no history, no `subscriptionMode`, no dead-letter queue, no traces, no encryption at
+rest and no transaction. None of those is missing: each one is a statement about data that is
+kept, and this class keeps none. A workload that needs any of them wants a
+[durable queue](/use/model), and the two live side by side in the same broker.
+
+<CardGrid>
+  <LinkCard
+    href="/reference/http/ephemeral"
+    title="Ephemeral routes"
+    description="The six verbs and the two status reads, field by field, with every refusal and the code it carries."
+  />
+  <LinkCard
+    href="/use/model"
+    title="The model"
+    description="Queue, partition, offset, consumer group, cursor, lease, ack: the vocabulary both classes share."
+  />
+  <LinkCard
+    href="/use/kv"
+    title="KV state"
+    description="The other surface that is not a queue: transactional key/value state that commits with your acks."
+  />
+  <LinkCard
+    href="/reference/limits"
+    title="Limits and non-goals"
+    description="What Queen deliberately does not do, and the operational boundaries to check before you build."
+  />
+</CardGrid>

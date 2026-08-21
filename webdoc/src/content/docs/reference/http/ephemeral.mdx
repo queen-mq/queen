@@ -1,0 +1,301 @@
+---
+title: "Ephemeral routes"
+description: "The six verbs and the two status reads of /api/v1/ephemeral: every body field, the four ack outcomes, the closed refusal taxonomy, and what the gateway meters."
+type: reference
+sidebar:
+  order: 19
+  label: ephemeral
+sourceOfTruth:
+  - server/src/handlers/ephemeral.rs
+  - server/src/ephemeral.rs
+  - server/src/main.rs
+  - server/src/switches.rs
+  - server/sql/procedures/030_ephemeral.sql
+  - proxy/src/routes.rs
+verifiedBy:
+  - server/tests/ephemeral_semantics.rs
+  - clients/client-js/test-v2/ephemeral-unit/ephemeralWire.test.js
+---
+
+Eight routes over one storage class whose contents live in the broker's memory.
+[Ephemeral queues](/use/ephemeral) is the contract these routes serve; this page is the wire.
+
+<Aside type="note">
+Every broker at 1.1 or above registers these routes, and no variable turns them off. A `404` on
+this family therefore means one of two things: the broker or the proxy in front of it predates
+1.1, which is what the SDKs report as `ephemeral_unsupported`, or you asked the depth read for a
+queue that does not exist. No other route here answers `404`.
+</Aside>
+
+## The routes
+
+| Method | Path | Access level | What it does |
+| --- | --- | --- | --- |
+| `POST` | `/api/v1/ephemeral/push` | write-only | append to one queue, all or nothing |
+| `GET` | `/api/v1/ephemeral/pop` | read-write | take a batch, optionally parking until one arrives |
+| `POST` | `/api/v1/ephemeral/ack` | read-write | settle popped messages, per id |
+| `POST` | `/api/v1/ephemeral/configure` | read-write | declare a queue and its bounds |
+| `POST` | `/api/v1/ephemeral/reset` | read-write | drop the contents, keep the declaration |
+| `DELETE` | `/api/v1/ephemeral/queue/:queue` | read-write | drop the contents **and** the declaration |
+| `GET` | `/api/v1/ephemeral/queues` | read-only | every queue of the tenant, with its gauges |
+| `GET` | `/api/v1/ephemeral/queues/:queue/depth` | read-only | one queue, per partition and per group |
+
+`push` is `write-only` for the same reason the durable push is: producing is a capability of its
+own, and a producer credential must have it without gaining anything else. `pop` is `read-write`
+because a pop advances a cursor and takes a lease.
+
+Every body is JSON and the tenant is never one of its fields: it comes from the request's identity,
+exactly as everywhere else in the API. Queue, partition and group names are at most 512 bytes and
+may not contain control characters, which is the durable engine's rule, applied here for the same
+reason: those names are joined to build one composite key.
+
+## push
+
+```json
+{
+  "queue": "presence",
+  "partition": "room-7",
+  "messages": [{ "payload": { "user": "alice", "typing": true } }]
+}
+```
+
+`201` with `{"pushed": 2}`. One queue per request, unlike the durable push whose items each name
+their own queue: that form exists so a bundle spanning queues can share one transaction, and there
+is no transaction here to share.
+
+| Field | Required | Notes |
+| --- | --- | --- |
+| `queue` | yes | created implicitly if it is not there |
+| `partition` | no | defaults to `Default`. FIFO is per `(queue, partition)` |
+| `messages` | yes | at most 10,000 per call. Each element is `{payload}` and nothing else |
+
+A message carries no `transactionId`, because there is no deduplication index to hold one, and no
+queue or partition, because the envelope already names them. An empty `messages` array is a `201`
+with `{"pushed": 0}` rather than a `400`.
+
+The push is all or nothing: if the queue is at a bound whose policy is `reject`, or a budget above
+it refuses, nothing in that request is appended.
+
+## pop
+
+Query parameters, all on `GET /api/v1/ephemeral/pop`:
+
+| Parameter | Default | Notes |
+| --- | --- | --- |
+| `queue` | required | |
+| `partition` | every partition | |
+| `group` | none | no group at all is queue mode, one shared cursor |
+| `batch` | `1` | clamped to 10,000 |
+| `wait` | `false` | park until a message arrives or the timeout expires |
+| `timeout` | the broker's pop default | milliseconds, clamped to 300,000 |
+| `autoAck` | `false` | advance the cursor at delivery and keep no lease |
+
+```json
+{
+  "queue": "presence",
+  "messages": [
+    { "id": "e:9f3a1c:room-7:41", "partition": "room-7", "attempts": 0, "payload": { "user": "alice" } }
+  ]
+}
+```
+
+`200`, with `messages` an **empty array** when there is nothing. This family has no `204`: the
+durable pop returns one because its empty body carried no information at all, while this body
+always carries the queue name, so there is one shape for every outcome and nothing to special-case.
+
+`wait: true` is a real long poll parked on an in-memory gate. There is no polling interval behind
+it and no database to re-query, so an idle waiter costs a parked task and nothing else.
+
+**The `id` is opaque.** It encodes the broker incarnation that minted it, which is what lets an ack
+arriving after a restart answer `stale` instead of settling somebody else's message. Do not parse
+it, and do not store it as a durable reference to anything.
+
+## ack
+
+```json
+{
+  "queue": "presence",
+  "group": "widget",
+  "acks": [{ "id": "e:9f3a1c:room-7:41", "status": "completed" }]
+}
+```
+
+`200` with `{"results": [{"id": "…", "outcome": "acked"}]}`, one element per id, at most 10,000 per
+call. Pass the same `group` the pop used, because cursors are per group.
+
+`status` is `completed` (the default), `failed` or `retry`. A `failed` or `retry` message is
+redelivered with `attempts` incremented until `retryLimit`, after which it is dropped and counted.
+An `error` string is accepted and ignored: the durable wire carries one because it lands in the
+dead-letter table and the trace store, and this class has neither.
+
+The four outcomes are a closed list, and none of them is an error:
+
+| `outcome` | What happened |
+| --- | --- |
+| `acked` | the lease was yours and the cursor advanced |
+| `redelivered` | a `failed` or `retry` put the message back for the group, immediately rather than at lease expiry |
+| `stale` | the id was minted by an incarnation that is gone. A restart or an ownership move, which is the loss contract and not a fault |
+| `unknown` | there is no such lease: it has already been acked, or it expired and the message was redelivered |
+
+A client that reconnects after a broker restart flushes its outstanding acks and receives a row of
+`stale`. That is information. A `4xx` per id would be a retry storm.
+
+## configure
+
+```json
+{
+  "queue": "presence",
+  "options": {
+    "maxBytes": 1048576,
+    "maxLength": 1000,
+    "policy": "dropOldest",
+    "ttlSeconds": 30,
+    "leaseSeconds": 15,
+    "retryLimit": 3,
+    "windowBuffer": { "ms": 20, "count": 50 }
+  }
+}
+```
+
+`201`, echoing the stored declaration verbatim. The declaration is written to PostgreSQL first and
+applied to memory second, so the failure that can happen is the one that heals itself at the next
+boot rather than the one that silently reverts at the next deploy.
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `maxBytes` | `QUEEN_EPHEMERAL_QUEUE_MAX_BYTES`, 16 MiB | the ring's byte ceiling |
+| `maxLength` | `QUEEN_EPHEMERAL_QUEUE_MAX_LENGTH`, 10,000 | the ring's message ceiling |
+| `policy` | `reject` | what a breach of either ceiling does: refuse the push, or drop from the head |
+| `ttlSeconds` | `0`, off | drop messages older than this, consumed or not. `0` turns it back off |
+| `leaseSeconds` | `QUEEN_EPHEMERAL_LEASE_S`, 30 | how long an unacknowledged message is held before redelivery |
+| `retryLimit` | `QUEEN_EPHEMERAL_RETRY_LIMIT`, 5 | attempts before a message is dropped and counted |
+| `windowBuffer` | off | `{ms, count}`: let a waiting pop fatten its batch, bounded by the pop's own `timeout` |
+
+The option list is **closed**. An unknown key is a `400` naming the keys that exist, rather than a
+silent drop, because every one of these bounds something and an ignored `ttlSecond` is a ring that
+grows until a cell-wide budget refuses it. Numeric options must be non-negative integers: a
+`ttlSeconds` of `1.5` is refused rather than truncated.
+
+The values stored are what you sent. The values **in force** are those clamped to the broker's own
+ceilings, and they are what the two status reads publish. The two are different questions and are
+answered separately.
+
+## reset and delete
+
+`POST /api/v1/ephemeral/reset` with `{"queue": "presence"}` answers `200` and
+`{"queue": "presence", "dropped": 412}`: every message dropped, every lease voided, every group
+cursor rewound. The declaration stays. It is a verb that would be indefensible on a durable queue
+and is merely honest here, because it destroys nothing the class ever promised to keep.
+
+`DELETE /api/v1/ephemeral/queue/:queue` answers `200` and
+`{"queue": "presence", "deleted": true, "declared": true}`, removing the contents, the cursors and
+the declaration. `declared` says whether a declaration row was there to remove.
+
+Neither answers `404` on a queue that is not there: `reset` reports `dropped: 0` and `delete`
+reports `deleted: false`. An implicit queue that the idle collector has already taken is
+indistinguishable from one that never existed, and both are correctly described as "there is
+nothing left to drop". This is the house rule the durable queue delete already follows: the status
+describes the outcome of the call, never the verdict of the predicate.
+
+## The two status reads
+
+Both are pure in-memory gauges. They open no database connection and count nothing, which is what
+makes them safe to poll every second, and safe to poll during the incident they exist for.
+
+`GET /api/v1/ephemeral/queues` returns every queue of the tenant, declared and implicit:
+
+```json
+{
+  "queues": [
+    {
+      "queue": "presence",
+      "tier": "declared",
+      "depth": 12,
+      "bytes": 4096,
+      "partitions": 3,
+      "groups": 2,
+      "drops": { "bounds": 0, "ttl": 41, "retry": 0 },
+      "options": { "maxBytes": 1048576, "maxLength": 1000, "policy": "dropOldest", "ttlSeconds": 30, "leaseSeconds": 15, "retryLimit": 3, "windowBuffer": { "ms": 20, "count": 50 } }
+    }
+  ],
+  "count": 1,
+  "cellBytes": 8402944
+}
+```
+
+`drops` is three numbers rather than one, and the split is the diagnosis: `bounds` says the queue
+is too small or its producer too fast, `ttl` says the consumer is too slow, `retry` says the
+handlers are failing. `cellBytes` is the whole broker's ephemeral footprint, not the tenant's,
+because it is the number a cell-wide `503` is measured against.
+
+`GET /api/v1/ephemeral/queues/:queue/depth` takes an optional `?group=` and returns the durable
+depth read's field names (`queue`, `group`, `pending`, `partitionsPending`, `partitions[]`) plus
+what only this class has:
+
+```json
+{
+  "queue": "presence",
+  "group": null,
+  "tier": "declared",
+  "pending": 12,
+  "partitionsPending": 3,
+  "bytes": 4096,
+  "partitions": [{ "partition": "room-7", "pending": 5, "bytes": 1700 }],
+  "groups": [{ "group": "widget", "pending": 5, "skipped": 0 }]
+}
+```
+
+`bytes` because the budget on this class is memory rather than rows, `tier` because it is the one
+field that says what a restart leaves behind, and per-group `skipped` because a group whose cursor
+sat below a dropped range is legal here and therefore has to be legible. This is the one route on
+the family that answers `404`, with `ephemeral_queue_not_found`, matching the durable depth read it
+mirrors.
+
+## Status codes
+
+Every failure on this family is `{"error": "…", "code": "…"}`. The `code` is the contract: branch
+on it and never on the prose, which is written for a human reading a log.
+
+| Code | `error` code | When |
+| --- | --- | --- |
+| `200` | | pop, ack, reset, delete, and the two status reads |
+| `201` | | push and configure |
+| `400` | `ephemeral_bad_request` | shape: no queue, an unknown option, a non-integer bound, a name over 512 bytes or carrying a control character, more than 10,000 items in one call |
+| `403` | `ephemeral_quota_exceeded` | the tenant is at its ephemeral byte or queue allowance |
+| `403` | `feature_gated` | the tenant is not granted the class |
+| `404` | `ephemeral_queue_not_found` | the depth read, and nothing else |
+| `429` | `queue_full` | the queue is at `maxBytes` or `maxLength` and its policy is `reject` |
+| `429` | `rate_limited` | the tenant is over its messages-per-second allowance, with `Retry-After` |
+| `500` | `ephemeral_configure_failed`, `ephemeral_delete_failed` | the declaration could not be written or removed |
+| `503` | `ephemeral_unavailable` | the broker is at `QUEEN_EPHEMERAL_MAX_BYTES`, or no database connection was available for a declaration write |
+| `503` | `ephemeral_disabled` | an operator paused the surface, with `Retry-After`. See [the kill switch](/reference/http/system) |
+
+The same one-sentence rule separates the three refusals as on the [KV routes](/reference/http/kv):
+`429` means retry later and it will work, `403` means retry as much as you like until something
+changes, `503` means it is the cell and not you.
+
+`queue_full` is a `429` and not a `507` or a `403` deliberately. It is backpressure: the producer
+that waits and retries gets in, because a consumer is draining the ring behind it. That is also
+the shape every SDK's bounded push buffer already knows how to drain against.
+
+The refusals are checked outermost first, so the answer names the reason an operator would act on:
+the kill switch before the grant, the grant before the rate, the rate before the queue's own
+bounds. A paused surface must not leak, through a quota message, that a tenant exists.
+
+## Through the multi-tenant gateway
+
+Two independent gates stand in front of a cloud tenant, and **both** must open: the plan's
+`ephemeral` feature at the gateway, which is off unless the plan says otherwise, and the broker's
+own grant row, whose absence refuses a tenant when `QUEEN_EPHEMERAL_REQUIRE_GRANT` is on (it
+defaults to on wherever tenancy headers are). A self-hosted broker has neither gate closed and
+serves the class from its first boot. Both refusals answer `403 feature_gated`, and the gateway's
+own arrives as `404 route_blocked` when the proxy predates the feature.
+
+Metering is stated once and it is simple: **a push meters as messages**, item by item and through
+the same message allowance as a durable push, and a pop meters as a delivery. Nothing about the
+storage class changes what an item costs. A waiting pop holds a parked-consumer slot for as long
+as it waits, exactly as a durable long poll does.
+
+[Endpoints a tenant can reach](/reference/multi-tenant/endpoints) has the generated classification
+of every route on this family, and [quotas](/reference/multi-tenant/quotas) has the plan columns
+behind it.

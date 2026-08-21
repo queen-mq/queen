@@ -90,6 +90,47 @@ pub struct Metrics {
     /// `rates` line as windowed deltas (§6.1); neither is per-message-logged.
     pub conflated: AtomicU64,
     pub conflation_conflicts: AtomicU64,
+    /// EPHEMERAL_QUEUES.md §6 — the RAM-class series, same shape and the same
+    /// reasoning as the conflation pair above: plain `AtomicU64` on this struct,
+    /// fed from `src/ephemeral.rs`, never a per-message log line.
+    ///
+    /// The three DROP counters are not one counter with a label, because the
+    /// three causes need different reactions and a single number hides which
+    /// one is happening: `bounds` says the queue is too small (or its producer
+    /// too fast), `ttl` says the consumer is too slow for the age limit, and
+    /// `retry` says handlers are failing. On this class a drop is legal (§1.2),
+    /// which is exactly why it has to be VISIBLE — nothing else in the system
+    /// will complain about it.
+    pub eph_pushed: AtomicU64,
+    pub eph_popped: AtomicU64,
+    pub eph_acked: AtomicU64,
+    pub eph_dropped_bounds: AtomicU64,
+    pub eph_dropped_ttl: AtomicU64,
+    pub eph_dropped_retry: AtomicU64,
+    /// EPHEMERAL_QUEUES.md §3.6/§6 — requests this broker relayed to the
+    /// rendezvous OWNER of a (queue, partition) instead of serving locally.
+    ///
+    /// The number §7.6 is about: it is one extra intra-cell hop per request, and
+    /// a forwarded fraction that sits near 1.0 on a multi-broker cell is the
+    /// evidence that would justify the replicated local reads deferred in §9. It
+    /// is a REQUEST counter, not a message one, because the hop is paid per
+    /// request whatever the batch carries.
+    pub eph_forwarded: AtomicU64,
+    /// EPHEMERAL_QUEUES.md §3.7/§6 — rings dropped because their (queue,
+    /// partition) stopped hashing to this broker.
+    ///
+    /// RINGS and not messages: what an operator needs to see is how much
+    /// ownership CHURN a cell is living through, and one wipe is one ownership
+    /// move whether the ring held zero messages or ten thousand. Non-zero on a
+    /// stable cell means membership is flapping, which on this class costs
+    /// content (§1.2) — legal, and exactly the kind of legal loss that has to be
+    /// visible or nothing in the system will ever mention it.
+    pub eph_wipes: AtomicU64,
+    /// Gauges, not counters: bytes held by the cell's ephemeral rings, and how
+    /// many ephemeral queues exist (declared + live implicit). `AtomicI64`
+    /// because a gauge goes down.
+    pub eph_bytes: AtomicI64,
+    pub eph_queues: AtomicI64,
     /// Database failures observed on the DATA paths (push/pop/ack/transaction):
     /// a statement error, a statement timeout, or a pool acquisition failure.
     /// Bump it ONLY through `record_db_error(s)` — the gauge is charted as
@@ -1140,6 +1181,16 @@ impl Metrics {
             dlq_moved: AtomicU64::new(0),
             conflated: AtomicU64::new(0),
             conflation_conflicts: AtomicU64::new(0),
+            eph_pushed: AtomicU64::new(0),
+            eph_popped: AtomicU64::new(0),
+            eph_acked: AtomicU64::new(0),
+            eph_dropped_bounds: AtomicU64::new(0),
+            eph_dropped_ttl: AtomicU64::new(0),
+            eph_dropped_retry: AtomicU64::new(0),
+            eph_forwarded: AtomicU64::new(0),
+            eph_wipes: AtomicU64::new(0),
+            eph_bytes: AtomicI64::new(0),
+            eph_queues: AtomicI64::new(0),
             db_errors: AtomicU64::new(0),
             pop_targeted: AtomicU64::new(0),
             pop_wildcard: AtomicU64::new(0),
@@ -1280,6 +1331,68 @@ impl Metrics {
         // running this binary exposes the same series, and an alert rule can be
         // written once for the fleet.
         self.kvt.render(&mut s, &ht, &g);
+        // EPHEMERAL_QUEUES.md §6. Appended next to the kv/timers block and on
+        // the same terms: unconditionally, so every cell running this binary
+        // exposes the same series and an alert rule can be written once for the
+        // fleet. NO `tenant` label anywhere here — the per-tenant view of this
+        // class is the `sizes` top-N log line (§14.1), because a series keyed by
+        // a value the caller chooses is a cardinality the caller chooses.
+        ht(&mut s, "queen_ephemeral_messages_total", "Ephemeral messages by verb", "counter");
+        for (verb, ctr) in [
+            ("pushed", &self.eph_pushed),
+            ("popped", &self.eph_popped),
+            ("acked", &self.eph_acked),
+        ] {
+            g(
+                &mut s,
+                "queen_ephemeral_messages_total",
+                &format!("{{verb=\"{verb}\"}}"),
+                ctr.load(Ordering::Relaxed).to_string(),
+            );
+        }
+        // THREE LABEL VALUES AND NOT THREE FAMILIES, unlike the counters above:
+        // the causes are alternatives for the same event, so a dashboard wants
+        // them summable, while push/pop/ack are different events. Each still has
+        // its own remedy — `bounds` the queue is too small (or its producer too
+        // fast), `ttl` the consumer is too slow, `retry` the handlers are
+        // failing — which is why the label exists at all. On this class a drop is
+        // LEGAL (§1.2), and that is exactly why it has to be visible: nothing
+        // else in the system will complain about it.
+        ht(&mut s, "queen_ephemeral_dropped_total", "Ephemeral messages dropped, by cause", "counter");
+        for (cause, ctr) in [
+            ("bounds", &self.eph_dropped_bounds),
+            ("ttl", &self.eph_dropped_ttl),
+            ("retry", &self.eph_dropped_retry),
+        ] {
+            g(
+                &mut s,
+                "queen_ephemeral_dropped_total",
+                &format!("{{cause=\"{cause}\"}}"),
+                ctr.load(Ordering::Relaxed).to_string(),
+            );
+        }
+        // The two gauges. `queen_ephemeral_bytes` against
+        // `QUEEN_EPHEMERAL_MAX_BYTES` is the alert that matters: crossing it is a
+        // 503 for every tenant on the cell (§1.6 rung 3), and unlike every other
+        // occupancy number in this exposition it is EXACT — the broker is the
+        // meter, so there is no rollup between the value and the truth.
+        // EPHEMERAL_QUEUES.md §3.6/§3.7 — the two multi-broker series. Their own
+        // families and not labels on the counters above, because they count
+        // different EVENTS (a relayed request, an ownership move) rather than
+        // alternative causes of one event, which is the same rule that split
+        // push/pop/ack from the three drop causes.
+        //
+        // On a single-broker cell both stay at 0 for ever and that is the correct
+        // reading, not a gap: the rendezvous short-circuits to self (§3.7), so
+        // nothing is ever forwarded and nothing ever moves.
+        ht(&mut s, "queen_ephemeral_forwarded_total", "Ephemeral requests relayed to the partition's rendezvous owner", "counter");
+        g(&mut s, "queen_ephemeral_forwarded_total", "", self.eph_forwarded.load(Ordering::Relaxed).to_string());
+        ht(&mut s, "queen_ephemeral_wipes_total", "Ephemeral rings dropped because their partition moved owner", "counter");
+        g(&mut s, "queen_ephemeral_wipes_total", "", self.eph_wipes.load(Ordering::Relaxed).to_string());
+        ht(&mut s, "queen_ephemeral_bytes", "Bytes held by this broker's ephemeral rings", "gauge");
+        g(&mut s, "queen_ephemeral_bytes", "", self.eph_bytes.load(Ordering::Relaxed).to_string());
+        ht(&mut s, "queen_ephemeral_queues", "Ephemeral queues on this broker (declared + live implicit)", "gauge");
+        g(&mut s, "queen_ephemeral_queues", "", self.eph_queues.load(Ordering::Relaxed).to_string());
         s
     }
 }
@@ -1378,6 +1491,14 @@ mod kv_timers_tests {
             "queen_timers_schedule_rejected_total",
             "queen_sweeper_cycle_milliseconds",
             "queen_sweeper_rows_total",
+            // EPHEMERAL_QUEUES.md §6 — present on a FRESH broker, i.e. before
+            // anything ephemeral has happened. A counter that only appears once
+            // it is non-zero cannot be alerted on, because the alert would have
+            // to survive the series not existing.
+            "queen_ephemeral_messages_total",
+            "queen_ephemeral_dropped_total",
+            "queen_ephemeral_bytes",
+            "queen_ephemeral_queues",
         ] {
             assert!(out.contains(probe), "{probe} missing on a fresh broker");
         }

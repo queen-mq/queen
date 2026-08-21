@@ -15,6 +15,21 @@
         <span class="scope-sep">·</span>cell {{ actingCellSlug || 'unknown' }}
       </span>
       <span class="scope-fill"></span>
+
+      <!-- Cross-link, not a merged row. Ephemeral queues are a different
+           storage class: no pending, no retained bytes, no DLQ, contents that
+           survive nothing — they cannot share this table's columns without one
+           of them lying. The chip appears only once the family has actually
+           answered on this cell, so on an older broker there is no dead link
+           and no failing probe behind it. -->
+      <router-link
+        v-if="ephemeralAvailable"
+        to="/ephemeral"
+        class="chip chip-ice eph-link"
+        title="RAM-class queues — depth is a ring in broker memory, and it survives nothing"
+      >
+        {{ formatNumber(ephemeralCount) }} ephemeral queue{{ ephemeralCount === 1 ? '' : 's' }} →
+      </router-link>
     </div>
 
     <!-- Stale data presented as live is the failure mode: the store keeps the
@@ -173,10 +188,11 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { queues as queuesApi, system as systemApi, describeApiError } from '@/api'
-import { toNum } from '@/composables/useApi'
+import { formatNumber, toNum } from '@/composables/useApi'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { useToast } from '@/composables/useToast'
+import { useEphemeralStore } from '@/stores/ephemeralStore'
 import { useIdentity } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
 import QueueHealthGrid from '@/components/QueueHealthGrid.vue'
@@ -202,6 +218,14 @@ const {
 const lastFetchedText = computed(() =>
   lastFetched.value ? new Date(lastFetched.value).toLocaleTimeString() : 'an earlier load'
 )
+
+// Ephemeral cross-link. The same store the /ephemeral view uses, so the family
+// is probed ONCE per cluster: on a broker that does not serve it the store
+// records the verdict and stops asking, which is what keeps a 30s page refresh
+// from turning an old broker's 404 into a recurring toast.
+const ephemeralStore = useEphemeralStore()
+const ephemeralAvailable = ephemeralStore.available
+const ephemeralCount = ephemeralStore.count
 
 // Live tick, off the shared ticker. `lastFetched` only advances on a
 // SUCCESSFUL load, so on a failed refresh this keeps counting up while the
@@ -353,9 +377,15 @@ const fetchQueueOps = async () => {
   }
 }
 
-// Auto-refresh forces fresh queues; mount-time call reuses cache.
+// Auto-refresh forces fresh queues; mount-time call reuses cache. The
+// ephemeral probe is TTL-cached and never forced — the chip is a signpost, and
+// its own page is where the live figures are.
 const refreshAll = async () => {
-  await Promise.all([fetchQueues(true), fetchQueueOps()])
+  await Promise.all([
+    fetchQueues(true),
+    fetchQueueOps(),
+    ephemeralStore.fetchQueues(),
+  ])
 }
 
 const viewQueue = (queue) => {
@@ -406,6 +436,7 @@ useAutoRefresh(refreshAll)
 onMounted(() => {
   fetchQueues()       // cache-respecting
   fetchQueueOps()
+  ephemeralStore.fetchQueues()
 })
 </script>
 
@@ -429,6 +460,10 @@ onMounted(() => {
   height: 7px;
   border-radius: var(--r-pill);
 }
+
+/* The chip is a link: it must not carry a link's underline into a chip row. */
+.eph-link { text-decoration: none; white-space: nowrap; }
+.eph-link:hover { border-color: color-mix(in srgb, var(--ice-400) 45%, transparent); }
 
 @media (max-width: 880px) {
   .qhg-legend { display: none; }

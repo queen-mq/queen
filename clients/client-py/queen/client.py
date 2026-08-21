@@ -13,6 +13,7 @@ from .admin.admin import Admin
 from .buffer.buffer_manager import BufferManager
 from .builders.queue_builder import QueueBuilder
 from .builders.transaction_builder import TransactionBuilder
+from .ephemeral.ephemeral import Ephemeral
 from .http.http_client import HttpClient
 from .http.load_balancer import LoadBalancer
 from .kv.kv import KV
@@ -119,6 +120,7 @@ class Queen:
         # KV and timer surfaces (lazily initialized, same discipline as Admin)
         self._kv: Optional[KV] = None
         self._timers: Optional[Timers] = None
+        self._ephemeral: Optional[Ephemeral] = None
 
         # Setup graceful shutdown
         self._shutdown_handlers: List[Any] = []
@@ -318,6 +320,28 @@ class Queen:
         if self._timers is None:
             self._timers = Timers(self._http_client)
         return self._timers
+
+    @property
+    def ephemeral(self) -> Ephemeral:
+        """
+        RAM-class queues (EPHEMERAL_QUEUES.md §1, §3.1).
+
+        Read the note in ``queen/ephemeral/ephemeral.py`` once: the contents
+        survive NOTHING -- treat a failover like a Redis restart -- while a
+        declared configuration is durable and comes back empty. Consumption
+        semantics come from the pop's ``group``, exactly as on the durable
+        engine; there is no queue-level mode.
+
+        Requires a broker (and proxy) at 1.1 or later: an older one answers 404
+        on the whole family, which this surface maps to one ``EphemeralError``
+        with code ``ephemeral_unsupported``.
+
+        Returns:
+            Ephemeral API instance (lazily initialized, singleton)
+        """
+        if self._ephemeral is None:
+            self._ephemeral = Ephemeral(self._http_client, self._buffer_manager)
+        return self._ephemeral
 
     def timer(self, queue: str) -> TimerBuilder:
         """

@@ -11,7 +11,7 @@ description: "Every HTTP route the broker registers, with its access level and w
       - server/src/handlers/*.rs (Tenant extension)
 */}
 
-Queen's broker registers **74 method + path pairs**. Every row below is read out of the router and the authorization table at build time.
+Queen's broker registers **84 method + path pairs**. Every row below is read out of the router and the authorization table at build time.
 
 ### Message plane
 
@@ -109,10 +109,25 @@ Queen's broker registers **74 method + path pairs**. Every row below is read out
 | `DELETE` | `/api/v1/timers/:queue/*timerKey` | read-write | yes |
 | `GET` | `/api/v1/timers/:queue/*timerKey` | read-only | yes |
 
+### Ephemeral queues
+
+| Method | Path | Access level | Tenant-scoped |
+| --- | --- | --- | --- |
+| `POST` | `/api/v1/ephemeral/ack` | read-write | yes |
+| `POST` | `/api/v1/ephemeral/configure` | read-write | yes |
+| `GET` | `/api/v1/ephemeral/pop` | read-write | yes |
+| `POST` | `/api/v1/ephemeral/push` | write-only | yes |
+| `DELETE` | `/api/v1/ephemeral/queue/:queue` | read-write | yes |
+| `GET` | `/api/v1/ephemeral/queues` | read-only | yes |
+| `GET` | `/api/v1/ephemeral/queues/:queue/depth` | read-only | yes |
+| `POST` | `/api/v1/ephemeral/reset` | read-write | yes |
+
 ### Operator surfaces
 
 | Method | Path | Access level | Tenant-scoped |
 | --- | --- | --- | --- |
+| `GET` | `/api/v1/system/ephemeral` | admin | no |
+| `POST` | `/api/v1/system/ephemeral` | admin | no |
 | `GET` | `/api/v1/system/kv-timers` | admin | no |
 | `POST` | `/api/v1/system/kv-timers` | admin | no |
 | `GET` | `/api/v1/system/maintenance` | admin | no |
@@ -137,4 +152,4 @@ Queen's broker registers **74 method + path pairs**. Every row below is read out
 | `POST` | `/internal/api/notify` | admin | yes |
 | `GET` | `/internal/api/shared-state/stats` | admin | no |
 
-49 of these handlers resolve a tenant from the request; 13 `/api/v1/*` routes do not and are therefore cell-wide reads or operator surfaces.
+57 of these handlers resolve a tenant from the request; 15 `/api/v1/*` routes do not and are therefore cell-wide reads or operator surfaces.

@@ -260,6 +260,9 @@ fn features_json(f: Features) -> Value {
         // a 403 can see which flag said it.
         "kv": f.kv,
         "timers": f.timers,
+        // EPHEMERAL_QUEUES.md §5.1, same reason: a tenant refused with
+        // `feature_gated` can see which flag said it.
+        "ephemeral": f.ephemeral,
     })
 }
 
@@ -944,11 +947,18 @@ mod tests {
 
     #[test]
     fn features_json_roundtrip() {
-        let v = features_json(Features { streams: true, traces: false, kv: true, timers: false });
+        let v = features_json(Features {
+            streams: true,
+            traces: false,
+            kv: true,
+            timers: false,
+            ephemeral: true,
+        });
         assert_eq!(v["streams"], true);
         assert_eq!(v["traces"], false);
         assert_eq!(v["kv"], true);
         assert_eq!(v["timers"], false);
+        assert_eq!(v["ephemeral"], true);
     }
 
     // --- role gate ------------------------------------------------------------

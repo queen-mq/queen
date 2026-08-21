@@ -725,6 +725,181 @@ impl Broker {
         parse(&bytes)
     }
 
+    // ------------------------------------------------------------ ephemeral
+    //
+    // EPHEMERAL_QUEUES.md §3.1, in-process. The embedded broker is by definition
+    // a single-broker deployment, which is exactly the ownership topology the
+    // engine implements, so nothing here is degraded relative to HTTP.
+    //
+    // WHY THESE TAKE AND RETURN `serde_json::Value` while every method above
+    // takes a typed `queen_protocol` struct. The typed ephemeral structs belong
+    // in `queen-protocol` (§10 Q7) alongside the ones `client-rust` will use, and
+    // that crate is not this phase's to edit — publishing a second, divergent
+    // set of owned types here and then having to keep them in step with the
+    // protocol crate for ever is a worse outcome than one honest JSON seam. When
+    // the protocol structs land, these signatures tighten and the bodies do not
+    // move: they already go through the same handler the router dispatches to,
+    // which is the property that makes running embedded BE running the broker.
+    //
+    // The errors are the HTTP ones (`Error::status()` carries the code), so the
+    // ladder of §1.6 is observable from here exactly as a client sees it.
+
+    /// `POST /api/v1/ephemeral/push` — `{queue, partition?, messages:[{payload}]}`.
+    pub async fn ephemeral_push(&self, body: serde_json::Value) -> Result<serde_json::Value, Error> {
+        self.eph(
+            crate::handlers::handle_ephemeral_push(
+                State(self.inner.st.clone()),
+                Extension(crate::auth::AuthedSub(None)),
+                Extension(crate::tenant::Tenant::default_tenant()),
+                // EPHEMERAL_QUEUES.md §3.6 — no inbound headers here, and none
+                // are needed: the embedded broker has no mesh, so `route` always
+                // answers `Local` and the forwarding branch these carry is
+                // unreachable. An EMPTY map is the truthful value (this call
+                // arrived through no HTTP request at all), not a placeholder.
+                axum::http::HeaderMap::new(),
+                Bytes::from(body.to_string()),
+            )
+            .await,
+        )
+        .await
+    }
+
+    /// `GET /api/v1/ephemeral/pop` — the query string as key/value pairs.
+    pub async fn ephemeral_pop(
+        &self,
+        params: &[(&str, String)],
+    ) -> Result<serde_json::Value, Error> {
+        let q: std::collections::HashMap<String, String> = params
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect();
+        self.eph(
+            crate::handlers::handle_ephemeral_pop(
+                State(self.inner.st.clone()),
+                Extension(crate::auth::AuthedSub(None)),
+                Extension(crate::tenant::Tenant::default_tenant()),
+                axum::http::HeaderMap::new(),
+                // The URI the handler would relay: unreachable without a mesh
+                // (see the push above), so the route it names is the only thing
+                // that has to be right.
+                axum::http::Uri::from_static("/api/v1/ephemeral/pop"),
+                Query(q),
+            )
+            .await,
+        )
+        .await
+    }
+
+    /// `POST /api/v1/ephemeral/ack` — `{queue, group?, acks:[{id, status?}]}`.
+    pub async fn ephemeral_ack(&self, body: serde_json::Value) -> Result<serde_json::Value, Error> {
+        self.eph(
+            crate::handlers::handle_ephemeral_ack(
+                State(self.inner.st.clone()),
+                Extension(crate::auth::AuthedSub(None)),
+                Extension(crate::tenant::Tenant::default_tenant()),
+                axum::http::HeaderMap::new(),
+                Bytes::from(body.to_string()),
+            )
+            .await,
+        )
+        .await
+    }
+
+    /// `POST /api/v1/ephemeral/configure` — `{queue, options?}`. The options are
+    /// a CLOSED list and an unknown key is a 400, not a silently ignored field.
+    pub async fn ephemeral_configure(
+        &self,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, Error> {
+        self.eph(
+            crate::handlers::handle_ephemeral_configure(
+                State(self.inner.st.clone()),
+                Extension(crate::auth::AuthedSub(None)),
+                Extension(crate::tenant::Tenant::default_tenant()),
+                Bytes::from(body.to_string()),
+            )
+            .await,
+        )
+        .await
+    }
+
+    /// `POST /api/v1/ephemeral/reset` — drop every message, void every lease,
+    /// rewind every cursor. Legal only because of the loss contract (§1.2).
+    pub async fn ephemeral_reset(&self, queue: &str) -> Result<serde_json::Value, Error> {
+        self.eph(
+            crate::handlers::handle_ephemeral_reset(
+                State(self.inner.st.clone()),
+                Extension(crate::auth::AuthedSub(None)),
+                Extension(crate::tenant::Tenant::default_tenant()),
+                Bytes::from(serde_json::json!({ "queue": queue }).to_string()),
+            )
+            .await,
+        )
+        .await
+    }
+
+    /// `DELETE /api/v1/ephemeral/queue/:queue` — the rings AND the declaration.
+    pub async fn ephemeral_delete(&self, queue: &str) -> Result<serde_json::Value, Error> {
+        self.eph(
+            crate::handlers::handle_ephemeral_delete_queue(
+                State(self.inner.st.clone()),
+                Extension(crate::auth::AuthedSub(None)),
+                Extension(crate::tenant::Tenant::default_tenant()),
+                Path(queue.to_string()),
+            )
+            .await,
+        )
+        .await
+    }
+
+    /// `GET /api/v1/ephemeral/queues` — declared and live implicit, zero DB.
+    pub async fn ephemeral_queues(&self) -> Result<serde_json::Value, Error> {
+        self.eph(
+            crate::handlers::handle_ephemeral_queues(
+                State(self.inner.st.clone()),
+                Extension(crate::auth::AuthedSub(None)),
+                Extension(crate::tenant::Tenant::default_tenant()),
+            )
+            .await,
+        )
+        .await
+    }
+
+    /// `GET /api/v1/ephemeral/queues/:queue/depth`. `Error::NotFound` when the
+    /// queue is not on this broker — which for an implicit queue means it was
+    /// never used or has been idle-collected, and both are honestly "not here".
+    pub async fn ephemeral_depth(
+        &self,
+        queue: &str,
+        group: Option<&str>,
+    ) -> Result<serde_json::Value, Error> {
+        let mut q: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        if let Some(g) = group {
+            q.insert("group".into(), g.to_string());
+        }
+        self.eph(
+            crate::handlers::handle_ephemeral_depth(
+                State(self.inner.st.clone()),
+                Extension(crate::auth::AuthedSub(None)),
+                Extension(crate::tenant::Tenant::default_tenant()),
+                Path(queue.to_string()),
+                Query(q),
+            )
+            .await,
+        )
+        .await
+    }
+
+    /// One place where an ephemeral handler's rendered bytes become a result, so
+    /// the eight methods above cannot disagree about what a refusal is.
+    async fn eph(&self, resp: Response) -> Result<serde_json::Value, Error> {
+        let (status, bytes) = read_response(resp).await;
+        if !status.is_success() {
+            return Err(error_from(status, &bytes));
+        }
+        parse(&bytes)
+    }
+
     /// Stop the loops this handle owns, close the connection pool (idle
     /// Postgres connections drop immediately; any engine loop that survives —
     /// see the module docs — fails its next `pool.get()` and idles harmlessly),

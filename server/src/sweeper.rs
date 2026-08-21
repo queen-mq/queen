@@ -160,6 +160,16 @@ const _: () = assert!(MAX_PARALLELISM >= 2);
 /// never be one (§1.10).
 const SHARDS: i16 = 64;
 
+/// EPHEMERAL_QUEUES.md §3.2 — cadence of the ephemeral BACKSTOP phase.
+///
+/// A constant and not a knob, deliberately: it is not a lever on anything an
+/// operator can observe. Lease expiry, ttl head-drop and implicit GC all happen
+/// opportunistically on every ring touch, so this pass only ever finds work on
+/// rings NOBODY is touching — and for those the deadline that matters is the
+/// lease, which `Wake::hint` already rings to the millisecond. One second is
+/// simply the floor under a lost hint.
+const EPH_SWEEP_EVERY: Duration = Duration::from_millis(1000);
+
 // ===========================================================================
 // The sleep computation (§7.1 step D, §7.2)
 // ===========================================================================
@@ -402,8 +412,16 @@ pub fn spawn(
     cfg: &Config,
     switches: Arc<crate::switches::Switches>,
     quotas: Arc<crate::quota::Quotas>,
+    ephemeral: Arc<crate::ephemeral::Ephemeral>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     if !cfg.sweeper_enabled {
+        // NOTE for the ephemeral backstop (EPHEMERAL_QUEUES.md §3.2): with the
+        // sweeper off, an ephemeral ring that nobody pushes to or pops from
+        // never runs its lease expiry, its ttl drop or its implicit GC. Nothing
+        // is lost and nothing is served wrongly — every one of those also runs
+        // on the next touch — but an idle cell stops reclaiming. Said here
+        // rather than in a second warn line, because the boot warning main.rs
+        // already prints for this flag is the one an operator reads.
         tracing::info!(target: "sweeper", "disabled by QUEEN_SWEEPER=false");
         return None;
     }
@@ -471,9 +489,9 @@ pub fn spawn(
         leaderless = true,
         "service started"
     );
-    Some(tokio::spawn(
-        async move { run_loop(pool, metrics, knobs, switches, quotas).await },
-    ))
+    Some(tokio::spawn(async move {
+        run_loop(pool, metrics, knobs, switches, quotas, ephemeral).await
+    }))
 }
 
 /// `config.rs` owns the env parsers and keeps them private; three knobs of §7
@@ -548,6 +566,7 @@ async fn run_loop(
     k: Knobs,
     switches: Arc<crate::switches::Switches>,
     quotas: Arc<crate::quota::Quotas>,
+    ephemeral: Arc<crate::ephemeral::Ephemeral>,
 ) {
     let mut idle_cycles: u32 = 0;
     // Consecutive cycles in which the fire pass hit a ceiling. This is the ONLY
@@ -556,6 +575,7 @@ async fn run_loop(
     let mut pressure: u32 = 0;
     let mut kv_gate = Gate::new(k.kv_expire_every);
     let mut usage_gate = Gate::new(k.usage_every);
+    let mut eph_gate = Gate::new(EPH_SWEEP_EVERY);
     let mut kv_phase = PhaseState::On;
     let mut usage_phase = PhaseState::On;
     // Which shard this broker starts its scan at, rotated every cycle so N
@@ -749,6 +769,41 @@ async fn run_loop(
                         }
                     }
                 }
+            }
+        }
+
+        // ------------------------------------------------------------ C-eph
+        // EPHEMERAL_QUEUES.md §3.2 — the RAM-class backstop: expire leases,
+        // head-drop ttl'd messages and collect idle implicit queues on the
+        // rings NOBODY touched this second.
+        //
+        // NOT ON THE DEGRADATION LADDER, at any rung, and that is the point of
+        // putting it here rather than next to the two phases above. Every rung
+        // of that ladder is a response to DATABASE pressure — the fire hit its
+        // ceiling, so shed the phases whose cost is the database. This phase
+        // takes no connection, no lane slot and no lock outside its own maps;
+        // shedding it would relieve nothing and would let a cell under DB
+        // pressure stop reclaiming the one resource that has no database behind
+        // it to absorb the overrun.
+        //
+        // `worked` is deliberately NOT set by this phase either: it feeds the
+        // idle backoff, whose job is to keep an empty TIMER table from spinning
+        // the loop, and an ephemeral ring's work is already re-armed by
+        // `Wake::hint` from the engine.
+        if eph_gate.due(cycle_start) {
+            eph_gate.mark(cycle_start);
+            let s = ephemeral.sweep(crate::util::now_epoch_ms());
+            if s.redelivered > 0 || s.exhausted > 0 || s.dropped_ttl > 0 || s.gc_queues > 0 {
+                tracing::info!(
+                    target: "ephemeral",
+                    redelivered = s.redelivered,
+                    exhausted = s.exhausted,
+                    dropped_ttl = s.dropped_ttl,
+                    gc_queues = s.gc_queues,
+                    queues = ephemeral.queue_count(),
+                    bytes = ephemeral.global_bytes(),
+                    "backstop"
+                );
             }
         }
 

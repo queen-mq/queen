@@ -227,12 +227,13 @@ internal admission arbiter is adaptive and makes a request *wait* for a slot rat
 it, and rate limiting on those routes comes from the multi-tenant gateway rather than from the
 broker.
 
-The [kv](/reference/http/kv) and [timer](/reference/http/timers) routes are the exception, and they
-are the exception on purpose. They are the first surfaces whose call rate is decided by an end user
-of the customer rather than by a volume of messages, so a defence that lived only in the gateway
-would not be a defence of the product: self-hosted and dedicated deployments without a gateway are
-real. Those routes carry a per-tenant token bucket in the broker itself and answer `429` with
-`Retry-After`. They also answer `403` and `503` where the message plane has no equivalent, and
+The [kv](/reference/http/kv), [timer](/reference/http/timers) and
+[ephemeral](/reference/http/ephemeral) routes are the exception, and they are the exception on
+purpose. They are the surfaces whose call rate is decided by an end user of the customer rather than
+by a volume of messages, so a defence that lived only in the gateway would not be a defence of the
+product: self-hosted and dedicated deployments without a gateway are real. Those routes carry a
+per-tenant token bucket in the broker itself and answer `429` with `Retry-After`. They also answer
+`403` and `503` where the message plane has no equivalent, and
 [their pages](/reference/http/kv) carry the one sentence that separates the three.
 
 ## Retrying safely

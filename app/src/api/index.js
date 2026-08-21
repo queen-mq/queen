@@ -37,6 +37,52 @@ export const queues = {
 }
 
 // ============================================
+// EPHEMERAL QUEUES API (tenant-scoped)
+// ============================================
+// The RAM storage class (EPHEMERAL_QUEUES.md §3.1) — its own route family, and
+// its own vocabulary. What these answer is NOT what `queues` above answers: an
+// ephemeral queue has a ring depth and no pending, no retained bytes, no DLQ
+// and no PG-derived lag, because none of those concepts has a referent when the
+// contents survive nothing (§1.2). A view that borrows a durable column here is
+// inventing a number.
+//
+// The two status routes read in-process gauges and touch no database (§6), so —
+// unlike the durable meter, whose 1s poll is load-bearing on PG — they can be
+// polled at 1-2s at zero cost anywhere.
+//
+// OLD BROKER / OLD PROXY. The family is new in 1.1 and nothing negotiates a
+// version: a broker without the routes 404s, a proxy that does not classify
+// them answers 404 {"code":"route_blocked"}, and a broker-direct build falls
+// through to the SPA fallback, which client.js already converts into
+// `not_an_api_response`. All three mean "not exposed here" — a state to render,
+// never a failure to retry (stores/ephemeralStore.js owns that verdict).
+export const ephemeralQueues = (config) => client.get('/api/v1/ephemeral/queues', config)
+
+/** One queue's gauges. Queue names are arbitrary caller text — encode them (see `addr`). */
+export const ephemeralDepth = (queue, config) =>
+  client.get(`/api/v1/ephemeral/queues/${encodeURIComponent(queue)}/depth`, config)
+
+/**
+ * Drop every message, void the leases, rewind every group cursor. 200 {dropped}.
+ * Legal only because of the §1.2 loss contract — there is nothing to recover.
+ * The queue name travels in the BODY here, not the path (§3.1).
+ */
+export const ephemeralReset = (queue, config) =>
+  client.post('/api/v1/ephemeral/reset', { queue }, config)
+
+/** Contents AND the declared configuration (§1.1). Nothing survives it. */
+export const ephemeralDelete = (queue, config) =>
+  client.delete(`/api/v1/ephemeral/queue/${encodeURIComponent(queue)}`, config)
+
+/** Namespace form for call sites that read better grouped — the same four functions. */
+export const ephemeral = {
+  queues: ephemeralQueues,
+  depth: ephemeralDepth,
+  reset: ephemeralReset,
+  delete: ephemeralDelete,
+}
+
+// ============================================
 // MESSAGES API (tenant-scoped)
 // ============================================
 // A transaction id is arbitrary caller-supplied text (server/src/handlers/data.rs
@@ -169,6 +215,7 @@ export const operator = {
 export default {
   resources,
   queues,
+  ephemeral,
   messages,
   traces,
   analytics,

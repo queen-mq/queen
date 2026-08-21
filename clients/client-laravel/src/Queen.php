@@ -17,6 +17,7 @@ class Queen
     private ?Admin $admin = null;
     private ?Kv $kv = null;
     private ?Timers $timers = null;
+    private ?Ephemeral $ephemeral = null;
 
     /**
      * @param string|array $config Single URL string, array of URLs, or config array
@@ -84,6 +85,29 @@ class Queen
             $this->timers = new Timers($this->httpClient);
         }
         return $this->timers;
+    }
+
+    // ===========================
+    // Ephemeral API
+    // ===========================
+
+    /**
+     * RAM-class queues (EPHEMERAL_QUEUES.md §1, §3.1). Read the note on the
+     * Ephemeral class once: the contents survive NOTHING — treat a failover
+     * like a Redis restart — while a declared configuration is durable and
+     * comes back empty. Consumption semantics come from the pop's `group`,
+     * exactly as on the durable engine; there is no queue-level mode.
+     *
+     * Unlike kv() and timers(), this one has a version floor: a broker or proxy
+     * older than 1.1 has no such routes and answers 404 on all of them, which
+     * this surface maps to EphemeralUnsupportedException.
+     */
+    public function ephemeral(): Ephemeral
+    {
+        if ($this->ephemeral === null) {
+            $this->ephemeral = new Ephemeral($this->httpClient, $this->bufferManager);
+        }
+        return $this->ephemeral;
     }
 
     // ===========================

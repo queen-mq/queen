@@ -1,6 +1,6 @@
 ---
 title: System and internal routes
-description: "Maintenance mode, the kv and timer kill switches, shared state, the stats refresh trigger and the broker-to-broker /internal routes: all admin-gated operator surfaces."
+description: "Maintenance mode, the kv, timer and ephemeral kill switches, shared state, the stats refresh trigger and the broker-to-broker /internal routes: all admin-gated operator surfaces."
 type: reference
 tier: operate
 status: internal
@@ -227,6 +227,46 @@ fires when you turn it back on.
 Every flip of any of the three writes a single `sweeper` log line at the instant it happens,
 naming the switch and what the operator has just done to the cell. It is on-change only, so a
 switch that has been off for an hour does not write an hour of lines.
+
+## The ephemeral kill switch
+
+Same instrument, one switch, for the [ephemeral](/reference/http/ephemeral) route family. It is on
+the same pattern as the three above: an in-process atomic mirrored into `queen.system_state`, an
+absent row meaning **on**, and a paused surface answering `503` with `Retry-After` rather than
+`404`.
+
+### GET /api/v1/system/ephemeral
+
+```json
+{
+  "ephemeralEnabled": true,
+  "cellBytes": 8402944,
+  "cellMaxBytes": 268435456,
+  "queues": 314,
+  "grantedTenants": 12,
+  "requireGrant": true,
+  "epoch": "9f3a1c"
+}
+```
+
+Every number here is an in-process gauge: this route reads no table and counts nothing, which is
+what makes it safe to poll during the incident it exists for. `cellBytes` against `cellMaxBytes` is
+the pair a `503 ephemeral_unavailable` is decided on. `grantedTenants` at `0` with `requireGrant`
+true means **every** tenant is being refused, which is the single most confusing state to diagnose
+from the outside. `epoch` is this broker's incarnation id, the one carried inside every ephemeral
+message id, so a support ticket about an ack that answered `stale` can be resolved against it.
+
+### POST /api/v1/system/ephemeral
+
+```json
+{ "enabled": false }
+```
+
+With `enabled: false` every `/api/v1/ephemeral` route answers `503`. Consumers already parked stay
+parked until their own timeout expires, the rings keep their memory until the idle collector
+reaches them, and nothing stored durably is affected, because nothing of this class is stored
+durably except the declarations. Turning it back on resumes service on rings that are, by then,
+whatever the age and bound limits have left in them.
 
 ## GET /api/v1/system/shared-state
 

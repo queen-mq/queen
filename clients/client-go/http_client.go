@@ -162,6 +162,18 @@ func (hc *HttpClient) GetRaw(ctx context.Context, path string, opts ...RequestOp
 	return hc.doRequestRaw(ctx, http.MethodGet, path, nil, 0, "", resolveRequestOptions(opts))
 }
 
+// GetRawWith performs a GET request with a custom timeout and affinity key,
+// returning the undecoded response body.
+//
+// GetRaw's zero timeout and empty affinity key are right for the KV and timer
+// reads, which are short and stateless. A long-poll pop is neither: it needs a
+// deadline past the broker's own timeout so the client does not abort a request
+// that was about to be answered, and an affinity key so repeated pops of one
+// queue land on one backend.
+func (hc *HttpClient) GetRawWith(ctx context.Context, path string, timeoutMs int, affinityKey string, opts ...RequestOption) ([]byte, error) {
+	return hc.doRequestRaw(ctx, http.MethodGet, path, nil, timeoutMs, affinityKey, resolveRequestOptions(opts))
+}
+
 // PostRaw performs a POST request and returns the undecoded response body.
 func (hc *HttpClient) PostRaw(ctx context.Context, path string, body interface{}, opts ...RequestOption) ([]byte, error) {
 	return hc.doRequestRaw(ctx, http.MethodPost, path, body, 0, "", resolveRequestOptions(opts))

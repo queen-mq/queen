@@ -34,14 +34,24 @@
  * Buffered messages still live only in this process's memory. A crash, or a
  * `process.exit()` that skips `close()`, loses them -- buffering belongs on
  * telemetry-shaped traffic, not on anything that must not be lost.
+ *
+ * A buffer also carries its DESTINATION (buffer/sinks.js): the route its
+ * batches are posted to and the shape they are posted in. It is fixed at
+ * creation and never changes, because it is a property of the address -- one
+ * address is one queue of one storage class -- and because a drain that could
+ * change route mid-retry would post a re-queued batch somewhere its earlier
+ * attempt did not go. Absent, it is the durable push, which is what every
+ * caller that predates ephemeral queues gets without knowing sinks exist.
  */
 
 import { BUFFER_DEFAULTS } from '../utils/defaults.js'
+import { DURABLE_DESTINATION } from './sinks.js'
 
 export class MessageBuffer {
   #queueAddress
   #messages = []
   #options
+  #destination
   #flushCallback
   #timer = null
   #firstMessageTime = null
@@ -58,10 +68,11 @@ export class MessageBuffer {
   #parked = 0
   #stopWaiters = []
 
-  constructor(queueAddress, options, flushCallback) {
+  constructor(queueAddress, options, flushCallback, destination = null) {
     this.#queueAddress = queueAddress
     this.#options = MessageBuffer.normalizeOptions(options)
     this.#flushCallback = flushCallback
+    this.#destination = destination || DURABLE_DESTINATION
   }
 
   /**
@@ -296,6 +307,11 @@ export class MessageBuffer {
 
   get options() {
     return this.#options
+  }
+
+  /** `{ sink, queue, partition }` -- where this buffer's batches are posted. */
+  get destination() {
+    return this.#destination
   }
 
   get isFlushing() {

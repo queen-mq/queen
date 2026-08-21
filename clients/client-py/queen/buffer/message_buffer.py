@@ -38,6 +38,7 @@ from typing import Any, Callable, Deque, Dict, List, Optional
 
 from ..errors import QueenError
 from ..utils.defaults import BUFFER_DEFAULTS
+from .sinks import DURABLE_DESTINATION, Destination
 
 
 def resolve_buffer_options(options: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -101,6 +102,7 @@ class MessageBuffer:
         queue_address: str,
         options: Optional[Dict[str, Any]],
         flush_callback: Callable[[str], Any],
+        destination: Optional[Destination] = None,
     ):
         """
         Initialize message buffer
@@ -113,10 +115,15 @@ class MessageBuffer:
                 It must not block: it is called while the condition's lock is
                 held (see `add`), so it may only create the task, never await
                 the flush.
+            destination: Where this buffer's batches are posted, as
+                ``Destination(sink, queue, partition)`` (buffer/sinks.py).
+                None means the DURABLE push -- what every caller that predates
+                ephemeral queues gets without knowing sinks exist.
         """
         self._queue_address = queue_address
         self._options = resolve_buffer_options(options)
         self._flush_callback = flush_callback
+        self._destination = destination or DURABLE_DESTINATION
 
         # Read once: these are fixed for the buffer's lifetime and are on the
         # add path, which runs per message.
@@ -380,6 +387,11 @@ class MessageBuffer:
     def options(self) -> Dict[str, Any]:
         """Resolved buffer options"""
         return self._options
+
+    @property
+    def destination(self) -> Destination:
+        """``Destination(sink, queue, partition)`` -- where batches are posted."""
+        return self._destination
 
     @property
     def max_size(self) -> int:

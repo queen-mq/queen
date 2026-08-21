@@ -117,6 +117,20 @@ pub struct AppState {
     // Wildcard candidate hot-list (19-wildcard-hotlist.md, server/src/hotlist.rs).
     // Disabled (QUEEN_HOTLIST unset) ⇒ every hook is a no-op / one branch and the
     // wildcard pop takes the unchanged SQL candidate-scan path (byte-identical).
+    // EPHEMERAL_QUEUES.md §3.2 — the in-RAM queue class. Constructed on every
+    // broker and on the embedded facade: it needs no database, no mesh and no
+    // flag, so there is no configuration in which it is absent (M9). Its whole
+    // interaction with the durable engine is the wake gate it shares
+    // (`notifier`), and even that is namespaced (`eph:` in the queue half), so
+    // the two can only ever cross-WAKE — which is a hint, never state.
+    pub ephemeral: Arc<crate::ephemeral::Ephemeral>,
+    // EPHEMERAL_QUEUES.md §3.6 — the pooled broker→broker client, used ONLY to
+    // relay an ephemeral push/pop/ack to the partition's rendezvous owner. It is
+    // built on every broker, including single ones and the embedded facade, and
+    // costs a connection pool that never opens a connection there: the
+    // forwarding path is unreachable without a live mesh (§3.7), so a
+    // conditional field would be a second way to express the same "no peers".
+    pub peers: Arc<crate::peerclient::PeerClient>,
     pub hotlist: Arc<crate::hotlist::HotList>,
     // §8 reseed/cold-start interval (ms). QUEEN_HOTLIST_RESEED_MS (default 30s).
     pub hotlist_reseed_ms: i64,
@@ -480,6 +494,10 @@ mod data;
 // once decided whether their routes existed are gone, so there is no cell where
 // /api/v1/kv or /api/v1/timers is absent (see the header of `switches.rs`).
 mod kv;
+// EPHEMERAL_QUEUES.md §3.3 — the three hot verbs of the RAM-class queues.
+// Registered unconditionally like everything else here (M9): there is no cell
+// where `/api/v1/ephemeral/*` is absent, so a 404 never means "feature off".
+mod ephemeral;
 mod timers;
 mod queues;
 mod messages;
@@ -498,6 +516,7 @@ mod analytics;
 
 pub use data::*;
 pub use kv::*;
+pub use ephemeral::*;
 pub use timers::*;
 pub use queues::*;
 pub use messages::*;

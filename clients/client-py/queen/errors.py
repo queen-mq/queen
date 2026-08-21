@@ -87,6 +87,20 @@ class TimerError(QueenHttpError):
     """A refusal from the timer surface."""
 
 
+class EphemeralError(QueenHttpError):
+    """A refusal from the ephemeral surface (EPHEMERAL_QUEUES.md §3.1, §4).
+
+    One code deserves naming here because it is not a refusal at all but a
+    version verdict: ``ephemeral_unsupported``. No SDK negotiates capabilities,
+    so a broker or proxy older than 1.1 answers 404 on the WHOLE family -- the
+    broker because the routes were never registered, the proxy because an
+    unknown API path is ``route_blocked`` and it fails closed. Both are mapped
+    to this type with that code and the original kept as ``__cause__``, since
+    "the queue is missing" is not a thing this family can mean: its verbs answer
+    an absent queue with an ordinary body.
+    """
+
+
 def _body_of(response: httpx.Response) -> Dict[str, Any]:
     try:
         body = response.json()

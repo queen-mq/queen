@@ -12,8 +12,14 @@ keep using ``Queen``/``Admin`` and ignore the rest.
 from .admin import Admin
 from .builders.transaction_builder import TransactionResult
 from .client import Queen
+from .ephemeral import (
+    EPHEMERAL_UNSUPPORTED,
+    EPHEMERAL_UNSUPPORTED_MESSAGE,
+    Ephemeral,
+)
 from .errors import (
     ConflationUnsupportedError,
+    EphemeralError,
     KvError,
     QueenError,
     QueenHttpError,
@@ -39,6 +45,9 @@ __all__ = [
     "Admin",
     "KV",
     "KvResult",
+    "Ephemeral",
+    "EPHEMERAL_UNSUPPORTED",
+    "EPHEMERAL_UNSUPPORTED_MESSAGE",
     "Timers",
     "TimerBuilder",
     "TimerResult",
@@ -47,6 +56,7 @@ __all__ = [
     "QueenHttpError",
     "KvError",
     "TimerError",
+    "EphemeralError",
     "ConflationUnsupportedError",
     "Stream",
     "token_bucket_gate",

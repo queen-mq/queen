@@ -9,6 +9,11 @@ mod db;
 #[allow(dead_code)]
 mod dedup;
 mod encryption;
+// EPHEMERAL_QUEUES.md §3.2 — the in-RAM queue class. In BOTH crate roots (the
+// twin-list rule of lib.rs): the embedded `queen::Broker` is by definition a
+// single-broker deployment, which is exactly the topology this phase implements,
+// so it gets the engine for free.
+mod ephemeral;
 mod file_buffer;
 mod frames;
 mod fusion;
@@ -22,6 +27,9 @@ mod metrics;
 mod migrate;
 mod notify;
 mod obs;
+// EPHEMERAL_QUEUES.md §3.6 — the broker→broker forwarding client. Twin of the
+// `mod peerclient;` in lib.rs (the twin-list rule of lib.rs's header).
+mod peerclient;
 mod pgtls;
 mod quota;
 mod reconcile;
@@ -263,6 +271,10 @@ async fn main() {
             switches::Switches::KEY_KV,
             switches::Switches::KEY_TIMERS_SCHEDULE,
             switches::Switches::KEY_TIMERS_FIRE,
+            // EPHEMERAL_QUEUES.md §3.8 — same mirror, same adopt-on-boot rule:
+            // an absent row means ON, so a fresh cell never boots with the
+            // surface dead and no row to explain why.
+            switches::Switches::KEY_EPHEMERAL,
         ] {
             if let Ok(v) = db::get_system_flag_opt(&c, key).await {
                 switches.adopt(key, v);
@@ -374,6 +386,62 @@ async fn main() {
         );
     }
 
+    // EPHEMERAL_QUEUES.md §3.2 — the RAM-class engine. No pool, no schema read,
+    // no mesh: it is ready the instant it is constructed, which is why it is
+    // built here and not behind any of the boot awaits above.
+    let ephemeral = ephemeral::Ephemeral::new(
+        ephemeral::Knobs {
+            global_max_bytes: cfg.ephemeral_max_bytes,
+            queue_max_bytes: cfg.ephemeral_queue_max_bytes,
+            queue_max_length: cfg.ephemeral_queue_max_length,
+            lease_ms: cfg.ephemeral_lease_s * 1000,
+            retry_limit: cfg.ephemeral_retry_limit,
+            implicit_idle_ms: cfg.ephemeral_implicit_idle_s * 1000,
+            require_grant: cfg.ephemeral_require_grant,
+            rate: cfg.ephemeral_rate,
+            burst: cfg.ephemeral_burst,
+            // The per-tenant map cap is the KV one, on purpose: it bounds the
+            // same thing (in-RAM state keyed by an unvalidated, caller-chosen
+            // tenant id) on the same cell, and a second knob would be a second
+            // number an operator has to keep equal to the first.
+            max_tenants: cfg.kv_max_tenants,
+        },
+        metrics.clone(),
+    );
+    // §2 — the cold path, ONE read awaited BEFORE the listener opens, exactly
+    // like the KV quota seed above and for the sharper version of the same
+    // reason: with `require_grant` on, an empty grant map DENIES, so a cell that
+    // started serving first would answer `feature_gated` to every tenant for a
+    // refresh period on every rollout. It also vivifies the declared queues, so
+    // the first request after a restart already sees them (configured and empty,
+    // §1.2) rather than creating them implicitly with the defaults.
+    match ephemeral::refresh_once(&ephemeral, &pool, cfg.kv_max_tenants).await {
+        Ok((grants, configs)) => tracing::info!(
+            target: "ephemeral", grants, configs, "ephemeral grants and declared configs seeded"
+        ),
+        Err(e) => tracing::warn!(
+            target: "ephemeral", error = %e,
+            "ephemeral seed failed; declared queues will be re-created implicitly and \
+             grants stay unknown until the first successful refresh"
+        ),
+    }
+    // The lease-expiry / ttl backstop rides the sweeper's existing waker rather
+    // than adding a second timer task to the process (M10). Injected instead of
+    // called directly because `sweeper` exists only in this crate root — the
+    // embedded broker has no sweeper, and there the on-touch sweep is the whole
+    // mechanism.
+    ephemeral.attach_wake_hint(sweeper::hint_in_ms);
+    tracing::info!(
+        target: "boot",
+        // The incarnation id every ephemeral message carries (M4). Logged
+        // because it is the ONLY way to read an id in a support ticket: an ack
+        // answering `stale` names an epoch, and this line is what says whether
+        // that epoch was this process.
+        eph_epoch = %format!("{:x}", ephemeral.epoch()),
+        max_bytes = cfg.ephemeral_max_bytes,
+        "ephemeral engine ready"
+    );
+
     let state = Arc::new(AppState {
         pool: pool.clone(),
         fusion,
@@ -404,6 +472,8 @@ async fn main() {
         file_buffer: file_buffer.clone(),
         partition_queue: std::sync::Mutex::new(std::collections::HashMap::new()),
         seeded_groups: std::sync::Mutex::new(std::collections::HashMap::new()),
+        ephemeral: ephemeral.clone(),
+        peers: Arc::new(crate::peerclient::PeerClient::new()),
         hotlist: hotlist.clone(),
         hotlist_reseed_ms: cfg.hotlist_reseed_ms,
         hotlist_reseed_full_ms: cfg.hotlist_reseed_full_ms,
@@ -445,6 +515,7 @@ async fn main() {
         ack_registry: state.ack_registry.clone(),
         file_buffer: state.file_buffer.clone(),
         hotlist: state.hotlist.clone(),
+        ephemeral: state.ephemeral.clone(),
         dedup: state.fusion.dedup_cache(),
         dedup_cap_mb: cfg.dedup_cache_mb,
         admission: state.admission.clone(),
@@ -650,6 +721,18 @@ async fn main() {
         cfg.kv_max_tenants,
     );
 
+    // EPHEMERAL_QUEUES.md §2 — the grant/config re-read, on the SAME cadence
+    // knob. Its own loop for the same reason the quota refresh is not a phase of
+    // reconcile: it must run on brokers that do not sweep, because the enforcer
+    // is per-process. It is also the backstop the mesh phase relies on when a
+    // reset/delete broadcast is dropped (§10 Q4).
+    ephemeral::spawn_refresh(
+        ephemeral.clone(),
+        pool.clone(),
+        cfg.kv_quota_refresh_ms,
+        cfg.kv_max_tenants,
+    );
+
     // KV + timers background sweeper (PLAN_KV_TIMERS.md §7). Its own module, not a
     // phase of retention.rs: that cycle is fixed-cadence and leader-gated (session
     // advisory lock 737_001, one replica works per cycle), and folding this in would
@@ -673,6 +756,11 @@ async fn main() {
         &cfg,
         switches.clone(),
         quota.clone(),
+        // EPHEMERAL_QUEUES.md §3.2 — one more sub-cadence on the SAME loop, not
+        // a second background task: the ephemeral backstop is due-driven work
+        // measured in microseconds, and a process that already runs a due-driven
+        // loop does not need a second one to run it in.
+        ephemeral.clone(),
     );
     if !cfg.sweeper_enabled {
         // The configuration that silently accumulates: live surfaces with their only
@@ -771,10 +859,60 @@ async fn main() {
                     invalidate_queue_caches(&s, t, q);
                 })
             },
+            on_eph_admin: {
+                // EPHEMERAL_QUEUES.md §3.5 — a peer's admin verb, applied here.
+                // NO RE-BROADCAST: the originating broker fanned the frame out to
+                // every peer itself, and a re-broadcast on receipt is how a mesh
+                // of three becomes a storm of nine.
+                //
+                // The tenant arrives already validated as a UUID by `dispatch`
+                // (a destructive frame that cannot name its tenant is dropped
+                // there), so it is safe to build an engine key from it.
+                let eph = ephemeral.clone();
+                let pool = pool.clone();
+                Box::new(move |op: &str, t: &str, q: &str| match op {
+                    // Both are pure RAM and run inline on the inbound task —
+                    // they take a lock and a map removal, never a connection.
+                    "reset" => {
+                        eph.reset(t, q);
+                    }
+                    "delete" => {
+                        eph.remove(t, q);
+                    }
+                    // …and this one is the exception that must NOT run inline:
+                    // it re-reads one declared row, which awaits. Spawned, so a
+                    // slow database cannot stall the frame reader — and if the
+                    // read fails, the periodic refresh converges anyway (§10 Q4),
+                    // which is why the error is logged and dropped.
+                    "config_set" => {
+                        let eph = eph.clone();
+                        let pool = pool.clone();
+                        let t = t.to_string();
+                        let q = q.to_string();
+                        tokio::spawn(async move {
+                            if let Err(e) = ephemeral::reload_config(&eph, &pool, &t, &q).await {
+                                tracing::debug!(
+                                    target: "ephemeral", queue = %q, error = %e,
+                                    "peer config_set reload failed; the refresh will converge"
+                                );
+                            }
+                        });
+                    }
+                    // An op from a newer peer. Skipped for the same reason an
+                    // unknown FRAME TYPE is skipped (§11.2): a verb this build
+                    // does not implement is not a reason to stop reading.
+                    _ => {}
+                })
+            },
         };
-        match mesh::MeshTransport::bind(&cfg.sync, handlers).await {
+        match mesh::MeshTransport::bind(&cfg.sync, handlers, ephemeral.epoch()).await {
             Ok((t, bindings)) => {
                 notifier.attach_transport(t.clone());
+                // §3.5/§3.7 — the engine's own handle on the mesh: membership for
+                // the rendezvous hash, and the broadcast for the admin verbs.
+                // Attached here and not at construction because the transport's
+                // inbound handlers capture the state the engine is part of.
+                ephemeral.attach_mesh(t.clone());
                 t.start(bindings);
                 // 19-wildcard-hotlist §5: coalescing dirty-hint flusher. Drains
                 // the hot-list's local vuoto→pending transitions every ~20ms and
@@ -963,6 +1101,14 @@ async fn main() {
             "/api/v1/system/kv-timers",
             get(handlers::handle_get_kv_timers).post(handlers::handle_set_kv_timers),
         )
+        // EPHEMERAL_QUEUES.md §3.8 — the RAM class's runtime kill switch, on the
+        // same management plane and registered on the same terms: an operator
+        // must be able to READ that the surface is paused, so this route exists
+        // whether or not it is.
+        .route(
+            "/api/v1/system/ephemeral",
+            get(handlers::handle_get_ephemeral).post(handlers::handle_set_ephemeral),
+        )
         // ------------------------------------- internal inter-instance surface
         .route("/internal/api/notify", post(internal::handle_notify))
         .route(
@@ -1040,6 +1186,41 @@ async fn main() {
     // cannot stop, up to the horizon or an operator's intervention. Blocking would
     // produce the opposite of its purpose, so cancel goes through a route the proxy
     // classifies as read/management and never blocks.
+    // ------------------------------------- ephemeral (EPHEMERAL_QUEUES.md §3.1)
+    //
+    // The RAM-class surface: contents live in this process's heap and survive
+    // nothing (§1.2). Eight routes — three hot verbs, three management verbs and
+    // two status reads.
+    //
+    // ORDER MATTERS HERE, and this is the sixth time this file says it: matchit
+    // needs the STATIC segments registered before their `:param` siblings.
+    // `/queues` and `/queues/:queue/depth` are distinct paths so they cannot
+    // collide, but `/queue/:queue` (the delete) sits one segment deep under a
+    // family whose other members are all static, and registering it first would
+    // make `/api/v1/ephemeral/queue/...` shadow nothing today and something
+    // tomorrow. Static first, param last, always.
+    //
+    // Unconditional, like kv and timers above and for the same reason: no flag
+    // decides whether this surface exists, so a 404 here can only ever mean the
+    // broker predates the feature (which is exactly what the SDKs map it to).
+    // Pausing it is the runtime kill switch at /api/v1/system/ephemeral above.
+        .route("/api/v1/ephemeral/push", post(handlers::handle_ephemeral_push))
+        .route("/api/v1/ephemeral/pop", get(handlers::handle_ephemeral_pop))
+        .route("/api/v1/ephemeral/ack", post(handlers::handle_ephemeral_ack))
+        .route(
+            "/api/v1/ephemeral/configure",
+            post(handlers::handle_ephemeral_configure),
+        )
+        .route("/api/v1/ephemeral/reset", post(handlers::handle_ephemeral_reset))
+        .route("/api/v1/ephemeral/queues", get(handlers::handle_ephemeral_queues))
+        .route(
+            "/api/v1/ephemeral/queues/:queue/depth",
+            get(handlers::handle_ephemeral_depth),
+        )
+        .route(
+            "/api/v1/ephemeral/queue/:queue",
+            axum::routing::delete(handlers::handle_ephemeral_delete_queue),
+        )
         .route("/api/v1/timers", post(handlers::handle_timers_batch))
         .route("/api/v1/timers/:queue", get(handlers::handle_timers_list))
         .route(

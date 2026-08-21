@@ -69,6 +69,12 @@ pub const T_HELLO: u8 = 4;
 pub const T_HOTLIST_DIRTY_BATCH: u8 = 5;
 pub const T_QUEUE_CONFIG_SET: u8 = 10;
 pub const T_QUEUE_CONFIG_DELETE: u8 = 11;
+// EPHEMERAL_QUEUES.md §3.5 — the ephemeral control frame: `{op, tenant, queue}`
+// with `op ∈ reset | delete | config_set`, broadcast fire-and-forget by the three
+// admin verbs. Its own DECADE and not `12`, so the deferred `T_EPH_DATA_BATCH`
+// (§3.5/§9, the replication payload lane) has a neighbouring tag when it lands
+// and the two are legible as one family in a packet dump.
+pub const T_EPH_ADMIN: u8 = 20;
 pub const T_MAINTENANCE_MODE_SET: u8 = 40;
 pub const T_POP_MAINTENANCE_MODE_SET: u8 = 41;
 
@@ -108,6 +114,42 @@ pub struct SyncHandlers {
     pub on_pop_maintenance: Box<dyn Fn(bool) + Send + Sync>,
     pub on_queue_config_set: Box<dyn Fn(Option<&str>, &str) + Send + Sync>,
     pub on_queue_config_delete: Box<dyn Fn(Option<&str>, &str) + Send + Sync>,
+    /// EPHEMERAL_QUEUES.md §3.5 — `(op, tenant, queue)` from a peer's admin verb.
+    ///
+    /// The tenant is a `&str` and NOT the `Option<&str>` every frame above takes,
+    /// and the asymmetry is deliberate: those are WAKES, where a frame with no
+    /// tenant degrades safely to an over-wake across every tenant holding the
+    /// name. These are DESTRUCTIVE (`reset` drops messages, `delete` drops the
+    /// queue), so the same degradation would let one un-attributable frame wipe
+    /// every tenant's queue of that name. A frame whose tenant is absent or
+    /// malformed is dropped in `dispatch` and never reaches this closure.
+    pub on_eph_admin: Box<dyn Fn(&str, &str, &str) + Send + Sync>,
+}
+
+/// One live, ephemeral-capable peer (EPHEMERAL_QUEUES.md §3.5, M3).
+///
+/// "Capable" means the peer's HELLO carried the v2 fields; "live" means a frame
+/// arrived from it within `dead_threshold`. A peer that is one but not the other
+/// is simply absent from [`MeshTransport::eph_members`], which is what keeps the
+/// rendezvous ring of §3.7 identical on every broker that sees the same
+/// membership — and what excludes an old peer mid-rolling-deploy without any
+/// version negotiation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EphMember {
+    pub server_id: String,
+    /// Dialable base URL, e.g. `http://queen-b:6632`. No trailing slash.
+    pub http_addr: String,
+    /// The peer's `eph_epoch` (M4) as of its last handshake. Not used for
+    /// routing — it is how a log line or a support ticket can tell a peer that
+    /// RESTARTED from one that merely reconnected.
+    pub epoch: u64,
+}
+
+/// What a peer's HELLO said about itself.
+struct PeerHello {
+    server_id: String,
+    /// `None` ⇒ pre-v2 peer ⇒ not ephemeral-capable (§8 compat matrix).
+    eph: Option<(String, u64)>,
 }
 
 // One configured outbound peer: the bounded sender its writer task drains, plus
@@ -145,12 +187,28 @@ pub struct MeshTransport {
     secret: String,
     heartbeat: Duration,
     dead_threshold: Duration,
+    /// HELLO v2 (§3.5): what WE advertise. See `config::SyncConfig::http_addr`.
+    http_addr: String,
+    /// HELLO v2 (§3.5, M4): this incarnation's `eph_epoch`, taken from the
+    /// engine at bind. Threaded through the transport rather than read from a
+    /// global, because there is exactly one engine per process and the mesh
+    /// should not be the thing that knows how to find it.
+    eph_epoch: u64,
 
     peers: Vec<Peer>,
     // Inbound liveness: last time we received ANY frame from a peer, keyed by the
     // server_id it announced in its HELLO. A peer whose last inbound frame is
     // older than `dead_threshold` is reported dead in stats.
     liveness: Mutex<HashMap<String, Instant>>,
+    /// HELLO v2 (§3.5, M3): `server_id -> (http_addr, eph_epoch)` for the peers
+    /// that advertised them. A peer ABSENT here has handshaked with a pre-v2
+    /// build and is not ephemeral-capable; it still wakes and still flips
+    /// maintenance, it is simply not in the rendezvous ring.
+    ///
+    /// Overwritten on every HELLO, so a peer that restarted publishes its new
+    /// epoch (and, after a redeploy onto a new pod, its new address) the moment
+    /// it re-dials — the liveness map alone could not tell those apart (M4).
+    eph_peers: Mutex<HashMap<String, (String, u64)>>,
     handlers: SyncHandlers,
 
     sent: AtomicU64,
@@ -164,9 +222,15 @@ impl MeshTransport {
     /// tasks — call [`start`](Self::start) with the returned bindings after wiring
     /// (e.g. `Notifier::attach_transport`) is complete. A bind failure (port in
     /// use) surfaces here so `main.rs` can fall back to the local waker.
+    /// `eph_epoch` is the engine's boot incarnation id (M4), advertised in
+    /// HELLO v2. It is a PARAMETER and not a `SyncConfig` field because it is a
+    /// runtime value drawn by `Ephemeral::new`, not something an operator sets;
+    /// a config field would invite someone to make it configurable, which would
+    /// defeat the fencing it exists for.
     pub async fn bind(
         cfg: &crate::config::SyncConfig,
         handlers: SyncHandlers,
+        eph_epoch: u64,
     ) -> std::io::Result<(Arc<MeshTransport>, MeshBindings)> {
         let listener = TcpListener::bind(format!("0.0.0.0:{}", cfg.mesh_port)).await?;
         let mut peers = Vec::with_capacity(cfg.peers.len());
@@ -188,8 +252,11 @@ impl MeshTransport {
             secret: cfg.secret.clone(),
             heartbeat: Duration::from_millis(cfg.heartbeat_ms),
             dead_threshold: Duration::from_millis(cfg.dead_threshold_ms),
+            http_addr: cfg.http_addr.clone(),
+            eph_epoch,
             peers,
             liveness: Mutex::new(HashMap::new()),
+            eph_peers: Mutex::new(HashMap::new()),
             handlers,
             sent: AtomicU64::new(0),
             received: AtomicU64::new(0),
@@ -316,6 +383,27 @@ impl MeshTransport {
         self.broadcast(encode_frame(T_QUEUE_CONFIG_SET, &payload).into());
     }
 
+    /// EPHEMERAL_QUEUES.md §3.5 — broadcast one ephemeral admin op.
+    ///
+    /// FIRE AND FORGET, on the same terms as every other frame in this module: a
+    /// dropped one costs a ghost ring until the config reconcile heals it (§10
+    /// Q4), never correctness — the contents of an ephemeral queue are allowed to
+    /// disappear (§1.2), so the worst case of a lost `reset` is that a peer's
+    /// copy survives a little longer than the operator expected.
+    ///
+    /// `tenant` and `queue` are sent SEPARATELY and the queue is the BARE name,
+    /// without the `eph:` prefix: the prefix is an internal key convention (M5)
+    /// and putting it on the wire would make every receiver strip it back off.
+    pub fn send_eph_admin(&self, op: &str, tenant: &str, queue: &str) {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "op": op,
+            "tenant": tenant,
+            "queue": queue,
+        }))
+        .unwrap_or_default();
+        self.broadcast(encode_frame(T_EPH_ADMIN, &payload).into());
+    }
+
     pub fn send_queue_config_delete(&self, qkey: &str) {
         let (tenant, queue) = crate::handlers::split_tenant_queue(qkey);
         let payload = serde_json::to_vec(&serde_json::json!({ "queue": queue, "tenant": tenant }))
@@ -367,7 +455,15 @@ impl MeshTransport {
         // `localhost` resolves to `::1` first.
         let mut stream = TcpStream::connect((host, port)).await?;
         stream.set_nodelay(true).ok();
-        let hello = encode_frame(T_HELLO, &build_hello_payload(&self.server_id, &self.secret));
+        let hello = encode_frame(
+            T_HELLO,
+            &build_hello_payload(
+                &self.server_id,
+                &self.secret,
+                &self.http_addr,
+                self.eph_epoch,
+            ),
+        );
         stream.write_all(&hello).await?;
         Ok(stream)
     }
@@ -434,13 +530,32 @@ impl MeshTransport {
             self.handshake_failures.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        let sender_id = match verify_hello(&payload, &self.secret) {
-            Some(id) => id,
+        let hello = match verify_hello(&payload, &self.secret) {
+            Some(h) => h,
             None => {
                 self.handshake_failures.fetch_add(1, Ordering::Relaxed);
                 return;
             }
         };
+        let sender_id = hello.server_id;
+        // HELLO v2 (§3.5). A peer that advertises the pair joins the rendezvous
+        // ring; a peer that does not is simply never inserted, which is the whole
+        // of the rolling-deploy story — no version field, no negotiation, and an
+        // old peer is excluded by the absence of the thing forwarding needs.
+        match hello.eph {
+            Some((addr, epoch)) => {
+                self.eph_peers
+                    .lock()
+                    .unwrap()
+                    .insert(sender_id.clone(), (addr, epoch));
+            }
+            // A DOWNGRADE must also be honoured: if this peer was capable and
+            // has been rolled back, leaving the stale address in the map would
+            // forward ephemeral traffic into a broker that answers 404.
+            None => {
+                self.eph_peers.lock().unwrap().remove(&sender_id);
+            }
+        }
         self.mark_seen(&sender_id);
         loop {
             match read_frame(&mut stream).await {
@@ -459,6 +574,56 @@ impl MeshTransport {
             .lock()
             .unwrap()
             .insert(sender_id.to_string(), Instant::now());
+    }
+
+    /// This broker's own mesh identity — the rendezvous ring's node key (§3.7).
+    pub fn server_id(&self) -> &str {
+        &self.server_id
+    }
+
+    /// EPHEMERAL_QUEUES.md §3.5/M3 — the live, ephemeral-capable peers.
+    ///
+    /// SELF IS NOT IN THE LIST. The caller adds it (§3.7: "over `eph_members()` ∪
+    /// self"), because self's liveness is not a question this map can answer and
+    /// a transport that inserted itself would make an empty return value
+    /// ambiguous between "no peers" and "not wired".
+    ///
+    /// Two filters, and they are different questions:
+    ///   * ALIVE — a frame within `dead_threshold`, from the same map `stats()`
+    ///     counts. A peer that stops heartbeating leaves the ring, its partitions
+    ///     re-hash to whoever is left, and their contents are gone (§1.2/§1.4).
+    ///   * CAPABLE — its HELLO carried `http_addr` and `eph_epoch`. Without an
+    ///     address there is nowhere to forward to (§3.6), so an old peer is
+    ///     excluded rather than guessed at.
+    ///
+    /// Sorted by `server_id` so two brokers building the same ring from the same
+    /// membership feed the hash the same list — the tie-break in `hrw_pick` is
+    /// then the only thing that has to agree, not the iteration order of a map.
+    pub fn eph_members(&self) -> Vec<EphMember> {
+        let now = Instant::now();
+        // Fixed order (liveness, then eph_peers) wherever both are held. They are
+        // only ever taken together here, but writing the rule down is cheaper
+        // than rediscovering it from a deadlock.
+        let live = self.liveness.lock().unwrap();
+        let caps = self.eph_peers.lock().unwrap();
+        let mut out: Vec<EphMember> = caps
+            .iter()
+            .filter_map(|(id, (addr, epoch))| {
+                let last = live.get(id)?;
+                if now.duration_since(*last) > self.dead_threshold {
+                    return None;
+                }
+                Some(EphMember {
+                    server_id: id.clone(),
+                    http_addr: addr.clone(),
+                    epoch: *epoch,
+                })
+            })
+            .collect();
+        drop(caps);
+        drop(live);
+        out.sort_by(|a, b| a.server_id.cmp(&b.server_id));
+        out
     }
 
     /// Log alive→dead and dead→alive transitions for operability (the stats
@@ -565,6 +730,33 @@ impl MeshTransport {
                     (self.handlers.on_queue_config_delete)(t.as_deref(), q);
                 }
             }
+            T_EPH_ADMIN => {
+                let Ok(v) = serde_json::from_slice::<serde_json::Value>(payload) else { return };
+                let Some(op) = v.get("op").and_then(|x| x.as_str()).filter(|s| !s.is_empty())
+                else {
+                    return;
+                };
+                let Some(q) = v.get("queue").and_then(|x| x.as_str()).filter(|s| !s.is_empty())
+                else {
+                    return;
+                };
+                // The one frame family that REFUSES the tenant-less fan-out the
+                // wakes take (see `on_eph_admin`): these ops destroy, and an
+                // un-attributable destructive frame is dropped, not broadened.
+                let Some(t) = frame_tenant(&v) else { return };
+                (self.handlers.on_eph_admin)(op, &t, q);
+            }
+            // AN UNKNOWN TAG IS SKIPPED AND THE CONNECTION SURVIVES (§11.2).
+            //
+            // This is the whole of the rolling-deploy contract in one arm: a peer
+            // one version ahead sends a frame this build has no name for, and the
+            // only correct reaction is to ignore that frame — closing the socket
+            // would take every WAKE on it down with the tag nobody knew, turning
+            // a forward-compatible addition into a cluster-wide latency event.
+            // Framing is what makes it safe: the length prefix is read before the
+            // type, so the reader can step over a frame it cannot interpret. It
+            // is also why a NEW capability rides new FIELDS on an existing frame
+            // (HELLO v2 above) whenever it can, and a new tag only when it must.
             _ => {}
         }
     }
@@ -617,6 +809,12 @@ impl MeshTransport {
             "peers": peers_json,
             "servers_alive": alive,
             "servers_dead": dead,
+            // EPHEMERAL_QUEUES.md §3.5. How many of the live peers are in the
+            // rendezvous ring — i.e. advertised HELLO v2. During a rolling
+            // deploy this is BELOW `servers_alive` and that is the expected
+            // reading, not an error: the old peers still wake and still flip
+            // maintenance, they just do not own ephemeral partitions.
+            "eph_members": self.eph_members().len(),
             "messages_sent": self.sent.load(Ordering::Relaxed),
             "messages_received": self.received.load(Ordering::Relaxed),
             "messages_dropped": self.dropped.load(Ordering::Relaxed),
@@ -678,10 +876,22 @@ async fn read_frame<R: AsyncReadExt + Unpin>(r: &mut R) -> std::io::Result<(u8, 
     Ok((tb[0], payload))
 }
 
-/// Build the HELLO payload `{server_id, nonce, mac}`. `mac = HMAC-SHA256(secret,
-/// nonce)` over the nonce's hex bytes; an empty secret leaves `mac` empty
-/// (open mode).
-fn build_hello_payload(server_id: &str, secret: &str) -> Vec<u8> {
+/// Build the HELLO payload — v2: `{server_id, nonce, mac, http_addr, eph_epoch}`.
+/// `mac = HMAC-SHA256(secret, nonce)` over the nonce's hex bytes; an empty secret
+/// leaves `mac` empty (open mode).
+///
+/// THE TWO NEW FIELDS ARE ADDITIVE JSON, which is what makes the rolling deploy
+/// of §8 work in both directions: an older peer reads `server_id`/`nonce`/`mac`
+/// exactly where it always did and never looks at the rest, while a newer peer
+/// reading an older HELLO finds them absent and marks that peer not
+/// ephemeral-capable. This is the same mechanism `tenant` arrived by in Track B,
+/// and it is why the capability needed no version number.
+///
+/// `eph_epoch` goes on the wire as HEX and not as a JSON number: it is a full
+/// `u64`, JSON numbers are conventionally doubles, and the value is printed in
+/// hex in the boot line and inside every message id (§3.1) — one spelling
+/// everywhere is what lets an operator match an `stale` ack to a log line.
+fn build_hello_payload(server_id: &str, secret: &str, http_addr: &str, eph_epoch: u64) -> Vec<u8> {
     let nonce = gen_nonce_hex();
     let mac = if secret.is_empty() {
         String::new()
@@ -694,29 +904,49 @@ fn build_hello_payload(server_id: &str, secret: &str) -> Vec<u8> {
         "server_id": server_id,
         "nonce": nonce,
         "mac": mac,
+        "http_addr": http_addr,
+        "eph_epoch": format!("{eph_epoch:x}"),
     }))
     .unwrap_or_default()
 }
 
-/// Verify a HELLO payload, returning the peer's `server_id` on success. An empty
+/// Verify a HELLO payload, returning what the peer said about itself. An empty
 /// secret accepts any well-formed HELLO (open mode). A configured secret requires
 /// a matching HMAC over the nonce, compared in constant time.
-fn verify_hello(payload: &[u8], secret: &str) -> Option<String> {
+///
+/// The v2 pair is read only AFTER the MAC has been checked, and it is read as a
+/// PAIR: an address without an epoch (or vice versa) is a half-written HELLO and
+/// yields `None` — being in the rendezvous ring without a resolvable identity is
+/// worse than being out of it.
+fn verify_hello(payload: &[u8], secret: &str) -> Option<PeerHello> {
     let v: serde_json::Value = serde_json::from_slice(payload).ok()?;
     let server_id = v.get("server_id").and_then(|x| x.as_str())?;
     if server_id.is_empty() {
         return None;
     }
-    if secret.is_empty() {
-        return Some(server_id.to_string());
+    if !secret.is_empty() {
+        let nonce = v.get("nonce").and_then(|x| x.as_str())?;
+        let mac_hex = v.get("mac").and_then(|x| x.as_str())?;
+        let mac_bytes = hex::decode(mac_hex).ok()?;
+        let mut m = HmacSha256::new_from_slice(secret.as_bytes()).ok()?;
+        m.update(nonce.as_bytes());
+        m.verify_slice(&mac_bytes).ok()?;
     }
-    let nonce = v.get("nonce").and_then(|x| x.as_str())?;
-    let mac_hex = v.get("mac").and_then(|x| x.as_str())?;
-    let mac_bytes = hex::decode(mac_hex).ok()?;
-    let mut m = HmacSha256::new_from_slice(secret.as_bytes()).ok()?;
-    m.update(nonce.as_bytes());
-    m.verify_slice(&mac_bytes).ok()?;
-    Some(server_id.to_string())
+    let addr = v
+        .get("http_addr")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty());
+    let epoch = v
+        .get("eph_epoch")
+        .and_then(|x| x.as_str())
+        .and_then(|s| u64::from_str_radix(s, 16).ok());
+    Some(PeerHello {
+        server_id: server_id.to_string(),
+        eph: match (addr, epoch) {
+            (Some(a), Some(e)) => Some((a.to_string(), e)),
+            _ => None,
+        },
+    })
 }
 
 fn gen_nonce_hex() -> String {
@@ -789,13 +1019,15 @@ mod tests {
 
     #[test]
     fn handshake_good_secret_roundtrips() {
-        let payload = build_hello_payload("node-A", "s3cr3t");
-        assert_eq!(verify_hello(&payload, "s3cr3t").as_deref(), Some("node-A"));
+        let payload = build_hello_payload("node-A", "s3cr3t", "http://a:6632", 0xabc);
+        let h = verify_hello(&payload, "s3cr3t").expect("good secret verifies");
+        assert_eq!(h.server_id, "node-A");
+        assert_eq!(h.eph, Some(("http://a:6632".to_string(), 0xabc)));
     }
 
     #[test]
     fn handshake_bad_secret_rejected() {
-        let payload = build_hello_payload("node-A", "s3cr3t");
+        let payload = build_hello_payload("node-A", "s3cr3t", "http://a:6632", 1);
         assert!(verify_hello(&payload, "wrong").is_none());
     }
 
@@ -803,18 +1035,18 @@ mod tests {
     fn handshake_open_mode_accepts_any() {
         // Empty secret on both sides = open mode: HELLO is exchanged (to learn the
         // server_id) but not verified.
-        let payload = build_hello_payload("node-B", "");
-        assert_eq!(verify_hello(&payload, "").as_deref(), Some("node-B"));
+        let payload = build_hello_payload("node-B", "", "http://b:6632", 2);
+        assert_eq!(verify_hello(&payload, "").unwrap().server_id, "node-B");
         // A secured node still learns the id of an authenticated peer even if it
         // itself runs open.
-        let signed = build_hello_payload("node-C", "k");
-        assert_eq!(verify_hello(&signed, "").as_deref(), Some("node-C"));
+        let signed = build_hello_payload("node-C", "k", "http://c:6632", 3);
+        assert_eq!(verify_hello(&signed, "").unwrap().server_id, "node-C");
     }
 
     #[test]
     fn handshake_secretless_peer_rejected_by_secured_listener() {
         // A peer that sends no MAC cannot talk to a listener that requires one.
-        let payload = build_hello_payload("node-D", "");
+        let payload = build_hello_payload("node-D", "", "http://d:6632", 4);
         assert!(verify_hello(&payload, "required-secret").is_none());
     }
 
@@ -837,6 +1069,7 @@ mod tests {
 
     fn forwarding_handlers(tx: tmpsc::UnboundedSender<Fwd>) -> SyncHandlers {
         let dtx = tx.clone();
+        let etx = tx.clone();
         SyncHandlers {
             on_message_available: Box::new(move |t, q, p| {
                 let _ = tx.send((t.map(|s| s.to_string()), q.to_string(), p.to_string()));
@@ -856,6 +1089,11 @@ mod tests {
             on_pop_maintenance: Box::new(|_| {}),
             on_queue_config_set: Box::new(|_, _| {}),
             on_queue_config_delete: Box::new(|_, _| {}),
+            // EPHEMERAL_QUEUES.md §3.5 — routed to the same channel, tagged
+            // "eph:<op>", so one assertion shape covers every frame family.
+            on_eph_admin: Box::new(move |op, t, q| {
+                let _ = etx.send((Some(t.to_string()), format!("eph:{op}"), q.to_string()));
+            }),
         }
     }
 
@@ -873,6 +1111,7 @@ mod tests {
             dead_threshold_ms: 300,
             cache_refresh_ms: 60_000,
             server_id: server_id.to_string(),
+            http_addr: format!("http://{server_id}.test:6632"),
         }
     }
 
@@ -891,7 +1130,7 @@ mod tests {
     async fn mesh_delivers_single_and_batched_wakes() {
         // Node B listens (no peers of its own); node A dials B and sends.
         let (btx, mut brx) = tmpsc::unbounded_channel();
-        let (tb, bind_b) = MeshTransport::bind(&mk_cfg(vec![], "", "B"), forwarding_handlers(btx))
+        let (tb, bind_b) = MeshTransport::bind(&mk_cfg(vec![], "", "B"), forwarding_handlers(btx), 0xb0)
             .await
             .unwrap();
         let pb = bind_b.local_addr().unwrap().port();
@@ -901,6 +1140,7 @@ mod tests {
         let (ta, bind_a) = MeshTransport::bind(
             &mk_cfg(vec![("127.0.0.1".into(), pb)], "", "A"),
             forwarding_handlers(atx),
+            0xa0,
         )
         .await
         .unwrap();
@@ -977,7 +1217,7 @@ mod tests {
     #[tokio::test]
     async fn a_tenantless_frame_is_never_attributed_to_a_tenant() {
         let (tx, mut rx) = tmpsc::unbounded_channel();
-        let (t, _bind) = MeshTransport::bind(&mk_cfg(vec![], "", "solo"), forwarding_handlers(tx))
+        let (t, _bind) = MeshTransport::bind(&mk_cfg(vec![], "", "solo"), forwarding_handlers(tx), 0x50)
             .await
             .unwrap();
         t.dispatch(
@@ -1021,7 +1261,7 @@ mod tests {
         // B requires a secret; A dials with the wrong one.
         let (btx, mut brx) = tmpsc::unbounded_channel();
         let (tb, bind_b) =
-            MeshTransport::bind(&mk_cfg(vec![], "right", "B"), forwarding_handlers(btx))
+            MeshTransport::bind(&mk_cfg(vec![], "right", "B"), forwarding_handlers(btx), 0xb1)
                 .await
                 .unwrap();
         let pb = bind_b.local_addr().unwrap().port();
@@ -1031,6 +1271,7 @@ mod tests {
         let (ta, bind_a) = MeshTransport::bind(
             &mk_cfg(vec![("127.0.0.1".into(), pb)], "wrong", "A"),
             forwarding_handlers(atx),
+            0xa1,
         )
         .await
         .unwrap();
@@ -1072,6 +1313,7 @@ mod tests {
         let (ta, bind_a) = MeshTransport::bind(
             &mk_cfg(vec![("127.0.0.1".into(), pb)], "", "A"),
             forwarding_handlers(atx),
+            0xa0,
         )
         .await
         .unwrap();
@@ -1095,7 +1337,7 @@ mod tests {
         let (tb, bind_b) = {
             let mut attempt = None;
             for _ in 0..100 {
-                match MeshTransport::bind(&cfg_b, forwarding_handlers(btx.clone())).await {
+                match MeshTransport::bind(&cfg_b, forwarding_handlers(btx.clone()), 0xb2).await {
                     Ok(v) => {
                         attempt = Some(v);
                         break;
@@ -1133,7 +1375,7 @@ mod tests {
         // HELLO + one frame, then goes silent and disconnects. After dead_threshold
         // the listener must report it dead — and still serve a fresh connection.
         let (btx, mut brx) = tmpsc::unbounded_channel();
-        let (tb, bind_b) = MeshTransport::bind(&mk_cfg(vec![], "", "B"), forwarding_handlers(btx))
+        let (tb, bind_b) = MeshTransport::bind(&mk_cfg(vec![], "", "B"), forwarding_handlers(btx), 0xb0)
             .await
             .unwrap();
         let pb = bind_b.local_addr().unwrap().port();
@@ -1141,7 +1383,7 @@ mod tests {
 
         {
             let mut s = TcpStream::connect(("127.0.0.1", pb)).await.unwrap();
-            s.write_all(&encode_frame(T_HELLO, &build_hello_payload("ghost", "")))
+            s.write_all(&encode_frame(T_HELLO, &build_hello_payload("ghost", "", "http://ghost:6632", 0x9)))
                 .await
                 .unwrap();
             s.write_all(&encode_frame(
@@ -1172,7 +1414,7 @@ mod tests {
 
         // The listener keeps serving: a fresh connection is dispatched normally.
         let mut s2 = TcpStream::connect(("127.0.0.1", pb)).await.unwrap();
-        s2.write_all(&encode_frame(T_HELLO, &build_hello_payload("live", "")))
+        s2.write_all(&encode_frame(T_HELLO, &build_hello_payload("live", "", "http://live:6632", 0xa)))
             .await
             .unwrap();
         s2.write_all(&encode_frame(
@@ -1186,5 +1428,245 @@ mod tests {
             .expect("listener stopped serving after a peer died")
             .unwrap();
         assert_eq!(got2, (None, "q2".to_string(), "p2".to_string()));
+    }
+
+    // =======================================================================
+    // EPHEMERAL_QUEUES.md §3.5 — HELLO v2, T_EPH_ADMIN, unknown-tag tolerance
+    // =======================================================================
+
+    /// "Old peers lacking the fields are tolerated and marked not
+    /// ephemeral-capable" (§3.5/§8). The v1 HELLO shape is written by hand here
+    /// rather than by an older `build_hello_payload`, because the point of the
+    /// test is that THIS parser accepts the bytes a previous release emitted.
+    #[test]
+    fn hello_v1_from_an_old_peer_parses_but_is_not_capable() {
+        let v1 = serde_json::to_vec(&serde_json::json!({
+            "server_id": "old-node",
+            "nonce": "aa",
+            "mac": "",
+        }))
+        .unwrap();
+        let h = verify_hello(&v1, "").expect("a v1 HELLO must still handshake");
+        assert_eq!(h.server_id, "old-node");
+        assert!(h.eph.is_none(), "a peer with no v2 fields is not capable");
+    }
+
+    /// Half a v2 HELLO is not a v2 HELLO: an address with no epoch (or an epoch
+    /// with no address) leaves the peer OUT of the ring rather than in it with a
+    /// hole, because a member the ring cannot forward to or fence against is
+    /// worse than one member fewer.
+    #[test]
+    fn a_half_written_hello_v2_is_not_capable() {
+        for payload in [
+            serde_json::json!({"server_id":"n","nonce":"aa","mac":"","http_addr":"http://n:1"}),
+            serde_json::json!({"server_id":"n","nonce":"aa","mac":"","eph_epoch":"ff"}),
+            // A non-hex epoch is a garbled field, not a zero one.
+            serde_json::json!({
+                "server_id":"n","nonce":"aa","mac":"",
+                "http_addr":"http://n:1","eph_epoch":"zz"
+            }),
+        ] {
+            let bytes = serde_json::to_vec(&payload).unwrap();
+            assert!(verify_hello(&bytes, "").unwrap().eph.is_none());
+        }
+    }
+
+    /// The v2 fields are ADDITIVE: an old reader still finds every field it
+    /// knows, in the same place (the §8 rolling-deploy direction new → old).
+    #[test]
+    fn hello_v2_still_parses_as_the_v1_shape() {
+        let payload = build_hello_payload("node-A", "", "http://a:6632", 0x1234);
+        let v: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(v.get("server_id").and_then(|x| x.as_str()), Some("node-A"));
+        assert!(v.get("nonce").and_then(|x| x.as_str()).is_some());
+        assert!(v.get("mac").and_then(|x| x.as_str()).is_some());
+        // The epoch is hex TEXT, not a JSON number — a full u64 must survive a
+        // round trip that a double would round off.
+        assert_eq!(v.get("eph_epoch").and_then(|x| x.as_str()), Some("1234"));
+        let big = build_hello_payload("n", "", "http://n:1", u64::MAX);
+        assert_eq!(verify_hello(&big, "").unwrap().eph.unwrap().1, u64::MAX);
+    }
+
+    /// §11.2 — "unknown frame types on old peers must be ignored, not fatal".
+    /// The connection has to SURVIVE one: a peer one version ahead sends a tag
+    /// this build has no name for, and closing on it would take every wake
+    /// sharing that socket down with it.
+    #[tokio::test]
+    async fn an_unknown_frame_type_is_skipped_and_the_connection_survives() {
+        let (btx, mut brx) = tmpsc::unbounded_channel();
+        let (tb, bind_b) =
+            MeshTransport::bind(&mk_cfg(vec![], "", "B"), forwarding_handlers(btx), 0xb3)
+                .await
+                .unwrap();
+        let pb = bind_b.local_addr().unwrap().port();
+        tb.start(bind_b);
+
+        let mut s = TcpStream::connect(("127.0.0.1", pb)).await.unwrap();
+        s.write_all(&encode_frame(
+            T_HELLO,
+            &build_hello_payload("future", "", "http://future:6632", 0xf),
+        ))
+        .await
+        .unwrap();
+        // A tag from the future, with a payload this build cannot even parse.
+        s.write_all(&encode_frame(213, b"\x00\x01\x02 not json at all"))
+            .await
+            .unwrap();
+        // …followed by a frame it does know. Receiving THIS is the assertion:
+        // the reader stepped over the unknown frame using its length prefix and
+        // stayed on the connection.
+        s.write_all(&encode_frame(
+            T_MESSAGE_AVAILABLE,
+            br#"{"queue":"after","partition":"p"}"#,
+        ))
+        .await
+        .unwrap();
+
+        let got = tokio::time::timeout(Duration::from_secs(2), brx.recv())
+            .await
+            .expect("the connection died on an unknown frame type")
+            .unwrap();
+        assert_eq!(got, (None, "after".to_string(), "p".to_string()));
+    }
+
+    /// §3.5 end to end: HELLO v2 puts a peer in `eph_members()` with the address
+    /// and epoch it advertised, and a `T_EPH_ADMIN` frame round-trips its three
+    /// fields.
+    #[tokio::test]
+    async fn hello_v2_populates_members_and_eph_admin_round_trips() {
+        let (btx, mut brx) = tmpsc::unbounded_channel();
+        let (tb, bind_b) =
+            MeshTransport::bind(&mk_cfg(vec![], "", "B"), forwarding_handlers(btx), 0xb4)
+                .await
+                .unwrap();
+        let pb = bind_b.local_addr().unwrap().port();
+        tb.start(bind_b);
+
+        let (atx, _arx) = tmpsc::unbounded_channel();
+        let (ta, bind_a) = MeshTransport::bind(
+            &mk_cfg(vec![("127.0.0.1".into(), pb)], "", "A"),
+            forwarding_handlers(atx),
+            0xdead_beef_cafe,
+        )
+        .await
+        .unwrap();
+        ta.start(bind_a);
+        assert!(wait_peer0_connected(&ta, true).await, "A never connected to B");
+
+        // B learned A from the HELLO — address and epoch, not just the id.
+        let mut members = Vec::new();
+        for _ in 0..200 {
+            members = tb.eph_members();
+            if !members.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            members,
+            vec![EphMember {
+                server_id: "A".to_string(),
+                http_addr: "http://A.test:6632".to_string(),
+                epoch: 0xdead_beef_cafe,
+            }]
+        );
+        // A itself is NEVER in its own list — §3.7's caller adds self.
+        assert!(ta.eph_members().is_empty());
+        assert_eq!(tb.stats()["eph_members"].as_u64(), Some(1));
+
+        let uuid = "11111111-1111-1111-1111-111111111111";
+        ta.send_eph_admin("reset", uuid, "inbox");
+        let got = tokio::time::timeout(Duration::from_secs(2), brx.recv())
+            .await
+            .expect("no eph admin frame within 2s")
+            .unwrap();
+        assert_eq!(
+            got,
+            (Some(uuid.to_string()), "eph:reset".to_string(), "inbox".to_string())
+        );
+    }
+
+    /// A destructive frame that cannot name its tenant is DROPPED, where a wake
+    /// in the same shape fans out (§3.5). Dispatched directly, since the point is
+    /// the parse and not the transport.
+    #[tokio::test]
+    async fn an_eph_admin_without_a_valid_tenant_is_dropped() {
+        let (tx, mut rx) = tmpsc::unbounded_channel();
+        let (t, _bind) =
+            MeshTransport::bind(&mk_cfg(vec![], "", "solo"), forwarding_handlers(tx), 0x51)
+                .await
+                .unwrap();
+        // No tenant at all (a pre-Track-B shape), a garbled one, and a missing
+        // op or queue: all four are silently skipped.
+        t.dispatch(T_EPH_ADMIN, br#"{"op":"delete","queue":"inbox"}"#);
+        t.dispatch(T_EPH_ADMIN, br#"{"op":"delete","queue":"inbox","tenant":"nope"}"#);
+        t.dispatch(
+            T_EPH_ADMIN,
+            br#"{"queue":"inbox","tenant":"11111111-1111-1111-1111-111111111111"}"#,
+        );
+        t.dispatch(
+            T_EPH_ADMIN,
+            br#"{"op":"delete","tenant":"11111111-1111-1111-1111-111111111111"}"#,
+        );
+        assert!(rx.try_recv().is_err(), "a destructive frame leaked through");
+        // …and a well-formed one on the same transport still lands, so the test
+        // is not passing because dispatch is broken outright.
+        t.dispatch(
+            T_EPH_ADMIN,
+            br#"{"op":"config_set","queue":"inbox","tenant":"11111111-1111-1111-1111-111111111111"}"#,
+        );
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            (
+                Some("11111111-1111-1111-1111-111111111111".to_string()),
+                "eph:config_set".to_string(),
+                "inbox".to_string()
+            )
+        );
+    }
+
+    /// A peer that goes silent leaves the rendezvous ring within
+    /// `dead_threshold` — the membership change §3.7 turns into an ownership
+    /// move. Capability alone is not membership.
+    #[tokio::test]
+    async fn a_silent_peer_leaves_eph_members() {
+        let (btx, _brx) = tmpsc::unbounded_channel();
+        let (tb, bind_b) =
+            MeshTransport::bind(&mk_cfg(vec![], "", "B"), forwarding_handlers(btx), 0xb5)
+                .await
+                .unwrap();
+        let pb = bind_b.local_addr().unwrap().port();
+        tb.start(bind_b);
+
+        {
+            let mut s = TcpStream::connect(("127.0.0.1", pb)).await.unwrap();
+            s.write_all(&encode_frame(
+                T_HELLO,
+                &build_hello_payload("ghost", "", "http://ghost:6632", 7),
+            ))
+            .await
+            .unwrap();
+            // dropped → silent from here on
+        }
+        let mut saw = false;
+        for _ in 0..200 {
+            if tb.eph_members().len() == 1 {
+                saw = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(saw, "a capable peer never entered the ring");
+
+        // dead_threshold is 300ms in the test config.
+        let mut gone = false;
+        for _ in 0..200 {
+            if tb.eph_members().is_empty() {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(gone, "a dead peer stayed in the rendezvous ring");
     }
 }

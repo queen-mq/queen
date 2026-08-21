@@ -37,6 +37,10 @@ entries in `operations`: `kv` writes [transactional state](/use/kv) and `timers`
 a [timer](/use/timers). Both are served by every broker, and a bundle that carries neither is byte for
 byte the call it was before they existed.
 
+[Ephemeral queues](/use/ephemeral) are the one thing here that is not built on that commit at all.
+They are a second storage class, on their own routes, whose contents live in the broker's memory and
+survive nothing, for the workloads that have no use for history and should not pay for it.
+
 <Render file="snippets/js-push" />
 
 The queue and the partition are created by the push that names them, so there is nothing to

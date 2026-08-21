@@ -33,6 +33,21 @@ class Recorded:
     query: Dict[str, List[str]] = field(default_factory=dict)
     body: Any = None
     headers: Dict[str, str] = field(default_factory=dict)
+    #: The request body as it went out, before json.loads. A parsed body cannot
+    #: answer a byte-identity question -- key order, a field that grew, an
+    #: envelope that changed shape all survive a dict comparison intact -- so
+    #: the raw bytes are kept for the pins that need them
+    #: (tests/ephemeral_unit/test_durable_sink_pin.py).
+    raw: bytes = b""
+    #: The query exactly as it was emitted. `query` above answers "was the
+    #: parameter sent"; this one answers "in what ORDER", which is a contract in
+    #: its own right wherever a plan fixes one (EPHEMERAL_QUEUES.md §3.1).
+    query_string: str = ""
+    #: The path as it went out on the wire, still percent-encoded. `path` above
+    #: is httpx's DECODED view, in which a queue named `rooms/7` is
+    #: indistinguishable from the two path segments `rooms` and `7` -- and that
+    #: difference is exactly what an encoding test has to be able to see.
+    raw_path: str = ""
 
     @property
     def route(self) -> str:
@@ -140,12 +155,17 @@ class PlanServer(httpx.AsyncBaseTransport):
         except Exception:
             body = raw.decode("utf-8", "replace")
 
+        query = request.url.query
+        query_string = query.decode() if isinstance(query, bytes) else query
         rec = Recorded(
             method=request.method,
             path=request.url.path,
-            query=parse_qs(request.url.query.decode() if isinstance(request.url.query, bytes) else request.url.query),
+            query=parse_qs(query_string),
             body=body,
             headers={k.lower(): v for k, v in request.headers.items()},
+            raw=raw or b"",
+            query_string=query_string,
+            raw_path=request.url.raw_path.decode().split("?", 1)[0],
         )
         self.requests.append(rec)
 

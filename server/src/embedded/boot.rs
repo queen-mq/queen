@@ -321,6 +321,8 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
             switches::Switches::KEY_KV,
             switches::Switches::KEY_TIMERS_SCHEDULE,
             switches::Switches::KEY_TIMERS_FIRE,
+            // EPHEMERAL_QUEUES.md §3.8 (KEEP IN SYNC with main.rs).
+            switches::Switches::KEY_EPHEMERAL,
         ] {
             if let Ok(v) = db::get_system_flag_opt(&c, key).await {
                 switches.adopt(key, v);
@@ -387,6 +389,46 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
     );
     hotlist.attach_notifier(notifier.clone());
 
+    // EPHEMERAL_QUEUES.md §3.2 — KEEP IN SYNC with main.rs (the embedded-API
+    // memory rule). The embedded broker is by definition single-broker, which is
+    // exactly the ownership topology the engine implements, so nothing about it
+    // is degraded here. The one difference is deliberate and stated: there is no
+    // sweeper embedded, so no `attach_wake_hint` — the opportunistic expiry
+    // sweep on every ring touch is the whole mechanism, and it is the
+    // correctness floor on the HTTP broker too.
+    let ephemeral = crate::ephemeral::Ephemeral::new(
+        crate::ephemeral::Knobs {
+            global_max_bytes: cfg.ephemeral_max_bytes,
+            queue_max_bytes: cfg.ephemeral_queue_max_bytes,
+            queue_max_length: cfg.ephemeral_queue_max_length,
+            lease_ms: cfg.ephemeral_lease_s * 1000,
+            retry_limit: cfg.ephemeral_retry_limit,
+            implicit_idle_ms: cfg.ephemeral_implicit_idle_s * 1000,
+            require_grant: cfg.ephemeral_require_grant,
+            rate: cfg.ephemeral_rate,
+            burst: cfg.ephemeral_burst,
+            max_tenants: cfg.kv_max_tenants,
+        },
+        metrics.clone(),
+    );
+    // §2 — the grants and the declared configs, ONE read awaited before the
+    // facade is handed back (KEEP IN SYNC with main.rs, where the same read is
+    // awaited before the listener opens). The embedded broker has no listener,
+    // so "before serving" is "before `Broker::start` returns" — and the property
+    // being kept is the same one: the first operation must already see the
+    // declared queues and the grant map, or a declared queue is silently
+    // re-created implicitly with the broker defaults.
+    match crate::ephemeral::refresh_once(&ephemeral, &pool, cfg.kv_max_tenants).await {
+        Ok((grants, configs)) => tracing::info!(
+            target: "ephemeral", grants, configs, "ephemeral grants and declared configs seeded"
+        ),
+        Err(e) => tracing::warn!(
+            target: "ephemeral", error = %e,
+            "ephemeral seed failed; declared queues will be re-created implicitly and \
+             grants stay unknown until the first successful refresh"
+        ),
+    }
+
     let st = Arc::new(AppState {
         pool: pool.clone(),
         fusion,
@@ -417,6 +459,8 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
         file_buffer: file_buffer.clone(),
         partition_queue: std::sync::Mutex::new(std::collections::HashMap::new()),
         seeded_groups: std::sync::Mutex::new(std::collections::HashMap::new()),
+        ephemeral: ephemeral.clone(),
+        peers: Arc::new(crate::peerclient::PeerClient::new()),
         hotlist: hotlist.clone(),
         hotlist_reseed_ms: cfg.hotlist_reseed_ms,
         hotlist_reseed_full_ms: cfg.hotlist_reseed_full_ms,
@@ -457,6 +501,7 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
             ack_registry: st.ack_registry.clone(),
             file_buffer: st.file_buffer.clone(),
             hotlist: st.hotlist.clone(),
+            ephemeral: st.ephemeral.clone(),
             dedup: st.fusion.dedup_cache(),
             dedup_cap_mb: cfg.dedup_cache_mb,
             admission: st.admission.clone(),
@@ -574,6 +619,7 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
                         crate::switches::Switches::KEY_KV,
                         crate::switches::Switches::KEY_TIMERS_SCHEDULE,
                         crate::switches::Switches::KEY_TIMERS_FIRE,
+                        crate::switches::Switches::KEY_EPHEMERAL,
                     ] {
                         if let Ok(v) = db::get_system_flag_opt(&c, key).await {
                             state.switches.adopt(key, v);
@@ -599,6 +645,55 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
         cfg.kv_quota_refresh_ms,
         cfg.kv_max_tenants,
     ));
+
+    // EPHEMERAL_QUEUES.md §2 — the grant/config re-read, same cadence knob and
+    // same handle discipline (KEEP IN SYNC with main.rs).
+    tasks.push(crate::ephemeral::spawn_refresh(
+        st.ephemeral.clone(),
+        pool.clone(),
+        cfg.kv_quota_refresh_ms,
+        cfg.kv_max_tenants,
+    ));
+
+    // EPHEMERAL_QUEUES.md §3.2 — the RAM-class backstop. On the HTTP broker this
+    // is one sub-cadence of `sweeper::run_loop` (phase C-eph, 1 s gate); there is
+    // no sweeper here, so it is its own tiny interval task at the same cadence.
+    //
+    // IT IS NOT OPTIONAL, and that is worth stating because the rest of the
+    // sweeper genuinely is absent embedded. Lease expiry and ttl head-drop do
+    // happen opportunistically on every ring touch, so a busy queue needs
+    // nothing — but IMPLICIT GC has no on-touch path at all (an idle, empty
+    // queue is by definition one nobody is touching), so without this loop an
+    // embedding application accumulates one ring per short-lived inbox for the
+    // life of the process. That is precisely the workload the class exists for.
+    //
+    // Gated on QUEEN_SWEEPER for one reason only: it is the knob that means
+    // "this process runs no reapers", and a reaper that ignored it would make
+    // the knob a lie. It takes no connection, no lock outside its own maps and
+    // no lane slot, so it is safe to run anywhere else.
+    if cfg.sweeper_enabled {
+        let eph = st.ephemeral.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut iv = tokio::time::interval(std::time::Duration::from_millis(1000));
+            iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                iv.tick().await;
+                let s = eph.sweep(crate::util::now_epoch_ms());
+                if s.redelivered > 0 || s.exhausted > 0 || s.dropped_ttl > 0 || s.gc_queues > 0 {
+                    tracing::info!(
+                        target: "ephemeral",
+                        redelivered = s.redelivered,
+                        exhausted = s.exhausted,
+                        dropped_ttl = s.dropped_ttl,
+                        gc_queues = s.gc_queues,
+                        queues = eph.queue_count(),
+                        bytes = eph.global_bytes(),
+                        "backstop"
+                    );
+                }
+            }
+        }));
+    }
 
     // Idle sweep for the hot-list rings and long-poll wake gates (inlined from
     // reconcile::spawn_idle_sweep for the same handle reason; 0 disables).

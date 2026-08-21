@@ -59,6 +59,7 @@ pub mod admin;
 pub mod buffer;
 pub mod config;
 pub mod consumer;
+pub mod ephemeral;
 pub mod error;
 mod http;
 mod inner;
@@ -77,6 +78,7 @@ pub use admin::Admin;
 pub use buffer::{BufferOptions, BufferStats};
 pub use config::{Config, HostHeader, Retry429, RetryKind};
 pub use consumer::{Cancel, ConsumeSummary, StopReason};
+pub use ephemeral::{Ephemeral, EphemeralBatch, EphemeralPushed};
 pub use error::{Error, Result};
 pub use kv::{Kv, KvOutcome};
 pub use lb::Strategy;
@@ -87,10 +89,12 @@ pub use transaction::TransactionBuilder;
 // Re-exported so callers do not need a direct dependency on the protocol crate
 // for the types that appear in this client's signatures.
 pub use queen_protocol::{
-    AckResult, AckStatus, DlqParams, DlqResponse, Expiry, KvOpKind, KvOperation, KvPrecondition,
-    KvReason, KvResult, KvRow, Message, PushItem, PushResult, PushStatus, QueueOptions,
-    SeekRequest, SubscriptionMode, TimerListRow, TimerOpKind, TimerOperation, TimerPage, TimerPeek,
-    TimerResult, TimerStatus, TraceRequest, TransactionResponse, TxnPushItem, TxnResultItem,
+    AckResult, AckStatus, DlqParams, DlqResponse, EphemeralAck, EphemeralAckResult,
+    EphemeralDelivered, EphemeralOptions, EphemeralOutcome, EphemeralPolicy, EphemeralStatus,
+    EphemeralWindowBuffer, Expiry, KvOpKind, KvOperation, KvPrecondition, KvReason, KvResult,
+    KvRow, Message, PushItem, PushResult, PushStatus, QueueOptions, SeekRequest, SubscriptionMode,
+    TimerListRow, TimerOpKind, TimerOperation, TimerPage, TimerPeek, TimerResult, TimerStatus,
+    TraceRequest, TransactionResponse, TxnPushItem, TxnResultItem,
 };
 
 use crate::buffer::BufferManager;
@@ -163,6 +167,15 @@ impl Queen {
         Timers::new(Arc::clone(&self.inner))
     }
 
+    /// RAM-class queues whose contents survive nothing.
+    ///
+    /// A different storage class, not a different transport: the durable engine
+    /// is untouched by it, and the two families share only this client. Read
+    /// [`ephemeral`] before the first push — the loss contract is the API.
+    pub fn ephemeral(&self) -> Ephemeral {
+        Ephemeral::new(Arc::clone(&self.inner))
+    }
+
     /// Begin an atomic push + ack.
     pub fn transaction(&self) -> TransactionBuilder {
         TransactionBuilder::new(Arc::clone(&self.inner))
@@ -232,7 +245,14 @@ impl Queen {
 
     // -------------------------------------------------------------- buffers
 
-    /// Send everything currently buffered, across every queue and partition.
+    /// Send everything currently buffered, across every queue and partition —
+    /// both storage classes, which share one manager.
+    ///
+    /// The results are the DURABLE push's, because they are the only per-item
+    /// verdicts on either wire: an ephemeral push answers `{pushed}` and has no
+    /// message id to report, having no dedup index to mint one from. An empty
+    /// vector from a client that only buffers ephemeral messages means "flushed",
+    /// not "nothing was there".
     pub async fn flush_all_buffers(&self) -> Result<Vec<PushResult>> {
         self.inner.buffers.flush_all().await
     }

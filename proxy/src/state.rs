@@ -43,6 +43,11 @@ pub struct Features {
     pub traces: bool,
     pub kv: bool,
     pub timers: bool,
+    /// EPHEMERAL_QUEUES.md §5.1/§8. Default-off in the cloud is the whole
+    /// posture of the family: self-hosted brokers register the routes
+    /// unconditionally, and the proxy is what makes a cloud tenant wait for
+    /// the plan to say so.
+    pub ephemeral: bool,
 }
 
 /// Everything the data plane needs to know about a cluster, cached hot.
