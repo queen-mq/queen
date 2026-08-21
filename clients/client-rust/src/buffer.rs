@@ -140,6 +140,52 @@ struct PushBatch<'a> {
     items: &'a [PushItem],
 }
 
+/// The ephemeral push body (EPHEMERAL_QUEUES.md §3.1), borrowing the same way.
+///
+/// The two families disagree about where the identity lives, and that
+/// disagreement is the entire reason [`Destination`] exists: the durable push
+/// repeats `{queue, partition}` on EVERY item, so its envelope is just
+/// `{items}`; the ephemeral push hoists them to the envelope, so the elements
+/// carry nothing but their payload — no `transactionId`, because there is no
+/// dedup index to hold one.
+#[derive(Serialize)]
+struct EphemeralBatch<'a> {
+    queue: &'a str,
+    /// Omitted, never defaulted client-side: which ring a push without a
+    /// partition lands on is the broker's rule to make.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    partition: Option<&'a str>,
+    messages: Vec<EphemeralItem<'a>>,
+}
+
+#[derive(Serialize)]
+struct EphemeralItem<'a> {
+    payload: &'a serde_json::Value,
+}
+
+/// WHERE a buffered batch goes, and in what shape.
+///
+/// The machinery this module implements — blocking backpressure at `max_size`,
+/// one drain per address, a failed batch put back at the FRONT and retried
+/// until it lands — is about ordering, occupancy and loss. None of that is
+/// durable-specific, and none of it is worth writing twice, so the drain takes
+/// a destination instead of a hardcoded POST.
+///
+/// [`Destination::Durable`] IS today's request, byte for byte, and it is what
+/// every buffer created through [`BufferManager::add`] gets — which is every
+/// caller that existed before ephemeral queues did. `tests/ephemeral_wire.rs`
+/// carries a pin that fails if that ever stops being true.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Destination {
+    /// `POST /api/v1/push`.
+    Durable,
+    /// `POST /api/v1/ephemeral/push`, bound to one `(queue, partition)`.
+    Ephemeral {
+        queue: String,
+        partition: Option<String>,
+    },
+}
+
 #[cfg(test)]
 type FakeSink = Arc<
     dyn Fn(
@@ -161,20 +207,47 @@ enum Sink {
 }
 
 impl Sink {
-    async fn send(&self, items: &[PushItem]) -> Result<Vec<PushResult>> {
+    async fn send(&self, dest: &Destination, items: &[PushItem]) -> Result<Vec<PushResult>> {
         match self {
-            Self::Http(http) => {
-                let body = PushBatch { items };
-                let results: Option<Vec<PushResult>> = http
-                    .post_json("/api/v1/push", &body, &Opts::default())
-                    .await?;
-                Ok(results.unwrap_or_default())
-            }
+            Self::Http(http) => match dest {
+                Destination::Durable => {
+                    let body = PushBatch { items };
+                    let results: Option<Vec<PushResult>> = http
+                        .post_json("/api/v1/push", &body, &Opts::default())
+                        .await?;
+                    Ok(results.unwrap_or_default())
+                }
+                Destination::Ephemeral { queue, partition } => {
+                    let body = EphemeralBatch {
+                        queue,
+                        partition: partition.as_deref(),
+                        messages: items
+                            .iter()
+                            .map(|i| EphemeralItem {
+                                payload: &i.payload,
+                            })
+                            .collect(),
+                    };
+                    // `{pushed}` and no per-item array: this wire has no
+                    // message id to report, because it has no dedup index to
+                    // mint one from. The count is read so a malformed answer
+                    // still fails the flush (and re-queues the batch) rather
+                    // than being taken for success.
+                    let _: Option<queen_protocol::EphemeralPushResponse> = http
+                        .post_json(EPHEMERAL_PUSH_PATH, &body, &Opts::default())
+                        .await?;
+                    Ok(Vec::new())
+                }
+            },
             #[cfg(test)]
             Self::Fake(f) => f(items.to_vec()).await,
         }
     }
 }
+
+/// The ephemeral push route. Named here because the drain and the unbuffered
+/// push in `ephemeral.rs` must not be able to disagree about it.
+pub(crate) const EPHEMERAL_PUSH_PATH: &str = "/api/v1/ephemeral/push";
 
 struct Buffer {
     items: Vec<PushItem>,
@@ -208,10 +281,15 @@ struct Buffer {
     /// WAIT for the one in flight instead of interleaving batches with it —
     /// two senders on one partition would reorder the lane.
     drain_lock: Arc<AsyncMutex<()>>,
+    /// Where this address drains to. Fixed when the entry is created, and a
+    /// pure function of the address: the `eph:` prefix that namespaces an
+    /// ephemeral address is exactly what keeps the two families' buffers apart,
+    /// so one address can never want two destinations.
+    dest: Destination,
 }
 
 impl Buffer {
-    fn new(opts: BufferOptions) -> Self {
+    fn with_dest(opts: BufferOptions, dest: Destination) -> Self {
         let opts = opts.normalized();
         Self {
             items: Vec::new(),
@@ -221,6 +299,7 @@ impl Buffer {
             capacity: Arc::new(Semaphore::new(opts.max_size)),
             parked: 0,
             drain_lock: Arc::new(AsyncMutex::new(())),
+            dest,
             opts,
         }
     }
@@ -257,6 +336,19 @@ impl BufferManager {
         item: PushItem,
         opts: BufferOptions,
     ) -> Result<()> {
+        self.add_to(address, Destination::Durable, item, opts).await
+    }
+
+    /// [`BufferManager::add`], for a buffer that drains somewhere other than the
+    /// durable push. The destination is applied when the entry is created and
+    /// ignored afterwards — see [`Buffer::dest`].
+    pub async fn add_to(
+        self: &Arc<Self>,
+        address: String,
+        dest: Destination,
+        item: PushItem,
+        opts: BufferOptions,
+    ) -> Result<()> {
         enum Slot {
             Ready(OwnedSemaphorePermit),
             Full(Arc<Semaphore>),
@@ -269,7 +361,7 @@ impl BufferManager {
             }
             let buf = buffers
                 .entry(address.clone())
-                .or_insert_with(|| Buffer::new(opts));
+                .or_insert_with(|| Buffer::with_dest(opts, dest.clone()));
             let capacity = Arc::clone(&buf.capacity);
             match Arc::clone(&capacity).try_acquire_owned() {
                 Ok(permit) => Slot::Ready(permit),
@@ -314,7 +406,7 @@ impl BufferManager {
             }
             let buf = buffers
                 .entry(address.clone())
-                .or_insert_with(|| Buffer::new(opts));
+                .or_insert_with(|| Buffer::with_dest(opts, dest.clone()));
             if buf.items.is_empty() {
                 buf.first_at = Some(Instant::now());
             }
@@ -427,7 +519,7 @@ impl BufferManager {
 
         let mut all = Vec::new();
         loop {
-            let chunk = {
+            let (chunk, dest) = {
                 let mut buffers = self.buffers.lock().unwrap();
                 let Some(buf) = buffers.get_mut(address) else {
                     break;
@@ -443,7 +535,7 @@ impl BufferManager {
                 if buf.items.is_empty() {
                     buf.first_at = None;
                 }
-                chunk
+                (chunk, buf.dest.clone())
             };
 
             // Owns the chunk until it is acknowledged. If the request fails —
@@ -453,11 +545,12 @@ impl BufferManager {
                 manager: self,
                 address,
                 items: Some(chunk),
+                dest: dest.clone(),
             };
 
             let result = {
                 let items = in_flight.items.as_deref().expect("just set");
-                self.sink.send(items).await
+                self.sink.send(&dest, items).await
             };
 
             match result {
@@ -589,6 +682,10 @@ struct InFlight<'a> {
     manager: &'a BufferManager,
     address: &'a str,
     items: Option<Vec<PushItem>>,
+    /// Carried so the rebuild path below can restore the entry with the
+    /// destination it had, rather than silently re-creating an ephemeral
+    /// address as a durable one.
+    dest: Destination,
 }
 
 impl InFlight<'_> {
@@ -615,7 +712,7 @@ impl Drop for InFlight<'_> {
                 max_size: items.len().max(BufferOptions::default().max_size),
                 ..Default::default()
             };
-            let mut restored = Buffer::new(opts);
+            let mut restored = Buffer::with_dest(opts, self.dest.clone());
             // These messages held capacity on the entry that went away; take it
             // again on the fresh one so the bound still describes reality.
             restored
@@ -697,6 +794,22 @@ fn stopped_error(address: &str) -> Error {
 /// buffer would not make the write any cheaper.
 pub(crate) fn address(queue: &str, partition: &str) -> String {
     format!("{queue}/{partition}")
+}
+
+/// The ephemeral counterpart, kept next to its durable sibling so the two can
+/// be compared at a glance: `eph:queue/partition`, or `eph:queue` when the
+/// caller named no partition — which is a DIFFERENT destination from any named
+/// one, because the broker picks, and a buffer must not merge the two.
+///
+/// The prefix is [`queen_protocol::EPHEMERAL_KEY_PREFIX`], the same namespacing
+/// the broker applies to its own queue keys, for the same reason: an ephemeral
+/// `orders` and a durable `orders` are unrelated objects, and a shared address
+/// would post one family's messages to the other family's route.
+pub(crate) fn ephemeral_address(queue: &str, partition: Option<&str>) -> String {
+    match partition {
+        Some(p) => format!("{}{queue}/{p}", queen_protocol::EPHEMERAL_KEY_PREFIX),
+        None => format!("{}{queue}", queen_protocol::EPHEMERAL_KEY_PREFIX),
+    }
 }
 
 #[cfg(test)]
@@ -784,7 +897,7 @@ mod tests {
     /// `flush` send more than one chunk.
     fn seed(m: &Arc<BufferManager>, address: &str, count: u64, opts: BufferOptions) {
         let mut buffers = m.buffers.lock().unwrap();
-        let mut buf = Buffer::new(opts);
+        let mut buf = Buffer::with_dest(opts, Destination::Durable);
         buf.items = (0..count).map(item).collect();
         buf.first_at = Some(Instant::now());
         // Seeded messages hold capacity like added ones do, or the bound would
