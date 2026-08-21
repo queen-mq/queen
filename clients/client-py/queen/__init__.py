@@ -13,6 +13,7 @@ from .admin import Admin
 from .builders.transaction_builder import TransactionResult
 from .client import Queen
 from .ephemeral import (
+    EPHEMERAL_QUEUE_NOT_FOUND,
     EPHEMERAL_UNSUPPORTED,
     EPHEMERAL_UNSUPPORTED_MESSAGE,
     Ephemeral,
@@ -20,6 +21,7 @@ from .ephemeral import (
 from .errors import (
     ConflationUnsupportedError,
     EphemeralError,
+    EphemeralQueueNotFoundError,
     KvError,
     QueenError,
     QueenHttpError,
@@ -48,6 +50,7 @@ __all__ = [
     "Ephemeral",
     "EPHEMERAL_UNSUPPORTED",
     "EPHEMERAL_UNSUPPORTED_MESSAGE",
+    "EPHEMERAL_QUEUE_NOT_FOUND",
     "Timers",
     "TimerBuilder",
     "TimerResult",
@@ -57,6 +60,7 @@ __all__ = [
     "KvError",
     "TimerError",
     "EphemeralError",
+    "EphemeralQueueNotFoundError",
     "ConflationUnsupportedError",
     "Stream",
     "token_bucket_gate",

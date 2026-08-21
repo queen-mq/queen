@@ -379,8 +379,11 @@ public:
  * and nothing to fall back to: the WHOLE /api/v1/ephemeral/* family answers 404
  * -- the broker because the routes were never registered, the proxy because an
  * unknown API path is `route_blocked` and it fails closed. Both are one verdict,
- * "upgrade", and neither is "your queue is missing": the ephemeral verbs answer
- * an absent queue with an ordinary body, never a 404.
+ * "upgrade".
+ *
+ * Exactly one 404 on this family means something else, which is why the mapping
+ * reads the body's CODE and not the status the two share: see
+ * EphemeralQueueNotFoundError.
  *
  * It derives from HttpError rather than std::runtime_error on purpose. A 404 IS
  * an HTTP refusal, so every existing `catch (const HttpError&)` around a push or
@@ -407,6 +410,54 @@ public:
 
     /** The peer's own code, kept so the two 404s stay distinguishable in a log. */
     const std::string& original_code() const { return original_code_; }
+};
+
+/**
+ * `depth` named an ephemeral queue that is not there
+ * (EPHEMERAL_QUEUES.md §3.1).
+ *
+ * The ONLY verb of the family that can say this, and that is worth knowing
+ * rather than discovering: push and pop create a queue by naming it, `reset`
+ * answers dropped:0 and `delete` answers deleted:false. So this is a real DATA
+ * fact -- a queue name typo, or a ring that was empty and idle long enough to be
+ * collected -- and not the DEPLOYMENT fact EphemeralUnsupportedError states.
+ * Collapsing the two would send somebody chasing a broker version over a queue
+ * name.
+ *
+ * Same shape as its sibling and deliberately BESIDE it rather than under it, so
+ * that `catch (const EphemeralUnsupportedError&)` never catches a missing queue:
+ * both derive from HttpError, so a 404 stays an HTTP refusal and every existing
+ * `catch (const HttpError&)` around a depth call keeps catching it. `code()` is
+ * CODE, the broker's own code string unchanged, and `queue()` names the queue
+ * that was not found -- the body of the original 404 stays reachable through
+ * body(), because that answer is the evidence for the claim this exception
+ * makes.
+ */
+class EphemeralQueueNotFoundError : public HttpError {
+private:
+    std::string queue_;
+
+    static std::string message_for(const std::string& queue) {
+        return queue.empty() ? std::string("ephemeral: that queue does not exist")
+                             : "ephemeral: queue \"" + queue + "\" does not exist";
+    }
+
+public:
+    /**
+     * The broker's own code, kept identical across every SDK (Go
+     * ErrEphemeralQueueNotFound, queen_protocol::EPHEMERAL_QUEUE_NOT_FOUND_CODE)
+     * so a code seen in one language's logs means the same thing in the next.
+     */
+    static constexpr const char* CODE = "ephemeral_queue_not_found";
+
+    EphemeralQueueNotFoundError(const HttpError& cause, const std::string& queue)
+        : HttpError(cause.status_code(), message_for(queue), cause.body(), CODE,
+                    cause.retry_after_seconds()),
+          queue_(queue) {
+    }
+
+    /** The queue the caller asked about, so what() is not the only clue. */
+    const std::string& queue() const { return queue_; }
 };
 
 // ============================================================================
@@ -2805,13 +2856,13 @@ public:
 //
 // WHAT THIS CLIENT DOES NOT HAVE, and why. The JS, Python and PHP SDKs also
 // offer a BUFFERED ephemeral push, which reuses their 1.0.6 buffer machinery
-// through a parametrized drain (§4.1). This client's BufferManager predates
-// that rewrite -- it has no maxSize bound, no re-queue of a failed batch at the
-// front, and it drops what it could not send -- so there is no sink-shaped seam
-// to reuse here, and bolting one on would advertise a durability story this
-// client cannot honour on the durable path either. Ephemeral pushes here are
-// unbuffered; when the C++ buffer is brought up to the 1.0.6 contract, the sink
-// parameter lands with it.
+// through a parametrized drain (§4.1). This client's BufferManager now honours
+// that same contract -- the maxSize bound, a failed batch back at the FRONT and
+// retried, nothing dropped (see test_buffer.cpp) -- but it is not yet wired to
+// this surface: there is no sink parameter on the drain, so an ephemeral push
+// has no way to say WHERE its batch goes. Ephemeral pushes here are unbuffered
+// until a follow-up adds that parameter; nothing in the buffer's behaviour
+// stands in the way any more.
 // ============================================================================
 
 class EphemeralBuilder {
@@ -2835,20 +2886,33 @@ private:
     }
 
     /**
-     * Every request in this class goes through here, so the 404 rule has ONE
-     * home. An old broker 404s because the routes do not exist; an old proxy
-     * 404s `route_blocked` because it fails closed on unknown API paths. Both
-     * are "upgrade", and neither is "your queue is missing" -- the ephemeral
-     * verbs answer an absent queue with a normal body.
+     * Every request in this class goes through here, so the two 404 rules have
+     * ONE home. THE BODY'S CODE decides which one, not the status:
+     *
+     *   * `ephemeral_queue_not_found` -- the routes are there and answered; the
+     *     QUEUE is not. Only `depth` can say this (§3.1): push and pop create
+     *     implicitly, `reset` answers dropped:0, `del` answers deleted:false. It
+     *     is checked for on every verb anyway, because which verbs can say it is
+     *     the broker's business and this client should not re-encode that list.
+     *   * anything else -- an old broker that never registered the routes, or an
+     *     old proxy answering `route_blocked` because it fails closed on unknown
+     *     API paths. Both mean "upgrade".
+     *
+     * `queue` is passed only so a missing-queue error can name it.
      */
     template <typename Fn>
-    json call(Fn&& fn) {
+    json call(Fn&& fn, const std::string& queue = "") {
         try {
             return fn();
         } catch (const EphemeralUnsupportedError&) {
             throw;
+        } catch (const EphemeralQueueNotFoundError&) {
+            throw;
         } catch (const HttpError& error) {
             if (error.status_code() == 404) {
+                if (error.code() == EphemeralQueueNotFoundError::CODE) {
+                    throw EphemeralQueueNotFoundError(error, queue);
+                }
                 throw EphemeralUnsupportedError(error);
             }
             throw;
@@ -2878,7 +2942,7 @@ public:
         return call([&] {
             return http_client_->post("/api/v1/ephemeral/configure",
                                       wire::eph_configure_body(queue, options));
-        });
+        }, queue);
     }
 
     /**
@@ -2893,7 +2957,7 @@ public:
         require_queue(queue);
         return call([&] {
             return http_client_->post("/api/v1/ephemeral/reset", json{{"queue", queue}});
-        });
+        }, queue);
     }
 
     /**
@@ -2904,7 +2968,7 @@ public:
         require_queue(queue);
         return call([&] {
             return http_client_->del("/api/v1/ephemeral/queue/" + util::url_encode(queue));
-        });
+        }, queue);
     }
 
     // ------------------------------------------------------------------- push
@@ -2927,7 +2991,7 @@ public:
         json body = wire::eph_push_body(queue, options.partition, messages);
         return call([&] {
             return http_client_->post("/api/v1/ephemeral/push", body);
-        });
+        }, queue);
     }
 
     // -------------------------------------------------------------------- pop
@@ -2982,7 +3046,7 @@ public:
                 // A long poll that meets a 429 should back off and keep waiting
                 // rather than give up after a handful of tries.
                 options.wait ? RetryKind::Pop : RetryKind::Default);
-        });
+        }, queue);
 
         json messages = json::array();
         if (result.is_object() && result.contains("messages") && result["messages"].is_array()) {
@@ -3024,7 +3088,7 @@ public:
         json body = wire::eph_ack_body(queue, acks, options);
         return call([&] {
             return http_client_->post("/api/v1/ephemeral/ack", body);
-        });
+        }, queue);
     }
 
     /** The boolean sugar: true is `completed`, false is `failed`. */
@@ -3051,13 +3115,22 @@ public:
         });
     }
 
-    /** Depth gauges for one queue: ring length, bytes, and the group cursors. */
+    /**
+     * Depth gauges for one queue: ring length, bytes, and the group cursors.
+     *
+     * THE ONLY VERB THAT CAN TELL YOU A QUEUE IS MISSING. Everything else either
+     * creates the queue (push, pop) or answers a normal body about having done
+     * nothing (`reset` -> dropped:0, `del` -> deleted:false). Here an unknown
+     * queue throws EphemeralQueueNotFoundError -- a different fact from
+     * EphemeralUnsupportedError, which is about the broker's version, and worth
+     * distinguishing precisely because both are 404s.
+     */
     json depth(const std::string& queue) {
         require_queue(queue);
         return call([&] {
             return http_client_->get("/api/v1/ephemeral/queues/" + util::url_encode(queue) +
                                      "/depth");
-        });
+        }, queue);
     }
 };
 
@@ -3664,6 +3737,10 @@ public:
      * them, which this surface maps to EphemeralUnsupportedError -- there is no
      * capability negotiation anywhere in this SDK, so the refusal is the only
      * signal there is.
+     *
+     * One 404 is NOT that: `depth` answers `ephemeral_queue_not_found` for a
+     * queue that is not there, and that arrives as EphemeralQueueNotFoundError.
+     * The two are told apart by the body's code, never by the status they share.
      */
     EphemeralBuilder ephemeral() {
         return EphemeralBuilder(http_client_);

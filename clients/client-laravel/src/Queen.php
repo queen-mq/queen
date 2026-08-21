@@ -101,6 +101,11 @@ class Queen
      * Unlike kv() and timers(), this one has a version floor: a broker or proxy
      * older than 1.1 has no such routes and answers 404 on all of them, which
      * this surface maps to EphemeralUnsupportedException.
+     *
+     * One 404 is NOT that: `depth` answers `ephemeral_queue_not_found` for a
+     * queue that is not there, and that arrives as
+     * EphemeralQueueNotFoundException. The two are told apart by the body's
+     * code, never by the status they share.
      */
     public function ephemeral(): Ephemeral
     {

@@ -95,10 +95,39 @@ class EphemeralError(QueenHttpError):
     so a broker or proxy older than 1.1 answers 404 on the WHOLE family -- the
     broker because the routes were never registered, the proxy because an
     unknown API path is ``route_blocked`` and it fails closed. Both are mapped
-    to this type with that code and the original kept as ``__cause__``, since
-    "the queue is missing" is not a thing this family can mean: its verbs answer
-    an absent queue with an ordinary body.
+    to this type with that code and the original kept as ``__cause__``.
+
+    Exactly one 404 on this family means something else, which is why the
+    mapping reads the body's CODE and not the status the two share: see
+    ``EphemeralQueueNotFoundError``.
     """
+
+
+class EphemeralQueueNotFoundError(EphemeralError):
+    """``depth`` named an ephemeral queue that is not there.
+
+    The ONLY verb of the family that can say this, and that is worth knowing
+    rather than discovering: push and pop create a queue by naming it, ``reset``
+    answers ``dropped:0`` and ``delete`` answers ``deleted:false``. So this is a
+    real DATA fact -- a queue name typo, or a ring that was empty and idle long
+    enough to be collected -- and not the DEPLOYMENT fact
+    ``ephemeral_unsupported`` states. Collapsing the two would send somebody
+    chasing a broker version over a queue name.
+
+    A subclass of ``EphemeralError`` on purpose: every existing
+    ``except EphemeralError`` keeps catching it, and what the distinct type buys
+    is branching without string-matching the prose. ``code`` is
+    ``ephemeral_queue_not_found`` -- the broker's own code string, byte-identical
+    across every SDK (Go ``ErrEphemeralQueueNotFound``,
+    ``queen_protocol::EPHEMERAL_QUEUE_NOT_FOUND_CODE``) so a code seen in one
+    language's logs means the same thing in the next. ``queue`` names the missing
+    queue, ``response`` is the 404 as it arrived, and ``__cause__`` is the
+    original.
+    """
+
+    def __init__(self, message: str, *, queue: Optional[str] = None, **kwargs: Any) -> None:
+        super().__init__(message, **kwargs)
+        self.queue = queue
 
 
 def _body_of(response: httpx.Response) -> Dict[str, Any]:
@@ -107,6 +136,24 @@ def _body_of(response: httpx.Response) -> Dict[str, Any]:
     except Exception:
         return {}
     return body if isinstance(body, dict) else {}
+
+
+def code_of(response: httpx.Response) -> Optional[str]:
+    """The machine-readable verdict in a refusal body, whoever answered.
+
+    The broker puts the stable identifier in ``error``; the proxy puts it in
+    ``code`` and prose in ``error``. ``code`` wins when both are present, because
+    the only responses carrying both are the proxy's.
+
+    One definition, used by ``wrap_http_error`` and by any surface that has to
+    branch on the code BEFORE the wrapping (the ephemeral family, whose two 404s
+    are told apart by this field and by nothing else) -- two parsers would be two
+    answers to "which field is the code", which is the question this whole
+    module exists to settle.
+    """
+    body = _body_of(response)
+    code = body.get("code") or body.get("error")
+    return code if isinstance(code, str) else None
 
 
 def wrap_http_error(error: Exception, kind: type) -> Exception:
@@ -122,10 +169,7 @@ def wrap_http_error(error: Exception, kind: type) -> Exception:
         return error
 
     body = _body_of(error.response)
-    # The broker puts the stable identifier in `error`; the proxy puts it in
-    # `code` and prose in `error`. Prefer `code` when it exists, because the
-    # only responses that carry both are the proxy's.
-    code = body.get("code") or body.get("error")
+    code = code_of(error.response)
     retry_after = getattr(error, "retry_after_seconds", None)
     if retry_after is None:
         raw = error.response.headers.get("retry-after")
@@ -139,7 +183,7 @@ def wrap_http_error(error: Exception, kind: type) -> Exception:
         str(body.get("detail") or body.get("error") or error),
         request=error.request,
         response=error.response,
-        code=code if isinstance(code, str) else None,
+        code=code,
         reason=body.get("reason") if isinstance(body.get("reason"), str) else None,
         detail=body.get("detail") if isinstance(body.get("detail"), str) else None,
         retry_after_seconds=retry_after,

@@ -32,6 +32,7 @@ __all__ = [
     "acked",
     "OLD_BROKER",
     "OLD_PROXY",
+    "QUEUE_NOT_FOUND",
     "until",
 ]
 
@@ -80,6 +81,17 @@ OLD_BROKER: Dict[str, Any] = {"status": 404, "json": {"error": "not_found"}}
 OLD_PROXY: Dict[str, Any] = {
     "status": 404,
     "json": {"error": "route_blocked", "code": "route_blocked"},
+}
+
+#: The OTHER 404, and the reason the mapping has to read the body: a broker that
+#: fully supports the family, answering `depth` about a queue that is not there.
+#: Byte-identical to what handlers/ephemeral.rs writes.
+QUEUE_NOT_FOUND: Dict[str, Any] = {
+    "status": 404,
+    "json": {
+        "error": "no ephemeral queue by that name exists on this broker",
+        "code": "ephemeral_queue_not_found",
+    },
 }
 
 

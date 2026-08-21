@@ -5,7 +5,9 @@ namespace Queen;
 use Queen\Buffer\BufferManager;
 use Queen\Buffer\Destination;
 use Queen\Buffer\Sink;
+use Queen\Exceptions\EphemeralQueueNotFoundException;
 use Queen\Exceptions\EphemeralUnsupportedException;
+use Queen\Exceptions\ErrorCode;
 use Queen\Exceptions\HttpException;
 use Queen\Http\HttpClient;
 use Queen\Http\Retry429Policy;
@@ -47,10 +49,21 @@ use Queen\Http\Retry429Policy;
  * Every group has its own cursor over the ONE ring, so fan-out subscribers each
  * see everything and competing consumers of one group share the work.
  *
- * AND THE ONE ERROR YOU WILL MEET FIRST. No SDK negotiates a version. Against a
- * broker or proxy older than 1.1 the whole family answers 404, and every one of
- * those is mapped to EphemeralUnsupportedException — see that class for why the
- * two different 404s are one verdict.
+ * AND THE TWO KINDS OF 404, WHICH MUST NEVER BE CONFUSED FOR EACH OTHER. No SDK
+ * negotiates a version, so against a broker or proxy older than 1.1 the whole
+ * family answers 404 — the broker because the routes do not exist, the proxy
+ * because an unknown API path is `route_blocked`. That is a DEPLOYMENT fact and
+ * arrives as EphemeralUnsupportedException.
+ *
+ * But `depth` also answers a real 404, with `code: ephemeral_queue_not_found`,
+ * when the queue simply is not there — and it is the only verb that can, since
+ * push and pop create implicitly, `reset` answers dropped:0 and `delete` answers
+ * deleted:false. That is a DATA fact and arrives as
+ * EphemeralQueueNotFoundException. Collapsing it into the first would send
+ * somebody chasing a broker version over a queue name typo.
+ *
+ * Both keep the broker's own refusal as the previous exception. Branch on the
+ * type or on $errorCode, never on the prose.
  */
 class Ephemeral
 {
@@ -119,7 +132,7 @@ class Ephemeral
         return $this->call('POST', '/api/v1/ephemeral/configure', [
             'queue' => $queue,
             'options' => $this->buildConfigureOptions($options),
-        ]);
+        ], queue: $queue);
     }
 
     /**
@@ -134,7 +147,7 @@ class Ephemeral
     {
         $this->requireQueue($queue);
 
-        return $this->call('POST', '/api/v1/ephemeral/reset', ['queue' => $queue]);
+        return $this->call('POST', '/api/v1/ephemeral/reset', ['queue' => $queue], queue: $queue);
     }
 
     /** Delete the queue: contents, cursors, and the declared configuration in PG. */
@@ -142,7 +155,7 @@ class Ephemeral
     {
         $this->requireQueue($queue);
 
-        return $this->call('DELETE', '/api/v1/ephemeral/queue/' . rawurlencode($queue));
+        return $this->call('DELETE', '/api/v1/ephemeral/queue/' . rawurlencode($queue), queue: $queue);
     }
 
     // ===========================
@@ -194,7 +207,7 @@ class Ephemeral
         }
         $body['messages'] = $items;
 
-        $result = $this->call('POST', Sink::EPHEMERAL_PATH, $body);
+        $result = $this->call('POST', Sink::EPHEMERAL_PATH, $body, queue: $queue);
 
         return is_array($result) ? $result : ['pushed' => count($items)];
     }
@@ -314,7 +327,8 @@ class Ephemeral
             $affinityKey,
             // A long poll that meets a 429 should back off and keep waiting
             // rather than give up after a handful of tries.
-            $wait ? Retry429Policy::KIND_POP : null
+            $wait ? Retry429Policy::KIND_POP : null,
+            $queue
         );
 
         $body = is_array($result) ? $result : [];
@@ -362,7 +376,7 @@ class Ephemeral
         }
         $body['acks'] = $entries;
 
-        return $this->call('POST', '/api/v1/ephemeral/ack', $body);
+        return $this->call('POST', '/api/v1/ephemeral/ack', $body, queue: $queue);
     }
 
     // ===========================
@@ -381,26 +395,43 @@ class Ephemeral
         return $this->call('GET', '/api/v1/ephemeral/queues');
     }
 
-    /** Depth gauges for one queue: ring length, bytes, and the per-group cursors. */
+    /**
+     * Depth gauges for one queue: ring length, bytes, and the per-group cursors.
+     *
+     * THE ONLY VERB THAT CAN TELL YOU A QUEUE IS MISSING. Everything else either
+     * creates the queue (push, pop) or answers a normal body about having done
+     * nothing (`reset` -> dropped:0, `delete` -> deleted:false). Here an unknown
+     * queue raises EphemeralQueueNotFoundException — a different fact from
+     * EphemeralUnsupportedException, which is about the broker's version, and
+     * worth distinguishing precisely because both are 404s.
+     */
     public function depth(string $queue): mixed
     {
         $this->requireQueue($queue);
 
-        return $this->call('GET', '/api/v1/ephemeral/queues/' . rawurlencode($queue) . '/depth');
+        return $this->call(
+            'GET',
+            '/api/v1/ephemeral/queues/' . rawurlencode($queue) . '/depth',
+            queue: $queue
+        );
     }
 
     // ===========================
     // Internals
     // ===========================
 
-    /** Every request in this class goes through here, so the 404 rule has one home. */
+    /**
+     * Every request in this class goes through here, so the two 404 rules have
+     * one home. `$queue` is passed only so a missing-queue error can name it.
+     */
     private function call(
         string $method,
         string $path,
         ?array $body = null,
         ?int $timeoutMillis = null,
         ?string $affinityKey = null,
-        ?string $retryKind = null
+        ?string $retryKind = null,
+        ?string $queue = null
     ): mixed {
         try {
             return match ($method) {
@@ -409,14 +440,38 @@ class Ephemeral
                 default => $this->httpClient->post($path, $body, $timeoutMillis, $affinityKey, $retryKind),
             };
         } catch (HttpException $error) {
-            // Every 404 on this family means the same thing (§4, §8): the routes
-            // are not there. Never "your queue is missing" — the ephemeral verbs
-            // answer an absent queue with a normal body.
-            if ($error->statusCode === 404 && !$error instanceof EphemeralUnsupportedException) {
-                throw EphemeralUnsupportedException::from($error);
-            }
-            throw $error;
+            throw $this->map404($error, $queue);
         }
+    }
+
+    /**
+     * Two facts arrive on this family as 404, and telling them apart is the
+     * whole job of this method. THE BODY'S CODE decides, not the status:
+     *
+     *   - `ephemeral_queue_not_found` — the routes are there and answered; the
+     *     QUEUE is not. Only `depth` can say this (§3.1): push and pop create
+     *     implicitly, `reset` answers dropped:0, `delete` answers deleted:false.
+     *     It is checked for on every verb anyway, because which verbs can say it
+     *     is the broker's business and this client should not re-encode that
+     *     list.
+     *   - anything else — an old broker that never registered the routes, or an
+     *     old proxy answering `route_blocked` because it fails closed on unknown
+     *     API paths (§4, §8). Both mean "upgrade".
+     *
+     * The original refusal is kept as the previous exception either way, so
+     * nothing the HTTP layer surfaced is lost by the mapping.
+     */
+    private function map404(HttpException $error, ?string $queue): HttpException
+    {
+        if ($error->statusCode !== 404
+            || $error instanceof EphemeralUnsupportedException
+            || $error instanceof EphemeralQueueNotFoundException) {
+            return $error;
+        }
+
+        return $error->errorCode === ErrorCode::EPHEMERAL_QUEUE_NOT_FOUND
+            ? EphemeralQueueNotFoundException::from($error, $queue)
+            : EphemeralUnsupportedException::from($error);
     }
 
     private function requireQueue(string $queue): void

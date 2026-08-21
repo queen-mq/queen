@@ -13,17 +13,32 @@ caller's, which nothing observes at all.
 One more thing is pinned here that no end-to-end run against a 1.1 broker could
 ever produce: the 404 mapping (§4). A broker or proxy older than 1.1 answers 404
 on the whole family, and the SDK has to turn that into one clear
-"upgrade" verdict rather than let it read as "your queue is missing".
+"upgrade" verdict rather than let it read as "your queue is missing" -- while a
+1.1 broker's OWN 404, the one ``depth`` answers for a queue that is not there,
+has to stay the second thing and never become the first.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from queen.ephemeral import EPHEMERAL_UNSUPPORTED, EPHEMERAL_UNSUPPORTED_MESSAGE
-from queen.errors import EphemeralError
+from queen.ephemeral import (
+    EPHEMERAL_QUEUE_NOT_FOUND,
+    EPHEMERAL_UNSUPPORTED,
+    EPHEMERAL_UNSUPPORTED_MESSAGE,
+)
+from queen.errors import EphemeralError, EphemeralQueueNotFoundError
 
-from .envelopes import OLD_BROKER, OLD_PROXY, acked, frame, make, popped, pushed
+from .envelopes import (
+    OLD_BROKER,
+    OLD_PROXY,
+    QUEUE_NOT_FOUND,
+    acked,
+    frame,
+    make,
+    popped,
+    pushed,
+)
 
 QUEUE = "inbox"
 
@@ -409,7 +424,16 @@ async def test_queues_and_depth_are_plain_gets_on_the_status_routes():
 
 
 # ---------------------------------------------------------------------------
-# An old broker, or an old proxy: the same verdict, once (§4, §8).
+# The two kinds of 404 (§4, §8).
+#
+# The status alone cannot tell them apart, which is exactly why the mapping
+# reads the body's CODE:
+#
+#   * no SDK negotiates a version, so a pre-1.1 broker (routes never registered)
+#     and a pre-1.1 proxy (`route_blocked`, fails closed on unknown API paths)
+#     both answer 404, and to a caller those are one fact: upgrade;
+#   * a broker that DOES support the family answers 404 with
+#     `ephemeral_queue_not_found` when `depth` names a queue that is not there.
 # ---------------------------------------------------------------------------
 
 
@@ -460,6 +484,57 @@ async def test_every_verb_of_the_family_maps_the_404():
             await call
         assert caught.value.code == EPHEMERAL_UNSUPPORTED
     assert len(server.requests) == 8
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_404_for_a_missing_queue_is_its_own_error():
+    """Not "your broker is too old".
+
+    ``depth`` is the only verb that can answer a real 404 -- push and pop create
+    implicitly, ``reset`` answers ``dropped:0``, ``delete`` answers
+    ``deleted:false`` -- and collapsing it into the version verdict would send
+    somebody chasing a broker version over a queue name typo.
+    """
+    client, server = make([QUEUE_NOT_FOUND])
+    with pytest.raises(EphemeralQueueNotFoundError) as caught:
+        await client.ephemeral.depth(QUEUE)
+
+    assert caught.value.code == EPHEMERAL_QUEUE_NOT_FOUND
+    assert caught.value.status == 404
+    assert caught.value.queue == QUEUE, "the error names the queue that was not found"
+    assert "does not exist" in str(caught.value)
+    assert "1.1" not in str(caught.value), "a missing queue must not read as a version problem"
+    # Nothing the HTTP layer surfaced is lost by the mapping.
+    assert caught.value.__cause__ is not None
+    assert caught.value.__cause__.response.json()["code"] == EPHEMERAL_QUEUE_NOT_FOUND
+    assert server.only.route == f"GET /api/v1/ephemeral/queues/{QUEUE}/depth"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_tells_the_two_404s_apart_on_the_same_verb():
+    """By the BODY and not the status, which is all they have in common.
+
+    The regression this pins: ``depth`` answering a real 404 while the routes are
+    demonstrably present, because the very next call proves an old broker reads
+    differently on the same verb.
+    """
+    client, server = make([QUEUE_NOT_FOUND, OLD_BROKER])
+
+    with pytest.raises(EphemeralError) as missing:
+        await client.ephemeral.depth(QUEUE)
+    assert missing.value.code == EPHEMERAL_QUEUE_NOT_FOUND
+
+    with pytest.raises(EphemeralError) as old:
+        await client.ephemeral.depth(QUEUE)
+    assert old.value.code == EPHEMERAL_UNSUPPORTED
+    assert not isinstance(old.value, EphemeralQueueNotFoundError)
+
+    # And the narrower type is still catchable as the family's error, so an
+    # existing `except EphemeralError` keeps working.
+    assert isinstance(missing.value, EphemeralQueueNotFoundError)
+    assert len(server.requests) == 2
     await client.close()
 
 

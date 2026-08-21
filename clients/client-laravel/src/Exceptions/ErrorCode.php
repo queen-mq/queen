@@ -31,4 +31,15 @@ class ErrorCode
      * one condition no version negotiation can discover is still branchable.
      */
     public const EPHEMERAL_UNSUPPORTED = 'ephemeral_unsupported';
+
+    /**
+     * This one IS a server code, and it is the reason the 404 mapping above
+     * reads the body rather than the status: a broker that fully supports the
+     * family answers it when `depth` names a queue that is not there
+     * (EPHEMERAL_QUEUES.md §3.1). Byte-identical across every SDK (Go
+     * ErrEphemeralQueueNotFound, queen_protocol::EPHEMERAL_QUEUE_NOT_FOUND_CODE)
+     * so a code seen in one language's logs means the same thing in the next.
+     * Carried on EphemeralQueueNotFoundException.
+     */
+    public const EPHEMERAL_QUEUE_NOT_FOUND = 'ephemeral_queue_not_found';
 }

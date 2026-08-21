@@ -5,6 +5,7 @@ namespace Queen\Tests;
 use GuzzleHttp\HandlerStack;
 use PHPUnit\Framework\TestCase;
 use Psr\Http\Message\RequestInterface;
+use Queen\Exceptions\EphemeralQueueNotFoundException;
 use Queen\Exceptions\EphemeralUnsupportedException;
 use Queen\Exceptions\ErrorCode;
 use Queen\Exceptions\HttpException;
@@ -26,7 +27,9 @@ use Queen\Tests\Support\PlanHandler;
  * One more thing is pinned here that no end-to-end run against a 1.1 broker
  * could ever produce: the 404 mapping (§4). A broker or proxy older than 1.1
  * answers 404 on the whole family, and the SDK has to turn that into one clear
- * "upgrade" verdict rather than let it read as "your queue is missing".
+ * "upgrade" verdict rather than let it read as "your queue is missing" — while a
+ * 1.1 broker's OWN 404, the one `depth` answers for a queue that is not there,
+ * has to stay the second thing and never become the first.
  */
 class EphemeralTest extends TestCase
 {
@@ -404,8 +407,28 @@ class EphemeralTest extends TestCase
     }
 
     // ===========================
-    // An old broker, or an old proxy: one verdict (§4, §8)
+    // The two kinds of 404 (§4, §8)
+    //
+    // The status alone cannot tell them apart, which is exactly why the mapping
+    // reads the body's CODE:
+    //
+    //   - no SDK negotiates a version, so a pre-1.1 broker (routes never
+    //     registered) and a pre-1.1 proxy (`route_blocked`, fails closed on
+    //     unknown API paths) both answer 404, and to a caller those are one
+    //     fact: upgrade;
+    //   - a broker that DOES support the family answers 404 with
+    //     `ephemeral_queue_not_found` when `depth` names a queue that is not
+    //     there.
     // ===========================
+
+    /** What a live 1.1 broker answers when `depth` names a queue that is gone. */
+    private function queueNotFound(): array
+    {
+        return ['status' => 404, 'json' => [
+            'error' => 'no ephemeral queue by that name exists on this broker',
+            'code' => 'ephemeral_queue_not_found',
+        ]];
+    }
 
     public function testMapsAMissingBrokerRouteToTheOneClearError(): void
     {
@@ -473,6 +496,79 @@ class EphemeralTest extends TestCase
         }
 
         $this->assertSame(8, $handler->count());
+    }
+
+    /**
+     * A 404 for a MISSING QUEUE is its own error, not "your broker is too old".
+     *
+     * `depth` is the only verb that can answer a real 404 — push and pop create
+     * implicitly, `reset` answers dropped:0, `delete` answers deleted:false — and
+     * collapsing it into the version verdict would send somebody chasing a
+     * broker version over a queue name typo.
+     */
+    public function testA404ForAMissingQueueIsItsOwnError(): void
+    {
+        $handler = new PlanHandler([$this->queueNotFound()]);
+
+        try {
+            $this->queen($handler)->ephemeral()->depth(self::QUEUE);
+            $this->fail('a missing queue must raise');
+        } catch (EphemeralQueueNotFoundException $error) {
+            $this->assertSame(404, $error->statusCode);
+            $this->assertSame(ErrorCode::EPHEMERAL_QUEUE_NOT_FOUND, $error->errorCode);
+            $this->assertSame(self::QUEUE, $error->queue, 'the error names the queue');
+            $this->assertStringContainsString('does not exist', $error->getMessage());
+            $this->assertStringNotContainsString(
+                '1.1',
+                $error->getMessage(),
+                'a missing queue must not read as a version problem'
+            );
+            // Nothing the HTTP layer surfaced is lost by the mapping.
+            $previous = $error->getPrevious();
+            $this->assertInstanceOf(HttpException::class, $previous);
+            $this->assertSame('ephemeral_queue_not_found', $previous->errorCode);
+        }
+
+        $this->assertSame(
+            '/api/v1/ephemeral/queues/inbox/depth',
+            $handler->requests[0]->getRequestTarget()
+        );
+    }
+
+    /**
+     * Tells the two 404s apart on the same verb, by the body and not the status.
+     *
+     * The regression this pins: `depth` answering a real 404 while the routes are
+     * demonstrably present, because the very next call proves an old broker reads
+     * differently on the same verb.
+     */
+    public function testTellsTheTwo404sApartOnTheSameVerb(): void
+    {
+        $handler = new PlanHandler([
+            $this->queueNotFound(),
+            ['status' => 404, 'json' => ['error' => 'not_found']],
+        ]);
+        $eph = $this->queen($handler)->ephemeral();
+
+        try {
+            $eph->depth(self::QUEUE);
+            $this->fail('a missing queue must raise');
+        } catch (HttpException $error) {
+            $this->assertInstanceOf(EphemeralQueueNotFoundException::class, $error);
+            $this->assertNotInstanceOf(EphemeralUnsupportedException::class, $error);
+            $this->assertSame(ErrorCode::EPHEMERAL_QUEUE_NOT_FOUND, $error->errorCode);
+        }
+
+        try {
+            $eph->depth(self::QUEUE);
+            $this->fail('an old broker must raise');
+        } catch (HttpException $error) {
+            $this->assertInstanceOf(EphemeralUnsupportedException::class, $error);
+            $this->assertNotInstanceOf(EphemeralQueueNotFoundException::class, $error);
+            $this->assertSame(ErrorCode::EPHEMERAL_UNSUPPORTED, $error->errorCode);
+        }
+
+        $this->assertSame(2, $handler->count());
     }
 
     /**

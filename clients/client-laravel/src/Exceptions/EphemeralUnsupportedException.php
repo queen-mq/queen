@@ -9,9 +9,14 @@ namespace Queen\Exceptions;
  * No SDK in this product negotiates capabilities, so there is nothing to probe
  * and nothing to fall back to: the WHOLE family answers 404 — the broker
  * because the routes were never registered, the proxy because an unknown API
- * path is `route_blocked` and it fails closed. Both are one verdict, "upgrade",
- * and neither is "your queue is missing": the ephemeral verbs answer an absent
- * queue with an ordinary body, never a 404.
+ * path is `route_blocked` and it fails closed. Both are one verdict, "upgrade".
+ *
+ * Exactly one 404 on this family means something else, which is why the mapping
+ * reads the body's `code` and not the status the two share: `depth` answers
+ * `ephemeral_queue_not_found` for a queue that is not there, and that arrives as
+ * EphemeralQueueNotFoundException — a sibling of this class, deliberately not a
+ * subclass, so `catch (EphemeralUnsupportedException)` never catches a queue
+ * name typo.
  *
  * It extends HttpException rather than RuntimeException on purpose. A 404 IS an
  * HTTP refusal, and every existing `catch (HttpException)` around a push or a

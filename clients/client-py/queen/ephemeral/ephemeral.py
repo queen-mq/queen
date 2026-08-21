@@ -39,12 +39,22 @@ see everything and competing consumers of one group share the work.
 ORDERING is FIFO per (queue, partition) within one ownership incarnation.
 Across an incarnation boundary the question is empty: the contents are gone.
 
-AND THE ONE ERROR YOU WILL MEET FIRST. No SDK negotiates a version. Against a
-broker or proxy older than 1.1 the whole family answers 404 -- the broker
-because the routes do not exist, the proxy because an unknown API path is
-``route_blocked`` -- so every 404 on this family is mapped to one
-``EphemeralError`` whose ``.code`` is ``EPHEMERAL_UNSUPPORTED``, keeping the
-original as ``__cause__``. Branch on the code, never on the prose.
+AND THE TWO KINDS OF 404, WHICH MUST NEVER BE CONFUSED FOR EACH OTHER. No SDK
+negotiates a version, so against a broker or proxy older than 1.1 the whole
+family answers 404 -- the broker because the routes do not exist, the proxy
+because an unknown API path is ``route_blocked``. That is a DEPLOYMENT fact and
+arrives as an ``EphemeralError`` whose ``.code`` is ``EPHEMERAL_UNSUPPORTED``.
+
+But ``depth`` also answers a real 404, with ``code: 'ephemeral_queue_not_found'``,
+when the queue simply is not there -- and it is the only verb that can, since
+push and pop create implicitly, ``reset`` answers ``dropped:0`` and ``delete``
+answers ``deleted:false``. That is a DATA fact and arrives as
+``EphemeralQueueNotFoundError``, whose ``.code`` is
+``EPHEMERAL_QUEUE_NOT_FOUND``. Collapsing it into the first would send somebody
+chasing a broker version over a queue name typo.
+
+Both keep the broker's own refusal as ``__cause__``. Branch on the code, never
+on the prose.
 """
 
 from __future__ import annotations
@@ -55,7 +65,12 @@ from urllib.parse import quote, urlencode
 import httpx
 
 from ..buffer.sinks import EPHEMERAL_SINK, ephemeral_address, ephemeral_destination
-from ..errors import EphemeralError, wrap_http_error
+from ..errors import (
+    EphemeralError,
+    EphemeralQueueNotFoundError,
+    code_of,
+    wrap_http_error,
+)
 from ..utils import logger
 
 #: ``error.code`` on the old-broker error, so callers branch on a code and never
@@ -67,6 +82,12 @@ EPHEMERAL_UNSUPPORTED = "ephemeral_unsupported"
 EPHEMERAL_UNSUPPORTED_MESSAGE = (
     "broker/proxy does not support ephemeral queues (requires >= 1.1)"
 )
+
+#: ``error.code`` when the queue itself does not exist -- the broker's own code
+#: string, kept identical across every SDK (Go ``ErrEphemeralQueueNotFound``,
+#: ``queen_protocol::EPHEMERAL_QUEUE_NOT_FOUND_CODE``) so a code seen in one
+#: language's logs means the same thing in the next.
+EPHEMERAL_QUEUE_NOT_FOUND = "ephemeral_queue_not_found"
 
 _CONFIGURE_ROUTE = "/api/v1/ephemeral/configure"
 _RESET_ROUTE = "/api/v1/ephemeral/reset"
@@ -106,23 +127,46 @@ def _require_queue(queue: Any) -> str:
     return queue
 
 
-def _map_error(error: Exception) -> Exception:
-    """Every 404 on this family means the same thing (§4, §8): the routes are
-    not there.
+def _map_error(error: Exception, queue: Optional[str] = None) -> Exception:
+    """Two facts arrive on this family as 404, and telling them apart is the
+    whole job of this function. THE BODY'S CODE decides, not the status:
 
-    An old broker 404s because it never registered them; an old proxy 404s
-    ``route_blocked`` because it fails closed on unknown API paths. Both are
-    "upgrade", neither is "your queue is missing" -- the ephemeral verbs answer
-    an absent queue with a normal body, never a 404.
+    * ``ephemeral_queue_not_found`` -- the routes are there and answered; the
+      QUEUE is not. Only ``depth`` can say this (§3.1): push and pop create
+      implicitly, ``reset`` answers ``dropped:0``, ``delete`` answers
+      ``deleted:false``. It is checked for on every verb anyway, because which
+      verbs can say it is the broker's business and this client should not
+      re-encode that list.
+    * anything else -- an old broker that never registered the routes, or an old
+      proxy answering ``route_blocked`` because it fails closed on unknown API
+      paths (§4, §8). Both mean "upgrade".
+
+    ``queue`` is passed only so a missing-queue error can name it. The broker's
+    own response is kept on both mappings, so nothing the HTTP layer surfaced is
+    lost.
     """
-    if isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 404:
-        return EphemeralError(
-            EPHEMERAL_UNSUPPORTED_MESSAGE,
+    if not (
+        isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 404
+    ):
+        return wrap_http_error(error, EphemeralError)
+
+    if code_of(error.response) == EPHEMERAL_QUEUE_NOT_FOUND:
+        return EphemeralQueueNotFoundError(
+            f'ephemeral: queue "{queue}" does not exist'
+            if queue
+            else "ephemeral: that queue does not exist",
             request=error.request,
             response=error.response,
-            code=EPHEMERAL_UNSUPPORTED,
+            code=EPHEMERAL_QUEUE_NOT_FOUND,
+            queue=queue,
         )
-    return wrap_http_error(error, EphemeralError)
+
+    return EphemeralError(
+        EPHEMERAL_UNSUPPORTED_MESSAGE,
+        request=error.request,
+        response=error.response,
+        code=EPHEMERAL_UNSUPPORTED,
+    )
 
 
 def _configure_body(
@@ -310,7 +354,7 @@ class Ephemeral:
         self._buffer_manager = buffer_manager
 
     # -----------------------------------------------------------------
-    # The one place the 404 rule lives.
+    # The one place the two 404 rules live.
     # -----------------------------------------------------------------
 
     async def _call(
@@ -322,6 +366,7 @@ class Ephemeral:
         timeout_millis: Optional[int] = None,
         affinity_key: Optional[str] = None,
         retry_kind: Optional[str] = None,
+        queue: Optional[str] = None,
     ) -> Any:
         try:
             if method == "GET":
@@ -346,13 +391,18 @@ class Ephemeral:
                     "code": getattr(error, "code", None),
                 },
             )
-            mapped = _map_error(error)
-            # The original is kept as __cause__ for the unsupported mapping --
-            # "the broker answered 404" is the evidence for "upgrade the broker"
-            # and dropping it would leave a caller with a claim and no proof.
-            # Anything else follows the kv/timers precedent and suppresses the
-            # chain, whose traceback says nothing the wrapped error does not.
-            if isinstance(mapped, EphemeralError) and mapped.code == EPHEMERAL_UNSUPPORTED:
+            mapped = _map_error(error, queue)
+            # The original is kept as __cause__ for BOTH 404 mappings -- "the
+            # broker answered 404" is the evidence for "upgrade the broker", and
+            # "it answered 404 with ephemeral_queue_not_found" is the evidence
+            # for "that queue is not there"; dropping either would leave a
+            # caller with a claim and no proof. Anything else follows the
+            # kv/timers precedent and suppresses the chain, whose traceback says
+            # nothing the wrapped error does not.
+            if isinstance(mapped, EphemeralError) and mapped.code in (
+                EPHEMERAL_UNSUPPORTED,
+                EPHEMERAL_QUEUE_NOT_FOUND,
+            ):
                 raise mapped from error
             raise mapped from None
 
@@ -389,7 +439,7 @@ class Ephemeral:
         _require_queue(queue)
         body = {"queue": queue, "options": _configure_body(options, overrides)}
         logger.log("Ephemeral.configure", {"queue": queue, "options": list(body["options"])})
-        return await self._call("POST", _CONFIGURE_ROUTE, body)
+        return await self._call("POST", _CONFIGURE_ROUTE, body, queue=queue)
 
     async def reset(self, queue: str) -> Any:
         """Drop every message, void every lease, rewind every group cursor.
@@ -401,7 +451,7 @@ class Ephemeral:
         """
         _require_queue(queue)
         logger.log("Ephemeral.reset", {"queue": queue})
-        return await self._call("POST", _RESET_ROUTE, {"queue": queue})
+        return await self._call("POST", _RESET_ROUTE, {"queue": queue}, queue=queue)
 
     async def delete(self, queue: str) -> Any:
         """Delete the queue: contents, cursors, and the declared configuration
@@ -409,7 +459,7 @@ class Ephemeral:
         _require_queue(queue)
         logger.log("Ephemeral.delete", {"queue": queue})
         return await self._call(
-            "DELETE", f"/api/v1/ephemeral/queue/{quote(queue, safe='')}"
+            "DELETE", f"/api/v1/ephemeral/queue/{quote(queue, safe='')}", queue=queue
         )
 
     # -----------------------------------------------------------------
@@ -468,7 +518,7 @@ class Ephemeral:
         logger.log(
             "Ephemeral.push", {"queue": queue, "partition": partition, "count": len(items)}
         )
-        return await self._call("POST", EPHEMERAL_SINK.path, body)
+        return await self._call("POST", EPHEMERAL_SINK.path, body, queue=queue)
 
     async def _push_buffered(
         self,
@@ -611,6 +661,7 @@ class Ephemeral:
             # A long poll that meets a 429 should back off and keep waiting
             # rather than give up after a handful of tries.
             retry_kind="pop" if wait else None,
+            queue=queue,
         )
 
         body = result if isinstance(result, dict) else {}
@@ -669,7 +720,7 @@ class Ephemeral:
         logger.log(
             "Ephemeral.ack", {"queue": queue, "group": group, "count": len(entries)}
         )
-        return await self._call("POST", _ACK_ROUTE, body)
+        return await self._call("POST", _ACK_ROUTE, body, queue=queue)
 
     # -----------------------------------------------------------------
     # Status.
@@ -688,9 +739,18 @@ class Ephemeral:
 
     async def depth(self, queue: str) -> Any:
         """Depth gauges for one queue: ring length, bytes, and the per-group
-        cursors."""
+        cursors.
+
+        THE ONLY VERB THAT CAN TELL YOU A QUEUE IS MISSING. Everything else
+        either creates the queue (push, pop) or answers a normal body about
+        having done nothing (``reset`` -> ``dropped:0``, ``delete`` ->
+        ``deleted:false``). Here an unknown queue raises
+        ``EphemeralQueueNotFoundError`` -- a different fact from the
+        ``EPHEMERAL_UNSUPPORTED`` verdict, which is about the broker's version,
+        and worth distinguishing precisely because both are 404s.
+        """
         _require_queue(queue)
         logger.log("Ephemeral.depth", {"queue": queue})
         return await self._call(
-            "GET", f"{_QUEUES_ROUTE}/{quote(queue, safe='')}/depth"
+            "GET", f"{_QUEUES_ROUTE}/{quote(queue, safe='')}/depth", queue=queue
         )

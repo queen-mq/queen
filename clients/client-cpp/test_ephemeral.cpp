@@ -14,11 +14,13 @@
  * `wait=true` is a long poll returning on the BROKER's default instead of the
  * caller's, which nothing observes at all.
  *
- * And one thing here can never be produced by an end-to-end run against a 1.1
+ * And one thing here can never be produced by an end-to-end run against a single
  * broker, which is the strongest argument for the file: the 404 mapping. A
  * broker or proxy older than 1.1 answers 404 on the whole family, and the SDK
  * has to turn that into one clear "upgrade" verdict rather than let it read as
- * "your queue is missing".
+ * "your queue is missing" -- while a 1.1 broker's OWN 404, the one `depth`
+ * answers for a queue that is not there, has to stay the second thing and never
+ * become the first.
  *
  * Like its siblings it serves its own responses from an in-process
  * httplib::Server, so it needs neither a broker nor Postgres:
@@ -29,7 +31,9 @@
  */
 
 #include "queen_client.hpp"
+#include <atomic>
 #include <iostream>
+#include <memory>
 #include <thread>
 #include <mutex>
 #include <map>
@@ -77,6 +81,16 @@ inline void old_broker(const httplib::Request&, httplib::Response& res) {
 inline void old_proxy(const httplib::Request&, httplib::Response& res) {
     res.status = 404;
     res.set_content(R"({"error":"route_blocked","code":"route_blocked"})", "application/json");
+}
+
+/// The OTHER 404, and the reason the mapping has to read the body: a broker that
+/// fully supports the family, answering `depth` about a queue that is not there.
+/// Byte-identical to what handlers/ephemeral.rs writes.
+inline void queue_not_found(const httplib::Request&, httplib::Response& res) {
+    res.status = 404;
+    res.set_content(
+        R"({"error":"no ephemeral queue by that name exists on this broker","code":"ephemeral_queue_not_found"})",
+        "application/json");
 }
 
 class CaptureServer {
@@ -660,7 +674,16 @@ void test_queues_and_depth_are_plain_gets_on_the_status_routes() {
 }
 
 // ============================================================================
-// An old broker, or an old proxy: one verdict (§4, §8)
+// The two kinds of 404 (§4, §8)
+//
+// The status alone cannot tell them apart, which is exactly why the mapping
+// reads the body's CODE:
+//
+//   * no SDK negotiates a version, so a pre-1.1 broker (routes never
+//     registered) and a pre-1.1 proxy (`route_blocked`, fails closed on unknown
+//     API paths) both answer 404, and to a caller those are one fact: upgrade;
+//   * a broker that DOES support the family answers 404 with
+//     `ephemeral_queue_not_found` when `depth` names a queue that is not there.
 // ============================================================================
 
 void test_maps_a_missing_broker_route_to_the_one_clear_error() {
@@ -746,6 +769,96 @@ void test_every_verb_of_the_family_maps_the_404() {
     }
 
     check(server.count() == 8, "and every one of them was actually attempted");
+}
+
+void test_a_404_for_a_missing_queue_is_its_own_error() {
+    // Not "your broker is too old". `depth` is the only verb that can answer a
+    // real 404 -- push and pop create implicitly, `reset` answers dropped:0,
+    // `del` answers deleted:false -- and collapsing it into the version verdict
+    // would send somebody chasing a broker version over a queue name typo.
+    CaptureServer server(queue_not_found);
+    QueenClient client({server.url()}, fast_config());
+
+    bool threw = false;
+    try {
+        client.ephemeral().depth(QUEUE);
+    } catch (const EphemeralUnsupportedError&) {
+        check(false, "a missing queue must NOT become the version error");
+    } catch (const EphemeralQueueNotFoundError& error) {
+        threw = true;
+        check(error.status_code() == 404, "the status is kept");
+        check_equal(error.code(), "ephemeral_queue_not_found",
+                    "the broker's own code, unchanged and branchable");
+        check_equal(error.queue(), QUEUE, "the error names the queue that was not found");
+        check(std::string(error.what()).find("does not exist") != std::string::npos,
+              "and says so in words");
+        check(std::string(error.what()).find("1.1") == std::string::npos,
+              "a missing queue must not read as a version problem");
+        // Nothing the HTTP layer surfaced is lost by the mapping.
+        check(error.body().find("ephemeral_queue_not_found") != std::string::npos,
+              "the broker's own body survives the mapping");
+    }
+    check(threw, "a missing queue must raise EphemeralQueueNotFoundError");
+}
+
+void test_the_queue_not_found_error_is_still_an_http_error() {
+    // Every existing `catch (const HttpError&)` around a depth call keeps
+    // catching this one, and the two 404 types stay siblings: catching one must
+    // never catch the other.
+    CaptureServer server(queue_not_found);
+    QueenClient client({server.url()}, fast_config());
+
+    bool caught_as_http_error = false;
+    try {
+        client.ephemeral().depth(QUEUE);
+    } catch (const HttpError& error) {
+        caught_as_http_error = true;
+        check(dynamic_cast<const EphemeralQueueNotFoundError*>(&error) != nullptr,
+              "and it is still the specific type");
+        check(dynamic_cast<const EphemeralUnsupportedError*>(&error) == nullptr,
+              "and it is NOT the version error");
+    }
+    check(caught_as_http_error,
+          "EphemeralQueueNotFoundError must be catchable as an HttpError");
+}
+
+void test_tells_the_two_404s_apart_on_the_same_verb() {
+    // The regression this pins: `depth` answering a real 404 while the routes
+    // are demonstrably present, because the very next call on the SAME verb --
+    // a bare old-broker 404 -- has to read differently. The body decides, and
+    // the status, which they share, decides nothing.
+    auto call_number = std::make_shared<std::atomic<int>>(0);
+    CaptureServer server([call_number](const httplib::Request& req, httplib::Response& res) {
+        if ((*call_number)++ == 0) {
+            queue_not_found(req, res);
+        } else {
+            old_broker(req, res);
+        }
+    });
+    QueenClient client({server.url()}, fast_config());
+
+    bool missing = false;
+    try {
+        client.ephemeral().depth(QUEUE);
+    } catch (const EphemeralQueueNotFoundError& error) {
+        missing = true;
+        check_equal(error.code(), "ephemeral_queue_not_found", "the queue is what is missing");
+    }
+    check(missing, "the first 404 is the missing queue");
+
+    bool unsupported = false;
+    try {
+        client.ephemeral().depth(QUEUE);
+    } catch (const EphemeralQueueNotFoundError&) {
+        check(false, "a bare 404 must NOT become the missing-queue error");
+    } catch (const EphemeralUnsupportedError& error) {
+        unsupported = true;
+        check_equal(error.what(), EphemeralUnsupportedError::MESSAGE,
+                    "the second 404 is the version verdict");
+    }
+    check(unsupported, "the second 404 is the old broker");
+
+    check(server.count() == 2, "and both were actually attempted");
 }
 
 void test_leaves_every_other_refusal_alone() {
@@ -837,6 +950,12 @@ int main() {
              test_the_unsupported_error_is_still_an_http_error);
     run_test("every verb of the family maps the 404",
              test_every_verb_of_the_family_maps_the_404);
+    run_test("a 404 for a missing queue is its own error",
+             test_a_404_for_a_missing_queue_is_its_own_error);
+    run_test("the queue-not-found error is still an HttpError",
+             test_the_queue_not_found_error_is_still_an_http_error);
+    run_test("tells the two 404s apart on the same verb",
+             test_tells_the_two_404s_apart_on_the_same_verb);
     run_test("leaves every other refusal alone", test_leaves_every_other_refusal_alone);
 
     std::cout << std::endl;

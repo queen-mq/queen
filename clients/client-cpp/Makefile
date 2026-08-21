@@ -131,9 +131,9 @@ run-buffer: bin/test_buffer
 # Build the ephemeral-queues wire suite (EPHEMERAL_QUEUES.md §3.1, §4, §7.3).
 # Broker-free like its siblings, and it has to be: the thing it pins hardest --
 # that a 404 from a pre-1.1 broker OR from a proxy that fails closed on unknown
-# API paths becomes ONE clear "upgrade" error rather than reading as "your queue
-# is missing" -- cannot be produced by any run against a broker that has the
-# routes.
+# API paths becomes ONE clear "upgrade" error, while the 404 a LIVE broker
+# answers for a queue that is not there stays its own error -- cannot be
+# produced by any run against a single broker.
 ephemeral: bin/test_ephemeral
 	@echo "Ephemeral wire test suite built successfully!"
 	@echo "Run with: ./bin/test_ephemeral"
