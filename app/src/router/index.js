@@ -56,13 +56,29 @@ const routes = [
     }
   },
   {
+    // The RAM storage class (EPHEMERAL_QUEUES.md §5.3). Tenant-scoped and
+    // 'read' like the durable list — the two status routes are classified
+    // Gated(Ephemeral, Read) at the proxy, so anyone who may read queues may
+    // read these. It is a SEPARATE page on purpose: an ephemeral queue has no
+    // pending, no retained bytes and no DLQ, so its rows cannot share a table
+    // with columns that would have to lie about them.
+    path: '/ephemeral',
+    name: 'Ephemeral',
+    component: () => import('@/views/Ephemeral.vue'),
+    meta: {
+      title: 'Ephemeral Queues', subtitle: 'RAM-class queues — contents survive nothing',
+      requires: 'read', scope: 'tenant',
+      nav: { group: 'Routing', icon: 'ephemeral', order: 2 },
+    }
+  },
+  {
     path: '/consumers',
     name: 'Consumers',
     component: () => import('@/views/Consumers.vue'),
     meta: {
       title: 'Consumer Groups', subtitle: 'Monitor consumer lag and status',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Routing', icon: 'consumers', order: 2 },
+      nav: { group: 'Routing', icon: 'consumers', order: 3 },
     }
   },
   {
@@ -72,7 +88,7 @@ const routes = [
     meta: {
       title: 'Messages', subtitle: 'Browse and inspect messages',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Routing', icon: 'messages', order: 3 },
+      nav: { group: 'Routing', icon: 'messages', order: 4 },
     }
   },
   {
