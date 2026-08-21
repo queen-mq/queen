@@ -48,6 +48,15 @@ export const OLD_BROKER = { status: 404, body: { error: 'not_found' } }
 export const OLD_PROXY = { status: 404, body: { error: 'route_blocked', code: 'route_blocked' } }
 
 /**
+ * The OTHER 404, and the reason the mapping has to read the body: a broker that
+ * fully supports the family, answering `depth` about a queue that is not there.
+ */
+export const QUEUE_NOT_FOUND = {
+  status: 404,
+  body: { error: 'ephemeral queue not found', code: 'ephemeral_queue_not_found' }
+}
+
+/**
  * Run `fn(ephemeral, hits, queen)` against a plan server, closing the client
  * afterwards. `handleSignals:false` because a test process must not have its
  * SIGINT handler replaced by every client it builds.

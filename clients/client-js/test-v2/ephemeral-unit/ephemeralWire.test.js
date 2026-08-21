@@ -33,8 +33,8 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { EPHEMERAL_UNSUPPORTED } from '../../client-v2/index.js'
-import { withEphemeral, ok, pushed, popped, frame, acked, OLD_BROKER, OLD_PROXY } from './_planServer.js'
+import { EPHEMERAL_UNSUPPORTED, EPHEMERAL_QUEUE_NOT_FOUND } from '../../client-v2/index.js'
+import { withEphemeral, ok, pushed, popped, frame, acked, OLD_BROKER, OLD_PROXY, QUEUE_NOT_FOUND } from './_planServer.js'
 
 const QUEUE = 'test-ephemeral'
 
@@ -316,10 +316,21 @@ describe('ephemeral wire — status', () => {
   })
 })
 
-describe('ephemeral wire — an old broker or proxy', () => {
-  // No SDK negotiates a version (§4, §8). A pre-1.1 broker never registered
-  // these routes and a pre-1.1 proxy fails closed on unknown API paths, so both
-  // answer 404 — and to the caller those are the same fact: upgrade.
+describe('ephemeral wire — the two kinds of 404', () => {
+  // The status alone cannot tell these apart, which is exactly why the mapping
+  // reads the body's CODE:
+  //
+  //   * no SDK negotiates a version (§4, §8), so a pre-1.1 broker (routes never
+  //     registered) and a pre-1.1 proxy (`route_blocked`, fails closed on
+  //     unknown API paths) both answer 404, and to a caller those are one fact:
+  //     upgrade;
+  //   * a broker that DOES support the family answers 404 with
+  //     `ephemeral_queue_not_found` when `depth` names a queue that is not
+  //     there — the only verb that can, since push and pop create implicitly,
+  //     `reset` answers dropped:0 and `delete` answers deleted:false.
+  //
+  // Collapsing the second into the first sends somebody chasing a broker
+  // version over a queue name typo.
   const oneClearError = (e) => {
     assert.equal(e.code, EPHEMERAL_UNSUPPORTED)
     assert.equal(e.message, 'broker/proxy does not support ephemeral queues (requires >= 1.1)')
@@ -341,6 +352,33 @@ describe('ephemeral wire — an old broker or proxy', () => {
         assert.equal(e.cause.code, 'route_blocked', 'the proxy verdict is kept, it is just not what the caller branches on')
         return true
       })
+    }, { retryAttempts: 1 })
+  })
+
+  it('a 404 for a MISSING QUEUE is its own error, not "your broker is too old"', async () => {
+    await withEphemeral([QUEUE_NOT_FOUND], async (eph, hits) => {
+      await assert.rejects(() => eph.depth(QUEUE), (e) => {
+        assert.equal(e.code, EPHEMERAL_QUEUE_NOT_FOUND)
+        assert.equal(e.status, 404)
+        assert.equal(e.queue, QUEUE, 'the error names the queue that was not found')
+        assert.match(e.message, /does not exist/)
+        assert.doesNotMatch(e.message, /1\.1/, 'a missing queue must not read as a version problem')
+        // Nothing the HTTP layer surfaced is lost by the mapping.
+        assert.equal(e.cause.status, 404)
+        assert.equal(e.cause.code, 'ephemeral_queue_not_found')
+        assert.equal(e.cause.message, 'ephemeral queue not found')
+        return true
+      })
+      assert.equal(hits[0].url, `/api/v1/ephemeral/queues/${QUEUE}/depth`)
+    }, { retryAttempts: 1 })
+  })
+
+  it('tells the two 404s apart on the same verb, by the body and not the status', async () => {
+    // The regression this pins: `depth` answering a real 404 while the routes
+    // are demonstrably present, because the very next call succeeds.
+    await withEphemeral([QUEUE_NOT_FOUND, OLD_BROKER], async (eph) => {
+      await assert.rejects(() => eph.depth(QUEUE), e => e.code === EPHEMERAL_QUEUE_NOT_FOUND)
+      await assert.rejects(() => eph.depth(QUEUE), e => e.code === EPHEMERAL_UNSUPPORTED)
     }, { retryAttempts: 1 })
   })
 

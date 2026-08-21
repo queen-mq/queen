@@ -288,7 +288,10 @@ export class Queen {
    * `queen.close()` drains it on the same deadline (§4.1).
    *
    * Requires broker/proxy >= 1.1; an older one 404s the whole family and every
-   * verb here maps that to one error with `.code === EPHEMERAL_UNSUPPORTED`.
+   * verb here maps that to `.code === EPHEMERAL_UNSUPPORTED`. Not to be
+   * confused with the OTHER 404: `depth` on a queue that does not exist raises
+   * `.code === EPHEMERAL_QUEUE_NOT_FOUND`, which is a missing queue and not a
+   * missing feature.
    *
    * Lazily initialized, singleton, like `admin` and `kv`.
    * @returns {Ephemeral}

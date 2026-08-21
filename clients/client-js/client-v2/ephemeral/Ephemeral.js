@@ -37,12 +37,21 @@
  * ORDERING is FIFO per (queue, partition) within one ownership incarnation.
  * Across an incarnation boundary the question is empty: the contents are gone.
  *
- * AND THE ONE ERROR YOU WILL MEET FIRST. No SDK negotiates a version. Against a
- * broker or proxy older than 1.1 the whole family answers 404 -- the broker
- * because the routes do not exist, the proxy because an unknown API path is
- * `route_blocked` -- so every 404 on this family is mapped to one error with
- * `.code === EPHEMERAL_UNSUPPORTED`, and the original is kept as `.cause`.
- * Branch on the code, never on the prose.
+ * AND THE TWO KINDS OF 404, WHICH MUST NEVER BE CONFUSED FOR EACH OTHER. No SDK
+ * negotiates a version, so against a broker or proxy older than 1.1 the whole
+ * family answers 404 -- the broker because the routes do not exist, the proxy
+ * because an unknown API path is `route_blocked`. That is a DEPLOYMENT fact and
+ * arrives as `.code === EPHEMERAL_UNSUPPORTED`.
+ *
+ * But `depth` also answers a real 404, with `code: 'ephemeral_queue_not_found'`,
+ * when the queue simply is not there -- and it is the only verb that can, since
+ * push and pop create implicitly, `reset` answers `dropped:0` and `delete`
+ * answers `deleted:false`. That is a DATA fact and arrives as
+ * `.code === EPHEMERAL_QUEUE_NOT_FOUND`. Collapsing it into the first would
+ * send somebody chasing a broker version over a queue name typo.
+ *
+ * Both keep the broker's own error as `.cause`. Branch on the code, never on
+ * the prose.
  */
 
 import * as logger from '../utils/logger.js'
@@ -54,6 +63,14 @@ export const EPHEMERAL_UNSUPPORTED = 'ephemeral_unsupported'
 /** The message every SDK fixes for this case (§4). Keep it identical across clients. */
 export const EPHEMERAL_UNSUPPORTED_MESSAGE =
   'broker/proxy does not support ephemeral queues (requires >= 1.1)'
+
+/**
+ * `error.code` when the queue itself does not exist -- the broker's own code
+ * string, kept identical across every SDK (Go `ErrEphemeralQueueNotFound`,
+ * `queen-protocol::EPHEMERAL_QUEUE_NOT_FOUND_CODE`) so a code seen in one
+ * language's logs means the same thing in the next.
+ */
+export const EPHEMERAL_QUEUE_NOT_FOUND = 'ephemeral_queue_not_found'
 
 /**
  * The seven knobs of `configure` (§3.1). A CLOSED list: an option this client
@@ -87,14 +104,38 @@ function requireQueue(queue) {
 }
 
 /**
- * Every 404 on this family means the same thing (§4, §8): the routes are not
- * there. An old broker 404s because it never registered them; an old proxy
- * 404s `route_blocked` because it fails closed on unknown API paths. Both are
- * "upgrade", neither is "your queue is missing" -- the ephemeral verbs answer
- * an absent queue with a normal body, never a 404.
+ * Two facts arrive on this family as 404, and telling them apart is the whole
+ * job of this function. THE BODY'S CODE decides, not the status:
+ *
+ *   * `ephemeral_queue_not_found` -- the routes are there and answered; the
+ *     QUEUE is not. Only `depth` can say this (§3.1): push and pop create
+ *     implicitly, `reset` answers `dropped:0`, `delete` answers
+ *     `deleted:false`. It is checked for on every verb anyway, because which
+ *     verbs can say it is the broker's business and this client should not
+ *     re-encode that list.
+ *   * anything else -- an old broker that never registered the routes, or an
+ *     old proxy answering `route_blocked` because it fails closed on unknown
+ *     API paths (§4, §8). Both mean "upgrade".
+ *
+ * The broker's own error is kept as `.cause` either way, so nothing the HTTP
+ * layer surfaced is lost by the mapping.
  */
-function mapUnsupported(error) {
+function map404(error, queue) {
   if (!error || error.status !== 404) return error
+
+  if (error.code === EPHEMERAL_QUEUE_NOT_FOUND) {
+    const missing = new Error(
+      queue
+        ? `ephemeral: queue "${queue}" does not exist`
+        : 'ephemeral: that queue does not exist'
+    )
+    missing.code = EPHEMERAL_QUEUE_NOT_FOUND
+    missing.status = 404
+    if (queue) missing.queue = queue
+    missing.cause = error
+    return missing
+  }
+
   const mapped = new Error(EPHEMERAL_UNSUPPORTED_MESSAGE)
   mapped.code = EPHEMERAL_UNSUPPORTED
   mapped.status = 404
@@ -193,15 +234,18 @@ export class Ephemeral {
     this.#bufferManager = bufferManager
   }
 
-  /** Every request in this class goes through here, so the 404 rule has one home. */
-  async #call(method, path, body = null, { timeoutMillis = null, affinityKey = null, retryKind = null } = {}) {
+  /**
+   * Every request in this class goes through here, so the two 404 rules have
+   * one home. `queue` is passed only so a missing-queue error can name it.
+   */
+  async #call(method, path, body = null, { timeoutMillis = null, affinityKey = null, retryKind = null, queue = null } = {}) {
     try {
       if (method === 'GET') return await this.#httpClient.get(path, timeoutMillis, affinityKey, retryKind)
       if (method === 'DELETE') return await this.#httpClient.delete(path, timeoutMillis, affinityKey, retryKind)
       return await this.#httpClient.post(path, body, timeoutMillis, affinityKey, retryKind)
     } catch (error) {
       logger.error('Ephemeral.request', { method, path, status: error.status, error: error.message, code: error.code })
-      throw mapUnsupported(error)
+      throw map404(error, queue)
     }
   }
 
@@ -228,7 +272,7 @@ export class Ephemeral {
     requireQueue(queue)
     const body = { queue, options: buildConfigureOptions(options) }
     logger.log('Ephemeral.configure', { queue, options: Object.keys(body.options) })
-    return this.#call('POST', '/api/v1/ephemeral/configure', body)
+    return this.#call('POST', '/api/v1/ephemeral/configure', body, { queue })
   }
 
   /**
@@ -242,14 +286,14 @@ export class Ephemeral {
   async reset(queue) {
     requireQueue(queue)
     logger.log('Ephemeral.reset', { queue })
-    return this.#call('POST', '/api/v1/ephemeral/reset', { queue })
+    return this.#call('POST', '/api/v1/ephemeral/reset', { queue }, { queue })
   }
 
   /** Delete the queue: contents, cursors, and the declared configuration in PG. */
   async delete(queue) {
     requireQueue(queue)
     logger.log('Ephemeral.delete', { queue })
-    return this.#call('DELETE', `/api/v1/ephemeral/queue/${encodeURIComponent(queue)}`)
+    return this.#call('DELETE', `/api/v1/ephemeral/queue/${encodeURIComponent(queue)}`, null, { queue })
   }
 
   // ------------------------------------------------------------------ push
@@ -292,7 +336,7 @@ export class Ephemeral {
     body.messages = items
 
     logger.log('Ephemeral.push', { queue, partition, count: items.length })
-    return this.#call('POST', EPHEMERAL_SINK.path, body)
+    return this.#call('POST', EPHEMERAL_SINK.path, body, { queue })
   }
 
   /**
@@ -389,6 +433,7 @@ export class Ephemeral {
     // either way, so this saves a hop, it does not create correctness.
     const affinityKey = `${queue}:${partition || '*'}:${group || '__QUEUE_MODE__'}`
     const result = await this.#call('GET', `/api/v1/ephemeral/pop?${params}`, null, {
+      queue,
       timeoutMillis: wait ? timeoutMillis + WAIT_TIMEOUT_SLACK_MILLIS : null,
       affinityKey,
       // A long poll that meets a 429 should back off and keep waiting rather
@@ -429,7 +474,7 @@ export class Ephemeral {
     body.acks = list
 
     logger.log('Ephemeral.ack', { queue, group: opts.group ?? null, count: list.length })
-    return this.#call('POST', '/api/v1/ephemeral/ack', body)
+    return this.#call('POST', '/api/v1/ephemeral/ack', body, { queue })
   }
 
   // ---------------------------------------------------------------- status
@@ -446,11 +491,20 @@ export class Ephemeral {
     return this.#call('GET', '/api/v1/ephemeral/queues')
   }
 
-  /** Depth gauges for one queue: ring length, bytes, and the per-group cursors. */
+  /**
+   * Depth gauges for one queue: ring length, bytes, and the per-group cursors.
+   *
+   * THE ONLY VERB THAT CAN TELL YOU A QUEUE IS MISSING. Everything else either
+   * creates the queue (push, pop) or answers a normal body about having done
+   * nothing (`reset` -> `dropped:0`, `delete` -> `deleted:false`). Here an
+   * unknown queue raises with `.code === EPHEMERAL_QUEUE_NOT_FOUND` -- a
+   * different fact from `EPHEMERAL_UNSUPPORTED`, which is about the broker's
+   * version, and worth distinguishing precisely because both are 404s.
+   */
   async depth(queue) {
     requireQueue(queue)
     logger.log('Ephemeral.depth', { queue })
-    return this.#call('GET', `/api/v1/ephemeral/queues/${encodeURIComponent(queue)}/depth`)
+    return this.#call('GET', `/api/v1/ephemeral/queues/${encodeURIComponent(queue)}/depth`, null, { queue })
   }
 }
 
