@@ -169,6 +169,10 @@ pub fn spawn(state: Arc<AppState>, pool: Pool, interval_ms: u64) {
                     crate::switches::Switches::KEY_KV,
                     crate::switches::Switches::KEY_TIMERS_SCHEDULE,
                     crate::switches::Switches::KEY_TIMERS_FIRE,
+                    // EPHEMERAL_QUEUES.md §3.8: the RAM class's switch rides the
+                    // same mirror, so a flip made on one broker of a cell reaches
+                    // the others within one reconcile interval.
+                    crate::switches::Switches::KEY_EPHEMERAL,
                 ] {
                     if let Ok(v) = db::get_system_flag_opt(&c, key).await {
                         state.switches.adopt(key, v);

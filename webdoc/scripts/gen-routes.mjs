@@ -64,7 +64,13 @@ function parseRoutes(text) {
 // 2026-08-17: re-read for PLAN_KV_TIMERS.md §8.1. The KV and timer families were
 // answering read-write on every route including the GETs, because the Rust named
 // none of them and they reached the fallthrough at the bottom of the function.
-const ACCESS_FINGERPRINT = "eace69501e32bd14";
+// 2026-08-21: re-read for EPHEMERAL_QUEUES.md §3.9. Three new rules, mirrored
+// below in the same order the Rust evaluates them: the two ephemeral STATUS
+// reads are read-only and live INSIDE the GET block (the documented trap), the
+// ephemeral push is write-only like the durable push, and the rest of the family
+// — pop, ack, configure, reset, the queue delete — is read-write by an explicit
+// arm rather than by the fallthrough.
+const ACCESS_FINGERPRINT = "e7d992a4b1d8b5b6";
 
 function accessLevel(method, path) {
   const m = method;
@@ -92,6 +98,9 @@ function accessLevel(method, path) {
     // PLAN_KV_TIMERS.md §8.1: inside the GET block, never outside it.
     if (path.startsWith("/api/v1/kv")) return "read-only";
     if (path.startsWith("/api/v1/timers")) return "read-only";
+    // EPHEMERAL_QUEUES.md §3.9: the two status reads only. The pop is a GET but
+    // it mutates, so it is read-write further down.
+    if (path.startsWith("/api/v1/ephemeral/queues")) return "read-only";
   }
 
   if (path === "/streams/v1/state/get") return "read-only";
@@ -100,8 +109,12 @@ function accessLevel(method, path) {
   if (path === "/api/v1/push") return "write-only";
   // Scheduling a timer is a produce operation; cancelling one is not.
   if (m === "POST" && path === "/api/v1/timers") return "write-only";
+  // An ephemeral push is a produce operation, like the durable push.
+  if (m === "POST" && path === "/api/v1/ephemeral/push") return "write-only";
 
   if (path.startsWith("/api/v1/kv") || path.startsWith("/api/v1/timers")) return "read-write";
+  // Pop, ack, configure, reset and the queue delete.
+  if (path.startsWith("/api/v1/ephemeral")) return "read-write";
 
   return "read-write";
 }
@@ -142,6 +155,9 @@ const GROUPS = [
   // boot flags that used to gate them are gone. Without this entry they land in
   // "Ungrouped".
   ["Key/value state and timers", (p) => /^\/api\/v1\/(kv|timers)(\/|$)/.test(p)],
+  // EPHEMERAL_QUEUES.md §3.1. Registered unconditionally like the eight above;
+  // without this entry the family lands in "Ungrouped".
+  ["Ephemeral queues", (p) => /^\/api\/v1\/ephemeral(\/|$)/.test(p)],
   ["Operator surfaces", (p) => p.startsWith("/api/v1/system")],
   ["Dashboard identity (broker-direct)", (p) => p.startsWith("/auth/")],
   ["Internal (broker-to-broker)", (p) => p.startsWith("/internal/")],

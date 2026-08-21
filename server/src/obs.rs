@@ -282,6 +282,10 @@ pub struct ReporterHandles {
     pub ack_registry: Arc<AckRegistry>,
     pub file_buffer: Arc<FileBufferManager>,
     pub hotlist: Arc<HotList>,
+    /// EPHEMERAL_QUEUES.md §6 — read for the `eph_*` columns of the two blocks
+    /// below. An `Arc` clone, like every other handle here, and the reporter
+    /// only ever reads gauges off it: no lock is held across a log call.
+    pub ephemeral: Arc<crate::ephemeral::Ephemeral>,
     pub dedup: Arc<DedupCache>,
     pub dedup_cap_mb: usize,
     pub admission: Arc<crate::admission::Admission>,
@@ -305,6 +309,21 @@ pub fn spawn_reporter(h: ReporterHandles) {
         let mut prev_kv_ops = h.metrics.kvt.kv_ops_total();
         let mut prev_kv_rej = h.metrics.kvt.kv_rejected_total();
         let mut prev_fired = h.metrics.kvt.timers_fired_total();
+        // EPHEMERAL_QUEUES.md §6 — the same windowed-delta discipline the kv and
+        // conflation columns follow: four relaxed loads per tick, and the fields
+        // ride the EXISTING blocks. No third periodic target (§14.4, restated by
+        // the plan) and no per-message line, ever.
+        let eph = |m: &Metrics| {
+            (
+                m.eph_pushed.load(Ordering::Relaxed),
+                m.eph_popped.load(Ordering::Relaxed),
+                m.eph_acked.load(Ordering::Relaxed),
+                m.eph_dropped_bounds.load(Ordering::Relaxed)
+                    + m.eph_dropped_ttl.load(Ordering::Relaxed)
+                    + m.eph_dropped_retry.load(Ordering::Relaxed),
+            )
+        };
+        let (mut p_eph_push, mut p_eph_pop, mut p_eph_ack, mut p_eph_drop) = eph(&h.metrics);
         let (mut prev_visits, mut prev_cands, _, _) = h.hotlist.lap.snapshot();
         static POOL_SAT: Sampler = Sampler::new(10_000);
         let mut last = Instant::now();
@@ -384,6 +403,7 @@ pub fn spawn_reporter(h: ReporterHandles) {
             // gone, every cell has both surfaces, and the fields are now permanent
             // columns of `broker rates` — one field list, always the same shape, which
             // is what a log parser wanted in the first place.
+            let (eph_push, eph_pop, eph_ack, eph_drop) = eph(&h.metrics);
             let kvt = &h.metrics.kvt;
             let kv_ops = kvt.kv_ops_total();
             let kv_rej = kvt.kv_rejected_total();
@@ -437,11 +457,28 @@ pub fn spawn_reporter(h: ReporterHandles) {
                 // periodic block and no per-message line (§6).
                 conflated_s = format!("{:.0}", d(cur.conflated, prev.conflated)),
                 cfl_conflict_s = format!("{:.1}", d(cur.conflation_conflicts, prev.conflation_conflicts)),
+                // EPHEMERAL_QUEUES.md §6. Permanent columns of this line, like
+                // the kv/timers ones beside them: every cell has the surface, so
+                // a parser sees one shape. They stay 0 where nobody uses it.
+                eph_push_s = format!("{:.0}", d(eph_push, p_eph_push)),
+                eph_pop_s = format!("{:.0}", d(eph_pop, p_eph_pop)),
+                eph_ack_s = format!("{:.0}", d(eph_ack, p_eph_ack)),
+                // The three drop causes summed, because on the RATES line the
+                // question is "is this cell losing messages?" — WHICH cause it
+                // is comes from the per-queue `drops` of the status endpoint and
+                // from the three Prometheus counters. A non-zero here on a class
+                // whose contract permits loss is still the signal that somebody
+                // has under-sized a queue or over-run a consumer.
+                eph_drop_s = format!("{:.1}", d(eph_drop, p_eph_drop)),
                 "broker rates"
             );
             prev_kv_ops = kv_ops;
             prev_kv_rej = kv_rej;
             prev_fired = fired;
+            p_eph_push = eph_push;
+            p_eph_pop = eph_pop;
+            p_eph_ack = eph_ack;
+            p_eph_drop = eph_drop;
 
             // ---- rates (top-N hot queues) ----
             let cur_q = h.metrics.per_queue.snapshot();
@@ -536,8 +573,47 @@ pub fn spawn_reporter(h: ReporterHandles) {
                 kv_unpruned = kvt.kv_expired_not_pruned(),
                 timers = format!("{}pending", timers_pending),
                 kv_pool = format!("{}/{}", pool_used, pool_max),
+                // EPHEMERAL_QUEUES.md §6. The one number in this whole block that
+                // is EXACT rather than sampled or estimated: it is this process's
+                // own heap, counted as it is charged. `rss_gb` above is the total
+                // it lives inside, and the pair is what says whether a memory
+                // climb is the ephemeral class or something else.
+                eph = format!(
+                    "{:.1}MB/{}queues",
+                    h.ephemeral.global_bytes() as f64 / (1024.0 * 1024.0),
+                    h.ephemeral.queue_count()
+                ),
                 "broker sizes"
             );
+            // Per-tenant top-N, on the SAME line shape as the kv one below and
+            // for the same reason (§14.1): this is where the per-tenant view
+            // lives — a log line, never a Prometheus label on a counter.
+            //
+            // SKIPPED for a tenant holding nothing, so a cell with the surface
+            // and no traffic prints no lines at all: the same anti-flood rule the
+            // per-queue block follows.
+            let (eph_top, eph_tenants) = h.ephemeral.tenant_top(h.top_n);
+            for (tenant, bytes, queues, cap) in eph_top {
+                if bytes == 0 && queues == 0 {
+                    continue;
+                }
+                tracing::info!(
+                    target: "sizes",
+                    tenant = %tenant,
+                    eph_mb = format!("{:.1}", bytes as f64 / (1024.0 * 1024.0)),
+                    eph_queues = queues,
+                    // Percentage of the tenant's own grant, or `-` when the grant
+                    // is unlimited. Not 0 and not 100: both would read as a real
+                    // ratio, and "there is no limit here" is a third answer.
+                    eph_quota_pct = %if cap > 0 {
+                        format!("{:.0}", 100.0 * bytes as f64 / cap as f64)
+                    } else {
+                        "-".to_string()
+                    },
+                    top = format!("{}/{}", h.top_n.min(eph_tenants), eph_tenants),
+                    "ephemeral tenant sizes"
+                );
+            }
             // Per-tenant top-N, modelled on the per-queue lines above. This is
             // where the per-tenant view of these surfaces LIVES (§14.1): it is a
             // log line and a JSON endpoint, never a Prometheus label on a

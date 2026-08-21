@@ -598,6 +598,21 @@ pub struct Config {
     /// empty and unpolled before it is collected. Declared queues are never
     /// collected: their configuration is durable and their emptiness is normal.
     pub ephemeral_implicit_idle_s: i64,
+    /// `QUEEN_EPHEMERAL_REQUIRE_GRANT`. With tenancy ON, the ABSENCE of a grant row
+    /// is a DENIAL (403 `feature_gated`) and not a permission — the identical
+    /// posture, and the identical derivation, as `kv_require_grant` above (§1.6
+    /// rung 2 / M7). The tenant header is opaque and unvalidated, so a client that
+    /// rotates it on every request would otherwise mint a fresh unlimited tenant —
+    /// and on THIS class an unlimited tenant is unlimited RAM.
+    pub ephemeral_require_grant: bool,
+    /// `QUEEN_EPHEMERAL_RATE` / `_BURST`: per-tenant token bucket over PUSHED
+    /// MESSAGES per second (§1.6 rung 2), evaluated before a single byte is
+    /// charged, answering 429 + `Retry-After`. A grant row's `max_msgs_per_sec`
+    /// overrides both. The default is deliberately an order of magnitude above the
+    /// durable commit-bound ceiling of a free cell: this class costs a `VecDeque`
+    /// push, so the rate is a runaway-producer guard and not a throughput policy.
+    pub ephemeral_rate: u32,
+    pub ephemeral_burst: u32,
 
     // --- Sweeper (§7). ONE background component, TWO clocks. The asymmetry is a
     // principle, not a convenience: a late fire is product latency and is visible,
@@ -1013,6 +1028,13 @@ pub fn log_effective(cfg: &Config) {
         eph_lease_s = cfg.ephemeral_lease_s,
         eph_retry_limit = cfg.ephemeral_retry_limit,
         eph_implicit_idle_s = cfg.ephemeral_implicit_idle_s,
+        // The grant posture, printed with the value ACTUALLY in force rather than
+        // the formula (the `kv_require_grant` rule one block up): "on" here means
+        // a tenant with no row in the grant table is refused, which is the single
+        // most confusing line to reconstruct from the environment during an
+        // incident, because nothing in the environment spells it.
+        eph_require_grant = cfg.ephemeral_require_grant,
+        eph_rate = %format!("{}/{}burst msgs/s", cfg.ephemeral_rate, cfg.ephemeral_burst),
         "config: ephemeral"
     );
     tracing::info!(
@@ -1301,6 +1323,12 @@ pub fn load() -> Config {
         // 0 IS legal here and means "never collect implicit queues" — unlike the
         // budgets, an operator who wants that is asking for something coherent.
         ephemeral_implicit_idle_s: env_int("QUEEN_EPHEMERAL_IMPLICIT_IDLE_S", 300).max(0),
+        // DERIVED from the tenancy flag, exactly like `kv_require_grant` above: a
+        // self-hosted operator never has to discover why they should configure
+        // something, and a cloud cell is off until the plan grants it.
+        ephemeral_require_grant: env_bool("QUEEN_EPHEMERAL_REQUIRE_GRANT", tenancy_header),
+        ephemeral_rate: env_int("QUEEN_EPHEMERAL_RATE", 5000).max(1) as u32,
+        ephemeral_burst: env_int("QUEEN_EPHEMERAL_BURST", 10_000).max(1) as u32,
         sweeper_enabled: env_bool("QUEEN_SWEEPER", true),
         sweeper_min_sleep_ms: env_int("QUEEN_SWEEPER_MIN_SLEEP_MS", 5).max(1) as u64,
         sweeper_max_sleep_ms: env_int("QUEEN_SWEEPER_MAX_SLEEP_MS", 1000).max(1) as u64,

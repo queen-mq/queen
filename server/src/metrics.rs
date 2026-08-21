@@ -1310,6 +1310,55 @@ impl Metrics {
         // running this binary exposes the same series, and an alert rule can be
         // written once for the fleet.
         self.kvt.render(&mut s, &ht, &g);
+        // EPHEMERAL_QUEUES.md §6. Appended next to the kv/timers block and on
+        // the same terms: unconditionally, so every cell running this binary
+        // exposes the same series and an alert rule can be written once for the
+        // fleet. NO `tenant` label anywhere here — the per-tenant view of this
+        // class is the `sizes` top-N log line (§14.1), because a series keyed by
+        // a value the caller chooses is a cardinality the caller chooses.
+        ht(&mut s, "queen_ephemeral_messages_total", "Ephemeral messages by verb", "counter");
+        for (verb, ctr) in [
+            ("pushed", &self.eph_pushed),
+            ("popped", &self.eph_popped),
+            ("acked", &self.eph_acked),
+        ] {
+            g(
+                &mut s,
+                "queen_ephemeral_messages_total",
+                &format!("{{verb=\"{verb}\"}}"),
+                ctr.load(Ordering::Relaxed).to_string(),
+            );
+        }
+        // THREE LABEL VALUES AND NOT THREE FAMILIES, unlike the counters above:
+        // the causes are alternatives for the same event, so a dashboard wants
+        // them summable, while push/pop/ack are different events. Each still has
+        // its own remedy — `bounds` the queue is too small (or its producer too
+        // fast), `ttl` the consumer is too slow, `retry` the handlers are
+        // failing — which is why the label exists at all. On this class a drop is
+        // LEGAL (§1.2), and that is exactly why it has to be visible: nothing
+        // else in the system will complain about it.
+        ht(&mut s, "queen_ephemeral_dropped_total", "Ephemeral messages dropped, by cause", "counter");
+        for (cause, ctr) in [
+            ("bounds", &self.eph_dropped_bounds),
+            ("ttl", &self.eph_dropped_ttl),
+            ("retry", &self.eph_dropped_retry),
+        ] {
+            g(
+                &mut s,
+                "queen_ephemeral_dropped_total",
+                &format!("{{cause=\"{cause}\"}}"),
+                ctr.load(Ordering::Relaxed).to_string(),
+            );
+        }
+        // The two gauges. `queen_ephemeral_bytes` against
+        // `QUEEN_EPHEMERAL_MAX_BYTES` is the alert that matters: crossing it is a
+        // 503 for every tenant on the cell (§1.6 rung 3), and unlike every other
+        // occupancy number in this exposition it is EXACT — the broker is the
+        // meter, so there is no rollup between the value and the truth.
+        ht(&mut s, "queen_ephemeral_bytes", "Bytes held by this broker's ephemeral rings", "gauge");
+        g(&mut s, "queen_ephemeral_bytes", "", self.eph_bytes.load(Ordering::Relaxed).to_string());
+        ht(&mut s, "queen_ephemeral_queues", "Ephemeral queues on this broker (declared + live implicit)", "gauge");
+        g(&mut s, "queen_ephemeral_queues", "", self.eph_queues.load(Ordering::Relaxed).to_string());
         s
     }
 }
@@ -1408,6 +1457,14 @@ mod kv_timers_tests {
             "queen_timers_schedule_rejected_total",
             "queen_sweeper_cycle_milliseconds",
             "queen_sweeper_rows_total",
+            // EPHEMERAL_QUEUES.md §6 — present on a FRESH broker, i.e. before
+            // anything ephemeral has happened. A counter that only appears once
+            // it is non-zero cannot be alerted on, because the alert would have
+            // to survive the series not existing.
+            "queen_ephemeral_messages_total",
+            "queen_ephemeral_dropped_total",
+            "queen_ephemeral_bytes",
+            "queen_ephemeral_queues",
         ] {
             assert!(out.contains(probe), "{probe} missing on a fresh broker");
         }

@@ -36,6 +36,9 @@
       "name": "Streams"
     },
     {
+      "name": "Ephemeral queues"
+    },
+    {
       "name": "Operator"
     },
     {
@@ -274,6 +277,14 @@
             }
           },
           {
+            "name": "conflation",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
             "name": "x-queen-tenant",
             "in": "header",
             "required": false,
@@ -285,17 +296,6 @@
           }
         ],
         "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
-                }
-              }
-            },
-            "x-queen-schema": "opaque"
-          },
           "204": {
             "description": "No content. The broker returns 204 with an empty body: no content-length, no payload."
           },
@@ -425,6 +425,14 @@
             }
           },
           {
+            "name": "conflation",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
             "name": "x-queen-tenant",
             "in": "header",
             "required": false,
@@ -436,17 +444,6 @@
           }
         ],
         "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
-                }
-              }
-            },
-            "x-queen-schema": "opaque"
-          },
           "204": {
             "description": "No content. The broker returns 204 with an empty body: no content-length, no payload."
           },
@@ -574,6 +571,14 @@
             }
           },
           {
+            "name": "conflation",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
             "name": "x-queen-tenant",
             "in": "header",
             "required": false,
@@ -585,17 +590,6 @@
           }
         ],
         "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
-                }
-              }
-            },
-            "x-queen-schema": "opaque"
-          },
           "204": {
             "description": "No content. The broker returns 204 with an empty body: no content-length, no payload."
           },
@@ -3375,6 +3369,98 @@
         }
       }
     },
+    "/api/v1/system/ephemeral": {
+      "get": {
+        "operationId": "get_ephemeral",
+        "tags": [
+          "Operator"
+        ],
+        "summary": "GET /api/v1/system/ephemeral",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          }
+        },
+        "x-queen-access-level": "admin",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/maintenance.rs::handle_get_ephemeral",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "set_ephemeral",
+        "tags": [
+          "Operator"
+        ],
+        "summary": "POST /api/v1/system/ephemeral",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "admin",
+        "x-queen-tenant-scoped": false,
+        "x-queen-handler": "server/src/handlers/maintenance.rs::handle_set_ephemeral",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "enabled"
+                ]
+              }
+            }
+          },
+          "x-queen-schema": "derived",
+          "x-queen-schema-source": "EphemeralBody"
+        }
+      }
+    },
     "/internal/api/notify": {
       "post": {
         "operationId": "notify",
@@ -4242,6 +4328,568 @@
         },
         "x-queen-catch-all": true,
         "x-queen-note": "This route takes no query parameters and refuses any query string outright, rather than ignoring one: a prefix or key in a URL is recorded by every access log, proxy sample and tracing span between the client and the database."
+      }
+    },
+    "/api/v1/ephemeral/push": {
+      "post": {
+        "operationId": "ephemeral_push",
+        "tags": [
+          "Ephemeral queues"
+        ],
+        "summary": "POST /api/v1/ephemeral/push",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          }
+        },
+        "x-queen-access-level": "write-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/ephemeral.rs::handle_ephemeral_push",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "queue": {
+                          "description": "Rust type `CowStr<'a>`."
+                        },
+                        "partition": {
+                          "description": "Rust type `CowStr<'a>`."
+                        },
+                        "payload": {
+                          "description": "Any JSON value."
+                        },
+                        "transactionId": {
+                          "description": "Rust type `CowStr<'a>`."
+                        }
+                      },
+                      "required": [
+                        "queue",
+                        "payload"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "items"
+                ]
+              }
+            }
+          },
+          "x-queen-schema": "derived",
+          "x-queen-schema-source": "PushBody"
+        }
+      }
+    },
+    "/api/v1/ephemeral/pop": {
+      "get": {
+        "operationId": "ephemeral_pop",
+        "tags": [
+          "Ephemeral queues"
+        ],
+        "summary": "GET /api/v1/ephemeral/pop",
+        "parameters": [
+          {
+            "name": "queue",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "partition",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "group",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "timeout",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/ephemeral.rs::handle_ephemeral_pop",
+        "x-queen-query-params": "adhoc",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/ephemeral/ack": {
+      "post": {
+        "operationId": "ephemeral_ack",
+        "tags": [
+          "Ephemeral queues"
+        ],
+        "summary": "POST /api/v1/ephemeral/ack",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/ephemeral.rs::handle_ephemeral_ack",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "queue": {
+                    "type": "string"
+                  },
+                  "group": {
+                    "type": "string"
+                  },
+                  "acks": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string"
+                        },
+                        "error": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "queue",
+                  "acks"
+                ]
+              }
+            }
+          },
+          "x-queen-schema": "derived",
+          "x-queen-schema-source": "AckBody"
+        }
+      }
+    },
+    "/api/v1/ephemeral/configure": {
+      "post": {
+        "operationId": "ephemeral_configure",
+        "tags": [
+          "Ephemeral queues"
+        ],
+        "summary": "POST /api/v1/ephemeral/configure",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Dependency unavailable, typically PostgreSQL.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/ephemeral.rs::handle_ephemeral_configure",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "queue": {
+                    "type": "string"
+                  },
+                  "options": {
+                    "description": "Any JSON value."
+                  }
+                },
+                "required": [
+                  "queue"
+                ]
+              }
+            }
+          },
+          "x-queen-schema": "derived",
+          "x-queen-schema-source": "ConfigureBody"
+        }
+      }
+    },
+    "/api/v1/ephemeral/reset": {
+      "post": {
+        "operationId": "ephemeral_reset",
+        "tags": [
+          "Ephemeral queues"
+        ],
+        "summary": "POST /api/v1/ephemeral/reset",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/ephemeral.rs::handle_ephemeral_reset",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "queue": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "queue"
+                ]
+              }
+            }
+          },
+          "x-queen-schema": "derived",
+          "x-queen-schema-source": "QueueOnlyBody"
+        }
+      }
+    },
+    "/api/v1/ephemeral/queues": {
+      "get": {
+        "operationId": "ephemeral_queues",
+        "tags": [
+          "Ephemeral queues"
+        ],
+        "summary": "GET /api/v1/ephemeral/queues",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/ephemeral.rs::handle_ephemeral_queues",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/ephemeral/queues/{queue}/depth": {
+      "get": {
+        "operationId": "ephemeral_depth",
+        "tags": [
+          "Ephemeral queues"
+        ],
+        "summary": "GET /api/v1/ephemeral/queues/:queue/depth",
+        "parameters": [
+          {
+            "name": "queue",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "group",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/ephemeral.rs::handle_ephemeral_depth",
+        "x-queen-query-params": "adhoc",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/ephemeral/queue/{queue}": {
+      "delete": {
+        "operationId": "ephemeral_delete_queue",
+        "tags": [
+          "Ephemeral queues"
+        ],
+        "summary": "DELETE /api/v1/ephemeral/queue/:queue",
+        "parameters": [
+          {
+            "name": "queue",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Dependency unavailable, typically PostgreSQL.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/ephemeral.rs::handle_ephemeral_delete_queue",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
       }
     },
     "/api/v1/timers": {

@@ -316,3 +316,197 @@ fn the_system_state_keys_are_the_ones_the_plan_names() {
     sw.adopt("kv_enbaled", Some(false));
     assert!(!sw.kv_on());
 }
+
+// ===========================================================================
+// THE SAME THREE RUNGS FOR THE EPHEMERAL FAMILY (EPHEMERAL_QUEUES.md §1.6, M7)
+// ===========================================================================
+//
+// A separate entry point (`decide_ephemeral`) because its third rung reads an
+// authority that is not `Quotas` — the broker IS the meter for a class that
+// lives in its own heap — but the SAME contract: same order, same `Answer`, same
+// rendering. These cases exist to pin that "same" rather than to trust it.
+
+fn eph(require_grant: bool) -> std::sync::Arc<crate::ephemeral::Ephemeral> {
+    crate::ephemeral::Ephemeral::new(
+        crate::ephemeral::Knobs { require_grant, ..crate::ephemeral::Knobs::defaults() },
+        std::sync::Arc::new(crate::metrics::Metrics::new()),
+    )
+}
+
+const EPH_SURFACES: [Surface; 4] =
+    [Surface::EphPush, Surface::EphPop, Surface::EphAck, Surface::EphAdmin];
+
+/// A fresh broker serves every ephemeral surface, and — with no grant required —
+/// serves them to a tenant nobody has ever configured. That is the OSS posture of
+/// M9 stated as a test: no boot flag, no row, no setup.
+#[test]
+fn a_fresh_broker_allows_every_ephemeral_surface() {
+    let sw = Switches::for_test();
+    let e = eph(false);
+    for s in EPH_SURFACES {
+        assert_eq!(decide_ephemeral(&sw, &e, T, s, 1), Answer::Allow, "{s:?} was refused");
+    }
+}
+
+/// NO RUNG MAY ANSWER 404, on this family either. Its routes are registered
+/// unconditionally (M9), so a 404 from anywhere under `/api/v1/ephemeral` can
+/// only ever mean "this broker predates the feature" — which is exactly what the
+/// SDKs map it to, and what a paused surface must never be confused with.
+#[test]
+fn no_ephemeral_rung_can_answer_not_found() {
+    for require_grant in [false, true] {
+        for paused in [false, true] {
+            let sw = Switches::for_test();
+            if paused {
+                sw.set_ephemeral(false);
+            }
+            let e = eph(require_grant);
+            for s in EPH_SURFACES {
+                if let Some(h) = decide_ephemeral(&sw, &e, T, s, 1).http(Origin::Route, s) {
+                    assert_ne!(h.status, 404, "{s:?} answered 404");
+                }
+            }
+        }
+    }
+}
+
+/// Rung 1: the operator's switch is 503 with a `Retry-After`, and it names the
+/// EPHEMERAL family — a paused RAM surface answering `kv_disabled` would send an
+/// operator to the wrong runbook.
+#[test]
+fn ephemeral_rung_one_is_503_with_its_own_code() {
+    let sw = Switches::for_test();
+    sw.set_ephemeral(false);
+    let e = eph(false);
+    for s in EPH_SURFACES {
+        let h = decide_ephemeral(&sw, &e, T, s, 1)
+            .http(Origin::Route, s)
+            .expect("a paused surface must refuse");
+        assert_eq!(h.status, 503, "{s:?}");
+        assert_eq!(h.code, "ephemeral_disabled", "{s:?}");
+        assert_eq!(h.retry_after, Some(1), "{s:?}");
+    }
+    // And the kv switch is independent: pausing one family must not pause the
+    // other, which is the whole reason there are three keys and not one.
+    assert!(sw.kv_on());
+}
+
+/// Rung 2: with `require_grant` on, the ABSENCE of a row is a denial and not a
+/// permission — the `config.rs:1210` posture, applied to a class whose overrun is
+/// paid in RAM. 403 `feature_gated`, and never a `Retry-After`: waiting does not
+/// help, the control plane has to write a row.
+#[test]
+fn ephemeral_rung_two_no_grant_is_403_feature_gated() {
+    let sw = Switches::for_test();
+    let e = eph(true);
+    for s in EPH_SURFACES {
+        let h = decide_ephemeral(&sw, &e, T, s, 1)
+            .http(Origin::Route, s)
+            .expect("an ungranted tenant must be refused");
+        assert_eq!(h.status, 403, "{s:?}");
+        assert_eq!(h.code, "feature_gated", "{s:?}");
+        assert_eq!(h.retry_after, None, "{s:?}");
+    }
+}
+
+/// A grant row admits, and `enabled:false` on the row refuses again. The two are
+/// tested together because collapsing them — treating a disabled row as no row,
+/// or the reverse — is the mistake `quota.rs` calls out by name: it would either
+/// deny a tenant the operator never restricted or admit one they never
+/// authorised.
+#[test]
+fn an_ephemeral_grant_row_admits_and_a_disabled_one_does_not() {
+    let sw = Switches::for_test();
+    let e = eph(true);
+    e.apply_grants(vec![crate::ephemeral::Grant {
+        tenant: T.to_string(),
+        enabled: true,
+        max_bytes: None,
+        max_queues: None,
+        max_msgs_per_sec: None,
+    }]);
+    assert_eq!(decide_ephemeral(&sw, &e, T, Surface::EphPush, 1), Answer::Allow);
+
+    e.apply_grants(vec![crate::ephemeral::Grant {
+        tenant: T.to_string(),
+        enabled: false,
+        max_bytes: None,
+        max_queues: None,
+        max_msgs_per_sec: None,
+    }]);
+    let h = decide_ephemeral(&sw, &e, T, Surface::EphPush, 1)
+        .http(Origin::Route, Surface::EphPush)
+        .expect("a disabled grant refuses");
+    assert_eq!((h.status, h.code), (403, "feature_gated"));
+
+    // A row that DISAPPEARS revokes. Deleting the row is how the control plane
+    // ends a plan, and a broker that kept the last grant it saw would keep
+    // serving a customer who is no longer entitled.
+    e.apply_grants(vec![]);
+    let h = decide_ephemeral(&sw, &e, T, Surface::EphPush, 1)
+        .http(Origin::Route, Surface::EphPush)
+        .expect("a revoked grant refuses");
+    assert_eq!((h.status, h.code), (403, "feature_gated"));
+}
+
+/// Rung 3: the per-tenant MESSAGE rate, and it is a rate over messages rather
+/// than over calls — a bucket that spent one token per request would be defeated
+/// by a single batch on a class that encourages batching.
+#[test]
+fn ephemeral_rung_three_is_a_message_rate_and_answers_429() {
+    let sw = Switches::for_test();
+    let e = crate::ephemeral::Ephemeral::new(
+        crate::ephemeral::Knobs {
+            rate: 1,
+            burst: 4,
+            ..crate::ephemeral::Knobs::defaults()
+        },
+        std::sync::Arc::new(crate::metrics::Metrics::new()),
+    );
+    // One call, four messages: the whole burst in a single request.
+    assert_eq!(decide_ephemeral(&sw, &e, T, Surface::EphPush, 4), Answer::Allow);
+    let h = decide_ephemeral(&sw, &e, T, Surface::EphPush, 4)
+        .http(Origin::Route, Surface::EphPush)
+        .expect("the second batch is over the burst");
+    assert_eq!(h.status, 429);
+    assert_eq!(h.code, "rate_limited");
+    // A `Retry-After` that is honest, and never zero: zero reads as "immediately"
+    // and produces a spin against a cell that has just said no.
+    assert!(h.retry_after.unwrap_or(0) >= 1);
+
+    // THE POP AND THE ACK ARE NOT ON THIS RUNG. They are the only ways for a
+    // tenant that has filled its allowance to get back under it, so refusing
+    // them would be the self-defeating shape §9.5 forbids for kv deletes.
+    assert_eq!(decide_ephemeral(&sw, &e, T, Surface::EphPop, 0), Answer::Allow);
+    assert_eq!(decide_ephemeral(&sw, &e, T, Surface::EphAck, 0), Answer::Allow);
+}
+
+/// THE ORDER IS THE CONTRACT: the answer names the OUTERMOST reason. A tenant
+/// that is both ungranted and on a paused cell hears `ephemeral_disabled`, not
+/// `feature_gated` — otherwise a prober learns that a tenant exists from a rung
+/// that a switch an operator pulled should have hidden (§13.5).
+#[test]
+fn the_outermost_ephemeral_rung_wins() {
+    let sw = Switches::for_test();
+    sw.set_ephemeral(false);
+    let e = eph(true);
+    let h = decide_ephemeral(&sw, &e, T, Surface::EphPush, 1)
+        .http(Origin::Route, Surface::EphPush)
+        .expect("refused");
+    assert_eq!(h.code, "ephemeral_disabled", "the switch must speak before the grant");
+}
+
+/// The ephemeral key is the plan's, and it adopts like the other three: an
+/// ABSENT row means ON, which is what keeps a fresh cell from booting with the
+/// surface dead and no row to explain why.
+#[test]
+fn the_ephemeral_system_state_key_adopts_like_the_others() {
+    assert_eq!(Switches::KEY_EPHEMERAL, "ephemeral_enabled");
+    let sw = Switches::for_test();
+    sw.adopt(Switches::KEY_EPHEMERAL, Some(false));
+    assert!(!sw.eph_on());
+    sw.adopt(Switches::KEY_EPHEMERAL, None);
+    assert!(sw.eph_on(), "an absent row means ON");
+    // And it is independent of the other three.
+    assert!(sw.kv_on() && sw.timers_schedule_on() && sw.fire_allowed());
+}

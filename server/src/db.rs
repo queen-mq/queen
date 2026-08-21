@@ -2279,6 +2279,105 @@ pub async fn kv_quota_refresh(
     Ok(row.get(0))
 }
 
+// ---------------------------------------------------------------- ephemeral
+// EPHEMERAL_QUEUES.md §2 — the ENTIRE database footprint of the RAM-class queue
+// family, and the only place in the broker that names its two tables.
+//
+// WHY THESE FIVE WRAPPERS EXIST AT ALL, given that push/pop/ack never call them:
+// that is exactly the point. The class's performance premise is that the hot
+// verbs construct no SQL and take no pooled connection (M12), and a premise that
+// nothing enforces is a comment. `tests/kv_handler_isolation.rs` greps every
+// source under `src/handlers/` for `queen.ephemeral_queues` and
+// `queen.ephemeral_quota` — in code AND in prose — and fails the suite on a hit.
+// That grep is only meaningful because the SQL lives here instead.
+//
+// `p_tenant` is an ARGUMENT of every one of these SPs and is never read out of a
+// request body — the §13.1 rule the KV surface is held to. This layer is the only
+// code allowed to bind it, and the tenant it binds comes from the middleware's
+// `Extension<Tenant>`, i.e. from the trusted header.
+//
+// `$1::text::uuid` and not a bare `$1::uuid`: the driver has no uuid type here,
+// so the double cast is the house idiom (the `$1::text::uuid` gotcha of the log
+// engine, learned the expensive way).
+
+/// Declare or reconfigure one ephemeral queue. Returns the stored row as JSON
+/// (`{queue, options, updatedAt}`) — the echo the 201 carries back.
+pub async fn eph_config_set(
+    client: &deadpool_postgres::Client,
+    tenant: &str,
+    queue: &str,
+    options_json: &str,
+) -> Result<String, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached(
+            "SELECT (queen.eph_config_set_v1($1::text, $2::text, $3::text::jsonb))::text",
+        )
+        .await?;
+    let row = client.query_one(&stmt, &[&tenant, &queue, &options_json]).await?;
+    Ok(row.get(0))
+}
+
+/// One declared config, or `None` when the queue is implicit (or gone). The SP
+/// answers SQL NULL for that case ON PURPOSE — an implicit queue is the NORMAL
+/// tier of this class, not a failure — so the `Option` here is the whole point
+/// of the wrapper and not a defensive habit.
+#[allow(dead_code)] // the mesh phase's config reconcile is its first caller
+pub async fn eph_config_get(
+    client: &deadpool_postgres::Client,
+    tenant: &str,
+    queue: &str,
+) -> Result<Option<String>, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached("SELECT (queen.eph_config_get_v1($1::text, $2::text))::text")
+        .await?;
+    let row = client.query_one(&stmt, &[&tenant, &queue]).await?;
+    Ok(row.get(0))
+}
+
+/// Forget one declaration. `{"deleted": bool}`, and a miss is 200 with
+/// `deleted:false` rather than an error (the queue-delete house rule).
+pub async fn eph_config_delete(
+    client: &deadpool_postgres::Client,
+    tenant: &str,
+    queue: &str,
+) -> Result<String, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached("SELECT (queen.eph_config_delete_v1($1::text, $2::text))::text")
+        .await?;
+    let row = client.query_one(&stmt, &[&tenant, &queue]).await?;
+    Ok(row.get(0))
+}
+
+/// Every declared config of ONE tenant, for the boot load. BOUNDED and ordered
+/// inside the SP: the result lands in a per-tenant map in broker RAM, and an
+/// unbounded boot read is how a cold start becomes the incident on the cell with
+/// the most declared queues.
+pub async fn eph_config_list(
+    client: &deadpool_postgres::Client,
+    tenant: &str,
+    limit: i32,
+) -> Result<String, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached("SELECT (queen.eph_config_list_v1($1::text, $2::int))::text")
+        .await?;
+    let row = client.query_one(&stmt, &[&tenant, &limit]).await?;
+    Ok(row.get(0))
+}
+
+/// The grant rows, for the in-process ladder. One bounded read of one table and
+/// no `count(*)` anywhere — the same rule as `kv_quota_refresh` above, and here
+/// it is free: this feature's occupancy never was in a table (M7).
+pub async fn eph_quota_list(
+    client: &deadpool_postgres::Client,
+    max_tenants: i32,
+) -> Result<String, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached("SELECT (queen.eph_quota_list_v1($1::int))::text")
+        .await?;
+    let row = client.query_one(&stmt, &[&max_tenants]).await?;
+    Ok(row.get(0))
+}
+
 // -------------------------------------------------------------------- timers
 // schedule / reschedule / cancel, ONE code path (§6.2). `ops_json` is the JSON
 // array of operations; the result is a JSONB array index-aligned with it, with

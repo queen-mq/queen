@@ -353,7 +353,17 @@ function parseRouterChain(block) {
   return routes;
 }
 
-/** Mirror of auth::route_access_level — see gen-routes.mjs for the drift guard. */
+/** Mirror of auth::route_access_level — see gen-routes.mjs for the drift guard.
+ *
+ * Kept in step with that mirror by hand and pinned by the SAME fingerprint: this
+ * script derives `security` for every operation from it, so a rule that lands in
+ * one mirror and not the other publishes a spec whose auth requirements disagree
+ * with the route table on the same site. 2026-08-21: the three EPHEMERAL_QUEUES
+ * §3.9 rules added below. The kv/timer GET arms are still absent here and are
+ * still a KNOWN gap of this mirror (they only widen `read-only` to `read-write`
+ * in the spec, never the reverse), left untouched by this change so that its
+ * diff says exactly one thing.
+ */
 function accessLevel(method, path) {
   const m = method.toUpperCase();
   if (path === "/health" || path === "/metrics" || path === "/metrics/prometheus") return "public";
@@ -372,10 +382,14 @@ function accessLevel(method, path) {
     if (path.startsWith("/api/v1/consumer-groups")) return "read-only";
     if (path.startsWith("/api/v1/dlq")) return "read-only";
     if (path.startsWith("/api/v1/traces")) return "read-only";
+    // EPHEMERAL_QUEUES.md §3.9: the two status reads, inside the GET block.
+    if (path.startsWith("/api/v1/ephemeral/queues")) return "read-only";
   }
   if (path === "/streams/v1/state/get") return "read-only";
   if (path.startsWith("/streams/")) return "read-write";
   if (path === "/api/v1/push") return "write-only";
+  if (m === "POST" && path === "/api/v1/ephemeral/push") return "write-only";
+  if (path.startsWith("/api/v1/ephemeral")) return "read-write";
   return "read-write";
 }
 
@@ -388,6 +402,9 @@ const TAGS = [
     /^\/api\/v1\/(status|analytics|stats)/.test(p) ||
     ["/health", "/status", "/metrics", "/metrics/prometheus"].includes(p)],
   ["Streams", (p) => p.startsWith("/streams/")],
+  // EPHEMERAL_QUEUES.md §3.1 — its own tag, not folded into the message plane:
+  // the two families share no storage, no durability contract and no verbs.
+  ["Ephemeral queues", (p) => /^\/api\/v1\/ephemeral(\/|$)/.test(p)],
   ["Operator", (p) => p.startsWith("/api/v1/system")],
   ["Dashboard identity", (p) => p.startsWith("/auth/")],
   ["Internal", (p) => p.startsWith("/internal/")],

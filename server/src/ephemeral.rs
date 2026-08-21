@@ -58,16 +58,23 @@
 //! silently, they are unrelated objects).
 
 //! ---------------------------------------------------------------------------
-//! ON THE `#[allow(dead_code)]` MARKS BELOW
+//! THE GRANT AND THE CAPS (§1.6 rung 2, M7) — WHY THEY LIVE HERE
 //!
-//! They sit on exactly the items phase T1b consumes — the `configure` seam and
-//! the two status reads — and on nothing else. The alternative (a module-wide
-//! allow, or deleting them and writing them again next phase) would either hide
-//! real dead code or split one design across two commits; the marks are removed
-//! by the phase that gives each item its caller.
+//! The KV quota reads its occupancy out of a table that a rollup writes, so its
+//! enforcer lives in `quota.rs` next to that measurement. This class has no such
+//! loop: the bytes are in THIS process's heap and the numbers below are exact,
+//! not sampled. So the per-tenant allowance lives on `TenantUsage`, next to the
+//! occupancy it bounds, and `switches::decide_ephemeral` reads it through
+//! `gate_grant` / `gate_push` — same three rungs, same `Answer`, different
+//! authority. What Postgres holds is only the GRANT ROW, refreshed on a slow
+//! cadence by `refresh_once` at the bottom of this file.
+//!
+//! The `#[allow(dead_code)] // T1b` marks that used to sit on the `configure`
+//! seam and the status reads are gone: this phase gave every one of them a
+//! caller, which is exactly what the marks were there to make visible.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::metrics::Metrics;
@@ -106,12 +113,31 @@ pub struct Knobs {
     pub retry_limit: u32,
     /// `QUEEN_EPHEMERAL_IMPLICIT_IDLE_S`, in milliseconds.
     pub implicit_idle_ms: i64,
+    /// `QUEEN_EPHEMERAL_REQUIRE_GRANT` (§1.6 rung 2). ON ⇒ a tenant with no row
+    /// in the grant table is REFUSED, not merely unlimited. Derived from the
+    /// tenancy flag, which is the whole `config.rs` KV posture: OSS on by
+    /// default, cloud off until the plan grants it.
+    pub require_grant: bool,
+    /// Cell-default per-tenant message rate, overridden by a grant row's
+    /// `maxMsgsPerSec`.
+    pub rate: u32,
+    pub burst: u32,
+    /// Size cap on the per-tenant map. It DENIES and does not evict: under an
+    /// unvalidated, caller-chosen tenant id an evicting map is an unbounded map
+    /// with extra steps, and every rotated id would be handed a fresh budget.
+    /// A tenant the control plane knows about is exempt (`quota.rs` §9.4 point 2).
+    pub max_tenants: usize,
 }
 
 impl Knobs {
     /// The documented defaults, in ONE place, so the `Config` block and every
     /// test read the same numbers (§10 Q2: 256 MiB cell, 16 MiB / 10 000 queue).
-    #[allow(dead_code)] // T1b: `configure` and the boot load read these too
+    ///
+    /// TEST-ONLY IN PRODUCTION BUILDS, and deliberately not `#[cfg(test)]`: the
+    /// numbers here are the documented contract, and hiding them behind a test
+    /// gate is how a default drifts from the value `config.rs` reads. The allow
+    /// says "no production caller", not "no caller".
+    #[allow(dead_code)]
     pub fn defaults() -> Knobs {
         Knobs {
             global_max_bytes: 256 * 1024 * 1024,
@@ -120,18 +146,45 @@ impl Knobs {
             lease_ms: 30_000,
             retry_limit: 5,
             implicit_idle_ms: 300_000,
+            // Never a grant requirement by default: the defaults are the
+            // self-hosted posture, and a fail-closed default here would mean a
+            // fresh OSS cell answers `feature_gated` to its own operator.
+            require_grant: false,
+            rate: 5_000,
+            burst: 10_000,
+            max_tenants: 10_000,
         }
     }
 }
 
 /// What a full queue does to the next push (§1.6 rung 1).
-#[allow(dead_code)] // DropOldest is only reachable through `configure` (T1b)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Policy {
     /// 429 `queue_full` — the shape the 1.0.6 SDK backpressure already handles.
     Reject,
     /// Feed semantics: drop from the head until the arrival fits.
     DropOldest,
+}
+
+impl Policy {
+    /// The wire spelling of `configure`'s `policy` option, parsed in ONE place so
+    /// the boot load of a stored blob and the HTTP verb cannot disagree about
+    /// what `"dropOldest"` means. `None` = not one of ours; the caller decides
+    /// whether that is a 400 (the verb) or a skipped option (the boot load).
+    pub fn parse(s: &str) -> Option<Policy> {
+        match s {
+            "reject" => Some(Policy::Reject),
+            "dropOldest" => Some(Policy::DropOldest),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Policy::Reject => "reject",
+            Policy::DropOldest => "dropOldest",
+        }
+    }
 }
 
 /// Delivery-side batch fattening (§1.7). Purely about when a WAITING pop
@@ -153,7 +206,6 @@ impl Window {
 /// The effective configuration of one queue: the knobs, plus whatever
 /// `configure` overrode. Copy, so a hot path reads it out from under the lock
 /// in one move instead of holding the lock while it works.
-#[allow(dead_code)] // the two bound fields are read by `set_config` (T1b)
 #[derive(Clone, Copy, Debug)]
 pub struct QueueConfig {
     pub max_bytes: i64,
@@ -188,7 +240,6 @@ impl QueueConfig {
 /// the declared configs both land here — this is the ONE place an option blob
 /// becomes engine state, so the clamps below cannot be bypassed by adding a
 /// second caller. The verb itself is not in this phase.
-#[allow(dead_code)] // T1b: the `configure` verb and the declared-config boot load
 #[derive(Clone, Copy, Debug, Default)]
 pub struct QueueOptions {
     pub max_bytes: Option<i64>,
@@ -208,7 +259,6 @@ impl QueueOptions {
     /// `QUEEN_EPHEMERAL_QUEUE_MAX_BYTES` under queues that were declared when it
     /// was higher), so a CHECK constraint would be a second authority that
     /// drifts the first time that happens.
-    #[allow(dead_code)] // T1b, with `set_config`
     pub fn apply(&self, base: QueueConfig, k: &Knobs) -> QueueConfig {
         let mut c = base;
         if let Some(v) = self.max_bytes {
@@ -299,7 +349,6 @@ impl Budget {
         self.used.load(Ordering::Relaxed)
     }
 
-    #[allow(dead_code)] // T1c: the grant refresh reads and rewrites the cap
     #[inline]
     pub fn cap(&self) -> i64 {
         self.cap.load(Ordering::Relaxed)
@@ -308,7 +357,6 @@ impl Budget {
     /// Raise or lower the ceiling at runtime (a grant refresh). Lowering it
     /// below current occupancy is legal and blocks the next arrival rather than
     /// evicting anything: this budget bounds admission, never contents.
-    #[allow(dead_code)] // T1b/T1c: `configure` and the grant refresh
     pub fn set_cap(&self, cap: i64) {
         self.cap.store(cap, Ordering::Relaxed);
     }
@@ -647,6 +695,77 @@ impl Ring {
     fn next_expiry(&self) -> Option<i64> {
         self.leases.keys().next().map(|(d, _)| *d)
     }
+
+    /// Messages this group could still be handed: everything from its cursor to
+    /// the tail, plus its pending redeliveries. Pure arithmetic — the deque is
+    /// contiguous over `[head_seq, next_seq)` by construction (every eviction
+    /// pops the FRONT and advances `head_seq` with it), so no walk is needed.
+    fn pending_of(&self, gi: u32) -> i64 {
+        let g = &self.groups[gi as usize];
+        let from = g.next.max(self.head_seq);
+        let forward = self.next_seq.saturating_sub(from) as i64;
+        // Redeliveries below the head were evicted under the group and were
+        // already counted as skips; they are not pending, they are gone.
+        let back = g.redeliver.iter().filter(|&&s| s >= self.head_seq).count() as i64;
+        forward + back
+    }
+
+    /// The number a DEPTH READ should publish for this ring.
+    ///
+    /// With a named group, that group's own backlog. Without one, the WORST
+    /// cursor — the same precedence `log_queue_depth_v1` applies on the durable
+    /// side, named groups first and `__QUEUE_MODE__` speaking only when no named
+    /// group exists — so the two engines answer the same question the same way.
+    /// With no cursor at all the answer is the ring's length: nobody has
+    /// consumed anything, so everything is owed.
+    fn pending_for(&self, group: Option<&str>) -> i64 {
+        if let Some(name) = group {
+            return match self.gix.get(name) {
+                Some(&gi) => self.pending_of(gi),
+                // A group with no cursor here owes the whole retained range —
+                // the same convention as everywhere else.
+                None => self.deque.len() as i64,
+            };
+        }
+        let mut worst: Option<i64> = None;
+        for (name, &gi) in self.gix.iter() {
+            if name == QUEUE_MODE {
+                continue;
+            }
+            let p = self.pending_of(gi);
+            worst = Some(worst.map_or(p, |w: i64| w.max(p)));
+        }
+        if let Some(w) = worst {
+            return w;
+        }
+        match self.gix.get(QUEUE_MODE) {
+            Some(&gi) => self.pending_of(gi),
+            None => self.deque.len() as i64,
+        }
+    }
+
+    /// §3.1 `reset`, at ring level: everything goes, the cursors land on the tail
+    /// and the leases are voided. Returns what the caller must refund; the ring
+    /// does not own the budgets (see `Freed`).
+    fn wipe(&mut self) -> Freed {
+        let freed = Freed {
+            bytes: self.bytes,
+            count: self.deque.len() as i64,
+            by_ttl: 0,
+            by_bounds: 0,
+        };
+        self.deque.clear();
+        self.bytes = 0;
+        self.head_seq = self.next_seq;
+        self.leases.clear();
+        self.lease_at.clear();
+        for g in self.groups.iter_mut() {
+            g.next = self.next_seq;
+            g.redeliver.clear();
+            g.attempts.clear();
+        }
+        freed
+    }
 }
 
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -662,7 +781,6 @@ struct LeaseSweep {
 struct EqQueue {
     /// Bare name, without the `eph:` prefix — what the wire says and what a log
     /// line should print.
-    #[allow(dead_code)] // read by `name_of` (T1b status verbs)
     name: String,
     config: Mutex<QueueConfig>,
     partitions: Mutex<HashMap<String, Arc<Mutex<Ring>>>>,
@@ -683,6 +801,16 @@ struct EqQueue {
     /// False = implicit (§1.1 tier 1), and therefore garbage-collectable.
     declared: AtomicBool,
     last_touch_ms: AtomicI64,
+    /// PER-QUEUE drop counters (§5.3: the dashboard's `drops` column). The
+    /// process-wide `Metrics` counters answer "is this cell dropping?"; these
+    /// answer "WHICH queue is", which is the question an operator actually has,
+    /// and a Prometheus label per queue is the cardinality §14.1 forbids. They
+    /// are three and not one for the same reason the global ones are: bounds
+    /// means the queue is too small, ttl that the consumer is too slow, retry
+    /// that the handlers are failing.
+    dropped_bounds: AtomicU64,
+    dropped_ttl: AtomicU64,
+    dropped_retry: AtomicU64,
 }
 
 /// Bound on `known_groups`. Fan-out cardinality is small by nature (one group
@@ -753,15 +881,80 @@ impl EqQueue {
     fn touch(&self, now_ms: i64) {
         self.last_touch_ms.store(now_ms, Ordering::Relaxed);
     }
+
+    /// Distinct consumer groups this queue has been popped with. Read from
+    /// `known_groups` and not from a ring's `gix`, because the set is the union
+    /// over partitions and survives a ring that has been collected — which is
+    /// what a fan-out operator wants to count.
+    fn group_count(&self) -> usize {
+        self.known_groups.lock().unwrap().len()
+    }
+
+    fn drops(&self) -> (u64, u64, u64) {
+        (
+            self.dropped_bounds.load(Ordering::Relaxed),
+            self.dropped_ttl.load(Ordering::Relaxed),
+            self.dropped_retry.load(Ordering::Relaxed),
+        )
+    }
 }
 
-/// Per-tenant occupancy (§1.6 rung 2). The cap is `Budget::cap`, which is 0 —
-/// unlimited — until the grant ladder lands (T1c): the MEASUREMENT is wired
-/// from day one so the byte accounting is already correct and tested when the
-/// limit is switched on, which is the half that is hard to retrofit.
+/// A token bucket over PUSHED MESSAGES per second (§1.6 rung 2).
+///
+/// A near-copy of `quota.rs`'s, and deliberately not a shared one: that bucket
+/// spends exactly one token per CALL, because a KV batch is one commit however
+/// many ops it carries. Here the unit is the MESSAGE — a push of 10 000 costs
+/// 10 000 — since what the rate bounds is arrival into RAM, and a per-call
+/// bucket would be defeated by batching, which this class encourages.
+#[derive(Debug)]
+struct RateBucket {
+    tokens: f64,
+    last_ms: i64,
+}
+
+impl RateBucket {
+    fn new(burst: u32) -> RateBucket {
+        RateBucket { tokens: burst as f64, last_ms: crate::util::now_epoch_ms() }
+    }
+
+    /// Spend `n` tokens, refilling first. `Retry-After` is never zero: it reads
+    /// as "immediately" and produces a spin against a cell that just said no.
+    fn take(&mut self, n: f64, rate: u32, burst: u32) -> crate::quota::Verdict {
+        use crate::quota::Verdict;
+        let now = crate::util::now_epoch_ms();
+        let dt = (now - self.last_ms).max(0) as f64 / 1000.0;
+        self.last_ms = now;
+        self.tokens = (self.tokens + dt * rate as f64).min(burst as f64);
+        if self.tokens >= n {
+            self.tokens -= n;
+            return Verdict::Allow;
+        }
+        let need = n - self.tokens;
+        let secs = if rate == 0 { 1.0 } else { need / rate as f64 };
+        Verdict::RateLimited(secs.ceil().max(1.0) as u32)
+    }
+}
+
+/// Per-tenant occupancy AND allowance (§1.6 rung 2), in one place because the
+/// two are read together on every push and a split would be two locks.
+///
+/// `Budget::cap == 0` is unlimited, which is what an ungranted tenant carries on
+/// an OSS cell: the rung is inert rather than a denial, so a self-hosted operator
+/// is never gated by a table nobody writes. `granted` is the OTHER half and is
+/// the one that bites in cloud — with `require_grant` on, its absence is a
+/// refusal, not a permission.
 struct TenantUsage {
     bytes: Budget,
     queues: AtomicI64,
+    /// `max_queues` from the grant row. 0 = unlimited.
+    queues_cap: AtomicI64,
+    /// Does a grant row exist for this tenant? Written only by the refresh.
+    granted: AtomicBool,
+    /// The row's `enabled` column. Meaningless while `granted` is false.
+    enabled: AtomicBool,
+    /// The row's `max_msgs_per_sec`, 0 = use the cell default.
+    rate_per_s: AtomicU32,
+    rate: Mutex<RateBucket>,
 }
 
 // ===========================================================================
@@ -846,6 +1039,68 @@ impl AckOutcome {
     }
 }
 
+/// One row of `GET /api/v1/ephemeral/queues` (§3.1, §5.3).
+///
+/// The columns are this class's own truth and are deliberately NOT the durable
+/// listing's: there is no `pending` vs `retained` split (nothing is retained), no
+/// DLQ (§9) and no lag-from-Postgres. `declared` is the tier of §1.1, and it is
+/// the one column that tells an operator whether a queue survives a restart —
+/// as configuration, never as contents.
+#[derive(Clone, Debug)]
+pub struct QueueStat {
+    pub name: String,
+    pub declared: bool,
+    pub depth: i64,
+    pub bytes: i64,
+    pub partitions: i64,
+    pub groups: i64,
+    pub dropped_bounds: u64,
+    pub dropped_ttl: u64,
+    pub dropped_retry: u64,
+    pub config: QueueConfig,
+}
+
+/// `GET /api/v1/ephemeral/queues/:queue/depth` (§3.1).
+#[derive(Clone, Debug)]
+pub struct Depth {
+    pub queue: String,
+    pub declared: bool,
+    pub pending: i64,
+    pub partitions_pending: i64,
+    pub bytes: i64,
+    pub partitions: Vec<PartitionDepth>,
+    pub groups: Vec<GroupDepth>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PartitionDepth {
+    pub partition: String,
+    pub pending: i64,
+    pub bytes: i64,
+}
+
+/// Per-group backlog AND the skip counter (§3.2). `skipped` is on the depth read
+/// and not only in a log line because for a fan-out consumer it is the
+/// difference between "slow" and "lost data", and this class's whole contract is
+/// that the second is legal — so it has to be legible.
+#[derive(Clone, Debug)]
+pub struct GroupDepth {
+    pub group: String,
+    pub pending: i64,
+    pub skipped: u64,
+}
+
+/// One row of the grant table (§1.6 rung 2, §2). `None` is UNLIMITED — the same
+/// convention as the proxy's plan columns and as `quota.rs::Limits`.
+#[derive(Clone, Debug)]
+pub struct Grant {
+    pub tenant: String,
+    pub enabled: bool,
+    pub max_bytes: Option<i64>,
+    pub max_queues: Option<i64>,
+    pub max_msgs_per_sec: Option<i64>,
+}
+
 /// What one sweeper pass did, for its log line and its next-wake hint.
 #[derive(Default, Debug)]
 pub struct Sweep {
@@ -905,7 +1160,6 @@ impl Ephemeral {
         self.epoch
     }
 
-    #[allow(dead_code)] // T1b: `configure` validates against them
     #[inline]
     pub fn knobs(&self) -> &Knobs {
         &self.knobs
@@ -914,6 +1168,14 @@ impl Ephemeral {
     #[inline]
     pub fn global_bytes(&self) -> i64 {
         self.global.used()
+    }
+
+    /// `QUEEN_EPHEMERAL_MAX_BYTES` as it is actually in force. Published next to
+    /// `global_bytes` by the operator endpoint: a byte count with no ceiling
+    /// beside it is a number nobody can act on at three in the morning.
+    #[inline]
+    pub fn global_cap(&self) -> i64 {
+        self.global.cap()
     }
 
     pub fn queue_count(&self) -> usize {
@@ -969,6 +1231,20 @@ impl Ephemeral {
         if !create {
             return None;
         }
+        // §1.6 rung 2, the OBJECT half: `max_queues` counts declared plus live
+        // implicit (§1.1). Checked HERE, on the auto-vivify path, because that is
+        // the only place a queue is born — a check in the `configure` verb alone
+        // would bound the tier that costs one row and leave unbounded the tier
+        // that costs a ring each.
+        if !self
+            .with_tenant(tenant, |t| {
+                let cap = t.queues_cap.load(Ordering::Relaxed);
+                cap <= 0 || t.queues.load(Ordering::Relaxed) < cap
+            })
+            .unwrap_or(false)
+        {
+            return None;
+        }
         let fresh = Arc::new(EqQueue {
             name: name.to_string(),
             config: Mutex::new(QueueConfig::from_knobs(&self.knobs)),
@@ -978,6 +1254,9 @@ impl Ephemeral {
             known_groups: Mutex::new(std::collections::HashSet::new()),
             declared: AtomicBool::new(false),
             last_touch_ms: AtomicI64::new(crate::util::now_epoch_ms()),
+            dropped_bounds: AtomicU64::new(0),
+            dropped_ttl: AtomicU64::new(0),
+            dropped_retry: AtomicU64::new(0),
         });
         let mut q = self.queues.lock().unwrap();
         let created = !q.contains_key(&key);
@@ -989,30 +1268,106 @@ impl Ephemeral {
         // be a refusal the tenant cannot explain.
         if created {
             self.metrics.eph_queues.store(n, Ordering::Relaxed);
-            self.with_tenant(tenant, |t| {
+            let _ = self.with_tenant(tenant, |t| {
                 t.queues.fetch_add(1, Ordering::Relaxed);
             });
         }
         Some(arc)
     }
 
-    fn with_tenant<R>(&self, tenant: &str, f: impl FnOnce(&TenantUsage) -> R) -> R {
+    /// Run `f` against this tenant's usage, creating the entry on first sight.
+    ///
+    /// `None` means THE MAP IS FULL and this tenant is not already in it — the
+    /// `quota.rs` §9.4 point 2 rule, restated because it is the one that looks
+    /// like a bug: the cap DENIES rather than evicting. Under a tenant id that is
+    /// opaque and unvalidated (`tenant.rs`), an evicting map is an unbounded map
+    /// with extra steps, and every rotated header would be handed a fresh budget.
+    /// Every caller here fails CLOSED on `None`; the honest 503 for it is
+    /// produced one level up, by `gate_grant`, which is what the ladder calls
+    /// before any of this runs.
+    fn with_tenant<R>(&self, tenant: &str, f: impl FnOnce(&TenantUsage) -> R) -> Option<R> {
         let mut m = self.tenants.lock().unwrap();
+        if !m.contains_key(tenant) && m.len() >= self.knobs.max_tenants {
+            return None;
+        }
         let e = m.entry(tenant.to_string()).or_insert_with(|| TenantUsage {
-            // 0 = unlimited. HOOK (T1c): the grant refresh sets this from
-            // queen.ephemeral_quota.max_bytes; until then the rung is inert
-            // rather than a denial, so an OSS cell is never gated by a table
-            // nobody writes.
+            // 0 = unlimited, until a grant row says otherwise. The rung is inert
+            // rather than a denial for an ungranted tenant on an OSS cell, so
+            // nobody is gated by a table nobody writes.
             bytes: Budget::new(0),
             queues: AtomicI64::new(0),
+            queues_cap: AtomicI64::new(0),
+            granted: AtomicBool::new(false),
+            enabled: AtomicBool::new(true),
+            rate_per_s: AtomicU32::new(0),
+            rate: Mutex::new(RateBucket::new(self.knobs.burst)),
         });
-        f(e)
+        Some(f(e))
+    }
+
+    // -------------------------------------------------------- the grant rungs
+
+    /// Rung 2 alone: is this tenant allowed on the surface at all?
+    ///
+    /// Called through `switches::decide_ephemeral`, never directly from a
+    /// handler — the order of the rungs is decided in one place or it is decided
+    /// in several.
+    pub fn gate_grant(&self, tenant: &str) -> crate::quota::Verdict {
+        use crate::quota::Verdict;
+        let seen = self.with_tenant(tenant, |t| {
+            (t.granted.load(Ordering::Relaxed), t.enabled.load(Ordering::Relaxed))
+        });
+        // The map is full and this tenant is new: a CELL condition, not the
+        // tenant's doing, so it takes the cell's status (503) and not a 403.
+        let Some((granted, enabled)) = seen else { return Verdict::NoRoom };
+        if self.knobs.require_grant && !granted {
+            return Verdict::NotGranted;
+        }
+        if granted && !enabled {
+            return Verdict::NotGranted;
+        }
+        Verdict::Allow
+    }
+
+    /// Rungs 2 and 3 for a push of `n` messages: the grant, then the per-tenant
+    /// message rate. The BYTE allowance is not tested here — it is charged
+    /// atomically inside `push`, where the bytes are (see `decide_ephemeral`).
+    pub fn gate_push(&self, tenant: &str, n: i64) -> crate::quota::Verdict {
+        use crate::quota::Verdict;
+        let v = self.gate_grant(tenant);
+        if v != Verdict::Allow {
+            return v;
+        }
+        // A push of nothing is not an arrival and costs no token: the SDK's
+        // buffered sink can legally flush an empty batch on close.
+        if n <= 0 {
+            return Verdict::Allow;
+        }
+        self.with_tenant(tenant, |t| {
+            // A grant row's rate is its own burst — `quota.rs::write_rate`'s
+            // rule, and for its reason: the cell default gets a burst because an
+            // operator sized the pair together, while a plan carries ONE number
+            // and inventing a multiplier for it would let a tenant exceed the
+            // figure its plan actually names.
+            let per_row = t.rate_per_s.load(Ordering::Relaxed);
+            let (rate, burst) = if per_row > 0 {
+                (per_row, per_row.max(1))
+            } else {
+                (self.knobs.rate, self.knobs.burst)
+            };
+            // Clamped to the burst: a single batch larger than the bucket could
+            // ever hold would be refused for ever, with a `Retry-After` that
+            // never comes true. The edge cap on items per call is the real bound
+            // on that shape; this one only has to be non-starving.
+            let want = (n as f64).min(burst as f64);
+            t.rate.lock().unwrap().take(want, rate, burst)
+        })
+        .unwrap_or(Verdict::NoRoom)
     }
 
     /// SEAM (T1b): `configure` and the boot load of declared configs. Creating
     /// the queue here is what makes a declared queue exist "as configured but
     /// empty" across a restart (§1.2).
-    #[allow(dead_code)] // T1b: the `configure` verb and the boot load
     pub fn set_config(&self, tenant: &str, name: &str, opts: QueueOptions, declared: bool) {
         let Some(q) = self.lookup(tenant, name, true) else { return };
         let base = QueueConfig::from_knobs(&self.knobs);
@@ -1074,6 +1429,7 @@ impl Ephemeral {
             let sweep = r.sweep_leases(now_ms, cfg.retry_limit);
             if sweep.exhausted > 0 {
                 self.metrics.eph_dropped_retry.fetch_add(sweep.exhausted, Ordering::Relaxed);
+                q.dropped_retry.fetch_add(sweep.exhausted, Ordering::Relaxed);
             }
             freed.merge(r.drop_expired(now_ms, cfg.ttl_ms));
             freed.merge(r.trim_consumed());
@@ -1087,7 +1443,9 @@ impl Ephemeral {
         if !self.charge_queue(&q, cfg.policy, &ring, total, count, tenant) {
             return Err(Refusal::QueueFull);
         }
-        let tenant_ok = self.with_tenant(tenant, |t| t.bytes.charge(total));
+        let tenant_ok = self
+            .with_tenant(tenant, |t| t.bytes.charge(total))
+            .unwrap_or(false);
         if !tenant_ok {
             q.bytes.refund(total);
             q.length.refund(count);
@@ -1096,7 +1454,7 @@ impl Ephemeral {
         if !self.global.charge(total) {
             q.bytes.refund(total);
             q.length.refund(count);
-            self.with_tenant(tenant, |t| t.bytes.refund(total));
+            let _ = self.with_tenant(tenant, |t| t.bytes.refund(total));
             return Err(Refusal::NoRoom);
         }
 
@@ -1177,13 +1535,15 @@ impl Ephemeral {
         }
         q.bytes.refund(f.bytes);
         q.length.refund(f.count);
-        self.with_tenant(tenant, |t| t.bytes.refund(f.bytes));
+        let _ = self.with_tenant(tenant, |t| t.bytes.refund(f.bytes));
         self.global.refund(f.bytes);
         if f.by_ttl > 0 {
             self.metrics.eph_dropped_ttl.fetch_add(f.by_ttl, Ordering::Relaxed);
+            q.dropped_ttl.fetch_add(f.by_ttl, Ordering::Relaxed);
         }
         if f.by_bounds > 0 {
             self.metrics.eph_dropped_bounds.fetch_add(f.by_bounds, Ordering::Relaxed);
+            q.dropped_bounds.fetch_add(f.by_bounds, Ordering::Relaxed);
         }
         self.metrics.eph_bytes.store(self.global.used(), Ordering::Relaxed);
     }
@@ -1249,6 +1609,7 @@ impl Ephemeral {
                 let sweep = r.sweep_leases(now_ms, cfg.retry_limit);
                 if sweep.exhausted > 0 {
                     self.metrics.eph_dropped_retry.fetch_add(sweep.exhausted, Ordering::Relaxed);
+                    q.dropped_retry.fetch_add(sweep.exhausted, Ordering::Relaxed);
                 }
                 freed.merge(r.drop_expired(now_ms, cfg.ttl_ms));
 
@@ -1432,6 +1793,7 @@ impl Ephemeral {
         }
         if exhausted > 0 {
             self.metrics.eph_dropped_retry.fetch_add(exhausted, Ordering::Relaxed);
+            q.dropped_retry.fetch_add(exhausted, Ordering::Relaxed);
         }
         out
     }
@@ -1473,6 +1835,9 @@ impl Ephemeral {
                     let ls = r.sweep_leases(now_ms, cfg.retry_limit);
                     out.redelivered += ls.redelivered;
                     out.exhausted += ls.exhausted;
+                    if ls.exhausted > 0 {
+                        q.dropped_retry.fetch_add(ls.exhausted, Ordering::Relaxed);
+                    }
                     freed.merge(r.drop_expired(now_ms, cfg.ttl_ms));
                     freed.merge(r.trim_consumed());
                     if let Some(d) = r.next_expiry() {
@@ -1539,7 +1904,7 @@ impl Ephemeral {
             // Empty by the test above, so there are no bytes to give back; the
             // per-tenant queue COUNT is what has to come down.
             let (tenant, _) = crate::handlers::split_tenant_queue(k);
-            self.with_tenant(tenant, |t| {
+            let _ = self.with_tenant(tenant, |t| {
                 let _ = t.queues.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                     Some((n - 1).max(0))
                 });
@@ -1551,15 +1916,260 @@ impl Ephemeral {
 
     // ---------------------------------------------------------- inspection
 
-    /// (messages, bytes) held by one queue. For the status verbs (T1b) and for
-    /// tests; reads two atomics and takes no lock.
-    #[allow(dead_code)] // T1b: GET /api/v1/ephemeral/queues/:queue/depth
+    /// (messages, bytes) held by one queue, straight off the two BUDGET
+    /// counters — the numbers the bounds of §1.6 are enforced against, which is
+    /// a different question from the cursor arithmetic `depth_detail` publishes.
+    /// Reads two atomics and takes no lock.
+    ///
+    /// No production caller today: the HTTP depth read needs the per-group and
+    /// per-partition breakdown, so it goes through `depth_detail`. This is what
+    /// the engine's own suite asserts occupancy with, and what the mesh phase
+    /// will answer a peer's cheap depth probe from.
+    #[allow(dead_code)]
     pub fn depth(&self, tenant: &str, name: &str) -> Option<(i64, i64)> {
         self.lookup(tenant, name, false).map(|q| (q.length.used(), q.bytes.used()))
     }
 
-    /// How many messages `group` never saw because eviction ran under it.
-    #[allow(dead_code)] // T1b: the dashboard's per-group drop column (§5.3)
+    /// Per-partition, per-group backlog for `GET .../:queue/depth` (§3.1).
+    ///
+    /// `None` when the queue does not exist HERE, which the handler turns into
+    /// the same 404 shape as the durable depth read. It is the honest answer for
+    /// this class: an implicit queue that has been idle-collected is gone, and
+    /// saying "0" would present a collected inbox as an empty live one.
+    pub fn depth_detail(&self, tenant: &str, name: &str, group: Option<&str>) -> Option<Depth> {
+        let q = self.lookup(tenant, name, false)?;
+        let group = group.filter(|g| !g.is_empty());
+        let mut parts: Vec<PartitionDepth> = Vec::new();
+        let mut groups: Vec<GroupDepth> = Vec::new();
+        let mut seen_groups: HashMap<String, (i64, u64)> = HashMap::new();
+        for p in q.partition_names() {
+            let Some(ring) = q.ring(&p) else { continue };
+            let r = ring.lock().unwrap();
+            parts.push(PartitionDepth {
+                pending: r.pending_for(group),
+                bytes: r.bytes,
+                partition: p,
+            });
+            for (name, &gi) in r.gix.iter() {
+                let e = seen_groups.entry(name.clone()).or_insert((0, 0));
+                e.0 += r.pending_of(gi);
+                e.1 += r.groups[gi as usize].skipped;
+            }
+        }
+        parts.sort_by(|a, b| a.partition.cmp(&b.partition));
+        for (name, (pending, skipped)) in seen_groups {
+            groups.push(GroupDepth { group: name, pending, skipped });
+        }
+        groups.sort_by(|a, b| a.group.cmp(&b.group));
+        Some(Depth {
+            queue: q.name.clone(),
+            declared: q.declared.load(Ordering::Relaxed),
+            pending: parts.iter().map(|p| p.pending).sum(),
+            partitions_pending: parts.iter().filter(|p| p.pending > 0).count() as i64,
+            bytes: q.bytes.used(),
+            partitions: parts,
+            groups,
+        })
+    }
+
+    /// Every ephemeral queue of ONE tenant: the declared ones (loaded at boot or
+    /// declared since) and the live implicit ones, in one list.
+    ///
+    /// They come from the same map because a declared config IS a queue here —
+    /// the boot load calls `set_config`, which vivifies it empty (§1.2: declared
+    /// configuration survives, contents do not). There is therefore no merge to
+    /// get wrong, and no way for the list to show a declared queue that the
+    /// engine would not actually serve.
+    pub fn list(&self, tenant: &str) -> Vec<QueueStat> {
+        let prefix = crate::handlers::tenant_queue_key(tenant, EPH_PREFIX);
+        let snapshot: Vec<Arc<EqQueue>> = self
+            .queues
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(k, _)| k.starts_with(&prefix))
+            .map(|(_, v)| v.clone())
+            .collect();
+        let mut out: Vec<QueueStat> = snapshot
+            .iter()
+            .map(|q| {
+                let (bounds, ttl, retry) = q.drops();
+                let cfg = *q.config.lock().unwrap();
+                QueueStat {
+                    name: q.name.clone(),
+                    declared: q.declared.load(Ordering::Relaxed),
+                    depth: q.length.used(),
+                    bytes: q.bytes.used(),
+                    partitions: q.partitions.lock().unwrap().len() as i64,
+                    groups: q.group_count() as i64,
+                    dropped_bounds: bounds,
+                    dropped_ttl: ttl,
+                    dropped_retry: retry,
+                    config: cfg,
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
+    /// §3.1 `reset` — drop every message, void every lease, rewind every cursor.
+    /// Returns how many messages were dropped, or `None` when the queue is not
+    /// here. Legal only because of §1.2, and it is the one operation on this
+    /// class that is destructive ON PURPOSE rather than by contract.
+    ///
+    /// The cursors are rewound TO THE TAIL and not to zero: the seqs are gone,
+    /// so a cursor pointing below the tail would make every group replay a range
+    /// that no longer exists. A group's own `attempts` bookkeeping goes with it,
+    /// because the messages those attempts counted are not coming back.
+    pub fn reset(&self, tenant: &str, name: &str) -> Option<i64> {
+        let q = self.lookup(tenant, name, false)?;
+        let mut freed = Freed::default();
+        for p in q.partition_names() {
+            let Some(ring) = q.ring(&p) else { continue };
+            let mut r = ring.lock().unwrap();
+            freed.merge(r.wipe());
+        }
+        let dropped = freed.count;
+        self.release(tenant, &q, &freed);
+        q.touch(crate::util::now_epoch_ms());
+        Some(dropped)
+    }
+
+    /// §3.1 `delete` — reset, then forget the queue entirely.
+    ///
+    /// `false` when there was nothing here, and that is NOT an error (the house
+    /// rule the durable queue delete follows: the status describes the outcome of
+    /// the CALL, never the verdict of the predicate). The durable half — the
+    /// declared config row — is dropped by the handler through `db.rs`; this is
+    /// only the RAM half.
+    pub fn remove(&self, tenant: &str, name: &str) -> bool {
+        let Some(dropped) = self.reset(tenant, name) else { return false };
+        let _ = dropped;
+        let key = Self::qkey(tenant, name);
+        let gone = {
+            let mut m = self.queues.lock().unwrap();
+            let gone = m.remove(&key).is_some();
+            let n = m.len() as i64;
+            drop(m);
+            self.metrics.eph_queues.store(n, Ordering::Relaxed);
+            gone
+        };
+        if gone {
+            let _ = self.with_tenant(tenant, |t| {
+                let _ = t.queues.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                    Some((n - 1).max(0))
+                });
+            });
+        }
+        gone
+    }
+
+    /// The tenants a grant row exists for, plus whatever the caller adds. The
+    /// config refresh uses it to decide WHOSE declared configs to load: the
+    /// per-tenant list SP takes a tenant, and with `require_grant` on a tenant
+    /// without a row cannot declare anything anyway (§2).
+    pub fn granted_tenants(&self) -> Vec<String> {
+        self.tenants
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, t)| t.granted.load(Ordering::Relaxed))
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
+    /// Adopt the grant table (§1.6 rung 2). The ONLY writer of the allowance
+    /// fields, called by `refresh_once` below.
+    ///
+    /// A row that has DISAPPEARED must revoke, not linger: with `require_grant`
+    /// on, deleting a row is how the control plane turns the feature off for a
+    /// tenant, and a broker that kept the last grant it saw would keep serving a
+    /// customer whose plan ended. So every known tenant is cleared first and only
+    /// the rows present re-grant. Occupancy is NOT touched — lowering a cap below
+    /// what is already held blocks the next arrival and evicts nothing
+    /// (`Budget::set_cap`), because this budget bounds admission, never contents.
+    pub fn apply_grants(&self, rows: Vec<Grant>) {
+        let mut m = self.tenants.lock().unwrap();
+        for t in m.values() {
+            t.granted.store(false, Ordering::Relaxed);
+            t.enabled.store(true, Ordering::Relaxed);
+            t.bytes.set_cap(0);
+            t.queues_cap.store(0, Ordering::Relaxed);
+            t.rate_per_s.store(0, Ordering::Relaxed);
+        }
+        let cap = self.knobs.max_tenants;
+        let burst = self.knobs.burst;
+        for r in rows {
+            if !m.contains_key(&r.tenant) && m.len() >= cap {
+                // The map denies rather than evicting (see `with_tenant`). A
+                // grant row that does not fit is a configuration the operator can
+                // see and fix; silently dropping a LIVE tenant to make room is
+                // not.
+                continue;
+            }
+            let e = m.entry(r.tenant.clone()).or_insert_with(|| TenantUsage {
+                bytes: Budget::new(0),
+                queues: AtomicI64::new(0),
+                queues_cap: AtomicI64::new(0),
+                granted: AtomicBool::new(false),
+                enabled: AtomicBool::new(true),
+                rate_per_s: AtomicU32::new(0),
+                rate: Mutex::new(RateBucket::new(burst)),
+            });
+            e.granted.store(true, Ordering::Relaxed);
+            e.enabled.store(r.enabled, Ordering::Relaxed);
+            e.bytes.set_cap(r.max_bytes.unwrap_or(0).max(0));
+            e.queues_cap.store(r.max_queues.unwrap_or(0).max(0), Ordering::Relaxed);
+            e.rate_per_s
+                .store(r.max_msgs_per_sec.unwrap_or(0).clamp(0, u32::MAX as i64) as u32, Ordering::Relaxed);
+        }
+    }
+
+    /// The `n` heaviest tenants by ephemeral bytes, plus how many there are in
+    /// total. `(tenant, bytes, queues, cap)`.
+    ///
+    /// A LOG LINE AND NOT A PROMETHEUS LABEL, the §14.1 rule this repo already
+    /// applies to the KV occupancy: a per-tenant series on a value the caller
+    /// chooses is a cardinality the caller chooses. Ranked by bytes because on
+    /// this class bytes are the scarce thing — the whole feature is bounded by
+    /// one process's RAM, and the top of this list is who to call.
+    pub fn tenant_top(&self, n: usize) -> (Vec<(String, i64, i64, i64)>, usize) {
+        let m = self.tenants.lock().unwrap();
+        let total = m.len();
+        let mut v: Vec<(String, i64, i64, i64)> = m
+            .iter()
+            .map(|(k, t)| {
+                (
+                    k.clone(),
+                    t.bytes.used(),
+                    t.queues.load(Ordering::Relaxed),
+                    t.bytes.cap(),
+                )
+            })
+            .collect();
+        drop(m);
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.2.cmp(&a.2)));
+        v.truncate(n);
+        (v, total)
+    }
+
+    /// How many tenants the grant table last granted — the refresh log line's
+    /// number, never a per-tenant Prometheus label (§14.1).
+    pub fn granted_count(&self) -> usize {
+        self.tenants
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|t| t.granted.load(Ordering::Relaxed))
+            .count()
+    }
+
+    /// How many messages `group` never saw because eviction ran under it, for
+    /// ONE partition. The HTTP depth read publishes the per-queue sum instead
+    /// (`depth_detail`), so this has no production caller; it is how the engine's
+    /// own suite pins the per-partition attribution, which a sum cannot show.
+    #[allow(dead_code)]
     pub fn skipped(&self, tenant: &str, name: &str, partition: &str, group: &str) -> u64 {
         let Some(q) = self.lookup(tenant, name, false) else { return 0 };
         let Some(ring) = q.ring(partition) else { return 0 };
@@ -1570,11 +2180,6 @@ impl Ephemeral {
         }
     }
 
-    /// The queue's bare name, for a log line that must not print the composite.
-    #[allow(dead_code)] // T1b: the status verbs' payload
-    pub fn name_of(&self, tenant: &str, name: &str) -> Option<String> {
-        self.lookup(tenant, name, false).map(|q| q.name.clone())
-    }
 }
 
 // ===========================================================================
@@ -1611,6 +2216,176 @@ pub fn window_ready(have: usize, batch: usize, waited_ms: i64, w: Window) -> boo
         return true;
     }
     w.ms > 0 && waited_ms >= w.ms as i64
+}
+
+// ===========================================================================
+// §2 — the cold path: grants and declared configs, read from Postgres
+// ===========================================================================
+//
+// This is the ONLY code in the feature that awaits, and it runs at boot and then
+// on a slow cadence. Push, pop and ack never reach it.
+
+/// Parse `queen.eph_quota_list_v1`'s array.
+fn parse_grants(txt: &str) -> Vec<Grant> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(txt) else {
+        return Vec::new();
+    };
+    let Some(arr) = v.as_array() else { return Vec::new() };
+    arr.iter()
+        .filter_map(|t| {
+            let num = |k: &str| t.get(k).and_then(|x| x.as_i64()).filter(|n| *n > 0);
+            Some(Grant {
+                tenant: t.get("tenant")?.as_str()?.to_string(),
+                // Absent `enabled` reads as TRUE: the column is NOT NULL DEFAULT
+                // TRUE, so its absence can only mean an older row shape, and a
+                // row that exists is a grant.
+                enabled: t.get("enabled").and_then(|x| x.as_bool()).unwrap_or(true),
+                max_bytes: num("maxBytes"),
+                max_queues: num("maxQueues"),
+                max_msgs_per_sec: num("maxMsgsPerSec"),
+            })
+        })
+        .collect()
+}
+
+/// Parse `queen.eph_config_list_v1`'s array into (queue, options) pairs.
+///
+/// UNKNOWN KEYS ARE IGNORED HERE, where the `configure` verb rejects them with a
+/// 400. That asymmetry is deliberate and one-directional: the verb is the gate
+/// (nothing reaches the table without passing it), and the boot load is reading
+/// back rows that a FUTURE broker version may have written with options this one
+/// does not know. Refusing them would make a rolling downgrade lose the whole
+/// queue's configuration instead of the one option it cannot honour.
+fn parse_options(v: &serde_json::Value) -> QueueOptions {
+    let mut o = QueueOptions::default();
+    let g = |k: &str| v.get(k).and_then(|x| x.as_i64());
+    o.max_bytes = g("maxBytes");
+    o.max_length = g("maxLength");
+    o.ttl_ms = g("ttlSeconds").map(|s| s.saturating_mul(1000));
+    o.lease_ms = g("leaseSeconds").map(|s| s.saturating_mul(1000));
+    o.retry_limit = g("retryLimit").map(|n| n.clamp(0, u32::MAX as i64) as u32);
+    o.policy = v.get("policy").and_then(|x| x.as_str()).and_then(Policy::parse);
+    o.window = v.get("windowBuffer").and_then(|w| {
+        let ms = w.get("ms").and_then(|x| x.as_u64()).unwrap_or(0);
+        let count = w.get("count").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+        (ms > 0 || count > 0).then_some(Window { ms, count })
+    });
+    o
+}
+
+/// One refresh of both cold-path reads.
+///
+/// SEPARATED FROM THE LOOP so the boot can await exactly one before the listener
+/// opens — the `quota::refresh_once` rule, and it matters more here: with
+/// `require_grant` on, an empty grant map DENIES, so a cell that started serving
+/// before its first read would answer `feature_gated` to every tenant for a
+/// refresh period on every single rollout.
+///
+/// WHOSE CONFIGS ARE LOADED, and why it is not "everyone's". The list SP is
+/// per-tenant (§2) and there is deliberately no cell-wide config scan: the set
+/// of tenants that can HAVE a declared queue is the set with a grant row, plus
+/// the default tenant (which is the only tenant at all when tenancy is off). A
+/// tenant with no grant row and tenancy on cannot reach `configure` — rung 2
+/// refuses it — so its declared configs cannot exist. When tenancy is off,
+/// `require_grant` is off too and the default tenant is everybody.
+pub async fn refresh_once(
+    eph: &Ephemeral,
+    pool: &deadpool_postgres::Pool,
+    max_tenants: usize,
+) -> Result<(usize, usize), String> {
+    let client = pool.get().await.map_err(|e| e.to_string())?;
+    let cap = max_tenants.clamp(1, i32::MAX as usize) as i32;
+    let txt = crate::db::eph_quota_list(&client, cap).await.map_err(|e| {
+        // Name the 42883 case: it is the broker-new/database-old shape and its
+        // remedy is one environment variable away.
+        match e.as_db_error().map(|d| d.code().code().to_string()) {
+            Some(code) if code.starts_with("42") => format!(
+                "{code}: queen.eph_quota_list_v1 is missing or does not match — apply the \
+                 schema (QUEEN_APPLY_SCHEMA=1) and restart"
+            ),
+            _ => e.to_string(),
+        }
+    })?;
+    let grants = parse_grants(&txt);
+    let n_grants = grants.len();
+    eph.apply_grants(grants);
+
+    let mut tenants = eph.granted_tenants();
+    if !tenants.iter().any(|t| t == crate::config::DEFAULT_TENANT) {
+        tenants.push(crate::config::DEFAULT_TENANT.to_string());
+    }
+    let mut n_configs = 0usize;
+    for t in tenants {
+        let txt = match crate::db::eph_config_list(&client, &t, cap).await {
+            Ok(v) => v,
+            // One tenant's read failing must not abort the others': a malformed
+            // tenant id in the grant table (the column is a uuid, but the SP
+            // casts) would otherwise cost every OTHER tenant its configuration.
+            Err(e) => return Err(e.to_string()),
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else { continue };
+        let Some(arr) = v.as_array() else { continue };
+        for row in arr {
+            let Some(queue) = row.get("queue").and_then(|x| x.as_str()) else { continue };
+            let opts = row.get("options").map(parse_options).unwrap_or_default();
+            // `declared = true` vivifies the queue EMPTY (§1.2): the
+            // configuration is what survives a restart, never the contents.
+            eph.set_config(&t, queue, opts, true);
+            n_configs += 1;
+        }
+    }
+    Ok((n_grants, n_configs))
+}
+
+static EPH_REFRESH_ERR: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
+
+/// The periodic re-read, on the SAME cadence knob the kv/timers gate uses
+/// (`QUEEN_KV_QUOTA_REFRESH_MS`).
+///
+/// ONE KNOB AND NOT A SECOND ONE, deliberately. The knob's meaning is "how long a
+/// grant change takes to reach a broker", and that is one property of the cell,
+/// not one per feature: an operator who tuned the KV cadence and found the
+/// ephemeral grants still stale a minute later would be reading a knob that lied
+/// about its own scope. It is also the cadence that backstops a lost `reset` /
+/// `delete` broadcast when the mesh phase lands (§10 Q4).
+///
+/// Returns the handle so the embedded broker can abort it on `shutdown()`.
+pub fn spawn_refresh(
+    eph: Arc<Ephemeral>,
+    pool: deadpool_postgres::Pool,
+    interval_ms: u64,
+    max_tenants: usize,
+) -> tokio::task::JoinHandle<()> {
+    let interval = std::time::Duration::from_millis(interval_ms.max(1000));
+    tracing::info!(
+        target: "ephemeral",
+        interval_ms = interval.as_millis() as u64,
+        max_tenants,
+        require_grant = eph.knobs.require_grant,
+        "ephemeral grant/config refresh started"
+    );
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            match refresh_once(&eph, &pool, max_tenants).await {
+                Ok((g, c)) => tracing::debug!(
+                    target: "ephemeral", grants = g, configs = c, "ephemeral grants refreshed"
+                ),
+                Err(e) => {
+                    // Logged and swallowed. A stale grant map UNBLOCKS nothing:
+                    // the caps a broker already adopted stay in force, and a
+                    // tenant that was refused stays refused — which is the safe
+                    // direction for a budget paid in RAM.
+                    if let Some(suppressed) = EPH_REFRESH_ERR.tick_now() {
+                        tracing::warn!(
+                            target: "ephemeral", error = %e, suppressed,
+                            "ephemeral grant refresh failed; the last grants stay in force"
+                        );
+                    }
+                }
+            }
+        }
+    })
 }
 
 // ===========================================================================
