@@ -63,12 +63,18 @@
             </select>
           </div>
 
+          <!-- No free entry: this filter is applied to the loaded rows, so a
+               name outside the list can only produce an empty table. -->
           <div class="filter-field-col">
-            <label class="label-xs">Queue</label>
-            <select v-model="filterQueue" class="input">
-              <option value="">All queues</option>
-              <option v-for="q in scopedQueueNames" :key="q" :value="q">{{ q }}</option>
-            </select>
+            <label class="label-xs" for="cg-queue-filter">Queue</label>
+            <Autocomplete
+              id="cg-queue-filter"
+              v-model="filterQueue"
+              :options="scopedQueueNames"
+              :loading="groupsFirstLoad"
+              label="Queue"
+              placeholder="All queues"
+            />
           </div>
 
           <label class="filter-check">
@@ -499,6 +505,7 @@ import { formatDateTimeLocal } from '@/composables/useFormat'
 import { useRefresh } from '@/composables/useRefresh'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
+import Autocomplete from '@/components/Autocomplete.vue'
 import { useQueuesStore } from '@/stores/queuesStore'
 
 // TENANT PAGE. /api/v1/consumer-groups* is tenant-scoped broker-side; the
