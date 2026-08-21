@@ -10,6 +10,7 @@ export const generateUUID = () => {
 
 //import { generateUUID } from '../../utils/uuid.js'
 import { isValidUUID } from '../utils/validation.js'
+import { durableAddress } from '../buffer/sinks.js'
 import { QUEUE_DEFAULTS, CONSUME_DEFAULTS, POP_DEFAULTS } from '../utils/defaults.js'
 import { checkConflationResponse, CONFLATION_UNSUPPORTED } from '../utils/conflation.js'
 import * as logger from '../utils/logger.js'
@@ -471,7 +472,7 @@ export class QueueBuilder {
     if (!this.#queueName) {
       throw new Error('Queue name is required for buffer flush')
     }
-    const queueAddress = `${this.#queueName}/${this.#partition}`
+    const queueAddress = durableAddress(this.#queueName, this.#partition)
     logger.log('QueueBuilder.flushBuffer', { queueAddress })
     await this.#bufferManager.flushBuffer(queueAddress)
   }
@@ -708,7 +709,10 @@ class PushBuilder {
     // off without awaiting would report success for messages the buffer never
     // accepted -- the exact failure this bound exists to remove.
     if (this.#bufferOptions) {
-      const queueAddress = `${this.#queueName}/${this.#partition}`
+      // No destination: the durable push is the default sink, so this address's
+      // buffer drains to POST /api/v1/push with a `{items}` body exactly as it
+      // did before sinks existed (buffer/sinks.js).
+      const queueAddress = durableAddress(this.#queueName, this.#partition)
       const accepted = []
 
       try {

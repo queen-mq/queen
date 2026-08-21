@@ -10,6 +10,7 @@ import { QueueBuilder } from './builders/QueueBuilder.js'
 import { TransactionBuilder } from './builders/TransactionBuilder.js'
 import { TimerBuilder } from './builders/TimerBuilder.js'
 import { Kv } from './kv/Kv.js'
+import { Ephemeral } from './ephemeral/Ephemeral.js'
 import { StreamBuilder } from './stream/StreamBuilder.js'
 import { StreamConsumer } from './stream/StreamConsumer.js'
 import { Admin } from './admin/Admin.js'
@@ -66,6 +67,7 @@ export class Queen {
   #shutdownHandlers = []
   #admin = null
   #kv = null
+  #ephemeral = null
 
   constructor(config = {}) {
     // Configure custom logger before anything else.
@@ -251,6 +253,51 @@ export class Queen {
       this.#kv = new Kv(this.#httpClient)
     }
     return this.#kv
+  }
+
+  // ===========================
+  // Ephemeral API Entry Point
+  // ===========================
+
+  /**
+   * RAM-class queues: `/api/v1/ephemeral/*` (EPHEMERAL_QUEUES.md §1, §4).
+   *
+   *     await queen.ephemeral.push('inbox:7', [{ hello: 'world' }])
+   *     const { messages } = await queen.ephemeral.pop('inbox:7', { wait: true })
+   *     await queen.ephemeral.ack('inbox:7', messages, { group: 'workers' })
+   *
+   * A different STORAGE CLASS, not a different API style. What changes:
+   *
+   *   * CONTENTS SURVIVE NOTHING (§1.2) -- restart, crash, deploy, or the
+   *     ownership move a membership change causes. Treat a failover like a
+   *     Redis restart. A declared queue's OPTIONS are durable; it comes back
+   *     configured and EMPTY.
+   *   * a queue does not have to exist: the first push or pop that names one
+   *     creates it, which is what makes thousands of short-lived req/reply
+   *     inboxes cheap (§1.1).
+   *   * delivery is at-least-once while the owning broker lives, at-most-once
+   *     with `autoAck` (§1.3) -- NOT "at most once" as a class. Consumers still
+   *     need idempotency.
+   *   * consumption semantics are the pop's `group`, exactly as on durable
+   *     queues (§1.5): same group competes, own group fans out, no group is
+   *     queue mode. There is no queue-level mode to set.
+   *   * there is no replay, no subscriptionMode, no DLQ, no transactions -- the
+   *     verbs are absent because the concepts have no referent (§9).
+   *
+   * `push(..., {buffered})` shares the durable buffer machinery, so
+   * `queen.close()` drains it on the same deadline (§4.1).
+   *
+   * Requires broker/proxy >= 1.1; an older one 404s the whole family and every
+   * verb here maps that to one error with `.code === EPHEMERAL_UNSUPPORTED`.
+   *
+   * Lazily initialized, singleton, like `admin` and `kv`.
+   * @returns {Ephemeral}
+   */
+  get ephemeral() {
+    if (!this.#ephemeral) {
+      this.#ephemeral = new Ephemeral(this.#httpClient, this.#bufferManager)
+    }
+    return this.#ephemeral
   }
 
   // ===========================

@@ -19,6 +19,14 @@
  * path that has a SIGTERM grace period to respect. When the deadline expires
  * the messages are still in the buffer -- the error says how many -- so the
  * failure is loud rather than silent.
+ *
+ * WHERE a batch goes is the buffer's DESTINATION (buffer/sinks.js), not
+ * something this loop knows: durable pushes and ephemeral pushes are two routes
+ * with two body shapes and exactly one set of ordering, backpressure and retry
+ * semantics, so the drain is parametrized instead of copied. Addresses are
+ * namespaced per family (`eph:` prefix), so the two never share a buffer, a
+ * drain, or a retry queue. A buffer created without a destination drains to the
+ * durable push exactly as before.
  */
 
 import { MessageBuffer } from './MessageBuffer.js'
@@ -45,9 +53,12 @@ export class BufferManager {
    * @param {string} queueAddress
    * @param {object} formattedMessage
    * @param {object} bufferOptions
-   * @param {{ signal?: AbortSignal }} [opts]
+   * @param {{ signal?: AbortSignal, destination?: object }} [opts] - `destination`
+   *   is `{ sink, queue, partition }` (buffer/sinks.js) and is read ONLY when
+   *   this address's buffer is created: an address belongs to one queue of one
+   *   storage class, so its route cannot change under an in-flight retry.
    */
-  async addMessage(queueAddress, formattedMessage, bufferOptions, { signal } = {}) {
+  async addMessage(queueAddress, formattedMessage, bufferOptions, { signal, destination = null } = {}) {
     // A push after cleanup() would otherwise create a fresh buffer that nothing
     // will ever flush -- messages accepted into a client that is already shut
     // down, which is the same false success the bound exists to remove.
@@ -60,8 +71,8 @@ export class BufferManager {
       // maxSize is derived from the messageCount this caller asked for, and
       // merging defaults here first would hide the difference between "not set"
       // and "set to the default".
-      const created = new MessageBuffer(queueAddress, bufferOptions, (addr) => { this.#startDrain(addr) })
-      logger.log('BufferManager.createBuffer', { queueAddress, options: created.options })
+      const created = new MessageBuffer(queueAddress, bufferOptions, (addr) => { this.#startDrain(addr) }, destination)
+      logger.log('BufferManager.createBuffer', { queueAddress, options: created.options, sink: created.destination.sink.name })
       this.#buffers.set(queueAddress, created)
     }
 
@@ -111,6 +122,7 @@ export class BufferManager {
 
   async #drain(queueAddress, buffer, ctl) {
     const { messageCount, retryDelayMillis } = buffer.options
+    const { sink, queue, partition } = buffer.destination
 
     try {
       while (buffer.messageCount > 0 && !buffer.isStopped) {
@@ -118,8 +130,8 @@ export class BufferManager {
         if (batch.length === 0) break
 
         try {
-          const result = await this.#httpClient.post('/api/v1/push', { items: batch })
-          logger.debug('BufferManager.drain', { queueAddress, sent: batch.length, serverResponse: result ? `${result.length || 'N/A'} items` : 'null' })
+          const result = await this.#httpClient.post(sink.path, sink.format(queue, partition, batch))
+          logger.debug('BufferManager.drain', { queueAddress, sink: sink.name, sent: batch.length, serverResponse: result ? `${result.length || 'N/A'} items` : 'null' })
 
           this.#flushCount++
           // Capacity freed. Woken here rather than at takeBatch, because a
