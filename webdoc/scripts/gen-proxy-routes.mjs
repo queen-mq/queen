@@ -29,7 +29,10 @@ const MAIN = "server/src/main.rs";
 // 2026-08-17: `classify` grew the KV and timer families and split every gated
 // class into a `(Feature, GatedOp)` pair, where the second half is the quota
 // decision and not a second feature flag. Re-read and mirrored below.
-const CLASSIFY_FINGERPRINT = "1e4d1611b9e875e4";
+// 2026-08-21: `classify` grew the ephemeral family (EPHEMERAL_QUEUES.md §5.1),
+// one more `Feature` behind one more default-false plan key, method-exact on
+// every path in it. Re-read and mirrored below.
+const CLASSIFY_FINGERPRINT = "f49462ece2914311";
 const OPERATOR_FINGERPRINT = "04d6dea7366b466d";
 
 // --- mirror of `is_operator_route` -----------------------------------------
@@ -97,6 +100,32 @@ function classify(m, p) {
     return ["GET", "DELETE"].includes(m) ? "gated (timers)" : "blocked";
   }
 
+  // The ephemeral family. Same shape as the two above: one `Feature` behind
+  // one plan key, and the `GatedOp` half is the quota decision rather than a
+  // second flag, so only the feature half names a class here. Method-exact on
+  // every path, and everything else under the prefix is `Blocked` in the Rust
+  // rather than left to travel to a 405.
+  if (p.startsWith("/api/v1/ephemeral/")) {
+    if (m === "POST") {
+      return [
+        "/api/v1/ephemeral/push",
+        "/api/v1/ephemeral/ack",
+        "/api/v1/ephemeral/configure",
+        "/api/v1/ephemeral/reset",
+      ].includes(p)
+        ? "gated (ephemeral)"
+        : "blocked";
+    }
+    if (m === "GET") {
+      if (p === "/api/v1/ephemeral/pop" || p === "/api/v1/ephemeral/queues") return "gated (ephemeral)";
+      return p.startsWith("/api/v1/ephemeral/queues/") && p.endsWith("/depth")
+        ? "gated (ephemeral)"
+        : "blocked";
+    }
+    if (m === "DELETE" && p.startsWith("/api/v1/ephemeral/queue/")) return "gated (ephemeral)";
+    return "blocked";
+  }
+
   if (
     p.startsWith("/api/v1/resources") ||
     p.startsWith("/api/v1/status") ||
@@ -127,6 +156,10 @@ const CLASS_MEANING = [
   [
     "gated (timers)",
     "Available when the plan enables the timers feature. Scheduling is quota-blockable; cancelling is not, and has its own route for that reason, since a tenant blocked from cancelling would keep producing messages it can no longer stop.",
+  ],
+  [
+    "gated (ephemeral)",
+    "Available when the plan enables the ephemeral feature, which a plan that has never heard of it does not. A `push` is the half a storage quota blocks and its messages are counted like any other; a pop is metered as a delivery and holds a parked-consumer slot while it waits; ack, configure, reset and the queue `DELETE` are write level and never quota-blocked, since dropping a queue is how a tenant gets its memory back. The two status reads are read level.",
   ],
   ["operator", "Cell-wide surfaces. Not tenant-scopable, so a tenant credential gets the same 404 a blocked route returns."],
   ["blocked", "Never exposed to a tenant, whatever the credential. Returns 404."],

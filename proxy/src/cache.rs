@@ -151,7 +151,13 @@ impl ClusterCache {
             // dev-static has no plans table to read, so every feature is on —
             // it is a single-developer loopback mode, and the cloud path never
             // reaches this branch.
-            features: Features { streams: true, traces: true, kv: true, timers: true },
+            features: Features {
+                streams: true,
+                traces: true,
+                kv: true,
+                timers: true,
+                ephemeral: true,
+            },
         });
         ClusterCache {
             dev_static,
@@ -761,6 +767,10 @@ fn parse_features(json: &str) -> Features {
         // so, and nowhere else. No migration, no default-on.
         kv: v.get("kv").and_then(|b| b.as_bool()).unwrap_or(false),
         timers: v.get("timers").and_then(|b| b.as_bool()).unwrap_or(false),
+        // EPHEMERAL_QUEUES.md §5.1: same rule again, and the reason the family
+        // ships "OSS on, cloud off" without a second mechanism — the plan row
+        // that does not name it is the plan that does not have it.
+        ephemeral: v.get("ephemeral").and_then(|b| b.as_bool()).unwrap_or(false),
     }
 }
 
@@ -947,5 +957,21 @@ mod tests {
         assert!(!f.kv);
         assert!(!f.timers);
         assert!(!parse_features("not json").kv);
+    }
+
+    /// EPHEMERAL_QUEUES.md §5.1/§8: the RAM family is default-off in the
+    /// cloud, and this is where that is decided — the 403 `feature_gated` a
+    /// tenant gets from gateway.rs is this `false` travelling downstream.
+    #[test]
+    fn ephemeral_defaults_off_and_is_independent() {
+        for json in ["{}", r#"{"streams":true,"traces":true,"kv":true,"timers":true}"#, "not json"] {
+            assert!(!parse_features(json).ephemeral, "features: {json}");
+        }
+        let f = parse_features(r#"{"ephemeral":true}"#);
+        assert!(f.ephemeral);
+        assert!(!f.kv, "the RAM class is sold on its own, not with kv");
+        // Junk in the JSONB is not a yes here either.
+        assert!(!parse_features(r#"{"ephemeral":"true"}"#).ephemeral);
+        assert!(!parse_features(r#"{"ephemeral":1}"#).ephemeral);
     }
 }

@@ -9,15 +9,20 @@
 //!   4. limits: check_req; Produce -> buffer body (cap = min(plan, cfg)), count
 //!      items + per-item payload caps, registry.admit each (queue,partition),
 //!      check_msgs(n); POST /configure -> buffer body, retention ceiling +
-//!      registry.admit the created (queue, Default); Consume wait=true ->
-//!      parked_slot RAII guard held across the upstream await
+//!      registry.admit the created (queue, Default); POST /ephemeral/push ->
+//!      buffer body, check_msgs(messages.len()) and nothing else (no registry,
+//!      no retention: the RAM class creates no rows); Consume wait=true, and
+//!      GET /ephemeral/pop wait=true -> parked_slot RAII guard held across the
+//!      upstream await
 //!   5. forward: rebuild URI on ctx.cell_base_url, strip hop-by-hop headers,
 //!      inject Authorization (ctx.cell_token), X-Queen-Tenant (cfg.send_tenant_header),
 //!      X-Queen-Request-Id; long-poll timeout = min(client timeout|30s, cfg max) + margin
 //!   6. meter post-response (M1–M6): push -> parse per-item statuses (exclude
 //!      error, dedupe duplicate, buffered counts), pop -> delivered count +
 //!      debit_deliveries, bytes in/out always; the same push parse feeds the
-//!      sampled §6.10 maintenance signal
+//!      sampled §6.10 maintenance signal. The ephemeral push/pop pair meters as
+//!      Push/Delivery like its durable twin (EPHEMERAL_QUEUES.md Q6), off a
+//!      one-number 201 body instead of a status array
 //!   7. shadow mode: when !limits.enforcing(), Deny decisions are logged (target
 //!      `limits`, field `would_block`) but the request proceeds
 //!
@@ -96,13 +101,7 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
         return errors::err_404(errors::CODE_ROUTE_BLOCKED, "not available");
     }
     if let RouteClass::Gated(f, op) = class {
-        let on = match f {
-            crate::routes::Feature::Streams => ctx.features.streams,
-            crate::routes::Feature::Traces => ctx.features.traces,
-            crate::routes::Feature::Kv => ctx.features.kv,
-            crate::routes::Feature::Timers => ctx.features.timers,
-        };
-        if !on {
+        if !feature_enabled(f, &ctx.features) {
             return errors::err_403(errors::CODE_FEATURE_GATED, "not in your plan");
         }
         // PLAN_KV_TIMERS.md §9.5: the growing half of a gated family answers
@@ -246,6 +245,29 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
             return blocked;
         }
         Body::from(buffered)
+    } else if path_only == EPH_PUSH_PATH {
+        // 4b'''. EPHEMERAL_QUEUES.md §5.1: the RAM push is not `Produce` — it
+        // creates no queue row and no partition, so registry admission and the
+        // retention ceiling have nothing to say about it — but its items ARE
+        // messages, and the message-rate bucket is the one limit that must see
+        // them (Q6). Same hard body-buffer ceiling as produce, and the same
+        // tolerance: a body we cannot read counts 0 and travels on to the
+        // broker's own 400 rather than being half-enforced here.
+        let buffered = match axum::body::to_bytes(body, st.cfg.max_body_bytes).await {
+            Ok(b) => b,
+            Err(_) => return errors::err_413("request body exceeds cap"),
+        };
+        bytes_in = buffered.len() as u64;
+        match st.limits.check_msgs(&ctx, count_ephemeral_push_items(&buffered)) {
+            Decision::Allow => {}
+            Decision::Deny { retry_after_s, code } => {
+                if st.limits.enforcing() {
+                    return errors::err_429(code, retry_after_s, "message rate limit exceeded");
+                }
+                // shadow deny: canonical would_block log emitted inside check_msgs
+            }
+        }
+        Body::from(buffered)
     } else {
         body
     };
@@ -371,7 +393,15 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
                 return errors::err_502("push response too large");
             }
         };
-        let counts = count_push_statuses(&buffered).unwrap_or_else(|| {
+        // Two 201 shapes reach here: the durable per-item status array, and the
+        // RAM family's one number (§3.1). Same treatment on a parse failure —
+        // charge nothing we cannot confirm.
+        let parsed = if path_only == EPH_PUSH_PATH {
+            count_ephemeral_pushed(&buffered)
+        } else {
+            count_push_statuses(&buffered)
+        };
+        let counts = parsed.unwrap_or_else(|| {
             tracing::warn!(target: "meter", cluster = %ctx.slug, rid, "push response parse failed; msgs=0");
             PushCounts::default()
         });
@@ -908,6 +938,41 @@ fn count_push_statuses(bytes: &[u8]) -> Option<PushCounts> {
     Some(counts)
 }
 
+/// Items in an ephemeral push body: `{queue, partition?, messages:[...]}`
+/// (EPHEMERAL_QUEUES.md §3.1). Only the array length is wanted — the per-item
+/// payload caps and the registry belong to the durable path — so the elements
+/// are counted without being materialised.
+///
+/// UNPARSEABLE COUNTS 0, deliberately: the same stance `enforce_produce` takes
+/// on a body it cannot read. The broker rejects the malformed body too, so
+/// nothing is stored either way, and the caller gets a named 400 instead of a
+/// 429 about a rate it never consumed.
+fn count_ephemeral_push_items(bytes: &[u8]) -> u64 {
+    #[derive(Deserialize)]
+    struct EphPushLite {
+        #[serde(default)]
+        messages: Vec<serde::de::IgnoredAny>,
+    }
+    serde_json::from_slice::<EphPushLite>(bytes)
+        .map(|p| p.messages.len() as u64)
+        .unwrap_or(0)
+}
+
+/// Count an ephemeral push 201: `{"pushed":N}` (§3.1). The family answers one
+/// number rather than a per-item status array because the request is
+/// all-or-nothing — there is no `duplicate` (no dedup) and no `buffered` (no
+/// spool: a RAM queue has nowhere to spill to), so `accepted` is the whole
+/// tally and the §6.10 maintenance signal can never fire off it. `None` on a
+/// shape we cannot read, handled at the call site exactly like a durable one.
+fn count_ephemeral_pushed(bytes: &[u8]) -> Option<PushCounts> {
+    #[derive(Deserialize)]
+    struct EphPushedLite {
+        pushed: u64,
+    }
+    let p: EphPushedLite = serde_json::from_slice(bytes).ok()?;
+    Some(PushCounts { accepted: p.pushed, buffered: 0, total: p.pushed })
+}
+
 /// What a transaction 2xx response says about the push ops counted on the way
 /// in. The two committed/rolled-back shapes are documented at
 /// server/src/handlers/data.rs::handle_transaction.
@@ -1087,8 +1152,33 @@ fn content_length(headers: &HeaderMap) -> u64 {
         .unwrap_or(0)
 }
 
+/// Is the plan flag for this gated family on? One arm per `Feature`, so the
+/// compiler names the file to edit when a family is added. A `Features` a plan
+/// row never mentioned is all-false (`cache::parse_features`), which is what
+/// makes a cell that has never heard of a feature deny it.
+fn feature_enabled(f: crate::routes::Feature, features: &crate::state::Features) -> bool {
+    match f {
+        crate::routes::Feature::Streams => features.streams,
+        crate::routes::Feature::Traces => features.traces,
+        crate::routes::Feature::Kv => features.kv,
+        crate::routes::Feature::Timers => features.timers,
+        crate::routes::Feature::Ephemeral => features.ephemeral,
+    }
+}
+
+/// The two RAM-family data-plane paths (EPHEMERAL_QUEUES.md §3.1). `classify`
+/// is method-exact on both, so matching the path here already implies the
+/// method — unlike `/api/v1/configure`, which classifies for every method and
+/// therefore needs `is_configure` to check one.
+const EPH_PUSH_PATH: &str = "/api/v1/ephemeral/push";
+const EPH_POP_PATH: &str = "/api/v1/ephemeral/pop";
+
+/// Both pop families: the response shape is the same `{...,"messages":[...]}`,
+/// so the delivery count and the `debit_deliveries` that follows it are read
+/// the same way. The RAM pop is `Gated`, never `Consume`, so widening this
+/// does not move any durable route between classes.
 fn is_pop_path(path: &str) -> bool {
-    path.starts_with("/api/v1/pop/queue/")
+    path.starts_with("/api/v1/pop/queue/") || path == EPH_POP_PATH
 }
 
 /// Map a (path, class) to the metering op class. Consume that is not a pop
@@ -1101,6 +1191,20 @@ fn op_for(path: &str, class: RouteClass) -> OpClass {
         RouteClass::Consume => OpClass::Read,
         RouteClass::QueueAdmin => OpClass::Configure,
         RouteClass::Read => OpClass::Read,
+        // EPHEMERAL_QUEUES.md Q6, decided before the family shipped: the RAM
+        // data plane meters as what it is — push as `Push`, pop as `Delivery`
+        // — instead of falling into the reqs-only `Read` gap below. Its
+        // messages cross this proxy exactly like durable ones and cost the
+        // cell exactly as much bandwidth; only where they are stored differs,
+        // and that is the storage quota's business, not the meter's. The other
+        // verbs (ack, configure, reset, delete, the two status reads) keep the
+        // `Read` default: they carry no messages.
+        RouteClass::Gated(crate::routes::Feature::Ephemeral, _) if path == EPH_PUSH_PATH => {
+            OpClass::Push
+        }
+        RouteClass::Gated(crate::routes::Feature::Ephemeral, _) if path == EPH_POP_PATH => {
+            OpClass::Delivery
+        }
         // Gated surfaces meter as reqs-only `Read`. That INCLUDES
         // `POST /api/v1/timers`, and PLAN_KV_TIMERS.md §9.7 says it should not
         // stay that way: a timer is a message that will never cross this proxy
@@ -1499,6 +1603,119 @@ mod tests {
             op_for("/api/v1/resources/queues", RouteClass::Read),
             OpClass::Read
         );
+    }
+
+    // ---- EPHEMERAL_QUEUES.md: the RAM family through the data plane ----
+
+    /// Q6, resolved before the family shipped: its two data-plane verbs meter
+    /// as messages, not as the reqs-only `Read` every other gated surface
+    /// falls into. A regression here is invisible in production until an
+    /// invoice is wrong, so it is pinned.
+    #[test]
+    fn ephemeral_push_and_pop_meter_as_messages() {
+        use crate::routes::{Feature, GatedOp};
+        assert_eq!(
+            op_for(EPH_PUSH_PATH, RouteClass::Gated(Feature::Ephemeral, GatedOp::Grow)),
+            OpClass::Push
+        );
+        assert_eq!(
+            op_for(EPH_POP_PATH, RouteClass::Gated(Feature::Ephemeral, GatedOp::Open)),
+            OpClass::Delivery
+        );
+        // the rest of the family carries no messages and keeps the default
+        for p in [
+            "/api/v1/ephemeral/ack",
+            "/api/v1/ephemeral/configure",
+            "/api/v1/ephemeral/reset",
+            "/api/v1/ephemeral/queue/orders",
+        ] {
+            assert_eq!(
+                op_for(p, RouteClass::Gated(Feature::Ephemeral, GatedOp::Open)),
+                OpClass::Read,
+                "{p}"
+            );
+        }
+        assert_eq!(
+            op_for("/api/v1/ephemeral/queues", RouteClass::Gated(Feature::Ephemeral, GatedOp::Read)),
+            OpClass::Read
+        );
+        // and the neighbouring families are untouched by the new arms
+        assert_eq!(
+            op_for("/api/v1/kv/ns/k", RouteClass::Gated(Feature::Kv, GatedOp::Grow)),
+            OpClass::Read
+        );
+    }
+
+    /// The pop-metering branch is selected by path, so the RAM pop has to be
+    /// on it: that is what counts deliveries out of the response and debits
+    /// them. Durable routes must not change class in the process.
+    #[test]
+    fn ephemeral_pop_is_a_pop_path() {
+        assert!(is_pop_path(EPH_POP_PATH));
+        assert!(is_pop_path("/api/v1/pop/queue/orders"));
+        assert!(!is_pop_path(EPH_PUSH_PATH));
+        assert!(!is_pop_path("/api/v1/pop"));
+        // its response shape is the durable one, so one counter serves both
+        assert_eq!(
+            count_pop_messages(br#"{"queue":"inbox","messages":[{"id":"e:1a:p:1"},{"id":"e:1a:p:2"}]}"#),
+            Some(2)
+        );
+        assert_eq!(count_pop_messages(br#"{"queue":"inbox","messages":[]}"#), Some(0));
+    }
+
+    /// The ingress count that reaches `limits.check_msgs`. Cheap (elements are
+    /// counted, never materialised) and tolerant (an unreadable body is 0, not
+    /// a refusal), exactly as `enforce_produce` treats a durable batch.
+    #[test]
+    fn ephemeral_push_items_are_counted_from_the_body() {
+        let body = br#"{"queue":"inbox","partition":"c-42","messages":[
+            {"payload":{"a":1}},{"payload":"hello"},{"payload":[1,2,3]}
+        ]}"#;
+        assert_eq!(count_ephemeral_push_items(body), 3);
+        assert_eq!(count_ephemeral_push_items(br#"{"queue":"inbox","messages":[]}"#), 0);
+        // no partition is the common shape (the broker defaults it)
+        assert_eq!(count_ephemeral_push_items(br#"{"queue":"i","messages":[{"payload":1}]}"#), 1);
+        // unreadable / wrong shape -> 0, and the broker answers its own 400
+        assert_eq!(count_ephemeral_push_items(b"not json"), 0);
+        assert_eq!(count_ephemeral_push_items(br#"{"queue":"inbox"}"#), 0);
+        assert_eq!(count_ephemeral_push_items(br#"[{"payload":1}]"#), 0);
+    }
+
+    /// The 201 the family answers is one number, not a status array (§3.1).
+    #[test]
+    fn ephemeral_push_201_is_counted_from_pushed() {
+        let counts = count_ephemeral_pushed(br#"{"pushed":3}"#).expect("parse");
+        assert_eq!(counts.accepted, 3);
+        assert_eq!(counts.total, 3);
+        // nothing spools in RAM, so the maintenance signal can never fire here
+        assert_eq!(counts.buffered, 0);
+        assert!(!predominantly_buffered(&counts));
+        // a shape we cannot read charges nothing, like a durable push 201
+        assert_eq!(count_ephemeral_pushed(br#"{"error":"queue_full"}"#), None);
+        assert_eq!(count_ephemeral_pushed(b"not json"), None);
+        // and the durable counter is not fooled by it either way round
+        assert_eq!(count_push_statuses(br#"{"pushed":3}"#), None);
+    }
+
+    /// The plan gate the 403 `feature_gated` is read from. A `Features` a plan
+    /// row never mentioned is all-false, so a cell that has never heard of the
+    /// RAM class denies it — the §8 "cloud off until the plan says so" posture.
+    #[test]
+    fn ephemeral_is_denied_until_the_plan_grants_it() {
+        use crate::routes::Feature;
+        let none = crate::state::Features::default();
+        assert!(!feature_enabled(Feature::Ephemeral, &none));
+
+        let granted = crate::state::Features { ephemeral: true, ..Default::default() };
+        assert!(feature_enabled(Feature::Ephemeral, &granted));
+        // one flag, one family: granting the RAM class grants nothing else
+        assert!(!feature_enabled(Feature::Kv, &granted));
+        assert!(!feature_enabled(Feature::Timers, &granted));
+        assert!(!feature_enabled(Feature::Streams, &granted));
+        assert!(!feature_enabled(Feature::Traces, &granted));
+        // ...and no other flag turns it on
+        let kv_only = crate::state::Features { kv: true, ..Default::default() };
+        assert!(!feature_enabled(Feature::Ephemeral, &kv_only));
     }
 
     #[test]
