@@ -47,7 +47,7 @@ function snippet(raw: string, id: string): string {
 
 /** The page's `<h1>`, verbatim. */
 export const HOME_HEADLINE =
-  "The queue that doesn't fall apart at the other end of your workload.";
+  "The queue that doesn't fall apart at the far end of your workload.";
 
 /**
  * One line describing the page, for the index and corpus rows that list it.
@@ -240,6 +240,38 @@ export function homepageBody(): string {
   const lines: string[] = [HOME_EYEBROW, "", HOME_LEAD, ""];
 
   lines.push(HOME_FEATURES.join(" · "), "");
+
+  // The README intro, verbatim — the same block index.astro renders below the
+  // hero. Two transcriptions, like the rest of this file; edit both together.
+  lines.push(
+    "Queen is a message broker written in Rust that uses PostgreSQL as its data store. " +
+      "Its main idea is to let you have an arbitrarily large number of FIFO partitions, " +
+      "created on demand at push time.",
+    "",
+    "Queen has:",
+    "",
+    "- **High throughput** (1 million msg/s end to end on 200 partitions, verified in a 24-hour soak)",
+    "- **High dynamic cardinality** (1 million partitions at 200k msg/s, verified end to end)",
+    "- **Guaranteed order** within every partition",
+    "- **Easy HTTP transport**: curl is a first-class client",
+    "- **Transactional dedup at push**: part of the exactly-once guarantees on broker operations",
+    "- **Transactional ack+KV+push**: the rest of the exactly-once guarantees",
+    "- **KV**: a small but powerful key-value store alongside your queue operations",
+    "- **Timers**: schedule messages ahead of time",
+    "- **Consumer groups** with replay and seek",
+    "- **DLQ**: no message lost, even in the worst cases",
+    "- **Integrated stream processor**: three window types, with map and aggregation",
+    "- **Conflation, window buffers, delayed delivery**",
+    "- **HA**: multiple brokers with best-effort coordination and wake-ups on push and ack",
+    "- **Durable by default, with synchronous commit**: not losing data is the whole point of Queen",
+    "- **Ephemeral in-memory queues** for lighter jobs like signaling and request/reply",
+    "- **Multi-tenant** with quotas, through the bundled Rust proxy",
+    "- **Single binary**",
+    "",
+    "As far as we know, nothing else out there has all of this in one system. If you use " +
+      "Queen, you can offload to it a ton of logic you would otherwise have to write yourself.",
+    "",
+  );
 
   lines.push("## It looks like this", "");
   lines.push(

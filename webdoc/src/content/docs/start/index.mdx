@@ -20,7 +20,36 @@ digest: >-
   ghcr.io/queen-mq/queen.
 ---
 
-Queen MQ is a message broker written in Rust that keeps its data in PostgreSQL. It was built at
+**The queue that doesn't fall apart at the far end of your workload.**
+
+Queen is a message broker written in Rust that uses PostgreSQL as its data store. Its main idea
+is to let you have an arbitrarily large number of FIFO partitions, created on demand at push
+time.
+
+Queen has:
+
+- **High throughput** (1 million msg/s end to end on 200 partitions, verified in a 24-hour soak)
+- **High dynamic cardinality** (1 million partitions at 200k msg/s, verified end to end)
+- **Guaranteed order** within every partition
+- **Easy HTTP transport**: curl is a first-class client
+- **Transactional dedup at push**: part of the exactly-once guarantees on broker operations
+- **Transactional ack+KV+push**: the rest of the exactly-once guarantees
+- **KV**: a small but powerful key-value store alongside your queue operations
+- **Timers**: schedule messages ahead of time
+- **Consumer groups** with replay and seek
+- **DLQ**: no message lost, even in the worst cases
+- **Integrated stream processor**: three window types, with map and aggregation
+- **Conflation, window buffers, delayed delivery**
+- **HA**: multiple brokers with best-effort coordination and wake-ups on push and ack
+- **Durable by default, with synchronous commit**: not losing data is the whole point of Queen
+- **Ephemeral in-memory queues** for lighter jobs like signaling and request/reply
+- **Multi-tenant** with quotas, through the bundled Rust proxy
+- **Single binary**
+
+As far as we know, nothing else out there has all of this in one system. If you use Queen, you
+can offload to it a ton of logic you would otherwise have to write yourself.
+
+Queen MQ was built at
 Smartness to solve head-of-line blocking in Smartchat, a messaging system for hotels where much
 of the pipeline is slow and uneven: translations, agent calls. Everything a broker is expected to
 have was added on top of that, and what came out is small enough to operate and complete enough
