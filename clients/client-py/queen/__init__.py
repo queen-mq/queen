@@ -40,7 +40,7 @@ from .utils.defaults import (
     BUFFER_DEFAULTS,
 )
 
-__version__ = "1.0.6"
+__version__ = "1.1.0"
 
 __all__ = [
     "Queen",
