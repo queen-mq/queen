@@ -35,12 +35,18 @@
         </div>
 
         <div class="filter-row">
+          <!-- No free entry: the watcher below drops a queue this cluster does
+               not list, so accepting a typed name would only make it vanish. -->
           <div class="filter-field-col">
-            <label class="label-xs">Queue</label>
-            <select v-model="queueFilter" class="input">
-              <option value="">All queues</option>
-              <option v-for="q in queues" :key="q.name" :value="q.name">{{ q.name }}</option>
-            </select>
+            <label class="label-xs" for="an-queue-filter">Queue</label>
+            <Autocomplete
+              id="an-queue-filter"
+              v-model="queueFilter"
+              :options="queueNames"
+              :loading="queuesFirstLoad"
+              label="Queue"
+              placeholder="All queues"
+            />
           </div>
 
           <div class="filter-field-col">
@@ -256,6 +262,7 @@ import { formatChartLabel, formatDateTimeLocal, isMultiDay, validateRange } from
 import { useRefresh } from '@/composables/useRefresh'
 import { stamp } from '@/composables/useStamp'
 import { useIdentity } from '@/stores/identity'
+import Autocomplete from '@/components/Autocomplete.vue'
 
 // TENANT PAGE. Every source here is tenant-scoped broker-side:
 //   /api/v1/analytics/queue-ops  — per (bucket, queue) push/pop/ack in a range
@@ -386,6 +393,7 @@ const clearFilters = () => {
 // Scope
 // ---------------------------------------------------------------------------
 const queues = computed(() => queueList.data.value?.queues || [])
+const queueNames = computed(() => queues.value.map(q => q.name).filter(Boolean).sort())
 const namespaceOptions = computed(() => namespacesApi.data.value?.namespaces || [])
 const taskOptions = computed(() => tasksApi.data.value?.tasks || [])
 

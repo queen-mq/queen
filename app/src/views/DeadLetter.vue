@@ -34,12 +34,29 @@
     <div class="card filters">
       <div class="card-body filter-rows">
         <div class="filter-row">
-          <div class="filter-field-col">
-            <label class="label-xs">Queue</label>
-            <select v-model="filterQueue" class="input">
-              <option value="">All Queues</option>
-              <option v-for="q in queueOptions" :key="q" :value="q">{{ q }}</option>
-            </select>
+          <!-- Autocomplete, not a select: a cell carries hundreds of queues and
+               the names are long and dotted, so scanning one flat list is the
+               slow way to reach `smartchat.agent.document-to-process`. Free
+               entry stays open because the queue list and the DLQ come from two
+               different endpoints — a queue that only exists in the DLQ must
+               still be filterable. -->
+          <div class="filter-field-col filter-field-wide">
+            <label class="label-xs" for="dlq-queue-filter">Queue</label>
+            <Autocomplete
+              id="dlq-queue-filter"
+              v-model="filterQueue"
+              :options="queueOptions"
+              :loading="queuesLoading"
+              label="Queue"
+              placeholder="All queues"
+              allow-custom
+            />
+            <span v-if="queuesUnavailable" class="filter-hint">
+              Queue list unavailable - type a name to filter
+            </span>
+            <span v-else-if="unlistedQueue" class="filter-hint">
+              Not in this cluster's queue list - filtering by name anyway
+            </span>
           </div>
           <div class="filter-field-col">
             <label class="label-xs">Consumer group</label>
@@ -67,41 +84,63 @@
       </div>
     </div>
 
-    <!-- Summary. Every figure here is computed from the DLQ page below — the
-         cluster-wide lifetime counter in /api/v1/status is a different fact
-         (and the proxy blocks that route for tenants anyway). -->
-    <div class="card" style="margin-bottom:16px;">
+    <!-- Summary. What an operator opens this page for is WHICH failure is
+         dominating, so that is the only summary kept: a count of rows on the
+         page and a partition tally over the same rows both dressed a page-sized
+         fact as a queue-sized one (the broker reports no DLQ total, and the
+         proxy blocks /api/v1/status for tenants).
+         Rendered only with rows to describe — a breakdown of nothing is noise,
+         and the table below owns the loading and failure states. -->
+    <div v-if="pageMessages.length" class="card" style="margin-bottom:16px;">
       <div class="card-header">
-        <h3>Dead-letter snapshot</h3>
-        <span class="card-sub">computed from the messages on this page</span>
+        <h3>Failure breakdown</h3>
+        <span class="card-sub">
+          {{ errorGroups.length }} distinct {{ errorGroups.length === 1 ? 'error' : 'errors' }}
+          across the {{ formatNumber(pageMessages.length) }} messages on this page
+        </span>
         <span class="muted">{{ stamp(listPanel) }}</span>
       </div>
-      <div class="card-body">
-        <div class="stat-grid stat-grid-3">
-          <div class="stat">
-            <div class="stat-label">Dead-lettered messages</div>
-            <div class="stat-value" style="color:var(--ember-400);">{{ known ? formatNumber(messages.length) : '—' }}</div>
-            <div class="stat-foot">
-              <span v-if="known">on this page · the broker reports no DLQ total</span>
-              <span v-else>unknown — the list did not load</span>
-            </div>
-          </div>
-          <div class="stat">
-            <div class="stat-label">Affected partitions</div>
-            <div class="stat-value">{{ known ? formatNumber(affectedPartitions) : '—' }}</div>
-            <div class="stat-foot">
-              <span v-if="known">among the messages on this page</span>
-              <span v-else>unknown — the list did not load</span>
-            </div>
-          </div>
-          <div class="stat">
-            <div class="stat-label">Most frequent error</div>
-            <!-- Text, not a figure: the tile keeps its shape without pretending a
-                 long mono string is a 22px number. -->
-            <div class="stat-value-text" style="color:var(--ember-400);">
-              {{ known ? (topError || 'No error text recorded') : '—' }}
-            </div>
-          </div>
+      <div class="card-body dlq-breakdown">
+        <!-- The shape of the failure in one 6px strip: whether this page is one
+             recurring fault or a long tail of unrelated ones. -->
+        <div class="dlq-dist">
+          <button
+            v-for="seg in distribution"
+            :key="seg.error"
+            type="button"
+            class="dlq-dist-seg"
+            :class="{ 'dlq-dist-seg-on': errorFilter === seg.error }"
+            :style="{ width: seg.share * 100 + '%', opacity: segmentOpacity(seg) }"
+            :title="`${seg.count} · ${seg.error}`"
+            :aria-label="`${seg.count} messages: ${seg.error}`"
+            @click="toggleErrorFilter(seg.error)"
+          />
+        </div>
+
+        <!-- Two columns, so six errors cost three rows of height. Each row is a
+             filter for the table below, not a label. No percentage column: the
+             default page size is 100, where a share and a count are the same
+             two digits — the strip above already carries the proportion. -->
+        <div class="dlq-err-grid">
+          <button
+            v-for="entry in visibleErrorGroups"
+            :key="entry.error"
+            type="button"
+            class="dlq-err"
+            :class="{ 'dlq-err-on': errorFilter === entry.error }"
+            :title="entry.error"
+            :aria-pressed="errorFilter === entry.error"
+            @click="toggleErrorFilter(entry.error)"
+          >
+            <span class="dlq-err-count font-mono tabular-nums">{{ entry.count }}</span>
+            <span class="dlq-err-text">{{ entry.error }}</span>
+          </button>
+        </div>
+
+        <div v-if="errorGroups.length > COLLAPSED_ERRORS" class="dlq-err-more">
+          <button type="button" class="dlq-link" @click="showAllErrors = !showAllErrors">
+            {{ showAllErrors ? `Show top ${COLLAPSED_ERRORS}` : `Show all ${errorGroups.length}` }}
+          </button>
         </div>
       </div>
     </div>
@@ -110,8 +149,15 @@
     <div class="card" style="margin-bottom:16px;">
       <div class="card-header">
         <h3>Dead-lettered messages</h3>
-        <span class="chip chip-mute">{{ formatNumber(messages.length) }} loaded</span>
+        <span class="chip chip-mute">{{ formatNumber(pageMessages.length) }} loaded</span>
         <span class="chip chip-mute">page <span class="font-mono tabular-nums">{{ page }}</span></span>
+        <!-- A narrowed table must say so where the row count is read, not only
+             up in the breakdown that narrowed it. -->
+        <button v-if="errorFilter" type="button" class="chip chip-bad dlq-filter-chip" @click="errorFilter = null">
+          <span class="dlq-filter-chip-text">{{ formatNumber(messages.length) }} shown · {{ errorFilter }}</span>
+          <span aria-hidden="true">×</span>
+          <span class="sr-only">Clear the error filter</span>
+        </button>
         <span class="muted">{{ stamp(listPanel) }}</span>
       </div>
 
@@ -207,32 +253,11 @@
       <!-- Not drawn under an empty first page, under a failure, or on a broker
            that ignores the limit: Previous/Next there offer travel that goes
            nowhere. -->
-      <div v-if="serverPaginates && (messages.length || page > 1)" class="pager">
+      <div v-if="serverPaginates && (pageMessages.length || page > 1)" class="pager">
         <span class="pager-count">Page <span class="font-mono tabular-nums">{{ page }}</span></span>
         <div class="pager-nav">
           <button class="btn btn-ghost" :disabled="page === 1" @click="prevPage">Previous</button>
           <button class="btn btn-ghost" :disabled="!canPageForward" @click="nextPage">Next</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Top errors breakdown -->
-    <div v-if="errorHistogram.length" class="card" style="margin-bottom:16px;">
-      <div class="card-header">
-        <h3>Errors on this page</h3>
-        <span class="card-sub">grouped by error text</span>
-        <span class="chip chip-mute">{{ errorHistogram.length }} distinct</span>
-        <span class="muted">{{ stamp(listPanel) }}</span>
-      </div>
-      <div class="card-body" style="display:flex; flex-direction:column; gap:12px;">
-        <div v-for="entry in errorHistogram" :key="entry.error" style="display:flex; align-items:center; gap:12px;">
-          <span class="font-mono" style="font-size:24px; font-weight:300; color:var(--ember-400); min-width:48px; text-align:right;">{{ entry.count }}</span>
-          <div style="flex:1; min-width:0;">
-            <div style="font-size:13px; font-family:'JetBrains Mono',monospace; color:var(--text-hi); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ entry.error }}</div>
-          </div>
-          <div class="bar" style="width:120px; display:block;">
-            <i style="background:linear-gradient(90deg, var(--ember-500), var(--ember-600));" :style="{ width: (entry.count / maxErrorCount * 100) + '%' }" />
-          </div>
         </div>
       </div>
     </div>
@@ -348,12 +373,28 @@ import { useRefresh } from '@/composables/useRefresh'
 import { stamp } from '@/composables/useStamp'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
+import Autocomplete from '@/components/Autocomplete.vue'
 
 const { can, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
 const { notifySuccess, notifyError } = useToast()
 
+/** Error groups shown before the breakdown has to be expanded. Two columns, so
+    an even number keeps the grid square. */
+const COLLAPSED_ERRORS = 6
+/** Bars in the distribution strip; everything past this merges into one tail. */
+const DIST_SEGMENTS = 8
+const TAIL_SEGMENT = '__tail__'
+/** Errors the broker sent with no text: still a group, and still says so. */
+const NO_ERROR_TEXT = '(no error text recorded)'
+
+const errorKey = (msg) => msg.errorMessage || NO_ERROR_TEXT
+
 const selectedKey = ref(null)
 const copied = ref(false)
+// Client-side narrowing of the loaded page by one error text. Not a request
+// parameter: the DLQ endpoint takes queue and consumerGroup only.
+const errorFilter = ref(null)
+const showAllErrors = ref(false)
 const filterQueue = ref('')
 const filterGroup = ref('')
 const page = ref(1)
@@ -382,6 +423,11 @@ const listPanel = useApi((params, config) => dlq.list(params, config), {
     serverPaginates.value = rows.length <= pageSize.value
     purged.value = new Set()
     rowErrors.value = new Map()
+    // Drop a selection the new page cannot honour, so the table is never
+    // narrowed by an error none of its rows carry.
+    if (errorFilter.value && !rows.some(m => errorKey(m) === errorFilter.value)) {
+      errorFilter.value = null
+    }
     // A detail panel over a message that is no longer listed is a stale fact.
     if (selectedKey.value && !rows.some(m => msgKey(m) === selectedKey.value)) {
       selectedKey.value = null
@@ -397,22 +443,40 @@ const {
   execute: executeList,
 } = listPanel
 
-const { data: queuesData, refresh: refreshQueues } = useApi(
-  (config) => queuesApi.list(undefined, config),
-  { immediate: false },
-)
+const {
+  data: queuesData,
+  loading: queuesLoading,
+  error: queuesError,
+  refresh: refreshQueues,
+} = useApi((config) => queuesApi.list(undefined, config), { immediate: false })
 
 const extractRows = (payload) =>
   Array.isArray(payload?.messages) ? payload.messages : (Array.isArray(payload) ? payload : [])
 
-const messages = computed(
+/** Everything the broker returned for this page, minus what this session purged. */
+const pageMessages = computed(
   () => extractRows(listData.value).filter(m => !purged.value.has(msgKey(m)))
 )
+/** What the table shows: the page, narrowed by the breakdown's error filter. */
+const messages = computed(() => (
+  errorFilter.value
+    ? pageMessages.value.filter(m => errorKey(m) === errorFilter.value)
+    : pageMessages.value
+))
 const queueOptions = computed(
   () => (queuesData.value?.queues || []).map(q => q.name).filter(Boolean).sort()
 )
+// The picker suggests from /resources/queues, but the filter is applied by the
+// DLQ endpoint. When the two disagree, say which one is being trusted instead
+// of leaving a name in the box that looks unrecognised.
+const queuesUnavailable = computed(() => Boolean(queuesError.value) && queueOptions.value.length === 0)
+const unlistedQueue = computed(
+  () => Boolean(filterQueue.value) && queueOptions.value.length > 0 && !queueOptions.value.includes(filterQueue.value)
+)
+// Resolved against the whole page, not the filtered view: narrowing the table
+// must not empty a drawer the user already has open.
 const selectedMsg = computed(
-  () => messages.value.find(m => msgKey(m) === selectedKey.value) || null
+  () => pageMessages.value.find(m => msgKey(m) === selectedKey.value) || null
 )
 
 /** Skeletons on the first paint only: a refresh leaves the rows on screen. */
@@ -423,34 +487,72 @@ const rowError = (msg) => rowErrors.value.get(msgKey(msg)) || null
 
 const canAdmin = computed(() => can('queueAdmin'))
 
-/** False when a failed load left us with nothing: then every figure is unknown, not zero. */
-const known = computed(() => !(error.value && messages.value.length === 0))
+// ---------------------------------------------------------------------------
+// Failure breakdown — the page's only summary, and the table's filter
+// ---------------------------------------------------------------------------
 
-const affectedPartitions = computed(
-  () => new Set(messages.value.map(m => m.partitionId).filter(Boolean)).size
-)
-
-const errorHistogram = computed(() => {
+/** Every group is computed over the PAGE, never over the filtered view: a
+    breakdown that narrows with its own selection cannot be clicked back open. */
+const errorGroups = computed(() => {
   const counts = new Map()
-  for (const m of messages.value) {
-    const key = m.errorMessage || '(no error text recorded)'
+  for (const m of pageMessages.value) {
+    const key = errorKey(m)
     counts.set(key, (counts.get(key) || 0) + 1)
   }
+  const total = pageMessages.value.length || 1
   return [...counts.entries()]
-    .map(([text, count]) => ({ error: text, count }))
-    .sort((a, b) => b.count - a.count)
-    .slice(0, 8)
+    .map(([error, count]) => ({ error, count, share: count / total }))
+    .sort((a, b) => b.count - a.count || a.error.localeCompare(b.error))
 })
-const topError = computed(() => errorHistogram.value[0]?.error || null)
-const maxErrorCount = computed(() => Math.max(...errorHistogram.value.map(e => e.count), 1))
 
-const groupSuggestions = computed(
-  () => [...new Set(messages.value.map(m => m.consumerGroup).filter(Boolean))].sort()
+const visibleErrorGroups = computed(
+  () => (showAllErrors.value ? errorGroups.value : errorGroups.value.slice(0, COLLAPSED_ERRORS))
 )
 
-const hasFilters = computed(() => Boolean(filterQueue.value || filterGroup.value))
+/** Segments of the distribution strip: the top groups, then one bar for the
+    tail, so the widths always add up to the page. */
+const distribution = computed(() => {
+  const head = errorGroups.value.slice(0, DIST_SEGMENTS)
+  const segments = head.map((entry, i) => ({
+    ...entry,
+    // The palette carries one "bad" hue, so rank is stepped in opacity.
+    opacity: Math.max(0.32, 1 - i * 0.11),
+  }))
+  const tail = errorGroups.value.slice(DIST_SEGMENTS)
+  if (tail.length) {
+    const count = tail.reduce((sum, e) => sum + e.count, 0)
+    segments.push({
+      error: TAIL_SEGMENT,
+      count,
+      share: count / (pageMessages.value.length || 1),
+      opacity: 0.22,
+    })
+  }
+  return segments
+})
+
+/** A selection mutes every other bar, so the strip reads as "this slice of the
+    page" instead of staying a full-width chart of something else. */
+const segmentOpacity = (seg) => {
+  if (!errorFilter.value) return seg.opacity
+  return errorFilter.value === seg.error ? 1 : 0.14
+}
+
+/** Toggle, not set: a second click on the active error clears the filter. */
+const toggleErrorFilter = (error) => {
+  if (error === TAIL_SEGMENT) return
+  errorFilter.value = errorFilter.value === error ? null : error
+}
+
+const groupSuggestions = computed(
+  () => [...new Set(pageMessages.value.map(m => m.consumerGroup).filter(Boolean))].sort()
+)
+
+const hasFilters = computed(() => Boolean(filterQueue.value || filterGroup.value || errorFilter.value))
+// Against the page, not the filtered view: an error filter narrows what is on
+// screen, it does not tell us the broker has no further page.
 const canPageForward = computed(
-  () => serverPaginates.value && messages.value.length >= pageSize.value
+  () => serverPaginates.value && pageMessages.value.length >= pageSize.value
 )
 const lastUpdatedText = computed(() =>
   lastUpdated.value ? formatRelativeTime(lastUpdated.value) : null
@@ -557,6 +659,60 @@ fetchMessages()
 </script>
 
 <style scoped>
+/* Queue names here are dotted and long (`connect.newsletter.sendgrid`), so the
+   picker gets more room than the 220px the shared filter column allows. */
+.filter-field-wide { flex-basis: 240px; max-width: 300px; }
+
+/* --- Failure breakdown -----------------------------------------------------
+   The page's summary, so it is sized like a strip and not like a panel: a 6px
+   distribution bar over two columns of rows, roughly a third of the height the
+   three stat tiles and the bottom histogram used to cost between them. */
+.dlq-breakdown { display: flex; flex-direction: column; gap: 12px; }
+
+.dlq-dist { display: flex; align-items: stretch; gap: 2px; height: 6px; }
+.dlq-dist-seg {
+  height: 100%; min-width: 3px; padding: 0; border: none; cursor: pointer;
+  border-radius: 2px; background: var(--ember-400);
+  transition: opacity .12s var(--ease), transform .12s var(--ease);
+}
+.dlq-dist-seg:hover { transform: scaleY(1.5); }
+.dlq-dist-seg-on { transform: scaleY(1.5); box-shadow: 0 0 0 1px var(--ember-bd); }
+
+.dlq-err-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px 18px;
+}
+@media (max-width: 900px) { .dlq-err-grid { grid-template-columns: minmax(0, 1fr); } }
+
+.dlq-err {
+  display: flex; align-items: baseline; gap: 8px; width: 100%;
+  padding: 3px 7px; border-radius: var(--r-chip);
+  border: 1px solid transparent; background: none; cursor: pointer;
+  text-align: left; transition: background .12s var(--ease), border-color .12s var(--ease);
+}
+.dlq-err:hover { background: var(--ink-3); }
+.dlq-err-on { background: var(--ember-glow); border-color: var(--ember-bd); }
+.dlq-err-count {
+  min-width: 34px; text-align: right; flex-shrink: 0;
+  font-size: 13px; color: var(--ember-400);
+}
+.dlq-err-text {
+  flex: 1; min-width: 0;
+  font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--text-hi);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.dlq-err-more { display: flex; }
+.dlq-link {
+  padding: 0; border: none; background: none; cursor: pointer;
+  font-size: 11px; color: var(--text-low); transition: color .12s var(--ease);
+}
+.dlq-link:hover { color: var(--text-hi); }
+
+/* The active error can be a whole sentence: it truncates rather than pushing
+   the freshness stamp off the header. */
+.dlq-filter-chip { cursor: pointer; max-width: 340px; }
+.dlq-filter-chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .dlq-kv { display: flex; flex-direction: column; gap: 16px; }
 .dlq-kv-row { display: flex; flex-direction: column; gap: 4px; }
 

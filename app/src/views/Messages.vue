@@ -50,14 +50,20 @@
             />
           </div>
 
+          <!-- Free entry allowed: `queue` is a server-side parameter here, and a
+               deep link can arrive with a queue this cluster's list does not
+               carry. -->
           <div class="filter-field-col">
-            <label class="label-xs">Queue</label>
-            <select v-model="filterQueue" class="input">
-              <option value="">All Queues</option>
-              <option v-for="q in queues" :key="q.name" :value="q.name">
-                {{ q.name }}
-              </option>
-            </select>
+            <label class="label-xs" for="msg-queue-filter">Queue</label>
+            <Autocomplete
+              id="msg-queue-filter"
+              v-model="filterQueue"
+              :options="queueNames"
+              :loading="queuesLoading"
+              label="Queue"
+              placeholder="All queues"
+              allow-custom
+            />
           </div>
 
           <div class="filter-field-col">
@@ -489,6 +495,7 @@ import { useRefresh } from '@/composables/useRefresh'
 import { stamp } from '@/composables/useStamp'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
+import Autocomplete from '@/components/Autocomplete.vue'
 
 const route = useRoute()
 const { can, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
@@ -541,13 +548,15 @@ const {
   execute: executeList,
 } = listPanel
 
-const { data: queuesData, refresh: refreshQueues } = useApi(
-  (config) => queuesApi.list(undefined, config),
-  { immediate: false },
-)
+const {
+  data: queuesData,
+  loading: queuesLoading,
+  refresh: refreshQueues,
+} = useApi((config) => queuesApi.list(undefined, config), { immediate: false })
 
 const messages = computed(() => listData.value?.messages || [])
 const queues = computed(() => queuesData.value?.queues || [])
+const queueNames = computed(() => queues.value.map(q => q.name).filter(Boolean).sort())
 const queueMode = computed(() => listData.value?.mode || null)
 
 // Permissions come from the identity store only — never from whether a call 403'd.
