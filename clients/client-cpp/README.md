@@ -185,8 +185,10 @@ client.queue("emails")
 ```cpp
 // Buffer messages for performance
 BufferOptions buffer_opts;
-buffer_opts.message_count = 100;   // Flush after 100 messages
-buffer_opts.time_millis = 1000;    // Or after 1 second
+buffer_opts.message_count = 100;       // Flush after 100 messages
+buffer_opts.time_millis = 1000;        // Or after 1 second
+buffer_opts.max_size = 400;            // Backpressure bound (0 = 4 x message_count)
+buffer_opts.retry_delay_millis = 250;  // Pause before retrying a failed batch (0 = 250)
 
 for (int i = 0; i < 10000; i++) {
     client.queue("events")
@@ -196,9 +198,20 @@ for (int i = 0; i < 10000; i++) {
         });
 }
 
-// Flush any remaining buffered messages
+// Flush any remaining buffered messages (retries failed batches until they
+// land; pass a deadline in ms to bound that -- see below)
 client.flush_all_buffers();
 ```
+
+The buffer is bounded and lossless under errors (the 1.0.6 buffer contract, shared with every
+other SDK). At `max_size` waiting messages a buffered `push()` **blocks** until the flusher frees
+room — "unbounded" is deliberately not expressible, because an unbounded buffer accepts messages
+it will lose. A batch whose POST fails is re-queued at the **front** of the buffer, in order, and
+retried every `retry_delay_millis` until it lands; it is never dropped. `flush_buffer(deadline_millis)`
+and `flush_all_buffers(deadline_millis)` bound the retrying: on expiry they throw
+`BufferFlushError`, whose `unflushed_count()` says how many messages are still buffered (still
+buffered — not dropped). `close()` flushes under a 30 s deadline and reports anything left unsent;
+a buffered push after `close()` throws.
 
 ### Transactions
 
@@ -499,7 +512,7 @@ Output:
 - `transaction()` - Create transaction builder
 - `ack(message, status, context)` - Acknowledge message(s)
 - `renew(message)` - Renew message lease
-- `flush_all_buffers()` - Flush all client-side buffers
+- `flush_all_buffers(deadline_millis = -1)` - Flush all client-side buffers (retries failed batches; a deadline bounds that and throws `BufferFlushError` on expiry)
 - `get_buffer_stats()` - Get buffer statistics
 - `close()` - Graceful shutdown
 
@@ -529,8 +542,8 @@ Output:
 - `renew_lease(enabled, interval)` - Auto-renew leases
 
 **Buffering:**
-- `buffer(options)` - Enable client-side buffering
-- `flush_buffer()` - Flush queue buffer
+- `buffer(options)` - Enable client-side buffering (bounded: blocks at `max_size`)
+- `flush_buffer(deadline_millis = -1)` - Flush queue buffer
 
 ### TransactionBuilder
 

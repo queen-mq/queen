@@ -9,7 +9,8 @@
  * - HTTP client with retry and failover
  * - Bearer-token auth, 429 backoff and terminal 403 codes (proxy contract)
  * - Load balancing (round-robin & session)
- * - Client-side buffering with time/count triggers
+ * - Client-side buffering with time/count triggers, a blocking max_size
+ *   bound, and lossless flush retry (1.0.6 buffer contract)
  * - Consumer groups and partitions
  * - Atomic transactions
  * - Lease renewal
@@ -39,6 +40,8 @@
 
 #include <string>
 #include <vector>
+#include <deque>
+#include <cstdint>
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
@@ -199,7 +202,45 @@ struct ConsumeOptions {
 struct BufferOptions {
     int message_count = 100;
     int time_millis = 1000;
+    /**
+     * Backpressure bound: once this many messages are waiting, a buffered
+     * push() BLOCKS until the flusher drains below the bound, instead of
+     * growing the heap. 0 (or negative) means the DEFAULT bound of
+     * 4 * message_count -- "unbounded" is deliberately not expressible,
+     * because unbounded was the defect (measured on the Go client: 20.9M
+     * messages / 11.7 GB accumulated in 45s and all lost at exit, with zero
+     * client-side errors). Floored at message_count: a buffer that must block
+     * before it can assemble one batch would deadlock against its own flush
+     * threshold. The bound is approximate: a batch that fails to send is put
+     * back at the front, so occupancy can overshoot by up to one batch.
+     */
+    int max_size = 0;
+    /**
+     * How long the flusher waits before retrying a batch whose POST failed.
+     * The batch is re-queued at the FRONT of the buffer, in order, and retried
+     * until it lands, the buffer is stopped, or an explicit flush deadline
+     * expires -- never dropped. 0 (or negative) means the default of 250ms.
+     */
+    int retry_delay_millis = 0;
 };
+
+/**
+ * Fill in defaults and enforce the bound's invariants, mirroring the 1.0.6
+ * buffer contract of the JS/Python/Go/PHP SDKs. The resolved options are what
+ * a MessageBuffer actually runs with; the raw struct keeps 0 = "not set" so
+ * the default bound can follow the caller's message_count (a caller asking for
+ * message_count 1000 gets a 4000 bound, not the 400 that suits the default
+ * batch of 100).
+ */
+inline BufferOptions resolve_buffer_options(const BufferOptions& options) {
+    BufferOptions resolved = options;
+    if (resolved.message_count <= 0) resolved.message_count = 100;
+    if (resolved.time_millis <= 0) resolved.time_millis = 1000;
+    if (resolved.max_size <= 0) resolved.max_size = 4 * resolved.message_count;
+    if (resolved.max_size < resolved.message_count) resolved.max_size = resolved.message_count;
+    if (resolved.retry_delay_millis <= 0) resolved.retry_delay_millis = 250;
+    return resolved;
+}
 
 // ============================================================================
 // Errors
@@ -249,6 +290,37 @@ public:
     bool is_cluster_suspended() const {
         return status_code_ == 403 && code_ == "cluster_suspended";
     }
+};
+
+/**
+ * An explicit buffer flush ran out of deadline with messages still unsent.
+ *
+ * The flusher retries a failed batch forever by default -- the right behavior
+ * for a background flush, and the wrong one for a shutdown path with a SIGTERM
+ * grace period to respect -- so flush_buffer()/flush_all_buffers() accept a
+ * deadline, and this is what expiring it throws. The messages are STILL IN THE
+ * BUFFER when this is raised (nothing was dropped; the failed batch went back
+ * to the front): the caller learns exactly how many were not accepted and can
+ * retry, persist them, or fail loudly. what() carries the transport error plus
+ * the count, unflushed_count() carries the number alone.
+ *
+ * Derives from std::runtime_error so existing catch (const std::exception&)
+ * sites are unaffected.
+ */
+class BufferFlushError : public std::runtime_error {
+private:
+    std::string queue_address_;
+    int unflushed_count_;
+
+public:
+    BufferFlushError(const std::string& message, const std::string& queue_address,
+                     int unflushed_count)
+        : std::runtime_error(message), queue_address_(queue_address),
+          unflushed_count_(unflushed_count) {
+    }
+
+    const std::string& queue_address() const { return queue_address_; }
+    int unflushed_count() const { return unflushed_count_; }
 };
 
 /**
@@ -591,6 +663,9 @@ inline std::string pop_target_label(const std::string& queue, const std::string&
  *   conflict -> the broker speaks conflation and the stored policy won: warn,
  *               once per (queue, group). Not an error -- §3.3/Q3, a reject here
  *               takes down the already-correct half of a rolling deploy.
+ *   paused   -> pop maintenance: the request never reached the claim path, so
+ *               there is no policy to echo and nothing to conclude from the
+ *               absence of one. Not a verdict, not an error.
  *   neither  -> the broker never applied it and never heard of it. Raise (§4).
  */
 inline void enforce_conflation_contract(bool requested, const json& response,
@@ -600,6 +675,9 @@ inline void enforce_conflation_contract(bool requested, const json& response,
     }
     if (conflation_conflicted(response)) {
         warn_conflation_conflict_once(queue, group);
+        return;
+    }
+    if (response.is_object() && response.value("paused", false)) {
         return;
     }
     throw ConflationUnsupportedError(queue, group);
@@ -1443,105 +1521,354 @@ public:
 };
 
 // ============================================================================
-// MessageBuffer - Buffer for a single queue
+// MessageBuffer - Buffer for a single queue/partition address
 // ============================================================================
 
+/**
+ * The client-side linger for one `queue/partition` address: single pushes
+ * accumulate here and leave as one POST once `message_count` messages are
+ * waiting, or `time_millis` after the first one arrived. Port of the 1.0.6
+ * buffer rewrite that shipped in the JS/Python/Go/PHP SDKs; two properties
+ * beyond the batching are load-bearing:
+ *
+ *  - `max_size` is a BLOCKING bound, not a hint. add() parks on a condition
+ *    variable while the buffer is full, so a producer that outruns the flush
+ *    pipeline is paced down to the drain rate instead of growing the heap.
+ *    (Measured on the Go client, which had exactly this shape: 1.46M adds/s
+ *    against a 1.0M/s flush pipeline accumulated 20.9M messages / 11.7 GB in
+ *    45s and lost every one at exit with zero errors; the bounded version
+ *    sustained 881k msg/s with exact send/receive parity in 71 MB.)
+ *
+ *  - A batch that fails to send goes BACK to the front of the buffer, in
+ *    order, and is retried after `retry_delay_millis` -- indefinitely, until
+ *    it lands, the buffer is stopped, or an explicit flush deadline expires.
+ *    It is never dropped. Before this port, the C++ flusher extracted the
+ *    batch before the POST and only logged the failure: up to message_count
+ *    messages vanished per failed request, with the caller long since told
+ *    the push succeeded.
+ *
+ * THREADING SHAPE: one flusher thread per buffer, owning ALL sends for its
+ * address. That is the C++ spelling of the JS invariant "exactly one drain
+ * loop per buffer" -- a single sender by construction, so batches can never
+ * interleave out of order -- and it doubles as the time-based trigger (the
+ * detached timer threads of the old implementation, which could outlive the
+ * buffer they pointed into, are gone). Producers and the flusher share one
+ * mutex; producers park on `not_full_`, the flusher parks on `flusher_wake_`,
+ * and explicit flush callers park on `drain_progress_`.
+ *
+ * Buffered messages live only in this process's memory. A crash, or an exit
+ * that skips close(), loses them -- buffering belongs on telemetry-shaped
+ * traffic, not on anything that must not be lost.
+ */
 class MessageBuffer {
+public:
+    using Clock = std::chrono::steady_clock;
+    /** POSTs one batch; throws when the broker did not accept it. */
+    using Sender = std::function<void(const std::vector<json>&)>;
+
 private:
     std::string queue_address_;
-    std::vector<json> messages_;
-    BufferOptions options_;
-    std::function<void(const std::string&)> flush_callback_;
-    std::mutex mutex_;
-    std::unique_ptr<std::thread> timer_thread_;
-    std::atomic<bool> timer_active_{false};
-    std::atomic<bool> flushing_{false};
-    std::chrono::steady_clock::time_point first_message_time_;
-    
-    void start_timer() {
-        if (timer_active_) return;
-        
-        timer_active_ = true;
-        first_message_time_ = std::chrono::steady_clock::now();
-        
-        timer_thread_ = std::make_unique<std::thread>([this]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(options_.time_millis));
-            if (timer_active_ && !flushing_) {
-                flush_callback_(queue_address_);
+    BufferOptions options_;                  // resolved: every field positive
+    Sender sender_;
+
+    mutable std::mutex mutex_;
+    std::condition_variable not_full_;       // producers parked on the max_size bound
+    std::condition_variable flusher_wake_;   // the flusher, while idle / lingering / pacing a retry
+    std::condition_variable drain_progress_; // flush_until() callers, between drain events
+
+    std::deque<json> messages_;
+    Clock::time_point first_message_time_{};
+    bool has_first_message_ = false;
+    bool flush_requested_ = false;           // an add or a flush caller wants a drain now
+    bool draining_ = false;                  // the flusher is inside its drain loop
+    bool stopped_ = false;
+    // Tightest deadline any explicit flush caller is currently willing to wait
+    // out. The drain consults it only on a FAILED batch: a deadline bounds the
+    // retrying of failures, never the sending of batches that land.
+    Clock::time_point flush_deadline_ = Clock::time_point::max();
+    std::string last_flush_error_;
+    // Times the drain consumed a deadline and gave up with messages still
+    // buffered. Monotonic, so a flush caller can tell "a failure happened at
+    // or after my deadline" without having to catch the flusher between two
+    // drains -- the flusher holds the mutex from one drain to the next, so a
+    // waiter keyed on observing draining_ == false could starve forever.
+    uint64_t give_up_count_ = 0;
+    // Earliest instant the flusher may start a drain again after giving up on
+    // a deadline: the fresh time_millis linger the JS SDK's endFlush schedules,
+    // so a consumed deadline does not turn into a hot retry loop.
+    Clock::time_point next_drain_at_ = Clock::time_point::min();
+
+    std::thread flusher_;
+
+    /**
+     * Send until the buffer is empty, the buffer stops, or the deadline is
+     * consumed by a failure. Called by the flusher thread with `lock` held;
+     * the lock is released around every POST.
+     */
+    void drain(std::unique_lock<std::mutex>& lock) {
+        flush_requested_ = false;
+        draining_ = true;
+
+        while (!messages_.empty() && !stopped_) {
+            const size_t batch_size =
+                std::min(messages_.size(), static_cast<size_t>(options_.message_count));
+            std::vector<json> batch;
+            batch.reserve(batch_size);
+            for (size_t i = 0; i < batch_size; ++i) {
+                batch.push_back(std::move(messages_.front()));
+                messages_.pop_front();
             }
-        });
-        timer_thread_->detach();
+            if (messages_.empty()) {
+                has_first_message_ = false;
+            }
+
+            lock.unlock();
+            bool sent = false;
+            std::string error_text;
+            try {
+                sender_(batch);
+                sent = true;
+            } catch (const std::exception& e) {
+                error_text = e.what();
+            }
+            lock.lock();
+
+            if (sent) {
+                // Capacity is freed only when the batch is definitively gone.
+                // Waking at extraction instead would let producers refill
+                // against room that never freed if the POST then failed.
+                not_full_.notify_all();
+                drain_progress_.notify_all();
+                continue;
+            }
+
+            // NOT dropped: back at the FRONT, in order. These messages were
+            // queued before everything still in the buffer, and a retry must
+            // not reorder a partition's lane. This is the one place occupancy
+            // can exceed max_size, by at most one batch.
+            messages_.insert(messages_.begin(),
+                             std::make_move_iterator(batch.begin()),
+                             std::make_move_iterator(batch.end()));
+            if (!has_first_message_) {
+                first_message_time_ = Clock::now();
+                has_first_message_ = true;
+            }
+            last_flush_error_ = error_text;
+            util::log_error("MessageBuffer.flush", "push failed for " + queue_address_ +
+                ": " + error_text + " (" + std::to_string(batch_size) +
+                " message(s) requeued)");
+
+            const auto now = Clock::now();
+            if (now >= flush_deadline_) {
+                // The deadline is consumed, not left armed: the caller that
+                // set it is about to throw, and background operation resumes
+                // with the default "retry until it lands" -- after a fresh
+                // linger window, not immediately, or a dead broker would turn
+                // the flusher into a hot loop the moment a deadline expired.
+                flush_deadline_ = Clock::time_point::max();
+                ++give_up_count_;
+                next_drain_at_ = now + std::chrono::milliseconds(options_.time_millis);
+                break;
+            }
+            auto wake_at = now + std::chrono::milliseconds(options_.retry_delay_millis);
+            if (flush_deadline_ < wake_at) {
+                wake_at = flush_deadline_;
+            }
+            // The retry delay, but a shutdown must not wait out a pause that
+            // only exists to pace a broker that is not answering.
+            flusher_wake_.wait_until(lock, wake_at, [&] { return stopped_; });
+        }
+
+        draining_ = false;
+        flush_deadline_ = Clock::time_point::max();
+        if (!messages_.empty()) {
+            // Whatever remains (a requeued batch, or adds that landed while
+            // the drain was giving up) gets a fresh linger window, so it
+            // cannot sit unnoticed until the next add.
+            first_message_time_ = Clock::now();
+            has_first_message_ = true;
+        }
+        drain_progress_.notify_all();
     }
-    
+
+    void flusher_loop() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        while (!stopped_) {
+            if (messages_.empty()) {
+                flush_requested_ = false;
+                flusher_wake_.wait(lock, [&] { return stopped_ || !messages_.empty(); });
+                continue;
+            }
+            // An explicit flush request drains NOW -- it overrides the linger
+            // timer and the post-give-up pause alike. Otherwise: at the count
+            // threshold the drain is due immediately, except while the pause a
+            // consumed deadline leaves behind is running; below it, the timer
+            // that started with the first message rules.
+            if (!flush_requested_) {
+                const bool at_threshold =
+                    messages_.size() >= static_cast<size_t>(options_.message_count);
+                const auto fire_at = at_threshold
+                    ? next_drain_at_
+                    : first_message_time_ + std::chrono::milliseconds(options_.time_millis);
+                if (Clock::now() < fire_at) {
+                    const bool state_changed = flusher_wake_.wait_until(lock, fire_at, [&] {
+                        return stopped_ || flush_requested_ ||
+                               (!at_threshold &&
+                                messages_.size() >=
+                                    static_cast<size_t>(options_.message_count));
+                    });
+                    if (state_changed) {
+                        continue; // re-evaluate under the new state (it may be `stopped`)
+                    }
+                }
+            }
+            drain(lock);
+        }
+    }
+
 public:
     MessageBuffer(const std::string& queue_address, const BufferOptions& options,
-                 std::function<void(const std::string&)> flush_callback)
-        : queue_address_(queue_address), options_(options), flush_callback_(flush_callback) {
+                  Sender sender)
+        : queue_address_(queue_address), options_(resolve_buffer_options(options)),
+          sender_(std::move(sender)) {
+        flusher_ = std::thread([this] { flusher_loop(); });
     }
-    
+
     ~MessageBuffer() {
-        cancel_timer();
+        stop();
+        // The flusher may be inside a POST; joining waits it out (bounded by
+        // the HTTP client's own timeout/retry budget). Anything cheaper leaves
+        // a thread pointing into a dead object.
+        if (flusher_.joinable()) {
+            flusher_.join();
+        }
     }
-    
-    void add(const json& message) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        
+
+    /**
+     * Append one message, BLOCKING while the buffer is at max_size.
+     *
+     * Returns once the message is in the buffer. Throws if the buffer is
+     * stopped -- before or while parked -- because an add that could not be
+     * buffered must never look like a successful push.
+     */
+    void add(const json& formatted_message) {
+        std::unique_lock<std::mutex> lock(mutex_);
+
+        // BACKPRESSURE. Re-checked in a loop, not once: the wake is a
+        // broadcast, and the first producers to resume can fill the room that
+        // was freed, so the rest have to park again. Being at the bound means
+        // producers outran the flusher -- make sure a drain is actually coming
+        // before parking (the time-based trigger may be most of a second away).
+        while (messages_.size() >= static_cast<size_t>(options_.max_size) && !stopped_) {
+            flush_requested_ = true;
+            flusher_wake_.notify_all();
+            not_full_.wait(lock);
+        }
+
+        if (stopped_) {
+            throw std::runtime_error("Queen buffer " + queue_address_ +
+                " is stopped (client closed): message not buffered");
+        }
+
         if (messages_.empty()) {
-            start_timer();
+            first_message_time_ = Clock::now();
+            has_first_message_ = true;
         }
-        
-        messages_.push_back(message);
-        
-        if (messages_.size() >= static_cast<size_t>(options_.message_count)) {
-            // Trigger flush (will be called outside lock)
-            timer_active_ = false;
-            flush_callback_(queue_address_);
+        messages_.push_back(formatted_message);
+
+        // The first message starts the flusher's linger clock; crossing the
+        // threshold starts a drain. In between, the flusher is already parked
+        // on a timed wait and needs no signal.
+        if (messages_.size() == 1 ||
+            messages_.size() >= static_cast<size_t>(options_.message_count)) {
+            flusher_wake_.notify_all();
         }
     }
-    
-    std::vector<json> extract_messages(int batch_size = -1) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        
-        if (batch_size < 0 || batch_size >= static_cast<int>(messages_.size())) {
-            std::vector<json> result = std::move(messages_);
-            messages_.clear();
-            timer_active_ = false;
-            flushing_ = false;
-            return result;
+
+    /**
+     * Wait until everything buffered has LANDED (not merely been extracted),
+     * or until `deadline` -- at which point a BufferFlushError reports how
+     * many messages are still buffered, none of them dropped.
+     *
+     * The deadline bounds the retrying of failures and is checked between
+     * attempts, mirroring the JS/PHP SDKs: the first attempt always happens
+     * (a caller with a zero deadline still gets one real try), a batch that
+     * lands never counts against it, and a single in-flight POST is bounded
+     * by the HTTP client's own timeout rather than cut short. Pass
+     * Clock::time_point::max() to retry until it lands or the buffer stops.
+     * Returns silently on a stopped buffer: cleanup() reports the discard.
+     */
+    void flush_until(Clock::time_point deadline) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        const uint64_t give_ups_before = give_up_count_;
+
+        while (true) {
+            if (stopped_) {
+                return;
+            }
+            if (messages_.empty() && !draining_) {
+                return;
+            }
+            // Give up only once the DRAIN has: a bumped give_up_count_ means a
+            // real attempt failed at or after the (tightened) deadline. Keying
+            // on the counter instead of on catching the flusher idle matters
+            // -- the flusher can hold the mutex from one drain straight into
+            // the next, so "idle" may never be observable from here.
+            if (give_up_count_ > give_ups_before && !messages_.empty() &&
+                Clock::now() >= deadline) {
+                const int count = static_cast<int>(messages_.size());
+                const std::string reason =
+                    last_flush_error_.empty() ? "buffer flush deadline expired"
+                                              : last_flush_error_;
+                throw BufferFlushError(reason + " (" + std::to_string(count) +
+                    " message(s) still buffered for " + queue_address_ + ", not sent)",
+                    queue_address_, count);
+            }
+            // Tighten, not replace: the shortest patience of any concurrent
+            // flush caller wins, otherwise a shutdown could be held open by a
+            // background retry loop that was started with none.
+            if (deadline < flush_deadline_) {
+                flush_deadline_ = deadline;
+            }
+            flush_requested_ = true;
+            flusher_wake_.notify_all();
+            drain_progress_.wait(lock);
         }
-        
-        std::vector<json> result(messages_.begin(), messages_.begin() + batch_size);
-        messages_.erase(messages_.begin(), messages_.begin() + batch_size);
-        
-        if (messages_.empty()) {
-            timer_active_ = false;
-            flushing_ = false;
+    }
+
+    /**
+     * Stop the buffer: adds are refused, parked adds wake AND THROW (their
+     * message was never buffered -- reporting success for a message dropped on
+     * the floor is the failure mode this class exists to remove), the flusher
+     * unwinds at its next check, and flush_until() callers return.
+     */
+    void stop() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (stopped_) {
+                return;
+            }
+            stopped_ = true;
         }
-        
-        return result;
+        not_full_.notify_all();
+        flusher_wake_.notify_all();
+        drain_progress_.notify_all();
     }
-    
-    void set_flushing(bool value) {
-        flushing_ = value;
-    }
-    
-    void cancel_timer() {
-        timer_active_ = false;
-    }
-    
+
     size_t message_count() const {
+        std::lock_guard<std::mutex> lock(mutex_);
         return messages_.size();
     }
-    
+
     const BufferOptions& get_options() const {
         return options_;
     }
-    
+
     int first_message_age_millis() const {
-        if (messages_.empty()) return 0;
-        auto now = std::chrono::steady_clock::now();
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
-            now - first_message_time_).count();
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!has_first_message_) return 0;
+        return static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            Clock::now() - first_message_time_).count());
     }
 };
 
@@ -1549,113 +1876,139 @@ public:
 // BufferManager - Manages buffers for all queues
 // ============================================================================
 
+/**
+ * The registry of per-address MessageBuffers. One buffer per `queue/partition`
+ * (the granularity the broker fuses writes on), created on the first buffered
+ * push to that address -- whose options configure the buffer for its lifetime.
+ * All batching, backpressure, retry and ordering live in MessageBuffer; this
+ * class only routes, aggregates stats, and owns the shutdown sequencing.
+ *
+ * Buffers are retired only by cleanup(), never when they drain empty: a
+ * concurrent producer may already hold the buffer it looked up, and retiring
+ * it under that producer would strand its message in an object nothing ever
+ * flushes again. An idle buffer costs one parked thread and an empty deque.
+ */
 class BufferManager {
 private:
     std::shared_ptr<HttpClient> http_client_;
-    std::unordered_map<std::string, std::unique_ptr<MessageBuffer>> buffers_;
-    mutable std::mutex mutex_;  // mutable so it can be locked in const methods
+    std::unordered_map<std::string, std::shared_ptr<MessageBuffer>> buffers_;
+    // Guards the registry only, and is never held across an add or a flush --
+    // holding it across a blocking add() would queue every producer on every
+    // queue behind one parked one.
+    mutable std::mutex mutex_;
     std::atomic<int> flush_count_{0};
-    
-    void flush_buffer_internal(const std::string& queue_address) {
-        std::unique_lock<std::mutex> lock(mutex_);
-        
+    std::atomic<bool> stopped_{false};
+
+    std::shared_ptr<MessageBuffer> get_buffer(const std::string& queue_address) const {
+        std::lock_guard<std::mutex> lock(mutex_);
         auto it = buffers_.find(queue_address);
-        if (it == buffers_.end() || it->second->message_count() == 0) {
-            return;
-        }
-        
-        auto& buffer = it->second;
-        buffer->set_flushing(true);
-        
-        lock.unlock();
-        
-        try {
-            auto messages = buffer->extract_messages();
-            
-            if (!messages.empty()) {
-                json request = {{"items", messages}};
-                http_client_->post("/api/v1/push", request);
-                flush_count_++;
-            }
-            
-            lock.lock();
-            if (buffer->message_count() == 0) {
-                buffers_.erase(queue_address);
-            }
-            
-        } catch (const std::exception& e) {
-            util::log_error("BufferManager.flush", std::string("Error: ") + e.what());
-            buffer->set_flushing(false);
-            throw;
-        }
+        return it == buffers_.end() ? nullptr : it->second;
     }
-    
+
+    static MessageBuffer::Clock::time_point absolute_deadline(int deadline_millis) {
+        return deadline_millis < 0
+            ? MessageBuffer::Clock::time_point::max()
+            : MessageBuffer::Clock::now() + std::chrono::milliseconds(deadline_millis);
+    }
+
 public:
     BufferManager(std::shared_ptr<HttpClient> http_client)
         : http_client_(http_client) {
     }
-    
+
+    ~BufferManager() {
+        cleanup();
+    }
+
+    /**
+     * Buffer one message, BLOCKING while that address's buffer is at its
+     * max_size bound. Throws if the client has been closed -- a push after
+     * cleanup() would otherwise create a fresh buffer that nothing will ever
+     * flush, which is the same false success the bound exists to remove.
+     */
     void add_message(const std::string& queue_address, const json& formatted_message,
                     const BufferOptions& options) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        
-        if (buffers_.find(queue_address) == buffers_.end()) {
-            auto flush_callback = [this](const std::string& addr) {
-                flush_buffer_internal(addr);
-            };
-            
-            buffers_[queue_address] = std::make_unique<MessageBuffer>(
-                queue_address, options, flush_callback
-            );
-        }
-        
-        buffers_[queue_address]->add(formatted_message);
-    }
-    
-    void flush_buffer(const std::string& queue_address) {
-        std::unique_lock<std::mutex> lock(mutex_);
-        
-        auto it = buffers_.find(queue_address);
-        if (it == buffers_.end()) {
-            return;
-        }
-        
-        auto& buffer = it->second;
-        buffer->cancel_timer();
-        
-        lock.unlock();
-        
-        while (buffer->message_count() > 0) {
-            flush_buffer_internal(queue_address);
-        }
-    }
-    
-    void flush_all_buffers() {
-        std::vector<std::string> queue_addresses;
-        
+        std::shared_ptr<MessageBuffer> buffer;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (stopped_) {
+                throw std::runtime_error(
+                    "Queen client is closed: message not buffered for " + queue_address);
+            }
+            auto it = buffers_.find(queue_address);
+            if (it == buffers_.end()) {
+                auto sender = [this](const std::vector<json>& items) {
+                    json request = {{"items", items}};
+                    http_client_->post("/api/v1/push", request);
+                    flush_count_++;
+                };
+                it = buffers_.emplace(queue_address,
+                    std::make_shared<MessageBuffer>(queue_address, options, sender)).first;
+            }
+            buffer = it->second;
+        }
+        // Outside the registry lock, deliberately: this call can park.
+        buffer->add(formatted_message);
+    }
+
+    /**
+     * Send everything buffered for one address. deadline_millis < 0 (the
+     * default) retries a failing batch until it lands or the buffer stops;
+     * otherwise a BufferFlushError after the deadline reports how many
+     * messages are still buffered (none dropped).
+     */
+    void flush_buffer(const std::string& queue_address, int deadline_millis = -1) {
+        auto buffer = get_buffer(queue_address);
+        if (!buffer) {
+            return;
+        }
+        buffer->flush_until(absolute_deadline(deadline_millis));
+    }
+
+    /**
+     * Send everything buffered, for every address. The deadline is one
+     * absolute instant shared by all of them, every buffer is attempted even
+     * after an earlier one fails -- an unreachable queue must not strand the
+     * others' messages -- and the first failure is rethrown at the end.
+     */
+    void flush_all_buffers(int deadline_millis = -1) {
+        const auto deadline = absolute_deadline(deadline_millis);
+
+        std::vector<std::shared_ptr<MessageBuffer>> buffers;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            buffers.reserve(buffers_.size());
             for (const auto& pair : buffers_) {
-                queue_addresses.push_back(pair.first);
+                buffers.push_back(pair.second);
             }
         }
-        
-        for (const auto& addr : queue_addresses) {
-            flush_buffer(addr);
+
+        std::exception_ptr first_error;
+        for (const auto& buffer : buffers) {
+            try {
+                buffer->flush_until(deadline);
+            } catch (...) {
+                if (!first_error) {
+                    first_error = std::current_exception();
+                }
+            }
+        }
+        if (first_error) {
+            std::rethrow_exception(first_error);
         }
     }
-    
+
     json get_stats() const {
         std::lock_guard<std::mutex> lock(mutex_);
-        
+
         int total_buffered = 0;
         int oldest_age = 0;
-        
+
         for (const auto& pair : buffers_) {
-            total_buffered += pair.second->message_count();
+            total_buffered += static_cast<int>(pair.second->message_count());
             oldest_age = std::max(oldest_age, pair.second->first_message_age_millis());
         }
-        
+
         return {
             {"activeBuffers", buffers_.size()},
             {"totalBufferedMessages", total_buffered},
@@ -1663,10 +2016,32 @@ public:
             {"flushesPerformed", flush_count_.load()}
         };
     }
-    
+
+    /**
+     * Stop every buffer and discard what is left, loudly. Stopping wakes
+     * parked adds (they throw: their message was never buffered) and ends any
+     * retry loop, then joining the flusher threads makes destruction safe.
+     * Anything still buffered here is lost -- which is why close() flushes
+     * with a deadline first and this logs what remains.
+     */
     void cleanup() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        buffers_.clear();
+        std::unordered_map<std::string, std::shared_ptr<MessageBuffer>> doomed;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopped_ = true;
+            doomed.swap(buffers_);
+        }
+
+        int unflushed = 0;
+        for (const auto& pair : doomed) {
+            pair.second->stop();
+            unflushed += static_cast<int>(pair.second->message_count());
+        }
+        if (unflushed > 0) {
+            util::log_error("BufferManager.cleanup", std::to_string(unflushed) +
+                " unflushed message(s) discarded");
+        }
+        doomed.clear(); // destructors join the flusher threads
     }
 };
 
@@ -2597,12 +2972,18 @@ public:
     }
     
     // Buffer management
-    void flush_buffer() {
+    /**
+     * Flush this builder's queue/partition buffer. With no deadline (the
+     * default) a failing batch is retried until it lands or the client
+     * closes; with one, a BufferFlushError after deadline_millis reports how
+     * many messages are still buffered (none dropped).
+     */
+    void flush_buffer(int deadline_millis = -1) {
         if (queue_name_.empty()) {
             throw std::runtime_error("Queue name is required for buffer flush");
         }
         std::string queue_address = queue_name_ + "/" + partition_;
-        buffer_manager_->flush_buffer(queue_address);
+        buffer_manager_->flush_buffer(queue_address, deadline_millis);
     }
     
     // DLQ methods
@@ -2899,25 +3280,40 @@ public:
         return message_or_lease_id.is_array() ? results : results[0];
     }
     
-    void flush_all_buffers() {
-        buffer_manager_->flush_all_buffers();
+    /**
+     * Flush every buffer. deadline_millis < 0 (the default) retries failing
+     * batches until they land; see BufferManager::flush_all_buffers.
+     */
+    void flush_all_buffers(int deadline_millis = -1) {
+        buffer_manager_->flush_all_buffers(deadline_millis);
     }
-    
+
     json get_buffer_stats() const {
         return buffer_manager_->get_stats();
     }
-    
+
+    /**
+     * How long close() keeps retrying failing flush batches before giving up.
+     * The flusher retries forever while the process is running, which is
+     * wrong on the way out: a SIGTERM grace period is finite, so shutdown
+     * stops after this deadline and reports what is left instead of hanging
+     * until the runtime is killed. Same value as the JS SDK's close deadline.
+     */
+    static constexpr int CLOSE_FLUSH_DEADLINE_MILLIS = 30000;
+
     void close() {
         std::cout << "Closing Queen client..." << std::endl;
         shutdown_requested_ = true;
-        
+
         try {
-            buffer_manager_->flush_all_buffers();
+            buffer_manager_->flush_all_buffers(CLOSE_FLUSH_DEADLINE_MILLIS);
             std::cout << "All buffers flushed" << std::endl;
         } catch (const std::exception& e) {
+            // BufferFlushError::what() carries the unflushed count; cleanup()
+            // below logs the discard as well. Loud, not silent.
             std::cerr << "Error flushing buffers: " << e.what() << std::endl;
         }
-        
+
         buffer_manager_->cleanup();
         std::cout << "Queen client closed" << std::endl;
     }

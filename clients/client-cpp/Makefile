@@ -49,7 +49,7 @@ else
 endif
 
 # Targets
-.PHONY: all test retry429 run-retry429 kvtimers run-kvtimers conflation run-conflation unit run-unit clean help
+.PHONY: all test retry429 run-retry429 kvtimers run-kvtimers conflation run-conflation buffer run-buffer unit run-unit clean help
 
 all: test
 
@@ -111,10 +111,27 @@ bin/test_conflation: test_conflation.cpp queen_client.hpp ../server/vendor/json.
 run-conflation: bin/test_conflation
 	./bin/test_conflation
 
-# Every suite that needs no broker, in one command.
-unit: retry429 kvtimers conflation
+# Build the buffer contract suite (the 1.0.6 discipline: blocking max_size
+# backpressure, failed batches re-queued at the front and retried, loud flush
+# deadlines). Also broker-free: it exercises the client against an in-process
+# httplib::Server whose responder it controls, which is the only way to make a
+# POST fail deterministically and then watch what the buffer does with the
+# batch.
+buffer: bin/test_buffer
+	@echo "Buffer contract test suite built successfully!"
+	@echo "Run with: ./bin/test_buffer"
 
-run-unit: run-retry429 run-kvtimers run-conflation
+bin/test_buffer: test_buffer.cpp queen_client.hpp ../server/vendor/json.hpp ../server/include/threadpool.hpp
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) $(INCLUDES) test_buffer.cpp -o bin/test_buffer $(LIBS)
+
+run-buffer: bin/test_buffer
+	./bin/test_buffer
+
+# Every suite that needs no broker, in one command.
+unit: retry429 kvtimers conflation buffer
+
+run-unit: run-retry429 run-kvtimers run-conflation run-buffer
 
 # Run tests (requires Queen server running)
 run-test: bin/test_client
@@ -170,6 +187,8 @@ help:
 	@echo "  make run-kvtimers - Build and run KV/timer wire tests (no server needed)"
 	@echo "  make conflation   - Build conflation wire contract tests"
 	@echo "  make run-conflation - Build and run conflation wire tests (no server needed)"
+	@echo "  make buffer       - Build buffer contract tests (backpressure/lossless retry)"
+	@echo "  make run-buffer   - Build and run buffer contract tests (no server needed)"
 	@echo "  make unit         - Build every suite that needs no broker"
 	@echo "  make run-unit     - Build and run every suite that needs no broker"
 	@echo "  make clean        - Remove build artifacts"

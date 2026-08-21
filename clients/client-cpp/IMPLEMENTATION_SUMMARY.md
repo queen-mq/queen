@@ -115,7 +115,10 @@ All functionality is contained in `queen_client.hpp` for easy integration. Just 
 ### Threading Model
 - Uses `astp::ThreadPool` from `server/include/threadpool.hpp`
 - Consumer workers run in parallel using the thread pool
-- Buffer timers run in detached threads
+- Each message buffer owns one joinable flusher thread: the single sender for
+  its queue/partition (so batches never interleave), and the time-based flush
+  trigger. Producers block on a condition variable at the buffer's `max_size`
+  bound; a batch whose POST fails is re-queued at the front and retried
 - All thread-safe with mutexes and atomics
 
 ### Error Handling
