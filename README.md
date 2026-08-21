@@ -1,409 +1,386 @@
 <div align="center">
-  <img src="assets/queen-tile.png" alt="Queen MQ" width="120">
-</div>
 
 # Queen MQ
 
-**The queue that doesn't fall apart at the far end of your workload.**
+**High-performance transactional messaging for applications that need an ordered stream per entity.**
 
-Queen is a message broker written in Rust that uses PostgreSQL as its data store. Its main idea is to let you have an arbitrarily large number of FIFO partitions, created on demand at push time.
+Queen is a message broker written in Rust that keeps every byte of its state in PostgreSQL. Its
+defining abstraction is one logical ordered partition per application entity (a customer, an
+account, a conversation, a device, a workflow, a session, a job), created by the first push that
+names it, never provisioned in advance.
 
-Queen has:
-
-- **High throughput** (1 million msg/s end to end on 200 partitions, verified in a 24-hour soak)
-- **High dynamic cardinality** (1 million partitions at 200k msg/s, verified end to end)
-- **Guaranteed order** within every partition
-- **Easy HTTP transport**: curl is a first-class client
-- **Transactional dedup at push**: part of the exactly-once guarantees on broker operations
-- **Transactional ack+KV+push**: the rest of the exactly-once guarantees
-- **KV**: a small but powerful key-value store alongside your queue operations
-- **Timers**: schedule messages ahead of time
-- **Consumer groups** with replay and seek
-- **DLQ**: no message lost, even in the worst cases
-- **Integrated stream processor**: three window types, with map and aggregation
-- **Conflation, window buffers, delayed delivery**
-- **HA**: multiple brokers with best-effort coordination and wake-ups on push and ack
-- **Durable by default, with synchronous commit**: not losing data is the whole point of Queen
-- **Ephemeral in-memory queues** for lighter jobs like signaling and request/reply
-- **Multi-tenant** with quotas, through the bundled Rust proxy
-- **Single binary**
-
-As far as we know, nothing else out there has all of this in one system. If you use Queen, you can offload to it a ton of logic you would otherwise have to write yourself.
-
-[Every number above, with the conditions that make it true →](https://queenmq.com/benchmarks/comparison)
-
-<div align="center">
-
-<img src="assets/queen-map.svg" alt="A map of sustained message rate against ordered entities. Both axes are logarithmic, unnumbered, and carry the same range and the same scale, so a system that reaches the same figure on both draws a square. Each system is drawn as the region where it keeps one ordered lane per entity: Kafka holds a low lane ceiling, because entities hash onto a partition set sized in advance, and its region runs off the right of the map with its closing edge dashed, because that rate is not an edge we measured; RabbitMQ closes a small corner, one live queue per entity; pgmq reaches higher in entities at modest rate; SQS FIFO closes a dashed corner at its published rate quota and its in-flight cap. Queen's region is the largest, and it is a square: a million messages a second sustained for 24 hours, and a million ordered lanes in one database, from two separate runs. The corner beyond it, more of both, belongs to nobody on the map." width="880" />
-
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE.md)
-[![Rust](https://img.shields.io/badge/rust-2021-000000.svg)](https://www.rust-lang.org/)
-[![PostgreSQL](https://img.shields.io/badge/postgresql-15%2B-336791.svg)](https://www.postgresql.org/)
-[![Node](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen.svg)](https://nodejs.org/)
-[![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
-[![Go](https://img.shields.io/badge/go-1.24%2B-00ADD8.svg)](https://go.dev/)
-[![Rust client](https://img.shields.io/badge/rust%20client-1.86%2B-000000.svg)](clients/client-rust)
-[![PHP](https://img.shields.io/badge/php-8.3%2B-777BB4.svg)](https://www.php.net/)
-
-📚 **[Documentation](https://queenmq.com/)** · 🚀 **[Quickstart](https://queenmq.com/start/quickstart)** · 📊 **[Benchmarks](https://queenmq.com/benchmarks)** · 🛠 **[Develop](#developing-on-queen)**
+[Documentation](https://queenmq.com) · [Benchmarks](https://queenmq.com/benchmarks) · [Quickstart](https://queenmq.com/start/quickstart) · Apache-2.0 · v1.1.0
 
 </div>
 
-Queen MQ is a message queue that keeps its data in PostgreSQL. A queue is split into
-**partitions**, one per entity, created the first time you push to one. Each partition is a
-strictly ordered lane that a consumer group drains independently, so ten thousand partitions
-cost ten thousand index rows rather than ten thousand commit-log files or ten thousand
-processes, and a consumer stuck on one lane never blocks another.
-
-Everything else follows from that. The broker is one stateless Rust binary holding no cluster
-membership and no partition assignments, so you scale it by starting another copy against the
-same database. Clients speak plain HTTP and hold no coordination state either, so there is no
-rebalancing protocol to wait out when a worker restarts. Durability, backup and replication are
-whatever your PostgreSQL already does.
-
-<div align="center">
-<img src="assets/queen-features.svg" alt="A queue split into one ordered lane per session, one of them stalled behind a slow consumer and holding up nobody, and that same lane magnified to single messages: four complete behind the committed cursor, three leased, three waiting, one arriving from a push. Three panels show consumer groups replaying from a segment edge, a lease resolving to a retry or to the dead-letter table, and window state, output and the acknowledgement of the source committing together. Underneath, three identical broker processes with nothing between them, over one PostgreSQL boundary holding the partition, segment, consumer and dead-letter tables." width="880" />
-</div>
-
-## What you get
-
-- **One ordered lane per entity, no preallocation.** Partitions are logical and created on first push.
-- **Consumer groups with replay.** Each group keeps its own cursor per partition, and can be moved back to a timestamp or forward to the end.
-- **Acknowledgement as an offset commit.** No per-message delivery state to store, scan or clean up.
-- **Transactional handoff.** Acking one message and pushing the next stage's happens in a single PostgreSQL transaction.
-- **Windowed aggregation in the same transaction.** Tumbling, sliding, session and cron windows over a queue, with the window state, the emitted messages and the source acknowledgement committing together or not at all. No changelog topic, no state store, no second system.
-- **Exact, windowed deduplication.** A `transactionId` you supply makes a push idempotent inside a configurable window, enforced in the database rather than a cache.
-- **Transactional key/value state, and messages scheduled for later**, both committing with your acks and pushes rather than beside them. Behind flags, off by default: see [Key/value state and timers](#keyvalue-state-and-timers).
-- **A second storage class, for what should not be stored.** Ephemeral queues keep their contents in broker memory and survive nothing, so a request/reply inbox, a presence fan-out or a progress feed stops paying for a history nobody reads. See [Ephemeral queues](#ephemeral-queues).
-- **A dead-letter queue, tracing, and a dashboard**, all served by the same binary.
-- **Six client SDKs, an operator CLI, and a plain HTTP API**, so anything that can make an HTTP request is a first-class client.
-- **An embeddable engine.** The broker is a Rust library before it is a binary: a product can run the same engine inside its own process instead of shipping a second container. See [Embedding the engine](#embedding-the-engine).
-
-> *Why "Queen"? Because years ago, when I first read "queue", I read it as "queen" in my mind. The name stuck.*
-
-Born at [Smartness](https://www.linkedin.com/company/smartness-com/) to power **Smartchat**, where
-one ordered lane per chat session was the requirement that nothing else satisfied cheaply.
-
-## Quickstart
-
-```bash
-docker network create queen
+```text
+  ~1M msg/s              1M partitions          24h                0
+  pushed AND popped      in one PostgreSQL,     no restarts,       order violations
+  86.4B in a 24h soak    created at 1,000/s     RSS flat 4.1 GB    over 88.5M messages
 ```
 
-```bash
-docker run --name qpg --network queen -e POSTGRES_PASSWORD=postgres -p 5433:5432 -d postgres:16
-```
-
-```bash
-docker run -d --name queen --restart on-failure:10 -p 6632:6632 --network queen -e PG_HOST=qpg -e PG_PASSWORD=postgres ghcr.io/queen-mq/queen:latest
-```
-
-The broker creates its own schema on boot. `--restart on-failure:10` covers the seconds PostgreSQL
-spends initialising on a first run: the broker refuses to start against a database it cannot reach,
-and Docker brings it back as soon as it can. `curl -s http://localhost:6632/health` tells you when
-it is up, and `docker logs queen` says why if it is not.
-
-Then push and consume with the JavaScript SDK (`npm install queen-mq`):
-
-```js
-import { Queen } from 'queen-mq'
-
-const queen = new Queen('http://localhost:6632')
-
-// Queue and partition are created on first use.
-await queen
-  .queue('orders')
-  .partition('customer-42')
-  .push([{ data: { hello: 'world' } }])
-
-// A group created after the push starts at the tail by default;
-// subscriptionMode('all') points its new cursor at the beginning.
-await queen
-  .queue('orders')
-  .group('billing')
-  .subscriptionMode('all')
-  .each()
-  .consume(async (message) => {
-    console.log(message.data)
-  })
-```
-
-or with curl, from anything:
-
-```bash
-curl -X POST http://localhost:6632/api/v1/push -H "Content-Type: application/json" -d '{"items":[{"queue":"demo","payload":{"hello":"world"}}]}'
-```
-
-```bash
-curl "http://localhost:6632/api/v1/pop/queue/demo?autoAck=true"
-```
-
-An empty pop answers `204` with no body at all. The dashboard is at
-[http://localhost:6632](http://localhost:6632).
-
-Full walkthrough: **[queenmq.com/start/quickstart](https://queenmq.com/start/quickstart)**.
-
-## Key/value state and timers
-
-Two surfaces that share the log's transaction instead of sitting beside it.
-
-**Key/value** (`POST /api/v1/kv`) is a namespaced store with `get`, `getMany`, `getPrefix`, `put`,
-`putIfAbsent`, `delete` and `incr`. Its point is not the store: it is that the idempotency marker,
-the message it guards and the cursor advance commit together. Every write states its lifetime,
-exactly one of `ttlSeconds` and `forever`, because a marker with no expiry is how a table grows in
-silence.
-
-**Timers** (`POST /api/v1/timers`) schedule a message into a queue for later, keyed by
-`(queue, timerKey)` so a reschedule is the same upsert and a retry after a crash is safe. At fire
-time the staging row is deleted and the message appended in one transaction, so there is no
-half-delivered state.
-
-```js
-// Do the bundle at most once: the marker, the push and the ack commit or roll back together.
-const res = await queen.transaction()
-  .ack(message)
-  .queue('emails').push([{ data: mail }])
-  .once('sent', message.transactionId, { ttl: '24h' })
-  .commit()
-
-if (res.success === false) return  // a redelivery. Already done, nothing was sent twice.
-
-// Not before 30 minutes from now, into a real queue, through the real log.
-await queen.timer('reminders').key(orderId).delay('30m').payload({ orderId }).schedule()
-```
-
-Three things to know before you reach for them:
-
-- **Neither is behind a flag.** There is no `QUEEN_KV_ENABLED` and no `QUEEN_TIMERS_ENABLED`, for
-  the same reason there is no `QUEEN_PUSH_ENABLED`: every broker serves both surfaces from its first
-  boot. What an operator has is a runtime kill switch for pausing one during an incident, which
-  answers **503** and never 404.
-- **A verdict is not an error.** A lost `putIfAbsent`, a key that is not there, a cancel that found
-  nothing: all HTTP 200 with an explicit field. `applied: false` is the most frequent outcome of
-  this API, and the SDKs return it rather than raising, so it stays out of your retry policy.
-- **A cancel that answers `absent` may mean already delivered.** A fired timer leaves no tombstone,
-  so `absent` means "no longer pending". The authority is the log: the answer carries the `txn` the
-  delivered message would have.
-
-Guides: **[queenmq.com/use/kv](https://queenmq.com/use/kv)** ·
-**[queenmq.com/use/timers](https://queenmq.com/use/timers)**. How they work:
-**[internals/kv](https://queenmq.com/internals/kv)** ·
-**[internals/timers](https://queenmq.com/internals/timers)**.
-
-## Ephemeral queues
-
-A queue whose contents live in the broker's memory and survive nothing: a clean exit, a crash, a
-deploy and a move to another broker each leave it empty, and none of those is a fault. What does
-survive is the configuration of a declared queue, which comes back as configured and empty. It is
-its own route family, `/api/v1/ephemeral/*`, and its own SDK namespace, `queen.ephemeral`, with
-six verbs and two status reads. It shares the broker process with the durable engine and nothing
-else: no table, no stored procedure, no code path.
-
-```js
-// An inbox nobody declared, created by the message that names it.
-await queen.ephemeral.push(`rpc-inbox-${id}`, [{ n, squared: n * n }])
-
-// A long poll parked on a memory gate: no database in the path, no polling interval.
-const { messages } = await queen.ephemeral.pop(`rpc-inbox-${id}`, {
-  wait: true, timeout: 5000, autoAck: true
-})
-```
-
-Three things to know before you reach for them:
-
-- **The class decides what can be lost, the ack mode decides the guarantee.** `autoAck` is
-  at-most-once. An explicit ack is at-least-once for as long as the owning broker lives, because an
-  unacknowledged message redelivers when its lease expires. Consumers still need to be idempotent,
-  exactly as on a durable queue.
-- **Consumption semantics come from the consumer group**, exactly as on a durable queue: one shared
-  group competes, a group per subscriber fans out, no group at all is queue mode. There is no
-  queue-level mode to choose.
-- **`ttlSeconds` is not `retention`.** It drops messages nobody consumed. Durable retention cleans
-  consumed history and never touches a pending message. One word per contract.
-
-Runnable: `examples/35-ephemeral-basics.js` and `examples/36-ephemeral-reqreply.js`.
-Guide: **[queenmq.com/use/ephemeral](https://queenmq.com/use/ephemeral)**. Routes:
-**[reference/http/ephemeral](https://queenmq.com/reference/http/ephemeral)**.
-
-## Developing on Queen
-
-The only thing you need in a container is PostgreSQL. The broker builds and runs natively,
-which keeps the edit-compile-run loop fast and lets you attach a debugger.
-
-**1. PostgreSQL in a container.** Nothing else goes in Docker.
-
-```bash
-docker run --name queen-dev-pg -e POSTGRES_PASSWORD=postgres -p 5432:5432 -d postgres:16
-```
-
-**2. Run the broker from source.** Every connection default already matches that container
-(`PG_HOST=localhost`, `PG_PORT=5432`, `PG_USER=postgres`, `PG_PASSWORD=postgres`,
-`PG_DATABASE=postgres`), so there is nothing to configure:
-
-```bash
-cd server && cargo run
-```
-
-The broker applies its schema at every boot under an advisory lock, so there is no migration
-step and no ordering to get right. It listens on `:6632`.
-
-**3. Point something at it.** Any SDK, `curl`, or the CLI:
-
-```bash
-cd clients/client-cli && go run . --server http://localhost:6632 status
-```
-
-The repository's `go.work` is what makes that build against the `client-go` in this tree
-rather than the last published one, so run it from inside the repository.
-
-**4. Run the tests.** Unit tests need nothing:
-
-```bash
-cd server && cargo test
-```
-
-The full client matrix builds throwaway stacks in Docker and runs every language suite against
-a freshly built broker, on a single-node stack and on a two-broker mesh:
-
-```bash
-test/run.sh
-```
-
-### Three things to know before you build
-
-- **The SQL lives inside the binary.** `server/sql/schema.sql` and everything under
-  `server/sql/procedures/` is embedded with `include_str!` at compile time. Editing a `.sql`
-  file and restarting is not enough: you have to rebuild, or you will be running the previous
-  version of your own stored procedure.
-- **So does the dashboard.** `server/src/handlers/static_files.rs` embeds `server/webapp/dist`
-  at compile time. To work on the UI, build it into place and rebuild the broker:
-  `cd app && npm install && npm run build` writes straight into `server/webapp/dist`.
-- **`/health` talks to the database.** It answers `503` when PostgreSQL is unreachable, which is
-  correct for readiness and wrong for liveness. Do not wire it to a restart policy.
-
-More: **[Contributing](CONTRIBUTING.md)** ·
-**[queenmq.com/internals/contributing](https://queenmq.com/internals/contributing)**
-
-## Clients
-
-| Language | Package | Source |
-| --- | --- | --- |
-| JavaScript / TypeScript | `queen-mq` (npm) | [clients/client-js](clients/client-js) |
-| Python | `queen-mq` (PyPI) | [clients/client-py](clients/client-py) |
-| Go | `github.com/smartpricing/queen/clients/client-go` | [clients/client-go](clients/client-go) |
-| Rust | `queen-mq` (crates.io) | [clients/client-rust](clients/client-rust) |
-| PHP / Laravel | in this tree, not yet on Packagist | [clients/client-laravel](clients/client-laravel) |
-| C++ | single header | [clients/client-cpp](clients/client-cpp) |
-| CLI | `queenctl` | [clients/client-cli](clients/client-cli) |
-
-All of them speak the same HTTP API, which is documented in full and published as
-[OpenAPI 3.1](https://queenmq.com/reference/openapi) generated from the router itself.
-
-The Rust client is the one exception to "an SDK re-describes the wire by hand": it and the
-broker both depend on [`crates/queen-protocol`](crates/queen-protocol), and the broker's own
-tests round-trip its request parsers and rendered responses through those types. A renamed
-field fails a test instead of reaching a client.
-
-Key/value and timers reach the six SDKs, not `queenctl`, which has no `kv` or `timer` command in
-1.0: its value there would be inspection, and `curl` already covers it. The C++ client wraps five
-of the seven key/value operations and two of the four timer ones. The capability matrix, row by
-row and including the boxes where parity is not there, is on every SDK reference page:
-[queenmq.com/reference/sdk/javascript](https://queenmq.com/reference/sdk/javascript).
-
-## Embedding the engine
-
-The clients above talk to a broker. There is a second way in, for Rust products that want to
-*be* one: the broker crate has a library target, and the same engine that serves HTTP in the
-container runs inside your process. `Broker::start` connects to PostgreSQL, applies the
-schema, starts the background machinery and hands back typed operations — push, pop with
-long-poll, ack, leases, transactions, configure, delete, the DLQ, metrics. Each one invokes
-the same handler functions the HTTP router dispatches to, so behaviour and defaults are the
-broker's by construction, not a reimplementation's. What it buys you is one process to build,
-version and supervise instead of two.
-
-```toml
-[dependencies]
-queen-engine = { version = "1.0.0", default-features = false }
-```
-
-The package is named `queen-engine` — the bare crates.io name `queen` belongs to an unrelated
-crate — but the library still imports as `queen`. `default-features = false` skips the HTTP
-server, the dashboard and the tracing subscriber: an embedding application owns its own
-surface and its own logging. (`queen-mq` remains the HTTP *client*; this crate is the broker.)
-
-```rust
-use queen::{Broker, BrokerConfig};
-use queen::protocol as qp;
-
-let broker = Broker::start(
-    BrokerConfig::new().pg("localhost", 5432, "postgres", "postgres", "postgres"),
-)
-.await?;
-
-broker.configure(&qp::ConfigureRequest::new("jobs")).await?;
-broker.push(vec![qp::PushItem::new("jobs", serde_json::json!({"n": 1}))]).await?;
-let popped = broker.pop("jobs", &qp::PopParams::default()).await?;
-```
-
-Boundaries to know before you build on it:
-
-- One `Broker` per process lifetime: the admission arbiter is process-global.
-- The outage spool defaults to a per-instance temp directory: set `spool_dir` if
-  `status: "buffered"` pushes must survive a restart.
-- The v1 surface is the data plane plus the DLQ; consumer-group administration, listings,
-  traces and streams still need the HTTP surface.
-
-The full list, and what N embedded instances over one PostgreSQL do, is at
-[queenmq.com/use/embed](https://queenmq.com/use/embed).
-
-Guide: **[queenmq.com/use/embed](https://queenmq.com/use/embed)** · API reference:
-**[queenmq.com/reference/engine](https://queenmq.com/reference/engine)**.
-
-## Repository layout
-
-| Path | What it is |
-| --- | --- |
-| `server/` | The broker. Rust, package `queen-engine`, library `queen`, binary `queen`. Schema and stored procedures in `server/sql/`, embedded at compile time. |
-| `proxy/` | Multi-tenant gateway: API keys, quotas, rate limits, metering, console. Its own PostgreSQL. |
-| `app/` | The Vue dashboard, compiled into the broker binary. |
-| `clients/` | The six SDKs and the `queenctl` CLI. |
-| `crates/` | Crates shared between the broker and a client. Today: `queen-protocol`, the wire types — a regular dependency of both, and the request/response types of the embedded engine. |
-| `webdoc/` | This project's documentation site (Astro). Large parts of it are generated from the source in `server/` and `proxy/`. |
-| `test/` | The Docker test harness: every client suite against a freshly built broker. |
-| `benchmark-queen/` | Benchmark sessions with their raw artifacts. Every number on the website comes from here. |
-| `examples/`, `streams/` | Complete runnable examples: `examples/full/` in JavaScript, Python, Go and Rust, with a runner that asserts each one's outcome. |
-
-## Documentation
-
-The site is written from the current source, and its reference material is generated from it:
-the route table, the environment-variable reference, the Prometheus family list, the proxy's
-route classes, the OpenAPI documents and the benchmark figures are all derived at build time,
-and CI fails when any of them falls behind the code.
-
-- [Start here](https://queenmq.com/start): what Queen is, why it exists, and where its limits are
-- [Use Queen](https://queenmq.com/use): the model, the SDKs, the embedded engine, worked examples
-- [Self-hosting](https://queenmq.com/selfhost): deployment, PostgreSQL, high availability, security, operations, multi-tenancy
-- [Internals](https://queenmq.com/internals): segments, offsets, the push and pop paths, the schema
-- [Reference](https://queenmq.com/reference): routes, configuration, metrics, client APIs
-- [Benchmarks](https://queenmq.com/benchmarks): the runs, their configuration, and their raw output
-
-## Versions
-
-Version **1.0.0** is a Rust broker on a new storage engine. The 0.16.x line was a C++
-implementation on a row-based engine and is retired; its measurements and its architecture
-documentation do not describe this release. See [CHANGELOG.md](CHANGELOG.md) and
-[queenmq.com/reference/compatibility](https://queenmq.com/reference/compatibility).
-
-## Contributing
-
-Bug reports and feature requests are welcome through the
-[issue templates](https://github.com/queen-mq/queen/issues/new/choose). Start from
-[CONTRIBUTING.md](CONTRIBUTING.md). Security issues: [SECURITY.md](SECURITY.md).
-
-## License
-
-[Apache 2.0](LICENSE.md).
+Published benchmark results under defined workloads, one broker against one PostgreSQL on a
+32 vCPU / 62 GiB machine. They are evidence of what the design reaches, not a capacity guarantee
+for your workload. Every figure links to its archived artifacts: [Benchmarks](https://queenmq.com/benchmarks).
 
 ---
 
-**Built with ❤️ by [Smartness](https://www.linkedin.com/company/smartness-com/)**
+## The problem Queen solves
+
+Most brokers give you ordering per *shard*. Your requirement is ordering per *entity*: this
+customer's events processed in order, this conversation's messages not overtaking each other, this
+account's transactions settling in sequence.
+
+Bridging the two is where the pain lives. Hash your entities onto a fixed partition count and the
+ones that collide block each other: a slow customer stalls every customer sharing its shard. Give
+each entity its own queue instead and broker-side objects grow with your customer list.
+
+Queen removes the bridge: **the entity *is* the partition.**
+
+## One entity, one ordered partition
+
+You choose the partition key. It is your ordering boundary, not an infrastructure sizing decision.
+
+```text
+customer_id -> ordered per customer     device_id   -> ordered per device
+account_id  -> ordered per account      workflow_id -> ordered per workflow
+conversation_id -> ordered per conversation
+```
+
+Each partition is an independent ordered lane, created by the push that first names it:
+
+```text
+customer A  ──►  A1 ──► A2 ──► A3            strict FIFO within a lane
+customer B  ──►  B1 ──► B2                   B is not held up by A
+customer C  ──►  C1 ──► C2 ──► C3            C is not held up by A or B
+```
+
+Nothing is preallocated, nothing is assigned, nothing rebalances when a consumer restarts.
+
+**Two things this does not mean.**
+
+*A single hot partition stays sequential, by design.* Parallelism comes from many active
+partitions, not from splitting one. Twenty workers on a one-partition queue is one worker's
+throughput and nineteen idle pollers: add lanes, not workers.
+
+*Do not pick a key because it has high cardinality.* Pick the boundary your application genuinely
+requires. A partition per message is not a supported shape.
+
+How partitions, consumer groups, cursors and leases fit together is
+[the model, in one page](https://queenmq.com/use/model).
+
+## Transactional processing
+
+The second reason Queen exists, and the reason PostgreSQL is not an implementation detail. A single
+[`POST /api/v1/transaction`](https://queenmq.com/reference/http/transaction) bundles
+acknowledgements, pushes, key/value writes and timer operations into **one PostgreSQL transaction**:
+
+```text
+consume input
+     │
+     ├── update application state   (kv rider)
+     ├── produce output             (push, any queue, any partition)
+     ├── schedule / cancel a timer  (timers rider)
+     └── acknowledge input          (cursor advance)
+                │
+             COMMIT          all of it, or none of it
+```
+
+The bundle is N-to-M: one call may acknowledge batches leased from any number of partitions, queues
+and consumer groups, and push to any number of queues and partitions, which is what makes a fan-in
+stage possible.
+
+This is what replaces transactional outbox tables, a separate store for idempotency markers,
+offset/state coordination glue, and the reconciliation code that exists only because the broker's
+commit and the database's commit were two different commits.
+
+**Where the guarantee stops, precisely.** Atomicity covers broker state, not the network: if the
+response is lost you do not know whether it committed, and a blind retry duplicates the pushes
+unless your transaction ids are deterministic and the retry lands inside the deduplication window.
+Queen does not make an external HTTP call exactly-once, and no broker can.
+
+The one case that *is* exactly-once end to end is when the effect is itself a row in this
+PostgreSQL, written through the `kv` rider: marker, effect, output and cursor advance become a
+single `COMMIT`. [The exactly-once
+boundary](https://queenmq.com/reference/http/transaction) states every rollback cause.
+
+## The mental model
+
+```text
+Application entity        the thing whose order matters
+    ▼  Partition key      your ordering boundary, chosen by you
+    ▼  Ordered stream     one row, created on demand, strict FIFO
+    ▼  Transaction        ack + state + output in one commit
+    ▼  PostgreSQL         the single source of truth
+    ▼  Stateless brokers  hold nothing durable; restart freely
+    ▼  Cell               one deployment, one failure domain
+    ▼  Region             where a cell physically lives
+```
+
+The top half is your application's shape. The bottom half is infrastructure. Queen's central bet is
+that these two halves should scale independently of each other.
+
+## Published benchmarks
+
+| Run | Result | The conditions that make it true |
+| --- | --- | --- |
+| [Throughput, 24h](https://queenmq.com/benchmarks/soak-24h) | **86,369,975,300 messages in 24 hours**, about 1,000,000 a second *in each direction*: pushed, popped and acknowledged. 0 restarts, broker memory flat at ~4.1 GB | Leased pops with **explicit acks**, **dedup on** (60 s window), retention on, 200 partitions, 600 consumers, push batch 100, 256 B payloads |
+| [Cardinality](https://queenmq.com/benchmarks/cardinality-1m) | **1,000,000 ordered partitions in one queue**, none preallocated, created during the run at 1,000/s while serving **200,000 msg/s**; 722,265,600 messages, **0 push / pop / ack errors** | Leased pops with explicit acks, retention on, **dedup off**, 300 consumers, 1 hour of which 43 min on the completed space. p50 27.5 ms, p99 115 ms at full space |
+| [Ordering correctness](https://queenmq.com/benchmarks/ordered-pipeline) | **88,503,408 messages across 4 stages and 1,000 partitions with 0 duplicates, 0 gaps, 0 order violations** | 25,000 events/s for 600 s, dedup window 300 s, explicit bulk acks, per-stage verifier |
+| [Multi-tenant cell](https://queenmq.com/benchmarks/multitenant-cell) | **0 cross-tenant deliveries** over an hour with 12 tenants sharing one queue name and one group name; a 2-core cell held >2400 msg/s through the proxy | Enforcement on, dedup off, 429 retry disabled. The run's *aggregate* verdict is FAIL: two rate-limited tenants' unretried refusals count as misses. Isolation is the clean result, not throughput |
+
+The two headline runs are Queen 1.0.0 with PostgreSQL's `synchronous_commit` left `on`, one broker
+against one PostgreSQL 18; the pipeline and multi-tenant runs predate the 1.0.0 tag.
+
+**What these do not establish.** Single-shape runs say nothing about *your* throughput, latency,
+PostgreSQL sizing, disk, retention capacity or partition distribution: those follow from your
+workload, payloads and hardware. Read [method and rig](https://queenmq.com/benchmarks/method)
+before quoting a number.
+
+## Application scale is not infrastructure scale
+
+This is the principle the rest of the architecture follows from.
+
+In most brokers the two are welded together: a per-entity ordering guarantee means a per-entity
+infrastructure object, either a topic partition with its own files and replicas or a live
+server-side queue. Doubling your customers means doubling something an operator has to think about.
+
+In Queen a partition is a row. A million of them measured 315 MB in total, and the serve path does
+not care how many exist. **Millions of logical entity streams do not require millions of
+infrastructure objects.**
+
+So the two halves scale on different axes. Confusing them is the most common way to mis-size a
+deployment.
+
+## Three kinds of scale
+
+**A. Partitions scale application cardinality.** Add entities freely. Nothing is provisioned, no
+process is created, no rebalance runs.
+
+**B. Brokers scale serving capacity and availability inside a cell.** Stateless replicas of one
+binary against one PostgreSQL, covering a process dying, a rolling restart, one node's network.
+**Three replicas is the designed ceiling**: past that the bottleneck is the database, not the
+broker count. Do not confuse this with partition scaling: throughput comes from partitions and from
+PostgreSQL, and more brokers buy availability first.
+
+```text
+  Broker A ─┐
+  Broker B ─┼──►  PostgreSQL       every replica serves every route
+  Broker C ─┘                      pop from A, ack to B, no affinity
+```
+
+**C. Cells scale the deployment.** Capacity grows by adding cells, not by growing one system: there
+is no global cluster to join and no cross-cell coordination in the message path.
+
+```text
+   one cell  ──►  another cell  ──►  another cell  ──►  another region
+```
+
+That buys bounded failure domains, independent upgrades, geographic placement and simpler recovery.
+It does not, on its own, solve cross-region replication or global ordering.
+
+## Inside a cell
+
+```text
+                    Queen Cell
+     ┌────────────────────────────────────┐
+     │  Queen Broker ──┐                  │
+     │  Queen Broker ──┼──► PostgreSQL    │  the only durable state
+     │  Queen Broker ──┘                  │
+     │  Queen Proxy  (optional)           │  tenant-facing boundary
+     └────────────────────────────────────┘
+```
+
+A cell is PostgreSQL plus one or more stateless brokers, optionally fronted by Queen Proxy. It is
+at once the scaling boundary, the failure boundary and the unit of upgrade and operational
+ownership.
+
+**PostgreSQL is the durable source of truth, and the brokers hold nothing authoritative.** Messages,
+offsets, leases, deduplication state, queue configuration and dead letters are all rows. That is why
+a broker can be added, removed, restarted or rolled without a rebalance, and why deduplication stays
+exact across replicas with no coordination protocol at all. Brokers do exchange hints over a mesh
+port to shorten latency, but nothing on that wire is authoritative and a dropped hint costs nothing
+but time ([the mesh](https://queenmq.com/internals/mesh)).
+
+**The failure domain is PostgreSQL.** Queen does not replicate itself; keeping the database alive is
+PostgreSQL's own tooling. While it is unreachable, pushes spool to a node-local disk buffer and are
+replayed later, and reads fail safely because an unacknowledged lease redelivers
+([high availability](https://queenmq.com/deploy/ha)).
+
+## Why PostgreSQL
+
+Not "we needed somewhere to put the bytes". PostgreSQL is chosen for what it lets the
+*application* do.
+
+- **Messaging state and application state share a transaction.** This is the whole reason for the
+  design; no other storage choice offers it.
+- Durability, ACID, replication, PITR, backup and recovery you already know how to operate.
+- SQL introspection: your messages are rows, queryable with the tools you already have.
+- No extensions and no migration step: the broker carries its own schema and applies it at boot.
+  PostgreSQL 15+.
+
+The trade, plainly: the database is the throughput ceiling and the single failure domain.
+
+## Queen Proxy and multi-tenancy
+
+```text
+   Internet  ─►  Queen Proxy  ─►  Queen brokers  ─►  PostgreSQL
+                 the tenant       messaging and
+                 boundary         processing only
+```
+
+`queen_proxy` is a second Rust binary and the tenant-facing boundary. Queen core stays focused on
+messaging; everything a shared broker has no business holding lives in the proxy: per-cluster API
+keys and human logins, plan limits on rate, size and count, and usage metering
+([multi-tenant](https://queenmq.com/deploy/multi-tenant)).
+
+**Isolation is split across both processes on purpose.** The broker scopes queue identity natively
+as `(tenant, name)` in SQL on every read and write, so two tenants both owning a queue called
+`orders` own different queues. The proxy is what makes the tenant identity driving that scoping
+trustworthy. Neither half is sufficient alone
+([isolation](https://queenmq.com/reference/multi-tenant/isolation)).
+
+**Cluster and cell are different things, and the distinction matters.** A **cluster** is the
+tenant-visible Queen: one hostname, one plan, one namespace. A **cell** is the physical stack it
+runs on. A cluster lives on exactly one cell and never spans two, which is why the proxy's quota
+accounting is exact in-process state with nothing to coordinate. One cell hosts many tenants,
+bounded by its own measured capacity.
+
+## Fleet and regions
+
+**What exists today.** The proxy's control-plane database models a fleet: cells carry a region, a
+class (shared or dedicated) and capacity, and clusters are placed onto them by operators.
+
+```text
+        Control plane  (cells, tenants, clusters, plans, usage)
+                │  placement and lifecycle only, never the data path
+     ┌──────────┼──────────┐
+   EU cell   EU cell    US cell        each: Proxy + Brokers + PostgreSQL
+```
+
+Two product properties follow, and both hold now:
+
+- **Customers address a cluster in a region, never a cell.** Cells are an internal deployment unit.
+  Which one hosts a cluster is an operator concern, invisible to the tenant.
+- **The control plane is not in the message data path.** The proxy reads it through a cache, so a
+  control-plane outage does not stop a cell that is already running.
+
+**What is planned, and not shipped.** A hosted Queen Cloud with automated cell provisioning and
+automatic tenant placement does not exist in this repository. Today cells are created and clusters
+placed by operators, not by an API. What *is* shipped is the self-hostable multi-tenant stack above
+(proxy, quotas, metering, isolation), Apache-2.0 and yours to run.
+
+## Features
+
+**Messaging.** Ordered FIFO partitions created on demand · consumer groups with one cursor per
+partition · subscription modes · leases with explicit ack, nack, retry and dlq · replay and seek by
+offset or timestamp · retry budgets and a real dead-letter queue, replayable · long-poll consumption
+· retention by age and by completion · durable by default, with no trade of `synchronous_commit`
+for speed.
+
+**Exactly-once building blocks.** Deduplication at push, keyed on your transaction id: exact, not
+probabilistic, evaluated inside PostgreSQL so a duplicate writes nothing
+([dedup](https://queenmq.com/internals/dedup)) · transactional `ack + kv + push + timers` in one
+commit.
+
+**State and time.** [`queen.kv`](https://queenmq.com/use/kv), a transactional key/value store with
+optimistic locking and an expiry on every write ·
+[timers](https://queenmq.com/use/timers) that schedule a real message into a real queue and stay
+cancellable until they fire · delayed delivery · window-buffer debounce · conflation, last-value
+delivery per partition.
+
+**Stream processing.** An [operator chain](https://queenmq.com/use/streams) that runs in *your*
+process with state in the same PostgreSQL: no job manager, no changelog topic, no state store to
+deploy. Four window types (tumbling, sliding, session, cron), map/filter/aggregate, event time with
+watermarks, and per-message gating. One cycle commits state, sink pushes and the ack together.
+
+**Ephemeral queues.** An [in-memory class](https://queenmq.com/use/ephemeral) with no database in
+the path, for request/reply, signalling, presence fan-out and cache invalidation: the shapes that
+should not pay for replay and retention. Contents survive nothing; that is the whole trade, and it
+is explicit.
+
+**Operations.** One stateless binary, HTTP on port 6632, curl is a first-class client · six SDKs
+(JavaScript, Python, Go, Rust, C++, PHP/Laravel) plus `queenctl` · a dashboard served by the same
+binary on the same port · Prometheus metrics · JWT/JWKS auth · payload encryption · disk spool for
+database outages · HA replicas.
+
+## Where Queen fits
+
+- **Per-customer or per-account workflows**: `customer-123` is a lane; a slow customer delays only itself.
+- **Conversations, chat, agent and tool-call sessions**: `conversation-42` keeps order without a queue per conversation.
+- **Financial and ledger processing**: ordering per account, plus ack and state in one commit.
+- **IoT and device telemetry**: `device-123` ordering at high device counts.
+- **Multi-step pipelines and sagas**: ack-input-and-push-output atomically, no outbox table.
+- **Multi-tenant SaaS**: many tenants on one cell behind the proxy, isolation enforced in SQL.
+
+## When something else is the better tool
+
+These systems made different tradeoffs, and some of those tradeoffs are better than Queen's for
+workloads that need them.
+
+- **Kafka ecosystem compatibility.** Queen speaks HTTP, not the Kafka protocol: no Connect, no
+  Streams, no Schema Registry, and none of that literature applies.
+- **A single ordered stream that must itself scale horizontally.** One lane is sequential. If your
+  ordering boundary is "everything", Queen's core idea does nothing for you.
+- **Storage that scales independently of the database**, or a system that replicates itself across
+  regions. Retention lives in PostgreSQL, which is also the one failure domain; there is no tiered
+  object storage and no cross-region replication in this repository.
+- **Rich content-based routing**: no exchanges, no bindings, no header matching. That is
+  RabbitMQ's strength.
+- **No server to operate at all.** That is SQS.
+
+In one sentence: distributed logs make *infrastructure partitions* the fundamental scaling
+abstraction; Queen makes *application entities* the fundamental ordering abstraction and *cells* the
+infrastructure scaling boundary. A fuller side-by-side is in
+[Comparison](https://queenmq.com/start/compare).
+
+## Quick start
+
+Docker and about five minutes. Nothing is installed into PostgreSQL; there is no migration to run.
+
+```bash
+docker network create queen
+docker run -d --name queen-pg --network queen -e POSTGRES_PASSWORD=postgres postgres:16
+docker run -d --name queen --restart on-failure:10 --network queen -p 6632:6632 \
+  -e PG_HOST=queen-pg -e PG_PASSWORD=postgres \
+  -v queen-spool:/var/lib/queen/buffers ghcr.io/queen-mq/queen:latest
+curl -s http://localhost:6632/health
+```
+
+The restart policy covers the seconds PostgreSQL spends initialising: the broker refuses to start
+against a database it cannot reach. Open `http://localhost:6632` for the bundled dashboard, then
+push your first message. The queue *and* the partition are created by this call:
+
+```bash
+curl -X POST http://localhost:6632/api/v1/push -H 'content-type: application/json' -d '{
+  "items": [{ "queue": "orders", "partition": "customer-123",
+              "transactionId": "order-8891-created",
+              "payload": { "orderId": 8891 } }]
+}'
+```
+
+`transactionId` is your idempotency key: a retry of the same push writes nothing the second time.
+Full walkthrough in the [Quickstart](https://queenmq.com/start/quickstart); the whole stack with
+proxy and two brokers in [Compose](https://queenmq.com/deploy/compose).
+
+## Documentation
+
+- **[The model](https://queenmq.com/use/model)**: queues, partitions, groups, offsets, leases, retention, in one page.
+- **[Transactions](https://queenmq.com/reference/http/transaction)**: bundle shape, rollback causes, the exactly-once boundary.
+- **[KV](https://queenmq.com/use/kv)** · **[Timers](https://queenmq.com/use/timers)** · **[Streams](https://queenmq.com/use/streams)** · **[Ephemeral](https://queenmq.com/use/ephemeral)**: the surfaces beyond push and pop.
+- **[Deploy](https://queenmq.com/deploy)** · [PostgreSQL](https://queenmq.com/deploy/postgres) · [HA](https://queenmq.com/deploy/ha) · [Kubernetes](https://queenmq.com/deploy/kubernetes): running it.
+- **[Multi-tenant](https://queenmq.com/deploy/multi-tenant)** · [Proxy](https://queenmq.com/deploy/proxy) · [Isolation](https://queenmq.com/reference/multi-tenant/isolation): running it for other people.
+- **[Internals](https://queenmq.com/internals)**: storage model, life of a push and a pop, dedup, retention, mesh.
+- **[Benchmarks](https://queenmq.com/benchmarks)** · [method and rig](https://queenmq.com/benchmarks/method) · [comparison](https://queenmq.com/start/compare).
+- **[HTTP reference](https://queenmq.com/reference/http)** · **[SDKs](https://queenmq.com/reference/sdk/javascript)**: routes and clients.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and the [contributing
+guide](https://queenmq.com/internals/contributing). Benchmark claims need an archived artifact
+under `benchmark-queen/`; doc pages declare the source files they are true of.
+
+## License
+
+Apache-2.0, see [LICENSE.md](LICENSE.md). Broker and proxy both, so the multi-tenant service is
+yours to run.
