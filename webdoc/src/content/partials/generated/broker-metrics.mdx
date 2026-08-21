@@ -10,7 +10,7 @@ description: "Every Prometheus metric family the broker exposes, with its type a
       - server/src/handlers/status.rs
 */}
 
-`GET /metrics/prometheus` exposes **78 families**. `queen_process_*` counts what this one broker instance did since it started; `queen_cluster_*` are lifetime totals read back out of PostgreSQL, so every instance reports the same value.
+`GET /metrics/prometheus` exposes **84 families**. `queen_process_*` counts what this one broker instance did since it started; `queen_cluster_*` are lifetime totals read back out of PostgreSQL, so every instance reports the same value.
 
 The `queen_kv_*`, `queen_timers_*` and `queen_sweeper_*` families are exposed by **every** broker, at zero on one that has never seen a key or a timer, because those surfaces are part of the engine rather than a feature a cell opts into. A dashboard panel or an alert built on them can therefore be written before the first tenant arrives, and a family that goes missing is a broker that is gone, not a feature that is off.
 
@@ -117,6 +117,12 @@ The `queen_kv_*`, `queen_timers_*` and `queen_sweeper_*` families are exposed by
 | `queen_db_pool_active` | gauge | Active pooled connections |
 | `queen_db_pool_idle` | gauge | Idle pooled connections |
 | `queen_db_pool_size` | gauge | Configured DB pool size |
+| `queen_ephemeral_bytes` | gauge | Bytes held by this broker's ephemeral rings |
+| `queen_ephemeral_dropped_total` | counter | Ephemeral messages dropped, by cause |
+| `queen_ephemeral_forwarded_total` | counter | Ephemeral requests relayed to the partition's rendezvous owner |
+| `queen_ephemeral_messages_total` | counter | Ephemeral messages by verb |
+| `queen_ephemeral_queues` | gauge | Ephemeral queues on this broker (declared + live implicit) |
+| `queen_ephemeral_wipes_total` | counter | Ephemeral rings dropped because their partition moved owner |
 | `queen_file_buffer_db_healthy` | gauge | File-buffer DB-reachability hint |
 | `queen_file_buffer_failed` | gauge | Spool write failures |
 | `queen_file_buffer_pending` | gauge | Spooled push events awaiting drain |

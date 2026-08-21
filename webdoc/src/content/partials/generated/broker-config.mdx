@@ -10,7 +10,7 @@ description: "Every environment variable the broker reads, with the default the 
       - server/src/fusion.rs (fusion-only overrides)
 */}
 
-The broker is configured entirely through environment variables: 138 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
+The broker is configured entirely through environment variables: 148 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
 
 Two columns record what a variable falls back to. **Also read as** is an older name for the same setting: either name configures the same thing, and the row's name wins when both are set. **Default inherited from** is a different knob whose value this one starts at when it is unset: setting that knob moves this variable and everything else that inherits from it, while setting this variable moves only this one.
 
@@ -63,6 +63,7 @@ Two columns record what a variable falls back to. **Also read as** is an older n
 | Variable | Type | Default | Default inherited from | Also read as |
 | --- | --- | --- | --- | --- |
 | `QUEEN_CACHE_REFRESH_INTERVAL_MS` | integer | `60000` |  |  |
+| `QUEEN_MESH_ADVERTISE_HOST` | string | `(empty)` |  |  |
 | `QUEEN_MESH_PEERS` | string | `(empty)` |  |  |
 | `QUEEN_MESH_PORT` | integer | `6633` |  | `QUEEN_UDP_NOTIFY_PORT` |
 | `QUEEN_SYNC_DEAD_THRESHOLD_MS` | integer | `5000` |  |  |
@@ -211,6 +212,20 @@ Two columns record what a variable falls back to. **Also read as** is an older n
 | `QUEEN_LOG_RATES_MS` | integer | `10000` |  |  |
 | `QUEEN_LOG_TOPN_QUEUES` | integer | `10` |  |  |
 | `RUST_LOG` | string | `&env_str("LOG_LEVEL", "info` |  |  |
+
+### Other
+
+| Variable | Type | Default | Default inherited from | Also read as |
+| --- | --- | --- | --- | --- |
+| `QUEEN_EPHEMERAL_BURST` | integer | `10_000` |  |  |
+| `QUEEN_EPHEMERAL_IMPLICIT_IDLE_S` | integer | `300` |  |  |
+| `QUEEN_EPHEMERAL_LEASE_S` | integer | `30` |  |  |
+| `QUEEN_EPHEMERAL_MAX_BYTES` | integer | `256 * 1024 * 1024` |  |  |
+| `QUEEN_EPHEMERAL_QUEUE_MAX_BYTES` | integer | `16 * 1024 * 1024` |  |  |
+| `QUEEN_EPHEMERAL_QUEUE_MAX_LENGTH` | integer | `10_000` |  |  |
+| `QUEEN_EPHEMERAL_RATE` | integer | `5000` |  |  |
+| `QUEEN_EPHEMERAL_REQUIRE_GRANT` | boolean | `tenancy_header` |  |  |
+| `QUEEN_EPHEMERAL_RETRY_LIMIT` | integer | `5` |  |  |
 
 ### Experiment-only
 

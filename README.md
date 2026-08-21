@@ -63,6 +63,7 @@ whatever your PostgreSQL already does.
 - **Windowed aggregation in the same transaction.** Tumbling, sliding, session and cron windows over a queue, with the window state, the emitted messages and the source acknowledgement committing together or not at all. No changelog topic, no state store, no second system.
 - **Exact, windowed deduplication.** A `transactionId` you supply makes a push idempotent inside a configurable window, enforced in the database rather than a cache.
 - **Transactional key/value state, and messages scheduled for later**, both committing with your acks and pushes rather than beside them. Behind flags, off by default: see [Key/value state and timers](#keyvalue-state-and-timers).
+- **A second storage class, for what should not be stored.** Ephemeral queues keep their contents in broker memory and survive nothing, so a request/reply inbox, a presence fan-out or a progress feed stops paying for a history nobody reads. See [Ephemeral queues](#ephemeral-queues).
 - **A dead-letter queue, tracing, and a dashboard**, all served by the same binary.
 - **Six client SDKs, an operator CLI, and a plain HTTP API**, so anything that can make an HTTP request is a first-class client.
 - **An embeddable engine.** The broker is a Rust library before it is a binary: a product can run the same engine inside its own process instead of shipping a second container. See [Embedding the engine](#embedding-the-engine).
@@ -177,6 +178,41 @@ Guides: **[queenmq.com/use/kv](https://queenmq.com/use/kv)** ·
 **[queenmq.com/use/timers](https://queenmq.com/use/timers)**. How they work:
 **[internals/kv](https://queenmq.com/internals/kv)** ·
 **[internals/timers](https://queenmq.com/internals/timers)**.
+
+## Ephemeral queues
+
+A queue whose contents live in the broker's memory and survive nothing: a clean exit, a crash, a
+deploy and a move to another broker each leave it empty, and none of those is a fault. What does
+survive is the configuration of a declared queue, which comes back as configured and empty. It is
+its own route family, `/api/v1/ephemeral/*`, and its own SDK namespace, `queen.ephemeral`, with
+six verbs and two status reads. It shares the broker process with the durable engine and nothing
+else: no table, no stored procedure, no code path.
+
+```js
+// An inbox nobody declared, created by the message that names it.
+await queen.ephemeral.push(`rpc-inbox-${id}`, [{ n, squared: n * n }])
+
+// A long poll parked on a memory gate: no database in the path, no polling interval.
+const { messages } = await queen.ephemeral.pop(`rpc-inbox-${id}`, {
+  wait: true, timeout: 5000, autoAck: true
+})
+```
+
+Three things to know before you reach for them:
+
+- **The class decides what can be lost, the ack mode decides the guarantee.** `autoAck` is
+  at-most-once. An explicit ack is at-least-once for as long as the owning broker lives, because an
+  unacknowledged message redelivers when its lease expires. Consumers still need to be idempotent,
+  exactly as on a durable queue.
+- **Consumption semantics come from the consumer group**, exactly as on a durable queue: one shared
+  group competes, a group per subscriber fans out, no group at all is queue mode. There is no
+  queue-level mode to choose.
+- **`ttlSeconds` is not `retention`.** It drops messages nobody consumed. Durable retention cleans
+  consumed history and never touches a pending message. One word per contract.
+
+Runnable: `examples/35-ephemeral-basics.js` and `examples/36-ephemeral-reqreply.js`.
+Guide: **[queenmq.com/use/ephemeral](https://queenmq.com/use/ephemeral)**. Routes:
+**[reference/http/ephemeral](https://queenmq.com/reference/http/ephemeral)**.
 
 ## Developing on Queen
 
