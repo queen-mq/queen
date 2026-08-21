@@ -49,7 +49,7 @@ else
 endif
 
 # Targets
-.PHONY: all test retry429 run-retry429 kvtimers run-kvtimers conflation run-conflation unit run-unit clean help
+.PHONY: all test retry429 run-retry429 kvtimers run-kvtimers conflation run-conflation ephemeral run-ephemeral unit run-unit clean help
 
 all: test
 
@@ -111,10 +111,27 @@ bin/test_conflation: test_conflation.cpp queen_client.hpp ../server/vendor/json.
 run-conflation: bin/test_conflation
 	./bin/test_conflation
 
-# Every suite that needs no broker, in one command.
-unit: retry429 kvtimers conflation
+# Build the ephemeral-queues wire suite (EPHEMERAL_QUEUES.md §3.1, §4, §7.3).
+# Broker-free like its siblings, and it has to be: the thing it pins hardest --
+# that a 404 from a pre-1.1 broker OR from a proxy that fails closed on unknown
+# API paths becomes ONE clear "upgrade" error rather than reading as "your queue
+# is missing" -- cannot be produced by any run against a broker that has the
+# routes.
+ephemeral: bin/test_ephemeral
+	@echo "Ephemeral wire test suite built successfully!"
+	@echo "Run with: ./bin/test_ephemeral"
 
-run-unit: run-retry429 run-kvtimers run-conflation
+bin/test_ephemeral: test_ephemeral.cpp queen_client.hpp ../server/vendor/json.hpp ../server/include/threadpool.hpp
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) $(INCLUDES) test_ephemeral.cpp -o bin/test_ephemeral $(LIBS)
+
+run-ephemeral: bin/test_ephemeral
+	./bin/test_ephemeral
+
+# Every suite that needs no broker, in one command.
+unit: retry429 kvtimers conflation ephemeral
+
+run-unit: run-retry429 run-kvtimers run-conflation run-ephemeral
 
 # Run tests (requires Queen server running)
 run-test: bin/test_client
@@ -170,6 +187,8 @@ help:
 	@echo "  make run-kvtimers - Build and run KV/timer wire tests (no server needed)"
 	@echo "  make conflation   - Build conflation wire contract tests"
 	@echo "  make run-conflation - Build and run conflation wire tests (no server needed)"
+	@echo "  make ephemeral    - Build ephemeral-queue wire contract tests"
+	@echo "  make run-ephemeral - Build and run ephemeral wire tests (no server needed)"
 	@echo "  make unit         - Build every suite that needs no broker"
 	@echo "  make run-unit     - Build and run every suite that needs no broker"
 	@echo "  make clean        - Remove build artifacts"

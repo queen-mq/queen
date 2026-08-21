@@ -12,12 +12,23 @@ class MessageBuffer
     private \Closure $flushCallback;
     private ?float $firstMessageTime = null;
     private bool $flushing = false;
+    private Destination $destination;
 
-    public function __construct(string $queueAddress, array $options, \Closure $flushCallback)
-    {
+    /**
+     * @param Destination|null $destination Where this buffer's batches are
+     *   posted (Buffer/Sink.php). Null means the DURABLE push — what every
+     *   caller that predates ephemeral queues gets without knowing sinks exist.
+     */
+    public function __construct(
+        string $queueAddress,
+        array $options,
+        \Closure $flushCallback,
+        ?Destination $destination = null
+    ) {
         $this->queueAddress = $queueAddress;
         $this->options = self::normalizeOptions($options);
         $this->flushCallback = $flushCallback;
+        $this->destination = $destination ?? Destination::durable();
     }
 
     /**
@@ -242,6 +253,12 @@ class MessageBuffer
     public function getOptions(): array
     {
         return $this->options;
+    }
+
+    /** Where this buffer's batches are posted, and in what envelope. */
+    public function getDestination(): Destination
+    {
+        return $this->destination;
     }
 
     public function getFirstMessageAge(): float

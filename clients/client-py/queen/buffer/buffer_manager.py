@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Set
 from ..errors import QueenError
 from ..utils import logger
 from .message_buffer import MessageBuffer
+from .sinks import Destination
 
 
 class BufferManager:
@@ -43,7 +44,11 @@ class BufferManager:
         self._lock = asyncio.Lock()
 
     async def add_message(
-        self, queue_address: str, formatted_message: Dict[str, Any], buffer_options: Dict[str, Any]
+        self,
+        queue_address: str,
+        formatted_message: Dict[str, Any],
+        buffer_options: Dict[str, Any],
+        destination: Optional[Destination] = None,
     ) -> None:
         """
         Add message to buffer, BLOCKING while that buffer is at its max_size.
@@ -58,6 +63,11 @@ class BufferManager:
             buffer_options: Buffer options (resolved by MessageBuffer; the
                 options of the FIRST push to an address configure the buffer for
                 its lifetime)
+            destination: Where this address drains to (buffer/sinks.py), read
+                ONLY when the buffer is created -- like the options above, the
+                first push to an address fixes it for the buffer's lifetime.
+                None means the durable push, which is what every caller that
+                predates ephemeral queues passes.
 
         Raises:
             QueenError: if the client has been closed
@@ -76,11 +86,17 @@ class BufferManager:
 
             buffer = self._buffers.get(queue_address)
             if buffer is None:
-                buffer = MessageBuffer(queue_address, buffer_options, self._schedule_flush)
+                buffer = MessageBuffer(
+                    queue_address, buffer_options, self._schedule_flush, destination
+                )
                 self._buffers[queue_address] = buffer
                 logger.log(
                     "BufferManager.createBuffer",
-                    {"queue_address": queue_address, "options": buffer.options},
+                    {
+                        "queue_address": queue_address,
+                        "options": buffer.options,
+                        "sink": buffer.destination.sink.name,
+                    },
                 )
 
         # Outside the registry lock, deliberately: this call can park.
@@ -133,6 +149,13 @@ class BufferManager:
         if not buffer.begin_flush():
             return
 
+        # WHERE a batch goes is the buffer's own destination (buffer/sinks.py),
+        # not a constant in this loop: everything below -- the claim, the
+        # re-queue at the front, the retry, the wake -- is about ordering,
+        # occupancy and loss, and none of it knows or needs to know which route
+        # the batch lands on.
+        sink, dest_queue, dest_partition = buffer.destination
+
         try:
             while True:
                 batch = buffer.take_batch()
@@ -140,7 +163,9 @@ class BufferManager:
                     return
 
                 try:
-                    await self._http_client.post("/api/v1/push", {"items": batch})
+                    await self._http_client.post(
+                        sink.path, sink.format(dest_queue, dest_partition, batch)
+                    )
                 except asyncio.CancelledError:
                     # Cancellation is not delivery. Put the batch back before
                     # unwinding, or a cancelled shutdown loses precisely what
@@ -171,6 +196,7 @@ class BufferManager:
                     "BufferManager.flushBuffer",
                     {
                         "queue_address": queue_address,
+                        "sink": sink.name,
                         "status": "success",
                         "messages_sent": len(batch),
                     },

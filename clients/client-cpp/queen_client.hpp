@@ -299,6 +299,44 @@ public:
     const std::string& group() const { return group_; }
 };
 
+/**
+ * The broker, or the proxy in front of it, is older than 1.1 and has no
+ * ephemeral routes at all (EPHEMERAL_QUEUES.md §4, §8).
+ *
+ * No SDK in this product negotiates capabilities, so there is nothing to probe
+ * and nothing to fall back to: the WHOLE /api/v1/ephemeral/* family answers 404
+ * -- the broker because the routes were never registered, the proxy because an
+ * unknown API path is `route_blocked` and it fails closed. Both are one verdict,
+ * "upgrade", and neither is "your queue is missing": the ephemeral verbs answer
+ * an absent queue with an ordinary body, never a 404.
+ *
+ * It derives from HttpError rather than std::runtime_error on purpose. A 404 IS
+ * an HTTP refusal, so every existing `catch (const HttpError&)` around a push or
+ * a pop keeps catching this one; what the distinct type buys is telling "your
+ * broker is too old" apart from any other refusal without matching on prose.
+ * `code()` is `ephemeral_unsupported` and `original_code()` is whatever the peer
+ * sent -- empty from a broker, `route_blocked` from a proxy -- because that is
+ * the evidence for the claim this exception makes.
+ */
+class EphemeralUnsupportedError : public HttpError {
+private:
+    std::string original_code_;
+
+public:
+    /** Verbatim across every SDK: operators grep this string. */
+    static constexpr const char* MESSAGE =
+        "broker/proxy does not support ephemeral queues (requires >= 1.1)";
+
+    explicit EphemeralUnsupportedError(const HttpError& cause)
+        : HttpError(cause.status_code(), MESSAGE, cause.body(), "ephemeral_unsupported",
+                    cause.retry_after_seconds()),
+          original_code_(cause.code()) {
+    }
+
+    /** The peer's own code, kept so the two 404s stay distinguishable in a log. */
+    const std::string& original_code() const { return original_code_; }
+};
+
 // ============================================================================
 // Utility Functions
 // ============================================================================
@@ -890,6 +928,70 @@ inline long long kv_int64(const json& value) {
 }
 
 // ============================================================================
+// Ephemeral queues - the options structs (EPHEMERAL_QUEUES.md §1, §3.1)
+// ============================================================================
+
+/**
+ * The seven knobs of `configure` (§3.1), and a CLOSED set by construction.
+ *
+ * The other SDKs refuse an unknown option key at runtime, because every one of
+ * these bounds something (bytes, length, age, redelivery) and a silently
+ * ignored `ttlSecond` is a ring that grows until a global budget answers 503.
+ * A struct makes that refusal a COMPILE error instead, which is the same rule
+ * enforced earlier.
+ *
+ * Unset fields are not sent, so the broker's own defaults own everything the
+ * caller did not name -- there is no client-side default here at all.
+ */
+struct EphemeralOptions {
+    /// Per-queue byte budget. Breaching it applies `policy`.
+    std::optional<long long> max_bytes;
+    /// Per-queue message budget. Breaching it applies `policy`.
+    std::optional<long long> max_length;
+    /// "reject" (429 queue_full) or "dropOldest" (feed semantics). Empty = unset.
+    std::string policy;
+    /// Drop messages older than this. NOT the durable `retention`, which cleans
+    /// consumed history and never touches pending.
+    std::optional<int> ttl_seconds;
+    /// Redelivery lease. An unacked message comes back when it expires.
+    std::optional<int> lease_seconds;
+    /// Attempts before a message is DROPPED and counted. There is no DLQ (§9).
+    std::optional<int> retry_limit;
+    /// {"ms": …, "count": …} -- let a waiting pop fatten its batch. Null = unset.
+    json window_buffer = nullptr;
+};
+
+/** `partition` picks the ring; empty leaves the choice to the broker. */
+struct EphemeralPushOptions {
+    std::string partition;
+};
+
+struct EphemeralPopOptions {
+    /// Empty = every partition of the queue, the broker's choice of order.
+    std::string partition;
+    /// 0 = unset, so the broker's own batch default applies.
+    int batch = 0;
+    /// A real long poll, parked on a RAM gate with no database behind it (§3.4).
+    bool wait = false;
+    /// Milliseconds. 0 with `wait` means the 30s default; ignored without it.
+    int timeout_millis = 0;
+    /// The WHOLE of the consumption semantics (§1.5): same group = competing
+    /// consumers, own group = fan-out, empty = the groupless queue mode.
+    std::string group;
+    /// Commit at delivery. At-most-once, and the only mode that is.
+    bool auto_ack = false;
+};
+
+struct EphemeralAckOptions {
+    /// Pass the same group the pop used -- cursors are per group.
+    std::string group;
+    /// "completed" (the broker's default), "failed" or "retry". Empty = unset.
+    std::string status;
+    /// Free-form, carried to the metrics and the log; empty = unset.
+    std::string error;
+};
+
+// ============================================================================
 // KV and timers - the ONE place operations are minted
 //
 // Every KV or timer operation this client sends is built here, whether it goes
@@ -1006,6 +1108,146 @@ inline json timer_cancel_op(const std::string& queue, const std::string& timer_k
  * feature, for instance -- into a business answer, and the caller would act on
  * a gate that never fired.
  */
+// ---------------------------------------------------------------------------
+// Ephemeral bodies (EPHEMERAL_QUEUES.md §3.1). Minted here, next to the KV and
+// timer ops, for the same reason: one place per wire shape.
+// ---------------------------------------------------------------------------
+
+/**
+ * One message on the ephemeral wire is `{payload}` and nothing else -- no
+ * transactionId, because there is no dedup index to hold one, and no queue or
+ * partition, because the envelope already carries them.
+ *
+ * The `{"data":…}` / `{"payload":…}` sugar is the durable push's, deliberately
+ * reproduced so one mental model covers both families, INCLUDING its trap: an
+ * object that happens to have a `data` key is read as the sugar, and its other
+ * keys do not travel. Wrap it -- `{"payload": obj}` -- when the object IS the
+ * payload.
+ */
+inline json eph_message(const json& item) {
+    if (item.is_null()) {
+        throw std::invalid_argument(
+            "ephemeral: a message may not be null; send {\"payload\": null} to push a null payload");
+    }
+    if (item.is_object()) {
+        if (item.contains("payload")) {
+            return json{{"payload", item["payload"]}};
+        }
+        if (item.contains("data")) {
+            return json{{"payload", item["data"]}};
+        }
+    }
+    return json{{"payload", item}};
+}
+
+inline json eph_messages(const json& messages) {
+    json out = json::array();
+    if (messages.is_array()) {
+        for (const auto& item : messages) {
+            out.push_back(eph_message(item));
+        }
+    } else {
+        out.push_back(eph_message(messages));
+    }
+    return out;
+}
+
+/** `{queue, partition?, messages:[{payload}…]}` -- identity on the ENVELOPE. */
+inline json eph_push_body(const std::string& queue, const std::string& partition,
+                          const json& messages) {
+    json body = {{"queue", queue}};
+    // Omitted, never defaulted client-side: which partition an ephemeral push
+    // without one lands on is the broker's rule, and inventing a "Default" here
+    // would take that decision away from it in a way the caller never asked for.
+    if (!partition.empty()) {
+        body["partition"] = partition;
+    }
+    body["messages"] = eph_messages(messages);
+    return body;
+}
+
+/** Only the options the caller set, in the plan's order. */
+inline json eph_configure_body(const std::string& queue, const EphemeralOptions& options) {
+    json opts = json::object();
+    if (options.max_bytes.has_value()) {
+        opts["maxBytes"] = *options.max_bytes;
+    }
+    if (options.max_length.has_value()) {
+        opts["maxLength"] = *options.max_length;
+    }
+    if (!options.policy.empty()) {
+        opts["policy"] = options.policy;
+    }
+    if (options.ttl_seconds.has_value()) {
+        opts["ttlSeconds"] = *options.ttl_seconds;
+    }
+    if (options.lease_seconds.has_value()) {
+        opts["leaseSeconds"] = *options.lease_seconds;
+    }
+    if (options.retry_limit.has_value()) {
+        opts["retryLimit"] = *options.retry_limit;
+    }
+    if (!options.window_buffer.is_null()) {
+        opts["windowBuffer"] = options.window_buffer;
+    }
+    return json{{"queue", queue}, {"options", opts}};
+}
+
+/**
+ * An ack entry is `{id, status?, error?}`. Accepts a popped message, a bare id
+ * string, or the wire object itself; a per-entry status wins over the call-wide
+ * default, which is how a mixed batch (some completed, one retry) is expressed
+ * in a single request.
+ */
+inline json eph_ack_entry(const json& entry, size_t index, const EphemeralAckOptions& options) {
+    std::string id;
+    if (entry.is_string()) {
+        id = entry.get<std::string>();
+    } else if (entry.is_object() && entry.contains("id") && entry["id"].is_string()) {
+        id = entry["id"].get<std::string>();
+    }
+    if (id.empty()) {
+        throw std::invalid_argument(
+            "ephemeral: ack at index " + std::to_string(index) +
+            " carries no message id; pass the popped message, or its `id`");
+    }
+
+    json ack = {{"id", id}};
+
+    if (entry.is_object() && entry.contains("status") && entry["status"].is_string()) {
+        ack["status"] = entry["status"];
+    } else if (!options.status.empty()) {
+        ack["status"] = options.status;
+    }
+
+    if (entry.is_object() && entry.contains("error") && entry["error"].is_string()) {
+        ack["error"] = entry["error"];
+    } else if (!options.error.empty()) {
+        ack["error"] = options.error;
+    }
+
+    return ack;
+}
+
+inline json eph_ack_body(const std::string& queue, const json& acks,
+                         const EphemeralAckOptions& options) {
+    json entries = json::array();
+    if (acks.is_array()) {
+        for (size_t i = 0; i < acks.size(); ++i) {
+            entries.push_back(eph_ack_entry(acks[i], i, options));
+        }
+    } else {
+        entries.push_back(eph_ack_entry(acks, 0, options));
+    }
+
+    json body = {{"queue", queue}};
+    if (!options.group.empty()) {
+        body["group"] = options.group;
+    }
+    body["acks"] = entries;
+    return body;
+}
+
 inline json single_result(const json& response, const char* what) {
     if (response.is_object() && response.contains("results") && response["results"].is_array() &&
         !response["results"].empty()) {
@@ -2157,6 +2399,294 @@ public:
 };
 
 // ============================================================================
+// EphemeralBuilder - RAM-class queues (EPHEMERAL_QUEUES.md §1, §3.1, §4)
+//
+// Eight verbs over one route family, /api/v1/ephemeral/*: configure, reset,
+// del, push, pop, ack, queues, depth. Flat methods, not a builder chain -- the
+// durable queue("x").partition("p").push(...) fluency exists because a durable
+// queue has a dozen configured properties that read well as a sentence; an
+// ephemeral queue has a ring in a broker's RAM and a handful of bounds, and a
+// chain would only hide how few moving parts there are.
+//
+// WHAT THIS CLASS IS ABOUT, BEFORE ANY SIGNATURE: contents survive NOTHING
+// (§1.2). Not a restart, not a crash, not a deploy, not the ownership move a
+// membership change causes. Treat a failover like a Redis restart. Declared
+// CONFIGURATION is durable -- it lives in PG and comes back after a restart, as
+// configured and EMPTY. There is no replay, no history, no subscriptionMode and
+// no DLQ, because none of those concepts has a referent when there is no
+// history to have.
+//
+// DELIVERY IS NOT "AT MOST ONCE" (§1.3), and the docs must not say it is. The
+// class picks what can be LOST; the ack mode picks the guarantee. `auto_ack`
+// advances the cursor at delivery and is at-most-once. The default -- explicit
+// ack -- is at-least-once for as long as the owning broker incarnation lives:
+// an unacked message redelivers when its lease expires, with `attempts`
+// incremented, until retryLimit, after which it is DROPPED and counted.
+// Consumers still need idempotency, exactly as on durable queues.
+//
+// CONSUMPTION SEMANTICS COME FROM THE GROUP, EXACTLY AS ON THE DURABLE ENGINE
+// (§1.5): same group = competing consumers, own group = fan-out, no group = the
+// queue mode. There is no queue-level mode to choose.
+//
+// WHAT THIS CLIENT DOES NOT HAVE, and why. The JS, Python and PHP SDKs also
+// offer a BUFFERED ephemeral push, which reuses their 1.0.6 buffer machinery
+// through a parametrized drain (§4.1). This client's BufferManager predates
+// that rewrite -- it has no maxSize bound, no re-queue of a failed batch at the
+// front, and it drops what it could not send -- so there is no sink-shaped seam
+// to reuse here, and bolting one on would advertise a durability story this
+// client cannot honour on the durable path either. Ephemeral pushes here are
+// unbuffered; when the C++ buffer is brought up to the 1.0.6 contract, the sink
+// parameter lands with it.
+// ============================================================================
+
+class EphemeralBuilder {
+private:
+    std::shared_ptr<HttpClient> http_client_;
+
+    /** Long-poll default, matching the durable pop's, when wait is asked for. */
+    static constexpr int DEFAULT_WAIT_TIMEOUT_MILLIS = 30000;
+
+    /**
+     * The HTTP deadline must outlive the server's own long-poll timeout, or the
+     * client aborts a request the broker was about to answer. Same 5s slack the
+     * durable pop uses.
+     */
+    static constexpr int WAIT_TIMEOUT_SLACK_MILLIS = 5000;
+
+    static void require_queue(const std::string& queue) {
+        if (queue.empty()) {
+            throw std::invalid_argument("ephemeral: queue must be a non-empty string");
+        }
+    }
+
+    /**
+     * Every request in this class goes through here, so the 404 rule has ONE
+     * home. An old broker 404s because the routes do not exist; an old proxy
+     * 404s `route_blocked` because it fails closed on unknown API paths. Both
+     * are "upgrade", and neither is "your queue is missing" -- the ephemeral
+     * verbs answer an absent queue with a normal body.
+     */
+    template <typename Fn>
+    json call(Fn&& fn) {
+        try {
+            return fn();
+        } catch (const EphemeralUnsupportedError&) {
+            throw;
+        } catch (const HttpError& error) {
+            if (error.status_code() == 404) {
+                throw EphemeralUnsupportedError(error);
+            }
+            throw;
+        }
+    }
+
+public:
+    explicit EphemeralBuilder(std::shared_ptr<HttpClient> http_client)
+        : http_client_(http_client) {
+    }
+
+    // ---------------------------------------------------------------- declare
+
+    /**
+     * Declare a queue and its bounds. Persists the OPTIONS in PG (§1.1): the
+     * configuration survives a restart, the contents never do, and the queue
+     * comes back declared and empty.
+     *
+     * Optional in every sense -- a push or a pop that names an unknown queue
+     * creates it implicitly with the tenant defaults. Declare when you want
+     * non-default bounds, or when you want the queue to exist in the dashboard
+     * before its first message.
+     */
+    json configure(const std::string& queue,
+                   const EphemeralOptions& options = EphemeralOptions()) {
+        require_queue(queue);
+        return call([&] {
+            return http_client_->post("/api/v1/ephemeral/configure",
+                                      wire::eph_configure_body(queue, options));
+        });
+    }
+
+    /**
+     * Drop every message, void every lease, rewind every group cursor. Answers
+     * {dropped}.
+     *
+     * A verb that would be indefensible on a durable queue and is merely honest
+     * here: it destroys nothing the class ever promised to keep (§1.2). The
+     * declared configuration stays.
+     */
+    json reset(const std::string& queue) {
+        require_queue(queue);
+        return call([&] {
+            return http_client_->post("/api/v1/ephemeral/reset", json{{"queue", queue}});
+        });
+    }
+
+    /**
+     * Delete the queue: contents, cursors, and the declared configuration in
+     * PG. Named `del` because `delete` is a keyword, exactly as on KvBuilder.
+     */
+    json del(const std::string& queue) {
+        require_queue(queue);
+        return call([&] {
+            return http_client_->del("/api/v1/ephemeral/queue/" + util::url_encode(queue));
+        });
+    }
+
+    // ------------------------------------------------------------------- push
+
+    /**
+     * Push one message or many. All-or-nothing per request; answers {pushed}.
+     *
+     *     client.ephemeral().push("presence", json::array({{{"typing", true}}}));
+     *     client.ephemeral().push("presence", msgs, {"room-7"});
+     *
+     * Each message may be a bare value, {"payload": …} or {"data": …} -- the
+     * durable push's sugar, trap included (see wire::eph_message).
+     */
+    json push(const std::string& queue, const json& messages,
+              const EphemeralPushOptions& options = EphemeralPushOptions()) {
+        require_queue(queue);
+        if (messages.is_array() && messages.empty()) {
+            return json{{"pushed", 0}};
+        }
+        json body = wire::eph_push_body(queue, options.partition, messages);
+        return call([&] {
+            return http_client_->post("/api/v1/ephemeral/push", body);
+        });
+    }
+
+    // -------------------------------------------------------------------- pop
+
+    /**
+     * Take up to `batch` messages. Answers {queue, messages}, with `messages`
+     * an EMPTY ARRAY when there was nothing -- never null, so iterating the
+     * result is always safe even on an idle queue or a bodiless 204.
+     *
+     * Each message is {id, partition, payload, attempts}. The `id` is opaque:
+     * it encodes the owning broker incarnation, which is what lets an ack that
+     * arrives after a restart or an ownership move answer `stale` instead of
+     * acking somebody else's message.
+     *
+     * `wait` is a real long poll (§3.4) -- no database behind it and no polling
+     * interval anywhere, which is the structural reason an ephemeral inbox
+     * answers in transport time. The HTTP deadline is set past the broker's own
+     * timeout so the broker's timeout always fires first.
+     */
+    json pop(const std::string& queue,
+             const EphemeralPopOptions& options = EphemeralPopOptions()) {
+        require_queue(queue);
+
+        int timeout_millis = options.timeout_millis > 0 ? options.timeout_millis
+                                                        : DEFAULT_WAIT_TIMEOUT_MILLIS;
+
+        std::stringstream path;
+        path << "/api/v1/ephemeral/pop?queue=" << util::url_encode(queue);
+        if (!options.partition.empty()) {
+            path << "&partition=" << util::url_encode(options.partition);
+        }
+        if (options.batch > 0) {
+            path << "&batch=" << options.batch;
+        }
+        // Sent only when true, so a plain pop is the shortest query this route
+        // can receive and the broker's own defaults own everything else.
+        if (options.wait) {
+            path << "&wait=true";
+            path << "&timeout=" << timeout_millis;
+        }
+        if (!options.group.empty()) {
+            path << "&group=" << util::url_encode(options.group);
+        }
+        if (options.auto_ack) {
+            path << "&autoAck=true";
+        }
+
+        json result = call([&] {
+            return http_client_->get(
+                path.str(),
+                options.wait ? timeout_millis + WAIT_TIMEOUT_SLACK_MILLIS : 0,
+                // A long poll that meets a 429 should back off and keep waiting
+                // rather than give up after a handful of tries.
+                options.wait ? RetryKind::Pop : RetryKind::Default);
+        });
+
+        json messages = json::array();
+        if (result.is_object() && result.contains("messages") && result["messages"].is_array()) {
+            for (const auto& message : result["messages"]) {
+                if (!message.is_null()) {
+                    messages.push_back(message);
+                }
+            }
+        }
+
+        std::string answered_queue = queue;
+        if (result.is_object() && result.contains("queue") && result["queue"].is_string()) {
+            answered_queue = result["queue"].get<std::string>();
+        }
+
+        return json{{"queue", answered_queue}, {"messages", messages}};
+    }
+
+    // -------------------------------------------------------------------- ack
+
+    /**
+     * Acknowledge popped messages. Answers {results:[{id, outcome}]} with
+     * `outcome` in {acked, redelivered, stale, unknown}.
+     *
+     * `stale` is NOT an error and never arrives as one: it is the answer to an
+     * ack whose message belonged to a previous incarnation of the ring, which
+     * is how this class fences a restart or an ownership move without a lease
+     * protocol.
+     *
+     * A failed or retried message comes back with attempts+1 until retryLimit,
+     * then it is dropped and counted. There is no DLQ.
+     */
+    json ack(const std::string& queue, const json& acks,
+             const EphemeralAckOptions& options = EphemeralAckOptions()) {
+        require_queue(queue);
+        if (acks.is_array() && acks.empty()) {
+            return json{{"results", json::array()}};
+        }
+        json body = wire::eph_ack_body(queue, acks, options);
+        return call([&] {
+            return http_client_->post("/api/v1/ephemeral/ack", body);
+        });
+    }
+
+    /** The boolean sugar: true is `completed`, false is `failed`. */
+    json ack(const std::string& queue, const json& acks, bool status,
+             const std::string& group = "") {
+        EphemeralAckOptions options;
+        options.group = group;
+        options.status = status ? "completed" : "failed";
+        return ack(queue, acks, options);
+    }
+
+    // ----------------------------------------------------------------- status
+
+    /**
+     * Every ephemeral queue this tenant currently has, declared and implicit.
+     *
+     * Free to poll: the gauges are read out of the broker's own memory, with no
+     * database behind them -- unlike the durable meter, whose 1s poll is
+     * load-bearing on PG.
+     */
+    json queues() {
+        return call([&] {
+            return http_client_->get("/api/v1/ephemeral/queues");
+        });
+    }
+
+    /** Depth gauges for one queue: ring length, bytes, and the group cursors. */
+    json depth(const std::string& queue) {
+        require_queue(queue);
+        return call([&] {
+            return http_client_->get("/api/v1/ephemeral/queues/" + util::url_encode(queue) +
+                                     "/depth");
+        });
+    }
+};
+
+// ============================================================================
 // DLQBuilder - Dead Letter Queue query builder
 // ============================================================================
 
@@ -2738,6 +3268,24 @@ public:
      */
     TimersBuilder timers() {
         return TimersBuilder(http_client_);
+    }
+
+    /**
+     * RAM-class queues (EPHEMERAL_QUEUES.md §1, §3.1).
+     *
+     * Read the note on EphemeralBuilder once: the contents survive NOTHING --
+     * treat a failover like a Redis restart -- while a declared configuration is
+     * durable and comes back EMPTY. Consumption semantics come from the pop's
+     * `group`, exactly as on the durable engine; there is no queue-level mode.
+     *
+     * Unlike kv() and timers(), this surface has a VERSION FLOOR. A broker or
+     * proxy older than 1.1 has no such routes and answers 404 on every one of
+     * them, which this surface maps to EphemeralUnsupportedError -- there is no
+     * capability negotiation anywhere in this SDK, so the refusal is the only
+     * signal there is.
+     */
+    EphemeralBuilder ephemeral() {
+        return EphemeralBuilder(http_client_);
     }
 
     json ack(const json& message, bool status = true, const json& context = json::object()) {

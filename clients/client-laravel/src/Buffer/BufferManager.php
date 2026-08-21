@@ -17,13 +17,25 @@ class BufferManager
         $this->httpClient = $httpClient;
     }
 
-    public function addMessage(string $queueAddress, array $formattedMessage, array $bufferOptions): void
-    {
+    /**
+     * @param Destination|null $destination Where this address drains to
+     *   (Buffer/Sink.php), read ONLY when the buffer is created — like the
+     *   options beside it, the first push to an address fixes it for the
+     *   buffer's lifetime. Null means the durable push, which is what every
+     *   caller that predates ephemeral queues passes.
+     */
+    public function addMessage(
+        string $queueAddress,
+        array $formattedMessage,
+        array $bufferOptions,
+        ?Destination $destination = null
+    ): void {
         if (!isset($this->buffers[$queueAddress])) {
             $this->buffers[$queueAddress] = new MessageBuffer(
                 $queueAddress,
                 MessageBuffer::normalizeOptions($bufferOptions),
-                fn(string $addr) => $this->doFlush($addr)
+                fn(string $addr) => $this->doFlush($addr),
+                $destination
             );
         }
 
@@ -93,6 +105,11 @@ class BufferManager
         $batchSize = $options['messageCount'];
         $retryDelayMicros = (int) ($options['retryDelayMillis'] * 1000);
         $deadline = microtime(true) + ($options['maxWaitMillis'] / 1000);
+        // WHERE a batch goes is the buffer's own destination (Buffer/Sink.php),
+        // not a constant in this loop: everything below — the extract, the
+        // restore at the front, the retry, the deadline — is about ordering and
+        // loss, and none of it knows or needs to know which route it lands on.
+        $destination = $buffer->getDestination();
 
         while ($buffer->getMessageCount() > 0) {
             $buffer->setFlushing(true);
@@ -102,7 +119,7 @@ class BufferManager
             }
 
             try {
-                $this->httpClient->post('/api/v1/push', ['items' => $messages]);
+                $this->httpClient->post($destination->sink->path, $destination->format($messages));
                 $this->flushCount++;
             } catch (\Throwable $error) {
                 $buffer->restoreMessages($messages);
@@ -157,6 +174,7 @@ class BufferManager
         // Collect all batches from all buffers
         $batches = []; // [[messages, address], ...]
         $optionsByAddress = [];
+        $destinationByAddress = [];
         foreach ($addresses as $address) {
             $buffer = $this->buffers[$address] ?? null;
             if ($buffer === null || $buffer->getMessageCount() === 0) {
@@ -165,6 +183,7 @@ class BufferManager
 
             $options = $buffer->getOptions();
             $optionsByAddress[$address] = $options;
+            $destinationByAddress[$address] = $buffer->getDestination();
             $batchSize = $options['messageCount'];
             $buffer->setFlushing(true);
 
@@ -186,7 +205,14 @@ class BufferManager
         // Send all batches concurrently
         $promises = [];
         foreach ($batches as $i => [$messages, $address]) {
-            $promises[$i] = $this->httpClient->postAsync('/api/v1/push', ['items' => $messages]);
+            // Each address keeps its own route and envelope here too: a
+            // concurrent pass that posted every batch to the durable path would
+            // deliver an ephemeral queue's messages to the log engine.
+            $destination = $destinationByAddress[$address] ?? Destination::durable();
+            $promises[$i] = $this->httpClient->postAsync(
+                $destination->sink->path,
+                $destination->format($messages)
+            );
         }
 
         $results = HttpClient::settleAll($promises);
@@ -219,7 +245,12 @@ class BufferManager
                 $this->buffers[$address] = new MessageBuffer(
                     $address,
                     $optionsByAddress[$address] ?? Defaults::BUFFER_DEFAULTS,
-                    fn(string $addr) => $this->doFlush($addr)
+                    fn(string $addr) => $this->doFlush($addr),
+                    // Its OWN destination, for the same reason as its own
+                    // options: a re-created buffer that fell back to the
+                    // durable sink would retry an ephemeral queue's batch
+                    // against /api/v1/push and quietly change its storage class.
+                    $destinationByAddress[$address] ?? null
                 );
             }
             $this->buffers[$address]->restoreMessages($messages);
