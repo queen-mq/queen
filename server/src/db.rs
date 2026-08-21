@@ -316,20 +316,22 @@ pub async fn pop_specific(
     sub_mode: &str,
     sub_from: &str,
     tenant: &str,
+    conflate: bool,
 ) -> Result<String, tokio_postgres::Error> {
     // Track B (§5): $10 = tenant, threaded into log_pop_specific_v1 (which
     // forwards it to log_pop_v1's p_tenant AND uses it for the partition-id
     // resolution — now ordered AFTER the claim inside the volatile function).
+    // PLAN_CONFLATION §3.2: $11 = the EFFECTIVE conflation policy (§3.3).
     let stmt = client
         .prepare_cached(
-            "SELECT (queen.log_pop_specific_v1($1, $2, $3, $4::int, $5::int, $6, $7::bool, $8, $9, $10::text::uuid))::text",
+            "SELECT (queen.log_pop_specific_v1($1, $2, $3, $4::int, $5::int, $6, $7::bool, $8, $9, $10::text::uuid, $11::bool))::text",
         )
         .await?;
     let row = client
         .query_one(
             &stmt,
             &[&queue, &partition, &group, &budget, &lease_seconds, &worker, &auto_ack,
-              &sub_mode, &sub_from, &tenant],
+              &sub_mode, &sub_from, &tenant, &conflate],
         )
         .await?;
     Ok(row.get(0))
@@ -357,22 +359,28 @@ pub async fn pop_list(
     sub_from: &str,
     skip_window: bool,
     tenant: &str,
+    conflate: bool,
 ) -> Result<(String, Vec<Vec<u8>>, String), tokio_postgres::Error> {
     let stmt = client
-        .prepare_cached(
-            "SELECT (t.meta)::text, t.blobs, (t.states)::text \
-             FROM queen.log_pop_list_v1($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::text::uuid) t",
-        )
+        .prepare_cached(POP_LIST_SQL)
         .await?;
     let row = client
         .query_one(
             &stmt,
             &[&queue, &group, &partitions, &budget, &lease_seconds, &worker, &auto_ack,
-              &max_partitions, &sub_mode, &sub_from, &skip_window, &tenant],
+              &max_partitions, &sub_mode, &sub_from, &skip_window, &tenant, &conflate],
         )
         .await?;
     Ok((row.get(0), row.get(1), row.get(2)))
 }
+
+// The ONE statement text both pop_list and pop_list_tx prepare. Sharing the
+// constant is what makes "identical text" a property of the code rather than of
+// two strings that happen to match: the prepared-statement cache is keyed by the
+// text, so the direct path and the pop-fusion path reuse one prepared statement
+// (and the SQL contract is provably the same for both).
+const POP_LIST_SQL: &str = "SELECT (t.meta)::text, t.blobs, (t.states)::text \
+     FROM queen.log_pop_list_v1($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::text::uuid,$13::bool) t";
 
 // pop_list inside a caller-owned TRANSACTION — the pop-fusion flush path
 // (server/src/pop_fusion.rs): N of these share one transaction / one commit.
@@ -393,18 +401,14 @@ pub async fn pop_list_tx(
     sub_from: &str,
     skip_window: bool,
     tenant: &str,
+    conflate: bool,
 ) -> Result<(String, Vec<Vec<u8>>, String), tokio_postgres::Error> {
-    let stmt = tx
-        .prepare_cached(
-            "SELECT (t.meta)::text, t.blobs, (t.states)::text \
-             FROM queen.log_pop_list_v1($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::text::uuid) t",
-        )
-        .await?;
+    let stmt = tx.prepare_cached(POP_LIST_SQL).await?;
     let row = tx
         .query_one(
             &stmt,
             &[&queue, &group, &partitions, &budget, &lease_seconds, &worker, &auto_ack,
-              &max_partitions, &sub_mode, &sub_from, &skip_window, &tenant],
+              &max_partitions, &sub_mode, &sub_from, &skip_window, &tenant, &conflate],
         )
         .await?;
     Ok((row.get(0), row.get(1), row.get(2)))
@@ -642,26 +646,34 @@ pub async fn discover_has_pending(
 // INSERT storm the seed prevents. One indexed point lookup on the cgm_identity_uk
 // (tenant_id, consumer_group, queue_id, partition_name, …) unique index, keyed by
 // the queue id resolved through queen.queues; non-locking.
-pub async fn group_seed_marker_exists(
+// PLAN_CONFLATION §3.2: the same probe now RETURNS the row's delivery policy
+// instead of a bare EXISTS — `Some(conflation)` when the marker row exists,
+// `None` when the group is unregistered on this queue. The presence half is
+// unchanged (it still gates the targeted/ring fast path); the payload is what
+// makes SQL the authority on conflation (§3.3) at zero extra cost, since the
+// broker already pays this one indexed lookup exactly once per (queue, group)
+// per process.
+pub async fn group_policy_lookup(
     client: &deadpool_postgres::Client,
     queue: &str,
     group: &str,
     tenant: &str,
-) -> Result<bool, tokio_postgres::Error> {
+) -> Result<Option<bool>, tokio_postgres::Error> {
     // Queue identity is now the queen.queues id: the marker row carries queue_id,
     // so the probe resolves the (name, tenant) pair through queen.queues — tenant
     // scoping is inherited from the queue row, and tenant A's seed can never gate
     // tenant B's targeted-pop fast path on a same-named (queue, group).
     let stmt = client
         .prepare_cached(
-            "SELECT EXISTS(SELECT 1 FROM queen.consumer_groups_metadata m \
+            "SELECT m.conflation FROM queen.consumer_groups_metadata m \
              JOIN queen.queues q ON q.id = m.queue_id \
              WHERE m.consumer_group = $1 AND q.name = $2 AND m.partition_name = '' \
-               AND q.tenant_id = $3::text::uuid)",
+               AND q.tenant_id = $3::text::uuid \
+             LIMIT 1",
         )
         .await?;
-    let row = client.query_one(&stmt, &[&group, &queue, &tenant]).await?;
-    Ok(row.get(0))
+    let rows = client.query(&stmt, &[&group, &queue, &tenant]).await?;
+    Ok(rows.first().map(|r| r.get::<_, bool>(0)))
 }
 
 // Renew every live lease held by `worker` via queen.log_renew_lease_v1
@@ -1703,17 +1715,21 @@ pub async fn pop_wildcard_bin(
     // Track B (§5): $10 = tenant, scopes the wildcard candidate scan (default
     // tenant when the feature is off ⇒ byte-identical claim set).
     tenant: &str,
+    // PLAN_CONFLATION §3.2: $11 = the EFFECTIVE conflation policy (§3.3). This
+    // call is also the REGISTRAR for a first-contact group, so the value it
+    // carries is what the durable row stores.
+    conflate: bool,
 ) -> Result<(String, Vec<Vec<u8>>), tokio_postgres::Error> {
     let stmt = client
         .prepare_cached(
-            "SELECT (t.meta)::text, t.blobs FROM queen.log_pop_wildcard_bin_v1($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::text::uuid) t",
+            "SELECT (t.meta)::text, t.blobs FROM queen.log_pop_wildcard_bin_v1($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::text::uuid,$11::bool) t",
         )
         .await?;
     let row = client
         .query_one(
             &stmt,
             &[&queue, &group, &budget, &lease_seconds, &worker, &auto_ack,
-              &max_partitions, &sub_mode, &sub_from, &tenant],
+              &max_partitions, &sub_mode, &sub_from, &tenant, &conflate],
         )
         .await?;
     Ok((row.get(0), row.get(1)))
@@ -1742,17 +1758,19 @@ pub async fn pop_discover(
     // Track B (§5): $11 = tenant, scopes the namespace/task queue set the discovery
     // pop wildcard-scans (default tenant when off).
     tenant: &str,
+    // PLAN_CONFLATION §3.2: $12 = the EFFECTIVE conflation policy (§3.3).
+    conflate: bool,
 ) -> Result<String, tokio_postgres::Error> {
     let stmt = client
         .prepare_cached(
-            "SELECT (queen.log_pop_discover_wire_v1($1, $2, $3, $4::int, $5::int, $6, $7::bool, $8::int, $9, $10, $11::text::uuid))::text",
+            "SELECT (queen.log_pop_discover_wire_v1($1, $2, $3, $4::int, $5::int, $6, $7::bool, $8::int, $9, $10, $11::text::uuid, $12::bool))::text",
         )
         .await?;
     let row = client
         .query_one(
             &stmt,
             &[&namespace, &task, &group, &budget, &lease_seconds, &worker,
-              &auto_ack, &max_partitions, &sub_mode, &sub_from, &tenant],
+              &auto_ack, &max_partitions, &sub_mode, &sub_from, &tenant, &conflate],
         )
         .await?;
     Ok(row.get(0))

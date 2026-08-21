@@ -491,19 +491,41 @@
             <div class="entity-head">
               <span class="status-dot" :class="cgDotClass(g)" />
               <span class="entity-name">{{ g.queueName || '?' }}</span>
-              <span class="entity-right num" :class="lagNumClass(g.maxTimeLag)">
+              <!-- A conflating group is delivered ONE message per partition —
+                   the newest — so the partitions still to visit are the whole
+                   of the work left, and they take the lead figure. Its message
+                   backlog is log depth and is named as such on the meta line
+                   below, next to the time lag this slot normally carries. -->
+              <span
+                v-if="isConflating(g)"
+                class="entity-right num"
+                :class="{ warn: (g.partitionsWithLag || 0) > 0 }"
+              >
+                {{ (g.partitionsWithLag || 0) > 0 ? `${g.partitionsWithLag} behind` : '—' }}
+              </span>
+              <span v-else class="entity-right num" :class="lagNumClass(g.maxTimeLag)">
                 {{ (g.maxTimeLag || 0) > 0 ? fmtLagSeconds(g.maxTimeLag) : '—' }}
               </span>
             </div>
             <div class="entity-meta">
               <span class="meta-text">
                 <span v-if="g.name === '__QUEUE_MODE__'" class="meta-tag">queue mode</span>
-                <span v-else><strong>{{ g.name }}</strong></span>
+                <span v-if="isConflating(g)" class="meta-tag meta-tag-cfl">conflation</span>
+                <span v-if="g.name !== '__QUEUE_MODE__'"><strong>{{ g.name }}</strong></span>
+                <!-- Conflating: the two numbers that reframe the row lead the
+                     line. It is one ellipsised row, and what a narrow window
+                     eats is the tail — which must not be the word "log". -->
+                <template v-if="isConflating(g)">
+                  <span class="meta-sep">·</span>
+                  <span class="num">{{ formatNumber(g.totalLag || 0) }} log lag</span>
+                  <span class="meta-sep">·</span>
+                  <span class="num" :class="lagNumClass(g.maxTimeLag)">{{ (g.maxTimeLag || 0) > 0 ? fmtLagSeconds(g.maxTimeLag) : '0s' }} time lag</span>
+                </template>
                 <span class="meta-sep">·</span>
                 <!-- One row per (partition, group) cursor — NOT a consumer
                      count: one process on a 32-partition queue is 32 rows. -->
                 {{ g.members || 0 }} {{ (g.members || 0) === 1 ? 'partition' : 'partitions' }} assigned
-                <template v-if="(g.partitionsWithLag || 0) > 0">
+                <template v-if="!isConflating(g) && (g.partitionsWithLag || 0) > 0">
                   <span class="meta-sep">·</span>
                   <span class="num warn">{{ g.partitionsWithLag }} lagging</span>
                 </template>
@@ -536,6 +558,7 @@ import {
   useApi, formatNumber, toNum, latestFinite, trimIncompleteBuckets,
 } from '@/composables/useApi'
 import { formatChartLabel } from '@/composables/useFormat'
+import { isConflating } from '@/composables/useConflation'
 import { semanticColors } from '@/composables/useChartTheme'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
@@ -1472,6 +1495,14 @@ onMounted(fetchAll)
   font-weight: 500;
   letter-spacing: .02em;
   margin-right: 2px;
+}
+/* Conflation is a declared delivery policy, not a severity: the app's "idle,
+   proven" ice tone (the token .chip-ice uses), same tag on every surface that
+   names a consumer group. */
+.meta-tag-cfl {
+  border-color: var(--ice-bd);
+  background: var(--ice-glow);
+  color: var(--ice-400);
 }
 
 .card-foot {

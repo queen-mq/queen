@@ -49,7 +49,7 @@ else
 endif
 
 # Targets
-.PHONY: all test retry429 run-retry429 kvtimers run-kvtimers unit run-unit clean help
+.PHONY: all test retry429 run-retry429 kvtimers run-kvtimers conflation run-conflation unit run-unit clean help
 
 all: test
 
@@ -94,10 +94,27 @@ bin/test_kv_timers: test_kv_timers.cpp queen_client.hpp ../server/vendor/json.hp
 run-kvtimers: bin/test_kv_timers
 	./bin/test_kv_timers
 
-# Every suite that needs no broker, in one command.
-unit: retry429 kvtimers
+# Build the conflation wire-contract suite (PLAN_CONFLATION.md §4, §3.1). Also
+# broker-free, and it has to be: the two things it pins -- that an old broker's
+# missing "conflation":true echo raises instead of silently draining a backlog,
+# and that a declaration conflict warns exactly ONCE per (queue, group) -- are
+# both invisible to an end-to-end run against a live 1.1.0 broker, which can
+# never produce the first response and cannot count the second.
+conflation: bin/test_conflation
+	@echo "Conflation wire test suite built successfully!"
+	@echo "Run with: ./bin/test_conflation"
 
-run-unit: run-retry429 run-kvtimers
+bin/test_conflation: test_conflation.cpp queen_client.hpp ../server/vendor/json.hpp ../server/include/threadpool.hpp
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) $(INCLUDES) test_conflation.cpp -o bin/test_conflation $(LIBS)
+
+run-conflation: bin/test_conflation
+	./bin/test_conflation
+
+# Every suite that needs no broker, in one command.
+unit: retry429 kvtimers conflation
+
+run-unit: run-retry429 run-kvtimers run-conflation
 
 # Run tests (requires Queen server running)
 run-test: bin/test_client
@@ -151,6 +168,8 @@ help:
 	@echo "  make run-retry429 - Build and run proxy contract tests (no server needed)"
 	@echo "  make kvtimers     - Build KV/timer wire contract tests"
 	@echo "  make run-kvtimers - Build and run KV/timer wire tests (no server needed)"
+	@echo "  make conflation   - Build conflation wire contract tests"
+	@echo "  make run-conflation - Build and run conflation wire tests (no server needed)"
 	@echo "  make unit         - Build every suite that needs no broker"
 	@echo "  make run-unit     - Build and run every suite that needs no broker"
 	@echo "  make clean        - Remove build artifacts"

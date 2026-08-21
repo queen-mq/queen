@@ -11,6 +11,7 @@ export const generateUUID = () => {
 //import { generateUUID } from '../../utils/uuid.js'
 import { isValidUUID } from '../utils/validation.js'
 import { QUEUE_DEFAULTS, CONSUME_DEFAULTS, POP_DEFAULTS } from '../utils/defaults.js'
+import { checkConflationResponse, CONFLATION_UNSUPPORTED } from '../utils/conflation.js'
 import * as logger from '../utils/logger.js'
 
 export class QueueBuilder {
@@ -36,6 +37,7 @@ export class QueueBuilder {
   #renewLeaseIntervalMillis = CONSUME_DEFAULTS.renewLeaseIntervalMillis
   #subscriptionMode = CONSUME_DEFAULTS.subscriptionMode
   #subscriptionFrom = CONSUME_DEFAULTS.subscriptionFrom
+  #conflation = CONSUME_DEFAULTS.conflation
   #each = false
   #maxPartitions = 1
 
@@ -265,6 +267,34 @@ export class QueueBuilder {
     return this
   }
 
+  /**
+   * Last-value delivery for this consumer group (PLAN_CONFLATION §1.1).
+   *
+   * A pop of a partition delivers exactly ONE message — the newest visible one
+   * — and commits past everything it skipped. For command-style queues where
+   * one partition is one logical task key ("recompute entity X"), a consumer
+   * behind a backlog then does the work once with the latest input instead of
+   * replaying every stale intermediate.
+   *
+   * It is a property of the GROUP, not of the call: it is persisted when the
+   * group first registers on the queue, and from then on the stored value wins
+   * for every consumer of that group. Declaring the opposite later does not
+   * flip it — the SDK warns once and keeps working. Default off; a group
+   * created without it behaves exactly as before.
+   *
+   * Requires broker >= 1.1.0. An older broker ignores the parameter and would
+   * quietly deliver the whole backlog, so the SDK raises on the first response
+   * that does not echo the flag rather than draining it silently.
+   *
+   * Refused by the broker (400) when combined with queue mode (no consumer
+   * group) or with autoAck, which commits at delivery and would turn the
+   * "the newest state is definitely processed" guarantee into at-most-once.
+   */
+  conflation(enabled = true) {
+    this.#conflation = !!enabled
+    return this
+  }
+
   each() {
     this.#each = true
     return this
@@ -292,6 +322,7 @@ export class QueueBuilder {
       renewLeaseIntervalMillis: this.#renewLeaseIntervalMillis,
       subscriptionMode: this.#subscriptionMode,
       subscriptionFrom: this.#subscriptionFrom,
+      conflation: this.#conflation,
       each: this.#each,
       maxPartitions: this.#maxPartitions,
       signal: options.signal
@@ -347,6 +378,11 @@ export class QueueBuilder {
       if (this.#subscriptionMode) params.append('subscriptionMode', this.#subscriptionMode)
       if (this.#subscriptionFrom) params.append('subscriptionFrom', this.#subscriptionFrom)
       if (this.#maxPartitions > 1) params.append('partitions', this.#maxPartitions.toString())
+      // Conflation (PLAN_CONFLATION §3.1): sent ONLY when true, so an
+      // undeclared pop is byte-identical to today. NOTE: this is the pop
+      // builder; consume() builds its params in ConsumerManager#buildParams —
+      // see the comment below #buildPopPath about exactly this hazard.
+      if (this.#conflation) params.append('conflation', 'true')
 
       // Generate affinity key for consistent routing to same backend
       const affinityKey = this.#getAffinityKey()
@@ -354,6 +390,19 @@ export class QueueBuilder {
       // wait=true is a long-poll: on 429 it should back off and keep waiting
       // rather than give up after a handful of tries (retryKind: 'pop').
       const result = await this.#httpClient.get(`${path}?${params}`, this.#timeoutMillis + 5000, affinityKey, this.#wait ? 'pop' : null)
+
+      // Degrade-loudly (PLAN_CONFLATION §4), BEFORE the empty-response return:
+      // an old broker's empty pop is a bodiless 204 (result === null), and that
+      // is precisely the first thing a consumer on an idle queue sees. Also
+      // where a declaration conflict is warned about, exactly once.
+      if (this.#conflation) {
+        checkConflationResponse(result, {
+          queue: this.#queueName,
+          namespace: this.#namespace,
+          task: this.#task,
+          group: this.#group
+        })
+      }
 
       if (!result || !result.messages) {
         logger.log('QueueBuilder.pop', { status: 'no-messages' })
@@ -364,6 +413,17 @@ export class QueueBuilder {
       logger.log('QueueBuilder.pop', { status: 'success', count: messages.length })
       return messages
     } catch (error) {
+      // Conflation is the one thing this method does NOT swallow. The
+      // swallow-to-[] contract exists for transport faults, where [] means "no
+      // messages right now"; for a declared conflation it would mean "your
+      // last-value policy is not in force and you will never be told", which is
+      // the silent failure the feature is not allowed to have (§4). Both the
+      // missing-echo error and the broker's 400 refusals (queue mode / autoAck)
+      // are permanent config faults, so they raise.
+      if (error.code === CONFLATION_UNSUPPORTED || (this.#conflation && error.status === 400)) {
+        logger.error('QueueBuilder.pop', { error: error.message, status: error.status, code: error.code, conflation: true })
+        throw error
+      }
       // Return empty array on error instead of throwing. This also covers a
       // 429 whose retry429 policy was exhausted (bounded pop, or an explicit
       // maxAttempts override) and a terminal 403 (e.g. cluster_suspended) --
@@ -397,6 +457,11 @@ export class QueueBuilder {
   // copy nobody calls: the pop would keep working and the parameter would
   // simply never arrive, which reads as a server-side mystery and not as a
   // client bug.
+  //
+  // The pair that is still live and MUST be kept in sync is pop()'s inline
+  // params above and ConsumerManager#buildParams: every pop query parameter
+  // (subscriptionMode, subscriptionFrom, partitions, conflation, ...) has to be
+  // appended in BOTH, because pop() and consume() share no builder.
 
   // ===========================
   // Buffer Management Methods

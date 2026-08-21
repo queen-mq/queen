@@ -13,6 +13,15 @@ use crate::fusion::{json_escape_into, Fusion};
 use crate::metrics::Metrics;
 use crate::admission::Admission;
 
+/// PLAN_CONFLATION §3.2/§3.3 — the durable per-(queue, group) delivery policy the
+/// broker caches off `queen.consumer_groups_metadata`. SQL is the authority; a
+/// pop's request flag is only used to REGISTER a brand-new group and to detect a
+/// conflict with what is already stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GroupPolicy {
+    pub conflation: bool,
+}
+
 pub struct AppState {
     pub pool: Pool,
     pub fusion: Arc<Fusion>,
@@ -97,7 +106,14 @@ pub struct AppState {
     // so the steady-state hit borrows queue+group with no allocation; cleared
     // alongside the other per-queue caches by reconcile so a delete+recreate
     // self-heals within one interval.
-    pub seeded_groups: Mutex<HashMap<String, HashSet<String>>>,
+    //
+    // PLAN_CONFLATION §3.2: the set became a map because the SAME row that
+    // proves the seed also carries the group's DELIVERY POLICY. SQL is the
+    // authority on conflation (§3.3) and this cache is how the pop path reads it
+    // for free: a hit is zero DB, so the steady-state hot path pays nothing for
+    // an authoritative policy read. Presence semantics are unchanged —
+    // `group_seeded` is now `group_policy(..).is_some()`.
+    pub seeded_groups: Mutex<HashMap<String, HashMap<String, GroupPolicy>>>,
     // Wildcard candidate hot-list (19-wildcard-hotlist.md, server/src/hotlist.rs).
     // Disabled (QUEEN_HOTLIST unset) ⇒ every hook is a no-op / one branch and the
     // wildcard pop takes the unchanged SQL candidate-scan path (byte-identical).
@@ -232,13 +248,28 @@ impl AppState {
     // Phase 2 first-contact safety: has this (queue, group)'s group-first-contact
     // bulk seed committed (004_log_pop)? Fast path = the monotonic positive cache (zero
     // DB, no allocation on a hit). On a miss, ONE indexed marker lookup
-    // (db::group_seed_marker_exists); a positive result is cached so the
+    // (db::group_policy_lookup); a positive result is cached so the
     // steady-state targeted pop path never reads again. A pool/DB error, or an
     // absent marker, returns false — the caller then uses the wildcard backstop,
     // which is always first-contact-safe. This NEVER returns true before the seed
     // exists, which is the whole point: it gates hint-driven targeted pops until
     // the convoy-preventing seed is in place. Guard is dropped before every await.
     pub(crate) async fn group_seeded(&self, queue: &str, group: &str, tenant: &str) -> bool {
+        self.group_policy(queue, group, tenant).await.is_some()
+    }
+
+    // PLAN_CONFLATION §3.3: the durable delivery policy of (queue, group), or
+    // None when the group has no registration row on this queue yet. Same cache,
+    // same single indexed lookup on a miss, same monotonic-positive discipline as
+    // the seed probe it replaced — a registered group is immutable policy-wise
+    // (group-setting-wins, §1.1), so a positive is valid until reconcile clears
+    // the per-queue caches (delete+recreate self-heals within one interval).
+    pub(crate) async fn group_policy(
+        &self,
+        queue: &str,
+        group: &str,
+        tenant: &str,
+    ) -> Option<GroupPolicy> {
         // Track B (§5): the seed marker lives in the (tenant_id, …)-keyed
         // consumer_groups_metadata, so the in-memory positive cache is keyed by
         // (tenant, queue) too — tenant A's seed must not gate tenant B's fast path
@@ -247,26 +278,28 @@ impl AppState {
         {
             let g = self.seeded_groups.lock().unwrap();
             if let Some(gs) = g.get(&key) {
-                if gs.contains(group) {
-                    return true;
+                if let Some(p) = gs.get(group) {
+                    return Some(*p);
                 }
             }
         }
-        let seeded = match self.pool.get().await {
-            Ok(c) => db::group_seed_marker_exists(&c, queue, group, tenant)
+        let found = match self.pool.get().await {
+            Ok(c) => db::group_policy_lookup(&c, queue, group, tenant)
                 .await
-                .unwrap_or(false),
-            Err(_) => false,
+                .unwrap_or(None),
+            Err(_) => None,
         };
-        if seeded {
+        if let Some(conflation) = found {
+            let policy = GroupPolicy { conflation };
             self.seeded_groups
                 .lock()
                 .unwrap()
                 .entry(key)
                 .or_default()
-                .insert(group.to_string());
+                .insert(group.to_string(), policy);
+            return Some(policy);
         }
-        seeded
+        None
     }
 
     // Record a partition -> queue mapping learned from a pop response.

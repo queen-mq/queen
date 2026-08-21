@@ -26,6 +26,7 @@ var (
 	tailIdleMillis  int
 	tailConcurrency int
 	tailTimeout     time.Duration
+	tailConflation  bool
 )
 
 var tailCmd = &cobra.Command{
@@ -40,7 +41,17 @@ queenctl push:
 
 Use --cg to bind to a consumer group (otherwise an ephemeral CG named
 "queenctl-tail" is used). With --follow the command keeps long-polling
-until interrupted; without it, returns once one batch is fetched.`,
+until interrupted; without it, returns once one batch is fetched.
+
+--conflation asks for last-value delivery: each round trip yields the newest
+message per partition and commits everything below it, so a tail of a queue
+with a 4M backlog prints the current state instead of replaying the history.
+It is a property of the CONSUMER GROUP the broker persists on first
+registration, not of this invocation — so pointing --conflation at a shared
+--cg changes nothing (the stored policy wins, and queenctl warns once), and
+pointing a plain tail at a conflating group still conflates. Requires broker
+>= 1.1.0: against an older one the stream STOPS with an error rather than
+quietly replaying the backlog into whatever is downstream of the pipe.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		queueName := args[0]
@@ -71,6 +82,10 @@ until interrupted; without it, returns once one batch is fetched.`,
 		}
 		if tailFromAt != "" {
 			qb = qb.SubscriptionFrom(tailFromAt)
+		}
+		if tailConflation {
+			qb = qb.Conflation(true)
+			showConflationWarnings()
 		}
 		if tailLimit > 0 {
 			qb = qb.Limit(tailLimit)
@@ -127,6 +142,11 @@ until interrupted; without it, returns once one batch is fetched.`,
 			return nil
 		}).Execute(ctx)
 		if err != nil && !errors.Is(err, context.Canceled) {
+			// The broker ignored --conflation: stop, rather than replay a
+			// backlog into whatever is on the other side of the pipe (§4).
+			if cerr := conflationErr(err, "tail"); cerr != nil {
+				return cerr
+			}
 			return clierr.Server(fmt.Errorf("tail: %w", err))
 		}
 		return nil
@@ -146,6 +166,7 @@ func init() {
 	tailCmd.Flags().IntVar(&tailIdleMillis, "idle-millis", 0, "stop after N ms of no messages")
 	tailCmd.Flags().IntVar(&tailConcurrency, "concurrency", 0, "parallel handlers")
 	tailCmd.Flags().DurationVar(&tailTimeout, "timeout", 0, "per-pop long-poll timeout (default: 30s, or --idle-millis when smaller)")
+	tailCmd.Flags().BoolVar(&tailConflation, "conflation", false, "last-value delivery: newest message per partition (group policy; broker >= 1.1.0)")
 	rootCmd.AddCommand(tailCmd)
 	_ = os.Stdout
 }

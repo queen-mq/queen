@@ -234,6 +234,9 @@ BEGIN
         committed = EXCLUDED.committed,
         batch_end = NULL,
         worker_id = NULL, lease_expires_at = NULL, lease_acquired_at = NULL,
+        -- a seek releases whatever lease was held: no stale conflation marker
+        -- may survive it (PLAN_CONFLATION §2.4)
+        lease_conflated = FALSE,
         batch_retry_count = 0,
         attempt_offset = NULL, attempt_count = 0;
 END;
@@ -440,6 +443,18 @@ BEGIN
         LEFT JOIN lag l ON l.partition_id = c.partition_id
                        AND l.consumer_group = c.consumer_group
     ),
+    -- PLAN_CONFLATION §2.6 (fixes M7). The three subscription fields below were
+    -- hard-coded NULL, so subscription mode had no console surface at all — and
+    -- a group-level policy the group view cannot display repeats that mistake.
+    -- One indexed cgm_identity_uk lookup per aggregated group, on a console route.
+    cgm AS (
+        SELECT m.consumer_group, q.name AS queue_name,
+               m.subscription_mode, m.subscription_timestamp, m.created_at,
+               m.conflation
+        FROM queen.consumer_groups_metadata m
+        JOIN queen.queues q ON q.id = m.queue_id AND q.tenant_id = p_tenant
+        WHERE m.partition_name = ''
+    ),
     v2_aggregated AS (
         SELECT consumer_group,
                queue_name,
@@ -457,9 +472,9 @@ BEGIN
     )
     SELECT COALESCE(jsonb_agg(
         jsonb_build_object(
-            'name', consumer_group,
-            'topics', jsonb_build_array(queue_name),
-            'queueName', queue_name,
+            'name', a.consumer_group,
+            'topics', jsonb_build_array(a.queue_name),
+            'queueName', a.queue_name,
             'members', member_count,
             -- v2_data is one row per (partition, group) CURSOR, so member_count
             -- is the number of partitions this group has a cursor on, NOT the
@@ -472,12 +487,16 @@ BEGIN
             'maxTimeLag', max_time_lag,
             'state', state,
             'storage', 'segments',
-            'subscriptionMode', NULL,
-            'subscriptionTimestamp', NULL,
-            'subscriptionCreatedAt', NULL
-        ) ORDER BY consumer_group, queue_name
+            -- §2.6: the real durable declaration, no longer three NULLs.
+            'subscriptionMode', g.subscription_mode,
+            'subscriptionTimestamp', g.subscription_timestamp,
+            'subscriptionCreatedAt', g.created_at,
+            'conflation', COALESCE(g.conflation, false)
+        ) ORDER BY a.consumer_group, a.queue_name
     ), '[]'::jsonb) INTO v_v2
-    FROM v2_aggregated;
+    FROM v2_aggregated a
+    LEFT JOIN cgm g ON g.consumer_group = a.consumer_group
+                   AND g.queue_name = a.queue_name;
 
     -- Was `v_result || v_v2` with v_result the (always empty) rows array.
     RETURN v_v2;
@@ -982,6 +1001,17 @@ BEGIN
     SELECT jsonb_object_agg(
         queue_name,
         (SELECT jsonb_build_object(
+            -- PLAN_CONFLATION §2.6: the group's durable delivery policy on THIS
+            -- queue, so the details view can say why one queue's lag is log lag
+            -- and another's is work.
+            'conflation', COALESCE((
+                SELECT m.conflation
+                FROM queen.consumer_groups_metadata m
+                JOIN queen.queues q2 ON q2.id = m.queue_id AND q2.tenant_id = p_tenant
+                WHERE m.consumer_group = p_consumer_group
+                  AND m.partition_name = ''
+                  AND q2.name = ld.queue_name
+                LIMIT 1), false),
             'partitions', jsonb_agg(
                 jsonb_build_object(
                     'partition', partition_name,

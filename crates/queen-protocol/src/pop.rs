@@ -116,6 +116,25 @@ pub struct PopResponse {
         skip_serializing_if = "Option::is_none"
     )]
     pub partitions_claimed: Option<i32>,
+
+    /// PLAN_CONFLATION §3.1 — present and true when this pop was served under
+    /// last-value delivery, on EMPTY responses too. That is the whole
+    /// degrade-loudly contract (§4): an SDK that sent `conflation=true` and does
+    /// not see this key on the first response is talking to a broker older than
+    /// 1.1.0 and must error instead of silently draining the backlog one message
+    /// at a time. Absent (not `false`) on every non-conflating response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflation: Option<bool>,
+
+    /// PLAN_CONFLATION §3.3 — present and true when this pop asked for a
+    /// conflation policy the group does not have. The STORED group setting won;
+    /// `conflation` above reports what was actually applied.
+    #[serde(
+        rename = "conflationConflict",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub conflation_conflict: Option<bool>,
 }
 
 fn default_true() -> bool {
@@ -129,6 +148,21 @@ impl PopResponse {
 
     pub fn is_empty(&self) -> bool {
         self.messages.is_empty()
+    }
+
+    /// PLAN_CONFLATION §4 — did the broker actually apply last-value delivery?
+    /// An SDK that requested conflation checks this on its FIRST response and
+    /// raises when it is false: an old broker ignores the unknown query parameter
+    /// and answers with the whole backlog, which is exactly the silent failure
+    /// the feature must not have.
+    pub fn conflation_applied(&self) -> bool {
+        self.conflation.unwrap_or(false)
+    }
+
+    /// PLAN_CONFLATION §3.3 — this consumer disagreed with the group's stored
+    /// policy; the stored one is in force. SDKs warn ONCE per (queue, group).
+    pub fn has_conflation_conflict(&self) -> bool {
+        self.conflation_conflict.unwrap_or(false)
     }
 }
 
@@ -184,6 +218,16 @@ pub struct PopParams {
     pub subscription_mode: Option<SubscriptionMode>,
     /// `now`, an ISO-8601 timestamp, or empty.
     pub subscription_from: Option<String>,
+    /// Last-value delivery for this consumer GROUP on this queue
+    /// (PLAN_CONFLATION §1.1): a pop of a partition delivers exactly the newest
+    /// visible message and the ack commits the whole span behind it. Declared in
+    /// consume/subscribe options, persisted on the group's FIRST registration,
+    /// and from then on the stored value wins for every consumer of that group —
+    /// it is not a per-call flag. Requires a `consumer_group`, and cannot be
+    /// combined with `auto_ack` (the broker refuses both with 400).
+    /// Broker >= 1.1.0; a conflating pop response echoes `"conflation":true`,
+    /// empty responses included, which is how an SDK detects an older broker.
+    pub conflation: Option<bool>,
     /// Discovery pops only (`/api/v1/pop`).
     pub namespace: Option<String>,
     /// Discovery pops only (`/api/v1/pop`).
@@ -231,6 +275,13 @@ impl PopParams {
         }
         if let Some(v) = self.lease_seconds {
             out.push(("leaseSeconds", v.to_string()));
+        }
+        // Only ever sent when true — the broker treats presence as opt-in, the
+        // same rule `autoAck` follows above, and `conflation=false` would read as
+        // a DISAGREEMENT with a group whose stored policy is true (the broker
+        // answers `"conflationConflict":true` and keeps the stored setting).
+        if self.conflation == Some(true) {
+            out.push(("conflation", "true".to_string()));
         }
         out
     }
@@ -498,9 +549,30 @@ mod tests {
         let p = PopParams {
             auto_ack: Some(false),
             partitions: Some(1),
+            conflation: Some(false),
             ..Default::default()
         };
         assert!(p.to_pairs().is_empty());
+    }
+
+    /// PLAN_CONFLATION §3.1/§4: the flag reaches the wire only when opted in, and
+    /// it is spelled `conflation` — the same key the broker's `PopParams` reads.
+    #[test]
+    fn params_send_conflation_only_when_true() {
+        let p = PopParams {
+            consumer_group: Some("workers".into()),
+            conflation: Some(true),
+            ..Default::default()
+        };
+        let pairs = p.to_pairs();
+        assert!(pairs.contains(&("conflation", "true".to_string())));
+
+        let off = PopParams {
+            consumer_group: Some("workers".into()),
+            conflation: None,
+            ..Default::default()
+        };
+        assert!(!off.to_pairs().iter().any(|(k, _)| *k == "conflation"));
     }
 
     #[test]

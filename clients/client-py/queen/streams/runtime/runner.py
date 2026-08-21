@@ -77,6 +77,10 @@ class Runner:
         self.max_wait_millis = opts["maxWaitMillis"] if opts.get("maxWaitMillis") is not None else 1000
         self.subscription_mode = opts.get("subscriptionMode")
         self.subscription_from = opts.get("subscriptionFrom")
+        # PLAN_CONFLATION §4: threaded through to the source pop exactly like
+        # subscriptionMode, since a stream's source IS an ordinary queue pop.
+        # Off unless asked for; the broker's echo check then applies as usual.
+        self.conflation = bool(opts.get("conflation", False))
         self.reset = bool(opts.get("reset"))
         self.on_error = opts.get("onError")
         self.logger = make_logger(opts.get("logger"))
@@ -237,6 +241,8 @@ class Runner:
             qb = qb.subscription_mode(self.subscription_mode)
         if self.subscription_from and hasattr(qb, "subscription_from"):
             qb = qb.subscription_from(self.subscription_from)
+        if self.conflation and hasattr(qb, "conflation"):
+            qb = qb.conflation(True)
         result = qb.pop()
         if inspect.isawaitable(result):
             result = await result

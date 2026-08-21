@@ -154,6 +154,53 @@ await queen.queue('events')
   .consume(async (message) => { /* from timestamp */ })
 ```
 
+### Conflation (Last-Value Delivery)
+
+For command-style queues where one partition is one logical task key — "recompute
+customer 42", "this entity is dirty" — only the newest pending message matters.
+`.conflation(true)` makes a pop of a partition deliver exactly one message, the
+newest visible one, and commit past everything it skipped:
+
+```javascript
+// A backlog of 4 000 recompute requests across 12 entities becomes
+// 12 handler calls, each with the freshest input.
+await queen.queue('recompute')
+  .group('workers')
+  .conflation(true)
+  .partitions(64)
+  .consume(async (message) => {
+    await recompute(message.data.entityId)
+  })
+```
+
+The guarantee: **after the last push to a partition, at least one handler run
+starts after that push committed.** Nothing is deleted — conflation is a delivery
+policy, not compaction; retention still governs what is stored, and a
+non-conflating group on the same queue still sees every message.
+
+Notes:
+
+- It is a property of the **consumer group**, fixed when that group first
+  registers on the queue. A later consumer declaring the opposite does not flip
+  it — the stored value wins, that consumer keeps working, and the SDK warns
+  once per (queue, group).
+- Skipping is per **partition**, so partitioning is the key: one partition = one
+  logical key is the contract this workload has to hold up.
+- A conflating pop returns at most one message per partition, so **partitions**
+  size the round-trip, not `batch`. Left unset, the broker uses `.batch(N)` as
+  the partition cap; either way it is clamped to 64, so a conflating pop returns
+  at most 64 messages per round-trip whatever `batch` says.
+- Refused with 400 by the broker without a `.group(...)`, and together with
+  `.autoAck(true)` (auto-ack commits at delivery, which would turn the guarantee
+  above into at-most-once).
+- Requires broker **>= 1.1.0**. An older broker ignores the flag and would
+  quietly deliver the whole backlog, so the SDK raises
+  `conflation was requested but this broker did not apply it` on the first
+  response that does not echo it — before any message is processed.
+- `admin.getQueueDepth(queue, group)` reports `effectivePending` (handler calls
+  still owed) next to `pending` (log positions still to retire). For a
+  conflating group `pending: 4000000, effectivePending: 12` is healthy.
+
 ---
 
 ## Connection Options

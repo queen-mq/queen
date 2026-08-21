@@ -71,11 +71,25 @@ export class Admin {
   /**
    * Per-partition backlog for a queue — the cheap sibling of getQueue:
    * watermark arithmetic only, no segments, no timestamps. Shape:
-   * {queue, group, pending, partitions: [{partition, pending}]}.
+   * {queue, group, pending, partitionsPending, conflation, effectivePending,
+   *  partitions: [{partition, pending}]}.
    * Omitting group gives queue-level pending under the same worst-cursor
    * precedence the dashboard publishes; a named group is that group's own
    * backlog per partition. Requires broker >= 1.0.4 — an older broker
    * answers 404 no_such_route, so fall back to getQueue there.
+   *
+   * The three fields added in 1.1.0 (PLAN_CONFLATION §2.5/§5.3):
+   *   - `partitionsPending`: how many partitions owe work (pending > 0). Useful
+   *     for every group; it is what queenctl used to compute client-side.
+   *   - `conflation`: the group's stored last-value delivery policy.
+   *   - `effectivePending`: WORK depth — handler invocations still owed. For a
+   *     conflating group that is `partitionsPending` (one call per partition,
+   *     newest message only); otherwise it equals `pending`.
+   *
+   * Read them together: for a conflating group `pending` is LOG depth (log
+   * positions still to retire), so `pending: 4000000, effectivePending: 12` is
+   * healthy — the same two numbers on a non-conflating group are an incident.
+   * Absent on brokers older than 1.1.0.
    * @param {string} name - Queue name
    * @param {string|null} [group] - Consumer group (optional)
    * @returns {Promise<object>}

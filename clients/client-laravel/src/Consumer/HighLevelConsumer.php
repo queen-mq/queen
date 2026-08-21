@@ -2,9 +2,11 @@
 
 namespace Queen\Consumer;
 
+use Queen\Exceptions\ConflationUnsupportedException;
 use Queen\Http\HttpClient;
 use Queen\Http\Retry429Policy;
 use Queen\Queen;
+use Queen\Support\ConflationGuard;
 
 /**
  * High-level consumer inspired by php-rdkafka's KafkaConsumer.
@@ -33,6 +35,8 @@ class HighLevelConsumer
     private string $popPath;
     private string $baseParams;
     private ?string $affinityKey;
+    /** [requested, queue, group, namespace, task] — see ConflationGuard. */
+    private array $conflationScope = [false, null, null, null, null];
 
     public function __construct(HttpClient $httpClient, Queen $queen, array $options)
     {
@@ -58,10 +62,12 @@ class HighLevelConsumer
         $subscriptionMode = $this->options['subscriptionMode'] ?? null;
         $subscriptionFrom = $this->options['subscriptionFrom'] ?? null;
         $maxPartitions = $this->options['maxPartitions'] ?? 1;
+        $conflation = $this->options['conflation'] ?? false;
 
         $this->popPath = $this->buildPath($queue, $partition, $namespace, $task);
-        $this->baseParams = $this->buildParams($batch, $wait, $timeoutMillis, $group, $subscriptionMode, $subscriptionFrom, $namespace, $task, $maxPartitions);
+        $this->baseParams = $this->buildParams($batch, $wait, $timeoutMillis, $group, $subscriptionMode, $subscriptionFrom, $namespace, $task, $maxPartitions, $conflation);
         $this->affinityKey = $this->getAffinityKey($queue, $partition, $namespace, $task, $group);
+        $this->conflationScope = [$conflation, $queue, $group, $namespace, $task];
         $this->subscribed = true;
 
         // Install signal handlers for graceful shutdown
@@ -114,6 +120,12 @@ class HighLevelConsumer
             // waiting instead of exhausting the bounded push-like budget.
             $result = $this->httpClient->get("{$this->popPath}?{$queryString}", $clientTimeout, $this->affinityKey, Retry429Policy::KIND_POP);
 
+            // Ahead of the empty-response shortcut: an old broker answers an
+            // empty pop with a bodiless 204, which arrives here as null, and
+            // that is the response the degrade-loudly check exists to catch
+            // (PLAN_CONFLATION §4).
+            ConflationGuard::check($result, ...$this->conflationScope);
+
             if (!$result || !isset($result['messages']) || empty($result['messages'])) {
                 return null;
             }
@@ -130,6 +142,13 @@ class HighLevelConsumer
 
             return $message;
         } catch (\Throwable $error) {
+            // Terminal by design (PLAN_CONFLATION §4), and re-thrown by TYPE
+            // ahead of the message-matching branches: a consumer that asked for
+            // conflation and is not getting it must stop, not poll on.
+            if ($error instanceof ConflationUnsupportedException) {
+                throw $error;
+            }
+
             // Timeouts are normal for long polling
             if (str_contains($error->getMessage(), 'timeout') || str_contains($error->getMessage(), 'timed out')) {
                 return null;
@@ -179,6 +198,10 @@ class HighLevelConsumer
             $clientTimeout = $timeoutMs + 5000;
             $result = $this->httpClient->get("{$this->popPath}?{$queryString}", $clientTimeout, $this->affinityKey, Retry429Policy::KIND_POP);
 
+            // See consume(): the check goes ahead of the empty shortcut so an
+            // old broker's bodiless 204 cannot pass for a quiet queue.
+            ConflationGuard::check($result, ...$this->conflationScope);
+
             if (!$result || !isset($result['messages']) || empty($result['messages'])) {
                 return [];
             }
@@ -192,6 +215,9 @@ class HighLevelConsumer
 
             return $messages;
         } catch (\Throwable $error) {
+            if ($error instanceof ConflationUnsupportedException) {
+                throw $error;
+            }
             if (str_contains($error->getMessage(), 'timeout') || str_contains($error->getMessage(), 'timed out')) {
                 return [];
             }
@@ -337,6 +363,7 @@ class HighLevelConsumer
         ?string $namespace,
         ?string $task,
         int $maxPartitions = 1,
+        bool $conflation = false,
     ): string {
         $params = [
             'batch' => (string) $batch,
@@ -362,6 +389,12 @@ class HighLevelConsumer
         // v4 multi-partition pop: drain up to N sparse partitions per call.
         if ($maxPartitions > 1) {
             $params['partitions'] = (string) $maxPartitions;
+        }
+        // Last-value delivery, sent only when true: the broker treats presence
+        // as opt-in, and conflation=false would read as a DISAGREEMENT with a
+        // group whose stored policy is true.
+        if ($conflation) {
+            $params['conflation'] = 'true';
         }
 
         return http_build_query($params);

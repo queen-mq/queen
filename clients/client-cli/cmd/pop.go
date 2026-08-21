@@ -23,6 +23,7 @@ var (
 	popTask        string
 	popSubMode     string
 	popSubFrom     string
+	popConflation  bool
 )
 
 var popCmd = &cobra.Command{
@@ -33,7 +34,17 @@ NDJSON on stdout. Use --limit to retrieve N. Use --auto-ack to have the
 server ack the messages atomically with the pop.
 
   queenctl pop orders --auto-ack
-  queenctl pop orders -n 50 --cg analyzer | jq -s 'length'`,
+  queenctl pop orders -n 50 --cg analyzer | jq -s 'length'
+
+--conflation asks for last-value delivery: one message per partition, the
+newest, with everything below it committed. It is a property of the CONSUMER
+GROUP, not of this call — the broker persists it on the group's first
+registration and the stored value wins for every consumer afterwards, so
+--conflation requires --cg and cannot be combined with --auto-ack. Requires
+broker >= 1.1.0: against an older one the pop FAILS rather than quietly
+handing back the whole backlog.
+
+  queenctl pop dirty-entities --cg recompute --conflation --max-partitions 64`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		c, cleanup, err := newClient()
@@ -72,6 +83,10 @@ server ack the messages atomically with the pop.
 		if popSubFrom != "" {
 			qb = qb.SubscriptionFrom(popSubFrom)
 		}
+		if popConflation {
+			qb = qb.Conflation(true)
+			showConflationWarnings()
+		}
 		qb = qb.AutoAck(popAutoAck).Wait(popWait).TimeoutMillis(int(popTimeout.Milliseconds()))
 
 		ctx, cancel := context.WithTimeout(cmd.Context(), popTimeout+10*time.Second)
@@ -79,6 +94,11 @@ server ack the messages atomically with the pop.
 
 		messages, err := qb.Pop(ctx)
 		if err != nil {
+			// The broker ignored --conflation, so what came back is the whole
+			// backlog. Fail before a single line is printed (§4).
+			if cerr := conflationErr(err, "pop"); cerr != nil {
+				return cerr
+			}
 			// Only the queue-less discovery pop (namespace/task) is blocked;
 			// a pop that names its queue never trips this branch.
 			return blockedErr(fmt.Errorf("pop: %w", err), "GET /api/v1/pop",
@@ -131,5 +151,6 @@ func init() {
 	popCmd.Flags().StringVar(&popTask, "task", "", "filter pop by task")
 	popCmd.Flags().StringVar(&popSubMode, "from-mode", "", "subscription mode: all|new|new-only")
 	popCmd.Flags().StringVar(&popSubFrom, "since", "", "subscription start: 'now', RFC3339, '5m ago'")
+	popCmd.Flags().BoolVar(&popConflation, "conflation", false, "last-value delivery: newest message per partition (group policy; broker >= 1.1.0)")
 	rootCmd.AddCommand(popCmd)
 }

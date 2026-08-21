@@ -32,6 +32,7 @@ type QueueBuilder struct {
 	subscriptionFrom string
 	each             bool
 	maxPartitions    int
+	conflation       bool
 }
 
 // NewQueueBuilder creates a new QueueBuilder.
@@ -165,6 +166,28 @@ func (qb *QueueBuilder) SubscriptionFrom(from string) *QueueBuilder {
 	return qb
 }
 
+// Conflation requests last-value delivery for the consumer group: each pop of a
+// partition returns only its NEWEST visible message and commits everything
+// below it. Under backlog the consumer runs the handler once per partition
+// instead of once per message.
+//
+// This is a GROUP policy, fixed at the group's first registration and stored by
+// the broker — not a per-call flag. A later consumer of the same group that
+// declares the opposite is warned once and keeps running on the stored policy;
+// to change the policy, delete and recreate the group.
+//
+//	client.Queue("recompute").Group("workers").Conflation(true).
+//	    Consume(ctx, handler).Execute(ctx)
+//
+// Requires broker >= 1.1.0. Against an older broker the flag is ignored server
+// side and the pop returns the full backlog; rather than draining it silently,
+// Pop and the consume loop fail with ErrConflationUnsupported on the first
+// response.
+func (qb *QueueBuilder) Conflation(enabled bool) *QueueBuilder {
+	qb.conflation = enabled
+	return qb
+}
+
 // Each sets whether to process messages one at a time.
 func (qb *QueueBuilder) Each() *QueueBuilder {
 	qb.each = true
@@ -237,6 +260,15 @@ func (qb *QueueBuilder) Pop(ctx context.Context) ([]*Message, error) {
 		return nil, fmt.Errorf("pop request failed: %w", err)
 	}
 
+	// Conflation is verified BEFORE the messages are handed to the caller: a
+	// broker that ignored the flag answers with the whole backlog, and returning
+	// it "successfully" is exactly the silent degradation this check exists to
+	// prevent (PLAN_CONFLATION.md §4).
+	if cerr := checkConflationEcho(result, qb.conflation,
+		conflationTarget(qb.queueName, qb.namespace, qb.task), qb.consumerGroup); cerr != nil {
+		return nil, cerr
+	}
+
 	// Parse response
 	messages := parseMessages(result)
 
@@ -299,6 +331,13 @@ func (qb *QueueBuilder) buildPopParams() string {
 		params.Set("partitions", strconv.Itoa(qb.maxPartitions))
 	}
 
+	// Conflation: last-value delivery for this group. Emitted ONLY when true,
+	// never as conflation=false — a consumer that does not opt in must produce
+	// the request it produced before this option existed.
+	if qb.conflation {
+		params.Set("conflation", "true")
+	}
+
 	// Namespace and task (for namespace/task mode)
 	if qb.namespace != "" {
 		params.Set("namespace", qb.namespace)
@@ -359,6 +398,7 @@ func (qb *QueueBuilder) getConsumeOptions() ConsumeOptions {
 		SubscriptionFrom: qb.subscriptionFrom,
 		Each:             qb.each,
 		MaxPartitions:    qb.maxPartitions,
+		Conflation:       qb.conflation,
 	}
 
 	// Apply defaults

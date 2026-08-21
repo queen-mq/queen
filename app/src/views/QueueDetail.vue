@@ -503,9 +503,15 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { analytics, queues as queuesApi, system as systemApi, describeApiError } from '@/api'
-import { formatNumber, formatDuration, toNum, latestFinite, trimIncompleteBuckets } from '@/composables/useApi'
+import {
+  analytics, queues as queuesApi, system as systemApi,
+  consumers as consumersApi, describeApiError,
+} from '@/api'
+import { formatNumber, formatDuration, toNum, latestFinite, trimIncompleteBuckets, useApi } from '@/composables/useApi'
 import { formatChartLabel } from '@/composables/useFormat'
+import {
+  laggingGroupsVerdict, pendingDepthAdvisory, PENDING_DEPTH_FLOOR,
+} from '@/composables/useConflation'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { useToast } from '@/composables/useToast'
@@ -901,6 +907,58 @@ const consumedContext = computed(() =>
 )
 
 // ---------------------------------------------------------------------------
+// Conflation — the one question the page's own two calls cannot answer
+// (PLAN_CONFLATION §5.4).
+//
+// A conflating consumer group is delivered ONE message per partition, the
+// newest, and commits past the rest. Its pending count is therefore LOG depth —
+// positions still to retire — and not handler runs owed. "High pending depth"
+// on a queue whose only lagging groups conflate is not an advisory, it is the
+// policy working as declared, and a banner that cries wolf there is a banner
+// operators learn to scroll past everywhere else.
+//
+// The group listing is a tenant-wide scan, which this page deliberately does
+// not pay for on every queue (see fetchAll). So it is asked ONLY when the
+// advisory would otherwise fire — a queue already deep enough to warn about —
+// and never for the shallow queues that are nearly all of them.
+// ---------------------------------------------------------------------------
+// Sticky until one succeeds, rather than `groupsProbe.failed`: execute() clears
+// the error before each retry goes out, so reading that flag directly would
+// blink the banner off at the top of every 30s cycle and back on when the call
+// failed again.
+const probeFailed = ref(false)
+const groupsProbe = useApi((config) => consumersApi.list(config), {
+  immediate: false,
+  onSuccess: () => { probeFailed.value = false },
+  onError: () => { probeFailed.value = true },
+})
+
+/**
+ * The groups on THIS queue, or null while the answer is not in — the listing is
+ * tenant-wide, so it stays valid across a queue switch.
+ */
+const queueGroups = computed(() => {
+  const d = groupsProbe.data.value
+  if (!d) return null
+  const rows = Array.isArray(d) ? d : (d.consumer_groups || [])
+  return rows.filter(g => g.queueName === queueName.value)
+})
+
+const conflationVerdict = computed(() =>
+  laggingGroupsVerdict(queueGroups.value, { failed: probeFailed.value })
+)
+const depthAdvisory = computed(() =>
+  pendingDepthAdvisory(totalMessages.value.pending, conflationVerdict.value)
+)
+
+// Which groups are behind moves with the traffic, so the probe rides the
+// refresh cycle — but only while the queue is deep enough for the answer to
+// change what is on screen.
+const probeGroupsIfDeep = () => {
+  if (totalMessages.value.pending > PENDING_DEPTH_FLOOR) groupsProbe.refresh()
+}
+
+// ---------------------------------------------------------------------------
 // Banner derivation — only the worst signals show, ordered by severity.
 // ---------------------------------------------------------------------------
 const banners = computed(() => {
@@ -921,7 +979,21 @@ const banners = computed(() => {
       detail: `${formatNumber(errorsTotal.value)} ack failure${errorsTotal.value === 1 ? '' : 's'} across the last ${selectedRange.value}.`,
     })
   }
-  if (totalMessages.value.pending > 10000) {
+  // Four outcomes, not two: 'none' below the floor, 'hold' while the conflation
+  // answer is in flight (say nothing rather than flash a warning that is
+  // retracted a round trip later — the count itself is in the strip below the
+  // whole time), 'log-depth' when the number is real but is not work, and
+  // 'fire' for the original advisory. A failed or unasked lookup lands on
+  // 'fire': not knowing has never been the same as being fine.
+  if (depthAdvisory.value === 'log-depth') {
+    out.push({
+      tone: 'info',
+      title: 'Pending is log depth',
+      detail: `${formatNumber(totalMessages.value.pending)} pending, and every group behind here conflates: one delivery per partition, the newest. The work left is partitions to visit, not messages.`,
+      cta: 'Open consumers',
+      action: goConsumers,
+    })
+  } else if (depthAdvisory.value === 'fire') {
     out.push({
       tone: totalMessages.value.pending > 100000 ? 'bad' : 'warn',
       title: 'High pending depth',
@@ -1001,6 +1073,11 @@ function goDLQ() {
 function goTraces() {
   router.push({ path: '/traces', query: { queue: queueName.value } })
 }
+function goConsumers() {
+  // Consumers reads `search` off the query on mount and matches it against both
+  // the group and the queue name.
+  router.push({ path: '/consumers', query: { search: queueName.value } })
+}
 
 // ---------------------------------------------------------------------------
 // Fetchers
@@ -1038,11 +1115,16 @@ const fetchOps = async () => {
 }
 
 const fetchAll = async () => {
-  // Two calls only: queue detail (for config + totals) and queue-ops
+  // Two calls for every queue: queue detail (for config + totals) and queue-ops
   // (for the metric table). Consumer-group + lagging-partition scans are
   // expensive at scale and intentionally skipped here — they live on
   // the dedicated /consumers page.
+  //
+  // The one exception is the conflation probe, and it is conditional on the
+  // totals this call just returned: a queue deep enough to warn about buys a
+  // third request, because on a conflating group that warning would be wrong.
   await Promise.all([fetchQueueDetail(), fetchOps()])
+  probeGroupsIfDeep()
   lastRefreshAt.value = Date.now()
   loading.value = false
 }

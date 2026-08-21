@@ -247,6 +247,21 @@ func (cm *ConsumerManager) worker(
 			continue
 		}
 
+		// Conflation echo check, BEFORE anything is parsed or handled
+		// (PLAN_CONFLATION.md §4). The broker emits the echo on empty pops too,
+		// so a broker that cannot conflate is caught on the first round trip and
+		// this worker stops - rather than quietly processing a whole backlog
+		// message by message on a consumer that asked for the newest state only.
+		if cerr := checkConflationEcho(result, opts.Conflation,
+			conflationTarget(opts.Queue, opts.Namespace, opts.Task), opts.Group); cerr != nil {
+			logError("ConsumerManager.worker", map[string]interface{}{
+				"workerId": workerID,
+				"status":   "conflation-not-applied",
+				"error":    cerr.Error(),
+			})
+			return cerr
+		}
+
 		// Parse messages
 		messages := parseMessages(result)
 		if len(messages) == 0 {
@@ -623,6 +638,13 @@ func (cm *ConsumerManager) buildParams(opts ConsumeOptions) string {
 	// v4 multi-partition pop: drain up to N sparse partitions per call.
 	if opts.MaxPartitions > 1 {
 		params.Set("partitions", strconv.Itoa(opts.MaxPartitions))
+	}
+	// Conflation: last-value delivery for this group. Emitted ONLY when true so
+	// a consumer that does not opt in sends the request it sent before this
+	// option existed. This builder is SEPARATE from QueueBuilder.buildPopParams
+	// (PLAN_CONFLATION.md §4) - any option added here must be added there too.
+	if opts.Conflation {
+		params.Set("conflation", "true")
 	}
 	// NEVER send autoAck for consume - client always manages acking
 

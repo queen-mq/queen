@@ -32,6 +32,22 @@ class QueenError(Exception):
     """Base class for errors this SDK raises on its own behalf."""
 
 
+class ConflationUnsupportedError(QueenError):
+    """`conflation=true` was sent and the broker did not apply it.
+
+    PLAN_CONFLATION §4, the degrade-loudly rule. No SDK does version or
+    capability negotiation, so an old broker answers a *successful* pop that
+    simply ignored the unknown query parameter -- and the consumer would then
+    drain the entire backlog message by message, quietly, which is the one
+    outcome the feature exists to prevent. The broker echoes `"conflation":true`
+    on every conflating response INCLUDING empty ones, so this fires on the
+    first round trip, before any message is handled.
+
+    Not an ``httpx.HTTPStatusError``: nothing failed at the HTTP layer. This is
+    the SDK refusing to run under a contract the peer does not honour.
+    """
+
+
 class QueenHttpError(httpx.HTTPStatusError, QueenError):
     """An HTTP failure carrying the server's machine-readable verdict."""
 

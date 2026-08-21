@@ -22,10 +22,18 @@ cd /suite
 # only guard. There is no such cell any more: `QUEEN_KV_ENABLED` and
 # `QUEEN_TIMERS_ENABLED` are gone and every broker has both surfaces, so the
 # integration suites below run unconditionally and a 404 from them is a bug.
+#
+# conflation-unit is here for the first of those reasons: it pins the pop query
+# string emitted by BOTH param builders (pop() and the consume loop build them
+# in separate code), plus the degrade-loudly raise when a broker does not echo
+# `"conflation":true` (PLAN_CONFLATION §4). Neither needs a broker, and the
+# degrade case in particular can only be produced by a scripted server -- a live
+# broker in this repo always applies the flag.
 node --test test-v2/http-unit/retry429.test.js \
              test-v2/kv-unit/kvWire.test.js \
              test-v2/kv-unit/timerWire.test.js \
-             test-v2/kv-unit/txnWire.test.js
+             test-v2/kv-unit/txnWire.test.js \
+             test-v2/conflation-unit/conflationWire.test.js
 
 # No argument = human + stream in one process; run.js calls process.exit(fail?1:0).
 exec node test-v2/run.js

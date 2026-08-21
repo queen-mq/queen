@@ -79,13 +79,33 @@ impl Admin {
 
     /// Per-partition backlog for one queue — the cheap sibling of
     /// [`Admin::queue`]: watermark arithmetic only, no segments, no
-    /// timestamps. Shape: `{queue, group, pending, partitions: [{partition,
-    /// pending}]}`. `group: None` is queue-level pending under the same
+    /// timestamps. Shape: `{queue, group, pending, partitionsPending,
+    /// conflation, effectivePending, partitions: [{partition, pending}]}`.
+    /// `group: None` is queue-level pending under the same
     /// worst-cursor precedence the dashboard publishes; `Some(g)` is that
     /// group's own backlog per partition (a group with no cursor on a
     /// partition owes its whole retained range). Requires broker >= 1.0.4 —
     /// an older broker answers 404 `no_such_route`, so a caller that must run
     /// against both falls back to [`Admin::queue`] on that error.
+    ///
+    /// # Reading the depth of a conflating group (broker >= 1.1.0)
+    ///
+    /// `pending` is **log depth**: positions left to retire. For a group with
+    /// [`crate::QueueBuilder::conflation`] on, that is not the amount of work
+    /// left, because one pop of a partition retires its whole backlog and runs
+    /// the handler once. The three fields that make the difference readable:
+    ///
+    /// * `partitionsPending` — partitions that owe anything at all. Useful for
+    ///   every group; `queenctl` used to compute it client-side.
+    /// * `conflation` — the group's stored policy, `false` for queue-level depth
+    ///   and for a group that never registered.
+    /// * `effectivePending` — **work depth**: handler invocations remaining.
+    ///   Equal to `partitionsPending` when the group conflates and to `pending`
+    ///   when it does not.
+    ///
+    /// So `pending: 4_000_000, effectivePending: 12` is a healthy conflating
+    /// queue; the same two numbers on a non-conflating group are an incident.
+    /// An older broker simply omits the three keys.
     pub async fn queue_depth(
         &self,
         name: &str,

@@ -92,6 +92,10 @@ CREATE TABLE IF NOT EXISTS queen.consumer_groups_metadata (
     task TEXT NOT NULL DEFAULT '',
     subscription_mode TEXT NOT NULL,
     subscription_timestamp TIMESTAMPTZ NOT NULL,
+    -- Conflation (PLAN_CONFLATION §1.1/§2.1): last-value delivery for this
+    -- group on this queue. See the ALTER below for the full rationale — this
+    -- copy only serves a database created from scratch.
+    conflation BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -101,6 +105,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS cgm_identity_uk
     ON queen.consumer_groups_metadata(tenant_id, consumer_group, queue_id, partition_name, namespace, task)
     NULLS NOT DISTINCT;
 CREATE INDEX IF NOT EXISTS idx_cgm_queue ON queen.consumer_groups_metadata(queue_id);
+
+-- Conflation (PLAN_CONFLATION §2.1): last-value delivery for this group on this
+-- queue. Sits beside subscription_mode because it is the same kind of fact — a
+-- delivery policy fixed at group creation, never re-negotiated by a later pop.
+-- NOT part of cgm_identity_uk: the identity of a group must not change with its
+-- policy, or a second consumer declaring a different value would create a
+-- SECOND group instead of colliding with the first.
+-- The CREATE TABLE above is IF NOT EXISTS, so it does NOT add the column to an
+-- existing database; this idempotent ALTER is what upgrades one (precedent:
+-- 019_worker_metrics.sql, 024_kv.sql). No new index — every read is by the
+-- cgm_identity_uk prefix or idx_cgm_queue.
+ALTER TABLE queen.consumer_groups_metadata
+    ADD COLUMN IF NOT EXISTS conflation BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- Watermark tracking for efficient wildcard POP discovery
 -- Tracks the timestamp of the last "empty scan" per (queue, consumer_group)

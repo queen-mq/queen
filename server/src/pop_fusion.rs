@@ -143,6 +143,12 @@ pub struct PopJob {
     pub sub_from: String,
     pub skip_window: bool,
     pub tenant: String,
+    /// PLAN_CONFLATION §3.2: the EFFECTIVE conflation policy for this claim.
+    /// Jobs carry DISJOINT candidate sets per (queue, group) by hot-list
+    /// checkout and there is no fold key (see the struct header), so a fused
+    /// flush can mix conflating and plain jobs with no batching-key change —
+    /// each leg passes its own flag to its own log_pop_list_v1 call.
+    pub conflate: bool,
     done: oneshot::Sender<PopVerdict>,
 }
 
@@ -225,6 +231,7 @@ impl PopFusion {
         sub_from: String,
         skip_window: bool,
         tenant: String,
+        conflate: bool,
     ) -> PopVerdict {
         if !self.enabled {
             return PopVerdict::FlushErr; // defensive; the caller gates on enabled()
@@ -244,6 +251,7 @@ impl PopFusion {
             sub_from,
             skip_window,
             tenant,
+            conflate,
             done: tx,
         };
         if self.senders[idx].send(job).is_err() {
@@ -346,6 +354,7 @@ fn spawn_flush(ctx: Arc<FlushCtx>, jobs: Vec<PopJob>, done: mpsc::UnboundedSende
                         &j.sub_from,
                         j.skip_window,
                         &j.tenant,
+                        j.conflate,
                     )
                     .await?;
                     results.push(r);

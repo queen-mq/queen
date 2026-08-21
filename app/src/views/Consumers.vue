@@ -194,14 +194,28 @@
             </thead>
             <tbody>
               <tr v-for="p in laggingPartitions" :key="`${p.consumer_group}@${p.queue_name}@${p.partition_name}`">
-                <td><span class="lp-cell-strong">{{ p.consumer_group === '__QUEUE_MODE__' ? 'queue mode' : p.consumer_group }}</span></td>
+                <td>
+                  <span class="lp-cell-strong">{{ p.consumer_group === '__QUEUE_MODE__' ? 'queue mode' : p.consumer_group }}</span>
+                  <!-- The lagging-partition payload carries no policy field of
+                       its own; the group listing this page already holds does,
+                       so the tag costs no extra request. -->
+                  <span v-if="rowConflates(p)" class="cfl-tag">conflation</span>
+                </td>
                 <td><span class="lp-cell-mid">{{ p.queue_name }}</span></td>
                 <td class="font-mono tabular-nums" style="color:var(--text-mid);">{{ p.partition_name }}</td>
                 <td>
                   <code class="lp-cell-code">{{ p.worker_id || '—' }}</code>
                 </td>
+                <!-- For a conflating group this number is LOG lag — positions
+                     still to retire — and the work behind it is one message per
+                     partition. It is stated, not toned as a warning, because on
+                     that policy a large one is the design working. -->
                 <td style="text-align:right;">
-                  <span class="font-mono tabular-nums num warn">{{ formatNumber(p.offset_lag) }}</span>
+                  <template v-if="rowConflates(p)">
+                    <span class="font-mono tabular-nums num">{{ formatNumber(p.offset_lag) }}</span>
+                    <span class="lp-lag-note">log lag</span>
+                  </template>
+                  <span v-else class="font-mono tabular-nums num warn">{{ formatNumber(p.offset_lag) }}</span>
                 </td>
                 <td style="text-align:right;">
                   <span
@@ -290,6 +304,11 @@
         <div class="card modal-card" style="max-width:672px;">
           <div class="card-header">
             <h3>{{ selectedConsumer.name === '__QUEUE_MODE__' ? selectedConsumer.queueName : selectedConsumer.name }}</h3>
+            <!-- Conflation next to the name, like the queue-mode label above:
+                 it is a property of this group's identity, and it is the key to
+                 the two tiles below — without it "Backlog: 4.0M" reads as an
+                 incident on a queue that is doing exactly what it was told. -->
+            <span v-if="isConflating(selectedConsumer)" class="cfl-tag">conflation</span>
             <button @click="selectedConsumer = null" class="btn btn-ghost btn-icon modal-close">
               <svg style="width:18px; height:18px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
                 <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -307,18 +326,30 @@
                 <div class="cg-state" :class="stateClass(selectedConsumer)">{{ getStatusText(selectedConsumer) }}</div>
               </div>
               <div class="stat">
+                <!-- Partitions behind. On a conflating group this is the WHOLE
+                     of the work — one handler run each, whatever the backlog —
+                     so it is the figure to size consumers against, and it says
+                     so. -->
                 <div class="stat-label">Lag parts</div>
                 <div
                   class="stat-value font-mono num"
                   :class="{ warn: (selectedConsumer.partitionsWithLag || 0) > 0 }"
                 >{{ dash(selectedConsumer.partitionsWithLag) }}</div>
+                <div v-if="isConflating(selectedConsumer)" class="stat-foot" style="justify-content:center;">
+                  handler runs left
+                </div>
               </div>
               <div class="stat">
                 <!-- Real message-count backlog from the log engine — the number
-                     operators actually ask for, and it is returned already. -->
-                <div class="stat-label">Backlog</div>
+                     operators actually ask for, and it is returned already.
+                     Under conflation those messages are superseded, not owed:
+                     the label says log lag so the tile beside it is read as the
+                     work. -->
+                <div class="stat-label">{{ isConflating(selectedConsumer) ? 'Log lag' : 'Backlog' }}</div>
                 <div class="stat-value font-mono">{{ dash(selectedConsumer.totalLag) }}</div>
-                <div class="stat-foot" style="justify-content:center;">messages behind</div>
+                <div class="stat-foot" style="justify-content:center;">
+                  {{ isConflating(selectedConsumer) ? 'positions to retire' : 'messages behind' }}
+                </div>
               </div>
               <div class="stat">
                 <div class="stat-label">Time lag</div>
@@ -463,6 +494,7 @@ import { consumers as consumersApi, describeApiError } from '@/api'
 import {
   formatDateTime, formatDuration, formatNumber, toNum, useApi,
 } from '@/composables/useApi'
+import { conflatingKeys, isConflating, partitionConflates } from '@/composables/useConflation'
 import { formatDateTimeLocal } from '@/composables/useFormat'
 import { useRefresh } from '@/composables/useRefresh'
 import { useToast } from '@/composables/useToast'
@@ -577,6 +609,13 @@ const isLagging = (g) => {
   if (g.state === 'Lagging') return true
   return (g.maxTimeLag || 0) > 0 || (g.partitionsWithLag || 0) > 0
 }
+
+// Conflation is declared per (group, queue) and only the GROUP listing carries
+// it — the lagging-partition rows below do not. One set built from the listing
+// the page already has, so the partition table can label its number without a
+// second request.
+const conflatingGroupKeys = computed(() => conflatingKeys(consumers.value))
+const rowConflates = (p) => partitionConflates(p, conflatingGroupKeys.value)
 
 // Helper — pull the queue meta (namespace/task) for a consumer row.
 // Returns an empty object when the queue isn't in the store yet, so
@@ -972,6 +1011,36 @@ onMounted(() => {
 .lp-table { width: 100%; }
 .lp-cell-strong { color: var(--text-hi); font-weight: 500; }
 .lp-cell-mid { color: var(--text-mid); }
+
+/* Conflation tag — the group's delivery policy, in the app's "idle, proven"
+   ice tone (the same token .chip-ice uses) and never a severity colour. One
+   shape for both places this page names a group: the partition table and the
+   detail modal's header. */
+.cfl-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: var(--r-chip);
+  border: 1px solid var(--ice-bd);
+  background: var(--ice-glow);
+  color: var(--ice-400);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+/* The unit under a conflating row's offset lag. Same right-aligned column, so
+   it sits under the figure it renames rather than beside it. */
+.lp-lag-note {
+  display: block;
+  font-size: 9.5px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--text-low);
+}
 .lp-cell-code {
   font-family: 'JetBrains Mono', monospace;
   font-size: 11.5px;

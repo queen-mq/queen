@@ -7,7 +7,10 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlencode
 
+from ..errors import ConflationUnsupportedError
 from ..utils import logger
+from ..utils.conflation import check_pop_response as check_conflation
+from ..utils.conflation import scope_of as conflation_scope
 
 
 class ConsumerManager:
@@ -48,6 +51,7 @@ class ConsumerManager:
         renew_lease_interval_millis = options.get("renew_lease_interval_millis")
         subscription_mode = options.get("subscription_mode")
         subscription_from = options.get("subscription_from")
+        conflation = bool(options.get("conflation", False))
         each = options.get("each", False)
         max_partitions = options.get("max_partitions", 1)
         signal = options.get("signal")
@@ -72,7 +76,8 @@ class ConsumerManager:
         # Build the path and params for pop requests
         path = self._build_path(queue, partition, namespace, task)
         base_params = self._build_params(
-            batch, wait, timeout_millis, group, subscription_mode, subscription_from, namespace, task, max_partitions
+            batch, wait, timeout_millis, group, subscription_mode, subscription_from, namespace, task, max_partitions,
+            conflation,
         )
 
         # Generate affinity key for consistent routing to same backend
@@ -92,6 +97,8 @@ class ConsumerManager:
             "signal": signal,
             "group": group,
             "affinity_key": affinity_key,
+            "conflation": conflation,
+            "conflation_scope": conflation_scope(queue, namespace, task),
         }
 
         workers = [
@@ -126,6 +133,8 @@ class ConsumerManager:
         signal = options["signal"]
         group = options["group"]
         affinity_key = options["affinity_key"]
+        conflation = options.get("conflation", False)
+        conflation_scope_name = options.get("conflation_scope")
 
         logger.log(
             "ConsumerManager.worker",
@@ -181,6 +190,18 @@ class ConsumerManager:
                 result = await self._http_client.get(
                     f"{path}?{base_params}", client_timeout, affinity_key,
                     retry_kind="pop" if wait else None,
+                )
+
+                # PLAN_CONFLATION §4: prove the broker applied the policy this
+                # consumer declared, BEFORE the empty-response branch below --
+                # the echo rides empty pops too, so an old broker is caught on
+                # the very first round trip rather than after the loop has
+                # quietly drained a backlog one message at a time.
+                check_conflation(
+                    result,
+                    requested=conflation,
+                    queue=conflation_scope_name,
+                    group=group,
                 )
 
                 # Handle empty response
@@ -272,6 +293,17 @@ class ConsumerManager:
                         except asyncio.CancelledError:
                             pass
 
+            except ConflationUnsupportedError:
+                # Terminal, and deliberately ahead of every retry branch below.
+                # The broker will answer exactly the same way on the next poll,
+                # so retrying is an infinite loop that silently processes the
+                # backlog message by message -- the failure §4 exists to make
+                # impossible. Stop the loop and surface it to the caller.
+                logger.error(
+                    "ConsumerManager.worker",
+                    {"worker_id": worker_id, "status": "conflation-unsupported"},
+                )
+                raise
             except Exception as error:
                 # Check if this is a timeout error (expected for long polling)
                 error_str = str(error)
@@ -584,6 +616,7 @@ class ConsumerManager:
         namespace: Optional[str],
         task: Optional[str],
         max_partitions: int = 1,
+        conflation: bool = False,
     ) -> str:
         """Build query parameters"""
         params: Dict[str, str] = {
@@ -605,6 +638,12 @@ class ConsumerManager:
         # v4 multi-partition pop: drain up to N sparse partitions per call.
         if max_partitions and max_partitions > 1:
             params["partitions"] = str(max_partitions)
+        # Last-value delivery for this group (PLAN_CONFLATION §3.1). Sent only
+        # when true so a non-conflating consumer's query string is unchanged.
+        # This builder is SEPARATE code from QueueBuilder.pop's inline params --
+        # §4 opens on that hazard, and the wire tests assert both sides.
+        if conflation:
+            params["conflation"] = "true"
         # NEVER send autoAck for consume - client always manages acking
         # autoAck is only for pop() where server auto-acks immediately
 

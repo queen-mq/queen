@@ -153,6 +153,16 @@ pub struct AckResult {
     /// The ack changed nothing — the cursor was already past this message.
     /// Usually a duplicate ack after a redelivery, and not an error.
     pub noop: bool,
+
+    /// PLAN_CONFLATION §2.4 — log positions this ack retired WITHOUT a handler
+    /// invocation, i.e. the messages conflation superseded: `commit_to − previous
+    /// cursor − 1`. Present only on a clean ack that CLOSED a conflating lease
+    /// (once per lease, on the item that closed it); absent everywhere else, so a
+    /// non-conflating ack result is byte-identical to the pre-1.1.0 one.
+    /// `total_consumed` still counts every retired position — this is the second,
+    /// honest number beside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflated: Option<i64>,
 }
 
 #[cfg(test)]

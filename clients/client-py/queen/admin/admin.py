@@ -85,17 +85,34 @@ class Admin:
         Per-partition backlog for a queue - the cheap sibling of get_queue:
         watermark arithmetic only, no segments, no timestamps.
 
-        Shape: {queue, group, pending, partitions: [{partition, pending}]}.
+        Shape: {queue, group, pending, partitionsPending, conflation,
+        effectivePending, partitions: [{partition, pending}]}.
+
+        The last three arrive with broker >= 1.1.0 (PLAN_CONFLATION §5.3) and
+        exist because one number stops being enough once a group conflates:
+
+            pending           log depth - positions left to retire
+            partitionsPending partitions that owe work (pending > 0)
+            conflation        this group's stored delivery policy
+            effectivePending  WORK depth - handler invocations remaining;
+                              partitionsPending when the group conflates,
+                              pending when it does not
+
+        Read them together or the reading is wrong: a conflating queue at
+        pending 4 000 000 / effectivePending 12 is healthy, while the same two
+        numbers on a non-conflating group are an incident.
 
         Args:
             name: Queue name
             group: Consumer group; None = queue-level pending under the same
                 worst-cursor precedence the dashboard publishes, a named group
-                = that group's own backlog per partition
+                = that group's own backlog per partition. `conflation` is a
+                per-group policy, so it reads false when no group is named.
 
         Returns:
             Depth report. Requires broker >= 1.0.4 - an older broker answers
-            404 no_such_route, so fall back to get_queue there.
+            404 no_such_route, so fall back to get_queue there. A broker
+            between 1.0.4 and 1.1.0 answers without the three fields above.
         """
         logger.log("Admin.get_queue_depth", {"name": name, "group": group})
         query_string = f"?group={quote(group)}" if group else ""

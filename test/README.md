@@ -25,6 +25,7 @@ parallel, without touching your live Postgres on `:5432`.
 | `mesh` | asserts the 2 brokers formed an authenticated mesh | — | ✓ | — | — | HA only |
 | `tenancy` | two-tenant isolation over the mesh pair | — | — | — | ✓ | flag-ON only |
 | `http` | every kv and timer route, and every form of the wire, with **no SDK** in the way | ✓ | — | — | — | no PG access; no env of its own — kv and timers are on every broker |
+| `conflation` | the `PLAN_CONFLATION.md` §7.3 end-to-end scenarios (guarantee, DLQ under a hot producer, mixed groups, conflict echo, mode composition, depth fields, conflated counter), raw HTTP with **no SDK** in the way | ✓ | — | — | — | no PG access; written red-first — stays red until the broker half of the plan lands |
 
 - **`single`** = 1 Postgres + 1 broker + the runner.
 - **`ha`** = 1 Postgres + `queen-a` + `queen-b` (framed-TCP mesh) + the runner.
@@ -115,13 +116,15 @@ test/run.sh --suite py --topo single
 test/run.sh --suite js --topo single,tenanted   # the tenancy parity pair
 test/run.sh --suite mesh                # HA mesh assertion only
 test/run.sh --suite tenancy             # two-tenant isolation over the HA pair
+test/run.sh --suite conflation          # PLAN_CONFLATION §7.3 e2e (red until the feature lands)
 test/run.sh -j 6                        # more parallelism (default 4)
 test/run.sh --no-build-broker           # reuse an existing queen:test image
 test/run.sh --keep                      # leave stacks up to poke at them
 ```
 
 `--topo` filters the **client** lanes (`single`, `ha`, `tenanted`); `mesh`,
-`tenancy` and `http` always bring their own topology, as `mesh` already did.
+`tenancy`, `http` and `conflation` always bring their own topology, as `mesh`
+already did.
 
 Requirements: Docker + Compose v2. The broker image builds from
 [`server/Dockerfile`](../server/Dockerfile) (~100 MB, `queen:test`); runner
@@ -194,6 +197,50 @@ two assertions are built to go red if the purge ever stops working (a fixed key
 that must be absent at the start, a fixed counter that must reach a fixed value).
 The mirror rule is that anything reaching the message log carries a per-run id,
 because no purge can reach the broker's dedup window.
+
+## The conflation gate (red-first)
+
+`test/runners/conflation` is the `PLAN_CONFLATION.md` §7.3 row, and it is the
+same "no SDK in the way" shape as the HTTP gate above, for the same reason:
+§4 ships the seven client halves *after* the broker, so a suite that asserted
+through a client library could not be written until the thing it gates already
+existed. `curl` is the client, `jq` is the assertion.
+
+**It is expected to be RED until the broker half of the plan lands.** It was
+written before the feature — the red half of TDD — so on a broker without
+conflation every scenario fails on its *assertions*, never on transport: the
+`conflation` query parameter is an unknown key that serde drops, so pops answer
+200/204 and simply deliver full batches, which is exactly the behaviour the
+suite exists to rule out. `test/run.sh` with no `--suite` therefore reports
+`SOME FAILURES` on this branch by design. Baseline measured against the current
+tree (`test/run.sh --suite conflation --no-build-broker`, 119 s):
+**37 assertions passed, 36 failed, all 7 scenarios red** — and every one of the
+36 is an assertion on *content*, with zero transport errors. That distinction is
+the suite's own health check: a red that reads "delivered nothing (HTTP 204)"
+is the harness failing, not the feature being absent, and is worth chasing
+before reading anything else in the log.
+
+| scenario | plan | what goes red without the feature |
+|---|---|---|
+| `E2E-1` | §1.3, §7.3 E2E-1 | the redelivery after the ack is the whole backlog, not the tail; the adversarial producer run processes every message instead of collapsing it |
+| `MODES` | §1.5 | `all`+conflation serves 200 of a 1000 backlog, not 1 |
+| `DEPTH` | §2.5, §5.3 | `partitionsPending` / `conflation` / `effectivePending` are absent from `/depth` |
+| `E2E-4` | §3.1, §3.3 | no `conflation` echo, no `conflationConflict` echo, and neither §3.3 refusal is a 400 |
+| `E2E-3` | §7.3 E2E-3 | `workers` reads all 10 000 like `audit` instead of one per partition |
+| `E2E-2` | §1.4, §7.3 E2E-2 | deliveries are batches, and the delivered head never supersedes across retries (the M2 pin) |
+| `COUNTER` | §6.2, §6.3 | `queen_queue_conflated_per_minute` is not a family |
+
+`E2E-5` (new SDK against an old broker) is **not** here: the behaviour under
+test is the SDK's degrade-loudly error (§4), which a suite with no SDK in the
+path cannot express, and the harness has no old-broker topology. It belongs with
+the §7.2 client suites. Two clauses of E2E-4 are likewise out of reach at the
+wire and say so in the script header — the conflict *counter* only ever reaches
+the `rates` log line (§6.1), and "warns exactly once" is SDK behaviour.
+
+Hygiene follows the §10.4 rule the HTTP gate established: queue names, consumer
+groups and transaction ids are per-run, because a group carries a cursor and the
+dedup ring carries txn ids and no `DELETE` here can reset either; the queues are
+dropped from an EXIT trap so a run that dies half way leaves nothing behind.
 
 ## The deep mesh gate
 
@@ -304,5 +351,7 @@ test/
     <suite>/Dockerfile + entrypoint.sh + Dockerfile.dockerignore
     mesh/mesh-check.sh         HA mesh assertion (curl + jq)
     tenancy/tenancy-check.sh   two-tenant isolation over the HA pair (curl + jq)
+    conflation/conflation-e2e-check.sh
+                               PLAN_CONFLATION §7.3 e2e (curl + jq), red-first
   vendor/cpp/threadpool.hpp  MIT header the C++ client needs (recovered from history)
 ```

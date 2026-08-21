@@ -2,10 +2,12 @@
 
 namespace Queen\Consumer;
 
+use Queen\Exceptions\ConflationUnsupportedException;
 use Queen\Exceptions\HttpException;
 use Queen\Http\HttpClient;
 use Queen\Http\Retry429Policy;
 use Queen\Queen;
+use Queen\Support\ConflationGuard;
 use GuzzleHttp\Promise\Utils as PromiseUtils;
 
 class ConsumerManager
@@ -39,10 +41,14 @@ class ConsumerManager
         $subscriptionMode = $options['subscriptionMode'] ?? null;
         $subscriptionFrom = $options['subscriptionFrom'] ?? null;
         $maxPartitions = $options['maxPartitions'] ?? 1;
+        $conflation = $options['conflation'] ?? false;
 
         $path = $this->buildPath($queue, $partition, $namespace, $task);
-        $baseParams = $this->buildParams($batch, $wait, $timeoutMillis, $group, $subscriptionMode, $subscriptionFrom, $namespace, $task, $maxPartitions);
+        $baseParams = $this->buildParams($batch, $wait, $timeoutMillis, $group, $subscriptionMode, $subscriptionFrom, $namespace, $task, $maxPartitions, $conflation);
         $affinityKey = $this->getAffinityKey($queue, $partition, $namespace, $task, $group);
+        // The identity the conflation checks report against: what was asked for,
+        // and which (queue, group) pair a declaration conflict belongs to.
+        $conflationScope = [$conflation, $queue, $group, $namespace, $task];
 
         // Install signal handlers, saving previous handlers for restoration
         $running = true;
@@ -64,13 +70,13 @@ class ConsumerManager
                 $this->worker(
                     $handler, $path, $baseParams, $batch, $limit, $idleMillis,
                     $autoAck, $wait, $timeoutMillis, $renewLease, $renewLeaseIntervalMillis,
-                    $each, $group, $affinityKey, $running
+                    $each, $group, $affinityKey, $running, $conflationScope
                 );
             } else {
                 $this->concurrentWorkers(
                     $concurrency, $handler, $path, $baseParams, $batch, $limit, $idleMillis,
                     $autoAck, $wait, $timeoutMillis, $renewLease, $renewLeaseIntervalMillis,
-                    $each, $group, $affinityKey, $running
+                    $each, $group, $affinityKey, $running, $conflationScope
                 );
             }
         } finally {
@@ -108,6 +114,7 @@ class ConsumerManager
         ?string $group,
         ?string $affinityKey,
         bool &$running,
+        array $conflationScope = [false, null, null, null, null],
     ): void {
         // Per-worker state
         $workerProcessed = array_fill(0, $concurrency, 0);
@@ -194,6 +201,15 @@ class ConsumerManager
                 }
 
                 $result = $outcome['value'];
+
+                // Ahead of the empty-response shortcut: an old broker answers an
+                // empty pop with a bodiless 204, which arrives here as null, and
+                // that is the response the degrade-loudly check exists to catch
+                // (PLAN_CONFLATION §4). Raising here leaves the poll round and
+                // stops the consumer, which is the point — the alternative is
+                // draining a backlog one message at a time in silence.
+                ConflationGuard::check($result, ...$conflationScope);
+
                 if (!$result || !isset($result['messages']) || empty($result['messages'])) {
                     if (!$wait) {
                         usleep(100_000);
@@ -268,6 +284,7 @@ class ConsumerManager
         ?string $group,
         ?string $affinityKey,
         bool &$running,
+        array $conflationScope = [false, null, null, null, null],
     ): void {
         $processedCount = 0;
         $lastMessageTime = $idleMillis !== null ? $this->nowMillis() : null;
@@ -301,6 +318,12 @@ class ConsumerManager
                 // waiting instead of giving up after the bounded push-like budget.
                 $result = $this->httpClient->get("{$path}?{$baseParams}", $clientTimeout, $affinityKey, $retryKind);
                 $consecutive429 = 0;
+
+                // Ahead of the empty-response shortcut: an old broker answers an
+                // empty pop with a bodiless 204, which arrives here as null, and
+                // that is the response the degrade-loudly check exists to catch
+                // (PLAN_CONFLATION §4).
+                ConflationGuard::check($result, ...$conflationScope);
 
                 if (!$result || !isset($result['messages']) || empty($result['messages'])) {
                     if (!$wait) {
@@ -346,6 +369,14 @@ class ConsumerManager
                     $processedCount += count($messages);
                 }
             } catch (\Throwable $error) {
+                // Degrade-loudly (PLAN_CONFLATION §4) is terminal by design and
+                // is re-thrown by TYPE, ahead of the message-matching branches
+                // below: a consumer that asked for conflation and is not getting
+                // it must stop, never back off and poll again.
+                if ($error instanceof ConflationUnsupportedException) {
+                    throw $error;
+                }
+
                 // 429: HttpClient already retried this with backoff (unbounded
                 // for a wait=true poll), so getting here means an explicit
                 // maxAttempts override ran out. Keep polling behind the same
@@ -515,6 +546,7 @@ class ConsumerManager
         ?string $namespace,
         ?string $task,
         int $maxPartitions = 1,
+        bool $conflation = false,
     ): string {
         $params = [
             'batch' => (string) $batch,
@@ -540,6 +572,12 @@ class ConsumerManager
         // v4 multi-partition pop: drain up to N sparse partitions per call.
         if ($maxPartitions > 1) {
             $params['partitions'] = (string) $maxPartitions;
+        }
+        // Last-value delivery, sent only when true: the broker treats presence
+        // as opt-in, and conflation=false would read as a DISAGREEMENT with a
+        // group whose stored policy is true.
+        if ($conflation) {
+            $params['conflation'] = 'true';
         }
 
         return http_build_query($params);

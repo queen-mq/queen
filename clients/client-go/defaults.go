@@ -45,6 +45,7 @@ var ConsumeDefaults = ConsumeOptions{
 	RenewLease:    false, // No auto-renewal
 	Each:          false, // Process as batch by default
 	MaxPartitions: 1,     // v4 multi-partition pop cap (1 = legacy single-partition)
+	Conflation:    false, // Last-value delivery off (group policy, opt-in)
 }
 
 // PopDefaults contains default values for pop operations.
@@ -54,6 +55,7 @@ var PopDefaults = PopOptions{
 	TimeoutMillis: 30000, // 30 seconds if wait=true
 	AutoAck:       false, // Server-side auto-ack (false = manual ack required)
 	MaxPartitions: 1,     // v4 multi-partition pop cap
+	Conflation:    false, // Last-value delivery off (group policy, opt-in)
 }
 
 // BufferDefaults contains default values for buffer configuration.

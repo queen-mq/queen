@@ -38,6 +38,9 @@ func (a *streamSourceAdapter) SubscriptionMode(m string) runtime.Source {
 func (a *streamSourceAdapter) SubscriptionFrom(t string) runtime.Source {
 	return &streamSourceAdapter{qb: a.qb.SubscriptionFrom(t)}
 }
+func (a *streamSourceAdapter) Conflation(b bool) runtime.Source {
+	return &streamSourceAdapter{qb: a.qb.Conflation(b)}
+}
 
 func (a *streamSourceAdapter) Pop(ctx context.Context) ([]runtime.Message, error) {
 	msgs, err := a.qb.Pop(ctx)

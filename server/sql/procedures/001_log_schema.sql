@@ -142,6 +142,10 @@ CREATE TABLE IF NOT EXISTS queen.log_consumers (
     attempt_offset BIGINT,                 -- redelivery detection (former attempt_seq/off)
     attempt_count INTEGER NOT NULL DEFAULT 0,
     total_consumed BIGINT NOT NULL DEFAULT 0,
+    -- The lease this row currently holds was a CONFLATING one (PLAN_CONFLATION
+    -- §2.2). See the ALTER below for the rationale; this copy only serves a
+    -- database created from scratch.
+    lease_conflated BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (partition_id, consumer_group)
 );
@@ -158,6 +162,17 @@ ALTER TABLE queen.log_consumers SET (
     autovacuum_vacuum_threshold = 500,
     autovacuum_vacuum_cost_delay = 0,
     vacuum_truncate = off);
+
+-- The lease this row currently holds was a CONFLATING one (PLAN_CONFLATION §2.2).
+-- Written by the pop that took the lease, read by the ack that closes it. It
+-- exists because ack must be able to (a) report the skipped count and (b) apply
+-- the completion clamp WITHOUT a second lookup: the ack path already does
+-- SELECT * INTO v_c on this row, so this column costs nothing to read, and it is
+-- non-indexed so writing it keeps the lease UPDATE HOT.
+-- CREATE TABLE above is IF NOT EXISTS, so this idempotent ALTER is what upgrades
+-- an existing database (precedent: 019_worker_metrics.sql, 024_kv.sql).
+ALTER TABLE queen.log_consumers
+    ADD COLUMN IF NOT EXISTS lease_conflated BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- A3 (PLAN_HOTLIST_FOLLOWUP.md): the durable floor under the mesh hot-list hint.
 --

@@ -836,10 +836,31 @@ AS $$
         'queue', q.name,
         'group', p_group,
         'pending', COALESCE(d.total, 0),
+        -- PLAN_CONFLATION §2.5/§5.3. `pending` stays LOG depth (positions to
+        -- retire). partitionsPending is the count of partitions that owe work —
+        -- useful for every group (queenctl computed it client-side and called it
+        -- partitionsNonEmpty). For a CONFLATING group it is also WORK depth:
+        -- one handler invocation per non-empty partition, so effectivePending
+        -- reads it instead of the log depth. A conflating queue at
+        -- pending: 4 000 000, effectivePending: 12 is healthy; the same numbers
+        -- on a non-conflating group are an incident.
+        'partitionsPending', COALESCE(d.nonempty, 0),
+        'conflation', COALESCE(g.conflation, false),
+        'effectivePending', CASE WHEN COALESCE(g.conflation, false)
+                                 THEN COALESCE(d.nonempty, 0)
+                                 ELSE COALESCE(d.total, 0) END,
         'partitions', COALESCE(d.parts, '[]'::jsonb))
     FROM queen.queues q
+    -- One indexed cgm_identity_uk lookup; NULL (⇒ conflation false) when the
+    -- caller asked for queue-level depth or the group never registered.
+    LEFT JOIN queen.consumer_groups_metadata g
+      ON p_group IS NOT NULL
+     AND g.queue_id = q.id
+     AND g.consumer_group = p_group
+     AND g.partition_name = ''
     LEFT JOIN LATERAL (
         SELECT SUM(t.pending)::bigint AS total,
+               SUM(CASE WHEN t.pending > 0 THEN 1 ELSE 0 END)::bigint AS nonempty,
                jsonb_agg(jsonb_build_object('partition', t.pname,
                                             'pending', t.pending)
                          ORDER BY t.pname) AS parts

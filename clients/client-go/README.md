@@ -298,6 +298,56 @@ legacy single-partition behaviour.
 `.Partitions(N)` only applies to **wildcard** pops; specifying
 `.Partition("name")` ignores the cap.
 
+### Conflation (Last-Value Delivery)
+
+For queues where one partition is one logical key and only the newest pending
+message matters ("recompute entity X", dirty-flag work): a conflating pop
+returns only the **newest visible** message of a partition and commits
+everything below it. A 4M-message backlog on 12 dirty partitions costs 12
+handler invocations, not 4M.
+
+```go
+client.Queue("recompute").
+    Group("workers").
+    Conflation(true).
+    Consume(ctx, func(ctx context.Context, msg *queen.Message) error {
+        return recompute(msg.Partition, msg.Data) // newest state only
+    }).Execute(ctx)
+```
+
+**It is a group policy, not a call flag.** The first consumer to register the
+group persists it; from then on the stored value wins for every consumer of
+that group. A consumer that declares the opposite is warned **once** per
+`(queue, group)` per process and keeps running on the stored policy — so a
+rolling deploy where half the fleet has the flag never breaks. To change a
+group's policy, delete and recreate the group.
+
+**The guarantee** is unchanged by conflation: after the last push to a
+partition, at least one handler invocation *starts* after that push commits.
+The broker never commits past an offset it did not observe at pop time, so a
+message pushed while your handler is running is delivered on the next pop.
+
+**Requires broker >= 1.1.0**, and the client checks rather than assumes: an
+older broker ignores the query parameter and answers with the whole backlog, so
+`Pop` and the consume loop fail with `queen.ErrConflationUnsupported` on the
+first response instead of silently draining it message by message.
+
+```go
+if errors.Is(err, queen.ErrConflationUnsupported) {
+    // the broker on the other end is older than 1.1.0
+}
+```
+
+Two notes on sizing and on reading the depth endpoint:
+
+* A conflating pop yields at most one message per partition, so `Batch(N)`
+  alone does not size it — leave `Partitions()` unset and the broker sizes the
+  claim from `Batch` (capped at 64 partitions per round trip), or set it.
+* `Admin().GetQueueDepth()` reports both numbers: `pending` is log depth
+  (positions to retire) and `effectivePending` is work depth (handler
+  invocations remaining). `pending: 4000000, effectivePending: 12` is healthy
+  on a conflating group and an incident on any other.
+
 ### Acknowledge Messages
 
 ```go

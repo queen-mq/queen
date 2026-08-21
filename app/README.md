@@ -71,6 +71,19 @@ Because the bytes are baked in, **a source change ships only after
 builds of rust-embed read from disk, so locally the npm build alone is usually
 enough; release builds are not.
 
+### Tests
+
+```bash
+npm test
+```
+
+Node's own runner (`node --test test/*.test.js`), no framework and no extra
+dependency — the same shape as `clients/client-js/test-v2/*-unit`. It covers the
+rules views share rather than the markup around them: the pure modules under
+`src/composables`, which is where a rule belongs the moment a second view needs
+it. Rendering tests would need `@vue/test-utils` and a DOM in devDependencies;
+there are none today.
+
 ## Configuration
 
 ### Environment Variables
@@ -131,6 +144,7 @@ app/
 │   ├── composables/              # Vue composables
 │   │   ├── useApi.js             # panel state: data/loading/error/lastUpdated
 │   │   ├── useChartTheme.js
+│   │   ├── useConflation.js      # last-value groups: log depth vs work depth
 │   │   ├── useRefresh.js         # shell refresh registry + shared ticker
 │   │   ├── useTheme.js
 │   │   └── useToast.js           # notifications
@@ -153,6 +167,7 @@ app/
 │   ├── App.vue                   # Root component
 │   ├── main.js                   # Entry point
 │   └── style.css                 # Global styles & design system
+├── test/                         # node --test unit tests (npm test)
 ├── index.html
 ├── package.json
 ├── tailwind.config.js

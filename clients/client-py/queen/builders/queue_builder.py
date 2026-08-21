@@ -5,8 +5,11 @@ Queue builder for fluent API
 from typing import Any, Callable, Dict, List, Optional, Union
 from urllib.parse import urlencode
 
+from ..errors import ConflationUnsupportedError
 from ..types import Message
 from ..utils import logger
+from ..utils.conflation import check_pop_response as check_conflation
+from ..utils.conflation import scope_of as conflation_scope
 from ..utils.defaults import QUEUE_DEFAULTS, CONSUME_DEFAULTS, POP_DEFAULTS
 from ..utils.uuid_gen import generate_uuid
 from ..utils.validation import is_valid_uuid
@@ -57,6 +60,7 @@ class QueueBuilder:
         self._renew_lease_interval_millis = CONSUME_DEFAULTS["renew_lease_interval_millis"]
         self._subscription_mode = CONSUME_DEFAULTS["subscription_mode"]
         self._subscription_from = CONSUME_DEFAULTS["subscription_from"]
+        self._conflation = CONSUME_DEFAULTS["conflation"]
         self._each = False
         self._max_partitions = 1
 
@@ -263,6 +267,32 @@ class QueueBuilder:
         self._subscription_from = from_
         return self
 
+    def conflation(self, enabled: bool = True) -> "QueueBuilder":
+        """
+        Last-value delivery: a pop of a partition delivers only the NEWEST
+        visible message and retires everything behind it.
+
+        For command-style queues where one partition is one logical task key
+        ("recompute entity X") and only the freshest request matters. Under
+        backlog the handler runs once per partition on the newest message
+        instead of once per message.
+
+        This is a property of the CONSUMER GROUP on this queue, sitting beside
+        subscription_mode: it is persisted when the group first registers, and
+        from then on the stored value wins for every consumer of that group.
+        A consumer that declares the opposite keeps working -- the stored
+        policy applies and the SDK warns once (PLAN_CONFLATION §3.3).
+
+        Requires broker >= 1.1.0. An older broker ignores the flag, so the SDK
+        raises ConflationUnsupportedError on the first pop rather than silently
+        draining the backlog message by message (§4).
+
+        Applies to both consume() and pop(); needs a consumer group, and is
+        refused by the broker together with server-side autoAck.
+        """
+        self._conflation = bool(enabled)
+        return self
+
     def each(self) -> "QueueBuilder":
         """Process messages one at a time"""
         self._each = True
@@ -305,6 +335,7 @@ class QueueBuilder:
             "renew_lease_interval_millis": self._renew_lease_interval_millis,
             "subscription_mode": self._subscription_mode,
             "subscription_from": self._subscription_from,
+            "conflation": self._conflation,
             "each": self._each,
             "max_partitions": self._max_partitions,
             "signal": signal,
@@ -368,6 +399,11 @@ class QueueBuilder:
                 params["subscriptionFrom"] = self._subscription_from
             if self._max_partitions > 1:
                 params["partitions"] = str(self._max_partitions)
+            # Only ever emitted when true, mirroring autoAck: an absent
+            # parameter is what keeps every non-conflating pop byte-identical
+            # to a pre-1.1.0 one (PLAN_CONFLATION §3.1).
+            if self._conflation:
+                params["conflation"] = "true"
 
             # Generate affinity key for consistent routing to same backend
             affinity_key = self._get_affinity_key()
@@ -380,6 +416,18 @@ class QueueBuilder:
                 retry_kind="pop" if self._wait else None,
             )
 
+            # Before anything is returned to the caller: did the broker
+            # actually apply the policy we asked for? (PLAN_CONFLATION §4.)
+            # This runs ahead of the empty-response branch on purpose -- the
+            # echo rides empty pops too, so an old broker is caught on the
+            # first round trip instead of after a backlog has been drained.
+            check_conflation(
+                result,
+                requested=self._conflation,
+                queue=conflation_scope(self._queue_name, self._namespace, self._task),
+                group=self._group,
+            )
+
             if not result or not result.get("messages"):
                 logger.log("QueueBuilder.pop", {"status": "no-messages"})
                 return []
@@ -387,6 +435,12 @@ class QueueBuilder:
             messages = [msg for msg in result["messages"] if msg is not None]
             logger.log("QueueBuilder.pop", {"status": "success", "count": len(messages)})
             return messages
+        except ConflationUnsupportedError:
+            # NOT swallowed into [], unlike every other failure below. An empty
+            # list here would hide the one thing this error exists to say, and
+            # the caller would go on polling a broker that silently ignores the
+            # policy it asked for.
+            raise
         except Exception as error:
             # Return empty array on error instead of throwing. This also
             # covers a 429 whose retry_429 policy was exhausted (bounded

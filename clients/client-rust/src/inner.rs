@@ -136,6 +136,7 @@ mod tests {
             lease_released: false,
             dlq: false,
             noop: false,
+            conflated: None,
         }
     }
 

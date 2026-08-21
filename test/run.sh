@@ -11,6 +11,9 @@
 #            tenancy            -> two-tenant isolation, `ha-tenanted` stack only
 #            http               -> the kv/timer wire with no SDK in the way
 #                                  (PLAN_KV_TIMERS.md §10.2), `single` only
+#            conflation         -> the PLAN_CONFLATION.md §7.3 end-to-end
+#                                  scenarios at the raw HTTP wire (no SDK),
+#                                  `single` only
 #
 #   topologies:
 #     single       1 PG + 1 broker                       (QUEEN_TENANCY_HEADER off)
@@ -34,6 +37,7 @@
 #   test/run.sh --suite js --topo tenanted     # flag-ON default-tenant lane
 #   test/run.sh --suite tenancy        # two-tenant isolation over the HA pair
 #   test/run.sh --suite http           # every kv/timer route, no SDK in the way
+#   test/run.sh --suite conflation     # PLAN_CONFLATION §7.3 e2e, no SDK in the way
 #   test/run.sh --no-build-broker      # reuse an existing queen:test
 #   test/run.sh -j 3                   # cap parallelism (default: 4)
 #   test/run.sh --keep                 # leave stacks up for debugging
@@ -41,7 +45,7 @@
 # Env: QUEEN_TEST_MAX_PARALLEL overrides -j.
 set -uo pipefail
 
-ALL_SUITES="js go py cli cpp laravel rust-client rust mesh tenancy http"
+ALL_SUITES="js go py cli cpp laravel rust-client rust mesh tenancy http conflation"
 CLIENT_SUITES="js go py cli cpp laravel rust-client"
 
 SUITES="$ALL_SUITES"
@@ -65,7 +69,7 @@ while [ $# -gt 0 ]; do
     --no-build)         BUILD_RUNNERS=0; BUILD_BROKER=0; shift;;
     -j)       MAXP="$2"; shift 2;;
     --keep)   KEEP=1; shift;;
-    -h|--help) sed -n '2,37p' "$0"; exit 0;;
+    -h|--help) sed -n '2,41p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -142,6 +146,15 @@ for s in $SUITES; do
     # wire. The wire shape it pins is topology-independent anyway: the same
     # bodies, the same routes and the same result layout on any stack.
     add_job http single
+  elif [ "$s" = "conflation" ]; then
+    # PLAN_CONFLATION.md §7.3: the conflation e2e scenarios, raw HTTP with no
+    # SDK in the path (the per-SDK halves belong to §7.2 and land with the
+    # clients). `single` only, and like `http` that is a scope statement rather
+    # than a cost cut: every §7.3 scenario is a (partition, consumer-group)
+    # semantic — the §1.3 guarantee, the retry budget, the stored policy, depth
+    # — none of which changes shape across the mesh, and the ha lanes of the
+    # client suites already exercise the transport.
+    add_job conflation single
   elif [ "$s" = "rust" ]; then
     add_job rust unit          # no stack
   fi

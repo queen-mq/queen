@@ -186,6 +186,62 @@ legacy single-partition behaviour.
 `->partitions(N)` only applies to **wildcard** pops; specifying
 `->partition('name')` ignores the cap.
 
+### Conflation (Last-Value Delivery)
+
+Requires broker >= 1.1.0.
+
+For command-style queues where one partition is one logical task key and only
+the newest pending message matters — "recompute entity X", dirty-flag
+workloads. Under backlog the consumer processes **one** message per partition,
+the newest, and the ack retires everything behind it:
+
+```php
+$queen->queue('recompute')
+    ->group('workers')
+    ->conflation(true)
+    ->partitions(64)
+    ->consume(function (array $messages) {
+        foreach ($messages as $m) {
+            recompute($m['partition']);   // the freshest state for this key
+        }
+    })
+    ->execute();
+```
+
+A 4,000,000-message backlog spread over 12 dirty keys becomes 12 handler
+invocations, not 4,000,000. The guarantee that makes it safe: **after the last
+push to a partition, at least one run of that partition's handler starts after
+that push commits.** Nothing is deleted — retention still governs storage, and
+a second, non-conflating group on the same queue still sees every message.
+
+Three things to know:
+
+- **It belongs to the consumer group, not to the call.** The first consumer to
+  register the group fixes the policy; every later consumer of that group gets
+  the stored setting whatever it asks for, and is warned once if it disagreed.
+  That is what lets `workers` conflate while `audit` reads everything.
+- **It needs `->group()`.** Queue mode is a shared cursor with no group identity
+  to hang a policy on, and the broker answers 400.
+- **A conflating pop returns at most 64 messages per round trip** — one per
+  claimed partition, capped by the checkout width. `batch()` above that is
+  inert; `partitions(N)` is the knob that sizes the call.
+
+Watch it with the depth endpoint, which separates the two numbers:
+
+```php
+$depth = $queen->admin()->getQueueDepth('recompute', 'workers');
+// pending          => 4000000   log depth: positions still to retire
+// effectivePending => 12        work depth: handler invocations still to come
+```
+
+Alert on `effectivePending`. On a conflating group those two numbers diverge by
+design; on an ordinary group they are equal.
+
+**Against a broker older than 1.1.0** the flag would be silently ignored and the
+consumer would quietly drain the whole backlog message by message. It does not:
+the consume loop raises `Queen\Exceptions\ConflationUnsupportedException` on the
+first response, before a single message is processed.
+
 ## Consuming Messages
 
 ### High-Level Consumer (recommended)
@@ -492,6 +548,12 @@ $admin->listQueues();
 $admin->getQueue('orders');
 $admin->getPartitions(['queue' => 'orders']);
 
+// Per-partition backlog, cheaper than getQueue (watermarks only).
+// Broker >= 1.1.0 adds partitionsPending / conflation / effectivePending —
+// see "Conflation" above for what effectivePending means.
+$admin->getQueueDepth('orders');
+$admin->getQueueDepth('orders', 'processors');
+
 // Messages
 $admin->listMessages(['queue' => 'orders', 'status' => 'pending']);
 $admin->getMessage($partitionId, $transactionId);
@@ -578,6 +640,11 @@ php artisan queen:consume events App\\Handlers\\EventHandler \
     --group=watchers \
     --subscription-mode=all \
     --subscription-from=2024-01-01T00:00:00Z
+
+# Conflation: only the newest message per partition (broker >= 1.1.0)
+php artisan queen:consume recompute App\\Handlers\\RecomputeHandler \
+    --group=workers \
+    --conflation
 ```
 
 Handler class:

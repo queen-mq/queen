@@ -16,6 +16,15 @@ cd /src/clients/client-cpp
 # commits without the gate.
 ./bin/test_kv_timers
 
+# Conflation wire contract (PLAN_CONFLATION.md §4, §3.1). Broker-free for the
+# same reason: the two things it pins cannot be produced by a live 1.1.0 broker.
+# Degrade-loudly needs a response WITHOUT the "conflation":true echo, which only
+# a pre-1.1.0 broker emits, and "warns exactly once per (queue, group)" is not a
+# thing the broker side can count -- one warning and a thousand look identical
+# from there. The end-to-end half of this feature is test/run.sh --suite
+# conflation, which drives raw HTTP with no SDK in the way.
+./bin/test_conflation
+
 # Broker URL is argv[1] (there is no env override); default would be localhost.
 # The KV/timer INTEGRATION tests inside this binary run unconditionally: every
 # broker carries both surfaces, so a failure there is a failure and not a

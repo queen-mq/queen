@@ -81,6 +81,20 @@ pub struct RunOptions {
     pub max_wait: Duration,
     pub subscription_mode: Option<SubscriptionMode>,
     pub subscription_from: Option<String>,
+    /// Last-value delivery on the stream's source queue: each cycle sees only
+    /// the newest message per partition and the rest are retired with it.
+    ///
+    /// This is [`crate::QueueBuilder::conflation`] on the pop the runner makes,
+    /// and it carries the same requirements — a broker >= 1.1.0, and a policy
+    /// stored on the group (here `streams.{query_id}` unless
+    /// [`RunOptions::consumer_group`] overrides it) that the first registration
+    /// fixes for every runner sharing that id.
+    ///
+    /// Sensible only for a chain whose result depends on the latest value rather
+    /// than on the sequence: a dirty-flag recompute, a "current state" join. A
+    /// windowed aggregate would be counting a *sample* of its input, because the
+    /// messages conflation skips never reach the reducer. Off by default.
+    pub conflation: bool,
     /// Wipe existing state when the chain's shape changed. Without it a changed
     /// chain is refused, which is the point.
     pub reset: bool,
@@ -98,6 +112,7 @@ impl RunOptions {
             max_wait: Duration::from_millis(1000),
             subscription_mode: None,
             subscription_from: None,
+            conflation: false,
             reset: false,
             consumer_group: None,
             cancel: None,
@@ -141,6 +156,13 @@ impl RunOptions {
 
     pub fn subscription_from(mut self, from: impl Into<String>) -> Self {
         self.subscription_from = Some(from.into());
+        self
+    }
+
+    /// See [`RunOptions::conflation`]. Read that before turning it on: it
+    /// changes what the chain is computing over, not just how fast it gets there.
+    pub fn conflation(mut self, enabled: bool) -> Self {
+        self.conflation = enabled;
         self
     }
 }
@@ -363,21 +385,9 @@ impl Runner {
     }
 
     async fn pop(&self) -> Result<Vec<Message>> {
-        let mut b = self
-            .source
-            .clone()
-            .batch(self.opts.batch_size)
-            .partitions(self.opts.max_partitions)
-            .wait(true)
-            .poll_timeout(self.opts.max_wait)
-            .group(&self.consumer_group);
-        if let Some(m) = self.opts.subscription_mode {
-            b = b.subscription_mode(m);
-        }
-        if let Some(f) = &self.opts.subscription_from {
-            b = b.subscription_from(f.clone());
-        }
-        b.pop().await
+        pop_builder(&self.source, &self.consumer_group, &self.opts)
+            .pop()
+            .await
     }
 
     fn touch(&self, partition_id: &str, partition: &str) {
@@ -1164,6 +1174,32 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Everything one cycle's pop takes from [`RunOptions`], applied to the source
+/// builder.
+///
+/// Free-standing rather than inline in `Runner::pop` so the wiring can be
+/// asserted without a broker: the builder is rebuilt from `source` on every
+/// cycle, so an option added to `RunOptions` and not copied here reaches nothing
+/// and nothing says so. That is the shape of the bug the plan's §4 warns about
+/// in the other SDKs, one layer down.
+fn pop_builder(source: &QueueBuilder, group: &str, opts: &RunOptions) -> QueueBuilder {
+    let mut b = source
+        .clone()
+        .batch(opts.batch_size)
+        .partitions(opts.max_partitions)
+        .wait(true)
+        .poll_timeout(opts.max_wait)
+        .group(group)
+        .conflation(opts.conflation);
+    if let Some(m) = opts.subscription_mode {
+        b = b.subscription_mode(m);
+    }
+    if let Some(f) = &opts.subscription_from {
+        b = b.subscription_from(f.clone());
+    }
+    b
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1183,6 +1219,47 @@ mod tests {
             lease_id: "L1".into(),
             consumer_group: "g".into(),
         }
+    }
+
+    // ------------------------------------------------------------ pop wiring
+
+    fn source_queue() -> QueueBuilder {
+        crate::Queen::connect(crate::Config::new("http://127.0.0.1:1"))
+            .expect("one http:// URL is a valid configuration")
+            .queue("events")
+    }
+
+    // PLAN_CONFLATION §4: the option has to survive the rebuild the cycle loop
+    // does on every poll. Asserted at the query string, which is the only place
+    // the broker ever sees it.
+    #[test]
+    fn conflation_reaches_the_streams_pop_query() {
+        let opts = RunOptions::new("q1").conflation(true);
+        let pairs = pop_builder(&source_queue(), "streams.q1", &opts)
+            .pop_params(false)
+            .to_pairs();
+
+        assert!(
+            pairs.contains(&("conflation", "true".to_string())),
+            "{pairs:?}"
+        );
+        assert!(
+            pairs.contains(&("consumerGroup", "streams.q1".to_string())),
+            "{pairs:?}"
+        );
+    }
+
+    // Off by default and off is silence: a stream that never asked must put
+    // byte-identical bytes on the socket, or every existing deployment's group
+    // registration changes meaning on upgrade.
+    #[test]
+    fn a_stream_that_did_not_ask_sends_no_conflation_key() {
+        let opts = RunOptions::new("q1");
+        assert!(!opts.conflation);
+        let pairs = pop_builder(&source_queue(), "streams.q1", &opts)
+            .pop_params(false)
+            .to_pairs();
+        assert!(!pairs.iter().any(|(k, _)| *k == "conflation"), "{pairs:?}");
     }
 
     // ------------------------------------------------- gate: message buckets

@@ -615,6 +615,112 @@ pub struct PopParams {
     subscription_mode: Option<String>,
     #[serde(rename = "subscriptionFrom")]
     subscription_from: Option<String>,
+    // PLAN_CONFLATION §3.1 — last-value delivery for this consumer GROUP on this
+    // queue: a pop of a partition delivers exactly the newest visible message and
+    // leases (committed, tail]. Declared here (query string, never a body field —
+    // the subscriptionMode shape), persisted on the group's first registration,
+    // and from then on the STORED value wins for every consumer of that group
+    // (§1.1/§3.3). Absent ⇒ off ⇒ byte-identical behaviour.
+    #[serde(rename = "conflation")]
+    conflation: Option<bool>,
+}
+
+/// PLAN_CONFLATION §3.1/§3.3 — what the response has to say about conflation.
+/// `on` is the EFFECTIVE policy (the stored one, or the requested one when this
+/// pop is the registrar); `conflict` records that the request disagreed with the
+/// stored value. Both keys are emitted ONLY when they are true, so a flag-off
+/// deployment keeps byte-identical response bytes (which
+/// `handlers::data::protocol_conformance` pins against `queen-protocol`).
+#[derive(Clone, Copy, Default)]
+struct Conflation {
+    on: bool,
+    conflict: bool,
+}
+
+impl Conflation {
+    const OFF: Conflation = Conflation { on: false, conflict: false };
+}
+
+/// Resolve the effective conflation policy for (queue, group) — §3.3: SQL is the
+/// authority, the broker caches it. The request flag is used for exactly two
+/// things, the first registration write and detecting a conflict.
+///
+/// A cache hit costs zero DB; a miss costs ONE indexed `consumer_groups_metadata`
+/// lookup per (queue, group) per process. An unregistered group has no stored
+/// policy yet, so the requested value becomes effective AND is what the
+/// registering pop persists.
+async fn resolve_conflation(
+    st: &Arc<AppState>,
+    queue: &str,
+    group: &str,
+    tenant: &str,
+    requested: Option<bool>,
+) -> Conflation {
+    // Group-less queue mode has no group identity to hang a policy on; the
+    // handlers refuse conflation=true there outright (§3.3), and a stray
+    // conflation=false must not cost a lookup.
+    if group == "__QUEUE_MODE__" {
+        return Conflation::OFF;
+    }
+    let stored = st.group_policy(queue, group, tenant).await.map(|p| p.conflation);
+    let on = stored.unwrap_or_else(|| requested.unwrap_or(false));
+    let conflict = matches!(requested, Some(r) if r != on);
+    if conflict {
+        // Group-setting-wins, LOUDLY (§3.3): a counter, a response echo, and a
+        // rate-limited line — never a per-request log line, which a mismatched
+        // fleet would turn into a flood (the POOL_SAT idiom, obs.rs).
+        st.metrics.per_queue.add_conflation_conflict(tenant, queue);
+        st.metrics
+            .conflation_conflicts
+            .fetch_add(1, Ordering::Relaxed);
+        static CFL_CONFLICT: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
+        if let Some(suppressed) = CFL_CONFLICT.tick(crate::util::now_epoch_ms()) {
+            tracing::warn!(
+                target: "conflation",
+                queue,
+                group,
+                stored = on,
+                requested = requested.unwrap_or(false),
+                suppressed,
+                "consumer declared a conflation policy the group does not have — \
+                 the STORED group setting wins"
+            );
+        }
+    }
+    Conflation { on, conflict }
+}
+
+/// §3.3 — the two refused combinations, rejected at the handler with a 400 that
+/// names the reason. This is the one place conflation REJECTS rather than warns,
+/// because both are consumer bugs whose silent form is unfixable in production.
+/// Returns the refusal response when the request is illegal.
+fn conflation_refusal(
+    requested: Option<bool>,
+    has_group: bool,
+    auto_ack: bool,
+) -> Option<Response> {
+    if requested != Some(true) {
+        return None;
+    }
+    if !has_group {
+        return Some(json(
+            StatusCode::BAD_REQUEST,
+            "{\"success\":false,\"error\":\"conflation requires consumerGroup: queue mode is a \
+             shared cursor with no group identity to hang a delivery policy on\",\"messages\":[]}"
+                .to_string(),
+        ));
+    }
+    if auto_ack {
+        return Some(json(
+            StatusCode::BAD_REQUEST,
+            "{\"success\":false,\"error\":\"conflation cannot be combined with autoAck: auto-ack \
+             commits at delivery with no lease, so a failed handler loses the tail and the \
+             at-least-once guarantee conflation exists to provide degrades to \
+             at-most-once\",\"messages\":[]}"
+                .to_string(),
+        ));
+    }
+    None
 }
 
 #[derive(Deserialize)]
@@ -697,11 +803,27 @@ pub async fn handle_pop(
         return json(StatusCode::NO_CONTENT, "{\"messages\":[],\"paused\":true}".to_string());
     }
     let batch = p.batch.unwrap_or(200);
-    let max_parts = p.partitions.unwrap_or(1);
     let auto_ack = p.auto_ack.unwrap_or(false);
     let wait = p.wait.unwrap_or(false);
     let timeout_ms = p.timeout.unwrap_or(st.pop_default_timeout_ms);
+    // PLAN_CONFLATION §3.3: refuse the two illegal combinations BEFORE anything
+    // else — both are consumer bugs whose silent form is unfixable in production.
+    if let Some(r) = conflation_refusal(p.conflation, p.consumer_group.is_some(), auto_ack) {
+        return r;
+    }
     let group = p.consumer_group.unwrap_or_else(|| "__QUEUE_MODE__".to_string());
+    let cfl = resolve_conflation(&st, &queue, &group, tenant.as_str(), p.conflation).await;
+    // M5 (§3.2): `partitions` defaults to 1, and a conflating pop yields at most
+    // ONE message per partition — so the batch budget stops being the thing that
+    // sizes a pop and the partition cap becomes it. Raise the cap to `batch`,
+    // clamped to the 64-wide checkout ceiling, which is load-bearing and measured
+    // (see the `k` comment in hotlist_pop_attempt). A conflating pop therefore
+    // returns at most 64 messages per round trip, whatever `batch` says.
+    let max_parts = if cfl.on {
+        p.partitions.unwrap_or(batch).clamp(1, 64)
+    } else {
+        p.partitions.unwrap_or(1)
+    };
     let sub_mode = p
         .subscription_mode
         .as_deref()
@@ -725,7 +847,7 @@ pub async fn handle_pop(
     if st.hotlist.enabled() {
         return serve_pop_hotlist(
             &st, &qkey, &queue, &group, batch, max_parts, auto_ack, wait, deadline, lease_seconds,
-            &sub_mode, &sub_from, &worker, tenant.as_str(),
+            &sub_mode, &sub_from, &worker, tenant.as_str(), cfl,
         )
         .await;
     }
@@ -769,7 +891,7 @@ pub async fn handle_pop(
                 st.stmt_timeout,
                 db::pop_wildcard_bin(
                     &client, &queue, &group, batch, lease_seconds, &worker, auto_ack, max_parts,
-                    &sub_mode, &sub_from, tenant.as_str(),
+                    &sub_mode, &sub_from, tenant.as_str(), cfl.on,
                 ),
             )
             .await;
@@ -801,7 +923,7 @@ pub async fn handle_pop(
         // carry no lease, so they report an empty leaseId.
         let lease_id: &str = if auto_ack { "" } else { &worker };
         let (body, count, meta) =
-            build_pop_response(&txt, Some(&blobs), &queue, &group, lease_id, &st.encryption);
+            build_pop_response(&txt, Some(&blobs), &queue, &group, lease_id, &st.encryption, cfl);
         if count == 0 && wait && Instant::now() < deadline {
             // Park on the queue's wake gate; a push wakes us at once.
             // RUSTFIX item 19: exponentially-backing-off re-query; a push-wake resets it.
@@ -839,7 +961,7 @@ pub async fn handle_pop(
                     if !hints.is_empty() {
                         if let Some(resp) = try_targeted_serve(
                             &st, &queue, &hints, &group, batch, lease_seconds, &worker, auto_ack,
-                            &sub_mode, &sub_from, tenant.as_str(),
+                            &sub_mode, &sub_from, tenant.as_str(), cfl,
                         )
                         .await
                         {
@@ -876,7 +998,23 @@ pub async fn handle_pop(
                 .ack_success
                 .fetch_add(count as u64, std::sync::atomic::Ordering::Relaxed);
         }
-        return json(if count == 0 { StatusCode::NO_CONTENT } else { StatusCode::OK }, body);
+        return json(pop_status(count, cfl), body);
+    }
+}
+
+/// PLAN_CONFLATION §3.1/§4 — an empty pop is a bodiless 204 (handlers::json drops
+/// the body there, RFC 9110 §15.3.5), which cannot carry the `"conflation":true`
+/// echo. That echo is the whole degrade-loudly contract: an SDK that asked for
+/// conflation must be able to tell an old broker from a new one on the FIRST
+/// round trip, before it processes a single message — so a CONFLATING pop answers
+/// 200 with a body even when it delivered nothing. Every flag-off response keeps
+/// the 204 byte for byte.
+#[inline]
+fn pop_status(count: usize, cfl: Conflation) -> StatusCode {
+    if count == 0 && !cfl.on {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::OK
     }
 }
 
@@ -902,6 +1040,9 @@ async fn try_targeted_serve(
     sub_mode: &str,
     sub_from: &str,
     tenant: &str,
+    // PLAN_CONFLATION §3.2: the mesh-hint path calls db::pop_specific, so it
+    // carries the effective policy like every other claim.
+    cfl: Conflation,
 ) -> Option<Response> {
     let lease_id: &str = if auto_ack { "" } else { worker };
     let mut parts: Vec<PopPart> = Vec::new();
@@ -926,7 +1067,7 @@ async fn try_targeted_serve(
             st.stmt_timeout,
             db::pop_specific(
                 &client, queue, hint, group, remaining, lease_seconds, worker, auto_ack, sub_mode,
-                sub_from, tenant,
+                sub_from, tenant, cfl.on,
             ),
         )
         .await;
@@ -962,7 +1103,7 @@ async fn try_targeted_serve(
         return None;
     }
     let (body, count, meta) =
-        render_pop_parts(&parts, None, queue, group, lease_id, &st.encryption);
+        render_pop_parts(&parts, None, queue, group, lease_id, &st.encryption, cfl);
     // A non-empty segment set that rendered to zero messages (e.g. an undecodable
     // blob) is left to the wildcard backstop rather than served as an empty 200.
     if count == 0 {
@@ -1072,6 +1213,9 @@ async fn serve_pop_hotlist(
     sub_from: &str,
     worker: &str,
     tenant: &str,
+    // PLAN_CONFLATION §3.2: resolved once by handle_pop and threaded, never
+    // re-resolved per poll iteration.
+    cfl: Conflation,
 ) -> Response {
     let lease_id: &str = if auto_ack { "" } else { worker };
     let mut backoff_count: u32 = 0;
@@ -1151,7 +1295,7 @@ async fn serve_pop_hotlist(
 
         let (body, count, meta, rtt) = match hotlist_pop_attempt(
             st, qkey, queue, group, batch, max_parts, auto_ack, lease_seconds, sub_mode, sub_from,
-            worker, lease_id, tenant,
+            worker, lease_id, tenant, cfl,
         )
         .await
         {
@@ -1218,10 +1362,7 @@ async fn serve_pop_hotlist(
                 queue, group, wtag, count, t_rq.elapsed().as_millis(),
                 crate::hotlist::trace_now_ms());
         }
-        return json(
-            if count == 0 { StatusCode::NO_CONTENT } else { StatusCode::OK },
-            body,
-        );
+        return json(pop_status(count, cfl), body);
     }
 }
 
@@ -1298,9 +1439,10 @@ async fn hotlist_pop_attempt(
     worker: &str,
     lease_id: &str,
     tenant: &str,
+    cfl: Conflation,
 ) -> Result<(String, usize, PopMeta, Duration), Response> {
     let now_ms = crate::util::now_epoch_ms();
-    let empty = || render_pop_parts(&[], None, queue, group, lease_id, &st.encryption);
+    let empty = || render_pop_parts(&[], None, queue, group, lease_id, &st.encryption, cfl);
 
     // First-contact BOOTSTRAP (spec §2 / §9, the st.group_seeded gate): the ring
     // path's log_pop_list_v1 does NOT carry the group-first-contact BULK SEED that
@@ -1328,7 +1470,7 @@ async fn hotlist_pop_attempt(
             st.stmt_timeout,
             db::pop_wildcard_bin(
                 &client, queue, group, batch, lease_seconds, worker, auto_ack, max_parts,
-                sub_mode, sub_from, tenant,
+                sub_mode, sub_from, tenant, cfl.on,
             ),
         )
         .await;
@@ -1351,7 +1493,7 @@ async fn hotlist_pop_attempt(
                     .note_partition_id(qkey, &part.partition, &part.partition_id);
             }
             let (body, count, meta) = render_pop_parts(
-                &parsed.partitions, Some(&blobs), queue, group, lease_id, &st.encryption,
+                &parsed.partitions, Some(&blobs), queue, group, lease_id, &st.encryption, cfl,
             );
             return Ok((body, count, meta, rtt));
         }
@@ -1462,6 +1604,7 @@ async fn hotlist_pop_attempt(
                 sub_from.to_string(),
                 skip_window,
                 tenant.to_string(),
+                cfl.on,
             )
             .await;
         guard.armed = false;
@@ -1475,7 +1618,7 @@ async fn hotlist_pop_attempt(
             crate::pop_fusion::PopVerdict::Served { meta, blobs, states, rtt } => {
                 return Ok(finish_pop_serve(
                     st, qkey, queue, group, cands, meta, blobs, states, now_ms, auto_ack,
-                    lease_ms, lease_seconds, lease_id, rtt,
+                    lease_ms, lease_seconds, lease_id, rtt, cfl,
                 ));
             }
             crate::pop_fusion::PopVerdict::FlushErr => {
@@ -1609,7 +1752,7 @@ async fn hotlist_pop_attempt(
         st.stmt_timeout,
         db::pop_list(
             &client, queue, group, &names, batch, lease_seconds, worker, auto_ack, max_parts,
-            sub_mode, sub_from, skip_window, tenant,
+            sub_mode, sub_from, skip_window, tenant, cfl.on,
         ),
     )
     .await;
@@ -1660,7 +1803,7 @@ async fn hotlist_pop_attempt(
 
     Ok(finish_pop_serve(
         st, qkey, queue, group, cands, meta_txt, blobs, states_txt, now_ms, auto_ack,
-        lease_ms, lease_seconds, lease_id, rtt,
+        lease_ms, lease_seconds, lease_id, rtt, cfl,
     ))
 }
 
@@ -1685,8 +1828,9 @@ fn finish_pop_serve(
     lease_seconds: i32,
     lease_id: &str,
     rtt: Duration,
+    cfl: Conflation,
 ) -> (String, usize, PopMeta, Duration) {
-    let empty = || render_pop_parts(&[], None, queue, group, lease_id, &st.encryption);
+    let empty = || render_pop_parts(&[], None, queue, group, lease_id, &st.encryption, cfl);
     // Map the tri-state verdicts back to the candidates we sent (§7).
     // Parse the served partitions FIRST: the checkin needs per-partition
     // batch_end (last served offset) to pair with the claim-time lastOff.
@@ -1774,8 +1918,9 @@ fn finish_pop_serve(
         st.hotlist
             .note_partition_id(qkey, &part.partition, &part.partition_id);
     }
-    let (body, count, meta) =
-        render_pop_parts(&parsed.partitions, Some(&blobs), queue, group, lease_id, &st.encryption);
+    let (body, count, meta) = render_pop_parts(
+        &parsed.partitions, Some(&blobs), queue, group, lease_id, &st.encryption, cfl,
+    );
     (body, count, meta, rtt)
 }
 
@@ -2028,7 +2173,15 @@ pub async fn handle_pop_partition(
     let auto_ack = p.auto_ack.unwrap_or(false);
     let wait = p.wait.unwrap_or(false);
     let timeout_ms = p.timeout.unwrap_or(st.pop_default_timeout_ms);
+    // PLAN_CONFLATION §3.3: the same two refusals as the wildcard route — a
+    // group-less pinned pop has no policy to hang conflation on either.
+    if let Some(r) = conflation_refusal(p.conflation, p.consumer_group.is_some(), auto_ack) {
+        return r;
+    }
     let group = p.consumer_group.unwrap_or_else(|| "__QUEUE_MODE__".to_string());
+    // `max_parts` is irrelevant here (a pinned pop is one partition), so M5 does
+    // not apply; the flag only switches the claim to the tail (§3.2).
+    let cfl = resolve_conflation(&st, &queue, &group, tenant.as_str(), p.conflation).await;
     let sub_mode = p
         .subscription_mode
         .as_deref()
@@ -2100,7 +2253,7 @@ pub async fn handle_pop_partition(
             st.stmt_timeout,
             db::pop_specific(
                 &client, &queue, &partition, &group, batch, lease_seconds, &worker,
-                auto_ack, &sub_mode, &sub_from, tenant.as_str(),
+                auto_ack, &sub_mode, &sub_from, tenant.as_str(), cfl.on,
             ),
         )
         .await;
@@ -2118,7 +2271,8 @@ pub async fn handle_pop_partition(
         };
 
         let lease_id: &str = if auto_ack { "" } else { &worker };
-        let (body, count, meta) = build_pop_specific_response(&txt, &queue, &partition, &group, lease_id, &st.encryption);
+        let (body, count, meta) =
+            build_pop_specific_response(&txt, &queue, &partition, &group, lease_id, &st.encryption, cfl);
         if count == 0 && wait && Instant::now() < deadline {
             // A push to any partition of this queue wakes us.
             // RUSTFIX item 19: exponentially-backing-off re-query; a push-wake resets it.
@@ -2160,7 +2314,7 @@ pub async fn handle_pop_partition(
                 .ack_success
                 .fetch_add(count as u64, std::sync::atomic::Ordering::Relaxed);
         }
-        return json(if count == 0 { StatusCode::NO_CONTENT } else { StatusCode::OK }, body);
+        return json(pop_status(count, cfl), body);
     }
 }
 
@@ -2187,6 +2341,9 @@ pub struct PopDiscoverParams {
     subscription_mode: Option<String>,
     #[serde(rename = "subscriptionFrom")]
     subscription_from: Option<String>,
+    // PLAN_CONFLATION §3.1 — same query parameter as the queue-scoped routes.
+    #[serde(rename = "conflation")]
+    conflation: Option<bool>,
 }
 
 // GET /api/v1/pop?namespace=&task=&consumerGroup=... — namespace/task discovery
@@ -2215,11 +2372,31 @@ pub async fn handle_pop_discover(
         );
     }
     let batch = p.batch.unwrap_or(200);
-    let max_parts = p.partitions.unwrap_or(1);
     let auto_ack = p.auto_ack.unwrap_or(false);
     let wait = p.wait.unwrap_or(false);
     let timeout_ms = p.timeout.unwrap_or(st.pop_default_timeout_ms);
+    // PLAN_CONFLATION §3.3: same two refusals as the queue-scoped routes.
+    if let Some(r) = conflation_refusal(p.conflation, p.consumer_group.is_some(), auto_ack) {
+        return r;
+    }
     let group = p.consumer_group.unwrap_or_else(|| "__QUEUE_MODE__".to_string());
+    // A discovery pop spans QUEUES, so there is no single (queue, group) whose
+    // stored policy the broker could cache here. The requested flag is therefore
+    // the effective one broker-side, and queen.log_pop_discover_wire_v1 resolves
+    // the DURABLE per-queue policy itself (its candidate scan joins
+    // consumer_groups_metadata) — so a registered group still gets its stored
+    // policy, per queue, and the request flag only ever registers a new one.
+    // Deliberate deviation from §3.3's single-queue cache read; see the report.
+    let cfl = Conflation {
+        on: p.conflation.unwrap_or(false) && group != "__QUEUE_MODE__",
+        conflict: false,
+    };
+    // M5 (§3.2), as in handle_pop.
+    let max_parts = if cfl.on {
+        p.partitions.unwrap_or(batch).clamp(1, 64)
+    } else {
+        p.partitions.unwrap_or(1)
+    };
     let sub_mode = p
         .subscription_mode
         .as_deref()
@@ -2281,7 +2458,7 @@ pub async fn handle_pop_discover(
             st.stmt_timeout,
             db::pop_discover(
                 &client, &namespace, &task, &group, batch, lease_seconds, &worker,
-                auto_ack, max_parts, &sub_mode, &sub_from, tenant.as_str(),
+                auto_ack, max_parts, &sub_mode, &sub_from, tenant.as_str(), cfl.on,
             ),
         )
         .await;
@@ -2305,7 +2482,7 @@ pub async fn handle_pop_discover(
         // cache attribution is skipped here for the same reason (acks on these
         // partitions attribute via the DB-lookup fallback).
         let (body, count, meta) =
-            build_pop_response(&txt, None, "", &group, lease_id, &st.encryption);
+            build_pop_response(&txt, None, "", &group, lease_id, &st.encryption, cfl);
         if count == 0 && wait && Instant::now() < deadline {
             // Discovery pops span queues -> this tenant's discovery gate, woken by
             // any push of ITS OWN (another tenant's push cannot satisfy this query,
@@ -2336,7 +2513,7 @@ pub async fn handle_pop_discover(
                 .ack_success
                 .fetch_add(count as u64, std::sync::atomic::Ordering::Relaxed);
         }
-        return json(if count == 0 { StatusCode::NO_CONTENT } else { StatusCode::OK }, body);
+        return json(pop_status(count, cfl), body);
     }
 }
 
@@ -2399,6 +2576,7 @@ fn pop_error_body(e: &str) -> (String, usize, PopMeta) {
 // Wildcard pop response: SP result is {"partitions":[{partition,partitionId,segments}]}.
 // `bin_blobs`: Some on the bin_v1 path — native bytea[] blobs aligned with the
 // meta's segment traversal order (base64 `blob` fields absent from the JSON).
+#[allow(clippy::too_many_arguments)]
 fn build_pop_response(
     txt: &str,
     bin_blobs: Option<&[Vec<u8>]>,
@@ -2406,6 +2584,7 @@ fn build_pop_response(
     group: &str,
     lease_id: &str,
     enc: &crate::encryption::Encryption,
+    cfl: Conflation,
 ) -> (String, usize, PopMeta) {
     let parsed: PopResult = match serde_json::from_str(txt) {
         Ok(p) => p,
@@ -2414,7 +2593,7 @@ fn build_pop_response(
     if let Some(e) = parsed.error {
         return pop_error_body(&e);
     }
-    render_pop_parts(&parsed.partitions, bin_blobs, queue, group, lease_id, enc)
+    render_pop_parts(&parsed.partitions, bin_blobs, queue, group, lease_id, enc, cfl)
 }
 
 // Specific-partition pop response: SP result is single-partition shaped
@@ -2422,6 +2601,7 @@ fn build_pop_response(
 // supplies the name from the request path. Adapts it to the same per-partition
 // structure the wildcard renderer consumes so every message emits the identical
 // per-message JSON and top-level fields.
+#[allow(clippy::too_many_arguments)]
 fn build_pop_specific_response(
     txt: &str,
     queue: &str,
@@ -2429,6 +2609,7 @@ fn build_pop_specific_response(
     group: &str,
     lease_id: &str,
     enc: &crate::encryption::Encryption,
+    cfl: Conflation,
 ) -> (String, usize, PopMeta) {
     let parsed: PopSpecificResult = match serde_json::from_str(txt) {
         Ok(p) => p,
@@ -2442,11 +2623,12 @@ fn build_pop_specific_response(
         partition_id: parsed.partition_id,
         segments: parsed.segments,
     };
-    render_pop_parts(std::slice::from_ref(&part), None, queue, group, lease_id, enc)
+    render_pop_parts(std::slice::from_ref(&part), None, queue, group, lease_id, enc, cfl)
 }
 
 // Shared renderer: decode + slice each partition's segment frames into the
 // wire per-message JSON, then wrap with the common top-level fields.
+#[allow(clippy::too_many_arguments)]
 fn render_pop_parts(
     parts: &[PopPart],
     bin_blobs: Option<&[Vec<u8>]>,
@@ -2454,6 +2636,9 @@ fn render_pop_parts(
     group: &str,
     lease_id: &str,
     enc: &crate::encryption::Encryption,
+    // PLAN_CONFLATION §3.1: the two conditional top-level keys. Emitted ONLY when
+    // true, so every existing deployment keeps byte-identical response bytes.
+    cfl: Conflation,
 ) -> (String, usize, PopMeta) {
     let mut count = 0usize;
     let mut meta = PopMeta::default();
@@ -2670,6 +2855,17 @@ fn render_pop_parts(
     }
     out.push_str("],\"partitionsClaimed\":");
     out.push_str(&parts.len().to_string());
+    // PLAN_CONFLATION §3.1. `conflation` rides EVERY conflating response, empty
+    // ones included — that is what lets an SDK detect an old broker on the first
+    // round trip (§4 degrade-loudly) instead of silently draining a backlog
+    // message by message. `conflationConflict` says the request disagreed with
+    // the stored group policy and the stored one won (§3.3).
+    if cfl.on {
+        out.push_str(",\"conflation\":true");
+    }
+    if cfl.conflict {
+        out.push_str(",\"conflationConflict\":true");
+    }
     out.push('}');
     (out, count, meta)
 }
@@ -2803,7 +2999,9 @@ pub async fn handle_ack_batch(
 // map 1:1 to the pre-fusion synchronous path's ok/ok:false; FlushErr is the new
 // ack-fusion whole-flush-failure branch.
 enum FastAck {
-    Committed,
+    /// PLAN_CONFLATION §2.4: carries the SP's `conflated` skipped-position count
+    /// when the lease was conflating; None for a plain lease.
+    Committed(Option<i64>),
     FallBack,
     FlushErr,
 }
@@ -2819,6 +3017,10 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
     let mut lease_released = vec![false; n];
     let mut dlq_flags = vec![false; n];
     let mut noop_flags = vec![false; n];
+    // PLAN_CONFLATION §2.4: per-item skipped-position count, present only for a
+    // clean ack of a CONFLATING lease. None everywhere else, so a flag-off ack
+    // result carries no `conflated` key at all.
+    let mut conflated: Vec<Option<i64>> = vec![None; n];
 
     // Group item indices by (partition_id, worker): one log_ack_by_hash_v1 call each.
     let mut groups: HashMap<(String, String), Vec<usize>> = HashMap::new();
@@ -2859,7 +3061,7 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
                 for e in errors.iter_mut() {
                     *e = Some("pool".to_string());
                 }
-                return render_ack_results(&acks, &success, &errors, &lease_released, &dlq_flags, &noop_flags);
+                return render_ack_results(&acks, &success, &errors, &lease_released, &dlq_flags, &noop_flags, &conflated);
             }
         }
     }
@@ -2949,13 +3151,14 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
                         )
                         .await
                     {
-                        crate::ack_fusion::AckVerdict::Committed => FastAck::Committed,
+                        crate::ack_fusion::AckVerdict::Committed(c) => FastAck::Committed(c),
                         crate::ack_fusion::AckVerdict::Rejected => FastAck::FallBack,
                         crate::ack_fusion::AckVerdict::FlushErr => FastAck::FlushErr,
                     }
                 } else {
-                    // Unchanged synchronous fast path (byte-identical to before).
-                    let hit_ok = match db::ack_at(
+                    // Unchanged synchronous fast path (byte-identical to before,
+                    // plus the optional `conflated` read — §2.4, no request change).
+                    let hit = match db::ack_at(
                         client.as_ref().unwrap(),
                         &pid,
                         group,
@@ -2966,25 +3169,41 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
                     )
                     .await
                     {
-                        Ok(txt) => serde_json::from_str::<serde_json::Value>(&txt)
-                            .ok()
-                            .and_then(|v| v.get("ok").and_then(|x| x.as_bool()))
-                            .unwrap_or(false),
-                        Err(_) => false,
+                        Ok(txt) => serde_json::from_str::<serde_json::Value>(&txt).ok(),
+                        Err(_) => None,
                     };
+                    let hit_ok = hit
+                        .as_ref()
+                        .and_then(|v| v.get("ok").and_then(|x| x.as_bool()))
+                        .unwrap_or(false);
                     if hit_ok {
-                        FastAck::Committed
+                        FastAck::Committed(
+                            hit.as_ref().and_then(|v| v.get("conflated").and_then(|x| x.as_i64())),
+                        )
                     } else {
                         FastAck::FallBack
                     }
                 };
 
                 match outcome {
-                    FastAck::Committed => {
+                    FastAck::Committed(cfl_skipped) => {
                         // Same per-item result shape as the SQL happy path.
                         for &i in &idxs {
                             success[i] = true;
                             lease_released[i] = true;
+                        }
+                        // PLAN_CONFLATION §2.4/§6.2: the skipped-position count is
+                        // a property of the (partition, worker) LEASE, so it is
+                        // reported on the item that closed it — the first of the
+                        // group — and counted once, never once per item.
+                        if let Some(c) = cfl_skipped {
+                            if let Some(&i0) = idxs.first() {
+                                conflated[i0] = Some(c);
+                            }
+                            st.metrics.conflated.fetch_add(c.max(0) as u64, Ordering::Relaxed);
+                            if let Some(q) = queue_name.as_ref() {
+                                st.metrics.per_queue.add_conflated(tenant, q, c.max(0) as u64);
+                            }
                         }
                         // Per-queue ack attribution (identical to the SQL-path tail).
                         if let Some(q) = queue_name.as_ref() {
@@ -3113,6 +3332,18 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
                         for &i in &idxs {
                             success[i] = true;
                             lease_released[i] = true;
+                        }
+                    }
+                    // PLAN_CONFLATION §2.4: the hash path reports the same count
+                    // on a clean conflating ack (the DLQ/nack branches never do —
+                    // they release the lease without completing the span).
+                    if let Some(c) = v.get("conflated").and_then(|x| x.as_i64()) {
+                        if let Some(&i0) = idxs.first() {
+                            conflated[i0] = Some(c);
+                        }
+                        st.metrics.conflated.fetch_add(c.max(0) as u64, Ordering::Relaxed);
+                        if let Some(q) = queue_name.as_ref() {
+                            st.metrics.per_queue.add_conflated(tenant, q, c.max(0) as u64);
                         }
                     }
                     // Below-cursor honesty (ack-as-commit): the SP reports hashes
@@ -3252,7 +3483,7 @@ async fn process_acks(st: &Arc<AppState>, group: &str, acks: Vec<Ack>, tenant: &
     // run shows how much of the ack traffic took the positional fast path.
     st.ack_registry.maybe_report(crate::util::now_epoch_ms());
 
-    render_ack_results(&acks, &success, &errors, &lease_released, &dlq_flags, &noop_flags)
+    render_ack_results(&acks, &success, &errors, &lease_released, &dlq_flags, &noop_flags, &conflated)
 }
 
 // Decode the segment COVERING the poison offset, extract the poison frame
@@ -3325,6 +3556,7 @@ async fn dlq_file_head(
     Ok(v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_ack_results(
     acks: &[Ack],
     success: &[bool],
@@ -3332,6 +3564,9 @@ fn render_ack_results(
     lease_released: &[bool],
     dlq_flags: &[bool],
     noop_flags: &[bool],
+    // PLAN_CONFLATION §2.4: emitted ONLY where present, so a flag-off ack result
+    // is byte-identical to the pre-feature one.
+    conflated: &[Option<i64>],
 ) -> String {
     let mut out = String::from("[");
     for (i, a) in acks.iter().enumerate() {
@@ -3359,6 +3594,10 @@ fn render_ack_results(
         out.push_str(if dlq_flags[i] { "true" } else { "false" });
         out.push_str(",\"noop\":");
         out.push_str(if noop_flags[i] { "true" } else { "false" });
+        if let Some(c) = conflated[i] {
+            out.push_str(",\"conflated\":");
+            out.push_str(&c.to_string());
+        }
         out.push('}');
     }
     out.push(']');
@@ -5645,10 +5884,19 @@ mod protocol_conformance {
             &[true, false],
             &[false, true],
             &[false, false],
+            // PLAN_CONFLATION §2.4: item 0 closed a conflating lease that skipped
+            // 98 positions; item 1 carries nothing, and must render no key.
+            &[Some(98), None],
         );
 
         let parsed: Vec<qp::AckResult> = serde_json::from_str(&rendered).unwrap();
         assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].conflated, Some(98));
+        assert_eq!(parsed[1].conflated, None);
+        assert!(
+            !rendered[rendered.find("esc").unwrap()..].contains("conflated"),
+            "a non-conflating ack item must carry no conflated key: {rendered}"
+        );
 
         assert_eq!(parsed[0].index, 0);
         assert_eq!(parsed[0].transaction_id, "t1");
@@ -5684,6 +5932,7 @@ mod protocol_conformance {
             subscription_from: Some("now".into()),
             namespace: None,
             task: None,
+            conflation: Some(true),
         };
 
         let qs = ours
@@ -5705,6 +5954,43 @@ mod protocol_conformance {
         assert_eq!(theirs.consumer_group.as_deref(), Some("workers"));
         assert_eq!(theirs.subscription_mode.as_deref(), Some("new"));
         assert_eq!(theirs.subscription_from.as_deref(), Some("now"));
+        // PLAN_CONFLATION §3.1: the client's key must be the one axum reads.
+        assert_eq!(theirs.conflation, Some(true));
+    }
+
+    /// PLAN_CONFLATION §3.1 — the response keys the broker emits must be the ones
+    /// the client type reads, and they must be ABSENT (never `false`) on a
+    /// non-conflating response, which is what makes the §4 degrade-loudly check
+    /// meaningful.
+    #[test]
+    fn conflation_echo_round_trips_through_the_client_type() {
+        let (body, count, _meta) = render_pop_parts(
+            &[],
+            None,
+            "orders",
+            "workers",
+            "lease-1",
+            &crate::encryption::Encryption::from_env(),
+            Conflation { on: true, conflict: true },
+        );
+        assert_eq!(count, 0, "empty claim");
+        let parsed: qp::PopResponse = serde_json::from_str(&body).unwrap();
+        assert!(parsed.conflation_applied(), "{body}");
+        assert!(parsed.has_conflation_conflict(), "{body}");
+
+        let (plain, _, _) = render_pop_parts(
+            &[],
+            None,
+            "orders",
+            "workers",
+            "lease-1",
+            &crate::encryption::Encryption::from_env(),
+            Conflation::OFF,
+        );
+        assert!(!plain.contains("conflation"), "{plain}");
+        let parsed: qp::PopResponse = serde_json::from_str(&plain).unwrap();
+        assert!(!parsed.conflation_applied());
+        assert!(!parsed.has_conflation_conflict());
     }
 
     /// A minimal client (everything defaulted) must still produce a query the

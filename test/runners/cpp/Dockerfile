@@ -24,9 +24,12 @@ COPY test/vendor/cpp/threadpool.hpp clients/server/include/threadpool.hpp
 COPY clients/client-cpp ./clients/client-cpp
 
 # make test = compile bin/test_client only (it does not run the binary).
-# `unit` builds the two broker-free suites: retry429 (the proxy contract --
-# bearer/429/403) and kvtimers (the KV/timer wire contract). Both serve their
-# own responses in-process, so they compile and run without a broker.
+# `unit` builds the broker-free suites: retry429 (the proxy contract --
+# bearer/429/403), kvtimers (the KV/timer wire contract) and conflation
+# (PLAN_CONFLATION.md §4 -- the flag on both param builders, the degrade-loudly
+# error against a pre-1.1.0 broker, the once-per-group conflict warning). All
+# three serve their own responses in-process, so they compile and run without a
+# broker.
 RUN cd clients/client-cpp && make test && make unit
 
 COPY test/runners/common/wait-for-broker.sh /usr/local/bin/wait-for-broker

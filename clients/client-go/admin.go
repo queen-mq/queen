@@ -74,13 +74,30 @@ func (a *Admin) GetQueue(ctx context.Context, name string) (map[string]interface
 
 // GetQueueDepth returns the per-partition backlog of a queue — the cheap
 // sibling of GetQueue: watermark arithmetic only, no segments, no timestamps.
-// Shape: {queue, group, pending, partitions: [{partition, pending}]}.
+// Shape: {queue, group, pending, partitionsPending, conflation,
+// effectivePending, partitions: [{partition, pending}]}.
 // An empty group means queue-level pending under the same worst-cursor
 // precedence the dashboard publishes; a named group is that group's own
 // backlog per partition (a group with no cursor on a partition owes its whole
 // retained range). Requires broker >= 1.0.4: an older broker answers 404
 // no_such_route, so a caller that must run against both falls back to
 // GetQueue on that error.
+//
+// The last three fields arrive from broker >= 1.1.0 and exist because
+// conflation makes "pending" two different numbers (PLAN_CONFLATION.md §5.3):
+//
+//	pending           LOG depth: positions still to retire.
+//	partitionsPending how many partitions hold at least one pending message.
+//	conflation        whether this GROUP is registered for last-value delivery.
+//	effectivePending  WORK depth: handler invocations remaining. Equals
+//	                  partitionsPending for a conflating group (one invocation
+//	                  per non-empty partition) and pending for every other group.
+//
+// Read them together or the alert is wrong in both directions: a conflating
+// queue sitting at pending 4,000,000 / effectivePending 12 is healthy, and the
+// same two numbers on a non-conflating group are an incident. An older broker
+// omits all three, so read them with the two-value form and treat absence as
+// "not conflating".
 func (a *Admin) GetQueueDepth(ctx context.Context, name string, group string) (map[string]interface{}, error) {
 	path := fmt.Sprintf("/api/v1/resources/queues/%s/depth", url.PathEscape(name))
 	if group != "" {

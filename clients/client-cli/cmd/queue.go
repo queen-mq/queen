@@ -218,8 +218,14 @@ via offset arithmetic only — no segment scans, no timestamps. Without
 precedence the dashboard publishes; with --group it is that group's own
 backlog. Requires broker >= 1.0.4.
 
-The table view prints the total and the non-empty partition count; use
--o json for the full per-partition array.`,
+The table view prints the total and the pending-partition count; use
+-o json for the full per-partition array.
+
+For a conflating consumer group (broker >= 1.1.0) 'pending' is LOG depth —
+positions still to retire — and 'effective' is WORK depth, one handler run
+per partition that owes something. A conflating group at pending 4,000,000
+and effective 12 is healthy; the same two numbers without conflation are an
+incident.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		c, cleanup, err := newClient()
@@ -238,25 +244,61 @@ The table view prints the total and the non-empty partition count; use
 		if r.Format == output.FormatTable {
 			// A queue can hold a hundred thousand partitions; the table view
 			// is the summary, the full array stays behind -o json.
-			parts, _ := data["partitions"].([]interface{})
-			nonEmpty := 0
-			for _, p := range parts {
-				if m, ok := p.(map[string]interface{}); ok {
-					if n, ok := m["pending"].(float64); ok && n > 0 {
-						nonEmpty++
-					}
-				}
-			}
-			return r.Render(map[string]interface{}{
-				"queue":              data["queue"],
-				"group":              data["group"],
-				"pending":            data["pending"],
-				"partitions":         len(parts),
-				"partitionsNonEmpty": nonEmpty,
-			})
+			return r.Render(depthTableRow(data))
 		}
 		return r.Render(data)
 	},
+}
+
+// depthTableRow condenses GET /api/v1/resources/queues/:q/depth into the
+// summary the table view shows (PLAN_CONFLATION §5.3).
+//
+// Two of the four numbers come from the broker since 1.1.0:
+//
+//   - partitionsPending replaces the count queenctl used to derive by walking
+//     the partitions array. The SP folds it into an aggregate it was already
+//     running (§2.5), and the server's answer is the right one even when the
+//     array a client holds is not the whole queue.
+//   - effective (the SP's effectivePending) is what a conflating group actually
+//     has left to DO. The broker sends it for every group, but it is surfaced
+//     only for a conflating one: elsewhere it equals pending by construction,
+//     and a duplicated number in a four-line summary only invites the question
+//     of which of the two is the real one.
+//
+// Every field degrades: against a 1.0.x broker neither key is sent, the local
+// count is used, and the output is what it always was minus the rename.
+func depthTableRow(data map[string]any) map[string]any {
+	parts, _ := data["partitions"].([]any)
+
+	row := map[string]any{
+		"queue":      data["queue"],
+		"group":      data["group"],
+		"pending":    data["pending"],
+		"partitions": len(parts),
+	}
+
+	if v, ok := data["partitionsPending"]; ok && v != nil {
+		row["partitionsPending"] = v
+	} else {
+		nonEmpty := 0
+		for _, p := range parts {
+			if m, ok := p.(map[string]any); ok {
+				if n, ok := m["pending"].(float64); ok && n > 0 {
+					nonEmpty++
+				}
+			}
+		}
+		row["partitionsPending"] = nonEmpty
+	}
+
+	conflating, _ := data["conflation"].(bool)
+	if conflating {
+		row["conflation"] = true
+	}
+	if v, ok := data["effectivePending"]; ok && v != nil && conflating {
+		row["effective"] = v
+	}
+	return row
 }
 
 var queueStatsCmd = &cobra.Command{

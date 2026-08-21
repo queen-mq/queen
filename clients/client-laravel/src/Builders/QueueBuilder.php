@@ -7,6 +7,7 @@ use Queen\Http\HttpClient;
 use Queen\Http\Retry429Policy;
 use Queen\Buffer\BufferManager;
 use Queen\Consumer\HighLevelConsumer;
+use Queen\Support\ConflationGuard;
 use Queen\Support\Defaults;
 use Queen\Support\Uuid;
 
@@ -36,6 +37,7 @@ class QueueBuilder
     private ?string $consumeSubscriptionFrom;
     private bool $consumeEach = false;
     private int $consumeMaxPartitions = 1;
+    private bool $consumeConflation;
 
     // Buffer options
     private ?array $bufferOptions = null;
@@ -60,6 +62,7 @@ class QueueBuilder
         $this->consumeRenewLeaseIntervalMillis = $d['renewLeaseIntervalMillis'];
         $this->consumeSubscriptionMode = $d['subscriptionMode'];
         $this->consumeSubscriptionFrom = $d['subscriptionFrom'];
+        $this->consumeConflation = $d['conflation'];
     }
 
     // ===========================
@@ -278,6 +281,40 @@ class QueueBuilder
         return $this;
     }
 
+    /**
+     * Last-value delivery: under backlog, process only the NEWEST message per
+     * partition and retire the rest.
+     *
+     * For command-style queues where one partition is one logical task key and
+     * only the freshest pending message matters ("recompute entity X"). The
+     * broker delivers exactly the newest visible message of a partition and the
+     * ack commits the whole span behind it, so a 4,000,000-message backlog over
+     * 12 dirty keys is 12 handler invocations, not 4,000,000.
+     *
+     * Three things to know before switching it on:
+     *
+     *  - It is a property of the consumer GROUP, not of this call. The first
+     *    consumer to register the group fixes it; every later consumer of that
+     *    group gets the stored setting whatever it asks for, and is warned once
+     *    if it disagreed. That is what lets `workers` conflate while `audit`
+     *    reads every message on the same queue.
+     *  - It needs a group(). Queue mode is a shared cursor with no group
+     *    identity to hang a policy on, and the broker answers 400.
+     *  - It cannot be combined with autoAck(true), which the broker also
+     *    refuses: auto-ack commits at delivery with no lease, so a crashed
+     *    handler would lose the newest state — the one thing conflation exists
+     *    to guarantee gets processed.
+     *
+     * Requires broker >= 1.1.0. Against an older one the consume loop raises
+     * ConflationUnsupportedException on the first response rather than quietly
+     * draining the backlog message by message.
+     */
+    public function conflation(bool $enabled = true): static
+    {
+        $this->consumeConflation = $enabled;
+        return $this;
+    }
+
     public function each(): static
     {
         $this->consumeEach = true;
@@ -342,6 +379,12 @@ class QueueBuilder
         if ($this->consumeMaxPartitions > 1) {
             $params['partitions'] = (string) $this->consumeMaxPartitions;
         }
+        // Only ever sent when true, the rule autoAck follows above: the broker
+        // treats presence as opt-in, and an explicit conflation=false would read
+        // as a DISAGREEMENT with a group whose stored policy is true.
+        if ($this->consumeConflation) {
+            $params['conflation'] = 'true';
+        }
 
         $query = http_build_query($params);
         $affinityKey = $this->getAffinityKey();
@@ -350,6 +393,19 @@ class QueueBuilder
         // rather than give up after the bounded push-like budget.
         $retryKind = $this->consumeWait ? Retry429Policy::KIND_POP : null;
         $result = $this->httpClient->get("{$path}?{$query}", $this->consumeTimeoutMillis + 5000, $affinityKey, $retryKind);
+
+        // Before the empty-response shortcut below, not after: an old broker's
+        // empty pop is a bodiless 204 that arrives here as null, and that is
+        // exactly the response an idle conflating consumer must not mistake for
+        // "working" (PLAN_CONFLATION §4).
+        ConflationGuard::check(
+            $result,
+            $this->consumeConflation,
+            $this->queueName,
+            $this->group,
+            $this->namespace,
+            $this->task
+        );
 
         if (!$result || !isset($result['messages'])) {
             return [];
@@ -408,6 +464,7 @@ class QueueBuilder
             'subscriptionFrom' => $this->consumeSubscriptionFrom,
             'each' => $this->consumeEach,
             'maxPartitions' => $this->consumeMaxPartitions,
+            'conflation' => $this->consumeConflation,
         ];
     }
 

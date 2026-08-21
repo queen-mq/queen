@@ -260,6 +260,9 @@ export class Stream {
    * @param {number} [runOptions.maxWaitMillis=1000] - long-poll wait for source pop
    * @param {string} [runOptions.subscriptionMode] - 'all' (default) | 'new'
    * @param {string} [runOptions.subscriptionFrom] - ISO timestamp or 'now'
+   * @param {boolean} [runOptions.conflation=false] - last-value delivery on the
+   *   source pop: each cycle sees only the newest visible message per partition
+   *   (PLAN_CONFLATION §1.1). Requires broker >= 1.1.0
    * @param {boolean} [runOptions.reset=false] - wipe state on config_hash mismatch
    * @param {(err:Error, ctx:object)=>void} [runOptions.onError] - cycle error hook
    * @param {AbortSignal} [runOptions.abortSignal] - external cancellation

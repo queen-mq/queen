@@ -3,6 +3,7 @@
  */
 
 import * as logger from '../utils/logger.js'
+import { checkConflationResponse, CONFLATION_UNSUPPORTED } from '../utils/conflation.js'
 
 export class ConsumerManager {
   #httpClient
@@ -47,6 +48,7 @@ export class ConsumerManager {
       renewLeaseIntervalMillis,
       subscriptionMode,
       subscriptionFrom,
+      conflation,
       each,
       maxPartitions,
       signal
@@ -68,7 +70,7 @@ export class ConsumerManager {
 
     // Build the path and params for pop requests
     const path = this.#buildPath(queue, partition, namespace, task)
-    const baseParams = this.#buildParams(batch, wait, timeoutMillis, group, subscriptionMode, subscriptionFrom, namespace, task, autoAck, maxPartitions)
+    const baseParams = this.#buildParams(batch, wait, timeoutMillis, group, subscriptionMode, subscriptionFrom, namespace, task, autoAck, maxPartitions, conflation)
     
     // Generate affinity key for consistent routing to same backend
     const affinityKey = this.#getAffinityKey(queue, partition, namespace, task, group)
@@ -88,7 +90,12 @@ export class ConsumerManager {
         each,
         signal,
         group,  // Pass consumer group to workers
-        affinityKey  // Pass affinity key to workers
+        affinityKey,  // Pass affinity key to workers
+        // Conflation was REQUESTED by this consumer: the worker has to check
+        // every response for the broker's echo (PLAN_CONFLATION §4) and needs
+        // the pop target to key the once-per-(queue,group) conflict warning.
+        conflation,
+        conflationCtx: { queue, namespace, task, group }
       }))
     }
 
@@ -113,7 +120,9 @@ export class ConsumerManager {
       each,
       signal,
       group,
-      affinityKey
+      affinityKey,
+      conflation,
+      conflationCtx
     } = options
 
     logger.log('ConsumerManager.worker', { workerId, status: 'started', limit, idleMillis })
@@ -149,6 +158,16 @@ export class ConsumerManager {
         // instead of giving up after the bounded push-like attempt budget.
         const clientTimeout = wait ? timeoutMillis + 5000 : timeoutMillis
         const result = await this.#httpClient.get(`${path}?${baseParams}`, clientTimeout, affinityKey, wait ? 'pop' : null)
+
+        // Degrade-loudly (PLAN_CONFLATION §4). Checked BEFORE the empty-response
+        // branch on purpose: a pre-1.1.0 broker answers an empty pop with a
+        // bodiless 204 (result === null), which is the first thing a consumer
+        // on an idle queue sees — and the whole point is to raise before a
+        // single message of a backlog is processed one-by-one. Throwing here
+        // leaves the loop through the catch below, which stops this worker.
+        if (conflation) {
+          checkConflationResponse(result, conflationCtx)
+        }
 
         // Handle empty response
         if (!result || !result.messages || result.messages.length === 0) {
@@ -219,6 +238,17 @@ export class ConsumerManager {
         }
 
       } catch (error) {
+        // Conflation faults are terminal and are classified FIRST, ahead of the
+        // message-substring heuristics below: a consumer that asked for
+        // last-value delivery and is not getting it must stop, not retry
+        // (PLAN_CONFLATION §4). The broker's 400 refusals (queue mode /
+        // autoAck) are permanent config faults and stop the loop for the same
+        // reason — retrying them forever would be the silent version.
+        if (error.code === CONFLATION_UNSUPPORTED || (conflation && error.status === 400)) {
+          logger.error('ConsumerManager.worker', { workerId, status: 'conflation-unavailable', code: error.code, httpStatus: error.status, error: error.message })
+          throw error
+        }
+
         // Check if this is a timeout error (expected for long polling)
         const isTimeoutError = error.name === 'AbortError' ||
                               error.message?.includes('timeout')
@@ -442,7 +472,7 @@ export class ConsumerManager {
     throw new Error('Must specify queue, namespace, or task')
   }
 
-  #buildParams(batch, wait, timeoutMillis, group, subscriptionMode, subscriptionFrom, namespace, task, autoAck, maxPartitions) {
+  #buildParams(batch, wait, timeoutMillis, group, subscriptionMode, subscriptionFrom, namespace, task, autoAck, maxPartitions, conflation) {
     const params = new URLSearchParams({
       batch: batch.toString(),
       wait: wait.toString(),
@@ -456,6 +486,11 @@ export class ConsumerManager {
     if (task) params.append('task', task)
     // v4 multi-partition pop: drain up to N sparse partitions per call.
     if (maxPartitions && maxPartitions > 1) params.append('partitions', maxPartitions.toString())
+    // Conflation (PLAN_CONFLATION §3.1): last-value delivery for this group.
+    // Sent ONLY when true, so a consumer that never declares it puts no new
+    // bytes on the wire. THIS IS THE SECOND PARAMETER BUILDER — the pop() one
+    // lives inline in QueueBuilder.pop and must gain every parameter too.
+    if (conflation) params.append('conflation', 'true')
     // NEVER send autoAck for consume - client always manages acking
     // autoAck is only for pop() where server auto-acks immediately
 

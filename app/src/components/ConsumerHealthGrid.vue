@@ -49,6 +49,11 @@
           <!-- Queue mode: queue name leads (the meaningful identifier);
                named groups: group name leads with queue as subtitle. -->
           <span class="cname-tag" v-if="g.name === '__QUEUE_MODE__'">qmode</span>
+          <!-- Conflation is a delivery POLICY of the group, so it rides the
+               name, not a metric column: the Lagging column beside it counts
+               partitions to visit either way, but for a conflating group that
+               is the whole of the work and its message backlog is not. -->
+          <span class="cname-tag cname-tag-cfl" v-if="isConflating(g)">conflation</span>
           <span class="nm">{{ primaryName(g) }}</span>
           <span class="ns" v-if="g.name !== '__QUEUE_MODE__'"> · {{ g.queueName }}</span>
         </span>
@@ -133,12 +138,16 @@
 <script setup>
 import { computed } from 'vue'
 
+import { isConflating } from '@/composables/useConflation'
+
 const props = defineProps({
   /**
    * Consumer-group rows. Each entry should expose:
-   *   { name, queueName, members, maxTimeLag, partitionsWithLag, state }
+   *   { name, queueName, members, maxTimeLag, partitionsWithLag, state,
+   *     conflation }
    * `name === '__QUEUE_MODE__'` indicates the synthetic queue-mode group;
    * the grid surfaces the queue name as the lead in that case.
+   * `conflation` is the group's last-value delivery policy (absent = off).
    */
   consumers: { type: Array, default: () => [] },
   loading: { type: Boolean, default: false },
@@ -361,6 +370,13 @@ const displayed = computed(() => {
   letter-spacing: .08em;
   text-transform: uppercase;
   flex-shrink: 0;
+}
+/* Conflation is a declared policy, not a severity: ice, the app's "idle,
+   proven" tone (same token as .chip-ice), never warn or ember. */
+.cname-tag-cfl {
+  color: var(--ice-400);
+  background: var(--ice-glow);
+  border-color: var(--ice-bd);
 }
 
 /* cell wrapper to align chip in column center */

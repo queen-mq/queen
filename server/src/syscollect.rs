@@ -194,6 +194,11 @@ async fn run_loop(pool: Pool, metrics: Arc<Metrics>, interval: Duration, hostnam
                 ack_failed: cur.ack_failed.saturating_sub(prev.ack_failed),
                 lag_sum_ms: cur.lag_sum_ms.saturating_sub(prev.lag_sum_ms),
                 lag_count: cur.lag_count.saturating_sub(prev.lag_count),
+                // PLAN_CONFLATION §6.2: diffed like every other counter. Nothing
+                // reads it out of QueueSnap here yet — §6.3's Prometheus family
+                // is out of this slice's scope (the plan asks for the two DEAD
+                // depth families to be resolved before a third is added).
+                conflated: cur.conflated.saturating_sub(prev.conflated),
             };
             let parked_avg = parked.remove(queue.as_str()).unwrap_or(0);
             if d.push_requests == 0
@@ -304,6 +309,11 @@ fn delta(prev: &Counters, now: &Counters) -> Counters {
         transactions: now.transactions.saturating_sub(prev.transactions),
         dlq_moved: now.dlq_moved.saturating_sub(prev.dlq_moved),
         db_errors: now.db_errors.saturating_sub(prev.db_errors),
+        // PLAN_CONFLATION §6.1/§6.2 — deltas, like everything else here.
+        conflated: now.conflated.saturating_sub(prev.conflated),
+        conflation_conflicts: now
+            .conflation_conflicts
+            .saturating_sub(prev.conflation_conflicts),
     }
 }
 

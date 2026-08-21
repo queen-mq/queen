@@ -430,6 +430,13 @@ pub fn spawn_reporter(h: ReporterHandles) {
                 timers_fire_s = format!("{:.1}", d(fired, prev_fired)),
                 timers_backlog = kvt.timers_due(),
                 fire_lag_p95 = format!("{:.2}", kvt.fire_lag_p95_seconds()),
+                // PLAN_CONFLATION §6.1: log positions per second retired WITHOUT a
+                // handler invocation, and declaration conflicts per second. Deltas
+                // over the same window as everything else on this line; both stay
+                // 0.0 on every deployment where no group conflates. NO third
+                // periodic block and no per-message line (§6).
+                conflated_s = format!("{:.0}", d(cur.conflated, prev.conflated)),
+                cfl_conflict_s = format!("{:.1}", d(cur.conflation_conflicts, prev.conflation_conflicts)),
                 "broker rates"
             );
             prev_kv_ops = kv_ops;
@@ -438,7 +445,8 @@ pub fn spawn_reporter(h: ReporterHandles) {
 
             // ---- rates (top-N hot queues) ----
             let cur_q = h.metrics.per_queue.snapshot();
-            let mut ranked: Vec<(String, f64, f64, f64, f64, f64)> = Vec::new();
+            #[allow(clippy::type_complexity)]
+            let mut ranked: Vec<(String, f64, f64, f64, f64, f64, f64)> = Vec::new();
             for (q, now) in &cur_q {
                 let was = prev_q.get(q).copied().unwrap_or_default();
                 let push_s = d(now.push_messages, was.push_messages);
@@ -462,12 +470,15 @@ pub fn spawn_reporter(h: ReporterHandles) {
                 } else {
                     0.0
                 };
-                ranked.push((q.clone(), activity, push_s, pop_s, ack_s, lag_ms));
+                // PLAN_CONFLATION §6.1: positions/s this queue retired without a
+                // handler invocation. 0.0 unless a group on it conflates.
+                let conflated_s = d(now.conflated, was.conflated);
+                ranked.push((q.clone(), activity, push_s, pop_s, ack_s, lag_ms, conflated_s));
                 let _ = empty_pct; // folded into the line below
             }
             ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             let total_hot = ranked.len();
-            for (q, _act, push_s, pop_s, ack_s, lag_ms) in ranked.into_iter().take(h.top_n) {
+            for (q, _act, push_s, pop_s, ack_s, lag_ms, conflated_s) in ranked.into_iter().take(h.top_n) {
                 // The counters are keyed by the (tenant, queue) composite, whose
                 // separator is invisible — logging it raw renders as the tenant uuid
                 // glued to the queue name.
@@ -480,6 +491,7 @@ pub fn spawn_reporter(h: ReporterHandles) {
                     pop_s = format!("{:.0}", pop_s),
                     ack_s = format!("{:.0}", ack_s),
                     lag_ms = format!("{:.0}", lag_ms),
+                    conflated_s = format!("{:.0}", conflated_s),
                     hot = format!("{}/{}", h.top_n.min(total_hot), total_hot),
                     "queue rates"
                 );

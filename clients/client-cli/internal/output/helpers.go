@@ -105,6 +105,29 @@ func HumanInt(v any) string {
 	}
 }
 
+// Flag renders a boolean policy column: "yes" when set, "-" otherwise.
+//
+// A column of "false" is noise in a table an operator scans vertically — the
+// only thing they are looking for is which rows have the policy. "-" is also
+// what a field the broker did not send has to render as, so an older broker
+// and an opted-out group look the same, which they are.
+func Flag(v any) string {
+	switch x := v.(type) {
+	case bool:
+		if x {
+			return "yes"
+		}
+		return "-"
+	case string:
+		if strings.EqualFold(x, "true") {
+			return "yes"
+		}
+		return "-"
+	default:
+		return "-"
+	}
+}
+
 // HumanRate appends "/s" to a count, useful for messages-per-second columns.
 func HumanRate(v any) string {
 	s := defaultFormat(v)

@@ -88,7 +88,15 @@
 -- subscription lookup. Added last with a DEFAULT. The DROP of the CURRENT
 -- signature is the boot-idempotency half of DROP+CREATE (see header), not an
 -- upgrade step.
+-- CONFLATION (PLAN_CONFLATION §2.3): p_conflate appended last with a DEFAULT,
+-- the same discipline p_tenant used — every existing caller is byte-identical.
+-- TRUE = last-value delivery: this pop serves exactly ONE frame, the newest
+-- VISIBLE one, and leases the span (committed, tail]. The broker resolves the
+-- EFFECTIVE flag from the durable group policy before calling (§3.3); this
+-- function never second-guesses it except on first contact, where it is the
+-- registrar and reads the stored value back.
 DROP FUNCTION IF EXISTS queen.log_pop_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, TEXT, TEXT, BOOLEAN, UUID);
+DROP FUNCTION IF EXISTS queen.log_pop_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, TEXT, TEXT, BOOLEAN, UUID, BOOLEAN);
 CREATE FUNCTION queen.log_pop_v1(
     p_queue TEXT,
     p_partition TEXT,
@@ -100,7 +108,8 @@ CREATE FUNCTION queen.log_pop_v1(
     p_sub_mode TEXT DEFAULT 'all',
     p_sub_from TEXT DEFAULT '',
     p_skip_window_debounce BOOLEAN DEFAULT FALSE,
-    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001'
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001',
+    p_conflate BOOLEAN DEFAULT FALSE
 ) RETURNS TABLE (
     r_base BIGINT,
     r_start_idx INTEGER,
@@ -134,6 +143,14 @@ DECLARE
     v_head RECORD;
     v_row RECORD;
     v_now TIMESTAMPTZ := clock_timestamp();
+    -- CONFLATION (§2.3/§3.3): the EFFECTIVE policy for this claim. Starts as the
+    -- caller's resolved value and is overwritten by the STORED one on first
+    -- contact, where this function is the registrar (M4).
+    v_conflate BOOLEAN := COALESCE(p_conflate, FALSE);
+    v_conflate_stored BOOLEAN;
+    v_cgm_seen INTEGER;
+    v_reg_mode TEXT;
+    v_reg_ts TIMESTAMPTZ;
 BEGIN
     -- Queue identity is the queen.queues id (log_queues is gone): ONE row read
     -- resolves the partition AND the visibility knobs (delayed_processing /
@@ -173,11 +190,74 @@ BEGIN
                        WHERE c.partition_id = v_pid AND c.consumer_group = p_group) THEN
         -- Queue-scoped metadata is keyed by queue_id now (tenant scoping is
         -- inherited from the queues row the resolve already read).
-        SELECT cgm.subscription_timestamp INTO v_from_ts
+        SELECT cgm.subscription_timestamp, cgm.conflation
+        INTO v_from_ts, v_conflate_stored
         FROM queen.consumer_groups_metadata cgm
         WHERE cgm.consumer_group = p_group AND cgm.queue_id = v_qid
           AND cgm.partition_name = ''
         LIMIT 1;
+
+        -- CONFLATION (§2.3 step 2, closes M4). A group that only ever uses the
+        -- PINNED route never went through the wildcard/discover registration, so
+        -- it had no durable group row and no place to hang a delivery policy —
+        -- which for conflation is fatal: a second consumer could never learn it.
+        -- Write the same row the wildcard path writes (:612-615), carrying the
+        -- pop-derived sub_mode/sub_from, then read the STORED conflation back so
+        -- a concurrent registrar's value wins, never the requested one.
+        --
+        -- DELIBERATE NARROWING vs the plan's literal text: this runs only for a
+        -- CONFLATING pop. That row doubles as the group-first-contact BULK SEED
+        -- marker (db::group_policy_lookup / AppState::group_seeded), and
+        -- this branch does NOT run that set-based seed — writing the marker
+        -- unconditionally would flip the broker's targeted/ring fast path on for
+        -- every pinned-pop-only group, ahead of the seed the marker exists to
+        -- prove (the 51e50c4 anti-convoy invariant). Gating on p_conflate keeps
+        -- every flag-off deployment byte-identical (§8 "default off"), which is
+        -- the stronger promise; the per-partition advisory-lock guard below is
+        -- still the correctness floor for a conflating group that mixes routes.
+        IF v_from_ts IS NULL AND v_conflate THEN
+            -- Registration mode/timestamp: the SAME decision the wildcard path
+            -- makes (:596-610), verbatim, so a group registered here and one
+            -- registered there are indistinguishable afterwards.
+            IF COALESCE(p_sub_from, '') <> '' AND COALESCE(p_sub_from, '') <> 'now' THEN
+                BEGIN
+                    v_reg_ts := p_sub_from::timestamptz;
+                    v_reg_mode := 'timestamp';
+                EXCEPTION WHEN OTHERS THEN
+                    v_reg_ts := v_now; v_reg_mode := 'new';  -- unparsable: registration-time 'new'
+                END;
+            ELSIF COALESCE(p_sub_mode, 'all') = 'new' OR COALESCE(p_sub_from, '') = 'now' THEN
+                v_reg_ts := v_now; v_reg_mode := 'new';
+            ELSE
+                v_reg_ts := '1970-01-01 00:00:00+00'::timestamptz; v_reg_mode := 'all';
+            END IF;
+
+            INSERT INTO queen.consumer_groups_metadata
+                (tenant_id, consumer_group, queue_id, partition_name,
+                 subscription_mode, subscription_timestamp, conflation)
+            VALUES (p_tenant, p_group, v_qid, '', v_reg_mode, v_reg_ts, v_conflate)
+            ON CONFLICT (tenant_id, consumer_group, queue_id, partition_name, namespace, task)
+            DO NOTHING;
+            GET DIAGNOSTICS v_cgm_seen = ROW_COUNT;
+            -- Re-read only when somebody else won the race; our own insert is
+            -- known to carry v_conflate. NB v_from_ts is deliberately left NULL
+            -- either way: the seeding decision below must stay the pop-carried
+            -- one this call already had, or a 'new' subscription could seed from
+            -- a timestamp we just stamped instead of from last_offset.
+            IF v_cgm_seen = 0 THEN
+                SELECT cgm.conflation INTO v_conflate_stored
+                FROM queen.consumer_groups_metadata cgm
+                WHERE cgm.consumer_group = p_group AND cgm.queue_id = v_qid
+                  AND cgm.partition_name = ''
+                LIMIT 1;
+                v_conflate := COALESCE(v_conflate_stored, v_conflate);
+            END IF;
+        ELSIF v_from_ts IS NOT NULL THEN
+            -- Registered group: the STORED policy wins for every consumer of it
+            -- (§1.1), so a stale broker cache can never conflate a plain group
+            -- (or vice versa) on this partition's first contact.
+            v_conflate := COALESCE(v_conflate_stored, v_conflate);
+        END IF;
 
         IF v_from_ts IS NOT NULL THEN
             -- Durable subscription: cursor lands just BEFORE the first segment
@@ -292,6 +372,35 @@ BEGIN
     -- forward scan below finds it starting at frame 0. This replaces the seg
     -- engine's "offset applies only to the exact cursor segment" rule with
     -- pure range arithmetic (no msg_count normalization lookups).
+    IF v_conflate THEN
+        -- CONFLATION (§1.2/§2.3 step 3). ONE backward PK step: the newest
+        -- VISIBLE segment. delayed_processing is applied HERE (not in a walk,
+        -- because there is no walk); created_at is monotone in base_offset, so
+        -- the deferred set is a contiguous SUFFIX and a filtered backward scan
+        -- lands exactly on the newest visible offset. Committing to it can
+        -- therefore never skip an offset that becomes visible later — everything
+        -- not yet visible sits strictly above it (§1.3).
+        SELECT s.base_offset, s.end_offset, s.created_at, s.blob
+        INTO v_head
+        FROM queen.log_segments s
+        WHERE s.partition_id = v_pid
+          AND (v_deadline IS NULL OR s.created_at <= v_deadline)
+        ORDER BY s.base_offset DESC LIMIT 1;
+
+        IF v_head.base_offset IS NOT NULL AND v_head.end_offset >= v_wanted THEN
+            r_base       := v_head.base_offset;
+            r_start_idx  := (v_head.end_offset - v_head.base_offset)::int;
+            r_take       := 1;
+            r_msg_count  := (v_head.end_offset - v_head.base_offset + 1)::int;
+            r_created_at := v_head.created_at;
+            r_blob       := v_head.blob;
+            RETURN NEXT;
+
+            v_taken := 1;
+            v_start := v_wanted;              -- EPISODE ANCHOR (§1.4), not v_last
+            v_last  := v_head.end_offset;     -- batch_end = commit_to
+        END IF;
+    ELSE
     SELECT s.base_offset, s.end_offset, s.created_at, s.blob
     INTO v_head
     FROM queen.log_segments s
@@ -347,6 +456,7 @@ BEGIN
             EXIT WHEN v_taken >= v_budget;
         END LOOP;
     END IF;
+    END IF;
 
     IF v_taken = 0 THEN
         -- Empty-partition cursor seal (2026-07-30; port of the C++
@@ -383,10 +493,14 @@ BEGIN
         -- auto-ack: commit the whole delivery in the same transaction; no
         -- lease, and the attempt state is untouched (auto-ack never
         -- redelivers — retired seg pop parity).
+        -- CONFLATION (§2.3 step 5): an auto-acking conflating pop commits
+        -- committed = v_last = tail in-transaction, which is the right thing;
+        -- there is no lease to describe, so the marker is cleared.
         UPDATE queen.log_consumers SET
             committed = v_last,
             worker_id = NULL, lease_expires_at = NULL, lease_acquired_at = NULL,
             batch_end = NULL,
+            lease_conflated = FALSE,
             total_consumed = total_consumed + v_taken
         WHERE partition_id = v_pid AND consumer_group = p_group;
     ELSE
@@ -401,6 +515,7 @@ BEGIN
             lease_expires_at = v_now + make_interval(secs => p_lease_seconds),
             lease_acquired_at = v_now,
             batch_end = v_last,
+            lease_conflated = v_conflate,
             attempt_count = CASE WHEN attempt_offset IS NOT DISTINCT FROM v_start
                                  THEN attempt_count + 1 ELSE 1 END,
             attempt_offset = v_start
@@ -423,7 +538,9 @@ $$;
 -- js/ha consumerGroupWithPartition 149/150 failure, 2026-07-31).
 -- Snapshot monotonicity makes this ordering airtight: anything the claim saw
 -- committed is visible to every later command of this function.
+-- CONFLATION (§2.3): p_conflate threaded straight through to log_pop_v1.
 DROP FUNCTION IF EXISTS queen.log_pop_specific_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, TEXT, TEXT, UUID);
+DROP FUNCTION IF EXISTS queen.log_pop_specific_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, TEXT, TEXT, UUID, BOOLEAN);
 CREATE FUNCTION queen.log_pop_specific_v1(
     p_queue TEXT,
     p_partition TEXT,
@@ -434,7 +551,8 @@ CREATE FUNCTION queen.log_pop_specific_v1(
     p_auto_ack BOOLEAN,
     p_sub_mode TEXT,
     p_sub_from TEXT,
-    p_tenant UUID
+    p_tenant UUID,
+    p_conflate BOOLEAN DEFAULT FALSE
 ) RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
@@ -453,7 +571,8 @@ BEGIN
            ) ORDER BY r_base), '[]'::jsonb)
     INTO v_segments
     FROM queen.log_pop_v1(p_queue, p_partition, p_group, p_budget, p_lease_seconds,
-                          p_worker, p_auto_ack, p_sub_mode, p_sub_from, FALSE, p_tenant);
+                          p_worker, p_auto_ack, p_sub_mode, p_sub_from, FALSE, p_tenant,
+                          p_conflate);
 
     -- Resolve the partition id AFTER the claim: this command's snapshot is at
     -- least as new as any snapshot the claim used, so a delivery can never be
@@ -491,7 +610,10 @@ $$;
 -- Track B (§5): p_tenant scopes the queue resolution + the per-(queue,group)
 -- watermark/metadata rows. Added last with a DEFAULT. Current-signature DROP =
 -- boot-idempotency half of DROP+CREATE (see log_pop_v1's header).
+-- CONFLATION (§2.3): p_conflate is stored on the registration row and forwarded
+-- to every per-candidate log_pop_v1 call.
 DROP FUNCTION IF EXISTS queen.log_pop_wildcard_wire_v1(TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, INTEGER, TEXT, TEXT, UUID);
+DROP FUNCTION IF EXISTS queen.log_pop_wildcard_wire_v1(TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, INTEGER, TEXT, TEXT, UUID, BOOLEAN);
 CREATE FUNCTION queen.log_pop_wildcard_wire_v1(
     p_queue TEXT,
     p_group TEXT,
@@ -502,7 +624,8 @@ CREATE FUNCTION queen.log_pop_wildcard_wire_v1(
     p_max_partitions INTEGER,
     p_sub_mode TEXT DEFAULT 'all',
     p_sub_from TEXT DEFAULT '',
-    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001'
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001',
+    p_conflate BOOLEAN DEFAULT FALSE
 ) RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
@@ -609,9 +732,14 @@ BEGIN
         v_from_ts := '1970-01-01 00:00:00+00'::timestamptz; v_sub_mode_stored := 'all';
     END IF;
 
+    -- CONFLATION (§2.3): the declared policy is persisted on this FIRST
+    -- registration and never re-negotiated — ON CONFLICT DO NOTHING is exactly
+    -- "group-setting-wins" (§3.3); the broker detects and reports the conflict.
     INSERT INTO queen.consumer_groups_metadata
-        (tenant_id, consumer_group, queue_id, partition_name, subscription_mode, subscription_timestamp)
-    VALUES (p_tenant, p_group, v_qid, '', v_sub_mode_stored, v_from_ts)
+        (tenant_id, consumer_group, queue_id, partition_name, subscription_mode,
+         subscription_timestamp, conflation)
+    VALUES (p_tenant, p_group, v_qid, '', v_sub_mode_stored, v_from_ts,
+            COALESCE(p_conflate, FALSE))
     ON CONFLICT (tenant_id, consumer_group, queue_id, partition_name, namespace, task) DO NOTHING;
     GET DIAGNOSTICS v_first_seen = ROW_COUNT;
 
@@ -706,7 +834,7 @@ BEGIN
         INTO v_segments, v_taken
         FROM queen.log_pop_v1(p_queue, v_p.name, p_group,
                               v_remaining, p_lease_seconds, p_worker, p_auto_ack,
-                              p_sub_mode, p_sub_from, FALSE, p_tenant);
+                              p_sub_mode, p_sub_from, FALSE, p_tenant, p_conflate);
 
         IF v_taken > 0 THEN
             v_out := v_out || jsonb_build_object(
@@ -776,7 +904,10 @@ $$;
 -- ============================================================================
 -- Track B (§5): p_tenant, as in log_pop_wildcard_wire_v1. Current-signature
 -- DROP = boot-idempotency half of DROP+CREATE (see log_pop_v1's header).
+-- CONFLATION (§2.3): as in log_pop_wildcard_wire_v1 — stored on registration,
+-- forwarded to every per-candidate claim.
 DROP FUNCTION IF EXISTS queen.log_pop_wildcard_bin_v1(TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, INTEGER, TEXT, TEXT, UUID);
+DROP FUNCTION IF EXISTS queen.log_pop_wildcard_bin_v1(TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, INTEGER, TEXT, TEXT, UUID, BOOLEAN);
 CREATE FUNCTION queen.log_pop_wildcard_bin_v1(
     p_queue TEXT,
     p_group TEXT,
@@ -787,7 +918,8 @@ CREATE FUNCTION queen.log_pop_wildcard_bin_v1(
     p_max_partitions INTEGER,
     p_sub_mode TEXT DEFAULT 'all',
     p_sub_from TEXT DEFAULT '',
-    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001'
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001',
+    p_conflate BOOLEAN DEFAULT FALSE
 ) RETURNS TABLE(meta JSONB, blobs BYTEA[])
 LANGUAGE plpgsql
 AS $$
@@ -852,9 +984,14 @@ BEGIN
         v_from_ts := '1970-01-01 00:00:00+00'::timestamptz; v_sub_mode_stored := 'all';
     END IF;
 
+    -- CONFLATION (§2.3): the declared policy is persisted on this FIRST
+    -- registration and never re-negotiated — ON CONFLICT DO NOTHING is exactly
+    -- "group-setting-wins" (§3.3); the broker detects and reports the conflict.
     INSERT INTO queen.consumer_groups_metadata
-        (tenant_id, consumer_group, queue_id, partition_name, subscription_mode, subscription_timestamp)
-    VALUES (p_tenant, p_group, v_qid, '', v_sub_mode_stored, v_from_ts)
+        (tenant_id, consumer_group, queue_id, partition_name, subscription_mode,
+         subscription_timestamp, conflation)
+    VALUES (p_tenant, p_group, v_qid, '', v_sub_mode_stored, v_from_ts,
+            COALESCE(p_conflate, FALSE))
     ON CONFLICT (tenant_id, consumer_group, queue_id, partition_name, namespace, task) DO NOTHING;
     GET DIAGNOSTICS v_first_seen = ROW_COUNT;
 
@@ -936,7 +1073,7 @@ BEGIN
         INTO v_segments, v_taken, v_part_blobs
         FROM queen.log_pop_v1(p_queue, v_p.name, p_group,
                               v_remaining, p_lease_seconds, p_worker, p_auto_ack,
-                              p_sub_mode, p_sub_from, FALSE, p_tenant);
+                              p_sub_mode, p_sub_from, FALSE, p_tenant, p_conflate);
 
         IF v_taken > 0 THEN
             v_out := v_out || jsonb_build_object(
@@ -1020,7 +1157,10 @@ $$;
 -- Track B (§5): p_tenant scopes the namespace/task queue set + watermarks/metadata.
 -- Current-signature DROP = boot-idempotency half of DROP+CREATE (see
 -- log_pop_v1's header).
+-- CONFLATION (§2.3): as in the wildcard SPs — stored on every matched queue's
+-- registration row, forwarded to every per-candidate claim.
 DROP FUNCTION IF EXISTS queen.log_pop_discover_wire_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, INTEGER, TEXT, TEXT, UUID);
+DROP FUNCTION IF EXISTS queen.log_pop_discover_wire_v1(TEXT, TEXT, TEXT, INTEGER, INTEGER, TEXT, BOOLEAN, INTEGER, TEXT, TEXT, UUID, BOOLEAN);
 CREATE FUNCTION queen.log_pop_discover_wire_v1(
     p_namespace TEXT,
     p_task TEXT,
@@ -1032,7 +1172,8 @@ CREATE FUNCTION queen.log_pop_discover_wire_v1(
     p_max_partitions INTEGER,
     p_sub_mode TEXT DEFAULT 'all',
     p_sub_from TEXT DEFAULT '',
-    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001'
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001',
+    p_conflate BOOLEAN DEFAULT FALSE
 ) RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
@@ -1095,9 +1236,13 @@ BEGIN
           AND (v_ns = '' OR qq.namespace = v_ns)
           AND (v_task = '' OR qq.task = v_task)
     LOOP
+        -- CONFLATION (§2.3): declared policy persisted on first registration of
+        -- THIS queue; group-setting-wins afterwards (ON CONFLICT DO NOTHING).
         INSERT INTO queen.consumer_groups_metadata
-            (tenant_id, consumer_group, queue_id, partition_name, subscription_mode, subscription_timestamp)
-        VALUES (p_tenant, p_group, v_q.qid, '', v_sub_mode_stored, v_from_ts)
+            (tenant_id, consumer_group, queue_id, partition_name, subscription_mode,
+             subscription_timestamp, conflation)
+        VALUES (p_tenant, p_group, v_q.qid, '', v_sub_mode_stored, v_from_ts,
+                COALESCE(p_conflate, FALSE))
         ON CONFLICT (tenant_id, consumer_group, queue_id, partition_name, namespace, task) DO NOTHING;
         GET DIAGNOSTICS v_first_seen = ROW_COUNT;
 
@@ -1176,9 +1321,18 @@ BEGIN
         SELECT p.id, p.name AS pname, qq.name AS qname,
                -- RUSTFIX item 18: request override (p_lease_seconds>0) wins per
                -- partition, else the queue's own lease_time, else the 60s floor.
-               COALESCE(NULLIF(p_lease_seconds, 0), qq.lease_time, 60) AS lease_time
+               COALESCE(NULLIF(p_lease_seconds, 0), qq.lease_time, 60) AS lease_time,
+               -- CONFLATION (§3.3): a discovery pop spans QUEUES, so the broker
+               -- has no single (queue, group) policy to cache — SQL resolves it
+               -- here instead, per matched queue, from the durable registration
+               -- row this call has just ensured exists. The request flag is the
+               -- fallback only for a queue with no row yet.
+               COALESCE(m.conflation, COALESCE(p_conflate, FALSE)) AS conflate
         FROM queen.log_partitions p
         JOIN queen.queues qq ON qq.id = p.queue_id
+        LEFT JOIN queen.consumer_groups_metadata m
+          ON m.queue_id = qq.id AND m.consumer_group = p_group
+         AND m.partition_name = ''
         LEFT JOIN queen.log_consumers c
           ON c.partition_id = p.id AND c.consumer_group = p_group
         WHERE qq.tenant_id = p_tenant
@@ -1204,7 +1358,7 @@ BEGIN
         INTO v_segments, v_taken
         FROM queen.log_pop_v1(v_p.qname, v_p.pname, p_group,
                               v_remaining, v_p.lease_time, p_worker, p_auto_ack,
-                              p_sub_mode, p_sub_from, FALSE, p_tenant);
+                              p_sub_mode, p_sub_from, FALSE, p_tenant, v_p.conflate);
 
         IF v_taken > 0 THEN
             v_out := v_out || jsonb_build_object(
@@ -1505,7 +1659,14 @@ GRANT EXECUTE ON FUNCTION queen.log_discover_has_pending_v1(TEXT, TEXT, TEXT, UU
 --     was never part of the contract. meta.partitions and the blob array keep
 --     exact serve order — those ARE positional.
 -- ----------------------------------------------------------------------------
+-- CONFLATION (§2.3): p_conflate switches PASS 2's LATERAL to a single backward
+-- step per candidate and the walk to a one-frame serve. The tri-state verdicts,
+-- the lastOff RETURNING, the blob fetch and the assembly are UNTOUCHED, so
+-- `drained` keeps working — and works better: a conflating serve sets
+-- batch_end = tail, so `be >= lo` is true exactly when the partition is fully
+-- retired for that group.
 DROP FUNCTION IF EXISTS queen.log_pop_list_v1(TEXT, TEXT, TEXT[], INTEGER, INTEGER, TEXT, BOOLEAN, INTEGER, TEXT, TEXT, BOOLEAN, UUID);
+DROP FUNCTION IF EXISTS queen.log_pop_list_v1(TEXT, TEXT, TEXT[], INTEGER, INTEGER, TEXT, BOOLEAN, INTEGER, TEXT, TEXT, BOOLEAN, UUID, BOOLEAN);
 CREATE FUNCTION queen.log_pop_list_v1(
     p_queue TEXT,
     p_group TEXT,
@@ -1518,7 +1679,8 @@ CREATE FUNCTION queen.log_pop_list_v1(
     p_sub_mode TEXT DEFAULT 'all',
     p_sub_from TEXT DEFAULT '',
     p_skip_window BOOLEAN DEFAULT FALSE,
-    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001'
+    p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001',
+    p_conflate BOOLEAN DEFAULT FALSE
 ) RETURNS TABLE(meta JSONB, blobs BYTEA[], states JSONB)
 LANGUAGE plpgsql
 AS $$
@@ -1558,6 +1720,10 @@ DECLARE
     m_base BIGINT[]      := '{}';
     m_end  BIGINT[]      := '{}';
     m_cre  TIMESTAMPTZ[] := '{}';
+    -- CONFLATION only (§2.3): 1 = the newest VISIBLE segment (the servable
+    -- tail), 0 = the seal-guard row that merely proves segments EXIST when
+    -- delayed_processing hides every one of them.
+    m_kind INTEGER[]     := '{}';
     m_len  INTEGER := 0;
     m_i    INTEGER := 1;
 
@@ -1707,6 +1873,40 @@ BEGIN
     -- suffix). Forward LIMIT = full budget: a segment holds >= 1 frame, so
     -- more rows can never be needed.
     -- ------------------------------------------------------------------
+    IF p_conflate THEN
+        -- CONFLATION (§2.3): ONE backward PK step per candidate for the newest
+        -- VISIBLE segment. The second leg exists ONLY to preserve the seal
+        -- decision when delayed_processing hides every segment (its `WHERE
+        -- v_delayed > 0` makes it free otherwise): without it a fully-deferred
+        -- partition would look segment-less and the zero-taken seal would jump
+        -- the cursor past live messages. Ordered by (ord, kind) so the walk sees
+        -- the servable row first.
+        FOR rec IN
+            SELECT req.ord, s.kind, s.base_offset, s.end_offset, s.created_at
+            FROM unnest(v_parts) WITH ORDINALITY AS req(name, ord)
+            CROSS JOIN LATERAL (
+                (SELECT 1 AS kind, s1.base_offset, s1.end_offset, s1.created_at
+                 FROM queen.log_segments s1
+                 WHERE s1.partition_id = a_pid[req.ord]
+                   AND (v_deadline IS NULL OR s1.created_at <= v_deadline)
+                 ORDER BY s1.base_offset DESC LIMIT 1)
+                UNION ALL
+                -- seal guard only: proves segments EXIST even when all are deferred.
+                (SELECT 0 AS kind, s0.base_offset, s0.end_offset, s0.created_at
+                 FROM queen.log_segments s0
+                 WHERE v_delayed > 0 AND s0.partition_id = a_pid[req.ord]
+                 ORDER BY s0.base_offset DESC LIMIT 1)
+            ) s
+            WHERE a_claimed[req.ord]
+            ORDER BY req.ord, s.kind DESC
+        LOOP
+            m_ord := m_ord || rec.ord;
+            m_base := m_base || rec.base_offset;
+            m_end := m_end || rec.end_offset;
+            m_cre := m_cre || rec.created_at;
+            m_kind := m_kind || rec.kind;
+        END LOOP;
+    ELSE
     FOR rec IN
         SELECT req.ord, s.base_offset, s.end_offset, s.created_at
         FROM unnest(v_parts) WITH ORDINALITY AS req(name, ord)
@@ -1730,7 +1930,9 @@ BEGIN
         m_base := m_base || rec.base_offset;
         m_end := m_end || rec.end_offset;
         m_cre := m_cre || rec.created_at;
+        m_kind := m_kind || 1;
     END LOOP;
+    END IF;
     m_len := COALESCE(array_length(m_ord, 1), 0);
 
     -- window_buffer newest-segment probe, only when the check is live.
@@ -1782,6 +1984,32 @@ BEGIN
             v_has_rows := FALSE;
             v_bfrom := COALESCE(array_length(sel_pid, 1), 0) + 1;
 
+            IF p_conflate THEN
+                -- CONFLATION (§2.3): consume this partition's metadata block,
+                -- serve AT MOST the kind=1 row (the newest visible segment) and
+                -- exactly ONE frame of it — its last. Any row at all (including
+                -- the kind=0 seal guard) proves segments exist, so the
+                -- zero-taken seal below stays correct for a fully-deferred
+                -- partition. Budget accounting and the EXIT are unchanged: each
+                -- served partition costs 1 of the batch budget, which is why the
+                -- broker raises max_parts for a conflating pop (M5).
+                WHILE m_i <= m_len AND m_ord[m_i] = v_ord LOOP
+                    v_has_rows := TRUE;
+                    IF v_taken = 0 AND m_kind[m_i] = 1 AND m_end[m_i] >= v_wanted THEN
+                        v_segj := v_segj || jsonb_build_object(
+                            'seq', m_base[m_i],
+                            'startOff', (m_end[m_i] - m_base[m_i])::int,
+                            'take', 1,
+                            'createdAt', to_char(m_cre[m_i], 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
+                        sel_pid := sel_pid || a_pid[v_ord];
+                        sel_base := sel_base || m_base[m_i];
+                        v_taken := 1;
+                        v_start := v_wanted;          -- EPISODE ANCHOR (§1.4)
+                        v_last := m_end[m_i];         -- batch_end = commit_to
+                    END IF;
+                    m_i := m_i + 1;
+                END LOOP;
+            ELSE
             WHILE m_i <= m_len AND m_ord[m_i] = v_ord LOOP
                 v_has_rows := TRUE;
                 IF v_taken < v_pbudget
@@ -1822,6 +2050,7 @@ BEGIN
                 END IF;
                 m_i := m_i + 1;
             END LOOP;
+            END IF;
 
             IF v_taken > 0 THEN
                 e_kind := array_append(e_kind, 'f');
@@ -1863,7 +2092,8 @@ BEGIN
             INTO v_segments, v_sp_taken, v_part_blobs
             FROM queen.log_pop_v1(p_queue, v_name, p_group,
                                   v_remaining, p_lease_seconds, p_worker, p_auto_ack,
-                                  p_sub_mode, p_sub_from, p_skip_window, p_tenant);
+                                  p_sub_mode, p_sub_from, p_skip_window, p_tenant,
+                                  p_conflate);
 
             IF v_sp_taken > 0 THEN
                 SELECT p.id, p.last_offset INTO v_pid2, v_lo2
@@ -1990,6 +2220,7 @@ BEGIN
                     committed = u.last_off,
                     worker_id = NULL, lease_expires_at = NULL, lease_acquired_at = NULL,
                     batch_end = NULL,
+                    lease_conflated = FALSE,   -- no lease to describe (§2.3 step 5)
                     total_consumed = c.total_consumed + u.take
                 FROM (SELECT ei, e_pid[ei] AS pid, e_last[ei] AS last_off, e_take[ei] AS take
                       FROM generate_series(1, array_length(e_kind, 1)) ei
@@ -2010,6 +2241,7 @@ BEGIN
                     lease_expires_at = v_now + make_interval(secs => p_lease_seconds),
                     lease_acquired_at = v_now,
                     batch_end = u.last_off,
+                    lease_conflated = COALESCE(p_conflate, FALSE),
                     attempt_count = CASE WHEN c.attempt_offset IS NOT DISTINCT FROM u.start_off
                                          THEN c.attempt_count + 1 ELSE 1 END,
                     attempt_offset = u.start_off

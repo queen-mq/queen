@@ -84,6 +84,12 @@ pub struct Metrics {
     pub ack_failed: AtomicU64,
     /// DLQ transitions observed on the ack path (worker_metrics parity).
     pub dlq_moved: AtomicU64,
+    /// PLAN_CONFLATION §6.2 — log positions a conflating delivery SKIPPED
+    /// (reported by the ack SPs as `conflated`), and declaration conflicts (a pop
+    /// asking for a policy the group does not have, §3.3). Both ride the existing
+    /// `rates` line as windowed deltas (§6.1); neither is per-message-logged.
+    pub conflated: AtomicU64,
+    pub conflation_conflicts: AtomicU64,
     /// Database failures observed on the DATA paths (push/pop/ack/transaction):
     /// a statement error, a statement timeout, or a pool acquisition failure.
     /// Bump it ONLY through `record_db_error(s)` — the gauge is charted as
@@ -136,6 +142,10 @@ pub struct Counters {
     pub transactions: u64,
     pub dlq_moved: u64,
     pub db_errors: u64,
+    /// PLAN_CONFLATION §6.1 — windowed-rate inputs for `conflated_s` /
+    /// `cfl_conflict_s` on the `rates` line.
+    pub conflated: u64,
+    pub conflation_conflicts: u64,
 }
 
 /// RUSTFIX item 24: per-queue throughput counters, flushed each minute into
@@ -162,6 +172,12 @@ pub struct QueueCounters {
     pub lag_sum_ms: AtomicU64,
     pub lag_count: AtomicU64,
     pub lag_max_ms: AtomicU64,
+    // PLAN_CONFLATION §6.2: positions skipped by conflation on this queue, and
+    // declaration conflicts seen on it. NO tenant label on the counters
+    // themselves (forbidden, :387-405) — the key already carries the tenant and
+    // attribution happens at flush time in syscollect.rs.
+    pub conflated_count: AtomicU64,
+    pub conflation_conflict_count: AtomicU64,
 }
 
 /// A per-queue snapshot the collector diffs into per-minute deltas.
@@ -179,6 +195,9 @@ pub struct QueueSnap {
     pub ack_failed: u64,
     pub lag_sum_ms: u64,
     pub lag_count: u64,
+    /// PLAN_CONFLATION §6.1: the per-queue top-N `rates` line reports this as a
+    /// windowed rate for a conflating queue (0 everywhere else).
+    pub conflated: u64,
 }
 
 #[derive(Default)]
@@ -226,6 +245,23 @@ impl PerQueue {
         c.ack_success.fetch_add(ok, Ordering::Relaxed);
         c.ack_failed.fetch_add(failed, Ordering::Relaxed);
     }
+    /// PLAN_CONFLATION §6.2: log positions a conflating ack retired WITHOUT a
+    /// handler invocation (the ack SPs' `conflated`). Fed from the ack handler.
+    pub fn add_conflated(&self, tenant: &str, queue: &str, n: u64) {
+        if n == 0 {
+            return;
+        }
+        self.counters(&crate::handlers::tenant_queue_key(tenant, queue))
+            .conflated_count
+            .fetch_add(n, Ordering::Relaxed);
+    }
+    /// PLAN_CONFLATION §3.3: one pop declared a conflation policy that disagrees
+    /// with the group's stored one. The stored value wins; this is the loud half.
+    pub fn add_conflation_conflict(&self, tenant: &str, queue: &str) {
+        self.counters(&crate::handlers::tenant_queue_key(tenant, queue))
+            .conflation_conflict_count
+            .fetch_add(1, Ordering::Relaxed);
+    }
     /// Pop lag observed on one delivery: `sum_ms` across `n` messages + batch max.
     pub fn add_pop_lag(&self, tenant: &str, queue: &str, sum_ms: u64, max_ms: u64, n: u64) {
         if n == 0 {
@@ -257,6 +293,7 @@ impl PerQueue {
                         ack_failed: c.ack_failed.load(Ordering::Relaxed),
                         lag_sum_ms: c.lag_sum_ms.load(Ordering::Relaxed),
                         lag_count: c.lag_count.load(Ordering::Relaxed),
+                        conflated: c.conflated_count.load(Ordering::Relaxed),
                     },
                 )
             })
@@ -1101,6 +1138,8 @@ impl Metrics {
             ack_success: AtomicU64::new(0),
             ack_failed: AtomicU64::new(0),
             dlq_moved: AtomicU64::new(0),
+            conflated: AtomicU64::new(0),
+            conflation_conflicts: AtomicU64::new(0),
             db_errors: AtomicU64::new(0),
             pop_targeted: AtomicU64::new(0),
             pop_wildcard: AtomicU64::new(0),
@@ -1131,6 +1170,8 @@ impl Metrics {
             transactions: self.transactions.load(Ordering::Relaxed),
             dlq_moved: self.dlq_moved.load(Ordering::Relaxed),
             db_errors: self.db_errors.load(Ordering::Relaxed),
+            conflated: self.conflated.load(Ordering::Relaxed),
+            conflation_conflicts: self.conflation_conflicts.load(Ordering::Relaxed),
         }
     }
 

@@ -44,6 +44,16 @@ class Defaults
         'subscriptionMode' => null,
         'subscriptionFrom' => null,
         'maxPartitions' => 1, // v4 multi-partition pop cap (1 = legacy single-partition)
+        // Last-value delivery for this consumer GROUP on this queue: a pop of a
+        // partition delivers exactly the newest visible message and the ack
+        // retires the whole backlog behind it. Declared here, persisted on the
+        // group's FIRST registration, and from then on the STORED value wins for
+        // every consumer of that group — it is not a per-call flag. Requires a
+        // consumer group, and the broker refuses it together with autoAck (a
+        // lease-less commit at delivery would turn the guarantee it exists to
+        // provide into at-most-once). Broker >= 1.1.0; an older one ignores it,
+        // which the response echo makes loud instead of silent (ConflationGuard).
+        'conflation' => false,
     ];
 
     public const POP_DEFAULTS = [

@@ -36,6 +36,7 @@ type Source interface {
 	Partitions(int) Source
 	SubscriptionMode(string) Source
 	SubscriptionFrom(string) Source
+	Conflation(bool) Source
 	Pop(context.Context) ([]Message, error)
 }
 
@@ -114,6 +115,15 @@ type RunOptions struct {
 	SubscriptionFrom string
 	Reset            bool
 	ConsumerGroup    string
+	// Conflation requests last-value delivery for this query's consumer group:
+	// each pop of a partition carries only its newest visible message
+	// (PLAN_CONFLATION.md §1.2). Sensible for a query whose windows are keyed
+	// on the partition and only the freshest state matters; wrong for anything
+	// that aggregates over every event, which is why it is off by default.
+	//
+	// Requires broker >= 1.1.0 - an older broker ignores it and the pop fails
+	// loudly rather than silently replaying the whole backlog.
+	Conflation       bool
 	Logger           util.Logger
 }
 
@@ -345,6 +355,9 @@ func (r *Runner) popMessages(ctx context.Context) ([]Message, error) {
 	}
 	if r.opts.SubscriptionFrom != "" {
 		src = src.SubscriptionFrom(r.opts.SubscriptionFrom)
+	}
+	if r.opts.Conflation {
+		src = src.Conflation(true)
 	}
 	return src.Pop(ctx)
 }

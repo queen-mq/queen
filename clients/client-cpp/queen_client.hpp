@@ -178,6 +178,21 @@ struct ConsumeOptions {
     std::string subscription_from;
     bool each = false;
     int max_partitions = 1;                  // v4 multi-partition pop cap
+    /**
+     * Last-value delivery for this consumer group on this queue
+     * (PLAN_CONFLATION.md §1.1): under backlog the group is served ONE message
+     * per partition, the newest, instead of the whole backlog.
+     *
+     * It is a property of the GROUP, not of the call: the first pop that
+     * registers the group persists it, and from then on the stored value wins
+     * for every consumer of that group. Declaring the opposite of what is stored
+     * does not flip anything -- it warns (§3.3).
+     *
+     * Requires a broker >= 1.1.0. An older one ignores the flag, which this
+     * client detects on the first response and refuses to continue past (§4);
+     * see ConflationUnsupportedError.
+     */
+    bool conflation = false;
     std::atomic<bool>* stop_signal = nullptr;
 };
 
@@ -234,6 +249,54 @@ public:
     bool is_cluster_suspended() const {
         return status_code_ == 403 && code_ == "cluster_suspended";
     }
+};
+
+/**
+ * Conflation was requested and the broker did not apply it
+ * (PLAN_CONFLATION.md §4, the degrade-loudly rule).
+ *
+ * There is no version or capability negotiation anywhere in this SDK, so a
+ * client that sends `conflation=true` to a broker predating 1.1.0 gets the
+ * unknown query param ignored and the WHOLE BACKLOG delivered, message by
+ * message, with nothing said. That is the one failure mode conflation cannot
+ * have: the feature exists to process the newest state and nothing else.
+ *
+ * The evidence is the response itself. A 1.1.0 broker echoes `"conflation":true`
+ * on every conflating response -- empty ones included, which is why a conflating
+ * pop answers 200-with-a-body where a plain one answers 204 -- so the absence of
+ * that echo is proof, and it is available on the FIRST round trip, before a
+ * single message has been handled. This is an error and not a warning: `pop()`
+ * throws it instead of returning its messages, and a consume loop stops.
+ *
+ * A `"conflationConflict":true` response is NOT this error. That key can only
+ * come from a broker that speaks conflation; it means the stored group policy
+ * disagreed with the request and won (§3.3), which is a warning, once per
+ * (queue, group) -- rejecting there is what would break a rolling deploy.
+ *
+ * Derives from std::runtime_error, so a `catch (const std::exception&)` site
+ * still sees it; catch this type to tell "your broker is too old" apart from a
+ * transport failure.
+ */
+class ConflationUnsupportedError : public std::runtime_error {
+private:
+    std::string queue_;
+    std::string group_;
+
+public:
+    ConflationUnsupportedError(const std::string& queue, const std::string& group)
+        // The message opens with the canonical wording from PLAN_CONFLATION §4,
+        // byte-identical across all seven SDKs so one grep finds every language;
+        // the queue and group are appended because in C++ the accessors below
+        // are rarely reached and what() is what ends up in the log.
+        : std::runtime_error(
+              "conflation was requested but this broker did not apply it \xE2\x80\x94 "
+              "requires broker >= 1.1.0 (queue '" + queue + "', consumer group '" +
+              group + "')"),
+          queue_(queue), group_(group) {
+    }
+
+    const std::string& queue() const { return queue_; }
+    const std::string& group() const { return group_; }
 };
 
 // ============================================================================
@@ -430,6 +493,116 @@ inline void log_error(const std::string& operation, const std::string& details) 
         std::cerr << "[" << get_iso_timestamp() << "] [ERROR] [" << operation << "] "
                   << details << std::endl;
     }
+}
+
+/**
+ * A warning that is NOT gated behind QUEEN_CLIENT_LOG.
+ *
+ * Reserved for facts an operator cannot act on if they never see them, and used
+ * by exactly one thing today: the conflation declaration conflict
+ * (PLAN_CONFLATION.md §3.3). That rule is the plan's deliberate improvement over
+ * the precedent it found -- a second consumer declaring a different
+ * subscriptionMode is dropped on the floor today with no log line, no counter
+ * and no response field (M3) -- so routing its one warning through a channel
+ * that is off by default would reproduce exactly the silence it replaces.
+ *
+ * Rate limiting is the caller's job. The one caller warns once per
+ * (queue, group) per process, so this can never flood.
+ */
+inline void log_warn_always(const std::string& operation, const std::string& details) {
+    std::cerr << "[" << get_iso_timestamp() << "] [WARN] [" << operation << "] "
+              << details << std::endl;
+}
+
+// ---------------------------------------------------------------------------
+// Conflation response contract (PLAN_CONFLATION.md §3.1, §4)
+// ---------------------------------------------------------------------------
+
+/**
+ * True when the response says conflation was actually APPLIED. The broker emits
+ * the key only when true and on every conflating response, empty ones included.
+ * A JSON null (a 204, or an empty body) is a legitimate input here and answers
+ * false: that is precisely the old-broker-with-an-idle-queue shape.
+ */
+inline bool conflation_applied(const json& response) {
+    return response.is_object() && response.contains("conflation") &&
+           response["conflation"].is_boolean() && response["conflation"].get<bool>();
+}
+
+/**
+ * True when the broker reports that the request disagreed with the stored group
+ * policy and the STORED one won (§3.3). Only a broker that understands
+ * conflation can emit this, which is what separates a conflict from an old
+ * broker.
+ */
+inline bool conflation_conflicted(const json& response) {
+    return response.is_object() && response.contains("conflationConflict") &&
+           response["conflationConflict"].is_boolean() &&
+           response["conflationConflict"].get<bool>();
+}
+
+/**
+ * Warn once per (queue, group) per process; returns true when this call is the
+ * one that warned. Per (queue, GROUP) and not per process: two groups on one
+ * queue are two independent policies, and collapsing them would hide the second
+ * misconfiguration behind the first.
+ */
+inline bool warn_conflation_conflict_once(const std::string& queue, const std::string& group) {
+    static std::mutex mutex;
+    static std::unordered_set<std::string> warned;
+
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        // \x1f (unit separator) cannot appear in a queue name that survived URL
+        // encoding, so the two halves of the key cannot be confused for one.
+        if (!warned.insert(queue + "\x1f" + group).second) {
+            return false;
+        }
+    }
+
+    log_warn_always("conflation",
+        "consumer declared conflation but the group does not have it: queue '" + queue +
+        "', consumer group '" + group + "'. The STORED group setting wins, so this "
+        "consumer is receiving FULL batches. Declare conflation on every consumer of "
+        "the group, or recreate the group. This warns once per queue+group.");
+    return true;
+}
+
+/**
+ * What to call this pop's target in a conflation warning. A pop addresses either
+ * a queue or a (namespace, task) pair; the label only ever names a log line and
+ * keys the once-per-target warning, so any stable spelling of the pair will do.
+ */
+inline std::string pop_target_label(const std::string& queue, const std::string& namespace_name,
+                                    const std::string& task) {
+    if (!queue.empty()) return queue;
+    if (!namespace_name.empty() && !task.empty()) return namespace_name + "/" + task;
+    if (!namespace_name.empty()) return namespace_name;
+    return task;
+}
+
+/**
+ * The whole client-side conflation contract in one place, so `pop()` and
+ * `consume()` -- two separate code paths in this SDK, which is the standing
+ * hazard §4 opens with -- cannot drift apart on it.
+ *
+ * No-op unless conflation was requested. Then:
+ *   applied  -> nothing to say.
+ *   conflict -> the broker speaks conflation and the stored policy won: warn,
+ *               once per (queue, group). Not an error -- §3.3/Q3, a reject here
+ *               takes down the already-correct half of a rolling deploy.
+ *   neither  -> the broker never applied it and never heard of it. Raise (§4).
+ */
+inline void enforce_conflation_contract(bool requested, const json& response,
+                                        const std::string& queue, const std::string& group) {
+    if (!requested || conflation_applied(response)) {
+        return;
+    }
+    if (conflation_conflicted(response)) {
+        warn_conflation_conflict_once(queue, group);
+        return;
+    }
+    throw ConflationUnsupportedError(queue, group);
 }
 
 /**
@@ -2120,6 +2293,7 @@ private:
     std::string subscription_from_;
     bool each_ = false;
     int max_partitions_ = 1;
+    bool conflation_ = false;
 
     // Buffer options
     std::optional<BufferOptions> buffer_options_;
@@ -2289,7 +2463,35 @@ public:
         subscription_from_ = from;
         return *this;
     }
-    
+
+    /**
+     * Last-value delivery for this consumer group (PLAN_CONFLATION.md §1.1):
+     * under backlog the group is served ONE message per partition -- the newest
+     * -- instead of the whole backlog. Sits beside subscription_mode() because
+     * it is the same kind of fact: a delivery policy of the GROUP, fixed when
+     * the group is first registered and never re-negotiated by a later pop.
+     *
+     *   client.queue("recompute").group("workers").conflation().consume(handler);
+     *
+     * Requires a broker >= 1.1.0: an older one ignores the flag and delivers the
+     * whole backlog, which pop() and consume() detect on the first response and
+     * refuse to continue past (ConflationUnsupportedError).
+     *
+     * NEEDS group(). Conflation is a policy of a consumer group, and a group-less
+     * pop is queue mode, which has no group identity to hang one on -- the broker
+     * refuses that combination with a 400 (§3.3).
+     *
+     * Composes with this client's auto_ack(), which defaults to true. The
+     * combination §3.3 refuses is the broker-side `autoAck` query param, which
+     * commits at delivery with no lease -- this SDK never sends it. auto_ack()
+     * here means "ack after the handler returns", i.e. the leased at-least-once
+     * shape conflation is built on, so the §1.3 guarantee holds.
+     */
+    QueueBuilder& conflation(bool enabled = true) {
+        conflation_ = enabled;
+        return *this;
+    }
+
     QueueBuilder& each() {
         each_ = true;
         return *this;
@@ -2345,6 +2547,13 @@ public:
         if (max_partitions_ > 1) {
             params << "&partitions=" << max_partitions_;
         }
+        // PLAN_CONFLATION §3.1: emitted ONLY when true. `conflation=false` is
+        // never sent -- it would read as "turn this group's policy off", which a
+        // pop is not allowed to do (the stored setting wins), and against a
+        // conflating group it would merely book a conflict.
+        if (conflation_) {
+            params << "&conflation=true";
+        }
 
         try {
             int client_timeout = wait_ ? timeout_millis_ + 5000 : timeout_millis_;
@@ -2352,12 +2561,27 @@ public:
             // giving up after a handful of tries.
             json result = http_client_->get(path.str() + params.str(), client_timeout,
                                             wait_ ? RetryKind::Pop : RetryKind::Default);
-            
+
+            // PLAN_CONFLATION §4, degrade loudly. BEFORE the empty-response
+            // return: an old broker answers an idle queue with a bodiless 204,
+            // and that is the likeliest first contact -- returning [] there
+            // would hide the version mismatch until the queue happened to have
+            // a backlog, i.e. until it did damage.
+            util::enforce_conflation_contract(
+                conflation_, result,
+                util::pop_target_label(queue_name_, namespace_, task_), group_);
+
             if (result.is_null() || !result.contains("messages")) {
                 return json::array();
             }
-            
+
             return result["messages"];
+        } catch (const ConflationUnsupportedError&) {
+            // Deliberately NOT swallowed into the [] contract below. This method
+            // returns [] for anything the caller can retry through; a broker that
+            // cannot conflate is not that -- every [] returned here would be a
+            // backlog silently drained one message at a time (§4).
+            throw;
         } catch (const HttpError& e) {
             // Also covers a 429 whose retry429 budget was exhausted and a
             // terminal 403 (e.g. cluster_suspended): both are logged with their
@@ -2753,6 +2977,13 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
     if (options.max_partitions > 1) {
         params << "&partitions=" << options.max_partitions;
     }
+    // PLAN_CONFLATION §3.1, emitted only when true. This is the SECOND place the
+    // flag has to be spelled onto the wire in this SDK: consume() and pop() build
+    // their query strings independently, and an option wired into one and not the
+    // other is the standing failure this feature was warned about (§4).
+    if (options.conflation) {
+        params << "&conflation=true";
+    }
 
     std::string full_url = path + params.str();
     
@@ -2766,8 +2997,15 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
     };
     auto terminal_error = std::make_shared<TerminalError>();
 
+    // Names this consumer's target in a conflation warning, and keys the
+    // once-per-(target, group) rule (§3.3). Computed once: it cannot change
+    // across a run.
+    const std::string conflation_target =
+        util::pop_target_label(options.queue, options.namespace_name, options.task);
+
     // Worker function
-    auto worker = [this, handler, full_url, options, terminal_error](int worker_id) {
+    auto worker = [this, handler, full_url, options, terminal_error,
+                   conflation_target](int worker_id) {
         int processed_count = 0;
         auto last_message_time = std::chrono::steady_clock::now();
         
@@ -2799,8 +3037,16 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
                 int client_timeout = options.wait ? options.timeout_millis + 5000 : options.timeout_millis;
                 json result = http_client_->get(full_url, client_timeout,
                                                 options.wait ? RetryKind::Pop : RetryKind::Default);
-                
-                if (result.is_null() || !result.contains("messages") || 
+
+                // PLAN_CONFLATION §4, degrade loudly. Placed BEFORE the
+                // empty-response continue on purpose: the check has to fire on
+                // the first round trip, and against an old broker the first
+                // round trip on an idle queue is a bodiless 204 that the
+                // continue below would swallow into an eternal poll.
+                util::enforce_conflation_contract(options.conflation, result,
+                                                  conflation_target, options.group);
+
+                if (result.is_null() || !result.contains("messages") ||
                     result["messages"].empty()) {
                     if (options.wait) {
                         continue; // Long polling timeout, retry
@@ -2861,6 +3107,24 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
                     processed_count += messages.size();
                 }
                 
+            } catch (const ConflationUnsupportedError& e) {
+                // PLAN_CONFLATION §4. Terminal, and terminal in the same way a
+                // 403 is: retrying cannot make an old broker conflate, and every
+                // further poll would hand the handler another message off a
+                // backlog the caller believes is being conflated away. Recorded
+                // rather than rethrown here because a worker runs inside a
+                // packaged_task whose future is only wait()ed on -- a throw
+                // would be discarded, and the loop would look like it simply
+                // ended.
+                util::log_error("ConsumerManager.worker", std::string("Worker ") +
+                              std::to_string(worker_id) + " stopping: " + e.what());
+                {
+                    std::lock_guard<std::mutex> lock(terminal_error->mutex);
+                    if (!terminal_error->error) {
+                        terminal_error->error = std::current_exception();
+                    }
+                }
+                break;
             } catch (const HttpError& e) {
                 // 429 (rate limited): HttpClient already retries this internally
                 // with backoff (unbounded for a wait=true pop). This branch is a
@@ -2962,6 +3226,7 @@ inline void QueueBuilder::consume(std::function<void(const json&)> handler,
     options.subscription_from = subscription_from_;
     options.each = each_;
     options.max_partitions = max_partitions_;
+    options.conflation = conflation_;
     options.stop_signal = stop_signal;
     
     ConsumerManager consumer_manager(http_client_, queen_);

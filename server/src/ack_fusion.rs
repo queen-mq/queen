@@ -85,7 +85,10 @@ fn record_flush(rows: usize) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AckVerdict {
     /// The cursor was durably advanced — render success + lease released.
-    Committed,
+    /// PLAN_CONFLATION §2.4: carries the SP's `conflated` skipped-position count
+    /// when the lease was a conflating one, `None` for a plain lease (so the ack
+    /// result keeps its byte-identical shape).
+    Committed(Option<i64>),
     /// The SP rejected this row (stale/expired lease, batch clamp) but the flush
     /// committed. The caller falls back to the unchanged SQL ack path for this
     /// client only (exactly today's ok:false fall-through).
@@ -423,7 +426,8 @@ fn parse_multi(txt: &str, expected: usize) -> Option<Vec<AckVerdict>> {
         // A row-level object is required; ok:true ⇒ Committed, ok:false ⇒ Rejected.
         let ok = e.get("ok").and_then(|x| x.as_bool())?;
         out.push(if ok {
-            AckVerdict::Committed
+            // PLAN_CONFLATION §2.4: absent for a plain lease.
+            AckVerdict::Committed(e.get("conflated").and_then(|x| x.as_i64()))
         } else {
             AckVerdict::Rejected
         });
@@ -535,10 +539,25 @@ mod tests {
         assert_eq!(
             vs,
             vec![
-                AckVerdict::Committed,
+                AckVerdict::Committed(None),
                 AckVerdict::Rejected,
-                AckVerdict::Committed
+                AckVerdict::Committed(None)
             ]
+        );
+    }
+
+    /// PLAN_CONFLATION §2.4: a conflating row carries `conflated`; a plain row
+    /// does not, and must keep resolving to a bare Committed.
+    #[test]
+    fn parse_multi_carries_the_conflated_count() {
+        let txt = r#"{"ok":true,"results":[
+            {"ok":true,"acked":1,"error":null,"conflated":98},
+            {"ok":true,"acked":3,"error":null}
+        ]}"#;
+        let vs = parse_multi(txt, 2).expect("parses");
+        assert_eq!(
+            vs,
+            vec![AckVerdict::Committed(Some(98)), AckVerdict::Committed(None)]
         );
     }
 

@@ -49,11 +49,26 @@ class Admin
     /**
      * Per-partition backlog for a queue — the cheap sibling of getQueue:
      * watermark arithmetic only, no segments, no timestamps. Shape:
-     * {queue, group, pending, partitions: [{partition, pending}]}.
+     * {queue, group, pending, partitionsPending, conflation, effectivePending,
+     *  partitions: [{partition, pending}]}.
      * A null group is queue-level pending under the same worst-cursor
      * precedence the dashboard publishes; a named group is that group's own
      * backlog per partition. Requires broker >= 1.0.4 — an older broker
      * answers 404 no_such_route, so fall back to getQueue there.
+     *
+     * `partitionsPending` (broker >= 1.1.0) is how many partitions have
+     * anything pending at all, and `effectivePending` is the number that
+     * actually predicts work:
+     *
+     *   pending           LOG depth — positions still to retire.
+     *   effectivePending  WORK depth — handler invocations still to come.
+     *
+     * They are the same number for an ordinary group. For a CONFLATING group
+     * (`conflation: true`, see QueueBuilder::conflation) they diverge by design,
+     * because one partition yields one invocation however deep it is:
+     * pending 4,000,000 with effectivePending 12 is a healthy conflating queue,
+     * while the same two numbers on a non-conflating group are an incident.
+     * Alert on `effectivePending`. Older brokers omit all three fields.
      */
     public function getQueueDepth(string $name, ?string $group = null): mixed
     {

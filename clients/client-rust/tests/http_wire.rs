@@ -660,3 +660,325 @@ async fn the_consume_loop_backs_off_through_a_throttle_and_carries_on() {
 
     assert_eq!(summary.processed, 1);
 }
+
+// ===========================================================================
+// Conflation — PLAN_CONFLATION §3.1 (the wire) and §4 (degrade loudly)
+//
+// The whole feature turns on one asymmetry: `conflation=true` is a query
+// parameter, and an older broker DROPS unknown query parameters silently. So a
+// 1.1.0 SDK against a 1.0.6 broker asks for last-value delivery, is told
+// nothing, and quietly drains the entire backlog message by message — the exact
+// failure the plan forbids. The only signal is the response echo, which is why
+// these tests are here and not in the live-broker suite: a healthy broker of the
+// right version can never produce the failing shape.
+// ===========================================================================
+
+/// A conflating claim as a 1.1.0 broker renders it: one message — the tail —
+/// and the `conflation` echo that rides EVERY conflating response.
+fn one_conflated_message() -> String {
+    r#"{"messages":[{"id":"m1","transactionId":"t1","data":{"n":1},
+        "createdAt":"2026-08-04T10:00:00.000Z","partitionId":"p1",
+        "partition":"one","leaseId":"L1","consumerGroup":"workers"}],
+        "partitionsClaimed":1,"conflation":true}"#
+        .into()
+}
+
+/// An EMPTY conflating pop. A conflating broker answers 200 with a body rather
+/// than a bodiless 204 precisely so the echo reaches the SDK on the first round
+/// trip, before a single message is processed.
+fn empty_conflated() -> String {
+    r#"{"messages":[],"partitionsClaimed":0,"conflation":true}"#.into()
+}
+
+#[tokio::test]
+async fn a_conflating_pop_declares_itself_on_the_wire() {
+    let broker = FakeBroker::start(vec![Reply::ok(empty_conflated())]).await;
+
+    client(&broker)
+        .queue("orders")
+        .group("workers")
+        .conflation(true)
+        .wait(false)
+        .pop()
+        .await
+        .expect("the broker applied conflation, so the pop succeeds");
+
+    let hit = &broker.hits()[0];
+    assert_eq!(hit.query("conflation"), Some("true"), "{}", hit.path);
+    assert_eq!(hit.query("consumerGroup"), Some("workers"));
+}
+
+// The plan's standing hazard (§4): in every SDK but this one the pop() and
+// consume() parameter builders are SEPARATE code, and an option wired into one
+// and not the other is the bug that comment at QueueBuilder.js:395 was left
+// behind by. Rust shares `pop_params`, so this test exists to keep that true —
+// if consume ever grows its own builder, this goes red.
+#[tokio::test]
+async fn a_conflating_consume_declares_itself_on_the_wire() {
+    let broker = FakeBroker::start_with(|_n, hit| {
+        if hit.route().contains("/ack") {
+            return Reply::ok(r#"[{"success":true}]"#);
+        }
+        Reply::ok(one_conflated_message())
+    })
+    .await;
+
+    let summary = client(&broker)
+        .queue("orders")
+        .group("workers")
+        .conflation(true)
+        .wait(false)
+        .limit(1)
+        .idle(Duration::from_secs(20))
+        .consume(|_msg| async { Ok::<_, std::convert::Infallible>(()) })
+        .await
+        .expect("a conflating consume against a 1.1.0 broker runs normally");
+
+    assert_eq!(summary.processed, 1);
+    let pop = broker
+        .hits()
+        .into_iter()
+        .find(|h| h.route().starts_with("/api/v1/pop"))
+        .expect("the consumer polled");
+    assert_eq!(pop.query("conflation"), Some("true"), "{}", pop.path);
+}
+
+// Default off, and `conflation(false)` is the ABSENCE of the key rather than
+// `conflation=false`: sending false would read to the broker as a disagreement
+// with a group whose stored policy is true, and would earn a conflict counter
+// for a consumer that never asked for anything.
+#[tokio::test]
+async fn conflation_off_leaves_the_query_byte_identical() {
+    let broker = FakeBroker::start(vec![Reply::ok(r#"{"messages":[]}"#)]).await;
+    let q = client(&broker);
+
+    q.queue("orders")
+        .group("workers")
+        .wait(false)
+        .pop()
+        .await
+        .unwrap();
+    q.queue("orders")
+        .group("workers")
+        .conflation(false)
+        .wait(false)
+        .pop()
+        .await
+        .unwrap();
+
+    for hit in broker.hits() {
+        assert_eq!(hit.query("conflation"), None, "{}", hit.path);
+    }
+}
+
+#[tokio::test]
+async fn a_broker_that_ignored_conflation_fails_the_pop_loudly() {
+    // 1.0.6 to the byte: the unknown query parameter is dropped, the whole
+    // backlog comes back, and nothing in the body mentions conflation.
+    let broker = FakeBroker::start(vec![Reply::ok(one_message())]).await;
+
+    let err = client(&broker)
+        .queue("orders")
+        .group("workers")
+        .conflation(true)
+        .wait(false)
+        .pop()
+        .await
+        .expect_err(
+            "a pop that asked for conflation and was silently given a full batch must \
+             not return that batch as if it were the tail",
+        );
+
+    let text = err.to_string();
+    assert!(
+        text.contains("conflation was requested but this broker did not apply it"),
+        "the error must say what happened: {text}"
+    );
+    assert!(
+        text.contains("1.1.0"),
+        "the error must name the version that fixes it: {text}"
+    );
+}
+
+// The check has to fire on the FIRST round trip, and the first round trip on a
+// quiet queue is an empty one. A 1.1.0 broker answers a conflating empty pop
+// with 200 + `"conflation":true`; a 1.0.6 broker answers 204 with no body at
+// all. Without this branch an idle consumer would sit there for hours looking
+// healthy and degrade the moment traffic arrived.
+#[tokio::test]
+async fn an_old_brokers_bodiless_204_is_caught_on_the_first_round_trip() {
+    let broker = FakeBroker::start(vec![Reply::status(204)]).await;
+
+    let err = client(&broker)
+        .queue("orders")
+        .group("workers")
+        .conflation(true)
+        .wait(false)
+        .pop()
+        .await
+        .expect_err("a bodiless 204 cannot carry the echo, so it is an old broker");
+
+    assert!(
+        err.to_string().contains("requires broker >= 1.1.0"),
+        "{err}"
+    );
+
+    // ...and the same reply is still a perfectly ordinary empty poll when
+    // conflation was never asked for.
+    let ok = client(&broker)
+        .queue("orders")
+        .group("workers")
+        .wait(false)
+        .pop()
+        .await
+        .expect("204 is an empty poll for everyone else");
+    assert!(ok.is_empty());
+}
+
+#[tokio::test]
+async fn a_conflating_consumer_stops_instead_of_draining_the_backlog() {
+    // The failure this test exists for: the handler runs 10 000 times on a
+    // backlog the consumer asked to skip. It must run zero times.
+    let broker = FakeBroker::start(vec![Reply::ok(one_message())]).await;
+
+    // Bounded, because the failure mode is not a wrong answer but an endless
+    // one: without the check this loop pops, handles, acks and pops again for
+    // as long as the broker has backlog to hand it.
+    let err = tokio::time::timeout(
+        Duration::from_secs(10),
+        client(&broker)
+            .queue("orders")
+            .group("workers")
+            .conflation(true)
+            .wait(false)
+            .idle(Duration::from_secs(30))
+            .consume(|_msg| async { Ok::<_, std::convert::Infallible>(()) }),
+    )
+    .await
+    .expect("the consumer never stopped: it is draining the backlog it asked to skip")
+    .expect_err("the consume loop must stop, not process the backlog");
+
+    assert!(err.to_string().contains("1.1.0"), "{err}");
+    let routes: Vec<String> = broker
+        .hits()
+        .iter()
+        .map(|h| h.route().to_string())
+        .collect();
+    assert!(
+        !routes.iter().any(|r| r.contains("/ack")),
+        "a message was handled and acked before the version check fired: {routes:?}"
+    );
+    assert_eq!(
+        broker.hit_count(),
+        1,
+        "the loop kept polling after the degrade error: {routes:?}"
+    );
+}
+
+// §3.3: the stored group policy wins and BOTH consumers keep working. A
+// conflict is a rolling-deploy artefact, not an outage — rejecting it would
+// take down the half of the fleet that is already correct.
+#[tokio::test]
+async fn a_declaration_conflict_does_not_stop_the_consumer() {
+    let broker = FakeBroker::start_with(|_n, hit| {
+        if hit.route().contains("/ack") {
+            return Reply::ok(r#"[{"success":true}]"#);
+        }
+        Reply::ok(
+            r#"{"messages":[{"id":"m1","transactionId":"t1","data":{"n":1},
+                "createdAt":"2026-08-04T10:00:00.000Z","partitionId":"p1",
+                "partition":"one","leaseId":"L1","consumerGroup":"workers"}],
+                "conflation":true,"conflationConflict":true}"#,
+        )
+    })
+    .await;
+
+    let summary = client(&broker)
+        .queue("orders")
+        .group("workers")
+        .conflation(true)
+        .wait(false)
+        .limit(2)
+        .idle(Duration::from_secs(20))
+        .consume(|_msg| async { Ok::<_, std::convert::Infallible>(()) })
+        .await
+        .expect("a conflict warns; it does not fail the consumer");
+
+    assert_eq!(summary.processed, 2);
+}
+
+// §5.3: depth is where a conflating queue stops looking like an incident.
+// `pending` is log depth and `effectivePending` is work depth, and this client
+// returns the broker's JSON verbatim — so the only way these fields can go
+// missing is somebody typing the response. Pinned.
+#[tokio::test]
+async fn queue_depth_carries_the_conflation_fields() {
+    let broker = FakeBroker::start(vec![Reply::ok(
+        r#"{"queue":"orders","group":"workers","pending":4000000,
+            "partitionsPending":12,"conflation":true,"effectivePending":12,
+            "partitions":[{"partition":"one","pending":4000000}]}"#,
+    )])
+    .await;
+
+    let depth = client(&broker)
+        .admin()
+        .queue_depth("orders", Some("workers"))
+        .await
+        .expect("depth is a plain GET");
+
+    let hit = &broker.hits()[0];
+    assert_eq!(hit.route(), "/api/v1/resources/queues/orders/depth");
+    assert_eq!(hit.query("group"), Some("workers"));
+
+    assert_eq!(depth["pending"], serde_json::json!(4_000_000i64));
+    assert_eq!(depth["partitionsPending"], serde_json::json!(12));
+    assert_eq!(depth["conflation"], serde_json::json!(true));
+    assert_eq!(
+        depth["effectivePending"],
+        serde_json::json!(12),
+        "4 000 000 pending with 12 handler invocations left is a HEALTHY conflating \
+         queue; dropping effectivePending turns it back into an incident"
+    );
+}
+
+// The same trap end to end. A group registered before anyone wanted conflation
+// stores `false`; §3.3 gives the stored value the last word, so this consumer is
+// answered "no" — the conflict key with no `conflation` echo, which is what an
+// old broker's response ALSO lacks. It must keep consuming: E2E-4's whole point
+// is that a rolling deploy where half the fleet declares the flag does not take
+// the other half down.
+#[tokio::test]
+async fn a_group_that_stores_conflation_off_keeps_the_consumer_running() {
+    let broker = FakeBroker::start_with(|_n, hit| {
+        if hit.route().contains("/ack") {
+            return Reply::ok(r#"[{"success":true}]"#);
+        }
+        Reply::ok(
+            r#"{"messages":[{"id":"m1","transactionId":"t1","data":{"n":1},
+                "createdAt":"2026-08-04T10:00:00.000Z","partitionId":"p1",
+                "partition":"one","leaseId":"L1","consumerGroup":"workers"}],
+                "conflationConflict":true}"#,
+        )
+    })
+    .await;
+
+    let summary = tokio::time::timeout(
+        Duration::from_secs(10),
+        client(&broker)
+            .queue("orders")
+            .group("workers")
+            .conflation(true)
+            .wait(false)
+            .limit(2)
+            .idle(Duration::from_secs(20))
+            .consume(|_msg| async { Ok::<_, std::convert::Infallible>(()) }),
+    )
+    .await
+    .expect("the consumer stopped responding")
+    .expect(
+        "the group's stored policy said no; that is a conflict to warn about, not a \
+         broker version to fail on",
+    );
+
+    assert_eq!(summary.processed, 2);
+}

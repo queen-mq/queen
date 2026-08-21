@@ -205,6 +205,24 @@ type ConsumeOptions struct {
 	// Batch field becomes a global cap on total messages returned across
 	// all claimed partitions.
 	MaxPartitions           int
+	// Conflation requests last-value delivery for this consumer group: a pop
+	// of a partition returns only its NEWEST visible message and commits
+	// everything below it, so a backlogged partition costs one handler
+	// invocation instead of one per message. For the "recompute entity X"
+	// shape, where one partition is one logical key and only the freshest
+	// state matters.
+	//
+	// It is a property of the GROUP, not of the call. The first consumer to
+	// register the group persists it, and from then on the stored value wins
+	// for every consumer of that group — a later consumer declaring the
+	// opposite is warned once (see ErrConflationUnsupported and
+	// conflation.go), not obeyed. Default false: a group that never sets it
+	// behaves exactly as before.
+	//
+	// Requires broker >= 1.1.0. An older broker ignores the flag and returns
+	// the full backlog; the client detects that and fails loudly rather than
+	// silently draining it.
+	Conflation              bool
 }
 
 // PopOptions contains options for popping messages.
@@ -218,6 +236,16 @@ type PopOptions struct {
 	SubscriptionFrom string
 	// MaxPartitions is the v4 multi-partition cap (default 1).
 	MaxPartitions    int
+	// Conflation requests last-value delivery for the consumer group. See
+	// ConsumeOptions.Conflation: it is the same group-level policy, and a pop
+	// declares it the same way a consume does.
+	//
+	// Note the interaction with MaxPartitions: a conflating pop yields at most
+	// ONE message per partition, so with the default MaxPartitions=1 a pop
+	// returns at most one message whatever Batch says. Leave MaxPartitions
+	// unset to let the broker size the claim from Batch (capped at 64, the
+	// measured checkout width), or set it explicitly.
+	Conflation       bool
 }
 
 // AckOptions contains options for acknowledging messages.

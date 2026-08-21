@@ -63,7 +63,14 @@ export const CONSUME_DEFAULTS = {
   renewLeaseIntervalMillis: null,      // Auto-renewal interval when enabled
   subscriptionMode: null,              // No subscription mode (standard queue mode)
   subscriptionFrom: null,              // No subscription start point
-  maxPartitions: 1                     // v4 multi-partition pop cap (1 = legacy single-partition)
+  maxPartitions: 1,                    // v4 multi-partition pop cap (1 = legacy single-partition)
+  // Last-value delivery for this consumer group (PLAN_CONFLATION §1.1): a pop
+  // of a partition delivers only the NEWEST visible message and commits past
+  // the ones it skipped. Off by default, and only ever SENT when true, so a
+  // client that never touches it is byte-identical on the wire. Requires
+  // broker >= 1.1.0 — an older one ignores the parameter, which the SDK
+  // detects from the missing response echo and raises on (§4).
+  conflation: false
 }
 
 export const POP_DEFAULTS = {

@@ -118,6 +118,44 @@ Two behaviours worth reading before using them:
 * Nothing else on these surfaces turns a verdict into an error. A lost `putIfAbsent`, a missing
   key, a cancel that found nothing: all `Ok`, with `applied()`, `found()` or `ok` saying so.
 
+## Conflation: last-value delivery (broker >= 1.1.0)
+
+For command-style queues where one partition is one logical task key and only the newest
+"recompute entity X" matters. With `.conflation(true)` a pop of a partition delivers just the
+newest message in it and the ack retires everything behind that message in one step, so a
+backlog costs one handler run per partition instead of one per message. Nothing on disk
+changes: retention still governs storage, and a second group reading the same queue without
+the flag still sees every message.
+
+```rust
+queen.queue("recompute")
+    .group("workers")
+    .conflation(true)
+    .partitions(64)          // a conflating pop yields <= 1 message per partition
+    .consume(|msg| async move { recompute(msg).await })
+    .await?;
+```
+
+It is a property of the **group**, not of the call: the value is persisted the first time the
+group registers on the queue, and from then on the stored value is what the broker applies to
+every consumer of that group. A later consumer declaring the opposite does not flip it — it
+keeps working under the stored policy, and this client logs one warning per (queue, group).
+Needs a `.group(..)`, and the broker refuses it together with `pop_auto_ack`.
+
+The guarantee it buys: after the last push to a partition, at least one run of that partition's
+handler *starts* after that push committed. The broker never commits past an offset it did not
+observe when it took the claim, so a message that lands mid-handler leaves the partition
+pending for the next pop.
+
+**A broker older than 1.1.0 drops the parameter silently** and answers with the whole backlog.
+Rather than let that pass as "conflation is on", every pop checks the broker's echo and returns
+an error naming the version — on the first round trip, including an empty one, so no message
+from a backlog you asked to skip is ever handed to your handler.
+
+`admin().queue_depth(..)` is where a conflating queue stops looking like an incident:
+`pending` is log depth, `effectivePending` is handler invocations remaining, and
+`pending: 4_000_000, effectivePending: 12` is healthy.
+
 ## Streams
 
 ```rust

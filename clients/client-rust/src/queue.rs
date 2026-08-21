@@ -1,6 +1,7 @@
 //! The queue builder: configure, push, pop, consume, DLQ.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -42,6 +43,7 @@ pub struct QueueBuilder {
     pub(crate) lease_seconds: Option<i32>,
     pub(crate) subscription_mode: Option<SubscriptionMode>,
     pub(crate) subscription_from: Option<String>,
+    pub(crate) conflation: bool,
     pub(crate) cancel: Option<crate::consumer::Cancel>,
 
     pub(crate) buffer: Option<BufferOptions>,
@@ -70,6 +72,7 @@ impl QueueBuilder {
             lease_seconds: None,
             subscription_mode: None,
             subscription_from: None,
+            conflation: false,
             cancel: None,
             buffer: None,
         }
@@ -193,6 +196,45 @@ impl QueueBuilder {
     /// `now`, or an ISO-8601 timestamp.
     pub fn subscription_from(mut self, from: impl Into<String>) -> Self {
         self.subscription_from = Some(from.into());
+        self
+    }
+
+    /// Last-value delivery: a pop of a partition delivers only the **newest**
+    /// message in it, and the ack retires everything behind that message in one
+    /// step. For command-style queues where one partition is one logical task
+    /// key and only the latest "recompute entity X" matters — under a backlog
+    /// the handler runs once per partition instead of once per message.
+    ///
+    /// Nothing on disk is touched: retention still governs storage, and a second
+    /// group reading the same queue without this flag still sees every message.
+    ///
+    /// # It is a property of the group, not of the call
+    ///
+    /// The value is persisted the first time the group registers on the queue,
+    /// and from then on the **stored** value is what the broker applies to every
+    /// consumer of that group. A later consumer declaring the opposite does not
+    /// flip it; it keeps working under the stored policy and this client logs one
+    /// warning per (queue, group). Requires a [`QueueBuilder::group`], and the
+    /// broker refuses it together with [`QueueBuilder::pop_auto_ack`] — auto-ack
+    /// commits at delivery with no lease, which would turn the guarantee below
+    /// into at-most-once on the one feature that exists to provide it.
+    ///
+    /// # The guarantee
+    ///
+    /// After the last push to a partition, at least one run of that partition's
+    /// handler *starts* after that push committed. The broker never commits past
+    /// an offset it did not observe when it took the claim, so a message that
+    /// arrives mid-handler leaves the partition pending and is picked up by the
+    /// next pop.
+    ///
+    /// # Requires broker >= 1.1.0
+    ///
+    /// An older broker drops the unknown parameter silently and answers with the
+    /// whole backlog. Rather than let that pass as "conflation is on", every pop
+    /// checks the broker's echo and fails with an error naming the version — see
+    /// [`QueueBuilder::pop`].
+    pub fn conflation(mut self, enabled: bool) -> Self {
+        self.conflation = enabled;
         self
     }
 
@@ -330,9 +372,90 @@ impl QueueBuilder {
             consumer_group: self.group.clone(),
             subscription_mode: self.subscription_mode,
             subscription_from: self.subscription_from.clone(),
+            // `Some(true)` or nothing. `PopParams::to_pairs` drops `Some(false)`
+            // anyway, but making the absence explicit here keeps the intent at
+            // the call site: not asking is not the same as asking for `false`,
+            // which the broker reads as a disagreement with the stored policy.
+            conflation: self.conflation.then_some(true),
             namespace: self.namespace.clone(),
             task: self.task.clone(),
         }
+    }
+
+    /// The pair a conflation policy is stored under, and therefore the unit a
+    /// declaration conflict is warned about — once per process, §4. Not the
+    /// partition: every lane of a queue shares one stored policy, so warning per
+    /// lane would multiply one operator mistake by the partition count.
+    fn conflation_scope(&self) -> String {
+        let addressed = match &self.queue {
+            Some(q) => q.clone(),
+            // A discovery pop has no queue in its path; what it addresses is the
+            // namespace/task pair.
+            None => format!(
+                "{}/{}",
+                self.namespace.as_deref().unwrap_or("*"),
+                self.task.as_deref().unwrap_or("*")
+            ),
+        };
+        format!(
+            "{addressed}\u{1}{}",
+            self.group
+                .as_deref()
+                .unwrap_or(queen_protocol::QUEUE_MODE_GROUP)
+        )
+    }
+
+    /// The degrade-loudly contract, PLAN_CONFLATION §4.
+    ///
+    /// No SDK negotiates versions with the broker, and query parameters an older
+    /// broker does not know are dropped without a word — so a 1.1.0 client
+    /// against a 1.0.6 broker would ask for last-value delivery, be handed the
+    /// entire backlog, and process every message of it believing it had skipped
+    /// them. The response echo is the only evidence, and a conflating broker
+    /// emits it on empty pops too (answering 200 with a body where it would
+    /// otherwise answer a bodiless 204), which is what lets this fire on the
+    /// FIRST round trip, before a single message is handled.
+    ///
+    /// `None` is that bodiless 204: no body, no echo, old broker.
+    ///
+    /// # What is *not* a version skew
+    ///
+    /// A group registered before anyone wanted conflation stores `false`, and
+    /// §3.3 gives the stored value the last word — so this consumer is answered
+    /// "no": `conflationConflict` with no `conflation` echo. The missing echo
+    /// looks exactly like an old broker's, and treating it as one would blame the
+    /// broker's version for an operator's group policy and stop the half of a
+    /// rolling deploy that is already correct. The conflict key is the
+    /// discriminator: no broker older than 1.1.0 can emit it. So the error is
+    /// raised only when the response says **nothing at all** about conflation.
+    fn check_conflation(&self, resp: Option<&PopResponse>) -> Result<()> {
+        if !self.conflation {
+            return Ok(());
+        }
+        let applied = resp.is_some_and(|r| r.conflation_applied());
+        let conflict = resp.is_some_and(|r| r.has_conflation_conflict());
+
+        if !applied && !conflict {
+            return Err(Error::Invalid(CONFLATION_UNSUPPORTED.to_string()));
+        }
+        // §3.3: the stored policy wins and this consumer keeps working — a
+        // conflict is a rolling-deploy artefact, not an outage. But it is also
+        // an operator mistake that is invisible otherwise, so it gets said out
+        // loud exactly once: a mismatched fleet polls several times a second,
+        // and a line per poll is a line that gets filtered out.
+        if conflict && first_conflation_conflict(&self.conflation_scope()) {
+            tracing::warn!(
+                queue = self.queue.as_deref().unwrap_or("<discovery>"),
+                group = self
+                    .group
+                    .as_deref()
+                    .unwrap_or(queen_protocol::QUEUE_MODE_GROUP),
+                applied,
+                "this consumer declared a conflation policy the group does not have; the \
+                 group's stored policy is what the broker applied"
+            );
+        }
+        Ok(())
     }
 
     /// Claim messages once.
@@ -346,6 +469,15 @@ impl QueueBuilder {
     /// `auto_ack` here is the broker-side flag: the cursor commits at delivery
     /// and no lease is taken, so a crash mid-handler loses the batch. Defaults
     /// to off, matching every other SDK's `pop()`.
+    ///
+    /// # With [`QueueBuilder::conflation`] on
+    ///
+    /// The pop returns the newest message of each claimed partition, and errors
+    /// if the broker did not say it applied conflation — including on an empty
+    /// poll, which is what makes the check fire before any message is handled
+    /// rather than after a backlog has been drained. A broker older than 1.1.0
+    /// drops the parameter silently, so its absence in the response is the only
+    /// evidence there is.
     pub async fn pop(&self) -> Result<Vec<Message>> {
         self.pop_with_auto_ack(false).await
     }
@@ -374,9 +506,17 @@ impl QueueBuilder {
 
         let resp: Option<PopResponse> = self.inner.http.get_json(&url, &opts).await?;
         let Some(resp) = resp else {
+            // A bodiless 204 — the shape a pre-1.1.0 broker gives an empty pop.
+            // A conflating broker never sends it, so for a consumer that asked
+            // for conflation this is the version check firing on the first
+            // round trip rather than an ordinary quiet poll.
+            self.check_conflation(None)?;
             return Ok(Vec::new());
         };
         if resp.is_paused() {
+            // Pop maintenance is not a version skew: the request never reached
+            // the claim path, so there is no echo to expect and nothing to
+            // conclude from its absence.
             tracing::debug!("broker is in pop maintenance; treating as an empty poll");
             return Ok(Vec::new());
         }
@@ -390,6 +530,10 @@ impl QueueBuilder {
                 retry_after_seconds: None,
             });
         }
+        // Before the messages are handed over, never after: the whole point is
+        // that no message from a backlog the caller asked to skip is ever
+        // processed. §4.
+        self.check_conflation(Some(&resp))?;
         Ok(resp.messages)
     }
 
@@ -446,6 +590,27 @@ impl QueueBuilder {
         let out: Option<DlqResponse> = self.inner.http.get_json(&path, &Opts::default()).await?;
         Ok(out.unwrap_or_default())
     }
+}
+
+/// PLAN_CONFLATION §4, word for word. It has to name the broker version: the
+/// symptom a consumer sees is "conflation does nothing", and the cause is never
+/// in their code.
+pub(crate) const CONFLATION_UNSUPPORTED: &str =
+    "conflation was requested but this broker did not apply it — requires broker >= 1.1.0";
+
+/// True the first time this (queue, group) scope reports a declaration conflict,
+/// false for ever after. Process-global on purpose: the point is one line per
+/// mistake per process, not one per builder — and a consumer typically rebuilds
+/// its `QueueBuilder` on every poll.
+fn first_conflation_conflict(scope: &str) -> bool {
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    SEEN.get_or_init(|| Mutex::new(HashSet::new()))
+        // A poisoned lock here means some other thread panicked while holding a
+        // set of strings. Losing the warning history is not worth turning a
+        // warning path into a panic on the consume loop.
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(scope.to_string())
 }
 
 pub(crate) fn encode_pairs(pairs: &[(&'static str, String)]) -> String {
@@ -728,6 +893,177 @@ mod tests {
         assert_eq!(
             stats.active_buffers, 1,
             "one buffer per (queue, partition), not one per push"
+        );
+    }
+
+    // ----------------------------------------------- conflation (§1.1, §4)
+
+    fn pop_response(body: &str) -> PopResponse {
+        serde_json::from_str(body).expect("fixture must decode as a pop response")
+    }
+
+    // Rust is the one SDK where `pop()` and `consume()` share a parameter
+    // builder — every other one has two copies and a standing comment about the
+    // bug that produced them. `pop_params` is called with `auto_ack` true from
+    // `pop_auto_ack` and false from both `pop()` and the consume loop, so both
+    // arms are asserted rather than assumed.
+    #[test]
+    fn conflation_reaches_the_query_from_both_pop_param_paths() {
+        for auto_ack in [false, true] {
+            let pairs = q("orders")
+                .group("workers")
+                .conflation(true)
+                .pop_params(auto_ack)
+                .to_pairs();
+            assert!(
+                pairs.contains(&("conflation", "true".to_string())),
+                "auto_ack={auto_ack}: {pairs:?}"
+            );
+        }
+    }
+
+    // Default off, and an explicit `false` is the absence of the key — never
+    // `conflation=false`. The broker reads a sent `false` against a group whose
+    // stored policy is `true` as a DISAGREEMENT (§3.3) and charges a conflict
+    // counter for it, so a consumer that never opted in must stay silent.
+    #[test]
+    fn conflation_is_off_by_default_and_off_is_silence() {
+        for b in [
+            q("orders").group("workers"),
+            q("orders").group("workers").conflation(false),
+        ] {
+            let pairs = b.pop_params(false).to_pairs();
+            assert!(!pairs.iter().any(|(k, _)| *k == "conflation"), "{pairs:?}");
+        }
+    }
+
+    // §4, the degrade-loudly contract. No SDK negotiates versions, and a broker
+    // older than 1.1.0 drops the unknown query parameter without a word — so the
+    // response echo is the only evidence conflation happened. Missing echo =
+    // error, on the first response, before a message is processed.
+    #[test]
+    fn a_response_without_the_echo_is_an_error_when_conflation_was_asked_for() {
+        let asked = q("orders").group("workers").conflation(true);
+
+        let old_broker = pop_response(r#"{"messages":[],"partitionsClaimed":0}"#);
+        let err = asked
+            .check_conflation(Some(&old_broker))
+            .expect_err("a pop with no echo came from a broker that ignored the flag");
+        assert_eq!(err.to_string(), CONFLATION_UNSUPPORTED);
+
+        // A bodiless 204 is the same verdict: a conflating broker answers an
+        // empty pop with 200 and a body precisely so this fires on the first
+        // round trip rather than whenever traffic next arrives.
+        assert!(asked.check_conflation(None).is_err());
+
+        let applied = pop_response(r#"{"messages":[],"conflation":true}"#);
+        assert!(asked.check_conflation(Some(&applied)).is_ok());
+    }
+
+    // The trap inside the degrade check. A group registered earlier WITHOUT
+    // conflation stores `false`, and §3.3 says the stored value wins — so a
+    // consumer that asks for it is answered "no": `conflationConflict:true` and
+    // no `conflation` echo, which is byte-for-byte what an old broker's answer
+    // also lacks. Reading that as a version skew would blame the broker for an
+    // operator's group policy and take down the half of a rolling deploy that is
+    // already correct — exactly what §7.3's E2E-4 forbids ("both consumers keep
+    // working"). The conflict key is the discriminator: no broker older than
+    // 1.1.0 can emit it.
+    #[test]
+    fn a_group_whose_stored_policy_is_off_is_a_conflict_not_an_old_broker() {
+        let refused = pop_response(r#"{"messages":[],"conflationConflict":true}"#);
+        let asked = q("conflict-queue-c").group("g1").conflation(true);
+
+        assert!(
+            asked.check_conflation(Some(&refused)).is_ok(),
+            "the group stores conflation=false; that is a declaration conflict, not a \
+             broker too old to understand the request"
+        );
+        assert!(
+            !first_conflation_conflict(&asked.conflation_scope()),
+            "the refusal must still be said out loud, once"
+        );
+    }
+
+    // The mirror case is a non-event: a consumer that never asked for conflation
+    // must not be broken by a group whose stored policy happens to be off — or on.
+    #[test]
+    fn a_consumer_that_did_not_ask_for_conflation_is_never_failed_by_the_echo() {
+        let plain = q("orders").group("workers");
+        assert!(plain.check_conflation(None).is_ok());
+        assert!(plain
+            .check_conflation(Some(&pop_response(r#"{"messages":[]}"#)))
+            .is_ok());
+        assert!(plain
+            .check_conflation(Some(&pop_response(r#"{"messages":[],"conflation":true}"#)))
+            .is_ok());
+    }
+
+    // §3.3/§4: the stored policy wins, the consumer keeps working, and it says so
+    // ONCE per (queue, group) per process. A mismatched fleet polls several times
+    // a second; a warning per poll is a log flood that gets the line filtered out,
+    // which is the same as not warning at all.
+    #[test]
+    fn a_declaration_conflict_warns_once_per_queue_and_group() {
+        let conflicted =
+            pop_response(r#"{"messages":[],"conflation":true,"conflationConflict":true}"#);
+
+        // Names unique to this test: the registry is process-global on purpose,
+        // and a shared name would couple this test to whatever ran before it.
+        let a = q("conflict-queue-a").group("g1").conflation(true);
+        assert!(
+            a.check_conflation(Some(&conflicted)).is_ok(),
+            "a conflict is not an error"
+        );
+
+        assert!(
+            !first_conflation_conflict(&a.conflation_scope()),
+            "the pop already claimed this scope; a second warning would be a duplicate"
+        );
+
+        // A different group on the same queue is a different declaration and
+        // gets its own warning...
+        let b = q("conflict-queue-a").group("g2").conflation(true);
+        assert!(first_conflation_conflict(&b.conflation_scope()));
+        // ...as does the same group on a different queue: the policy is stored
+        // per (queue, group), so that is the unit that can disagree.
+        let c = q("conflict-queue-b").group("g1").conflation(true);
+        assert!(first_conflation_conflict(&c.conflation_scope()));
+    }
+
+    // The scope is the pair the policy is stored under — not the partition, which
+    // would warn once per lane, and not the queue alone, which would silence a
+    // second group's genuinely different disagreement.
+    #[test]
+    fn the_conflict_scope_is_the_queue_and_the_group_only() {
+        let base = q("orders").group("workers");
+        assert_eq!(
+            base.clone().partition("eu").conflation_scope(),
+            base.conflation_scope(),
+            "two lanes of one queue share a stored policy, so they share a warning"
+        );
+        assert_ne!(
+            q("orders").group("audit").conflation_scope(),
+            base.conflation_scope()
+        );
+
+        // A group-less pop cannot conflate at all (the broker refuses it with
+        // 400), but the scope still has to be well-defined rather than collide
+        // with a real group named "".
+        assert!(q("orders").conflation_scope().contains("__QUEUE_MODE__"));
+
+        // A discovery pop has no queue in its path; its identity is the
+        // namespace/task pair it addresses.
+        let queen = Queen::connect(Config::new("http://127.0.0.1:1")).unwrap();
+        let scope = queen
+            .queue_opt(None)
+            .namespace("billing")
+            .task("invoice")
+            .group("workers")
+            .conflation_scope();
+        assert!(
+            scope.contains("billing") && scope.contains("invoice"),
+            "{scope}"
         );
     }
 

@@ -25,6 +25,7 @@ func (f *fakeSource) Group(string) Source                      { return f }
 func (f *fakeSource) Partitions(int) Source                    { return f }
 func (f *fakeSource) SubscriptionMode(string) Source           { return f }
 func (f *fakeSource) SubscriptionFrom(string) Source           { return f }
+func (f *fakeSource) Conflation(bool) Source                   { return f }
 func (f *fakeSource) Pop(_ context.Context) ([]Message, error) { return nil, nil }
 
 func newFake(name string) *fakeSource { return &fakeSource{name: name} }

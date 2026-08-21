@@ -110,6 +110,9 @@ DECLARE
     v_pid UUID;
     v_c RECORD;
     v_acked BIGINT := 0;
+    -- CONFLATION (§2.4): skipped-position count, NULL for a plain lease so the
+    -- key is simply absent from the result (flag-off responses stay identical).
+    v_conflated BIGINT;
 BEGIN
     -- Queue identity is the queen.queues id now (log_partitions.queue_id FKs it
     -- directly; queen.log_queues is gone).
@@ -152,22 +155,36 @@ BEGIN
             RETURN jsonb_build_object('ok', false, 'error', 'position beyond leased batch');
         END IF;
 
+        -- CONFLATION (PLAN_CONFLATION §2.4). A conflating lease delivered ONE
+        -- frame at batch_end, so total_consumed must count LOG POSITIONS RETIRED
+        -- (p_upto - committed), not the one handler invocation p_acked_count
+        -- reports — Q6 keeps total_consumed meaning "positions retired".
         UPDATE queen.log_consumers SET
             committed = p_upto,
             worker_id = NULL, lease_expires_at = NULL,
             batch_end = NULL,
-            total_consumed = total_consumed + GREATEST(p_acked_count, 0)
+            lease_conflated = FALSE,
+            total_consumed = total_consumed + CASE WHEN v_c.lease_conflated
+                THEN GREATEST(p_upto - v_c.committed, 0)
+                ELSE GREATEST(p_acked_count, 0) END
         WHERE partition_id = v_pid AND consumer_group = p_group;
         v_acked := GREATEST(p_acked_count, 0);
+        IF v_c.lease_conflated THEN
+            v_conflated := GREATEST(p_upto - v_c.committed - 1, 0);
+        END IF;
     ELSE
         -- nack / failed batch: release the lease, cursor untouched — the whole
         -- batch redelivers (at-least-once).
         UPDATE queen.log_consumers SET
             worker_id = NULL, lease_expires_at = NULL,
-            batch_end = NULL
+            batch_end = NULL,
+            lease_conflated = FALSE
         WHERE partition_id = v_pid AND consumer_group = p_group;
     END IF;
 
+    IF v_conflated IS NOT NULL THEN
+        RETURN jsonb_build_object('ok', true, 'acked', v_acked, 'conflated', v_conflated);
+    END IF;
     RETURN jsonb_build_object('ok', true, 'acked', v_acked);
 END;
 $$;
@@ -203,6 +220,8 @@ AS $$
 DECLARE
     v_c RECORD;
     v_acked BIGINT := 0;
+    -- CONFLATION (§2.4 item 2): skipped positions, NULL for a plain lease.
+    v_conflated BIGINT;
 BEGIN
     -- Same (partition, group) consumer row lock as log_ack_v1 — the ONLY lock
     -- the ack path takes. A missing row means the partition/group is unknown or
@@ -232,20 +251,34 @@ BEGIN
             RETURN jsonb_build_object('ok', false, 'error', 'position beyond leased batch');
         END IF;
 
+        -- CONFLATION (§2.4). The fast path only ever arrives with
+        -- p_upto = batch_end, so a conflating lease retires the whole span
+        -- (committed, batch_end] on one delivered frame: total_consumed counts
+        -- POSITIONS RETIRED (Q6) and `conflated` reports the skipped ones.
         UPDATE queen.log_consumers SET
             committed = p_upto,
             worker_id = NULL, lease_expires_at = NULL,
             batch_end = NULL,
-            total_consumed = total_consumed + GREATEST(p_acked_count, 0)
+            lease_conflated = FALSE,
+            total_consumed = total_consumed + CASE WHEN v_c.lease_conflated
+                THEN GREATEST(p_upto - v_c.committed, 0)
+                ELSE GREATEST(p_acked_count, 0) END
         WHERE partition_id = p_partition_id AND consumer_group = p_group;
         v_acked := GREATEST(p_acked_count, 0);
+        IF v_c.lease_conflated THEN
+            v_conflated := GREATEST(p_upto - v_c.committed - 1, 0);
+        END IF;
     ELSE
         UPDATE queen.log_consumers SET
             worker_id = NULL, lease_expires_at = NULL,
-            batch_end = NULL
+            batch_end = NULL,
+            lease_conflated = FALSE
         WHERE partition_id = p_partition_id AND consumer_group = p_group;
     END IF;
 
+    IF v_conflated IS NOT NULL THEN
+        RETURN jsonb_build_object('ok', true, 'acked', v_acked, 'conflated', v_conflated);
+    END IF;
     RETURN jsonb_build_object('ok', true, 'acked', v_acked);
 END;
 $$;
@@ -306,6 +339,9 @@ DECLARE
     v_ok BOOLEAN;
     v_err TEXT;
     v_acked BIGINT;
+    -- CONFLATION (§2.4 item 2): per-row skipped-position count, NULL for a plain
+    -- lease so the key stays absent from that row's verdict.
+    v_conflated BIGINT;
 BEGIN
     -- Array-length agreement guard: a silent misalignment would advance the
     -- WRONG cursor. Fail loudly (mirrors log_ack_by_hash_v1's misalign RAISE).
@@ -333,7 +369,7 @@ BEGIN
         ORDER BY u.pid::uuid, u.grp    -- deterministic lock order (see header)
     LOOP
         v_pid := v_rec.pid::uuid;
-        v_ok := false; v_err := NULL; v_acked := 0;
+        v_ok := false; v_err := NULL; v_acked := 0; v_conflated := NULL;
 
         -- Per-row: identical to log_ack_at_v1 (p_ok=true branch). The consumer
         -- row lock is the ONLY lock taken; re-entrant if two rows in THIS call
@@ -354,17 +390,28 @@ BEGIN
         ELSIF v_rec.end_off > v_c.batch_end THEN
             v_err := 'position beyond leased batch';
         ELSE
+            -- CONFLATION (§2.4): identical to log_ack_at_v1's commit branch —
+            -- positions retired for total_consumed, skipped positions reported.
             UPDATE queen.log_consumers SET
                 committed = v_rec.end_off,
                 worker_id = NULL, lease_expires_at = NULL,
                 batch_end = NULL,
-                total_consumed = total_consumed + GREATEST(v_rec.cnt, 0)
+                lease_conflated = FALSE,
+                total_consumed = total_consumed + CASE WHEN v_c.lease_conflated
+                    THEN GREATEST(v_rec.end_off - v_c.committed, 0)
+                    ELSE GREATEST(v_rec.cnt, 0) END
             WHERE partition_id = v_pid AND consumer_group = v_rec.grp;
             v_ok := true;
             v_acked := GREATEST(v_rec.cnt, 0);
+            IF v_c.lease_conflated THEN
+                v_conflated := GREATEST(v_rec.end_off - v_c.committed - 1, 0);
+            END IF;
         END IF;
 
-        v_out[v_rec.ord] := jsonb_build_object('ok', v_ok, 'acked', v_acked, 'error', v_err);
+        v_out[v_rec.ord] := CASE WHEN v_conflated IS NOT NULL
+            THEN jsonb_build_object('ok', v_ok, 'acked', v_acked, 'error', v_err,
+                                    'conflated', v_conflated)
+            ELSE jsonb_build_object('ok', v_ok, 'acked', v_acked, 'error', v_err) END;
     END LOOP;
 
     RETURN jsonb_build_object('ok', true, 'results', to_jsonb(v_out));
@@ -479,6 +526,9 @@ DECLARE
     v_stale JSONB := '[]'::jsonb;
     -- unresolvable honesty (2026-07-30): hashes with NO occurrence anywhere
     v_unresolved JSONB := '[]'::jsonb;
+    -- CONFLATION (§2.4): skipped positions on a clean conflating ack; NULL for a
+    -- plain lease, so the key is absent and flag-off results are byte-identical.
+    v_conflated BIGINT;
 BEGIN
     IF p_statuses IS NOT NULL
        AND COALESCE(array_length(p_statuses, 1), 0) <> v_n THEN
@@ -662,6 +712,9 @@ BEGIN
                 committed = v_new,
                 worker_id = NULL, lease_expires_at = NULL,
                 batch_end = NULL,
+                -- a RELEASED lease must not leave a stale conflation marker for
+                -- the next lease of a group whose policy changed (§2.4)
+                lease_conflated = FALSE,
                 batch_retry_count = v_retry_ct + 1,
                 total_consumed = total_consumed + v_delta
             WHERE partition_id = p_partition_id AND consumer_group = p_group;
@@ -689,6 +742,7 @@ BEGIN
                 committed = v_new,
                 worker_id = NULL, lease_expires_at = NULL,
                 batch_end = NULL,
+                lease_conflated = FALSE,     -- released lease, clear marker (§2.4)
                 batch_retry_count = 0,
                 total_consumed = total_consumed + v_delta + 1
             WHERE partition_id = p_partition_id AND consumer_group = p_group;
@@ -707,6 +761,7 @@ BEGIN
             committed = v_new,
             worker_id = NULL, lease_expires_at = NULL,
             batch_end = NULL,
+            lease_conflated = FALSE,         -- released lease, clear marker (§2.4)
             total_consumed = total_consumed + v_delta
         WHERE partition_id = p_partition_id AND consumer_group = p_group;
         RETURN jsonb_build_object('ok', true, 'acked', v_delta, 'off', v_new,
@@ -719,6 +774,21 @@ BEGIN
     -- no msg_count normalization needed), release the lease AND reset the
     -- retry/attempt state (batch complete); otherwise keep the lease so the
     -- rest of the batch can still be acked.
+    -- Conflation (PLAN_CONFLATION §2.4). A conflating lease delivered EXACTLY ONE
+    -- frame, at batch_end. A clean ack of it therefore completes the whole leased
+    -- span by construction, and the cursor belongs at batch_end — the offset the
+    -- pop OBSERVED under its claim (§1.3), never beyond it. Without this the
+    -- MIN-in-span rule (:425-431) would resolve a REPEATED transactionId to its
+    -- lowest in-span occurrence and leave the cursor short of the delivered
+    -- offset, keeping the lease open and re-delivering the same tail for ever.
+    -- Only reachable on a clean ack: v_sig_kind failed/dlq/retry returned from
+    -- branches (3)/(4)/(5) above.
+    IF v_c.lease_conflated AND v_has_lease AND v_max_ok IS NOT NULL THEN
+        v_new   := v_c.batch_end;
+        v_delta := GREATEST(v_new - v_c.committed, 0);
+        v_conflated := GREATEST(v_delta - 1, 0);
+    END IF;
+
     IF v_has_lease THEN
         v_reached_end := v_new >= v_c.batch_end;
     END IF;
@@ -728,6 +798,7 @@ BEGIN
             committed = v_new,
             worker_id = NULL, lease_expires_at = NULL,
             batch_end = NULL,
+            lease_conflated = FALSE,
             attempt_offset = NULL, attempt_count = 0,
             batch_retry_count = 0,
             total_consumed = total_consumed + v_delta
@@ -739,6 +810,11 @@ BEGIN
         WHERE partition_id = p_partition_id AND consumer_group = p_group;
     END IF;
 
+    IF v_conflated IS NOT NULL THEN
+        RETURN jsonb_build_object('ok', true, 'acked', v_delta, 'off', v_new,
+                                  'conflated', v_conflated,
+                                  'noopHashes', v_noop, 'staleHashes', v_stale, 'unresolvedHashes', v_unresolved);
+    END IF;
     RETURN jsonb_build_object('ok', true, 'acked', v_delta, 'off', v_new,
                               'noopHashes', v_noop, 'staleHashes', v_stale, 'unresolvedHashes', v_unresolved);
 END;
@@ -839,6 +915,7 @@ BEGIN
         committed = GREATEST(committed, p_off),
         worker_id = NULL, lease_expires_at = NULL,
         batch_end = NULL,
+        lease_conflated = FALSE,             -- released lease, clear marker (§2.4)
         attempt_offset = NULL, attempt_count = 0,
         batch_retry_count = 0,
         -- the frame is disposed of (moved to the DLQ), count it as consumed

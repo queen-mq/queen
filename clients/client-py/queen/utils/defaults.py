@@ -44,6 +44,17 @@ CONSUME_DEFAULTS: Dict[str, Any] = {
     "renew_lease_interval_millis": None,  # Auto-renewal interval when enabled
     "subscription_mode": None,  # No subscription mode (standard queue mode)
     "subscription_from": None,  # No subscription start point
+    # Last-value delivery for this consumer group on this queue
+    # (PLAN_CONFLATION §1.1). A DELIVERY POLICY of the group, not a per-call
+    # flag: it is persisted on first registration and the stored value wins for
+    # every consumer of that group afterwards. Default off -- a group created
+    # without it behaves byte-identically to before the feature existed.
+    #
+    # It is listed here, and not only on the builder, on purpose: `partitions`
+    # / maxPartitions never made it into this table (PLAN_CONFLATION §4 calls
+    # out the drift by name), which is how the consume path ended up with a
+    # builder option that had no default to read.
+    "conflation": False,
 }
 
 POP_DEFAULTS: Dict[str, Any] = {

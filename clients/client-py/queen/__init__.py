@@ -12,7 +12,13 @@ keep using ``Queen``/``Admin`` and ignore the rest.
 from .admin import Admin
 from .builders.transaction_builder import TransactionResult
 from .client import Queen
-from .errors import KvError, QueenError, QueenHttpError, TimerError
+from .errors import (
+    ConflationUnsupportedError,
+    KvError,
+    QueenError,
+    QueenHttpError,
+    TimerError,
+)
 from .kv import KV, KvResult
 from .streams.stream import Stream
 from .streams.helpers.rate_limiter import token_bucket_gate, sliding_window_gate
@@ -41,6 +47,7 @@ __all__ = [
     "QueenHttpError",
     "KvError",
     "TimerError",
+    "ConflationUnsupportedError",
     "Stream",
     "token_bucket_gate",
     "sliding_window_gate",

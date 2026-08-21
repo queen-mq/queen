@@ -15,6 +15,7 @@ class ConsumeCommand extends Command
         {--auto-ack : Enable auto-acknowledgment}
         {--subscription-mode= : Subscription mode}
         {--subscription-from= : Subscription start point}
+        {--conflation : Last-value delivery: process only the newest message per partition (needs --group, refuses --auto-ack, broker >= 1.1.0)}
         {--timeout=30000 : Long poll timeout in milliseconds}
         {--idle-timeout= : Stop after N milliseconds of inactivity}
         {--limit= : Stop after processing N messages}';
@@ -57,6 +58,11 @@ class ConsumeCommand extends Command
 
         if ($this->option('subscription-from')) {
             $builder->subscriptionFrom($this->option('subscription-from'));
+        }
+
+        if ($this->option('conflation')) {
+            $builder->conflation(true);
+            $this->info('Conflation: on (only the newest message per partition is processed)');
         }
 
         if ($this->option('idle-timeout')) {

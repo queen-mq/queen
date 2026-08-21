@@ -39,6 +39,7 @@ import { commitCycle } from './cycle.js'
 import { stateKeyFor, parseStateKey } from '../operators/ReduceOperator.js'
 import { makeLogger } from '../util/logger.js'
 import { sleep } from '../util/backoff.js'
+import { CONFLATION_UNSUPPORTED } from '../../utils/conflation.js'
 
 const DEFAULT_BATCH_SIZE = 200
 const DEFAULT_MAX_PARTITIONS = 4
@@ -60,6 +61,14 @@ export class Runner {
     this.maxWaitMillis    = opts.maxWaitMillis != null ? opts.maxWaitMillis : 1000
     this.subscriptionMode = opts.subscriptionMode || null
     this.subscriptionFrom = opts.subscriptionFrom || null
+    // Last-value delivery on the SOURCE pop (PLAN_CONFLATION §1.1): each cycle
+    // sees only the newest visible message per partition. Off by default. The
+    // query's own cursor/state path is untouched — this is the ordinary pop
+    // parameter, declared on the runner's consumer group like any other
+    // consumer's. Requires broker >= 1.1.0; an older one is detected from the
+    // missing response echo and stops the loop rather than quietly replaying
+    // every stale intermediate through the operators (§4).
+    this.conflation       = !!opts.conflation
     this.reset            = !!opts.reset
     this.onError          = opts.onError || null
     this.abortSignal      = opts.abortSignal || null
@@ -190,6 +199,14 @@ export class Runner {
         }
       } catch (err) {
         this._reportError(err, { phase: 'pop' })
+        // A broker that cannot apply the declared conflation policy is a
+        // permanent fault, not a transient one (PLAN_CONFLATION §4): retrying
+        // every 500ms would turn "your last-value policy is not in force" into
+        // a log line nobody reads while the operators chew the whole backlog.
+        if (err && err.code === CONFLATION_UNSUPPORTED) {
+          this._stopped = true
+          break
+        }
         await sleep(500)
       }
     }
@@ -228,6 +245,7 @@ export class Runner {
     }
     if (this.subscriptionMode) qb = qb.subscriptionMode(this.subscriptionMode)
     if (this.subscriptionFrom) qb = qb.subscriptionFrom(this.subscriptionFrom)
+    if (this.conflation) qb = qb.conflation(true)
     return qb.pop()
   }
 
