@@ -47,7 +47,7 @@ function snippet(raw: string, id: string): string {
 
 /** The page's `<h1>`, verbatim. */
 export const HOME_HEADLINE =
-  "The queue that doesn't fall apart at the far end of your workload.";
+  "High-performance transactional messaging for applications that need an ordered stream per entity.";
 
 /**
  * One line describing the page, for the index and corpus rows that list it.
@@ -55,33 +55,35 @@ export const HOME_HEADLINE =
  * description, and repeating it there says nothing about this page.
  */
 export const HOME_SUMMARY =
-  "The landing page: what Queen MQ is, what makes it different, and the measured numbers " +
-  "with the conditions they were measured under.";
+  "The landing page: what Queen MQ is, the entity-per-partition model it is built on, how " +
+  "partitions, brokers and cells scale differently, and the measured numbers with the " +
+  "conditions they were measured under.";
 
 /** The eyebrow above the headline. */
-const HOME_EYEBROW = "Queen MQ 1.0 · Apache 2.0";
+const HOME_EYEBROW = "Queen MQ 1.1 · Apache 2.0";
 
 /**
  * The hero paragraph, with the page's `<strong>` spans as markdown emphasis
  * and its JSX line wrapping collapsed.
  */
 const HOME_LEAD =
-  "Every entity gets its own ordered FIFO lane, created on first push, so a slow consumer " +
-  "on one never stalls another. One stateless binary on the PostgreSQL you already run, " +
-  "measured at **1,000,000 messages a second** for 24 hours and at **1,000,000 ordered " +
-  "partitions** in one database.";
+  "Queen is a message broker written in Rust that keeps every byte of its state in " +
+  "PostgreSQL. Its defining abstraction is **one logical ordered partition per application " +
+  "entity**, a customer, an account, a conversation, a device, a workflow, a session or a " +
+  "job, created by the first push that names it and never provisioned in advance.";
 
 /** The line of capabilities under the calls to action. */
 const HOME_FEATURES = [
   "Consumer groups",
-  "Replay",
+  "Replay and seek",
   "Dead-letter queue",
   "Exact deduplication",
-  "Transactional handoff",
+  "Transactional ack + state + push",
   "Key/value state",
   "Cancellable timers",
   "Windowed aggregation",
-  "A dashboard in the binary",
+  "Ephemeral queues",
+  "Multi-tenancy",
 ];
 
 /**
@@ -107,85 +109,46 @@ const HOME_MAP_CAPTION =
 
 const differentiators = [
   {
-    title: "One ordered lane per entity",
-    body: "A partition is created on first push and costs index rows, not a commit-log file and not a process. A consumer stuck on one lane never blocks another.",
+    title: "The entity is the partition",
+    body: "Most brokers give you ordering per shard, and your requirement is ordering per entity. Hash entities onto a fixed partition count and the ones that collide block each other. Give each entity its own queue and broker-side objects grow with your customer list. Queen removes the bridge: a partition is created by the first push that names it, and a slow customer delays only itself.",
   },
   {
-    title: "No rebalancing, because there is nothing to rebalance",
-    body: "Broker and clients hold no coordination state, so scaling is starting another copy against the same database.",
+    title: "The partition key is your ordering boundary",
+    body: "customer_id, account_id, conversation_id, device_id, workflow_id. You choose it, and it is an application decision rather than an infrastructure sizing decision. Do not pick a key because it has high cardinality: pick the boundary your application genuinely requires.",
   },
   {
-    title: "PostgreSQL is the storage engine",
-    body: "Durability, replication, backup and SQL introspection are the ones you already operate, not a second data system.",
+    title: "Ack the input, write the state and push the output in one commit",
+    body: "One transaction bundles acknowledgements, pushes, key/value writes and timer operations, across any number of partitions, queues and consumer groups. That is what replaces transactional outbox tables, a separate store for idempotency markers, and the reconciliation code that exists only because the broker's commit and the database's commit were two different commits.",
   },
   {
-    title: "Acknowledgement moves a cursor",
-    body: "Ack a single message or a whole leased batch. Either way progress is one cursor per partition and consumer group, so there is no per-message delivery record to store, scan or clean up.",
+    title: "Application scale is not infrastructure scale",
+    body: "In most brokers a per-entity ordering guarantee means a per-entity infrastructure object, either a topic partition with its own files and replicas or a live server-side queue. In Queen a partition is a row. A million of them measured 315 MB in total, and the serve path does not care how many exist.",
   },
   {
-    title: "Ack the input and push the output in one commit",
-    body: "One transaction acknowledges batches leased from any number of partitions and pushes to any number of queues. A pipeline stage cannot lose its input or duplicate its output.",
+    title: "Partitions, brokers and cells scale different things",
+    body: "Partitions scale application cardinality. Brokers scale serving capacity and availability inside a cell, with three replicas the designed ceiling. Cells scale the deployment: capacity grows by adding cells, not by growing one system, and there is no global cluster to join and no cross-cell coordination in the message path.",
   },
   {
-    title: "Key/value state and timers are part of the engine",
-    body: "A key/value write can share the transaction with a push and an ack, and if your lease expired while the work ran, the ack is refused and the marker is refused with it. A compare-and-swap in a second store cannot do that: it succeeds from a worker that no longer owns the message. A timer is a scheduled message you can cancel and reprogram until it fires, which an append-only log cannot express. Neither is a flag you turn on: they are on every cell that runs the binary.",
+    title: "PostgreSQL is the durable source of truth",
+    body: "Not somewhere to put the bytes. Messaging state and application state share a transaction, which is the whole reason for the design, and durability, replication, backup and SQL introspection are the ones you already operate. The trade is plain: the database is the throughput ceiling and the single failure domain.",
   },
   {
-    title: "Windowed aggregation, in the same transaction",
-    body: "Tumbling, sliding, session and cron windows whose state, output and acks commit together or not at all: exactly-once, with no changelog topic and no state store.",
+    title: "Brokers hold nothing authoritative",
+    body: "Messages, offsets, leases, deduplication state, queue configuration and dead letters are all rows, so a broker can be added, removed, restarted or rolled without a rebalance, and deduplication stays exact across replicas with no coordination protocol at all.",
   },
   {
-    title: "Exactly the semantics you already know",
-    body: "Offsets, consumer groups and replay from Kafka; leases, retries and a dead-letter queue from RabbitMQ. Real pipelines need both.",
+    title: "Key/value state, timers and windows are part of the engine",
+    body: "A key/value write can share the transaction with a push and an ack, which a store standing beside the broker cannot do at any price. A timer is a scheduled message you can cancel and reprogram until it fires. Tumbling, sliding, session and cron windows commit their state, their output and their acks together. None of it is a flag you turn on.",
+  },
+  {
+    title: "Many tenants on one cell, isolation enforced in SQL",
+    body: "The broker scopes queue identity natively as (tenant, name), so two tenants both owning a queue called orders own different queues. The proxy is the tenant-facing boundary that makes the identity driving that scoping trustworthy. Neither half is sufficient alone.",
   },
   {
     title: "Plain HTTP, six SDKs, one binary",
-    body: "No custom wire protocol, no JVM, no Erlang, no ZooKeeper. Anything that can make an HTTP request is a first-class client.",
+    body: "No custom wire protocol, no JVM, no Erlang, no ZooKeeper. Anything that can make an HTTP request is a first-class client, and curl is one.",
   },
 ];
-
-/**
- * The concession section. An agent asked to compare brokers is exactly the
- * reader this section is written for, so leaving it out of the corpus would
- * strip the one part of the page that names the alternatives by mechanism.
- */
-const HOME_ALTERNATIVES_LEAD =
-  "A consumer charges a card and is still writing its done flag to a side store when its " +
-  "lease expires. The broker gives the batch to somebody else, and somebody else finds no " +
-  "flag. An application write that commits with the cursor advance is what closes that " +
-  "window, and nothing about it is new: it is available today, four other ways, and every " +
-  "one of them is priced.";
-
-const alternatives = [
-  {
-    system: "Kafka Streams",
-    cost: "The stream processing model, state that is local to the partition, and a restore from the changelog on every rebalance.",
-  },
-  {
-    system: "Transactional outbox",
-    cost: "A relay process with its own failure modes, the latency between committing and emitting, and schema coupling between your database and your topics.",
-  },
-  {
-    system: "Redis Streams",
-    cost: "Every key involved in one hash slot, and a default fsync policy that loses up to a second of already committed work when the process dies.",
-  },
-  {
-    system: "pgmq and friends",
-    cost: "The atomicity for free, on a queue head that contends far below the throughput measured further down this page.",
-  },
-  {
-    system: "Queen",
-    cost: "A method call.",
-  },
-];
-
-const HOME_ALTERNATIVES_CODA =
-  "None of these is exactly-once end to end, and neither is Queen. The card charge happens " +
-  "outside PostgreSQL, so a crash between the charge and the commit repeats the charge on " +
-  "redelivery, and no broker can prevent that. What a shared commit removes is the state in " +
-  "between: the work marked done while the message comes back anyway, or the message " +
-  "acknowledged while the work is left unmarked. With two commits, whichever order you pick, " +
-  "a crash inside the window gives you one of those two.";
 
 /** The dashboard section, and the screenshot's alt text with it. */
 const HOME_DASHBOARD =
@@ -201,21 +164,27 @@ const HOME_DASHBOARD_IMAGE =
 const proof = [
   {
     figure: "86.4B",
-    unit: "messages",
-    body: "24 hours of continuous load at ~1M msg/s per side with explicit acknowledgement, 1,000 messages touched by an error, zero restarts, broker memory flat.",
+    unit: "messages in 24 hours",
+    body: "About 1,000,000 a second in each direction, pushed, popped and acknowledged, with explicit acks and deduplication on. Zero restarts, and broker memory flat near 4.1 GB for the whole run.",
     href: "/benchmarks/soak-24h",
-  },
-  {
-    figure: "0",
-    unit: "order violations",
-    body: "1,000 partitions through a four-stage pipeline at 25k events/s: 88,503,408 messages verified, zero duplicates, zero gaps.",
-    href: "/benchmarks/ordered-pipeline",
   },
   {
     figure: "1M",
     unit: "ordered partitions",
-    body: "A million FIFO lanes in one PostgreSQL, none preallocated, created during the run at a thousand a second and drained with zero push, pop or ack errors.",
+    body: "A million FIFO lanes in one PostgreSQL, none preallocated, created during the run at a thousand a second while serving 200,000 messages a second. Zero push, pop or ack errors over 722 million messages.",
     href: "/benchmarks/cardinality-1m",
+  },
+  {
+    figure: "0",
+    unit: "order violations",
+    body: "1,000 partitions through a four-stage pipeline at 25,000 events a second: 88,503,408 messages verified by a per-stage checker, with zero duplicates and zero gaps.",
+    href: "/benchmarks/ordered-pipeline",
+  },
+  {
+    figure: "0",
+    unit: "cross-tenant deliveries",
+    body: "Twelve tenants sharing one queue name and one consumer group name for an hour, with enforcement on. Not one message crossed a tenant boundary. Isolation is the clean result of that run, not throughput.",
+    href: "/benchmarks/multitenant-cell",
   },
 ];
 
@@ -225,11 +194,12 @@ const proof = [
  * rather than out of an array, and looks for it here.
  */
 const HOME_LIMITS =
-  "Queen has real limits: in-group parallelism is bounded by how many distinct entities you " +
-  "push to, because exactly one leased batch is in flight per partition and consumer group, " +
-  "and one PostgreSQL is both the ceiling and the failure domain. Ordering is per entity, and " +
-  "how coarse or fine that is comes from your partition key rather than from a number fixed " +
-  "when the queue was created.";
+  "Queen has real limits, and some workloads are better served elsewhere. One ordered " +
+  "lane is sequential, so if your ordering boundary is everything, the core idea does " +
+  "nothing for you. In-group parallelism is bounded by how many distinct entities you " +
+  "push to. One PostgreSQL is both the throughput ceiling and the failure domain, there " +
+  "is no tiered object storage and no cross-region replication, and Queen speaks HTTP " +
+  "rather than the Kafka protocol, so none of that ecosystem applies.";
 
 /**
  * The landing page as markdown, from the eyebrow down. The `# ` headline is
@@ -239,37 +209,71 @@ const HOME_LIMITS =
 export function homepageBody(): string {
   const lines: string[] = [HOME_EYEBROW, "", HOME_LEAD, ""];
 
-  lines.push(HOME_FEATURES.join(" · "), "");
+  lines.push(HOME_FEATURES.map((f) => `**${f}**`).join(" · "), "");
 
-  // The README intro, verbatim — the same block index.astro renders below the
-  // hero. Two transcriptions, like the rest of this file; edit both together.
+  // The README's opening argument, transcribed from index.astro. Two
+  // transcriptions, like the rest of this file; edit both together.
+  lines.push("## The problem", "");
   lines.push(
-    "Queen is a message broker written in Rust that uses PostgreSQL as its data store. " +
-      "Its main idea is to let you have an arbitrarily large number of FIFO partitions, " +
-      "created on demand at push time.",
+    "Most brokers give you ordering per *shard*. Your requirement is ordering per *entity*: " +
+      "this customer's events processed in order, this conversation's messages not overtaking " +
+      "each other, this account's transactions settling in sequence.",
     "",
-    "Queen has:",
+    "Bridging the two is where the pain lives. Hash your entities onto a fixed partition " +
+      "count and the ones that collide block each other: a slow customer stalls every customer " +
+      "sharing its shard. Give each entity its own queue instead and broker-side objects grow " +
+      "with your customer list.",
     "",
-    "- **High throughput** (1 million msg/s end to end on 200 partitions, verified in a 24-hour soak)",
-    "- **High dynamic cardinality** (1 million partitions at 200k msg/s, verified end to end)",
-    "- **Guaranteed order** within every partition",
-    "- **Easy HTTP transport**: curl is a first-class client",
-    "- **Transactional dedup at push**: part of the exactly-once guarantees on broker operations",
-    "- **Transactional ack+KV+push**: the rest of the exactly-once guarantees",
-    "- **KV**: a small but powerful key-value store alongside your queue operations",
-    "- **Timers**: schedule messages ahead of time",
-    "- **Consumer groups** with replay and seek",
-    "- **DLQ**: no message lost, even in the worst cases",
-    "- **Integrated stream processor**: three window types, with map and aggregation",
-    "- **Conflation, window buffers, delayed delivery**",
-    "- **HA**: multiple brokers with best-effort coordination and wake-ups on push and ack",
-    "- **Durable by default, with synchronous commit**: not losing data is the whole point of Queen",
-    "- **Ephemeral in-memory queues** for lighter jobs like signaling and request/reply",
-    "- **Multi-tenant** with quotas, through the bundled Rust proxy",
-    "- **Single binary**",
+    "Queen removes the bridge: **the entity is the partition.**",
     "",
-    "As far as we know, nothing else out there has all of this in one system. If you use " +
-      "Queen, you can offload to it a ton of logic you would otherwise have to write yourself.",
+  );
+
+  lines.push("## One entity, one ordered partition", "");
+  lines.push(
+    "Each partition is an independent ordered lane, created by the push that first names it. " +
+      "Nothing is preallocated, nothing is assigned, nothing rebalances when a consumer restarts.",
+    "",
+    "```text",
+    "customer A  ──►  A1 ──► A2 ──► A3     strict FIFO within a lane",
+    "customer B  ──►  B1 ──► B2            B is not held up by A",
+    "customer C  ──►  C1 ──► C2 ──► C3     C is not held up by A or B",
+    "```",
+    "",
+    "A single hot partition stays sequential, by design. Parallelism comes from many active " +
+      `partitions, not from splitting one. [The model, in one page](${url("/use/model/")})`,
+    "",
+  );
+
+  lines.push("## Transactional processing", "");
+  lines.push(
+    "The second reason Queen exists, and the reason PostgreSQL is not an implementation " +
+      "detail. A single call bundles acknowledgements, pushes, key/value writes and timer " +
+      "operations into one PostgreSQL transaction.",
+    "",
+    "```text",
+    "consume input",
+    "     │",
+    "     ├── update application state   (kv rider)",
+    "     ├── produce output             (push, any queue, any partition)",
+    "     ├── schedule / cancel a timer  (timers rider)",
+    "     └── acknowledge input          (cursor advance)",
+    "                │",
+    "             COMMIT          all of it, or none of it",
+    "```",
+    "",
+    "Atomicity covers broker state, not the network. Queen does not make an external HTTP " +
+      "call exactly-once, and no broker can. The one case that is exactly-once end to end is " +
+      "when the effect is itself a row in this PostgreSQL, written through the key/value " +
+      "rider: marker, effect, output and cursor advance become a single commit. " +
+      `[The bundle shape and every rollback cause](${url("/reference/http/transaction/")})`,
+    "",
+  );
+
+  lines.push("## Where it sits", "", HOME_MAP, "");
+  lines.push(
+    `${HOME_MAP_CAPTION} The conditions behind every figure are in ` +
+      `[the comparison](${url("/start/compare/")}) and in ` +
+      `[the measured runs](${url("/benchmarks/comparison")}).`,
     "",
   );
 
@@ -288,27 +292,42 @@ export function homepageBody(): string {
     "",
   );
 
-  lines.push("## Where it sits", "", HOME_MAP, "");
-  lines.push(
-    `${HOME_MAP_CAPTION} The conditions behind every figure are in ` +
-      `[the comparison](${url("/start/compare/")}) and in ` +
-      `[the measured runs](${url("/benchmarks/comparison")}).`,
-    "",
-  );
-
   lines.push("## What makes it different", "");
   for (const item of differentiators) {
     lines.push(`### ${item.title}`, "", item.body, "");
   }
 
-  lines.push("## You can already buy this. Here is what it costs.", "");
-  lines.push(HOME_ALTERNATIVES_LEAD, "");
-  for (const item of alternatives) {
-    lines.push(`- **${item.system}**: ${item.cost}`);
-  }
-  lines.push("", HOME_ALTERNATIVES_CODA, "");
+  lines.push("## Three kinds of scale", "");
   lines.push(
-    `[How the marker, the output and the cursor commit together](${url("/use/kv/")})`,
+    "Three axes, frequently confused, not interchangeable. Confusing them is the most common " +
+      "way to mis-size a deployment.",
+    "",
+    "- **Partitions scale application cardinality.** Add entities freely. Nothing is " +
+      "provisioned, no process is created, no rebalance runs. Millions of logical entity " +
+      "streams do not require millions of infrastructure objects.",
+    "- **Brokers scale capacity inside a cell.** Stateless replicas of one binary against one " +
+      "PostgreSQL, covering a process dying, a rolling restart, one node's network. Three " +
+      "replicas is the designed ceiling: past that the bottleneck is the database, not the " +
+      "broker count.",
+    "- **Cells scale the deployment.** A cell is PostgreSQL plus one or more stateless " +
+      "brokers, optionally fronted by the proxy. Capacity grows by adding cells, not by " +
+      "growing one system: no global cluster to join, no cross-cell coordination in the " +
+      "message path.",
+    "",
+    "```text",
+    "                    Queen Cell",
+    "     ┌────────────────────────────────────┐",
+    "     │  Queen Broker ──┐                  │",
+    "     │  Queen Broker ──┼──► PostgreSQL    │  the only durable state",
+    "     │  Queen Broker ──┘                  │",
+    "     │  Queen Proxy  (optional)           │  tenant-facing boundary",
+    "     └────────────────────────────────────┘",
+    "```",
+    "",
+    "A cell is at once the scaling boundary, the failure boundary and the unit of upgrade and " +
+      "operational ownership. The failure domain is PostgreSQL: Queen does not replicate " +
+      "itself, and keeping the database alive is PostgreSQL's own tooling. " +
+      `[Replicas, the mesh, and surviving a database outage](${url("/deploy/ha/")})`,
     "",
   );
 
@@ -318,7 +337,9 @@ export function homepageBody(): string {
   lines.push("## Measured, with the conditions attached", "");
   lines.push(
     "Every number on this site names the run that produced it. A figure without an " +
-      "archived artifact recording its configuration does not get published here.",
+      "archived artifact recording its configuration does not get published here. These are " +
+      "single-shape runs: they say nothing about your throughput, latency, PostgreSQL sizing " +
+      "or retention capacity, which follow from your workload, payloads and hardware.",
     "",
   );
   for (const item of proof) {
