@@ -1,0 +1,11 @@
+{
+  "class": "durable",
+  "mode": "latency",
+  "iterations": 300,
+  "delivered": 300,
+  "p50ms": 4.42,
+  "p95ms": 9.07,
+  "p99ms": 9.92,
+  "minms": 1.94,
+  "httpErrors": []
+}

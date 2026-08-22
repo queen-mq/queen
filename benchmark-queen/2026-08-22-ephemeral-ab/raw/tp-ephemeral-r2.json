@@ -1,0 +1,22 @@
+{
+  "class": "ephemeral",
+  "mode": "throughput",
+  "messages": 200000,
+  "partitions": 8,
+  "workers": 8,
+  "batch": 100,
+  "push": {
+    "ms": 331.3,
+    "msgPerSec": 603722,
+    "callP50ms": 1.08,
+    "callP99ms": 4.27
+  },
+  "drain": {
+    "ms": 564,
+    "drained": 200000,
+    "msgPerSec": 354636,
+    "callP50ms": 2.11,
+    "callP99ms": 4.88
+  },
+  "httpErrors": []
+}

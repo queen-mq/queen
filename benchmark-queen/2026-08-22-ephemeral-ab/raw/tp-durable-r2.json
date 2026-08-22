@@ -1,0 +1,22 @@
+{
+  "class": "durable",
+  "mode": "throughput",
+  "messages": 200000,
+  "partitions": 8,
+  "workers": 8,
+  "batch": 100,
+  "push": {
+    "ms": 827.6,
+    "msgPerSec": 241662,
+    "callP50ms": 1.66,
+    "callP99ms": 28.68
+  },
+  "drain": {
+    "ms": 7084,
+    "drained": 200000,
+    "msgPerSec": 28232,
+    "callP50ms": 3.27,
+    "callP99ms": 8.18
+  },
+  "httpErrors": []
+}

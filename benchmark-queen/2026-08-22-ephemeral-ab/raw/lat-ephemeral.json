@@ -1,0 +1,11 @@
+{
+  "class": "ephemeral",
+  "mode": "latency",
+  "iterations": 300,
+  "delivered": 300,
+  "p50ms": 1.06,
+  "p95ms": 2.21,
+  "p99ms": 3.14,
+  "minms": 0.31,
+  "httpErrors": []
+}
