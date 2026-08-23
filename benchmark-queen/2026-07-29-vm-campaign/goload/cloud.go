@@ -41,6 +41,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"math/rand"
 	"os"
 	"os/signal"
@@ -269,6 +270,7 @@ func runCloudMode(args []string) {
 	popWait := fs.Bool("pop-wait", true, "long-poll pop (wait=true) — the realistic consumer shape and what holds a proxy parked slot")
 	popTimeout := fs.Int("pop-timeout", 5000, "long-poll timeout ms")
 	popPartitions := fs.Int("pop-partitions", 1, "claim up to N partitions per pop call (v4 multi-partition wildcard)")
+	activeFrac := fs.Float64("active-fraction", 1.0, "fraction of each queue's partitions that actually RECEIVE traffic (1.0 = every partition, the uniform default; 0.002 = production-like, where a large cold tail exists but only a small working set is hot)")
 	autoAck := fs.Bool("auto-ack", false, "server-side autoAck inside the pop instead of a leased pop + explicit batch ack (the default, honest consumer path)")
 	emptySleepMs := fs.Int("empty-sleep", 5, "sleep ms after an empty pop (only when -pop-wait=false)")
 
@@ -399,6 +401,21 @@ func runCloudMode(args []string) {
 	}
 
 	fmt.Printf("goload -mode cloud [%s] -> %s\n", rid, baseURL)
+	// Traffic lands on partitions p0..p(activeParts-1); the remainder are created
+	// by configure and then stay dormant. Real deployments look like this — 53k
+	// partitions with a few hundred hot at any second — and spreading load evenly
+	// over every partition is the most expensive distribution that exists: every
+	// partition is faintly warm, none is worth visiting, and the rotation sweeps
+	// the whole set to collect almost nothing.
+	activeParts := *partitions
+	if *activeFrac > 0 && *activeFrac < 1 {
+		activeParts = int(math.Ceil(float64(*partitions) * *activeFrac))
+		if activeParts < 1 {
+			activeParts = 1
+		}
+	}
+	fmt.Printf("  active partitions: %d of %d per queue (%.3f%%)\n",
+		activeParts, *partitions, 100*float64(activeParts)/float64(*partitions))
 	fmt.Printf("  target=%s tenants=%d sharedQueue=%v queue=%q group=%q partitions=%d brokerTenantHeader=%v\n",
 		*target, nT, *sharedQueue, *queueName, *groupName, *partitions, *target == "broker" && *brokerTenantHdr)
 	fmt.Printf("  offered=%.1f msg/s total (%.2f/tenant) push-batch=%d -> %.2f req/s per tenant across %d producer(s) | max-inflight=%d\n",
@@ -587,7 +604,7 @@ func runCloudMode(args []string) {
 						// sent, and the checker would report a spurious "extra".
 						// Scheduling stops with prodCtx; requests already issued are
 						// allowed to land.
-						doCloudPush(ctxAll, t, sched, *pushBatch, *partitions, pad, *verify, faults,
+						doCloudPush(ctxAll, t, sched, *pushBatch, activeParts, pad, *verify, faults,
 							&pushReq, &pushedMsg, pushErrs, pushRTT, &pushRTTMax)
 					}(sched)
 				}
@@ -866,7 +883,7 @@ drainLoop:
 			"timeoutMs": *timeoutMs, "idleConnsPerClient": idle,
 			"retry429Attempts": *retry429, "retries": *retries,
 			"leaseTime": *leaseTime, "dedupWindowSeconds": *dedupWindow,
-			"minPopWaitTime": *minPopWait,
+			"minPopWaitTime":            *minPopWait,
 			"completedRetentionSeconds": *completedRet, "retentionSeconds": *pendingRet,
 			"verify": *verify, "fault": *fault, "note": *note,
 			"drainDeliveries":       drainDeliveries,

@@ -2,7 +2,7 @@
 //! builds the pool; migrations list is filled by Agent B (embedded include_str!,
 //! applied in order, recorded in queen_proxy.schema_migrations).
 
-use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
+use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use tokio_postgres::NoTls;
 
 use crate::config::PxdbConfig;
@@ -31,22 +31,36 @@ fn describe_pool_error(e: &deadpool_postgres::PoolError) -> String {
 }
 
 pub async fn create_pool(cfg: &PxdbConfig) -> Result<Pool, String> {
+    let timeout = cfg.timeout();
     let mut pg = tokio_postgres::Config::new();
     pg.host(&cfg.host)
         .port(cfg.port)
         .user(&cfg.user)
         .password(&cfg.password)
         .dbname(&cfg.dbname)
-        .application_name("queen-proxy");
+        .application_name("queen-proxy")
+        .connect_timeout(timeout);
     let mgr_cfg = ManagerConfig { recycling_method: RecyclingMethod::Fast };
-    let pool = if cfg.use_ssl {
+    let mgr = if cfg.use_ssl {
         let connector = crate::pgtls::make_connector(cfg.ssl_reject_unauthorized);
-        let mgr = Manager::from_config(pg, connector, mgr_cfg);
-        Pool::builder(mgr).max_size(cfg.pool_size).build().map_err(|e| e.to_string())?
+        Manager::from_config(pg, connector, mgr_cfg)
     } else {
-        let mgr = Manager::from_config(pg, NoTls, mgr_cfg);
-        Pool::builder(mgr).max_size(cfg.pool_size).build().map_err(|e| e.to_string())?
+        Manager::from_config(pg, NoTls, mgr_cfg)
     };
+    // Every wait is bounded (PxdbConfig::timeout). `wait` is the one that
+    // matters under load: with the pool saturated a caller now gets a
+    // PoolError::Timeout it already knows how to degrade on -- stale-serve,
+    // spool, skip the cycle -- instead of queueing behind the saturation.
+    // deadpool drives its timeouts off a runtime, hence `Runtime::Tokio1`
+    // (BuildError::NoRuntimeSpecified otherwise).
+    let pool = Pool::builder(mgr)
+        .max_size(cfg.pool_size)
+        .runtime(Runtime::Tokio1)
+        .wait_timeout(Some(timeout))
+        .create_timeout(Some(timeout))
+        .recycle_timeout(Some(timeout))
+        .build()
+        .map_err(|e| e.to_string())?;
     // fail fast on unreachable pxdb at boot
     let client = pool.get().await.map_err(|e| format!("pxdb connect: {}", describe_pool_error(&e)))?;
     client

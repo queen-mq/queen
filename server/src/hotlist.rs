@@ -175,8 +175,8 @@ pub struct ReseedDue {
 
 /// Which reseed scan to run for a (queue, group) — see [`HotList::reseed_begin`].
 ///
-/// The two differ ONLY in the SQL they call: `Full` runs the classic keyset walk over
-/// every partition of the queue, `Window(ms)` runs the same walk bounded to partitions
+/// The two differ ONLY in the lower bound they pin the one reseed statement to
+/// (`scan_bounds`): `Full` walks every partition of the queue, `Window(ms)` the ones
 /// written in the last `ms`. Both feed rows through `reseed_row`, so every ring-repair
 /// behaviour the rows carry (re-add IDLE, reclaim a stranded INFLIGHT, promote a stale
 /// WHEEL on a non-deferral queue) is identical between them.
@@ -192,6 +192,20 @@ pub enum ReseedMode {
 impl ReseedMode {
     pub fn is_full(self) -> bool {
         matches!(self, ReseedMode::Full)
+    }
+
+    /// The (p_window_ms, p_cutoff) pair the walk binds to `log_hotlist_reseed_window_v1`
+    /// — the ONE statement both modes run. `Window(ms)` lets the first page derive
+    /// `now() - ms` and pins it for the rest of the walk; `Full` pins the bound to
+    /// '-infinity' up front, so the window is never read (the SQL's COALESCE takes the
+    /// cutoff first). The dedicated full-walk statement, `log_hotlist_reseed_v1`, is no
+    /// longer called: under the generic plan `prepare_cached` converges to, it read every
+    /// partition in the cell per ring — its header in 004_log_pop.sql has the numbers.
+    pub fn scan_bounds(self) -> (i64, Option<&'static str>) {
+        match self {
+            ReseedMode::Full => (0, Some("-infinity")),
+            ReseedMode::Window(ms) => (ms, None),
+        }
     }
 }
 
@@ -3155,7 +3169,7 @@ mod tests {
             "periodic floor must be due even with a non-empty ring"
         );
         // The background task runs the keyset scan: reseed_row for the still-pending
-        // p_lost (exactly what log_hotlist_reseed_v1 returns: last_offset>committed).
+        // p_lost (exactly what the reseed walk returns: last_offset>committed).
         walk(&h, "q", "g", due_at, &[("id_lost", "p_lost")]);
         let got: HashSet<String> = names(&h.take_batch("q", "g", 5, u32::MAX, due_at)).into_iter().collect();
         assert!(
@@ -3316,6 +3330,14 @@ mod tests {
             "a full walk must come due within one interval (+jitter, +one step) of the \
              last one, got {t}ms of windowed passes"
         );
+    }
+
+    #[test]
+    fn scan_bounds_pin_the_full_walk_to_minus_infinity() {
+        // A full walk is the windowed statement with its cutoff already bound, so
+        // p_window_ms is unread; a windowed one derives its cutoff on the first page.
+        assert_eq!(ReseedMode::Full.scan_bounds(), (0, Some("-infinity")));
+        assert_eq!(ReseedMode::Window(120_000).scan_bounds(), (120_000, None));
     }
 
     #[test]

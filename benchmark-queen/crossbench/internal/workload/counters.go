@@ -30,16 +30,34 @@ type Counters struct {
 
 	latA latHist
 	latB latHist
+
+	// Same observations, split by cohort. These are ADDITIVE to latA/latB:
+	// the flow totals are computed exactly as before the skew work existed, so
+	// a skew build reproduces the pre-skew numbers on a uniform run.
+	// Indexed [flow: 0=A 1=B][cohort: 0=cold 1=hot].
+	latCohort [2][2]latHist
+	delivCoh  [2]atomic.Int64
 }
 
-// ObserveE2E records an end-to-end latency for one terminal delivery. Only
-// terminal stages should call this: intermediate hops would double-count.
-func (c *Counters) ObserveE2E(f Flow, micros int64) {
+func flowIdx(f Flow) int {
 	if f == FlowB {
-		c.latB.observe(micros)
-		return
+		return 1
 	}
-	c.latA.observe(micros)
+	return 0
+}
+
+// ObserveE2E records an end-to-end latency for one terminal delivery, against
+// both the flow total and the cohort split. Only terminal stages should call
+// this: intermediate hops would double-count.
+func (c *Counters) ObserveE2E(f Flow, ch Cohort, micros int64) {
+	fi := flowIdx(f)
+	if fi == 1 {
+		c.latB.observe(micros)
+	} else {
+		c.latA.observe(micros)
+	}
+	c.latCohort[fi][ch].observe(micros)
+	c.delivCoh[ch].Add(1)
 }
 
 // E2E returns p50/p95/p99 in milliseconds for one flow over the whole run.
@@ -50,6 +68,34 @@ func (c *Counters) E2E(f Flow) (p50, p95, p99 float64) {
 	}
 	return h.pct(0.50) / 1000, h.pct(0.95) / 1000, h.pct(0.99) / 1000
 }
+
+// E2ECohort returns p50/p95/p99 in ms for one (flow, cohort) pair.
+func (c *Counters) E2ECohort(f Flow, ch Cohort) (p50, p95, p99 float64) {
+	h := &c.latCohort[flowIdx(f)][ch]
+	return h.pct(0.50) / 1000, h.pct(0.95) / 1000, h.pct(0.99) / 1000
+}
+
+// E2ECohortBoth returns p50/p95/p99 in ms for one cohort across BOTH flows.
+// This is the headline series: the isolation claim is about entities, and an
+// entity's identity spans the two flows it appears in.
+func (c *Counters) E2ECohortBoth(ch Cohort) (p50, p95, p99 float64) {
+	var m latHist
+	for fi := 0; fi < 2; fi++ {
+		src := &c.latCohort[fi][ch]
+		for i := 0; i < histBuckets; i++ {
+			if v := src.b[i].Load(); v != 0 {
+				m.b[i].Add(v)
+				m.n.Add(v)
+			}
+		}
+	}
+	return m.pct(0.50) / 1000, m.pct(0.95) / 1000, m.pct(0.99) / 1000
+}
+
+// DeliveredCohort reports terminal deliveries counted against each cohort. It
+// is the proof that the skew actually happened: a cell whose hot share does not
+// match the configured weight did not run the workload it claims to have run.
+func (c *Counters) DeliveredCohort(ch Cohort) int64 { return c.delivCoh[ch].Load() }
 
 // ---------------------------------------------------------------------------
 // lock-free log-bucketed histogram

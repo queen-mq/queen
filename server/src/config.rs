@@ -444,7 +444,11 @@ pub struct Config {
     // Every one of those is a repair path, so this knob is really "how long may a
     // repair hide" — and it trades directly against database CPU, because the full
     // walk is Theta(partitions in the queue) per ring while the windowed one is
-    // Theta(partitions written in the window).
+    // Theta(partitions written in the window). Both run log_hotlist_reseed_window_v1
+    // — the full one with its lower bound pinned to '-infinity' — since 2026-08-23,
+    // when the dedicated full-walk statement turned out to be Theta(partitions in the
+    // CELL) under the generic plan prepare_cached converges to (its header in
+    // 004_log_pop.sql has the numbers).
     //
     // 0 is the config-only kill switch, and it restores the pre-windowing broker
     // (C2, PLAN_HOTLIST_FOLLOWUP.md) — which is more than the periodic cadence:

@@ -4,23 +4,31 @@
 //!
 //! `admit()`'s in-process state tracks two things per cluster, deliberately
 //! separate:
-//!   * `pairs` -- exact (queue, partition) tuples THIS PROCESS has admitted.
-//!     This is the literal fast path ("known pair -> Allowed, no DB") and
-//!     the only place individual partition identity lives at all.
+//!   * `partitions` -- per queue, the exact partition names THIS PROCESS has
+//!     admitted. This is the literal fast path ("known pair -> Allowed, no
+//!     DB"), the per-queue count the cap check reads in O(1), and the only
+//!     place individual partition identity lives at all.
 //!   * `db_partition_floor` -- the last-known partitions_count per queue,
 //!     seeded from queen_proxy.queues on lazy load and kept in step by the
 //!     reconciler. This exists because queen_proxy.queues (001_init.sql)
 //!     only ever stores a COUNT, never partition names (and neither does
 //!     the broker's own resources/queues response) -- so after a proxy
-//!     restart `pairs` starts empty and there is no way to repopulate exact
+//!     restart `partitions` starts empty and there is no way to repopulate exact
 //!     historical partition names from the DB. `db_partition_floor` is the
 //!     restart-safety net: the effective partition count used for the cap
-//!     check is `max(observed in `pairs`, db_partition_floor)`, so a
+//!     check is `max(observed in `partitions`, db_partition_floor)`, so a
 //!     restart can't be used to bypass max_partitions_per_queue before the
 //!     reconciler's next pass (or fresh traffic) catches back up.
+//!
+//! Nothing on the request path waits for the database. A miss is decided in
+//! memory and the queue row that records it is coalesced per (cluster, queue)
+//! for `spawn_persister`, which writes one UNNEST upsert per tick. The 2026-08-22
+//! soak ran the old shape -- one synchronous upsert per new (queue, partition),
+//! awaited before the push was forwarded -- to 743 149 writes during a
+//! partition-creation ramp, on the Postgres the data path was saturating.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use uuid::Uuid;
@@ -28,6 +36,8 @@ use uuid::Uuid;
 use crate::state::ClusterCtx;
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(60);
+/// Cadence of the coalesced queue-row write (QUEEN_PROXY_REGISTRY_PERSIST_MS).
+const PERSIST_INTERVAL: Duration = Duration::from_secs(1);
 const RECONCILE_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Cap on a single cell's resources/queues response body -- generous for a
 /// cell with many thousands of queues while still bounded against a
@@ -66,8 +76,9 @@ pub enum Admit {
 
 #[derive(Default, Debug)]
 struct ClusterRegistry {
-    /// Exact (queue, partition) pairs admitted this process lifetime.
-    pairs: HashSet<(String, String)>,
+    /// queue -> partition names admitted this process lifetime. Exact-pair
+    /// membership and the per-queue count are both O(1) reads of this map.
+    partitions: HashMap<String, HashSet<String>>,
     /// queue name -> last-known partitions_count from the DB (lazy-load or
     /// reconciler). A floor, not a ceiling -- see module doc.
     db_partition_floor: HashMap<String, i64>,
@@ -94,6 +105,9 @@ pub struct Registry {
     /// reconciler's last successful byte count. Read by the storage-quota
     /// pump in main.rs -- see `over_storage`.
     over_storage: Arc<RwLock<HashSet<Uuid>>>,
+    /// Queue rows admitted since the last persist tick: (cluster, queue) ->
+    /// highest projected partition count. Bounded by the number of queues.
+    pending: Arc<Pending>,
 }
 
 impl Registry {
@@ -103,39 +117,42 @@ impl Registry {
             known: Arc::new(RwLock::new(HashMap::new())),
             loaded: Arc::new(RwLock::new(HashSet::new())),
             over_storage: Arc::new(RwLock::new(HashSet::new())),
+            pending: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     /// Called with every (queue, partition) named in a produce/configure request.
-    /// Fast path: known pair -> Allowed without touching the DB.
+    /// Fast path: known pair -> Allowed without touching the DB. A miss is
+    /// decided in memory too; the queue row that records it is written off
+    /// the request path (`enqueue_persist`).
     pub async fn admit(&self, ctx: &ClusterCtx, queue: &str, partition: &str) -> Admit {
         self.ensure_loaded(ctx.cluster_id).await;
-
-        let key = (queue.to_string(), partition.to_string());
 
         // Fast path: exact pair already known for this cluster.
         {
             let map = self.known.read().unwrap();
             if let Some(cr) = map.get(&ctx.cluster_id) {
-                if cr.pairs.contains(&key) {
+                if cr.partitions.get(queue).is_some_and(|p| p.contains(partition)) {
                     return Admit::Allowed;
                 }
             }
         }
 
         // Miss: evaluate caps and admit under one write-lock critical
-        // section (dropped before any .await below) so "count, then
-        // insert" can't race with itself within this process. Cross-process
-        // races don't apply today (one proxy per cell, PLAN §2); a race
-        // against the periodic reconciler can cause brief overshoot, healed
-        // on the next pass -- accepted per spec.
-        let persisted = {
+        // section so "count, then insert" can't race with itself within this
+        // process. Everything in here is O(1): the section is the serial
+        // point of every new partition in the cell, and it used to scan the
+        // cluster's whole pair set per miss (616 us at 100k partitions).
+        // Cross-process races don't apply today (one proxy per cell, PLAN §2);
+        // a race against the periodic reconciler can cause brief overshoot,
+        // healed on the next pass -- accepted per spec.
+        let projected = {
             let mut map = self.known.write().unwrap();
             let cr = map.entry(ctx.cluster_id).or_default();
 
             // Someone else may have admitted this exact pair while we
             // waited for the write lock.
-            if cr.pairs.contains(&key) {
+            if cr.partitions.get(queue).is_some_and(|p| p.contains(partition)) {
                 return Admit::Allowed;
             }
 
@@ -147,7 +164,7 @@ impl Registry {
                 }
             }
 
-            let observed = cr.pairs.iter().filter(|(q, _)| q == queue).count() as i64;
+            let observed = cr.partitions.get(queue).map_or(0, |p| p.len()) as i64;
             let floor = cr.db_partition_floor.get(queue).copied().unwrap_or(0);
             let projected_partitions = observed.max(floor) + 1;
             if let Some(max_p) = ctx.limits.max_partitions_per_queue {
@@ -156,12 +173,12 @@ impl Registry {
                 }
             }
 
-            cr.pairs.insert(key);
+            cr.partitions.entry(queue.to_string()).or_default().insert(partition.to_string());
             cr.queue_names.insert(queue.to_string());
-            (queue.to_string(), projected_partitions)
+            projected_partitions
         };
 
-        self.upsert_queue_row(ctx.cluster_id, &persisted.0, persisted.1).await;
+        self.enqueue_persist(ctx.cluster_id, queue, projected);
         Admit::Allowed
     }
 
@@ -204,23 +221,46 @@ impl Registry {
         self.loaded.write().unwrap().insert(cluster_id);
     }
 
-    async fn upsert_queue_row(&self, cluster_id: Uuid, queue: &str, partitions_count: i64) {
-        let Some(pool) = &self.db else { return };
-        let client = match pool.get().await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(cluster = %cluster_id, error = %e, "registry: admit upsert pool.get failed");
-                return;
-            }
+    /// Record a queue's projected partition count for the persister, keeping
+    /// the maximum per (cluster, queue). A burst creating 5 000 partitions of
+    /// one queue is one row in the next flush, not 5 000 upserts on the
+    /// request path. No-op without a pxdb (dev-static).
+    fn enqueue_persist(&self, cluster_id: Uuid, queue: &str, partitions_count: i64) {
+        if self.db.is_none() {
+            return;
+        }
+        let mut pending = self.pending.lock().unwrap();
+        let slot = pending.entry((cluster_id, queue.to_string())).or_insert(0);
+        *slot = (*slot).max(partitions_count);
+    }
+
+    /// Spawn the queue-row persister: every QUEEN_PROXY_REGISTRY_PERSIST_MS it
+    /// writes whatever `admit` coalesced since the last tick as ONE statement.
+    /// Called from main.rs next to `spawn_reconciler`. No-op without a pxdb.
+    pub fn spawn_persister(&self) {
+        let Some(pool) = self.db.clone() else {
+            tracing::info!("registry persister: no pxdb configured, skipping (dev-static mode)");
+            return;
         };
-        let cluster_id_str = cluster_id.to_string();
-        let count = clamp_partitions(partitions_count);
-        let stmt = "INSERT INTO queen_proxy.queues(cluster_id, name, partitions_count) \
-                    VALUES ($1::text::uuid, $2, $3) \
-                    ON CONFLICT (cluster_id, name) WHERE deleted_at IS NULL \
-                    DO UPDATE SET partitions_count = GREATEST(queen_proxy.queues.partitions_count, EXCLUDED.partitions_count)";
-        if let Err(e) = client.execute(stmt, &[&cluster_id_str, &queue, &count]).await {
-            tracing::warn!(cluster = %cluster_id, queue, error = %e, "registry: admit upsert failed");
+        let pending = self.pending.clone();
+        tokio::spawn(async move {
+            let interval = Duration::from_millis(
+                crate::config::env_u64("QUEEN_PROXY_REGISTRY_PERSIST_MS", PERSIST_INTERVAL.as_millis() as u64)
+                    .max(100),
+            );
+            let mut tick = tokio::time::interval(interval);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                flush_pending(&pool, &pending).await;
+            }
+        });
+    }
+
+    /// Shutdown counterpart of the periodic flush (main.rs bounds it).
+    pub async fn drain(&self) {
+        if let Some(pool) = &self.db {
+            flush_pending(pool, &self.pending).await;
         }
     }
 
@@ -265,6 +305,59 @@ impl Registry {
     pub fn forget(&self, cluster_id: Uuid) {
         self.known.write().unwrap().remove(&cluster_id);
         self.loaded.write().unwrap().remove(&cluster_id);
+    }
+}
+
+// -------------------------------------------------------------- persister
+
+type Pending = Mutex<HashMap<(Uuid, String), i64>>;
+
+/// One multi-row upsert per flush. Arrays bind as text/int4 and cast in SQL
+/// (no uuid feature on tokio-postgres, like every other query in this crate);
+/// `GREATEST` keeps the row a floor that only the reconciler, which knows the
+/// broker's true count, ever lowers. Each (cluster, name) appears at most once
+/// per batch (it is the map key), which `ON CONFLICT DO UPDATE` requires.
+const PERSIST_SQL: &str = "INSERT INTO queen_proxy.queues(cluster_id, name, partitions_count) \
+    SELECT c::uuid, n, p FROM UNNEST($1::text[], $2::text[], $3::int4[]) AS t(c, n, p) \
+    ON CONFLICT (cluster_id, name) WHERE deleted_at IS NULL \
+    DO UPDATE SET partitions_count = GREATEST(queen_proxy.queues.partitions_count, EXCLUDED.partitions_count)";
+
+async fn flush_pending(pool: &deadpool_postgres::Pool, pending: &Pending) {
+    let batch: HashMap<(Uuid, String), i64> = {
+        let mut p = pending.lock().unwrap();
+        if p.is_empty() {
+            return;
+        }
+        std::mem::take(&mut *p)
+    };
+    let mut ids = Vec::with_capacity(batch.len());
+    let mut names = Vec::with_capacity(batch.len());
+    let mut counts = Vec::with_capacity(batch.len());
+    for ((cluster_id, name), count) in &batch {
+        ids.push(cluster_id.to_string());
+        names.push(name.clone());
+        counts.push(clamp_partitions(*count));
+    }
+    let written = match pool.get().await {
+        Ok(client) => client
+            .execute(PERSIST_SQL, &[&ids, &names, &counts])
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    };
+    match written {
+        Ok(()) => tracing::debug!(rows = batch.len(), "registry: queue rows persisted"),
+        Err(e) => {
+            tracing::warn!(rows = batch.len(), error = %e, "registry: queue persist failed; retrying next tick");
+            // Put the batch back under whatever arrived meanwhile. Bounded by
+            // the number of queues, so an outage holds one count per queue.
+            let mut p = pending.lock().unwrap();
+            for (key, count) in batch {
+                let slot = p.entry(key).or_insert(0);
+                *slot = (*slot).max(count);
+            }
+        }
     }
 }
 
@@ -333,7 +426,13 @@ async fn reconcile_cluster(
     over_storage: &Arc<RwLock<HashSet<Uuid>>>,
     target: &ReconcileTarget,
 ) {
-    let url = format!("{}/api/v1/resources/queues", target.base_url.trim_end_matches('/'));
+    // `?stats=cached`: the reconciler reads `name`, `partitions`, `retainedBytes`
+    // and the top-level kv/timer bytes, all of which the broker's cached
+    // queen.stats view already carries (refreshed at its stats cadence), so the
+    // per-poll live enrichment — until 2026-08-23 a pass over EVERY segment in
+    // the cell, per cluster, per interval — is declined. A broker older than the
+    // parameter ignores it and answers as before.
+    let url = format!("{}/api/v1/resources/queues?stats=cached", target.base_url.trim_end_matches('/'));
     let auth_header = target.cell_secret.as_ref().map(|secret| format!("Bearer {secret}"));
     let mut headers: Vec<(&str, &str)> = vec![("x-queen-tenant", target.broker_tenant.as_str())];
     if let Some(auth) = &auth_header {
@@ -384,14 +483,29 @@ async fn reconcile_cluster(
             bytes_found = true;
         }
 
-        let cluster_id_str = target.cluster_id.to_string();
-        let count = clamp_partitions(partitions);
-        let stmt = "INSERT INTO queen_proxy.queues(cluster_id, name, partitions_count) \
-                    VALUES ($1::text::uuid, $2, $3) \
-                    ON CONFLICT (cluster_id, name) WHERE deleted_at IS NULL \
-                    DO UPDATE SET partitions_count = EXCLUDED.partitions_count";
-        if let Err(e) = client.execute(stmt, &[&cluster_id_str, &name, &count]).await {
-            tracing::warn!(cluster = %target.cluster_id, queue = %name, error = %e, "registry reconciler: queue upsert failed");
+        // Write only what changed. `db_partition_floor` is the last count this
+        // process read from or wrote to the row, so an equal value means the
+        // row already says so -- and a no-op UPDATE is not free in Postgres:
+        // a new tuple version, WAL, and a dead tuple for autovacuum, once per
+        // queue per cycle, on the database the data path shares.
+        let unchanged = {
+            let map = known.read().unwrap();
+            map.get(&target.cluster_id)
+                .and_then(|cr| cr.db_partition_floor.get(&name))
+                .is_some_and(|&known_count| known_count == partitions)
+        };
+        if !unchanged {
+            let cluster_id_str = target.cluster_id.to_string();
+            let count = clamp_partitions(partitions);
+            let stmt = "INSERT INTO queen_proxy.queues(cluster_id, name, partitions_count) \
+                        VALUES ($1::text::uuid, $2, $3) \
+                        ON CONFLICT (cluster_id, name) WHERE deleted_at IS NULL \
+                        DO UPDATE SET partitions_count = EXCLUDED.partitions_count";
+            if let Err(e) = client.execute(stmt, &[&cluster_id_str, &name, &count]).await {
+                tracing::warn!(cluster = %target.cluster_id, queue = %name, error = %e, "registry reconciler: queue upsert failed");
+                // Not remembered as written: the next cycle must try again.
+                continue;
+            }
         }
 
         let mut map = known.write().unwrap();
@@ -457,6 +571,15 @@ async fn reconcile_cluster(
                            WHERE cluster_id = $1::text::uuid AND deleted_at IS NULL AND NOT (name = ANY($2))";
         if let Err(e) = client.execute(sweep_stmt, &[&cluster_id_str, &seen_names]).await {
             tracing::warn!(cluster = %target.cluster_id, error = %e, "registry reconciler: deleted-queue sweep failed");
+        } else {
+            // The swept rows are gone: forget their floor too, so a queue
+            // that comes back is written again rather than skipped as
+            // unchanged.
+            let seen: HashSet<&str> = seen_names.iter().map(String::as_str).collect();
+            let mut map = known.write().unwrap();
+            if let Some(cr) = map.get_mut(&target.cluster_id) {
+                cr.db_partition_floor.retain(|name, _| seen.contains(name.as_str()));
+            }
         }
     } else {
         tracing::warn!(cluster = %target.cluster_id, cell = %target.base_url, "registry reconciler: empty queue inventory, deferring sweep one cycle");
@@ -633,6 +756,50 @@ mod tests {
             limits: EffectiveLimits { max_queues, max_partitions_per_queue, ..Default::default() },
             features: Features::default(),
         }
+    }
+
+    /// A pool nothing listens behind (127.0.0.1:1), bounded so a test can
+    /// never hang on it: the registry must behave with a pxdb that is
+    /// configured but unreachable.
+    fn unreachable_pool() -> deadpool_postgres::Pool {
+        let mut pg = tokio_postgres::Config::new();
+        pg.host("127.0.0.1").port(1).user("x").dbname("x").connect_timeout(Duration::from_secs(2));
+        let mgr = deadpool_postgres::Manager::from_config(
+            pg,
+            tokio_postgres::NoTls,
+            deadpool_postgres::ManagerConfig { recycling_method: deadpool_postgres::RecyclingMethod::Fast },
+        );
+        deadpool_postgres::Pool::builder(mgr)
+            .max_size(1)
+            .runtime(deadpool_postgres::Runtime::Tokio1)
+            .wait_timeout(Some(Duration::from_secs(2)))
+            .create_timeout(Some(Duration::from_secs(2)))
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn new_partitions_coalesce_into_one_pending_row_per_queue() {
+        let reg = Registry::new(Some(unreachable_pool()));
+        let ctx = test_ctx(None, None);
+        for i in 0..50 {
+            assert_eq!(reg.admit(&ctx, "orders", &format!("p{i}")).await, Admit::Allowed);
+        }
+        assert_eq!(reg.admit(&ctx, "shipments", "p0").await, Admit::Allowed);
+        let pending = reg.pending.lock().unwrap().clone();
+        assert_eq!(pending.len(), 2, "one row per (cluster, queue), not one per partition");
+        assert_eq!(pending[&(ctx.cluster_id, "orders".to_string())], 50, "the highest projected count wins");
+        assert_eq!(pending[&(ctx.cluster_id, "shipments".to_string())], 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_flush_keeps_the_batch_for_the_next_tick() {
+        let reg = Registry::new(Some(unreachable_pool()));
+        let ctx = test_ctx(None, None);
+        assert_eq!(reg.admit(&ctx, "orders", "p0").await, Admit::Allowed);
+        reg.drain().await; // pxdb unreachable: the row must survive the failure
+        let pending = reg.pending.lock().unwrap().clone();
+        assert_eq!(pending.get(&(ctx.cluster_id, "orders".to_string())), Some(&1));
     }
 
     #[tokio::test]

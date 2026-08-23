@@ -1,0 +1,2 @@
+./cmbench -system queen -queen-url http://10.114.0.2:6632 -queen-pop-mode wildcard -queen-pop-partitions 40 -rate 2000 -properties 1000 -hot-props 1 -hot-factor 200 -duration 180 -ramp 10 -drain 90 -logdir results/skew-f200
+exit=0

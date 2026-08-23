@@ -1,0 +1,40 @@
+goload -mode cloud [r1000-noisy] -> http://10.114.0.2:6711
+  target=proxy tenants=10 sharedQueue=true queue="orders" group="workers" partitions=1 brokerTenantHeader=false
+  offered=500.0 msg/s total (50.00/tenant) push-batch=10 -> 5.00 req/s per tenant across 1 producer(s) | max-inflight=4096
+  consumers=1/tenant popBatch=100 popWait=true autoAck=false | payload=256B | duration=180s drain=25s | idleConns=414/client verify=true
+[configure] 10 queue(s) configured in 0.01s
+[08:09:28 load ] offered=     500/s push=     500/s pop=     496/s ack=     496/s shed=      0/s inflight=    0 | e2e p50=  51.97 p99=  626.69 ms | pushRTT p50=  3.57 p99=  14.78 ms | lag=120 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=63
+[08:09:58 load ] offered=     500/s push=     500/s pop=     502/s ack=     502/s shed=      0/s inflight=    0 | e2e p50= 207.87 p99=  626.69 ms | pushRTT p50=  3.38 p99=   7.71 ms | lag=50 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=63
+[08:10:28 load ] offered=     500/s push=     500/s pop=     497/s ack=     497/s shed=      0/s inflight=    0 | e2e p50= 207.87 p99=  626.69 ms | pushRTT p50=  3.41 p99=   8.64 ms | lag=130 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=63
+[08:10:58 load ] offered=     500/s push=     500/s pop=     503/s ack=     503/s shed=      0/s inflight=    0 | e2e p50=  36.10 p99=  626.69 ms | pushRTT p50=  3.41 p99=   8.77 ms | lag=50 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=63
+[08:11:28 load ] offered=     500/s push=     500/s pop=     498/s ack=     498/s shed=      0/s inflight=    0 | e2e p50=  57.60 p99=  626.69 ms | pushRTT p50=  3.41 p99=   8.77 ms | lag=100 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=63
+[drain] producers stopped after 180.0s; draining 25s before the correctness verdict
+[08:11:58 drain] offered=     500/s push=     500/s pop=     500/s ack=     500/s shed=      0/s inflight=    0 | e2e p50= 207.87 p99=  626.69 ms | pushRTT p50=  3.41 p99=   7.58 ms | lag=90 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=63
+
+========== r1000-noisy ==========
+offered        500.0 msg/s (90000 msgs, 0 shed)
+achieved  push    500.0 msg/s (90000 msgs)   pop    499.5 msg/s during load (   439.0 msg/s over load+drain, 90000 msgs)   ack 90000 msgs
+e2eFromSchedule  n=90000     p50=  207.87 p95=  618.50 p99=  626.69 p999=  643.07 max=   846.92 ms
+e2eFromSend      n=90000     p50=  205.82 p95=  618.50 p99=  626.69 p999=  643.07 max=   846.32 ms
+pushRtt          n=9000      p50=    3.41 p95=    6.11 p99=    9.02 p999=   35.58 max=    86.21 ms
+ackRtt           n=4461      p50=    6.30 p95=   15.68 p99=   20.10 p999=   45.31 max=    71.08 ms
+errors            none
+bytes     nominal 292 B/msg -> pushed 25.06 MiB, delivered 25.06 MiB
+
+---- delivery correctness (after the drain) ----
+idx  tenant         queue           sentOk  received  missing      dup   extra   cross verdict
+0    noisy-0000     orders            9000      9000        0        0       0       0 OK
+1    noisy-0001     orders            9000      9000        0        0       0       0 OK
+2    noisy-0002     orders            9000      9000        0        0       0       0 OK
+3    noisy-0003     orders            9000      9000        0        0       0       0 OK
+4    noisy-0004     orders            9000      9000        0        0       0       0 OK
+5    noisy-0005     orders            9000      9000        0        0       0       0 OK
+6    noisy-0006     orders            9000      9000        0        0       0       0 OK
+7    noisy-0007     orders            9000      9000        0        0       0       0 OK
+8    noisy-0008     orders            9000      9000        0        0       0       0 OK
+9    noisy-0009     orders            9000      9000        0        0       0       0 OK
+     TOTAL                           90000     90000        0        0       0       0
+VERDICT: PASS
+
+[artifacts] /root/ladder2/r1000-noisy.json
+            /root/ladder2/r1000-noisy-interval.csv

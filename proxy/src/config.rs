@@ -144,6 +144,19 @@ pub struct PxdbConfig {
     pub use_ssl: bool,
     pub ssl_reject_unauthorized: bool,
     pub pool_size: usize,
+    /// Bound on every pxdb I/O the proxy does outside a query: TCP connect,
+    /// pool checkout wait, connection create/recycle (db.rs, and the LISTEN
+    /// connection in cache.rs). The caches only fall back to a stale entry
+    /// once a lookup has FAILED, so without this a black-holed pxdb turned
+    /// every cache miss into a request parked for the OS TCP timeout, and a
+    /// saturated pool into an unbounded queue of requests behind it.
+    pub timeout_ms: u64,
+}
+
+impl PxdbConfig {
+    pub fn timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.timeout_ms.max(100))
+    }
 }
 
 /// Static single-cluster fallback for local dev without a pxdb (smoke tests).
@@ -236,6 +249,7 @@ impl Config {
             use_ssl: env_bool("PXDB_USE_SSL", false),
             ssl_reject_unauthorized: env_bool("PXDB_SSL_REJECT_UNAUTHORIZED", true),
             pool_size: env_u64("PXDB_POOL_SIZE", 16) as usize,
+            timeout_ms: env_u64("PXDB_TIMEOUT_MS", 5_000),
         });
         let dev_static = env_opt("QUEEN_PROXY_DEV_CELL_URL").map(|cell_url| DevStaticCluster {
             cell_url,

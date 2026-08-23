@@ -1,0 +1,60 @@
+goload -mode cloud [r3000-noisy] -> http://10.114.0.2:6711
+  target=proxy tenants=30 sharedQueue=true queue="orders" group="workers" partitions=1 brokerTenantHeader=false
+  offered=1500.0 msg/s total (50.00/tenant) push-batch=10 -> 5.00 req/s per tenant across 1 producer(s) | max-inflight=4096
+  consumers=1/tenant popBatch=100 popWait=true autoAck=false | payload=256B | duration=180s drain=25s | idleConns=141/client verify=true
+[configure] 30 queue(s) configured in 0.02s
+[08:12:54 load ] offered=    1500/s push=    1500/s pop=    1390/s ack=    1390/s shed=      0/s inflight=    0 | e2e p50=1515.52 p99= 5341.18 ms | pushRTT p50=  6.05 p99= 142.34 ms | lag=3300 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=253
+[08:13:24 load ] offered=    1500/s push=    1500/s pop=    1432/s ack=    1432/s shed=      0/s inflight=    0 | e2e p50=2867.20 p99=11730.94 ms | pushRTT p50=  5.86 p99=  15.17 ms | lag=5330 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=253
+[08:13:54 load ] offered=    1500/s push=    1500/s pop=    1395/s ack=    1395/s shed=      0/s inflight=    0 | e2e p50=3784.70 p99=17694.72 ms | pushRTT p50=  6.05 p99=  15.42 ms | lag=8490 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=253
+[08:14:24 load ] offered=    1500/s push=    1500/s pop=    1454/s ack=    1454/s shed=      0/s inflight=    0 | e2e p50=5472.26 p99=21102.59 ms | pushRTT p50=  5.92 p99=  15.81 ms | lag=9870 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=183
+[08:14:54 load ] offered=    1500/s push=    1500/s pop=    1444/s ack=    1444/s shed=      0/s inflight=    0 | e2e p50=5144.58 p99=26607.62 ms | pushRTT p50=  6.05 p99=  16.77 ms | lag=11550 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=183
+[drain] producers stopped after 180.0s; draining 25s before the correctness verdict
+[08:15:24 drain] offered=    1500/s push=    1500/s pop=    1478/s ack=    1478/s shed=      0/s inflight=    0 | e2e p50=6258.69 p99=28180.48 ms | pushRTT p50=  5.92 p99=  14.40 ms | lag=12210 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=153
+
+========== r3000-noisy ==========
+offered       1500.0 msg/s (270000 msgs, 0 shed)
+achieved  push   1500.0 msg/s (270000 msgs)   pop   1432.2 msg/s during load (  1317.1 msg/s over load+drain, 270000 msgs)   ack 270000 msgs
+e2eFromSchedule  n=270000    p50= 3751.94 p95=15400.96 p99=25296.90 p999=28966.91 max= 30802.86 ms
+e2eFromSend      n=270000    p50= 3751.94 p95=15400.96 p99=25296.90 p999=28966.91 max= 30801.81 ms
+pushRtt          n=27000     p50=    5.98 p95=   11.58 p99=   20.61 p999=  248.83 max=   533.60 ms
+ackRtt           n=3264      p50=    7.14 p95=   28.54 p99=   43.78 p999=  160.77 max=   285.21 ms
+errors            none
+bytes     nominal 292 B/msg -> pushed 75.19 MiB, delivered 75.19 MiB
+
+---- delivery correctness (after the drain) ----
+idx  tenant         queue           sentOk  received  missing      dup   extra   cross verdict
+0    noisy-0000     orders            9000      9000        0        0       0       0 OK
+1    noisy-0001     orders            9000      9000        0        0       0       0 OK
+2    noisy-0002     orders            9000      9000        0        0       0       0 OK
+3    noisy-0003     orders            9000      9000        0        0       0       0 OK
+4    noisy-0004     orders            9000      9000        0        0       0       0 OK
+5    noisy-0005     orders            9000      9000        0        0       0       0 OK
+6    noisy-0006     orders            9000      9000        0        0       0       0 OK
+7    noisy-0007     orders            9000      9000        0        0       0       0 OK
+8    noisy-0008     orders            9000      9000        0        0       0       0 OK
+9    noisy-0009     orders            9000      9000        0        0       0       0 OK
+10   noisy-0010     orders            9000      9000        0        0       0       0 OK
+11   noisy-0011     orders            9000      9000        0        0       0       0 OK
+12   noisy-0012     orders            9000      9000        0        0       0       0 OK
+13   noisy-0013     orders            9000      9000        0        0       0       0 OK
+14   noisy-0014     orders            9000      9000        0        0       0       0 OK
+15   noisy-0015     orders            9000      9000        0        0       0       0 OK
+16   noisy-0016     orders            9000      9000        0        0       0       0 OK
+17   noisy-0017     orders            9000      9000        0        0       0       0 OK
+18   noisy-0018     orders            9000      9000        0        0       0       0 OK
+19   noisy-0019     orders            9000      9000        0        0       0       0 OK
+20   noisy-0020     orders            9000      9000        0        0       0       0 OK
+21   noisy-0021     orders            9000      9000        0        0       0       0 OK
+22   noisy-0022     orders            9000      9000        0        0       0       0 OK
+23   noisy-0023     orders            9000      9000        0        0       0       0 OK
+24   noisy-0024     orders            9000      9000        0        0       0       0 OK
+25   noisy-0025     orders            9000      9000        0        0       0       0 OK
+26   noisy-0026     orders            9000      9000        0        0       0       0 OK
+27   noisy-0027     orders            9000      9000        0        0       0       0 OK
+28   noisy-0028     orders            9000      9000        0        0       0       0 OK
+29   noisy-0029     orders            9000      9000        0        0       0       0 OK
+     TOTAL                          270000    270000        0        0       0       0
+VERDICT: PASS
+
+[artifacts] /root/ladder2/r3000-noisy.json
+            /root/ladder2/r3000-noisy-interval.csv

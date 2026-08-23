@@ -46,6 +46,8 @@ func main() {
 	report := fs.Int("report", 1, "report interval, seconds")
 	logDir := fs.String("logdir", "./cmlogs", "stage logs + produced.meta + result.json")
 	payloadB := fs.Int("payload-b", 2048, "flow-B rates payload target bytes")
+	hotProps := fs.Int("hot-props", 0, "HOT entities: how many keys carry concentrated load (0 = uniform, no skew)")
+	hotFactor := fs.Int("hot-factor", 1, "each hot entity's share of offered load as a multiple of a cold entity's (1 = uniform)")
 	prefix := fs.String("prefix", "", "prefix on all four topic names. Belt-and-braces against cross-run contamination: -reset should already give a clean slate, but a run that inherits a previous run's backlog and cursors reports the old tail before the new seq 0, which reads as order violations that belong to nobody")
 
 	lanes := fs.Int("lanes", 0, "physical ordered lanes per topic (0 = one per property). Lower it to measure head-of-line blocking between properties")
@@ -103,6 +105,8 @@ func main() {
 	cfg.Topology.Properties = *properties
 	cfg.Topology.RateEvents = *rate
 	cfg.Topology.PayloadB = *payloadB
+	cfg.Topology.HotProps = *hotProps
+	cfg.Topology.HotFactor = *hotFactor
 	cfg.Topology.Prefix = *prefix
 	cfg.LogDir = *logDir
 	cfg.DurationSec = *duration
@@ -218,6 +222,8 @@ type resultFile struct {
 	Properties  int            `json:"properties"`
 	Durability  string         `json:"durability"`
 	DedupWindow int            `json:"dedup_window_sec"`
+	Skew        map[string]any `json:"skew"`
+	Isolation   map[string]any `json:"isolation"`
 	Invariants  map[string]int `json:"invariants"`
 	Provisioned map[string]any `json:"provisioned"`
 	Flow        map[string]any `json:"flow"`
@@ -243,6 +249,20 @@ func writeResult(dir string, r *runner.Result, cfg runner.Config) error {
 	p50a, p95a, p99a := c.E2E(workload.FlowA)
 	p50b, p95b, p99b := c.E2E(workload.FlowB)
 
+	t := r.Topology
+	cold50, cold95, cold99 := c.E2ECohortBoth(workload.CohortCold)
+	hot50, hot95, hot99 := c.E2ECohortBoth(workload.CohortHot)
+	dHot, dCold := c.DeliveredCohort(workload.CohortHot), c.DeliveredCohort(workload.CohortCold)
+	hotRate, coldRate := t.PerLaneRate()
+	// The isolation ratio is deliberately hot/cold and not a pass mark. A large
+	// ratio means the overloaded entity absorbed its own backlog; a ratio near 1
+	// with both numbers high means the pain leaked into the neighbours. Which of
+	// those is "good" is the reader's call, and both numbers are printed.
+	ratio := 0.0
+	if cold99 > 0 {
+		ratio = hot99 / cold99
+	}
+
 	var acked, ackErr int64
 	for _, sc := range r.Stages {
 		acked += sc.Acked.Load()
@@ -265,6 +285,22 @@ func writeResult(dir string, r *runner.Result, cfg runner.Config) error {
 		Properties:  r.Topology.Properties,
 		Durability:  cfg.Setup.Durability,
 		DedupWindow: cfg.Setup.DedupWindowSec,
+		Skew: map[string]any{
+			"hot_props": t.HotProps, "hot_factor": t.HotFactor,
+			"hot_share_pct":             t.HotSharePct(),
+			"hot_lane_offered_per_sec":  hotRate,
+			"cold_lane_offered_per_sec": coldRate,
+			"lane_ceiling_per_sec":      t.LaneCeiling(r.BatchSize),
+			"per_key_batch_cap":         r.BatchSize,
+			"hot_saturated":             t.HotSaturated(r.BatchSize),
+			"delivered_hot":             dHot,
+			"delivered_cold":            dCold,
+		},
+		Isolation: map[string]any{
+			"cold_p50_ms": cold50, "cold_p95_ms": cold95, "cold_p99_ms": cold99,
+			"hot_p50_ms": hot50, "hot_p95_ms": hot95, "hot_p99_ms": hot99,
+			"hot_over_cold_p99": ratio,
+		},
 		Invariants: map[string]int{
 			"deliveries_per_sec":       r.Invariants.DeliveriesPerSec,
 			"ordered_lanes":            r.Invariants.OrderedLanes,
@@ -290,6 +326,8 @@ func writeResult(dir string, r *runner.Result, cfg runner.Config) error {
 		Latency: map[string]any{
 			"flow_a_p50": p50a, "flow_a_p95": p95a, "flow_a_p99": p99a,
 			"flow_b_p50": p50b, "flow_b_p95": p95b, "flow_b_p99": p99b,
+			"cold_p50": cold50, "cold_p95": cold95, "cold_p99": cold99,
+			"hot_p50": hot50, "hot_p95": hot95, "hot_p99": hot99,
 		},
 		Correctness: map[string]any{
 			"pass": r.Verify.Pass, "gaps": r.Verify.Gaps,

@@ -1,0 +1,47 @@
+goload -mode cloud [pro-n20-q10] -> http://10.114.0.2:6711
+  target=proxy tenants=20 sharedQueue=true queue="app-q10" group="workers" partitions=500 brokerTenantHeader=false
+  offered=50.0 msg/s total (2.50/tenant) push-batch=1 -> 2.50 req/s per tenant across 1 producer(s) | max-inflight=4096
+  consumers=1/tenant popBatch=100 popWait=true autoAck=false | payload=256B | duration=120s drain=45s | idleConns=209/client verify=true
+[configure] 20 queue(s) configured in 0.17s
+[11:14:40 load ] offered=      50/s push=      50/s pop=      50/s ack=      50/s shed=      0/s inflight=    0 | e2e p50=  16.77 p99=  301.06 ms | pushRTT p50=  7.97 p99=  28.29 ms | lag=4 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=123
+[drain] producers stopped after 120.0s; draining 45s before the correctness verdict
+[11:15:40 drain] offered=      50/s push=      50/s pop=      50/s ack=      50/s shed=      0/s inflight=    0 | e2e p50=  16.77 p99=   37.12 ms | pushRTT p50=  8.16 p99=  24.19 ms | lag=4 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=103
+
+========== pro-n20-q10 ==========
+offered         50.0 msg/s (6000 msgs, 0 shed)
+achieved  push     50.0 msg/s (6000 msgs)   pop     50.0 msg/s during load (    36.3 msg/s over load+drain, 5997 msgs)   ack 5997 msgs
+e2eFromSchedule  n=5997      p50=   16.77 p95=   32.13 p99=  264.19 p999=  419.84 max=   450.04 ms
+e2eFromSend      n=5997      p50=   16.19 p95=   31.62 p99=  264.19 p999=  419.84 max=   449.99 ms
+pushRtt          n=6000      p50=    8.10 p95=   16.77 p99=   25.47 p999=   59.14 max=   125.71 ms
+ackRtt           n=5991      p50=    4.13 p95=    8.77 p99=   12.22 p999=   17.79 max=    93.30 ms
+errors            none
+bytes     nominal 292 B/msg -> pushed 1.67 MiB, delivered 1.67 MiB
+
+---- delivery correctness (after the drain) ----
+idx  tenant         queue           sentOk  received  missing      dup   extra   cross verdict
+0    cp-0000        app-q10            300       300        0        0       0       0 OK
+1    cp-0001        app-q10            300       300        0        0       0       0 OK
+2    cp-0002        app-q10            300       300        0        0       0       0 OK
+3    cp-0003        app-q10            300       300        0        0       0       0 OK
+4    cp-0004        app-q10            300       300        0        0       0       0 OK
+5    cp-0005        app-q10            300       300        0        0       0       0 OK
+6    cp-0006        app-q10            300       300        0        0       0       0 OK
+7    cp-0007        app-q10            300       300        0        0       0       0 OK
+8    cp-0008        app-q10            300       300        0        0       0       0 OK
+9    cp-0009        app-q10            300       300        0        0       0       0 OK
+10   cp-0010        app-q10            300       299        1        0       0       0 FAIL  firstMissing=[1]
+11   cp-0011        app-q10            300       299        1        0       0       0 FAIL  firstMissing=[1]
+12   cp-0012        app-q10            300       300        0        0       0       0 OK
+13   cp-0013        app-q10            300       299        1        0       0       0 FAIL  firstMissing=[1]
+14   cp-0014        app-q10            300       300        0        0       0       0 OK
+15   cp-0015        app-q10            300       300        0        0       0       0 OK
+16   cp-0016        app-q10            300       300        0        0       0       0 OK
+17   cp-0017        app-q10            300       300        0        0       0       0 OK
+18   cp-0018        app-q10            300       300        0        0       0       0 OK
+19   cp-0019        app-q10            300       300        0        0       0       0 OK
+     TOTAL                            6000      5997        3        0       0       0
+VERDICT: FAIL
+NOTE: consumers were idle at the cutoff and the consume path reported no errors, so 3 missing is real LOSS, not a tail.
+
+[artifacts] /root/cap16-pro/pro-n20-q10.json
+            /root/cap16-pro/pro-n20-q10-interval.csv

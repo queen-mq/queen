@@ -58,10 +58,112 @@ type Topology struct {
 	RateEvents int    // R: total offered events/s, split 50/50 across flows
 	PayloadB   int    // flow-B rates padding target, bytes
 
+	// Hot-entity skew (SPEC.md §10). HotProps entities each receive HotFactor
+	// times a cold entity's share of the offered rate; everything else is
+	// unchanged. HotProps=0 or HotFactor<=1 is the uniform workload, byte for
+	// byte — so the uniform baseline and the skewed cells run the same code.
+	HotProps  int
+	HotFactor int
+
 	DBSleepMinMs int
 	DBSleepMaxMs int
 	CalSleepMs   int
 	OtaSleepMs   int
+}
+
+// Cohort partitions the entities into the deliberately overloaded ones and
+// everyone else. It is the axis the isolation measurement is reported on.
+type Cohort uint8
+
+const (
+	CohortCold Cohort = iota // the neighbours: their latency is the result
+	CohortHot                // the noisy entity or entities
+)
+
+func (c Cohort) String() string {
+	if c == CohortHot {
+		return "hot"
+	}
+	return "cold"
+}
+
+// Skewed reports whether this topology actually concentrates load.
+func (t Topology) Skewed() bool { return t.HotProps > 0 && t.HotFactor > 1 }
+
+// CohortOf classifies a property. The hot entities are the first HotProps
+// indices: fixed and known up front so a reader can re-derive every number in
+// the report from the raw stream logs without trusting the harness.
+func (t Topology) CohortOf(prop int) Cohort {
+	if t.Skewed() && prop < t.HotProps {
+		return CohortHot
+	}
+	return CohortCold
+}
+
+// HotWeight and coldCount are the two integers the producer's exact scheduler
+// and every share calculation below are derived from.
+func (t Topology) hotWeight() int { return t.HotProps * t.HotFactor }
+func (t Topology) coldCount() int { return t.Properties - t.HotProps }
+
+// HotSharePct is the fraction of one flow's offered events that go to the hot
+// cohort, in percent.
+func (t Topology) HotSharePct() float64 {
+	if !t.Skewed() {
+		return 0
+	}
+	return 100 * float64(t.hotWeight()) / float64(t.hotWeight()+t.coldCount())
+}
+
+// PerLaneRate returns the offered events/s landing on ONE entity of each
+// cohort, for a single flow (each flow carries half the total rate).
+func (t Topology) PerLaneRate() (hot, cold float64) {
+	flowRate := float64(t.RateEvents) / 2
+	if !t.Skewed() {
+		if t.Properties == 0 {
+			return 0, 0
+		}
+		c := flowRate / float64(t.Properties)
+		return c, c
+	}
+	total := float64(t.hotWeight() + t.coldCount())
+	cold = flowRate / total
+	return cold * float64(t.HotFactor), cold
+}
+
+// LaneCeiling is how many messages per second ONE entity's ordering lane can be
+// served at, at a terminal stage.
+//
+// The stage does the simulated work for a batch CONCURRENTLY and commits the
+// batch in order, so ordering costs a barrier per batch, not serialisation per
+// message: one entity drains at perKeyBatch messages per work-interval, not
+// one. perKeyBatch=1 is therefore the floor of this ceiling, and a system that
+// hands over larger per-key batches genuinely serves a hot entity faster.
+//
+// This is a property of the WORKLOAD given a batch size, and the batch size a
+// system actually achieves per key is its own business — which is why the
+// number is reported next to the measured hot rate rather than used to pass or
+// fail anything.
+func (t Topology) LaneCeiling(perKeyBatch int) float64 {
+	if t.OtaSleepMs <= 0 {
+		return math.Inf(1)
+	}
+	if perKeyBatch < 1 {
+		perKeyBatch = 1
+	}
+	return float64(perKeyBatch) * 1000.0 / float64(t.OtaSleepMs)
+}
+
+// HotSaturated reports whether the hot entity is offered more than its single
+// ordering lane can drain. When true the hot cohort's backlog grows without
+// bound BY CONSTRUCTION, so its latency percentiles are a function of run
+// length and must not be read as a steady state — the cold cohort is the
+// measurement, and the hot cohort is the disturbance.
+func (t Topology) HotSaturated(perKeyBatch int) bool {
+	if !t.Skewed() {
+		return false
+	}
+	hot, _ := t.PerLaneRate()
+	return hot > t.LaneCeiling(perKeyBatch)
 }
 
 // DefaultTopology is the shape of SPEC.md §1: the July channel-manager run.

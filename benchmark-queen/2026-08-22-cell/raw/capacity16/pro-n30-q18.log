@@ -1,0 +1,61 @@
+goload -mode cloud [pro-n30-q18] -> http://10.114.0.2:6711
+  target=proxy tenants=30 sharedQueue=true queue="app-q18" group="workers" partitions=500 brokerTenantHeader=false
+  offered=75.0 msg/s total (2.50/tenant) push-batch=1 -> 2.50 req/s per tenant across 1 producer(s) | max-inflight=4096
+  consumers=1/tenant popBatch=100 popWait=true autoAck=false | payload=256B | duration=120s drain=45s | idleConns=141/client verify=true
+[configure] 30 queue(s) configured in 0.21s
+[11:17:27 load ] offered=      75/s push=      75/s pop=      75/s ack=      75/s shed=      0/s inflight=    1 | e2e p50=  30.59 p99=  667.65 ms | pushRTT p50= 13.63 p99=  48.38 ms | lag=0 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=184
+[drain] producers stopped after 120.0s; draining 45s before the correctness verdict
+[11:18:27 drain] offered=      75/s push=      68/s pop=      68/s ack=      68/s shed=      0/s inflight=    1 | e2e p50=  30.59 p99=  536.58 ms | pushRTT p50= 15.17 p99=  62.72 ms | lag=12 | err push=432 pop=2553 ack=5 (429=0 403=0 5xx=0 to=2553 conn=437) empty=25 cross=0 gor=221
+
+========== pro-n30-q18 ==========
+offered         75.0 msg/s (9000 msgs, 0 shed)
+achieved  push     71.4 msg/s (8568 msgs)   pop     71.3 msg/s during load (    52.0 msg/s over load+drain, 8573 msgs)   ack 8568 msgs
+e2eFromSchedule  n=8573      p50=   30.59 p95=  358.40 p99=  626.69 p999=  831.49 max= 30396.77 ms
+e2eFromSend      n=8573      p50=   30.08 p95=  358.40 p99=  626.69 p999=  831.49 max= 30395.83 ms
+pushRtt          n=8568      p50=   14.40 p95=   33.54 p99=   52.48 p999=  276.48 max=   504.29 ms
+ackRtt           n=8302      p50=    8.38 p95=   21.63 p99=   31.87 p999=   48.90 max=    66.91 ms
+errors push       total=432 kinds=map[conn:432] codes=map[]
+    first conn: push request failed: request failed after 1 attempts: Post "http://10.114.0.2:6711/api/v1/push": dial tcp 10.114.0.2:6711: connect: connection refused
+errors pop        total=2553 kinds=map[canceled:30 timeout:2553] codes=map[]
+    first timeout: pop request failed: Get "http://10.114.0.2:6711/api/v1/pop/queue/app-q18?autoAck=false&batch=100&consumerGroup=workers&partitions=500&timeout=5000&wait=true": dial tcp 10.114.0.2:6711: connect: connection refused
+errors ack        total=5 kinds=map[conn:5] codes=map[]
+    first conn: ack request failed: request failed after 1 attempts: Post "http://10.114.0.2:6711/api/v1/ack": read tcp 10.114.0.3:27396->10.114.0.2:6711: read: connection reset by peer
+bytes     nominal 292 B/msg -> pushed 2.39 MiB, delivered 2.39 MiB
+
+---- delivery correctness (after the drain) ----
+idx  tenant         queue           sentOk  received  missing      dup   extra   cross verdict
+0    cp-0000        app-q18            286       287        0        1       0       0 FAIL
+1    cp-0001        app-q18            285       285        0        0       0       0 OK
+2    cp-0002        app-q18            286       286        0        0       0       0 OK
+3    cp-0003        app-q18            285       285        0        0       0       0 OK
+4    cp-0004        app-q18            285       285        0        0       0       0 OK
+5    cp-0005        app-q18            286       286        0        0       0       0 OK
+6    cp-0006        app-q18            286       286        0        0       0       0 OK
+7    cp-0007        app-q18            286       286        0        0       0       0 OK
+8    cp-0008        app-q18            285       285        0        0       0       0 OK
+9    cp-0009        app-q18            286       286        0        0       0       0 OK
+10   cp-0010        app-q18            286       286        0        0       0       0 OK
+11   cp-0011        app-q18            286       286        0        0       0       0 OK
+12   cp-0012        app-q18            286       286        0        0       0       0 OK
+13   cp-0013        app-q18            285       285        0        0       0       0 OK
+14   cp-0014        app-q18            285       285        0        0       0       0 OK
+15   cp-0015        app-q18            285       285        0        0       0       0 OK
+16   cp-0016        app-q18            285       285        0        0       0       0 OK
+17   cp-0017        app-q18            286       287        0        1       0       0 FAIL
+18   cp-0018        app-q18            285       285        0        0       0       0 OK
+19   cp-0019        app-q18            285       285        0        0       0       0 OK
+20   cp-0020        app-q18            286       286        0        0       0       0 OK
+21   cp-0021        app-q18            285       285        0        0       0       0 OK
+22   cp-0022        app-q18            286       286        0        0       0       0 OK
+23   cp-0023        app-q18            286       286        0        0       0       0 OK
+24   cp-0024        app-q18            286       287        0        1       0       0 FAIL
+25   cp-0025        app-q18            286       287        0        1       0       0 FAIL
+26   cp-0026        app-q18            286       286        0        0       0       0 OK
+27   cp-0027        app-q18            286       286        0        0       0       0 OK
+28   cp-0028        app-q18            286       287        0        1       0       0 FAIL
+29   cp-0029        app-q18            285       285        0        0       0       0 OK
+     TOTAL                            8568      8573        0        5       0       0
+VERDICT: FAIL
+
+[artifacts] /root/cap16-pro/pro-n30-q18.json
+            /root/cap16-pro/pro-n30-q18-interval.csv

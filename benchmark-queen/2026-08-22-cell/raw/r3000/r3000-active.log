@@ -1,0 +1,300 @@
+goload -mode cloud [r3000-active] -> http://10.114.0.2:6711
+  target=proxy tenants=270 sharedQueue=true queue="orders" group="workers" partitions=1 brokerTenantHeader=false
+  offered=1350.0 msg/s total (5.00/tenant) push-batch=1 -> 5.00 req/s per tenant across 1 producer(s) | max-inflight=4096
+  consumers=1/tenant popBatch=100 popWait=true autoAck=false | payload=256B | duration=180s drain=25s | idleConns=20/client verify=true
+[configure] 270 queue(s) configured in 0.12s
+[08:12:54 load ] offered=    1350/s push=    1349/s pop=    1294/s ack=    1293/s shed=      0/s inflight=   31 | e2e p50= 995.33 p99= 2867.20 ms | pushRTT p50=  5.73 p99= 162.82 ms | lag=1658 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=2248
+[08:13:24 load ] offered=    1350/s push=    1351/s pop=    1338/s ack=    1338/s shed=      0/s inflight=   12 | e2e p50=1433.60 p99= 3555.33 ms | pushRTT p50=  5.60 p99=  15.17 ms | lag=2050 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=2229
+[08:13:54 load ] offered=    1350/s push=    1350/s pop=    1357/s ack=    1356/s shed=      0/s inflight=   10 | e2e p50=1613.82 p99= 3751.94 ms | pushRTT p50=  5.79 p99=  16.06 ms | lag=1850 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=2227
+[08:14:24 load ] offered=    1350/s push=    1350/s pop=    1347/s ack=    1347/s shed=      0/s inflight=   12 | e2e p50=1531.90 p99= 3588.10 ms | pushRTT p50=  5.66 p99=  16.32 ms | lag=1940 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=1635
+[08:14:54 load ] offered=    1350/s push=    1350/s pop=    1348/s ack=    1348/s shed=      0/s inflight=   13 | e2e p50=1564.67 p99= 3555.33 ms | pushRTT p50=  5.79 p99=  16.32 ms | lag=2013 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=1636
+[drain] producers stopped after 180.0s; draining 25s before the correctness verdict
+[08:15:24 drain] offered=    1350/s push=    1350/s pop=    1349/s ack=    1349/s shed=      0/s inflight=   10 | e2e p50=1564.67 p99= 3522.56 ms | pushRTT p50=  5.66 p99=  15.04 ms | lag=2057 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=1619
+
+========== r3000-active ==========
+offered       1350.0 msg/s (243003 msgs, 0 shed)
+achieved  push   1350.0 msg/s (243003 msgs)   pop   1338.5 msg/s during load (  1185.4 msg/s over load+drain, 243003 msgs)   ack 243003 msgs
+e2eFromSchedule  n=243003    p50= 1433.60 p95= 3227.65 p99= 3588.10 p999= 3850.24 max=  4022.26 ms
+e2eFromSend      n=243003    p50= 1433.60 p95= 3227.65 p99= 3588.10 p999= 3850.24 max=  4022.13 ms
+pushRtt          n=243003    p50=    5.73 p95=   11.20 p99=   21.38 p999=  254.98 max=   553.45 ms
+ackRtt           n=27918     p50=    5.47 p95=   17.54 p99=   43.26 p999=  220.16 max=   381.77 ms
+errors            none
+bytes     nominal 292 B/msg -> pushed 67.67 MiB, delivered 67.67 MiB
+
+---- delivery correctness (after the drain) ----
+idx  tenant         queue           sentOk  received  missing      dup   extra   cross verdict
+0    act-0000       orders             900       900        0        0       0       0 OK
+1    act-0001       orders             900       900        0        0       0       0 OK
+2    act-0002       orders             900       900        0        0       0       0 OK
+3    act-0003       orders             900       900        0        0       0       0 OK
+4    act-0004       orders             900       900        0        0       0       0 OK
+5    act-0005       orders             900       900        0        0       0       0 OK
+6    act-0006       orders             900       900        0        0       0       0 OK
+7    act-0007       orders             900       900        0        0       0       0 OK
+8    act-0008       orders             900       900        0        0       0       0 OK
+9    act-0009       orders             900       900        0        0       0       0 OK
+10   act-0010       orders             900       900        0        0       0       0 OK
+11   act-0011       orders             900       900        0        0       0       0 OK
+12   act-0012       orders             900       900        0        0       0       0 OK
+13   act-0013       orders             900       900        0        0       0       0 OK
+14   act-0014       orders             900       900        0        0       0       0 OK
+15   act-0015       orders             900       900        0        0       0       0 OK
+16   act-0016       orders             900       900        0        0       0       0 OK
+17   act-0017       orders             900       900        0        0       0       0 OK
+18   act-0018       orders             900       900        0        0       0       0 OK
+19   act-0019       orders             900       900        0        0       0       0 OK
+20   act-0020       orders             900       900        0        0       0       0 OK
+21   act-0021       orders             900       900        0        0       0       0 OK
+22   act-0022       orders             900       900        0        0       0       0 OK
+23   act-0023       orders             900       900        0        0       0       0 OK
+24   act-0024       orders             900       900        0        0       0       0 OK
+25   act-0025       orders             900       900        0        0       0       0 OK
+26   act-0026       orders             900       900        0        0       0       0 OK
+27   act-0027       orders             900       900        0        0       0       0 OK
+28   act-0028       orders             900       900        0        0       0       0 OK
+29   act-0029       orders             900       900        0        0       0       0 OK
+30   act-0030       orders             900       900        0        0       0       0 OK
+31   act-0031       orders             900       900        0        0       0       0 OK
+32   act-0032       orders             900       900        0        0       0       0 OK
+33   act-0033       orders             900       900        0        0       0       0 OK
+34   act-0034       orders             900       900        0        0       0       0 OK
+35   act-0035       orders             900       900        0        0       0       0 OK
+36   act-0036       orders             900       900        0        0       0       0 OK
+37   act-0037       orders             900       900        0        0       0       0 OK
+38   act-0038       orders             900       900        0        0       0       0 OK
+39   act-0039       orders             900       900        0        0       0       0 OK
+40   act-0040       orders             900       900        0        0       0       0 OK
+41   act-0041       orders             900       900        0        0       0       0 OK
+42   act-0042       orders             900       900        0        0       0       0 OK
+43   act-0043       orders             900       900        0        0       0       0 OK
+44   act-0044       orders             900       900        0        0       0       0 OK
+45   act-0045       orders             900       900        0        0       0       0 OK
+46   act-0046       orders             900       900        0        0       0       0 OK
+47   act-0047       orders             900       900        0        0       0       0 OK
+48   act-0048       orders             900       900        0        0       0       0 OK
+49   act-0049       orders             900       900        0        0       0       0 OK
+50   act-0050       orders             900       900        0        0       0       0 OK
+51   act-0051       orders             900       900        0        0       0       0 OK
+52   act-0052       orders             900       900        0        0       0       0 OK
+53   act-0053       orders             900       900        0        0       0       0 OK
+54   act-0054       orders             900       900        0        0       0       0 OK
+55   act-0055       orders             900       900        0        0       0       0 OK
+56   act-0056       orders             900       900        0        0       0       0 OK
+57   act-0057       orders             900       900        0        0       0       0 OK
+58   act-0058       orders             900       900        0        0       0       0 OK
+59   act-0059       orders             900       900        0        0       0       0 OK
+60   act-0060       orders             900       900        0        0       0       0 OK
+61   act-0061       orders             900       900        0        0       0       0 OK
+62   act-0062       orders             900       900        0        0       0       0 OK
+63   act-0063       orders             900       900        0        0       0       0 OK
+64   act-0064       orders             900       900        0        0       0       0 OK
+65   act-0065       orders             900       900        0        0       0       0 OK
+66   act-0066       orders             900       900        0        0       0       0 OK
+67   act-0067       orders             900       900        0        0       0       0 OK
+68   act-0068       orders             900       900        0        0       0       0 OK
+69   act-0069       orders             900       900        0        0       0       0 OK
+70   act-0070       orders             900       900        0        0       0       0 OK
+71   act-0071       orders             900       900        0        0       0       0 OK
+72   act-0072       orders             900       900        0        0       0       0 OK
+73   act-0073       orders             900       900        0        0       0       0 OK
+74   act-0074       orders             900       900        0        0       0       0 OK
+75   act-0075       orders             900       900        0        0       0       0 OK
+76   act-0076       orders             900       900        0        0       0       0 OK
+77   act-0077       orders             901       901        0        0       0       0 OK
+78   act-0078       orders             900       900        0        0       0       0 OK
+79   act-0079       orders             900       900        0        0       0       0 OK
+80   act-0080       orders             900       900        0        0       0       0 OK
+81   act-0081       orders             900       900        0        0       0       0 OK
+82   act-0082       orders             900       900        0        0       0       0 OK
+83   act-0083       orders             900       900        0        0       0       0 OK
+84   act-0084       orders             900       900        0        0       0       0 OK
+85   act-0085       orders             900       900        0        0       0       0 OK
+86   act-0086       orders             900       900        0        0       0       0 OK
+87   act-0087       orders             900       900        0        0       0       0 OK
+88   act-0088       orders             900       900        0        0       0       0 OK
+89   act-0089       orders             900       900        0        0       0       0 OK
+90   act-0090       orders             900       900        0        0       0       0 OK
+91   act-0091       orders             900       900        0        0       0       0 OK
+92   act-0092       orders             900       900        0        0       0       0 OK
+93   act-0093       orders             900       900        0        0       0       0 OK
+94   act-0094       orders             900       900        0        0       0       0 OK
+95   act-0095       orders             900       900        0        0       0       0 OK
+96   act-0096       orders             900       900        0        0       0       0 OK
+97   act-0097       orders             900       900        0        0       0       0 OK
+98   act-0098       orders             900       900        0        0       0       0 OK
+99   act-0099       orders             900       900        0        0       0       0 OK
+100  act-0100       orders             900       900        0        0       0       0 OK
+101  act-0101       orders             900       900        0        0       0       0 OK
+102  act-0102       orders             900       900        0        0       0       0 OK
+103  act-0103       orders             900       900        0        0       0       0 OK
+104  act-0104       orders             900       900        0        0       0       0 OK
+105  act-0105       orders             900       900        0        0       0       0 OK
+106  act-0106       orders             900       900        0        0       0       0 OK
+107  act-0107       orders             900       900        0        0       0       0 OK
+108  act-0108       orders             900       900        0        0       0       0 OK
+109  act-0109       orders             900       900        0        0       0       0 OK
+110  act-0110       orders             900       900        0        0       0       0 OK
+111  act-0111       orders             900       900        0        0       0       0 OK
+112  act-0112       orders             900       900        0        0       0       0 OK
+113  act-0113       orders             900       900        0        0       0       0 OK
+114  act-0114       orders             900       900        0        0       0       0 OK
+115  act-0115       orders             900       900        0        0       0       0 OK
+116  act-0116       orders             900       900        0        0       0       0 OK
+117  act-0117       orders             900       900        0        0       0       0 OK
+118  act-0118       orders             900       900        0        0       0       0 OK
+119  act-0119       orders             900       900        0        0       0       0 OK
+120  act-0120       orders             900       900        0        0       0       0 OK
+121  act-0121       orders             900       900        0        0       0       0 OK
+122  act-0122       orders             900       900        0        0       0       0 OK
+123  act-0123       orders             900       900        0        0       0       0 OK
+124  act-0124       orders             900       900        0        0       0       0 OK
+125  act-0125       orders             900       900        0        0       0       0 OK
+126  act-0126       orders             900       900        0        0       0       0 OK
+127  act-0127       orders             900       900        0        0       0       0 OK
+128  act-0128       orders             900       900        0        0       0       0 OK
+129  act-0129       orders             900       900        0        0       0       0 OK
+130  act-0130       orders             900       900        0        0       0       0 OK
+131  act-0131       orders             900       900        0        0       0       0 OK
+132  act-0132       orders             900       900        0        0       0       0 OK
+133  act-0133       orders             900       900        0        0       0       0 OK
+134  act-0134       orders             901       901        0        0       0       0 OK
+135  act-0135       orders             900       900        0        0       0       0 OK
+136  act-0136       orders             900       900        0        0       0       0 OK
+137  act-0137       orders             900       900        0        0       0       0 OK
+138  act-0138       orders             900       900        0        0       0       0 OK
+139  act-0139       orders             900       900        0        0       0       0 OK
+140  act-0140       orders             900       900        0        0       0       0 OK
+141  act-0141       orders             900       900        0        0       0       0 OK
+142  act-0142       orders             900       900        0        0       0       0 OK
+143  act-0143       orders             900       900        0        0       0       0 OK
+144  act-0144       orders             900       900        0        0       0       0 OK
+145  act-0145       orders             900       900        0        0       0       0 OK
+146  act-0146       orders             900       900        0        0       0       0 OK
+147  act-0147       orders             900       900        0        0       0       0 OK
+148  act-0148       orders             900       900        0        0       0       0 OK
+149  act-0149       orders             900       900        0        0       0       0 OK
+150  act-0150       orders             900       900        0        0       0       0 OK
+151  act-0151       orders             900       900        0        0       0       0 OK
+152  act-0152       orders             900       900        0        0       0       0 OK
+153  act-0153       orders             900       900        0        0       0       0 OK
+154  act-0154       orders             900       900        0        0       0       0 OK
+155  act-0155       orders             900       900        0        0       0       0 OK
+156  act-0156       orders             900       900        0        0       0       0 OK
+157  act-0157       orders             900       900        0        0       0       0 OK
+158  act-0158       orders             900       900        0        0       0       0 OK
+159  act-0159       orders             900       900        0        0       0       0 OK
+160  act-0160       orders             900       900        0        0       0       0 OK
+161  act-0161       orders             900       900        0        0       0       0 OK
+162  act-0162       orders             900       900        0        0       0       0 OK
+163  act-0163       orders             900       900        0        0       0       0 OK
+164  act-0164       orders             900       900        0        0       0       0 OK
+165  act-0165       orders             900       900        0        0       0       0 OK
+166  act-0166       orders             900       900        0        0       0       0 OK
+167  act-0167       orders             900       900        0        0       0       0 OK
+168  act-0168       orders             900       900        0        0       0       0 OK
+169  act-0169       orders             900       900        0        0       0       0 OK
+170  act-0170       orders             900       900        0        0       0       0 OK
+171  act-0171       orders             900       900        0        0       0       0 OK
+172  act-0172       orders             900       900        0        0       0       0 OK
+173  act-0173       orders             900       900        0        0       0       0 OK
+174  act-0174       orders             900       900        0        0       0       0 OK
+175  act-0175       orders             900       900        0        0       0       0 OK
+176  act-0176       orders             900       900        0        0       0       0 OK
+177  act-0177       orders             900       900        0        0       0       0 OK
+178  act-0178       orders             900       900        0        0       0       0 OK
+179  act-0179       orders             900       900        0        0       0       0 OK
+180  act-0180       orders             900       900        0        0       0       0 OK
+181  act-0181       orders             900       900        0        0       0       0 OK
+182  act-0182       orders             900       900        0        0       0       0 OK
+183  act-0183       orders             900       900        0        0       0       0 OK
+184  act-0184       orders             900       900        0        0       0       0 OK
+185  act-0185       orders             900       900        0        0       0       0 OK
+186  act-0186       orders             900       900        0        0       0       0 OK
+187  act-0187       orders             900       900        0        0       0       0 OK
+188  act-0188       orders             900       900        0        0       0       0 OK
+189  act-0189       orders             900       900        0        0       0       0 OK
+190  act-0190       orders             900       900        0        0       0       0 OK
+191  act-0191       orders             900       900        0        0       0       0 OK
+192  act-0192       orders             900       900        0        0       0       0 OK
+193  act-0193       orders             900       900        0        0       0       0 OK
+194  act-0194       orders             900       900        0        0       0       0 OK
+195  act-0195       orders             900       900        0        0       0       0 OK
+196  act-0196       orders             900       900        0        0       0       0 OK
+197  act-0197       orders             900       900        0        0       0       0 OK
+198  act-0198       orders             900       900        0        0       0       0 OK
+199  act-0199       orders             900       900        0        0       0       0 OK
+200  act-0200       orders             900       900        0        0       0       0 OK
+201  act-0201       orders             900       900        0        0       0       0 OK
+202  act-0202       orders             900       900        0        0       0       0 OK
+203  act-0203       orders             900       900        0        0       0       0 OK
+204  act-0204       orders             900       900        0        0       0       0 OK
+205  act-0205       orders             900       900        0        0       0       0 OK
+206  act-0206       orders             900       900        0        0       0       0 OK
+207  act-0207       orders             900       900        0        0       0       0 OK
+208  act-0208       orders             900       900        0        0       0       0 OK
+209  act-0209       orders             900       900        0        0       0       0 OK
+210  act-0210       orders             900       900        0        0       0       0 OK
+211  act-0211       orders             900       900        0        0       0       0 OK
+212  act-0212       orders             900       900        0        0       0       0 OK
+213  act-0213       orders             900       900        0        0       0       0 OK
+214  act-0214       orders             900       900        0        0       0       0 OK
+215  act-0215       orders             900       900        0        0       0       0 OK
+216  act-0216       orders             900       900        0        0       0       0 OK
+217  act-0217       orders             900       900        0        0       0       0 OK
+218  act-0218       orders             900       900        0        0       0       0 OK
+219  act-0219       orders             900       900        0        0       0       0 OK
+220  act-0220       orders             900       900        0        0       0       0 OK
+221  act-0221       orders             901       901        0        0       0       0 OK
+222  act-0222       orders             900       900        0        0       0       0 OK
+223  act-0223       orders             900       900        0        0       0       0 OK
+224  act-0224       orders             900       900        0        0       0       0 OK
+225  act-0225       orders             900       900        0        0       0       0 OK
+226  act-0226       orders             900       900        0        0       0       0 OK
+227  act-0227       orders             900       900        0        0       0       0 OK
+228  act-0228       orders             900       900        0        0       0       0 OK
+229  act-0229       orders             900       900        0        0       0       0 OK
+230  act-0230       orders             900       900        0        0       0       0 OK
+231  act-0231       orders             900       900        0        0       0       0 OK
+232  act-0232       orders             900       900        0        0       0       0 OK
+233  act-0233       orders             900       900        0        0       0       0 OK
+234  act-0234       orders             900       900        0        0       0       0 OK
+235  act-0235       orders             900       900        0        0       0       0 OK
+236  act-0236       orders             900       900        0        0       0       0 OK
+237  act-0237       orders             900       900        0        0       0       0 OK
+238  act-0238       orders             900       900        0        0       0       0 OK
+239  act-0239       orders             900       900        0        0       0       0 OK
+240  act-0240       orders             900       900        0        0       0       0 OK
+241  act-0241       orders             900       900        0        0       0       0 OK
+242  act-0242       orders             900       900        0        0       0       0 OK
+243  act-0243       orders             900       900        0        0       0       0 OK
+244  act-0244       orders             900       900        0        0       0       0 OK
+245  act-0245       orders             900       900        0        0       0       0 OK
+246  act-0246       orders             900       900        0        0       0       0 OK
+247  act-0247       orders             900       900        0        0       0       0 OK
+248  act-0248       orders             900       900        0        0       0       0 OK
+249  act-0249       orders             900       900        0        0       0       0 OK
+250  act-0250       orders             900       900        0        0       0       0 OK
+251  act-0251       orders             900       900        0        0       0       0 OK
+252  act-0252       orders             900       900        0        0       0       0 OK
+253  act-0253       orders             900       900        0        0       0       0 OK
+254  act-0254       orders             900       900        0        0       0       0 OK
+255  act-0255       orders             900       900        0        0       0       0 OK
+256  act-0256       orders             900       900        0        0       0       0 OK
+257  act-0257       orders             900       900        0        0       0       0 OK
+258  act-0258       orders             900       900        0        0       0       0 OK
+259  act-0259       orders             900       900        0        0       0       0 OK
+260  act-0260       orders             900       900        0        0       0       0 OK
+261  act-0261       orders             900       900        0        0       0       0 OK
+262  act-0262       orders             900       900        0        0       0       0 OK
+263  act-0263       orders             900       900        0        0       0       0 OK
+264  act-0264       orders             900       900        0        0       0       0 OK
+265  act-0265       orders             900       900        0        0       0       0 OK
+266  act-0266       orders             900       900        0        0       0       0 OK
+267  act-0267       orders             900       900        0        0       0       0 OK
+268  act-0268       orders             900       900        0        0       0       0 OK
+269  act-0269       orders             900       900        0        0       0       0 OK
+     TOTAL                          243003    243003        0        0       0       0
+VERDICT: PASS
+
+[artifacts] /root/ladder2/r3000-active.json
+            /root/ladder2/r3000-active-interval.csv

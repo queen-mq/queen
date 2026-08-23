@@ -178,7 +178,13 @@ async fn async_main(worker_threads: usize) {
     });
 
     st.cache.spawn_listener();
+    // Batched api_keys.last_used_at: one statement per interval, off the
+    // request path.
+    st.cache.spawn_touch_flush();
     st.registry.spawn_reconciler();
+    // Queue rows admitted on the data path, coalesced per (cluster, queue) and
+    // written once per tick -- never awaited by a push.
+    st.registry.spawn_persister();
     // Deny-list GC: drops revoked_tokens rows past their own exp.
     auth::spawn_revocation_sweep(st.clone());
     // Daily usage rollup (usage_minutes -> usage_days) + monthly quota checks.
@@ -263,24 +269,29 @@ async fn async_main(worker_threads: usize) {
             .expect("serve"),
     }
 
-    // Past this point the listener is closed. Metering is still in memory:
-    // flush it before the process goes away, or the open minute is silently
-    // lost on every restart.
+    // Past this point the listener is closed. Metering and the registry's
+    // pending queue rows are still in memory: flush them before the process
+    // goes away, or the open minute is silently lost on every restart.
     drain_usage(&st).await;
 }
 
-/// Flush the metering accumulators on the way out. `Meter::drain` spools to
-/// disk when pxdb will not take the rows, so the bound here is purely about not
-/// hanging on a dead pxdb — the spool, not this timeout, is what keeps the
-/// usage (recovered by `spawn_flush` on the next start).
+/// Flush the metering accumulators and the registry's pending queue rows on
+/// the way out. `Meter::drain` spools to disk when pxdb will not take the
+/// rows, so the bound here is purely about not hanging on a dead pxdb — the
+/// spool, not this timeout, is what keeps the usage (recovered by
+/// `spawn_flush` on the next start). A queue row that misses the bound is a
+/// restart-safety floor the reconciler rewrites on its next pass.
 async fn drain_usage(st: &St) {
     let budget = config::shutdown_drain_budget();
     let started = std::time::Instant::now();
-    match tokio::time::timeout(budget, st.meter.drain()).await {
+    let drains = async {
+        tokio::join!(st.meter.drain(), st.registry.drain());
+    };
+    match tokio::time::timeout(budget, drains).await {
         Ok(()) => tracing::info!(
             target: "meter",
             ms = started.elapsed().as_millis() as u64,
-            "usage drained at shutdown"
+            "usage and queue rows drained at shutdown"
         ),
         Err(_) => tracing::warn!(
             target: "meter",

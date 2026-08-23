@@ -169,14 +169,140 @@ func TestLatencyHistogramPercentiles(t *testing.T) {
 	var c Counters
 	// 99 observations at 1ms, 1 at 1s: p50 ~1ms, p99 well above.
 	for i := 0; i < 99; i++ {
-		c.ObserveE2E(FlowA, 1000)
+		c.ObserveE2E(FlowA, CohortCold, 1000)
 	}
-	c.ObserveE2E(FlowA, 1000000)
+	c.ObserveE2E(FlowA, CohortCold, 1000000)
 	p50, _, p99 := c.E2E(FlowA)
 	if p50 < 0.9 || p50 > 1.3 {
 		t.Fatalf("p50 should be ~1ms, got %.3fms", p50)
 	}
 	if p99 < 1.0 {
 		t.Fatalf("p99 should be well above p50, got %.3fms", p99)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// hot-entity skew
+// ---------------------------------------------------------------------------
+
+// The scheduler's whole job is to hand the hot cohort exactly its configured
+// share. If it drifts, every isolation number is measured against a workload
+// nobody declared, so this is checked exactly rather than approximately.
+func TestPropSelectorHotShareIsExact(t *testing.T) {
+	const props, hot, factor = 1000, 1, 100
+	s := newPropSelector(props, hot, factor)
+	total := hot*factor + (props - hot) // one full Bresenham window
+	counts := map[int]int{}
+	for i := 0; i < total*7; i++ {
+		counts[s.next()]++
+	}
+	if got, want := counts[0], factor*7; got != want {
+		t.Fatalf("hot key got %d events over 7 windows, want exactly %d", got, want)
+	}
+	for p := hot; p < props; p++ {
+		if counts[p] != 7 {
+			t.Fatalf("cold key %d got %d events, want 7", p, counts[p])
+		}
+	}
+}
+
+// A hot entity delivered in a burst is a buffering test, not a head-of-line
+// test. Assert the hot key is spread through the window instead of clumped.
+func TestPropSelectorInterleavesHotKey(t *testing.T) {
+	s := newPropSelector(1000, 1, 100)
+	var maxRun, run int
+	for i := 0; i < 1099; i++ {
+		if s.next() == 0 {
+			run++
+			if run > maxRun {
+				maxRun = run
+			}
+		} else {
+			run = 0
+		}
+	}
+	if maxRun > 1 {
+		t.Fatalf("hot key emitted in runs of %d; expected it interleaved one at a time", maxRun)
+	}
+}
+
+// Uniform must stay byte-identical to the pre-skew round robin, so a baseline
+// cell is the same workload it always was.
+func TestPropSelectorUniformIsRoundRobin(t *testing.T) {
+	for _, s := range []*propSelector{
+		newPropSelector(5, 0, 1),   // no hot keys
+		newPropSelector(5, 1, 1),   // factor 1 = no concentration
+		newPropSelector(5, 5, 100), // every key hot = no cold cohort
+	} {
+		for i := 0; i < 12; i++ {
+			if got, want := s.next(), i%5; got != want {
+				t.Fatalf("uniform selector gave %d, want %d", got, want)
+			}
+		}
+	}
+}
+
+func TestCohortAndLaneMath(t *testing.T) {
+	tp := DefaultTopology()
+	tp.Properties, tp.RateEvents = 1000, 2000
+	tp.HotProps, tp.HotFactor = 1, 100
+
+	if tp.CohortOf(0) != CohortHot || tp.CohortOf(1) != CohortCold {
+		t.Fatal("cohort boundary is wrong")
+	}
+	hot, cold := tp.PerLaneRate()
+	// flow rate 1000/s over weight 100 + 999 cold: hot ~91/s, cold ~0.91/s.
+	if hot < 90 || hot > 92 {
+		t.Fatalf("hot lane rate %.2f/s, want ~91", hot)
+	}
+	if cold < 0.85 || cold > 0.95 {
+		t.Fatalf("cold lane rate %.2f/s, want ~0.91", cold)
+	}
+	// Serial (batch 1) the lane drains at ~33/s; a batch of 10 raises it 10x.
+	if ceil := tp.LaneCeiling(1); ceil < 33 || ceil > 34 {
+		t.Fatalf("serial lane ceiling %.1f/s, want ~33.3 at 30ms of work", ceil)
+	}
+	if ceil := tp.LaneCeiling(10); ceil < 333 || ceil > 334 {
+		t.Fatalf("batch-10 lane ceiling %.1f/s, want ~333", ceil)
+	}
+	if !tp.HotSaturated(1) {
+		t.Fatal("91/s offered onto a serial 33/s lane must report as saturated")
+	}
+	if tp.HotSaturated(10) {
+		t.Fatal("91/s against a batch-10 ceiling of 333/s is not saturated")
+	}
+	tp.HotFactor = 10 // ~9.9/s: comfortably under even the serial ceiling
+	if tp.HotSaturated(1) {
+		t.Fatal("10x should be below the serial lane ceiling")
+	}
+}
+
+// The flow totals must keep counting every observation regardless of cohort,
+// so skew builds stay comparable with pre-skew results.
+func TestCohortSplitIsAdditive(t *testing.T) {
+	var c Counters
+	for i := 0; i < 40; i++ {
+		c.ObserveE2E(FlowA, CohortCold, 1000)
+	}
+	for i := 0; i < 10; i++ {
+		c.ObserveE2E(FlowA, CohortHot, 500000)
+	}
+	if got := c.DeliveredCohort(CohortHot); got != 10 {
+		t.Fatalf("hot deliveries %d, want 10", got)
+	}
+	if got := c.DeliveredCohort(CohortCold); got != 40 {
+		t.Fatalf("cold deliveries %d, want 40", got)
+	}
+	_, _, cold99 := c.E2ECohortBoth(CohortCold)
+	_, _, hot99 := c.E2ECohortBoth(CohortHot)
+	if cold99 > 2 {
+		t.Fatalf("cold p99 %.2fms should stay ~1ms and not absorb hot observations", cold99)
+	}
+	if hot99 < 100 {
+		t.Fatalf("hot p99 %.2fms should reflect the 500ms observations", hot99)
+	}
+	// p99 of the merged flow-A histogram must see the hot tail.
+	if _, _, all99 := c.E2E(FlowA); all99 < 100 {
+		t.Fatalf("flow total p99 %.2fms lost the hot tail", all99)
 	}
 }

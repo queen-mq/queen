@@ -1,0 +1,46 @@
+goload -mode cloud [pro-n20-q13] -> http://10.114.0.2:6711
+  target=proxy tenants=20 sharedQueue=true queue="app-q13" group="workers" partitions=500 brokerTenantHeader=false
+  offered=50.0 msg/s total (2.50/tenant) push-batch=1 -> 2.50 req/s per tenant across 1 producer(s) | max-inflight=4096
+  consumers=1/tenant popBatch=100 popWait=true autoAck=false | payload=256B | duration=120s drain=45s | idleConns=209/client verify=true
+[configure] 20 queue(s) configured in 0.13s
+[11:14:40 load ] offered=      50/s push=      50/s pop=      50/s ack=      50/s shed=      0/s inflight=    0 | e2e p50=  16.51 p99=  296.96 ms | pushRTT p50=  7.84 p99=  32.13 ms | lag=0 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=123
+[11:15:40 load ] offered=      50/s push=      50/s pop=      50/s ack=      50/s shed=      0/s inflight=    0 | e2e p50=  16.06 p99=   39.68 ms | pushRTT p50=  7.78 p99=  22.66 ms | lag=0 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=123
+[drain] producers stopped after 120.0s; draining 45s before the correctness verdict
+
+========== pro-n20-q13 ==========
+offered         50.0 msg/s (6000 msgs, 0 shed)
+achieved  push     50.0 msg/s (6000 msgs)   pop     50.0 msg/s during load (    36.4 msg/s over load+drain, 6000 msgs)   ack 6000 msgs
+e2eFromSchedule  n=6000      p50=   16.32 p95=   32.13 p99=  261.12 p999=  432.13 max=   459.43 ms
+e2eFromSend      n=6000      p50=   15.68 p95=   31.36 p99=  261.12 p999=  432.13 max=   459.25 ms
+pushRtt          n=6000      p50=    7.84 p95=   15.68 p99=   26.50 p999=   64.77 max=    99.86 ms
+ackRtt           n=5989      p50=    4.08 p95=    8.51 p99=   12.35 p999=   24.45 max=    37.50 ms
+errors            none
+bytes     nominal 292 B/msg -> pushed 1.67 MiB, delivered 1.67 MiB
+
+---- delivery correctness (after the drain) ----
+idx  tenant         queue           sentOk  received  missing      dup   extra   cross verdict
+0    cp-0000        app-q13            300       300        0        0       0       0 OK
+1    cp-0001        app-q13            300       300        0        0       0       0 OK
+2    cp-0002        app-q13            300       300        0        0       0       0 OK
+3    cp-0003        app-q13            300       300        0        0       0       0 OK
+4    cp-0004        app-q13            300       300        0        0       0       0 OK
+5    cp-0005        app-q13            300       300        0        0       0       0 OK
+6    cp-0006        app-q13            300       300        0        0       0       0 OK
+7    cp-0007        app-q13            300       300        0        0       0       0 OK
+8    cp-0008        app-q13            300       300        0        0       0       0 OK
+9    cp-0009        app-q13            300       300        0        0       0       0 OK
+10   cp-0010        app-q13            300       300        0        0       0       0 OK
+11   cp-0011        app-q13            300       300        0        0       0       0 OK
+12   cp-0012        app-q13            300       300        0        0       0       0 OK
+13   cp-0013        app-q13            300       300        0        0       0       0 OK
+14   cp-0014        app-q13            300       300        0        0       0       0 OK
+15   cp-0015        app-q13            300       300        0        0       0       0 OK
+16   cp-0016        app-q13            300       300        0        0       0       0 OK
+17   cp-0017        app-q13            300       300        0        0       0       0 OK
+18   cp-0018        app-q13            300       300        0        0       0       0 OK
+19   cp-0019        app-q13            300       300        0        0       0       0 OK
+     TOTAL                            6000      6000        0        0       0       0
+VERDICT: PASS
+
+[artifacts] /root/cap16-pro/pro-n20-q13.json
+            /root/cap16-pro/pro-n20-q13-interval.csv

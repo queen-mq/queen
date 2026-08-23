@@ -414,34 +414,16 @@ pub async fn pop_list_tx(
     Ok((row.get(0), row.get(1), row.get(2)))
 }
 
-// 19-wildcard-hotlist §8: reseed / cold-start keyset discovery. One bounded page
-// of probably-pending partitions for (queue, group) with id > after_id, in id
-// order. Returns (partition_id_text, partition_name) rows; the broker interns
-// the name, remembers the id for the ack bridge, and marks each into the ring.
-pub async fn hotlist_reseed(
-    client: &deadpool_postgres::Client,
-    queue: &str,
-    group: &str,
-    after_id: &str,
-    limit: i32,
-    tenant: &str,
-) -> Result<Vec<(String, String)>, tokio_postgres::Error> {
-    let stmt = client
-        .prepare_cached(
-            "SELECT r_id::text, r_name \
-             FROM queen.log_hotlist_reseed_v1($1,$2,$3::text::uuid,$4,$5::text::uuid)",
-        )
-        .await?;
-    let rows = client
-        .query(&stmt, &[&queue, &group, &after_id, &limit, &tenant])
-        .await?;
-    Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
-}
-
-// 19-wildcard-hotlist §8: the WINDOWED reseed — the same page, bounded to the
-// partitions written in the last `window_ms`. A separate prepared statement, not a
-// parameter on the one above: under a generic plan a window folded into an OR loses
-// the (queue_id, last_write_at) index bound, which is the whole point.
+// 19-wildcard-hotlist §8: THE reseed page — one bounded page of a (queue, group)'s
+// probably-pending partitions written since `cutoff` (or in the last `window_ms` when
+// no cutoff is bound yet), keyset on (last_write_at, id). Both reseed modes run this
+// statement; a full walk pins the cutoff to '-infinity' (ReseedMode::scan_bounds).
+// The dedicated full-walk statement this replaced on 2026-08-23, log_hotlist_reseed_v1
+// (keyset on id, queues joined as a relation), read every partition in the CELL under
+// the generic plan prepare_cached converges to — see hotlist_reseed_run and the SQL
+// header. The window stays a parameter of THIS statement rather than an OR on the old
+// one for the same planner reason: folded into an OR it loses the (queue_id,
+// last_write_at) index bound, which is the whole point.
 //
 // The keyset is (last_write_at, id) — see the SQL header for why the ordering is
 // load-bearing. Both halves cross the wire as TEXT and are cast in SQL, the same

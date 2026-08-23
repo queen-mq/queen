@@ -111,9 +111,73 @@ type ProducerConfig struct {
 	Rate       int
 	RampSec    int
 	Properties int
+	HotProps   int // entities receiving HotFactor x a cold entity's share
+	HotFactor  int // 0 or 1 = uniform
 	Shards     int // ordered pusher shards; property -> shard is fixed
 	ChanCap    int // per-shard queue depth; full => shed
 	RatesPad   []byte
+}
+
+// propSelector deals out the next property to publish.
+//
+// Uniform is a plain round robin, unchanged from the pre-skew harness. Skewed
+// uses exact integer Bresenham: across every window of hotWeight+coldCount
+// events, exactly hotWeight land on the hot cohort, spread as evenly as integer
+// arithmetic allows. Even spreading is the point — a hot entity delivered in
+// bursts is a buffering test, while a hot entity delivered steadily is a
+// head-of-line test, and only the second one is what a noisy neighbour is.
+//
+// No randomness: the same flags produce the same sequence on every run and on
+// every system under test, so a skew cell is as reproducible as a uniform one.
+type propSelector struct {
+	properties int
+	hotProps   int
+	hotWeight  int
+	coldCount  int
+	total      int
+	acc        int
+	hotNext    int
+	coldNext   int
+	rrNext     int
+}
+
+func newPropSelector(properties, hotProps, hotFactor int) *propSelector {
+	s := &propSelector{properties: properties}
+	if hotProps <= 0 || hotFactor <= 1 || hotProps >= properties {
+		return s // uniform
+	}
+	s.hotProps = hotProps
+	s.hotWeight = hotProps * hotFactor
+	s.coldCount = properties - hotProps
+	s.total = s.hotWeight + s.coldCount
+	return s
+}
+
+func (s *propSelector) next() int {
+	if s.hotProps == 0 {
+		p := s.rrNext
+		s.rrNext++
+		if s.rrNext >= s.properties {
+			s.rrNext = 0
+		}
+		return p
+	}
+	s.acc += s.hotWeight
+	if s.acc >= s.total {
+		s.acc -= s.total
+		p := s.hotNext
+		s.hotNext++
+		if s.hotNext >= s.hotProps {
+			s.hotNext = 0
+		}
+		return p
+	}
+	p := s.hotProps + s.coldNext
+	s.coldNext++
+	if s.coldNext >= s.coldCount {
+		s.coldNext = 0
+	}
+	return p
 }
 
 // RunProducer paces one flow and publishes its events SINGLY (batch of 1 — the
@@ -179,13 +243,9 @@ func RunProducer(ctx context.Context, wg *sync.WaitGroup, publish PublishFunc,
 				close(ch)
 			}
 		}()
-		next := 0
+		sel := newPropSelector(cfg.Properties, cfg.HotProps, cfg.HotFactor)
 		Pacer(ctx, cfg.Rate, cfg.RampSec, func(sched time.Time) {
-			prop := next
-			next++
-			if next >= cfg.Properties {
-				next = 0
-			}
+			prop := sel.next()
 			c.Offered.Add(1)
 			ch := chans[prop%shards]
 			// Reserve the seq only if the shard can take the job: a full

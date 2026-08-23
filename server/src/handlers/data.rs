@@ -2000,7 +2000,7 @@ fn finish_pop_serve(
 }
 
 // 19-wildcard-hotlist §8: keyset-paginated reseed. Walk the (queue, group)'s
-// probably-pending partitions in id order (bounded ~10k pages), interning each
+// probably-pending partitions in (last_write_at, id) order (bounded ~10k pages), interning each
 // name + remembering its id and marking it into the ring, then stamp the reseed
 // clock. This is the cold-start populator AND the correctness floor for any
 // missed mark / dropped mesh hint.
@@ -2118,8 +2118,8 @@ pub(crate) async fn hotlist_reseed_full(
 }
 
 // The shared keyset walk. The ticket carries the ring the rows land on and the mode
-// that picks the SQL; `broadcast` additionally queues each discovered partition as a
-// mesh dirty hint.
+// that picks the bound the one reseed statement is pinned to; `broadcast` additionally
+// queues each discovered partition as a mesh dirty hint.
 //
 // Errors abandon the walk (the next attempt retries) — the ring simply stays as-is,
 // never wrong. The clock is stamped even on a failed walk, deliberately: it is the
@@ -2135,77 +2135,69 @@ async fn hotlist_reseed_run(
     let mode = ticket.mode();
     let (tenant, queue) = split_tenant_queue(ticket.qkey());
     let group = ticket.group();
-    // The two scans keyset on different columns — the full walk on id, the windowed
-    // one on (last_write_at, id) — so the cursor carries both halves and each mode
-    // advances the part it owns. `after_write` is an opaque echo of the timestamp the
-    // previous page returned; '-infinity' starts a walk.
+    // ONE statement for both modes, log_hotlist_reseed_window_v1, keyset on
+    // (last_write_at, id); the mode only decides the lower bound it is pinned to
+    // (ReseedMode::scan_bounds). The full walk used to be its own statement,
+    // log_hotlist_reseed_v1, keyset on id with queen.queues joined as a relation — and
+    // under the GENERIC plan prepare_cached converges to after five executions, every
+    // parameter is unknown, p_limit included, which the planner assumes keeps 10% of
+    // the rows: an ordered walk of log_partitions_pkey with the queue as a join filter
+    // then looked 10x cheaper than the bitmap on the queue's own index and won. At run
+    // time the limit is 10k, above every queue, so the walk never stopped early: every
+    // page read EVERY partition in the cell. Measured on the 2026-08-22 soak's shape
+    // (229 rings, 827k partitions): 851k buffers and 303 ms per ring against 20k and
+    // ~10 ms for the custom plan, the same for a 500-partition queue as for a 5,000
+    // one — 229 full-cell scans per five-minute cycle, about one core continuously,
+    // and growing with the partitions heap (every push bumps the indexed
+    // last_write_at, so none of those updates is HOT: 124 -> 228 MB in thirty minutes
+    // of pushes). The windowed statement orders by its index's own leading columns and
+    // resolves the queue by scalar subquery, which removes that plan structurally (its
+    // header in 004_log_pop.sql); pinned to '-infinity' it returns the id-keyset walk's
+    // exact set in (last_write_at, id) order, which a reseed does not care about.
+    // Same shape, same generic plan: 25k buffers, 19 ms, Theta(partitions in the queue).
+    //
+    // `after_write`/`after_id` are an opaque echo of the last row the previous page
+    // returned; ('-infinity', nil) starts a walk. B1: the lower bound belongs to the
+    // WALK, not to the page — each page is its own statement with its own now(), so
+    // re-deriving it per page let the bound creep forward while the cursor climbed from
+    // the oldest row, and a partition written into the band between the two was
+    // excluded before the cursor reached it. The first windowed page derives the cutoff
+    // and reports it, the rest echo it back; a full walk starts with it pinned.
+    let (window_ms, pinned) = mode.scan_bounds();
     let mut after_id = NIL_UUID.to_string();
     let mut after_write = "-infinity".to_string();
-    // B1: the windowed walk's lower bound belongs to the WALK, not to the page. Each
-    // page is its own statement with its own now(), so re-deriving it per page let the
-    // bound creep forward while the cursor climbed from the oldest row — a partition
-    // written into the band between the two was excluded by the bound before the cursor
-    // reached it. The first page derives the cutoff and reports it; the rest echo it
-    // back, exactly like the keyset cursor beside it.
-    let mut cutoff: Option<String> = None;
+    let mut cutoff: Option<String> = pinned.map(str::to_string);
     let mut ok = true;
     let mut seen = 0usize;
     for _ in 0..HOTLIST_RESEED_MAX_PAGES {
-        let rows = match mode {
-            crate::hotlist::ReseedMode::Full => {
-                match db::hotlist_reseed(
-                    client,
-                    queue,
-                    group,
-                    &after_id,
-                    HOTLIST_RESEED_PAGE,
-                    tenant,
-                )
-                .await
-                {
-                    Ok(r) => {
-                        if let Some((id, _)) = r.last() {
-                            after_id = id.clone();
-                        }
-                        r
-                    }
-                    Err(_) => {
-                        ok = false;
-                        break;
-                    }
+        // Bound before the match: the borrow of `cutoff` in the argument list would
+        // otherwise outlive the arm that assigns it.
+        let page = db::hotlist_reseed_window(
+            client,
+            queue,
+            group,
+            &after_write,
+            &after_id,
+            HOTLIST_RESEED_PAGE,
+            window_ms,
+            cutoff.as_deref(),
+            tenant,
+        )
+        .await;
+        let rows = match page {
+            Ok((r, cut)) => {
+                if let Some((id, _, write)) = r.last() {
+                    after_id = id.clone();
+                    after_write = write.clone();
                 }
+                if cutoff.is_none() {
+                    cutoff = cut;
+                }
+                r.into_iter().map(|(id, name, _)| (id, name)).collect::<Vec<_>>()
             }
-            crate::hotlist::ReseedMode::Window(window_ms) => {
-                // Bound before the match: the borrow of `cutoff` in the argument list
-                // would otherwise outlive the arms that assign it.
-                let page = db::hotlist_reseed_window(
-                    client,
-                    queue,
-                    group,
-                    &after_write,
-                    &after_id,
-                    HOTLIST_RESEED_PAGE,
-                    window_ms,
-                    cutoff.as_deref(),
-                    tenant,
-                )
-                .await;
-                match page {
-                    Ok((r, cut)) => {
-                        if let Some((id, _, write)) = r.last() {
-                            after_id = id.clone();
-                            after_write = write.clone();
-                        }
-                        if cutoff.is_none() {
-                            cutoff = cut;
-                        }
-                        r.into_iter().map(|(id, name, _)| (id, name)).collect::<Vec<_>>()
-                    }
-                    Err(_) => {
-                        ok = false;
-                        break;
-                    }
-                }
+            Err(_) => {
+                ok = false;
+                break;
             }
         };
         if rows.is_empty() {

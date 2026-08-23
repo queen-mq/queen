@@ -16,6 +16,12 @@
 //! value, and a cursor that mishandled them would either loop forever or skip a
 //! page.
 //!
+//! Since 2026-08-23 the broker's FULL walk is this statement too, with the cutoff
+//! pinned to '-infinity' from the first page (`ReseedMode::scan_bounds`): the
+//! dedicated full-walk statement read every partition in the cell under the generic
+//! plan (its header in 004_log_pop.sql). So the equivalence below is the full walk's
+//! own contract now, and the last block pins the plan the whole move rests on.
+//!
 //! Needs a throwaway Postgres, so it is `#[ignore]` for a plain `cargo test`:
 //!
 //! ```bash
@@ -128,6 +134,65 @@ async fn windowed_walk(
 ) -> (Vec<String>, usize) {
     let (out, pages, _) = windowed_walk_paced(c, queue, group, window_ms, page, true, 0).await;
     (out, pages)
+}
+
+/// The broker's FULL walk since 2026-08-23: the same statement with the cutoff pinned
+/// to '-infinity' before the first page and `p_window_ms` = 0, which is unread once a
+/// cutoff is bound — exactly `ReseedMode::Full.scan_bounds()` — paginated at `page`.
+async fn unbounded_walk(
+    c: &tokio_postgres::Client,
+    queue: &str,
+    group: &str,
+    page: i32,
+) -> (Vec<String>, usize) {
+    let mut after_write = "-infinity".to_string();
+    let mut after_id = NIL.to_string();
+    let cutoff = Some("-infinity".to_string());
+    let mut out = Vec::new();
+    let mut pages = 0usize;
+    loop {
+        let rows = c
+            .query(
+                "SELECT r_id::text, r_write::text, r_cutoff::text \
+                 FROM queen.log_hotlist_reseed_window_v1\
+                 ($1,$2,$3::text::timestamptz,$4::text::uuid,$5,$6,\
+                  $7::text::uuid,$8::text::timestamptz)",
+                &[&queue, &group, &after_write, &after_id, &page, &0i64, &DEFAULT_TENANT, &cutoff],
+            )
+            .await
+            .expect("unbounded walk");
+        if rows.is_empty() {
+            break;
+        }
+        pages += 1;
+        for r in &rows {
+            out.push(r.get::<_, String>(0));
+        }
+        let last = rows.last().unwrap();
+        after_id = last.get::<_, String>(0);
+        after_write = last.get::<_, String>(1);
+        assert_eq!(
+            last.get::<_, String>(2),
+            "-infinity",
+            "a pinned cutoff must come back unchanged on every page"
+        );
+        if rows.len() < page as usize {
+            break;
+        }
+        assert!(pages < 200, "keyset made no progress: {pages} pages");
+    }
+    (out, pages)
+}
+
+/// One line per plan node, the way EXPLAIN prints it.
+async fn explain(c: &tokio_postgres::Client, sql: &str) -> String {
+    c.query(&format!("EXPLAIN (COSTS OFF) {sql}"), &[])
+        .await
+        .expect("explain")
+        .iter()
+        .map(|r| r.get::<_, String>(0))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -254,6 +319,27 @@ async fn windowed_reseed_matches_the_full_walk() {
         "paginated windowed walk must cover the full set exactly once"
     );
 
+    // ------------------------------------------- the FULL walk (2026-08-23)
+    // The broker's full walk is this statement with the cutoff pinned to '-infinity'
+    // before the first page. Paged at 100 it crosses the same five pages of the tie
+    // group the windowed walk just crossed, and it must be log_hotlist_reseed_v1's
+    // exact set, once — that equivalence is what made the move safe.
+    let (unbounded, unbounded_pages) = unbounded_walk(&c, &queue, group, 100).await;
+    assert!(unbounded_pages > 4, "expected several pages at 100/page, got {unbounded_pages}");
+    let unique_unbounded: std::collections::HashSet<_> = unbounded.iter().cloned().collect();
+    assert_eq!(
+        unique_unbounded.len(),
+        unbounded.len(),
+        "the pinned walk returned {} duplicate rows across {unbounded_pages} pages",
+        unbounded.len() - unique_unbounded.len()
+    );
+    let mut unbounded_sorted = unbounded.clone();
+    unbounded_sorted.sort();
+    assert_eq!(
+        unbounded_sorted, full,
+        "the walk pinned to '-infinity' must return exactly the old full walk's set"
+    );
+
     // ------------------------------------------------- a zero-width window
     // window_ms = 0 is "written at or after now", which no seeded row satisfies.
     // It must return nothing rather than error or fall back to everything: the
@@ -314,7 +400,92 @@ async fn windowed_reseed_matches_the_full_walk() {
         .len();
     assert_eq!(unbounded, 4, "an explicit cutoff must override p_window_ms");
 
+    // ---------------------------------------------- the plan, GENERIC (2026-08-23)
+    // Why the full walk moved onto this statement. The broker calls it through
+    // prepare_cached, so after five executions Postgres may switch to a generic plan in
+    // which every parameter is unknown — p_limit included, which the planner then
+    // assumes keeps 10% of the rows. On the old full-walk statement that made an
+    // ordered walk of log_partitions_pkey, with the queue applied as a join filter
+    // afterwards, look 10x cheaper than the bitmap on the queue's own index, and it
+    // won: every page read every partition in the cell (851k buffers against 20k on the
+    // 827k-partition soak shape). This statement orders by its index's own leading
+    // columns and resolves the queue by scalar subquery, so no such plan exists for it.
+    // Forty queues of 2,000 partitions is enough for the planner to take the bait on the
+    // old statement (the control) and to prefer the index on this one (the guard).
+    let planq = unique("planq");
+    seed_bulk(&c, &planq, 40, 2_000, group).await;
+    c.batch_execute(
+        "ANALYZE queen.queues; ANALYZE queen.log_partitions; ANALYZE queen.log_consumers; \
+         SET plan_cache_mode = force_generic_plan; \
+         PREPARE reseed_page(text,text,text,text,int,bigint,text,text) AS \
+           SELECT r_id::text, r_name, r_write::text, r_cutoff::text \
+           FROM queen.log_hotlist_reseed_window_v1($1,$2,$3::text::timestamptz,$4::text::uuid,$5,$6,\
+                                                   $7::text::uuid,$8::text::timestamptz); \
+         PREPARE reseed_v1(text,text,text,int,text) AS \
+           SELECT r_id::text, r_name FROM queen.log_hotlist_reseed_v1($1,$2,$3::text::uuid,$4,$5::text::uuid)",
+    )
+    .await
+    .expect("analyze + prepare under a generic plan");
+    let q7 = format!("{planq}-q7");
+    let plan = explain(
+        &c,
+        &format!("EXECUTE reseed_page('{q7}','{group}','-infinity','{NIL}',10000,0,'{DEFAULT_TENANT}','-infinity')"),
+    )
+    .await;
+    assert!(
+        plan.contains("idx_log_partitions_queue_write"),
+        "the full walk's generic plan must be bounded by the queue's own index:\n{plan}"
+    );
+    assert!(
+        !plan.contains("log_partitions_pkey"),
+        "the full walk's generic plan walked the partitions table in PK order:\n{plan}"
+    );
+    // The control: the statement the broker used to run, on the same data and plan
+    // mode. If this ever stops taking the PK walk, the planner has changed — re-verify
+    // at scale before trusting the guard above to mean anything.
+    let control = explain(
+        &c,
+        &format!("EXECUTE reseed_v1('{q7}','{group}','{NIL}',10000,'{DEFAULT_TENANT}')"),
+    )
+    .await;
+    assert!(
+        control.contains("Index Scan using log_partitions_pkey"),
+        "control: log_hotlist_reseed_v1 no longer takes the PK walk under a generic plan:\n{control}"
+    );
+    c.batch_execute("DEALLOCATE ALL; RESET plan_cache_mode").await.ok();
+
     broker.shutdown().await;
+}
+
+/// `nq` queues `<prefix>-q1..` of `np` partitions each, every partition holding data
+/// (last_offset = 10) with last_write_at spread over the last hour, and a consumer row
+/// for `group` on two thirds of them (half consumed, half behind): the population the
+/// planner sees, not the rows a walk returns.
+async fn seed_bulk(c: &tokio_postgres::Client, prefix: &str, nq: i32, np: i32, group: &str) {
+    c.execute(
+        "INSERT INTO queen.queues(name) SELECT $1 || '-q' || g FROM generate_series(1,$2) g \
+         ON CONFLICT DO NOTHING",
+        &[&prefix, &nq],
+    )
+    .await
+    .expect("queues");
+    c.execute(
+        "INSERT INTO queen.log_partitions(queue_id,name,last_offset,log_start,last_write_at) \
+         SELECT q.id, 'p'||g, 10, 0, now() - (random() * interval '1 hour') \
+         FROM queen.queues q, generate_series(1,$2) g WHERE q.name LIKE $1 || '-q%'",
+        &[&prefix, &np],
+    )
+    .await
+    .expect("partitions");
+    c.execute(
+        "INSERT INTO queen.log_consumers(partition_id,consumer_group,committed) \
+         SELECT p.id, $2, CASE WHEN (substring(p.name from 2))::int % 3 = 0 THEN 10 ELSE 3 END \
+         FROM queen.log_partitions p JOIN queen.queues q ON q.id = p.queue_id \
+         WHERE q.name LIKE $1 || '-q%' AND (substring(p.name from 2))::int % 3 <> 1",
+        &[&prefix, &group],
+    )
+    .await
+    .expect("consumers");
 }
 
 /// A queue of four pending partitions written 4.0, 3.9, 3.8 and 3.7 seconds ago:

@@ -1,0 +1,85 @@
+goload -mode cloud [r5000-noisy] -> http://10.114.0.2:6711
+  target=proxy tenants=50 sharedQueue=true queue="orders" group="workers" partitions=1 brokerTenantHeader=false
+  offered=2500.0 msg/s total (50.00/tenant) push-batch=10 -> 5.00 req/s per tenant across 1 producer(s) | max-inflight=4096
+  consumers=1/tenant popBatch=100 popWait=true autoAck=false | payload=256B | duration=180s drain=60s | idleConns=86/client verify=true
+[configure] 50 queue(s) configured in 0.04s
+[08:21:30 load ] offered=    2500/s push=    2498/s pop=    2164/s ack=    2164/s shed=      0/s inflight=    5 | e2e p50=133693.44 p99=133693.44 ms | pushRTT p50= 11.33 p99=1044.48 ms | lag=10010 | err push=1 pop=0 ack=0 (429=0 403=0 5xx=1 to=0 conn=0) empty=0 cross=0 gor=816
+[08:22:00 load ] offered=    2500/s push=    2500/s pop=     817/s ack=     817/s shed=      0/s inflight=    4 | e2e p50=32112.64 p99=133693.44 ms | pushRTT p50= 10.56 p99=  34.05 ms | lag=60520 | err push=1 pop=13 ack=0 (429=0 403=0 5xx=1 to=13 conn=0) empty=40 cross=0 gor=789
+[08:22:30 load ] offered=    2500/s push=    2500/s pop=     820/s ack=     820/s shed=      0/s inflight=    4 | e2e p50=58982.40 p99=133693.44 ms | pushRTT p50= 11.07 p99=  39.17 ms | lag=110920 | err push=1 pop=24 ack=0 (429=0 403=0 5xx=1 to=24 conn=0) empty=73 cross=0 gor=767
+[08:23:00 load ] offered=    2500/s push=    2500/s pop=     817/s ack=     817/s shed=      0/s inflight=    4 | e2e p50=76021.76 p99=133693.44 ms | pushRTT p50= 10.69 p99=  35.07 ms | lag=161420 | err push=1 pop=36 ack=0 (429=0 403=0 5xx=1 to=36 conn=0) empty=107 cross=0 gor=307
+[08:23:30 load ] offered=    2500/s push=    2500/s pop=     860/s ack=     860/s shed=      0/s inflight=    6 | e2e p50=98041.86 p99=133693.44 ms | pushRTT p50= 12.22 p99=  39.68 ms | lag=210610 | err push=1 pop=39 ack=0 (429=0 403=0 5xx=1 to=39 conn=0) empty=145 cross=0 gor=309
+[08:24:00 load ] offered=    2500/s push=    2500/s pop=    1247/s ack=    1247/s shed=      0/s inflight=    4 | e2e p50=116916.22 p99=133693.44 ms | pushRTT p50= 12.48 p99=  37.63 ms | lag=248220 | err push=1 pop=39 ack=0 (429=0 403=0 5xx=1 to=39 conn=0) empty=147 cross=0 gor=307
+[drain] producers stopped after 180.0s; draining 60s before the correctness verdict
+[08:24:30 drain] offered=       0/s push=       2/s pop=    9860/s ack=    9854/s shed=      0/s inflight=    0 | e2e p50=84410.37 p99=133693.44 ms | pushRTT p50= 14.91 p99=  16.32 ms | lag=-47540 | err push=1 pop=39 ack=0 (429=0 403=0 5xx=1 to=39 conn=0) empty=166 cross=0 gor=253
+[08:25:00 drain] offered=       0/s push=       0/s pop=     800/s ack=     807/s shed=      0/s inflight=    0 | e2e p50=50593.79 p99=83361.79 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=-71540 | err push=1 pop=39 ack=0 (429=0 403=0 5xx=1 to=39 conn=0) empty=434 cross=0 gor=253
+
+========== r5000-noisy ==========
+offered       2500.0 msg/s (450010 msgs, 0 shed)
+achieved  push   2500.0 msg/s (450000 msgs)   pop   1120.7 msg/s during load (  2173.1 msg/s over load+drain, 521540 msgs)   ack 521540 msgs
+e2eFromSchedule  n=521540    p50=88604.67 p95=133693.44 p99=133693.44 p999=133693.44 max=295295.69 ms
+e2eFromSend      n=521540    p50=88604.67 p95=133693.44 p99=133693.44 p999=133693.44 max=295295.60 ms
+pushRtt          n=45000     p50=   11.33 p95=   26.50 p99=   69.12 p999= 1105.92 max=  1875.24 ms
+ackRtt           n=5266      p50=   12.74 p95=  110.08 p99=  708.61 p999= 1286.14 max=  1410.94 ms
+errors push       total=1 kinds=map[http_5xx:1] codes=map[502/bad_gateway:1]
+    first http_5xx: push request failed: request failed after 1 attempts: HTTP 502 [bad_gateway]: {"code":"bad_gateway","error":"upstream unreachable"}
+errors pop        total=39 kinds=map[canceled:50 timeout:39] codes=map[]
+    first timeout: pop request failed: Get "http://10.114.0.2:6711/api/v1/pop/queue/orders?autoAck=false&batch=100&consumerGroup=workers&timeout=5000&wait=true": context deadline exceeded
+bytes     nominal 292 B/msg -> pushed 125.31 MiB, delivered 145.23 MiB
+
+---- delivery correctness (after the drain) ----
+idx  tenant         queue           sentOk  received  missing      dup   extra   cross verdict
+0    noisy-0000     orders            9000      9190        0      190       0       0 FAIL
+1    noisy-0001     orders            9000     12780        0     3780       0       0 FAIL
+2    noisy-0002     orders            9000     10590        0     1590       0       0 FAIL
+3    noisy-0003     orders            9000      9000        0        0       0       0 OK
+4    noisy-0004     orders            9000     11480        0     2480       0       0 FAIL
+5    noisy-0005     orders            9000     10590        0     1590       0       0 FAIL
+6    noisy-0006     orders            9000      9580        0      580       0       0 FAIL
+7    noisy-0007     orders            9000     11280        0     2280       0       0 FAIL
+8    noisy-0008     orders            9000      9280        0      280       0       0 FAIL
+9    noisy-0009     orders            9000      9000        0        0       0       0 OK
+10   noisy-0010     orders            9000     10480        0     1480       0       0 FAIL
+11   noisy-0011     orders            9000     10180        0     1180       0       0 FAIL
+12   noisy-0012     orders            9000     11380        0     2380       0       0 FAIL
+13   noisy-0013     orders            9000      9880        0      880       0       0 FAIL
+14   noisy-0014     orders            8990      9870        0      880       0       0 FAIL
+15   noisy-0015     orders            9000      9870        0      870       0       0 FAIL
+16   noisy-0016     orders            9000     11090        0     2090       0       0 FAIL
+17   noisy-0017     orders            9000     12690        0     3690       0       0 FAIL
+18   noisy-0018     orders            9000     11290        0     2290       0       0 FAIL
+19   noisy-0019     orders            9000     12270        0     3270       0       0 FAIL
+20   noisy-0020     orders            9000      9280        0      280       0       0 FAIL
+21   noisy-0021     orders            9000     11280        0     2280       0       0 FAIL
+22   noisy-0022     orders            9000      9000        0        0       0       0 OK
+23   noisy-0023     orders            9000     10880        0     1880       0       0 FAIL
+24   noisy-0024     orders            9000     10570        0     1570       0       0 FAIL
+25   noisy-0025     orders            9000     11680        0     2680       0       0 FAIL
+26   noisy-0026     orders            9000     12290        0     3290       0       0 FAIL
+27   noisy-0027     orders            9000     10480        0     1480       0       0 FAIL
+28   noisy-0028     orders            9000     10070        0     1070       0       0 FAIL
+29   noisy-0029     orders            9000     12380        0     3380       0       0 FAIL
+30   noisy-0030     orders            9000      9480        0      480       0       0 FAIL
+31   noisy-0031     orders            9000     11190        0     2190       0       0 FAIL
+32   noisy-0032     orders            9000      9590        0      590       0       0 FAIL
+33   noisy-0033     orders            9000      9780        0      780       0       0 FAIL
+34   noisy-0034     orders            9010      9010        0        0       0       0 OK
+35   noisy-0035     orders            9000     11090        0     2090       0       0 FAIL
+36   noisy-0036     orders            9000      9580        0      580       0       0 FAIL
+37   noisy-0037     orders            9000     10280        0     1280       0       0 FAIL
+38   noisy-0038     orders            9000      9380        0      380       0       0 FAIL
+39   noisy-0039     orders            9000      9000        0        0       0       0 OK
+40   noisy-0040     orders            9000      9290        0      290       0       0 FAIL
+41   noisy-0041     orders            9000     11790        0     2790       0       0 FAIL
+42   noisy-0042     orders            9000      9980        0      980       0       0 FAIL
+43   noisy-0043     orders            9000     10180        0     1180       0       0 FAIL
+44   noisy-0044     orders            9000      9000        0        0       0       0 OK
+45   noisy-0045     orders            9000      9000        0        0       0       0 OK
+46   noisy-0046     orders            9000     11280        0     2280       0       0 FAIL
+47   noisy-0047     orders            9000     11090        0     2090       0       0 FAIL
+48   noisy-0048     orders            9000     11080        0     2080       0       0 FAIL
+49   noisy-0049     orders            9000     10790        0     1790       0       0 FAIL
+     TOTAL                          450000    521540        0    71540       0       0
+VERDICT: FAIL
+
+[artifacts] /root/ladder3/r5000-noisy.json
+            /root/ladder3/r5000-noisy-interval.csv

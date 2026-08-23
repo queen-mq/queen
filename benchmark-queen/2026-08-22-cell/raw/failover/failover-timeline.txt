@@ -1,0 +1,43 @@
+=== backend state before ===
+broker-a UP
+broker-b UP
+load launched 09:12:59Z; killing cell-broker-a in 120s
+killed
+### cell-broker-a killed at 09:14:59Z
+09:15:03  broker-a=UP 2/3 broker-b=UP 
+09:15:06  broker-a=UP 2/3 broker-b=UP 
+09:15:09  broker-a=UP 1/3 broker-b=UP 
+09:15:12  broker-a=DOWN broker-b=UP 
+09:15:14  broker-a=DOWN broker-b=UP 
+09:15:17  broker-a=DOWN broker-b=UP 
+09:15:20  broker-a=DOWN broker-b=UP 
+09:15:23  broker-a=DOWN broker-b=UP 
+09:15:25  broker-a=DOWN broker-b=UP 
+09:15:28  broker-a=DOWN broker-b=UP 
+09:15:31  broker-a=DOWN broker-b=UP 
+=== waiting for the run to finish ===
+
+=== verdict ===
+################ RUNG r5000 — 5000 tenants (4500 idle / 450 active / 50 noisy) 09:12:59Z
+--- r5000 verdict ---
+  idle    p50= 5.86 p95= 15.30 p99= 23.17 429=0 VERDICT: FAIL
+
+  active  p50= 5.98 p95= 13.12 p99= 708.61 429=0 VERDICT: FAIL
+
+  noisy   p50= 6.62 p95= 13.76 p99= 41.22 http_429:1259 VERDICT: FAIL
+
+################ LADDER DONE 09:18:04Z
+=== delivery totals (loss is what matters, dups are at-least-once) ===
+idle         TOTAL                          211523    211526        0        1       2       0
+active       TOTAL                          520792    520834        0       38       4       0
+noisy        TOTAL                          576270    576390        0      100      20       0
+=== haproxy view of the event ===
+172.18.0.6:48768 [22/Aug/2026:09:18:02.886] brokers_fe brokers_be/broker-b 0/0/0/-1/1274 400 0 - - CH-- 26/26/6/6/0 0/0 "GET /api/v1/pop/queue/orders?autoAck=false&batch=100&consumerGroup=workers&timeout=5000&wait=true HTTP/1.1"
+172.18.0.6:50500 [22/Aug/2026:09:18:02.535] brokers_fe brokers_be/broker-b 0/0/0/-1/1626 400 0 - - CH-- 25/25/5/5/0 0/0 "GET /api/v1/pop/queue/orders?autoAck=false&batch=100&consumerGroup=workers&timeout=5000&wait=true HTTP/1.1"
+172.18.0.6:45238 [22/Aug/2026:09:18:01.794] brokers_fe brokers_be/broker-b 0/0/0/-1/2367 400 0 - - CH-- 24/24/4/4/0 0/0 "GET /api/v1/pop/queue/orders?autoAck=false&batch=100&consumerGroup=workers&timeout=5000&wait=true HTTP/1.1"
+172.18.0.6:39298 [22/Aug/2026:09:18:01.332] brokers_fe brokers_be/broker-b 0/0/0/-1/2830 400 0 - - CH-- 23/23/3/3/0 0/0 "GET /api/v1/pop/queue/orders?autoAck=false&batch=100&consumerGroup=workers&timeout=5000&wait=true HTTP/1.1"
+172.18.0.6:34216 [22/Aug/2026:09:18:03.210] brokers_fe brokers_be/broker-b 0/0/0/-1/953 400 0 - - CH-- 22/22/2/2/0 0/0 "GET /api/v1/pop/queue/orders?autoAck=false&batch=100&consumerGroup=workers&timeout=5000&wait=true HTTP/1.1"
+172.18.0.6:46640 [22/Aug/2026:09:18:02.400] brokers_fe brokers_be/broker-b 0/0/0/-1/1763 400 0 - - CH-- 21/21/1/1/0 0/0 "GET /api/v1/pop/queue/orders?autoAck=false&batch=100&consumerGroup=workers&timeout=5000&wait=true HTTP/1.1"
+### kill was at 09:14:59Z
+
+[exited with code 0]

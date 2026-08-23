@@ -1,0 +1,31 @@
+goload -mode cloud [pro-n5-q12] -> http://10.114.0.2:6711
+  target=proxy tenants=5 sharedQueue=true queue="app-q12" group="workers" partitions=500 brokerTenantHeader=false
+  offered=12.5 msg/s total (2.50/tenant) push-batch=1 -> 2.50 req/s per tenant across 1 producer(s) | max-inflight=4096
+  consumers=1/tenant popBatch=100 popWait=true autoAck=false | payload=256B | duration=120s drain=45s | idleConns=512/client verify=true
+[configure] 5 queue(s) configured in 0.06s
+[11:09:07 load ] offered=      12/s push=      12/s pop=      12/s ack=      12/s shed=      0/s inflight=    1 | e2e p50=  12.10 p99=   25.22 ms | pushRTT p50=  6.11 p99=  15.94 ms | lag=0 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=34
+[drain] producers stopped after 120.0s; draining 45s before the correctness verdict
+[11:10:07 drain] offered=      12/s push=      13/s pop=      12/s ack=      13/s shed=      0/s inflight=    0 | e2e p50=  12.10 p99=   23.17 ms | pushRTT p50=  6.11 p99=  13.38 ms | lag=1 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=28
+
+========== pro-n5-q12 ==========
+offered         12.5 msg/s (1500 msgs, 0 shed)
+achieved  push     12.5 msg/s (1500 msgs)   pop     12.5 msg/s during load (     9.1 msg/s over load+drain, 1500 msgs)   ack 1500 msgs
+e2eFromSchedule  n=1500      p50=   12.10 p95=   19.07 p99=   24.45 p999=   35.58 max=    42.30 ms
+e2eFromSend      n=1500      p50=   11.58 p95=   18.30 p99=   23.94 p999=   35.58 max=    41.63 ms
+pushRtt          n=1500      p50=    6.11 p95=   10.82 p99=   14.91 p999=   33.54 max=    34.02 ms
+ackRtt           n=1500      p50=    2.35 p95=    4.83 p99=    6.24 p999=    8.38 max=     8.54 ms
+errors            none
+bytes     nominal 292 B/msg -> pushed 0.42 MiB, delivered 0.42 MiB
+
+---- delivery correctness (after the drain) ----
+idx  tenant         queue           sentOk  received  missing      dup   extra   cross verdict
+0    cp-0000        app-q12            300       300        0        0       0       0 OK
+1    cp-0001        app-q12            300       300        0        0       0       0 OK
+2    cp-0002        app-q12            300       300        0        0       0       0 OK
+3    cp-0003        app-q12            300       300        0        0       0       0 OK
+4    cp-0004        app-q12            300       300        0        0       0       0 OK
+     TOTAL                            1500      1500        0        0       0       0
+VERDICT: PASS
+
+[artifacts] /root/cap16-pro/pro-n5-q12.json
+            /root/cap16-pro/pro-n5-q12-interval.csv

@@ -1,0 +1,36 @@
+goload -mode cloud [pro-n10-q14] -> http://10.114.0.2:6711
+  target=proxy tenants=10 sharedQueue=true queue="app-q14" group="workers" partitions=500 brokerTenantHeader=false
+  offered=125.0 msg/s total (12.50/tenant) push-batch=1 -> 12.50 req/s per tenant across 1 producer(s) | max-inflight=4096
+  consumers=1/tenant popBatch=100 popWait=true autoAck=false | payload=256B | duration=120s drain=45s | idleConns=414/client verify=true
+[configure] 10 queue(s) configured in 1.07s
+[11:20:37 load ] offered=     125/s push=     125/s pop=     125/s ack=     125/s shed=      0/s inflight=    6 | e2e p50= 741.38 p99=15400.96 ms | pushRTT p50=248.83 p99=14090.24 ms | lag=21 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=2277
+[drain] producers stopped after 120.0s; draining 45s before the correctness verdict
+[11:21:37 drain] offered=     125/s push=     125/s pop=     125/s ack=     125/s shed=      0/s inflight=    0 | e2e p50= 134.14 p99=  305.15 ms | pushRTT p50= 15.30 p99=  46.34 ms | lag=3 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=2271
+
+========== pro-n10-q14 ==========
+offered        125.0 msg/s (15000 msgs, 0 shed)
+achieved  push    125.0 msg/s (15000 msgs)   pop    125.0 msg/s during load (    90.9 msg/s over load+drain, 15000 msgs)   ack 15000 msgs
+e2eFromSchedule  n=15000     p50=  195.58 p95= 9109.50 p99=13434.88 p999=19005.44 max= 23118.99 ms
+e2eFromSend      n=15000     p50=  195.58 p95= 9109.50 p99=13434.88 p999=19005.44 max= 23117.97 ms
+pushRtt          n=15000     p50=   21.89 p95= 8093.70 p99=11862.02 p999=16580.61 max= 19979.03 ms
+ackRtt           n=4675      p50=   31.36 p95=   90.62 p99=  242.69 p999= 1761.28 max=  2183.65 ms
+errors            none
+bytes     nominal 292 B/msg -> pushed 4.18 MiB, delivered 4.18 MiB
+
+---- delivery correctness (after the drain) ----
+idx  tenant         queue           sentOk  received  missing      dup   extra   cross verdict
+0    cp-0000        app-q14           1500      1500        0        0       0       0 OK
+1    cp-0001        app-q14           1500      1500        0        0       0       0 OK
+2    cp-0002        app-q14           1500      1500        0        0       0       0 OK
+3    cp-0003        app-q14           1500      1500        0        0       0       0 OK
+4    cp-0004        app-q14           1500      1500        0        0       0       0 OK
+5    cp-0005        app-q14           1500      1500        0        0       0       0 OK
+6    cp-0006        app-q14           1500      1500        0        0       0       0 OK
+7    cp-0007        app-q14           1500      1500        0        0       0       0 OK
+8    cp-0008        app-q14           1500      1500        0        0       0       0 OK
+9    cp-0009        app-q14           1500      1500        0        0       0       0 OK
+     TOTAL                           15000     15000        0        0       0       0
+VERDICT: PASS
+
+[artifacts] /root/pro-shape/pro-n10-q14.json
+            /root/pro-shape/pro-n10-q14-interval.csv

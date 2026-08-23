@@ -683,6 +683,7 @@ mod tests {
             use_ssl: false,
             ssl_reject_unauthorized: false,
             pool_size: 4,
+            timeout_ms: 5_000,
         };
         let pool = crate::db::create_pool(&pxcfg).await.expect("connect to dev pxdb on :5465");
         {

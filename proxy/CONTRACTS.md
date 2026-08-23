@@ -26,10 +26,17 @@ agents work inside this crate. **Read both before writing code.**
 - `cache::ClusterCache` — `resolve_host(&str) -> Option<Arc<ClusterCtx>>`,
   `by_key_hash(&str) -> Option<(Arc<ClusterCtx>, Uuid /*key_id*/, Scopes)>`,
   `invalidate(Uuid)`, `spawn_listener()` (pg LISTEN `queen_proxy_inval`,
-  payload = cluster_id). Slug = first DNS label of Host.
-- `registry::Registry` — `admit(&ClusterCtx, queue, partition) -> Admit`;
-  `spawn_reconciler()` (scoped broker inventory sync + retained-bytes -> 
-  `limits.set_push_blocked`).
+  payload = cluster_id). Slug = first DNS label of Host. Lookups are
+  single-flight per key and stale-while-revalidate: an expired entry inside
+  the grace window is served while ONE background refresh runs, so a TTL
+  costs no request its latency and no request a herd. `api_keys.last_used_at`
+  is batched by `spawn_touch_flush()` (one statement per interval).
+- `registry::Registry` — `admit(&ClusterCtx, queue, partition) -> Admit`,
+  DB-free on the request path (O(1) per-queue counts; queue rows coalesced
+  per (cluster, queue) and written by `spawn_persister()` as one UNNEST
+  upsert per tick, `drain()` at shutdown); `spawn_reconciler()` (scoped
+  broker inventory sync + retained-bytes -> `limits.set_push_blocked`, writes
+  only rows whose count changed).
 - `limits::Limits` — `check_req`, `check_msgs(n)`, `debit_deliveries(n)`,
   `parked_slot -> ParkedGuard (RAII)`, `enforcing()`. Shadow mode: when
   `!enforcing()`, compute+log the Deny (target `limits`, field `would_block`)
