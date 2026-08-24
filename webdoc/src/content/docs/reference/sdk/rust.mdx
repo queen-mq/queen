@@ -122,8 +122,9 @@ The partition defaults to `Default`, which the broker treats as the absence of a
 | Method | Default | Meaning |
 | --- | --- | --- |
 | `concurrency(n)` | 1 | Parallel workers, each with its own poll loop. |
-| `batch(n)` | 1 | Messages per poll. |
-| `partitions(n)` | 1 | Partitions claimed per poll, sharing the batch budget and one lease. |
+| `batch(n)` | broker-sized | Total message budget for the call, shared across every partition it claims. Left unset the broker sizes it (pop autopilot); the pre-1.2 client default of `1` comes back with autopilot off. `batch(0)` reads as unset. |
+| `partitions(n)` | broker-sized | Claim up to N partitions per call; all share one `leaseId`. Left unset the broker sizes it (pop autopilot). Sent verbatim when set, `1` included, because a pinned width is a decision the broker must not widen; with autopilot off it is sent only when `> 1`. |
+| `autopilot(enabled)` | `true` | Broker-side pop sizing for the knobs above that you did not set. On by default; `false` restores the pre-1.2 client defaults (batch 1, partitions 1) and sends no `autopilot` parameter. `QUEEN_SDK_POP_AUTOPILOT=off` does the same for a whole process, read once when the client is built. Setting both knobs leaves nothing to decide, so no parameter is sent then either. See [pop autopilot](/reference/http/pop#autopilot). Requires broker >= 1.2; an older one applies its own defaults (batch 200, partitions 1) to the omitted knobs, which is a sizing difference and nothing more. |
 | `limit(n)` | none | Stop after this many messages, **across all workers**. |
 | `idle(Duration)` | none | Stop after this long without a message. |
 | `auto_ack(bool)` | `true` | Ack on handler success, nack on handler error. |
@@ -169,9 +170,17 @@ retried push write nothing:
 | --- | --- |
 | `pop()` | `Result<Vec<Message>>` |
 | `pop_auto_ack()` | `Result<Vec<Message>>` |
+| `pop_result()` | `Result<PopOutcome>` |
 
 `pop` returns `Err` on failure rather than an empty vector. An empty claim and a claim refused
 because pop maintenance is on both return `Ok` with nothing in it.
+
+`pop_result` is the same call, returning `PopOutcome { messages, autopilot }`: the broker's
+account of how it sized the claim, with `partitions`, `batch`, and an optional `wait_ms` pacing
+hint the consume loop honours in place of its own delay between empty polls. `autopilot` is
+`None` when the pop did not engage autopilot, when the broker is older than 1.2, or when the
+answer was a bodiless `204`, which has no body to carry an echo. See
+[pop autopilot](/reference/http/pop#autopilot).
 
 A batched pop claiming several partitions in one call:
 

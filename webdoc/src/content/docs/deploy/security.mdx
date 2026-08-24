@@ -32,10 +32,17 @@ digest: >-
   boot unless `QUEEN_KV_TRUSTED_PROXY=1` is set with it.
 ---
 
-The broker is one process with one plaintext listener. It binds `0.0.0.0:PORT`, serves the HTTP API
-and the dashboard from that single port, and authenticates nobody until you turn JWT on. There is
-no TLS listener and no CORS layer in the binary, so most of a deployment's security is what you put
-around it.
+The broker is one process with one plaintext listener. It binds `PORT` on `QUEEN_BIND_ADDR`, which
+defaults to `0.0.0.0` and so answers on every interface, serves the HTTP API and the dashboard from
+that single port, and authenticates nobody until you turn JWT on. There is no TLS listener and no
+CORS layer in the binary, so most of a deployment's security is what you put around it.
+
+Because there is no TLS and no CORS, the bind address is one of the few controls the binary itself
+gives you. `QUEEN_BIND_ADDR=127.0.0.1` makes the broker reachable only through something on the
+same host, which is the right setting when a TLS terminator or `queen_proxy` runs beside it. It is
+the wrong setting in Kubernetes, where the kubelet's probes and the Service both arrive on the pod
+IP. Narrowing it moves the mesh listener with it unless `QUEEN_MESH_BIND_ADDR` says otherwise, and
+neither one changes `QUEEN_MESH_ADVERTISE_HOST`, which is the address peers are told to dial.
 
 Generate the two secrets, keep them, and boot with everything the broker does implement turned on:
 

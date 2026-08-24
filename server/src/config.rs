@@ -131,6 +131,17 @@ pub struct SyncConfig {
     /// TCP mesh listen/dial port. `QUEEN_MESH_PORT`, falling back to the legacy
     /// `QUEEN_UDP_NOTIFY_PORT` (default 6633).
     pub mesh_port: u16,
+    /// Host the mesh listener binds. `QUEEN_MESH_BIND_ADDR`, defaulting to
+    /// whatever `QUEEN_BIND_ADDR` gives the HTTP listener — so one variable
+    /// moves both listeners, and this second knob exists only for the split
+    /// case (API on loopback, mesh on the pod IP).
+    ///
+    /// Not to be confused with `http_addr` below: bind is who can REACH this
+    /// process, advertise is where peers are TOLD to find it. Narrowing the
+    /// bind while advertising a routable host is the one combination that
+    /// looks configured and connects to nothing, which is why both are on the
+    /// boot line.
+    pub bind_addr: String,
     /// Parsed peer list — (host, port) pairs from `QUEEN_MESH_PEERS` (falling back
     /// to the legacy `QUEEN_UDP_PEERS`). Empty ⇒ no peers ⇒ no mesh.
     pub peers: Vec<(String, u16)>,
@@ -170,6 +181,20 @@ impl SyncConfig {
         // Prefer the new QUEEN_MESH_* names; fall back to the legacy QUEEN_UDP_*
         // ones so existing deployments keep working unchanged.
         let mesh_port = env_int("QUEEN_MESH_PORT", env_int("QUEEN_UDP_NOTIFY_PORT", 6633)) as u16;
+        // Unset ⇒ wherever the HTTP listener binds. Written as a nested default
+        // rather than the empty-sentinel fallback the peer list uses below,
+        // because this is a DEFAULT and that is an ALIAS, and the two read the
+        // same in the docs unless the source distinguishes them. An explicitly
+        // empty value is rejected, not inherited: nobody means "" by it.
+        //
+        // A bad QUEEN_BIND_ADDR is reported under its own name, not this one,
+        // because `load` builds `bind_addr` before `sync` and struct fields are
+        // evaluated in source order.
+        let bind_addr = checked_bind_addr(
+            "QUEEN_MESH_BIND_ADDR",
+            "QUEEN_MESH_PORT",
+            env_str("QUEEN_MESH_BIND_ADDR", &env_str("QUEEN_BIND_ADDR", "0.0.0.0")),
+        );
         let peers_raw = {
             let mesh = env_str("QUEEN_MESH_PEERS", "");
             if !mesh.is_empty() {
@@ -201,6 +226,7 @@ impl SyncConfig {
         SyncConfig {
             enabled: env_bool("QUEEN_SYNC_ENABLED", true),
             mesh_port,
+            bind_addr,
             peers,
             secret: env_str("QUEEN_SYNC_SECRET", ""),
             heartbeat_ms: env_int("QUEEN_SYNC_HEARTBEAT_MS", 1000).max(1) as u64,
@@ -276,6 +302,15 @@ fn parse_mesh_peers(raw: &str, default_port: u16) -> Vec<(String, u16)> {
 
 pub struct Config {
     pub port: String,
+    /// Host the HTTP listener binds — `QUEEN_BIND_ADDR`, default `0.0.0.0`:
+    /// every interface, which is what the address was hardcoded to before the
+    /// knob existed, so an upgrade changes nothing until someone sets it.
+    ///
+    /// HOST only. The port is `PORT` and nowhere else, because a variable that
+    /// could carry its own port would be a second place to write one, and the
+    /// two disagreeing is not a conflict anything downstream could resolve —
+    /// so `load` rejects a value with a port instead of picking a winner.
+    pub bind_addr: String,
     pub pg: deadpool_postgres::Config,
     pub pool_size: usize,
     // Postgres TLS (RUSTFIX item 5). C++ `PG_USE_SSL` (default false) /
@@ -481,6 +516,22 @@ pub struct Config {
     // an unbounded number of distinct queues. 0 disables the sweep (unbounded growth —
     // only for a single-tenant deployment that wants the pre-eviction behaviour).
     pub hotlist_idle_sweep_ms: u64,
+    // `QUEEN_HOTLIST_UNSERVED_TRIM_MS` (default 30000; 0 disables). How long a hot-list
+    // ring may go without a single SERVED POP on this broker before the trim drops it —
+    // see `HotList::trim_unserved` for the full argument. This is the standby-broker
+    // bound: rings are filled by paths that do not depend on this broker's own traffic
+    // (the reseed timer, mesh marks from a peer's pushes) and drained only by pops, so a
+    // broker behind an active/passive LB otherwise accumulates the whole cell's pending
+    // set forever — measured 827 000 ready entries / 2.12 GB RSS on the passive broker of
+    // the 2026-08-24 soak cell, against 727 MB on the active one, and a proximate cause
+    // of two global OOMs. `hotlist_idle_sweep_ms` cannot bound it: that sweep requires an
+    // EMPTY ring, which is exactly what a ring nobody drains never becomes.
+    //
+    // The trim keys on served pops and never on entry age: with ~1060 pops/s a legitimate
+    // 827 000-entry backlog puts the FIFO head at ~780 s, so age cannot tell a starved
+    // standby from a healthy, backlogged, actively-served queue. 0 restores the
+    // pre-2026-08-24 behaviour exactly (no clock read, no scan, no eviction).
+    pub hotlist_unserved_trim_ms: i64,
     // POP AUTOPILOT (server/src/pop_autopilot.rs) — the broker choosing `partitions`
     // (and echoing `batch`) for a grouped wildcard pop that opted in with
     // `?autopilot=true`. A request that does not carry the parameter is treated
@@ -842,6 +893,50 @@ pub(crate) fn normalize_subscription_mode(raw: &str) -> String {
     }
 }
 
+/// Join a bind host and a port into an authority, bracketing an IPv6 literal.
+/// Unbracketed, `::1` + `6632` is `::1:6632`, which is NOT a `SocketAddr` —
+/// that grammar requires the brackets — so it falls through to the name
+/// resolver, where it survives only because the platform's getaddrinfo happens
+/// to take a bare numeric v6 host. Bracketing keeps the bind on the parse path
+/// rather than resting on that, and puts the canonical form in the boot line,
+/// which is the string an operator pastes into curl. A hostname passes through
+/// untouched and is resolved at bind time.
+pub fn host_port(host: &str, port: &str) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+/// The HTTP listener's bind host, validated. Also the mesh listener's default,
+/// which is why it is a function and not an inline `env_str`.
+fn http_bind_addr() -> String {
+    checked_bind_addr("QUEEN_BIND_ADDR", "PORT", env_str("QUEEN_BIND_ADDR", "0.0.0.0"))
+}
+
+/// FATAL on a bind host that carries a port, or that is explicitly empty.
+/// Both would otherwise be joined with the port into an address nothing
+/// listens on, and the process would die at bind quoting a string no operator
+/// ever wrote (`0.0.0.0:7000:6632`). An IP literal — v4 or v6 — or a hostname
+/// is accepted here; whether the hostname RESOLVES is still the bind's problem,
+/// because resolution can fail for reasons that have nothing to do with config.
+/// `port_key` is the variable that owns the port for THIS listener, so the
+/// message points at the right one rather than at `PORT` for the mesh.
+fn checked_bind_addr(k: &str, port_key: &str, v: String) -> String {
+    if v.is_empty() {
+        crate::obs::fatal(format!(
+            "{k} is set to the empty string — give it a host or IP, or unset it for 0.0.0.0"
+        ));
+    }
+    if v.parse::<std::net::IpAddr>().is_err() && v.contains(':') {
+        crate::obs::fatal(format!(
+            "{k}={v} carries a port — set the host or IP only, the port comes from {port_key}"
+        ));
+    }
+    v
+}
+
 fn env_str(k: &str, def: &str) -> String {
     std::env::var(k).unwrap_or_else(|_| def.to_string())
 }
@@ -948,6 +1043,7 @@ pub fn log_effective(cfg: &Config) {
         target: "boot",
         version = crate::VERSION,
         port = %cfg.port,
+        bind = %cfg.bind_addr,
         pool = cfg.pool_size,
         stmt_timeout_ms = cfg.stmt_timeout.as_millis() as u64,
         max_body_bytes = %env_str("QUEEN_MAX_BODY_BYTES", "<default>"),
@@ -983,6 +1079,7 @@ pub fn log_effective(cfg: &Config) {
         mesh_active = cfg.sync.mesh_active(),
         server_id = %cfg.sync.server_id,
         mesh_port = cfg.sync.mesh_port,
+        mesh_bind = %cfg.sync.bind_addr,
         // EPHEMERAL_QUEUES.md §3.5/§3.6: what peers are told to forward to. On
         // the boot line because a wrong advertised address fails ONLY in the
         // other direction — this broker works perfectly and its peers cannot
@@ -1014,6 +1111,7 @@ pub fn log_effective(cfg: &Config) {
         hotlist_reseed_full_ms = cfg.hotlist_reseed_full_ms,
         hotlist_reseed_window_ms = cfg.hotlist_reseed_window_ms,
         hotlist_idle_sweep_ms = cfg.hotlist_idle_sweep_ms,
+        hotlist_unserved_trim_ms = cfg.hotlist_unserved_trim_ms,
         zstd_level = cfg.zstd_level,
         "config: engine"
     );
@@ -1275,6 +1373,7 @@ pub fn load() -> Config {
 
     let mut cfg = Config {
         port: env_str("PORT", "6632"),
+        bind_addr: http_bind_addr(),
         pg,
         pool_size,
         pg_use_ssl: env_bool("PG_USE_SSL", false),
@@ -1383,6 +1482,7 @@ pub fn load() -> Config {
         // so the boot line and every reader see the number actually in force.
         hotlist_reseed_window_ms: env_int("QUEEN_HOTLIST_RESEED_WINDOW_MS", 0).max(0),
         hotlist_idle_sweep_ms: env_int("QUEEN_HOTLIST_IDLE_SWEEP_MS", 300_000).max(0) as u64,
+        hotlist_unserved_trim_ms: env_int("QUEEN_HOTLIST_UNSERVED_TRIM_MS", 30_000).max(0),
         // POP AUTOPILOT (server/src/pop_autopilot.rs). The mode string is
         // validated below, next to the other enumerated knobs — an unrecognised
         // value is fatal rather than silently resolving to the default, the same

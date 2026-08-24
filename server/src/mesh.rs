@@ -232,7 +232,9 @@ impl MeshTransport {
         handlers: SyncHandlers,
         eph_epoch: u64,
     ) -> std::io::Result<(Arc<MeshTransport>, MeshBindings)> {
-        let listener = TcpListener::bind(format!("0.0.0.0:{}", cfg.mesh_port)).await?;
+        let listener =
+            TcpListener::bind(crate::config::host_port(&cfg.bind_addr, &cfg.mesh_port.to_string()))
+                .await?;
         let mut peers = Vec::with_capacity(cfg.peers.len());
         let mut peer_rxs = Vec::with_capacity(cfg.peers.len());
         for (h, p) in &cfg.peers {
@@ -1105,6 +1107,7 @@ mod tests {
         crate::config::SyncConfig {
             enabled: true,
             mesh_port: 0, // ephemeral — the real port is read back from the binding
+            bind_addr: "127.0.0.1".to_string(),
             peers,
             secret: secret.to_string(),
             heartbeat_ms: 100,

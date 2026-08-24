@@ -6197,6 +6197,7 @@ mod protocol_conformance {
             namespace: None,
             task: None,
             conflation: Some(true),
+            autopilot: Some(true),
         };
 
         let qs = ours
@@ -6220,6 +6221,10 @@ mod protocol_conformance {
         assert_eq!(theirs.subscription_from.as_deref(), Some("now"));
         // PLAN_CONFLATION §3.1: the client's key must be the one axum reads.
         assert_eq!(theirs.conflation, Some(true));
+        // POP AUTOPILOT: same check for the opt-in. A client that renders the
+        // flag under a name the broker does not read gets today's server-side
+        // defaults and no echo, which looks exactly like an old broker.
+        assert_eq!(theirs.autopilot, Some(true));
     }
 
     /// PLAN_CONFLATION §3.1 — the response keys the broker emits must be the ones

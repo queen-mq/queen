@@ -10,6 +10,7 @@ A comprehensive C++ client for Queen Message Queue, providing a fluent API match
 - ✅ **Load Balancing** - Round-robin and session-based strategies
 - ✅ **Client-Side Buffering** - Automatic batching with time/count triggers
 - ✅ **Consumer Groups** - Distributed message processing
+- ✅ **Pop Autopilot** - The broker sizes the knobs you did not set
 - ✅ **Partitions** - Ordered message processing per partition
 - ✅ **Atomic Transactions** - All-or-nothing operations
 - ✅ **Key/Value State** - `get`, `put`, `putIfAbsent`, `delete`, `incr`, standalone or inside a transaction
@@ -154,11 +155,67 @@ per-tenant work queues, per-device telemetry). Reduces network round-trips
 from O(P) to O(P / N) while preserving per-partition FIFO ordering.
 
 **When not to use:** few partitions, or each one busy enough to fill
-`batch(B)` on its own. Default is `partitions(1)` which preserves the
-legacy single-partition behaviour.
+`batch(B)` on its own. Leaving `.partitions()` unset hands the sweep width to
+the broker (see Pop Autopilot below); `.partitions(1)` pins the legacy
+single-partition behaviour.
 
 `.partitions(N)` only applies to **wildcard** pops; specifying
 `.partition("name")` ignores the cap.
+
+### Pop Autopilot (Let the Broker Size the Pop)
+
+Requires broker >= 1.2.
+
+`batch` and `partitions` that you do **not** set are chosen by the broker, per
+pop, from state the client cannot see: how many partitions of the group are
+ready, how old their oldest ready message is, how fast messages are arriving.
+The knobs you *do* set are never touched.
+
+```cpp
+// Both knobs are the broker's: it picks the sweep width and the budget.
+client.queue("events").group("workers").consume([](const json& msg) {
+    process(msg["data"]);
+});
+
+// One knob pinned, one delegated: this consumer stays on one partition
+// forever, and the broker sizes the batch for it.
+client.queue("events").group("workers").partitions(1).consume(handler);
+```
+
+The request carries `autopilot=true` and simply omits the delegated knobs.
+Setting both leaves nothing to decide, so nothing changes on the wire at all.
+
+**Two ways to switch it off**, both restoring the previous client-side defaults
+(batch 1, partitions 1) byte for byte:
+
+```cpp
+client.queue("events").autopilot(false).consume(handler);
+```
+
+```bash
+QUEEN_SDK_POP_AUTOPILOT=off   # whole process, read once at client construction
+```
+
+**What the broker chose** rides back on the response, along with an optional
+pacing hint the consume loop honours in place of its own delay between empty
+polls:
+
+```cpp
+auto res = client.queue("events").group("workers").pop_result();
+if (res.autopilot.present) {
+    std::cout << res.autopilot.partitions << " partitions, batch "
+              << res.autopilot.batch << ", poll again in "
+              << res.autopilot.wait_millis << "ms\n";
+}
+for (const auto& m : res.messages) { process(m["data"]); }
+```
+
+**An older broker ignores the parameter**, so the omitted knobs take *its*
+defaults (batch 200, partitions 1) instead of the old client-side ones. That is
+a sizing difference and nothing else — no message is lost, reordered or
+duplicated — so unlike conflation it degrades silently and on purpose. Pin the
+values explicitly, or turn autopilot off, if you need the old numbers against an
+old broker.
 
 ### Consumer Groups
 
@@ -529,13 +586,16 @@ Output:
 - `create()` - Create queue
 - `del()` - Delete queue
 - `push(messages)` - Push messages
-- `pop()` - Pop messages
+- `pop()` - Pop messages (broker-sized unless you pin the knobs; see Pop Autopilot)
+- `pop_result()` - Pop, and report what the broker chose for the call
 - `consume(handler)` - Start consumer
 - `dlq()` - Query dead letter queue
 
 **Consumer Options:**
 - `concurrency(count)` - Set worker count
-- `batch(size)` - Set batch size
+- `batch(size)` - Pin the message budget (unset = the broker sizes it)
+- `partitions(n)` - Pin the sweep width (unset = the broker sizes it)
+- `autopilot(enabled)` - Turn broker-side pop sizing off for this builder
 - `limit(count)` - Set message limit
 - `auto_ack(enabled)` - Enable/disable auto-ack
 - `wait(enabled)` - Enable/disable long polling

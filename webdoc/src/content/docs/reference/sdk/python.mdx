@@ -204,8 +204,9 @@ instead of growing the heap.
 
 | Method | `pop()` default | `consume()` default | Notes |
 | --- | --- | --- | --- |
-| `batch(size)` | `1` | `1` | Clamped to `≥ 1`. With `partitions(n)` it is the total budget across all claimed partitions. |
-| `partitions(n)` | `1` | `1` | Claim up to N partitions per call; all share one `leaseId`. Sent only when `> 1`. |
+| `batch(size)` | broker-sized | broker-sized | Total message budget for the call, shared across every partition it claims. Left unset the broker sizes it (pop autopilot); the pre-1.2 client default of `1` comes back with autopilot off. `batch(0)` reads as unset. |
+| `partitions(n)` | broker-sized | broker-sized | Claim up to N partitions per call; all share one `leaseId`. Left unset the broker sizes it (pop autopilot). Sent verbatim when set, `1` included, because a pinned width is a decision the broker must not widen; with autopilot off it is sent only when `> 1`. |
+| `autopilot(enabled)` | `True` | `True` | Broker-side pop sizing for the knobs above that you did not set. On by default; `false` restores the pre-1.2 client defaults (batch 1, partitions 1) and sends no `autopilot` parameter. `QUEEN_SDK_POP_AUTOPILOT=off` does the same for a whole process, read once when the client is built. Setting both knobs leaves nothing to decide, so no parameter is sent then either. See [pop autopilot](/reference/http/pop#autopilot). Requires broker >= 1.2; an older one applies its own defaults (batch 200, partitions 1) to the omitted knobs, which is a sizing difference and nothing more. |
 | `wait(enabled)` | `False` | `True` | Long-poll. |
 | `timeout_millis(ms)` | `30000` | `30000` | Server-side long-poll deadline. The HTTP call adds 5 s of slack so the server times out first. |
 | `auto_ack(enabled)` | `False` | `True` | The two meanings differ. See the warning. |
@@ -239,6 +240,10 @@ namespace or task without a queue uses `/api/v1/pop`. None of the three raises `
 `cluster_suspended`, a network error) is logged, **printed to stdout as `Pop failed: ...`**, and
 returns `[]`. An empty list does not distinguish an empty queue from revoked credentials.
 </Aside>
+
+#### `pop_result()`
+
+`async pop_result()` → `PopResult(messages, autopilot)`, a named tuple. It is the same call as ``pop()`` and returns the messages plus the broker's account of how it sized the claim: `partitions`, `batch`, and an optional ``wait_millis`` pacing hint the consume loop honours in place of its own delay between empty polls. `autopilot` is `None` when the pop did not engage autopilot, when the broker is older than 1.2, or when the answer was a bodiless `204`, which has no body to carry an echo. See [pop autopilot](/reference/http/pop#autopilot).
 
 #### `consume(handler, *, signal=None)`
 

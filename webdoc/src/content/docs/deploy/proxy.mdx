@@ -133,7 +133,8 @@ failing the boot, and an optional variable set to the empty string counts as uns
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `QUEEN_PROXY_PORT` | `6711` | Bind port. The listener is always `0.0.0.0:PORT`. |
+| `QUEEN_PROXY_PORT` | `6711` | Bind port, plaintext or TLS: there is one listener either way. |
+| `QUEEN_PROXY_BIND_ADDR` | `0.0.0.0` | Bind host, every interface by default. A host or IP only, so a value carrying its own port exits 1 at boot instead of binding somewhere unintended. |
 | `QUEEN_PROXY_TLS_CERT` | unset | Path to a PEM certificate chain. |
 | `QUEEN_PROXY_TLS_KEY` | unset | Path to the matching PEM private key. |
 

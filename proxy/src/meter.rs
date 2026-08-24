@@ -631,6 +631,7 @@ mod tests {
     fn cfg_with_dir(dir: &std::path::Path) -> crate::config::Config {
         crate::config::Config {
             port: 0,
+            bind_addr: "0.0.0.0".to_string(),
             pxdb: None,
             enforce: false,
             dev_insecure: true,

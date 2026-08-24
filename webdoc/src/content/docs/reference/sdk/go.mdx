@@ -206,8 +206,9 @@ is what you sent plus the broker's default for everything you did not.
 
 | Method | `Pop` default | `Consume` default | Notes |
 | --- | --- | --- | --- |
-| `Batch(size)` | `1` | `1` | With `Partitions(n)`, this is the total budget across all claimed partitions. |
-| `Partitions(n)` | `1` | `1` | Claim up to N partitions per call; all share one `LeaseID`. Sent only when `> 1`. |
+| `Batch(size)` | broker-sized | broker-sized | Total message budget for the call, shared across every partition it claims. Left unset the broker sizes it (pop autopilot); the pre-1.2 client default of `1` comes back with autopilot off. |
+| `Partitions(n)` | broker-sized | broker-sized | Claim up to N partitions per call; all share one `LeaseID`. Left unset the broker sizes it (pop autopilot). Sent verbatim when set, `1` included, because a pinned width is a decision the broker must not widen; with autopilot off it is sent only when `> 1`. |
+| `Autopilot(enabled)` | `true` | `true` | Broker-side pop sizing for the knobs above that you did not set. On by default; `false` restores the pre-1.2 client defaults (batch 1, partitions 1) and sends no `autopilot` parameter. `QUEEN_SDK_POP_AUTOPILOT=off` does the same for a whole process, read once when the client is built. Setting both knobs leaves nothing to decide, so no parameter is sent then either. See [pop autopilot](/reference/http/pop#autopilot). Requires broker >= 1.2; an older one applies its own defaults (batch 200, partitions 1) to the omitted knobs, which is a sizing difference and nothing more. |
 | `Wait(enabled)` | `false` | `true` | Long-poll. Tri-state internally: unset falls back to the per-method default. |
 | `TimeoutMillis(ms)` | `30000` | `30000` | Server-side deadline. `Pop` adds 5 s of client slack when waiting. |
 | `AutoAck(enabled)` | not sent | `true` | The two meanings differ. See the warning. |
@@ -244,6 +245,18 @@ return.
 </Aside>
 
 <Render file="snippets/go-pop" />
+
+#### `PopResult`
+
+```go
+func (qb *QueueBuilder) PopResult(ctx context.Context) (PopResult, error)
+```
+
+The same call as `Pop`, returning `PopResult{Messages, Autopilot}`: the broker's account of how
+it sized the claim, with `Partitions`, `Batch`, and an optional `WaitMillis` pacing hint the
+consume loop honours in place of its own delay between empty polls. `Autopilot` is `nil` when the
+pop did not engage autopilot, when the broker is older than 1.2, or when the answer was a bodiless
+`204`, which has no body to carry an echo. See [pop autopilot](/reference/http/pop#autopilot).
 
 #### `Consume` and `ConsumeBatch`
 

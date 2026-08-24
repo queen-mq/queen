@@ -4,6 +4,39 @@
 
 use std::env;
 
+/// Join a bind host and a port into an authority, bracketing an IPv6 literal.
+/// Unbracketed, `::1` + `6711` is `::1:6711`, which is NOT a `SocketAddr` —
+/// that grammar requires the brackets — so it falls through to the name
+/// resolver instead of the parse path. A hostname passes through untouched and
+/// is resolved at bind time.
+pub fn host_port(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+/// Exit on a bind host that carries a port, or that is explicitly empty —
+/// both would be joined with the port into an address nothing listens on, and
+/// the failure would quote a string no operator ever wrote. Checked here, in
+/// `load`, so it lands with the rest of the boot validation and before any
+/// TLS material is read. An IP literal (v4 or v6) or a hostname is accepted;
+/// whether a hostname resolves is still the bind's problem.
+fn checked_bind_addr(key: &str, v: String) -> String {
+    if v.is_empty() {
+        tracing::error!("{key} is set to the empty string — give it a host or IP, or unset it for 0.0.0.0");
+        std::process::exit(1);
+    }
+    if v.parse::<std::net::IpAddr>().is_err() && v.contains(':') {
+        tracing::error!(
+            "{key}={v} carries a port — set the host or IP only, the port comes from QUEEN_PROXY_PORT"
+        );
+        std::process::exit(1);
+    }
+    v
+}
+
 pub fn env_str(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
 }
@@ -170,6 +203,13 @@ pub struct DevStaticCluster {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub port: u16,
+    /// Host the listener binds — `QUEEN_PROXY_BIND_ADDR`, default `0.0.0.0`:
+    /// every interface, which is what the address was hardcoded to before the
+    /// knob existed, so an upgrade changes nothing until someone sets it.
+    /// HOST only — the port stays `QUEEN_PROXY_PORT`, and `load` refuses a
+    /// value carrying one rather than joining it into an address nothing
+    /// listens on. Applies to the TLS listener too: there is one socket here.
+    pub bind_addr: String,
     pub pxdb: Option<PxdbConfig>,
     /// false = shadow mode: limit decisions are computed+logged+metered but not enforced.
     pub enforce: bool,
@@ -258,6 +298,10 @@ impl Config {
         });
         Config {
             port: env_u64("QUEEN_PROXY_PORT", 6711) as u16,
+            bind_addr: checked_bind_addr(
+                "QUEEN_PROXY_BIND_ADDR",
+                env_str("QUEEN_PROXY_BIND_ADDR", "0.0.0.0"),
+            ),
             pxdb,
             enforce: env_bool("QUEEN_PROXY_ENFORCE", false),
             dev_insecure: env_bool("QUEEN_PROXY_DEV_INSECURE", false),

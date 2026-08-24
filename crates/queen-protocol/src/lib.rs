@@ -57,7 +57,7 @@ pub use admin::{
     SubscriptionRequest, TraceRequest, TraceResponse,
 };
 pub use error::{ErrorBody, ErrorCode};
-pub use pop::{Message, PopParams, PopResponse, SubscriptionMode};
+pub use pop::{AutopilotEcho, Message, PopParams, PopResponse, SubscriptionMode};
 pub use push::{PushItem, PushRequest, PushResult, PushStatus};
 pub use streams::{
     parse_state_key, session_state_key, state_key_for, CycleAck, CycleAckResult, CycleRequest,

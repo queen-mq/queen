@@ -388,6 +388,10 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
         cfg.tenancy_header,
     );
     hotlist.attach_notifier(notifier.clone());
+    // KEEP IN SYNC with main.rs. An embedded broker has no HA peer, so it cannot be the
+    // standby of a pair — but it can still hold a queue nobody pops (a write-only stretch,
+    // a consumer that stopped), which is the same accumulation.
+    hotlist.set_unserved_trim_ms(cfg.hotlist_unserved_trim_ms);
 
     // EPHEMERAL_QUEUES.md §3.2 — KEEP IN SYNC with main.rs (the embedded-API
     // memory rule). The embedded broker is by definition single-broker, which is
@@ -717,6 +721,27 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
                         gates_evicted = gates,
                         autopilot_lanes_evicted = lanes,
                         "idle sweep"
+                    );
+                }
+            }
+        }));
+    }
+
+    // Unserved-ring trim (inlined from reconcile::spawn_unserved_trim for the same handle
+    // reason; 0 disables). Its own timer, deliberately much faster than the idle sweep —
+    // see the rationale on `spawn_unserved_trim`.
+    if cfg.hotlist_unserved_trim_ms > 0 {
+        let state = st.clone();
+        let interval = std::time::Duration::from_millis(cfg.hotlist_unserved_trim_ms as u64);
+        tasks.push(tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                let trimmed = state.hotlist.trim_unserved(crate::util::now_epoch_ms());
+                if trimmed > 0 {
+                    tracing::info!(
+                        target: "reconcile",
+                        rings_trimmed = trimmed,
+                        "unserved-ring trim"
                     );
                 }
             }

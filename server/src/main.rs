@@ -378,6 +378,8 @@ async fn main() {
         cfg.tenancy_header,
     );
     hotlist.attach_notifier(notifier.clone());
+    // Standby-ring bound: see `HotList::trim_unserved` / `hotlist_unserved_trim_ms`.
+    hotlist.set_unserved_trim_ms(cfg.hotlist_unserved_trim_ms);
     if cfg.hotlist_enabled {
         tracing::info!(
             target: "boot",
@@ -715,6 +717,7 @@ async fn main() {
     // pairs that have gone idle, so an untrusted tenant cannot pin per-name state by
     // polling an unbounded set of queue names.
     reconcile::spawn_idle_sweep(state.clone(), cfg.hotlist_idle_sweep_ms);
+    reconcile::spawn_unserved_trim(state.clone(), cfg.hotlist_unserved_trim_ms);
 
     // PLAN_KV_TIMERS §9.3 — the quota/measurement refresh. Its own loop and NOT a
     // phase of reconcile above, for two reasons that both matter: its cadence is
@@ -1272,7 +1275,7 @@ async fn main() {
         tracing::info!(target: "boot", header = config::TENANT_HEADER, "QUEEN_TENANCY_HEADER on — native tenant scoping ENABLED");
     }
 
-    let addr = format!("0.0.0.0:{}", cfg.port);
+    let addr = config::host_port(&cfg.bind_addr, &cfg.port);
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => obs::fatal(format!("cannot bind {addr}: {e}")),

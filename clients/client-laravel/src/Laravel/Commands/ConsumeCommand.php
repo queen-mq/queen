@@ -11,7 +11,9 @@ class ConsumeCommand extends Command
         {queue : Queue name to consume from}
         {handler : Fully qualified class name with handle() method}
         {--group= : Consumer group name}
-        {--batch=1 : Number of messages per batch}
+        {--batch= : Messages per pop. Omit and the broker sizes it (pop autopilot, broker >= 1.2)}
+        {--partitions= : Partitions to claim per pop. Omit and the broker sizes it; --partitions=1 pins the legacy single-partition claim}
+        {--no-autopilot : Restore the pre-1.2 client-side defaults (batch 1, partitions 1) and send no autopilot parameter}
         {--auto-ack : Enable auto-acknowledgment}
         {--subscription-mode= : Subscription mode}
         {--subscription-from= : Subscription start point}
@@ -40,8 +42,23 @@ class ConsumeCommand extends Command
 
         $this->info("Starting Queen consumer on queue: {$queueName}");
 
-        $builder = $queen->queue($queueName)
-            ->batch((int) $this->option('batch'));
+        $builder = $queen->queue($queueName);
+
+        // Pop autopilot: an option the operator TYPED is a pin, an option left
+        // out is the broker's to choose. A default of 1 here would have pinned
+        // both knobs on every run without anyone asking, which is the whole
+        // feature switched off by accident.
+        if ($this->option('batch') !== null) {
+            $builder->batch((int) $this->option('batch'));
+        }
+
+        if ($this->option('partitions') !== null) {
+            $builder->partitions((int) $this->option('partitions'));
+        }
+
+        if ($this->option('no-autopilot')) {
+            $builder->autopilot(false);
+        }
 
         if ($this->option('group')) {
             $builder->group($this->option('group'));
@@ -80,7 +97,12 @@ class ConsumeCommand extends Command
         $this->info('Consumer subscribed. Waiting for messages... (Ctrl+C to stop)');
 
         $processed = 0;
-        $batch = (int) $this->option('batch');
+        // Which consume surface to drive, not what to put on the wire: the
+        // sizing already reached the builder above. An operator who named no
+        // batch gets the one-message loop, exactly as before -- the broker's
+        // choice of batch is about the claim, and this loop hands the caller one
+        // message at a time either way.
+        $batch = $this->option('batch') !== null ? (int) $this->option('batch') : 1;
         $autoAck = $this->option('auto-ack');
         $timeout = (int) $this->option('timeout');
         $limit = $this->option('limit') ? (int) $this->option('limit') : null;

@@ -394,9 +394,9 @@ $$;
 -- arithmetic (§9): pending per (partition, group) =
 --   GREATEST(last_offset - GREATEST(committed, log_start - 1), 0)
 -- — NO log_segments scan for the count. maxTimeLag = age of the oldest
--- unconsumed segment (that one is a per-partition PK-range MIN over
--- log_segments, the only segment touch here). Subscription metadata does not
--- exist per-partition in the log engine -> nulls, as before.
+-- unconsumed segment (a covering-segment PK probe per lagging cursor — the
+-- only segment touch here; rationale at the probe). Subscription metadata does
+-- not exist per-partition in the log engine -> nulls, as before.
 -- ============================================================================
 -- Track B (§5): p_tenant scopes the (global, cross-queue) group listing to one
 -- tenant's queues — two tenants can run the same group name on their own queues.
@@ -414,34 +414,68 @@ BEGIN
     -- -------------------------------------------------------------- log (v2)
     -- Pending frames are pure allocator/cursor arithmetic (§9) — the seg
     -- version's pre-aggregated segments×consumers SUM is gone. Only the time
-    -- lag still touches log_segments: MIN(created_at) over the not-yet-
-    -- consumed PK range per (partition, group).
-    WITH lag AS (
-        SELECT c.partition_id, c.consumer_group,
-               MIN(s.created_at) AS oldest_unconsumed_at
-        FROM queen.log_consumers c
-        JOIN queen.log_segments s
-          ON s.partition_id = c.partition_id
-         AND s.end_offset > c.committed
-        GROUP BY c.partition_id, c.consumer_group
-    ),
-    v2_data AS (
-        SELECT c.consumer_group,
+    -- lag still touches log_segments, via the covering probe in v2_data.
+    --
+    -- THE PROBE, not a MIN over the unconsumed range (2026-08-24, prod at 60k
+    -- partitions). The former free-standing lag CTE — MIN(created_at) over
+    -- end_offset > committed, grouped per (partition, group) — had no usable
+    -- index (log_segments deliberately carries only its (partition_id,
+    -- base_offset) PK), so the planner hash-joined a SEQ SCAN OF THE ENTIRE
+    -- SEGMENTS HEAP on every console load, cross-tenant (the tenant join sat
+    -- outside the GROUP BY, unreachable for pushdown), and a never-consumed
+    -- cursor (committed=-1: an abandoned group) fed every retained segment of
+    -- its every partition into the aggregate. Measured on a 60k-partition /
+    -- 6M-segment rig: 3.7-6.3s and ~1.9 GB of buffers per call — evicting the
+    -- pop path's working set as a side effect. Probe form, same rig: 0.6-1.1s,
+    -- output verified field-identical.
+    --
+    -- Correct because segments append in offset order, so created_at is
+    -- monotone in base_offset and the OLDEST unconsumed segment is the one
+    -- covering committed+1 — or the first after it when the cursor sits on a
+    -- segment boundary (an NTP slew can bend the monotonicity by seconds; the
+    -- 300s Lagging threshold absorbs that). Two O(log n) PK probes, and only
+    -- for cursors with pending > 0: a caught-up cursor provably has no
+    -- unconsumed segment (every end_offset <= last_offset <= committed).
+    WITH v2_base AS (
+        SELECT c.partition_id, c.consumer_group, c.committed, c.total_consumed,
                q.name AS queue_name,
-               c.total_consumed,
                -- committed=-1 (never consumed) counts the whole live log;
                -- log_start-1 dominates once retention has eaten past the
                -- cursor (evicted frames are not lag).
-               GREATEST(p.last_offset - GREATEST(c.committed, p.log_start - 1), 0) AS pending,
-               l.oldest_unconsumed_at
+               GREATEST(p.last_offset - GREATEST(c.committed, p.log_start - 1), 0) AS pending
         FROM queen.log_consumers c
         JOIN queen.log_partitions p ON p.id = c.partition_id
         -- Queue identity is the queen.queues id now: this join IS the
         -- queue-existence guard (the old name-join with its storage='segments'
-        -- predicate is merged into it). Track B: scoped to p_tenant.
+        -- predicate is merged into it). Track B: scoped to p_tenant — and the
+        -- probe below sits after this join, so other tenants' cursors are
+        -- never priced.
         JOIN queen.queues q ON q.id = p.queue_id AND q.tenant_id = p_tenant
-        LEFT JOIN lag l ON l.partition_id = c.partition_id
-                       AND l.consumer_group = c.consumer_group
+    ),
+    v2_data AS (
+        SELECT b.consumer_group, b.queue_name, b.total_consumed, b.pending,
+               l.oldest_unconsumed_at
+        FROM v2_base b
+        LEFT JOIN LATERAL (
+            -- The inner probe pins the scan start at the covering segment, so
+            -- a lagging cursor never walks its consumed-but-retained prefix;
+            -- COALESCE 0 = retention already deleted past the cursor, start at
+            -- the log head. LIMIT 1 keeps the join row-preserving.
+            SELECT s2.created_at AS oldest_unconsumed_at
+            FROM queen.log_segments s2
+            WHERE b.pending > 0
+              AND s2.partition_id = b.partition_id
+              AND s2.base_offset >= COALESCE((
+                    SELECT s1.base_offset
+                    FROM queen.log_segments s1
+                    WHERE s1.partition_id = b.partition_id
+                      AND s1.base_offset <= b.committed + 1
+                    ORDER BY s1.base_offset DESC
+                    LIMIT 1), 0)
+              AND s2.end_offset > b.committed
+            ORDER BY s2.base_offset
+            LIMIT 1
+        ) l ON TRUE
     ),
     -- PLAN_CONFLATION §2.6 (fixes M7). The three subscription fields below were
     -- hard-coded NULL, so subscription mode had no console surface at all — and
@@ -895,9 +929,11 @@ $$;
 -- rows CTE that used to run first, prepending its own (always empty) array,
 -- is deleted. The log branch is pure offset arithmetic: pending =
 --   GREATEST(last_offset - GREATEST(committed, log_start - 1), 0)
--- and the time lag is MIN(created_at) over the not-yet-consumed log_segments
--- PK range (the only segment touch). last_consumed_at does not exist in the
--- log consumer row -> NULL, same key shape.
+-- and the time lag is the covering-segment probe of get_consumer_groups_v4
+-- (same 2026-08-24 rewrite; the correlated MIN it replaces walked every
+-- partition's whole PK range per cursor — measured 14-36s at 60k partitions,
+-- probe form ~1s). last_consumed_at does not exist in the log consumer row ->
+-- NULL, same key shape.
 -- ============================================================================
 -- Track B (§5): p_tenant scopes the (global) lagging-partitions listing.
 CREATE OR REPLACE FUNCTION queen.get_lagging_partitions_v1(
@@ -920,13 +956,32 @@ BEGIN
             p.id AS partition_id,
             c.worker_id,
             GREATEST(p.last_offset - GREATEST(c.committed, p.log_start - 1), 0) AS pending,
-            (SELECT MIN(s.created_at) FROM queen.log_segments s
-             WHERE s.partition_id = c.partition_id
-               AND s.end_offset > c.committed) AS oldest_unconsumed_at
+            l.oldest_unconsumed_at
         FROM queen.log_consumers c
         JOIN queen.log_partitions p ON p.id = c.partition_id
         -- Queue identity is the queen.queues id now (log_queues is merged away).
         JOIN queen.queues q ON q.id = p.queue_id
+        -- The pending gate + covering probe (rationale at
+        -- get_consumer_groups_v4): a caught-up cursor touches no segment, a
+        -- lagging one pays two PK probes instead of a walk of its partition's
+        -- whole segment range. The pending>0 gate is spelled inline (the alias
+        -- above is not in scope here), same arithmetic.
+        LEFT JOIN LATERAL (
+            SELECT s2.created_at AS oldest_unconsumed_at
+            FROM queen.log_segments s2
+            WHERE p.last_offset > GREATEST(c.committed, p.log_start - 1)
+              AND s2.partition_id = c.partition_id
+              AND s2.base_offset >= COALESCE((
+                    SELECT s1.base_offset
+                    FROM queen.log_segments s1
+                    WHERE s1.partition_id = c.partition_id
+                      AND s1.base_offset <= c.committed + 1
+                    ORDER BY s1.base_offset DESC
+                    LIMIT 1), 0)
+              AND s2.end_offset > c.committed
+            ORDER BY s2.base_offset
+            LIMIT 1
+        ) l ON TRUE
         WHERE q.tenant_id = p_tenant
     )
     SELECT COALESCE(jsonb_agg(
@@ -987,15 +1042,32 @@ BEGIN
             c.total_consumed,
             c.lease_expires_at,
             GREATEST(p.last_offset - GREATEST(c.committed, p.log_start - 1), 0)::bigint AS offset_lag,
-            EXTRACT(EPOCH FROM (NOW() - (
-                SELECT MIN(s.created_at) FROM queen.log_segments s
-                WHERE s.partition_id = c.partition_id
-                  AND s.end_offset > c.committed
-            )))::integer AS time_lag_seconds
+            EXTRACT(EPOCH FROM (NOW() - l.oldest_unconsumed_at))::integer AS time_lag_seconds
         FROM queen.log_consumers c
         JOIN queen.log_partitions p ON p.id = c.partition_id
         -- Queue identity is the queen.queues id now (log_queues is merged away).
         JOIN queen.queues q ON q.id = p.queue_id
+        -- The pending gate + covering probe (rationale at
+        -- get_consumer_groups_v4) replacing the correlated MIN that walked the
+        -- partition's whole segment range per cursor — this is the per-group
+        -- console view, but one group over 60k partitions still measured
+        -- 0.6-2.1s the old way, 0.1-0.7s with the probe.
+        LEFT JOIN LATERAL (
+            SELECT s2.created_at AS oldest_unconsumed_at
+            FROM queen.log_segments s2
+            WHERE p.last_offset > GREATEST(c.committed, p.log_start - 1)
+              AND s2.partition_id = c.partition_id
+              AND s2.base_offset >= COALESCE((
+                    SELECT s1.base_offset
+                    FROM queen.log_segments s1
+                    WHERE s1.partition_id = c.partition_id
+                      AND s1.base_offset <= c.committed + 1
+                    ORDER BY s1.base_offset DESC
+                    LIMIT 1), 0)
+              AND s2.end_offset > c.committed
+            ORDER BY s2.base_offset
+            LIMIT 1
+        ) l ON TRUE
         WHERE c.consumer_group = p_consumer_group AND q.tenant_id = p_tenant
     )
     SELECT jsonb_object_agg(

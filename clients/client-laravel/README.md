@@ -131,7 +131,7 @@ Lower it for web requests, raise it for CLI workers.
 ### Pop Messages
 
 ```php
-// Pop a single message
+// Pop, broker-sized (see Pop Autopilot)
 $messages = $queen->queue('orders')->pop();
 
 // Pop a batch with long polling
@@ -180,11 +180,73 @@ per-tenant work queues, per-device telemetry). Reduces network round-trips
 from O(P) to O(P / N) while preserving per-partition FIFO ordering.
 
 **When not to use:** few partitions, or each one busy enough to fill
-`batch(B)` on its own. Default is `partitions(1)` which preserves the
-legacy single-partition behaviour.
+`batch(B)` on its own. Leaving `->partitions()` unset hands the sweep width to
+the broker (see Pop Autopilot below); `->partitions(1)` pins the legacy
+single-partition behaviour.
 
 `->partitions(N)` only applies to **wildcard** pops; specifying
 `->partition('name')` ignores the cap.
+
+### Pop Autopilot (Let the Broker Size the Pop)
+
+Requires broker >= 1.2.
+
+`batch` and `partitions` that you do **not** set are chosen by the broker, per
+pop, from state the client cannot see: how many partitions of the group are
+ready, how old their oldest ready message is, how fast messages are arriving.
+The knobs you *do* set are never touched.
+
+```php
+// Both knobs are the broker's: it picks the sweep width and the budget.
+$queen->queue('events')->group('workers')
+    ->consume(fn(array $messages) => handle($messages))
+    ->execute();
+
+// One knob pinned, one delegated: this consumer stays on one partition
+// forever, and the broker sizes the batch for it.
+$queen->queue('events')->group('workers')->partitions(1)
+    ->consume(fn(array $messages) => handle($messages))
+    ->execute();
+```
+
+The request carries `autopilot=true` and simply omits the delegated knobs.
+Setting both leaves nothing to decide, so nothing changes on the wire at all.
+
+**Two ways to switch it off**, both restoring the previous client-side defaults
+(batch 1, partitions 1) byte for byte:
+
+```php
+$queen->queue('events')->autopilot(false)->consume($handler)->execute();
+```
+
+```bash
+QUEEN_SDK_POP_AUTOPILOT=off   # whole process, read once at client creation
+```
+
+**What the broker chose** rides back on the response and is there for the
+reading, along with an optional pacing hint the consume loop honours in place of
+its own delay between empty polls:
+
+```php
+$res = $queen->queue('events')->group('workers')->popResult();
+if ($res['autopilot'] !== null) {
+    printf("%d partitions, batch %d, poll again in %dms\n",
+        $res['autopilot']['partitions'],
+        $res['autopilot']['batch'],
+        $res['autopilot']['waitMillis']);
+}
+```
+
+The high-level consumer is the one surface where the batch is never the
+broker's: `consume()` hands back exactly one message and `consumeBatch()` is
+given a maximum, so each pins its own budget and delegates only the width.
+
+**An older broker ignores the parameter**, so the omitted knobs take *its*
+defaults (batch 200, partitions 1) instead of the old client-side ones. That is
+a sizing difference and nothing else — no message is lost, reordered or
+duplicated — so unlike conflation it degrades silently and on purpose. Pin the
+values explicitly, or turn autopilot off, if you need the old numbers against an
+old broker.
 
 ### Conflation (Last-Value Delivery)
 
@@ -627,13 +689,20 @@ while (!$consumer->isClosed()) {
 # Basic consumption
 php artisan queen:consume orders App\\Handlers\\OrderHandler --group=processors --auto-ack
 
-# With options
+# With options. --batch and --partitions are opt-in: leave them out and the
+# broker sizes the pop (pop autopilot), name one and it is pinned.
 php artisan queen:consume orders App\\Handlers\\OrderHandler \
     --group=processors \
     --batch=10 \
+    --partitions=8 \
     --auto-ack \
     --timeout=30000 \
     --limit=1000
+
+# Pre-1.2 sizing, byte for byte (batch 1, partitions 1, no autopilot parameter)
+php artisan queen:consume orders App\\Handlers\\OrderHandler \
+    --group=processors \
+    --no-autopilot
 
 # Subscription mode
 php artisan queen:consume events App\\Handlers\\EventHandler \

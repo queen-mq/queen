@@ -19,6 +19,7 @@ from .http.load_balancer import LoadBalancer
 from .kv.kv import KV
 from .timers.timers import TimerBuilder, Timers
 from .utils import logger
+from .utils.autopilot import pop_autopilot_disabled_by_env
 from .utils.defaults import CLIENT_DEFAULTS
 from .utils.validation import validate_url, validate_urls
 
@@ -107,6 +108,12 @@ class Queen:
             transport=transport,
             headers=headers,
         )
+
+        # Pop autopilot: on unless the environment rolls it back. Read ONCE here
+        # rather than on every pop -- it is a deployment-level rollback, and
+        # re-reading it per request would let a running process change wire
+        # shape halfway through. A per-call .autopilot(...) still outranks it.
+        self.autopilot_off = pop_autopilot_disabled_by_env()
 
         # Create HTTP client
         self._http_client = self._create_http_client()

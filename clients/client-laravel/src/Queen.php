@@ -8,6 +8,7 @@ use Queen\Buffer\BufferManager;
 use Queen\Builders\QueueBuilder;
 use Queen\Builders\TransactionBuilder;
 use Queen\Support\Defaults;
+use Queen\Support\PopAutopilot;
 
 class Queen
 {
@@ -18,6 +19,8 @@ class Queen
     private ?Kv $kv = null;
     private ?Timers $timers = null;
     private ?Ephemeral $ephemeral = null;
+    /** Process-wide kill switch for pop autopilot, settled in the constructor. */
+    private bool $autopilotOff = false;
 
     /**
      * @param string|array $config Single URL string, array of URLs, or config array
@@ -25,8 +28,23 @@ class Queen
     public function __construct(string|array $config = [])
     {
         $this->config = $this->normalizeConfig($config);
+        // Pop autopilot: on unless the environment rolls it back. Read ONCE here
+        // rather than on every pop — it is a deployment-level rollback, and
+        // re-reading it per request would let a running process change wire
+        // shape halfway through. A per-builder ->autopilot(..) still outranks it.
+        $this->autopilotOff = PopAutopilot::disabledByEnv();
         $this->httpClient = $this->createHttpClient();
         $this->bufferManager = new BufferManager($this->httpClient);
+    }
+
+    /**
+     * Whether pop autopilot is off for this client because the environment
+     * asked (QUEEN_SDK_POP_AUTOPILOT). Read by the builders; a per-call
+     * ->autopilot(..) still outranks it.
+     */
+    public function autopilotOff(): bool
+    {
+        return $this->autopilotOff;
     }
 
     // ===========================

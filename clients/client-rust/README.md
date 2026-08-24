@@ -118,6 +118,50 @@ Two behaviours worth reading before using them:
 * Nothing else on these surfaces turns a verdict into an error. A lost `putIfAbsent`, a missing
   key, a cancel that found nothing: all `Ok`, with `applied()`, `found()` or `ok` saying so.
 
+## Pop autopilot: the broker sizes the pop (broker >= 1.2)
+
+`batch` and `partitions` that you do **not** set are chosen by the broker, per pop, from state
+this client cannot see: how many partitions of the group are ready, how old their oldest ready
+message is, how fast messages are arriving. The knobs you *do* set are never touched — the
+choice is per dimension.
+
+```rust
+// Both knobs are the broker's: it picks the sweep width and the budget.
+queen.queue("events").group("workers")
+    .consume(|msg| async move { handle(msg).await })
+    .await?;
+
+// One knob pinned, one delegated: this consumer stays on one partition forever,
+// and the broker sizes the batch for it.
+queen.queue("events").group("workers").partitions(1)
+    .consume(|msg| async move { handle(msg).await })
+    .await?;
+```
+
+The request carries `autopilot=true` and simply omits the delegated knobs. Setting both leaves
+nothing to decide, so nothing changes on the wire at all.
+
+Two ways to switch it off, both restoring the previous client-side defaults (batch 1,
+partitions 1) byte for byte: `.autopilot(false)` on a builder, or `QUEEN_SDK_POP_AUTOPILOT=off`
+for a whole process, read once at `Queen::connect`.
+
+What the broker chose rides back on the response, along with an optional pacing hint the
+consume loop honours in place of its own delay between empty polls:
+
+```rust
+let out = queen.queue("events").group("workers").pop_result().await?;
+if let Some(ap) = out.autopilot {
+    println!("{} partitions, batch {}, poll again in {:?}ms",
+             ap.partitions, ap.batch, ap.wait_ms);
+}
+```
+
+**A broker older than 1.2 ignores the parameter**, so the omitted knobs take *its* defaults
+(batch 200, partitions 1) instead of the old client-side ones. That is a sizing difference and
+nothing else — no message is lost, reordered or duplicated — so unlike conflation it degrades
+silently and on purpose. Pin the values explicitly, or turn autopilot off, if you need the old
+numbers against an old broker.
+
 ## Conflation: last-value delivery (broker >= 1.1.0)
 
 For command-style queues where one partition is one logical task key and only the newest

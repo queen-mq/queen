@@ -101,7 +101,8 @@ for. All five of these exit 1:
   `EdDSA`, `auto`;
 - `QUEEN_TENANCY_HEADER=1` with no `QUEEN_KV_TRUSTED_PROXY=1`;
 - a schema apply failure (unless `QUEEN_APPLY_SCHEMA=0`);
-- failure to bind `0.0.0.0:$PORT`.
+- failure to bind `$PORT` on `$QUEEN_BIND_ADDR`, including a `QUEEN_BIND_ADDR` that
+  carries a port of its own instead of a bare host or IP.
 
 The third is a safety interlock rather than a validation, and it is keyed on the
 tenancy mode alone. The tenant header is opaque and validated against nothing, so

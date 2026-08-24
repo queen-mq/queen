@@ -135,6 +135,67 @@ pub struct PopResponse {
         skip_serializing_if = "Option::is_none"
     )]
     pub conflation_conflict: Option<bool>,
+
+    /// POP AUTOPILOT — what the broker chose for this pop, present only when the
+    /// request sent `autopilot=true` and the broker resolved at least one knob
+    /// for it. Absent (not zeroed) on every other response, which is what keeps
+    /// a non-opted-in deployment byte-identical to a pre-1.2 broker's.
+    ///
+    /// It cannot ride a `204`, which has no body at all, so an empty
+    /// non-conflating pop carries no echo even under autopilot. The advice is
+    /// stable across pops of a lane, so a client that wants it reads it from a
+    /// response that carried messages.
+    #[serde(default, deserialize_with = "lenient_autopilot")]
+    pub autopilot: Option<AutopilotEcho>,
+}
+
+/// The broker's account of how it sized one pop (`server/src/pop_autopilot.rs`,
+/// `append_echo`).
+///
+/// Reading it is optional — the messages are already sized by it — but it is the
+/// only view a client has of the controller, and the only source of the pacing
+/// advice an empty-poll loop can honour.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotEcho {
+    /// Sweep width the claim actually used.
+    #[serde(default)]
+    pub partitions: i32,
+    /// Message budget the claim actually used.
+    #[serde(default)]
+    pub batch: i32,
+    /// How long the broker advises waiting before polling again. Emitted only
+    /// when the broker has an opinion; it is advice, not a lease.
+    #[serde(rename = "waitMs", default, skip_serializing_if = "Option::is_none")]
+    pub wait_ms: Option<u64>,
+}
+
+/// Deserialize the echo WITHOUT letting it fail the whole response.
+///
+/// This field is the broker telling the client what it did. A client that
+/// refuses to decode a pop — and therefore stops consuming — because a newer
+/// broker grew a fourth number, or spelled one of these as a string, would be a
+/// self-inflicted outage over a field nothing depends on. So an absent, null,
+/// non-object or wrongly-typed value degrades to "no echo" / zero, exactly as
+/// the Go, JS, Python and PHP clients do.
+fn lenient_autopilot<'de, D>(de: D) -> Result<Option<AutopilotEcho>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = serde_json::Value::deserialize(de)?;
+    let Some(obj) = raw.as_object() else {
+        return Ok(None);
+    };
+    Ok(Some(AutopilotEcho {
+        partitions: obj
+            .get("partitions")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0) as i32,
+        batch: obj
+            .get("batch")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0) as i32,
+        wait_ms: obj.get("waitMs").and_then(serde_json::Value::as_u64),
+    }))
 }
 
 fn default_true() -> bool {
@@ -232,6 +293,21 @@ pub struct PopParams {
     pub namespace: Option<String>,
     /// Discovery pops only (`/api/v1/pop`).
     pub task: Option<String>,
+
+    /// POP AUTOPILOT — "broker, choose the knobs I did not send".
+    ///
+    /// `Some(true)` (never `Some(false)`, the same rule `auto_ack` and
+    /// `conflation` follow) makes the broker size every one of `batch` and
+    /// `partitions` that is `None` here, from state no client can see. A knob
+    /// that IS set stays the caller's and is never overridden — the choice is
+    /// per dimension — and setting both leaves nothing to decide, which is why
+    /// `to_pairs` then emits the pre-autopilot request unchanged.
+    ///
+    /// A broker older than 1.2 drops the unknown parameter and applies its OWN
+    /// defaults (batch 200, partitions 1) to the omitted knobs. That is a sizing
+    /// difference, not a correctness one, so unlike conflation there is no
+    /// degrade-loudly check: nothing is lost, misordered or delivered twice.
+    pub autopilot: Option<bool>,
 }
 
 impl PopParams {
@@ -239,6 +315,13 @@ impl PopParams {
     /// HTTP layer. Order is stable so tests can assert on it.
     pub fn to_pairs(&self) -> Vec<(&'static str, String)> {
         let mut out: Vec<(&'static str, String)> = Vec::new();
+        // Only ever sent when true. First, so that a request which is NOT
+        // engaging autopilot is byte-identical — key order included — to the one
+        // this crate rendered before the parameter existed.
+        let autopilot = self.autopilot == Some(true);
+        if autopilot {
+            out.push(("autopilot", "true".to_string()));
+        }
         if let Some(v) = self.batch {
             out.push(("batch", v.to_string()));
         }
@@ -269,7 +352,12 @@ impl PopParams {
             out.push(("subscriptionFrom", v.clone()));
         }
         if let Some(v) = self.partitions {
-            if v > 1 {
+            // The legacy gate: partitions travels only above 1, because 1 IS the
+            // server-side default and a v4-era client never sent it. Under
+            // autopilot the gate is lifted, and it has to be: a caller who says
+            // 1 is pinning a width the controller would otherwise widen, and
+            // omitting the key is now how "you choose" is spelled.
+            if autopilot || v > 1 {
                 out.push(("partitions", v.to_string()));
             }
         }
@@ -587,5 +675,128 @@ mod tests {
         assert!(pairs.contains(&("partitions", "8".to_string())));
         assert!(pairs.contains(&("subscriptionMode", "new".to_string())));
         assert!(pairs.contains(&("subscriptionFrom", "now".to_string())));
+    }
+
+    // ------------------------------------------------------------ autopilot
+
+    /// POP AUTOPILOT — the opt-in travels only when true, a delegated knob is
+    /// simply omitted, and the `partitions > 1` gate is LIFTED while it is on:
+    /// under autopilot an omitted `partitions` means "broker, you choose", so a
+    /// caller who says 1 is pinning a width the controller would widen.
+    #[test]
+    fn params_send_autopilot_only_when_true_and_lift_the_partitions_gate() {
+        let both_delegated = PopParams {
+            consumer_group: Some("workers".into()),
+            autopilot: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            both_delegated.to_pairs(),
+            vec![
+                ("autopilot", "true".to_string()),
+                ("consumerGroup", "workers".to_string()),
+            ],
+            "a delegated knob does not travel at all"
+        );
+
+        let pinned_to_one = PopParams {
+            consumer_group: Some("workers".into()),
+            partitions: Some(1),
+            autopilot: Some(true),
+            ..Default::default()
+        };
+        assert!(
+            pinned_to_one
+                .to_pairs()
+                .contains(&("partitions", "1".to_string())),
+            "partitions=1 is a decision under autopilot, not the absence of one"
+        );
+    }
+
+    /// The escape hatch has to be exact: with the flag off the rendering is what
+    /// this crate produced before the parameter existed, key order included.
+    #[test]
+    fn params_without_autopilot_are_byte_identical_to_the_old_rendering() {
+        let off = PopParams {
+            batch: Some(1),
+            wait: Some(false),
+            timeout_millis: Some(30000),
+            consumer_group: Some("workers".into()),
+            partitions: Some(1),
+            autopilot: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            off.to_pairs(),
+            vec![
+                ("batch", "1".to_string()),
+                ("wait", "false".to_string()),
+                ("timeout", "30000".to_string()),
+                ("consumerGroup", "workers".to_string()),
+            ],
+            "no autopilot key, and partitions=1 stays off the wire"
+        );
+
+        // `Some(false)` is never rendered either, the rule auto_ack and
+        // conflation already follow.
+        let explicitly_off = PopParams {
+            consumer_group: Some("workers".into()),
+            autopilot: Some(false),
+            ..Default::default()
+        };
+        assert!(!explicitly_off
+            .to_pairs()
+            .iter()
+            .any(|(k, _)| *k == "autopilot"));
+    }
+
+    /// The echo is additive and MUST NOT be load-bearing: a response that says
+    /// nothing about autopilot, or says something this crate has never heard of,
+    /// still decodes. Refusing to decode a pop over this field would stop a
+    /// consumer for a value nothing depends on.
+    #[test]
+    fn the_autopilot_echo_is_read_leniently() {
+        let head = r#"{"success":true,"queue":"q","partition":"p","partitionId":"p1","#;
+        let tail = r#""leaseId":"l1","consumerGroup":"g","messages":[]"#;
+
+        let absent: PopResponse = serde_json::from_str(&format!("{head}{tail}}}")).unwrap();
+        assert!(absent.autopilot.is_none());
+
+        let full: PopResponse = serde_json::from_str(&format!(
+            r#"{head}{tail},"autopilot":{{"partitions":8,"batch":200,"waitMs":25}}}}"#
+        ))
+        .unwrap();
+        let echo = full.autopilot.expect("an object decodes");
+        assert_eq!((echo.partitions, echo.batch, echo.wait_ms), (8, 200, Some(25)));
+
+        // waitMs is optional: the broker sends it only when it has an opinion.
+        let no_wait: PopResponse = serde_json::from_str(&format!(
+            r#"{head}{tail},"autopilot":{{"partitions":4,"batch":64}}}}"#
+        ))
+        .unwrap();
+        assert_eq!(no_wait.autopilot.unwrap().wait_ms, None);
+
+        // A newer broker growing a field must not cost the fields we understand.
+        let grown: PopResponse = serde_json::from_str(&format!(
+            r#"{head}{tail},"autopilot":{{"partitions":2,"batch":10,"reason":"ready_age"}}}}"#
+        ))
+        .unwrap();
+        let echo = grown.autopilot.expect("unknown keys are ignored");
+        assert_eq!((echo.partitions, echo.batch), (2, 10));
+
+        // A wrongly typed field is dropped, and a wrongly shaped value reads as
+        // absent — neither is fatal.
+        for body in [
+            r#""autopilot":{"partitions":"eight","batch":10}"#,
+            r#""autopilot":null"#,
+            r#""autopilot":true"#,
+            r#""autopilot":[]"#,
+        ] {
+            let got: PopResponse =
+                serde_json::from_str(&format!("{head}{tail},{body}}}"))
+                    .unwrap_or_else(|e| panic!("{body} must still decode: {e}"));
+            let partitions = got.autopilot.map(|e| e.partitions).unwrap_or(0);
+            assert_eq!(partitions, 0, "{body}");
+        }
     }
 }

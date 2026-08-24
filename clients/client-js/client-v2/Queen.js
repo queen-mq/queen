@@ -14,6 +14,7 @@ import { Ephemeral } from './ephemeral/Ephemeral.js'
 import { StreamBuilder } from './stream/StreamBuilder.js'
 import { StreamConsumer } from './stream/StreamConsumer.js'
 import { Admin } from './admin/Admin.js'
+import { popAutopilotDisabledByEnv } from './utils/autopilot.js'
 import { CLIENT_DEFAULTS } from './utils/defaults.js'
 import { validateUrl, validateUrls } from './utils/validation.js'
 import * as logger from './utils/logger.js'
@@ -68,6 +69,11 @@ export class Queen {
   #admin = null
   #kv = null
   #ephemeral = null
+  // Process-wide kill switch for pop autopilot, read from
+  // QUEEN_SDK_POP_AUTOPILOT once here rather than on every pop: it is a
+  // deployment-level rollback, and re-reading it per request would let a
+  // running process change wire shape halfway through.
+  #autopilotOff = false
 
   constructor(config = {}) {
     // Configure custom logger before anything else.
@@ -83,6 +89,9 @@ export class Queen {
     // Normalize config
     this.#config = this.#normalizeConfig(config)
 
+    // Pop autopilot: on unless the environment rolls it back (utils/autopilot.js).
+    this.#autopilotOff = popAutopilotDisabledByEnv()
+
     // Create HTTP client
     this.#httpClient = this.#createHttpClient()
 
@@ -95,6 +104,15 @@ export class Queen {
     }
     
     logger.log('Queen.constructor', { status: 'initialized', urls: this.#config.urls.length, handleSignals: this.#config.handleSignals })
+  }
+
+  /**
+   * Whether pop autopilot is off for this client because the environment asked
+   * (QUEEN_SDK_POP_AUTOPILOT). Read by the builders; a per-call
+   * `.autopilot(...)` still outranks it.
+   */
+  get autopilotOff() {
+    return this.#autopilotOff
   }
 
   #normalizeConfig(config) {

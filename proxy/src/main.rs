@@ -253,7 +253,7 @@ async fn async_main(worker_threads: usize) {
         }
     };
 
-    let addr = format!("0.0.0.0:{}", st.cfg.port);
+    let addr = config::host_port(&st.cfg.bind_addr, st.cfg.port);
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind");
     tracing::info!(
         addr,

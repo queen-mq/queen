@@ -235,7 +235,14 @@ class Runner:
             .timeout_millis(self.max_wait_millis)
             .group(self.consumer_group)
         )
-        if self.max_partitions > 1 and hasattr(qb, "partitions"):
+        # Unconditional, and it has to be: the runtime has already defaulted
+        # max_partitions (to 4), so this is always a decision the streams layer
+        # made. Skipping the call for max_partitions == 1 used to be a harmless
+        # optimisation -- 1 was what an omitted `partitions` meant on the wire
+        # -- but with pop autopilot an omitted `partitions` means "broker, you
+        # choose", which would widen a query that explicitly asked for one
+        # partition per pop.
+        if hasattr(qb, "partitions"):
             qb = qb.partitions(self.max_partitions)
         if self.subscription_mode and hasattr(qb, "subscription_mode"):
             qb = qb.subscription_mode(self.subscription_mode)

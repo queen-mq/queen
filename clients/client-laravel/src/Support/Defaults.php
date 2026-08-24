@@ -31,9 +31,14 @@ class Defaults
         'encryptionEnabled' => false,
     ];
 
+    // `batch` and `maxPartitions` here are the AUTOPILOT-OFF defaults. With
+    // autopilot on (the default) a knob the caller never set is not defaulted at
+    // all -- it is omitted from the pop so the broker sizes it (PopAutopilot).
+    // These values are what comes back with QueueBuilder::autopilot(false), or
+    // with QUEEN_SDK_POP_AUTOPILOT=off for a whole process.
     public const CONSUME_DEFAULTS = [
         'concurrency' => 1,
-        'batch' => 1,
+        'batch' => 1, // autopilot off only
         'autoAck' => true,
         'wait' => true,
         'timeoutMillis' => 30000,
@@ -43,7 +48,7 @@ class Defaults
         'renewLeaseIntervalMillis' => null,
         'subscriptionMode' => null,
         'subscriptionFrom' => null,
-        'maxPartitions' => 1, // v4 multi-partition pop cap (1 = legacy single-partition)
+        'maxPartitions' => 1, // v4 multi-partition pop cap (autopilot off only)
         // Last-value delivery for this consumer GROUP on this queue: a pop of a
         // partition delivers exactly the newest visible message and the ack
         // retires the whole backlog behind it. Declared here, persisted on the
@@ -56,8 +61,9 @@ class Defaults
         'conflation' => false,
     ];
 
+    // As in CONSUME_DEFAULTS, `batch` is the autopilot-OFF default.
     public const POP_DEFAULTS = [
-        'batch' => 1,
+        'batch' => 1, // autopilot off only
         'wait' => false,
         'timeoutMillis' => 30000,
         'autoAck' => false,

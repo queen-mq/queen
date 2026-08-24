@@ -97,7 +97,7 @@ function parseEnvVars(text) {
     // consulted when A is unset, and the innermost literal is the real default.
     const aliases = [];
     let inner = def;
-    while (/^env_(bool|int|f64|str)\(/.test(inner)) {
+    while (/^&?env_(bool|int|f64|str)\(/.test(inner)) {
       const innerArgs = splitArgs(readArgs(inner, inner.indexOf("(")));
       const innerName = innerArgs[0]?.match(/^"([^"]+)"$/);
       if (innerName) aliases.push(innerName[1]);
@@ -136,7 +136,7 @@ function parseRawEnvVars(text) {
 // ---------------------------------------------------------------------------
 
 const GROUPS = [
-  ["Server", (n) => ["PORT", "QUEEN_SERVER_ID", "HOSTNAME", "QUEEN_MAX_BODY_BYTES", "QUEEN_APPLY_SCHEMA"].includes(n)],
+  ["Server", (n) => ["PORT", "QUEEN_BIND_ADDR", "QUEEN_SERVER_ID", "HOSTNAME", "QUEEN_MAX_BODY_BYTES", "QUEEN_APPLY_SCHEMA"].includes(n)],
   ["PostgreSQL", (n) => n.startsWith("PG_") || n.startsWith("DB_") || n === "QUEEN_STMT_TIMEOUT_MS"],
   ["Authentication", (n) => n.startsWith("JWT_")],
   ["Multi-broker mesh", (n) => n.startsWith("QUEEN_MESH_") || n.startsWith("QUEEN_SYNC_") || n.startsWith("QUEEN_UDP_") || n === "QUEEN_CACHE_REFRESH_INTERVAL_MS"],
@@ -173,6 +173,7 @@ const GROUPS = [
  * the list fails the build rather than outliving the code.
  */
 const INHERITS = new Map([
+  ["QUEEN_MESH_BIND_ADDR", "QUEEN_BIND_ADDR"],
   ["QUEEN_ACK_FUSION_SHARDS", "QUEEN_V2_FUSION_SHARDS"],
   ["QUEEN_HOTLIST_SHARDS", "QUEEN_V2_FUSION_SHARDS"],
 ]);

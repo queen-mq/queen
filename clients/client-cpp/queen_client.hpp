@@ -58,6 +58,8 @@
 #include <stdexcept>
 #include <iostream>
 #include <optional>
+#include <cctype>
+#include <cstdlib>
 #include <limits>
 #include <regex>
 #include <future>
@@ -169,7 +171,14 @@ struct ConsumeOptions {
     std::string task;
     std::string group;
     int concurrency = 1;
-    int batch = 1;
+    /**
+     * The pop's message budget. 0 means UNSET -- the dimension pop autopilot
+     * lets the broker choose, from state no client can see. It used to mean the
+     * client-side default of 1, which is now applied only when autopilot is off,
+     * so that "never set a batch" and "set a batch of 1" stay distinguishable
+     * all the way to the wire. See util::pop_sizing.
+     */
+    int batch = 0;
     int limit = 0;                           // 0 = unlimited
     int idle_millis = 0;                     // 0 = no idle timeout
     bool auto_ack = true;
@@ -180,7 +189,14 @@ struct ConsumeOptions {
     std::string subscription_mode;
     std::string subscription_from;
     bool each = false;
-    int max_partitions = 1;                  // v4 multi-partition pop cap
+    /// v4 multi-partition pop cap. 0 = unset, as for `batch` above.
+    int max_partitions = 0;
+    /**
+     * Broker-side pop sizing. Unset takes the client-wide default (on, unless
+     * QUEEN_SDK_POP_AUTOPILOT turned it off at construction); false restores the
+     * pre-1.2 client-side defaults byte for byte.
+     */
+    std::optional<bool> autopilot;
     /**
      * Last-value delivery for this consumer group on this queue
      * (PLAN_CONFLATION.md §1.1): under backlog the group is served ONE message
@@ -894,7 +910,188 @@ inline long long ttl_seconds_from_millis(long long millis) {
     return (millis + 999) / 1000;
 }
 
+// ============================================================================
+// Pop autopilot (server/src/pop_autopilot.rs)
+// ============================================================================
+//
+// The broker owns a controller that sizes a pop from state this client cannot
+// see: how many partitions of the (queue, group) are ready, how old their
+// oldest ready message is, at what rate messages are arriving. Two knobs are
+// under its control -- `partitions` (the sweep width) and `batch` (the message
+// budget for the sweep).
+//
+// THE RULE, and it is the only one: an explicit user value is sacred. Autopilot
+// applies ONLY to the knobs the user left unset, and it applies to them one by
+// one. A consumer that pins partitions(1) and says nothing about batch keeps its
+// single-partition claim forever and lets the broker size the batch; the pinned
+// dimension is never "adjusted", not even towards a value the controller would
+// consider better.
+//
+// The wire shape follows the conflation precedent above: a client that is not
+// engaging autopilot sends the byte-identical request it sent before this
+// feature existed. `autopilot=true` is emitted only when at least one knob is
+// being left to the broker, never as `autopilot=false`, and the delegated knobs
+// are simply omitted.
+//
+// WHAT AN OLD BROKER DOES, and why there is no capability check. A broker older
+// than 1.2 ignores unknown query params: the request succeeds, and the omitted
+// knobs fall back to the SERVER-side defaults (batch 200, partitions 1) instead
+// of the old client-side ones. That is a sizing difference, not a correctness
+// one -- nothing is lost, misordered or delivered twice -- so unlike conflation
+// (which silently hands a last-value consumer a whole backlog) this degrades
+// quietly and on purpose.
+
+/**
+ * The environment variable that disables pop autopilot for a whole process:
+ * QUEEN_SDK_POP_AUTOPILOT=off restores the client-side defaults this SDK applied
+ * before autopilot existed, byte for byte. It is read once, in the QueenClient
+ * constructor, so a single deployment can be rolled back without touching code.
+ */
+inline constexpr const char* ENV_POP_AUTOPILOT = "QUEEN_SDK_POP_AUTOPILOT";
+
+/**
+ * The vocabulary, split from the lookup so it can be tested without mutating a
+ * process-wide variable. "off", "false", "0", "no" and "disabled" all disable
+ * autopilot (case-insensitive, surrounding space ignored); every other value,
+ * including the empty one, leaves it on.
+ */
+inline bool autopilot_disabled_by_value(const std::string& raw) {
+    const auto first = raw.find_first_not_of(" \t\n\r\f\v");
+    if (first == std::string::npos) return false;
+    const auto last = raw.find_last_not_of(" \t\n\r\f\v");
+    std::string v = raw.substr(first, last - first + 1);
+    for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return v == "off" || v == "false" || v == "0" || v == "no" || v == "disabled";
+}
+
+inline bool autopilot_disabled_by_env() {
+    const char* raw = std::getenv(ENV_POP_AUTOPILOT);
+    return raw != nullptr && autopilot_disabled_by_value(raw);
+}
+
+/**
+ * Which of the three sizing keys travel on one pop, and with what values.
+ * `has_batch` / `has_partitions` false means "this key does not travel" -- the
+ * dimension the broker is choosing.
+ */
+struct PopSizing {
+    bool autopilot = false;
+    bool has_batch = false;
+    int batch = 0;
+    bool has_partitions = false;
+    int partitions = 0;
+};
+
+/**
+ * The batch/partitions/autopilot decision for one pop.
+ *
+ * IT EXISTS SO THERE IS EXACTLY ONE COPY OF THE EMISSION RULE. pop() and
+ * consume() build their query strings separately in this SDK -- the standing
+ * hazard PLAN_CONFLATION §4 names -- and a rule with three branches and a
+ * per-dimension carve-out is precisely the kind that gets copied wrong. Both
+ * builders call this and then only PLACE what it returns; where each key sits in
+ * the query string stays with the builder, because the pre-autopilot key order
+ * is part of what "byte-identical" means here.
+ *
+ * `batch` and `max_partitions` are the USER's own values: 0 (or less) means the
+ * setter was never called, which is what autopilot acts on. Note the case that
+ * looks like an omission and is not -- when both are set there is nothing left
+ * for the controller to decide, so `autopilot=true` is NOT emitted and the
+ * request is byte-identical to the one this SDK sent before autopilot existed.
+ */
+inline PopSizing pop_sizing(int batch, int max_partitions, int fallback_batch, bool autopilot) {
+    const bool batch_set = batch > 0;
+    const bool partitions_set = max_partitions > 0;
+
+    PopSizing out;
+    if (autopilot && !(batch_set && partitions_set)) {
+        out.autopilot = true;
+        out.has_batch = batch_set;
+        out.batch = batch;
+        out.has_partitions = partitions_set;
+        out.partitions = max_partitions;
+        return out;
+    }
+
+    out.autopilot = false;
+    out.has_batch = true;
+    out.batch = batch_set ? batch : fallback_batch;
+    // The legacy gate: partitions travels only above 1, because 1 IS the
+    // server-side default and a v4-era client never sent it.
+    out.has_partitions = partitions_set && max_partitions > 1;
+    out.partitions = max_partitions;
+    return out;
+}
+
+/**
+ * What the broker chose for one pop, echoed back under "autopilot" when the
+ * request engaged autopilot. `present` is false when the broker said nothing --
+ * a pop that never asked, a broker older than 1.2, or a bodiless 204, which has
+ * no body to carry the echo.
+ */
+struct AutopilotDecision {
+    bool present = false;
+    int partitions = 0;
+    int batch = 0;
+    /// The broker's advice on how long to wait before polling again (wire name
+    /// waitMs). Advice, not a lease: the consume loop honours it for the sleep it
+    /// was already taking between empty non-waiting pops, nothing more. 0 = none.
+    int wait_millis = 0;
+};
+
+/**
+ * Read the additive echo out of a decoded pop response.
+ *
+ * Unknown keys inside it are ignored, and an unknown-shaped value is treated as
+ * absent rather than as an error: this field is the broker telling the client
+ * what it did, and a client that refused to run because a newer broker grew a
+ * fourth number would be a self-inflicted outage.
+ */
+inline AutopilotDecision parse_autopilot_decision(const json& response) {
+    AutopilotDecision out;
+    if (!response.is_object() || !response.contains("autopilot")) return out;
+    const json& raw = response["autopilot"];
+    if (!raw.is_object()) return out;
+
+    auto num = [](const json& v) -> int {
+        return v.is_number() && !v.is_boolean() ? v.get<int>() : 0;
+    };
+
+    out.present = true;
+    if (raw.contains("partitions")) out.partitions = num(raw["partitions"]);
+    if (raw.contains("batch")) out.batch = num(raw["batch"]);
+    if (raw.contains("waitMs")) out.wait_millis = num(raw["waitMs"]);
+    return out;
+}
+
+/// The sleep the consume loop has always taken between two empty pops that are
+/// NOT long-polling. A waiting pop already blocks on the broker.
+inline constexpr int EMPTY_POLL_BACKOFF_MILLIS = 100;
+
+/**
+ * How long to wait after an empty pop: the broker's advice when it gave one, the
+ * historical constant otherwise. The advice is honoured as given, without a
+ * ceiling of this client's invention -- the broker knows the arrival rate on
+ * this queue and this client does not.
+ */
+inline int empty_poll_delay_millis(const AutopilotDecision& decision) {
+    return decision.present && decision.wait_millis > 0 ? decision.wait_millis
+                                                        : EMPTY_POLL_BACKOFF_MILLIS;
+}
+
 } // namespace util
+
+/**
+ * What one pop returned, plus the broker's account of how it sized it.
+ *
+ * `autopilot.present` is false when the pop did not engage autopilot, when the
+ * broker is older than 1.2, or when the answer was a bodiless 204 (an empty
+ * non-conflating pop) with nowhere to carry the echo.
+ */
+struct PopResult {
+    nlohmann::json messages = nlohmann::json::array();
+    util::AutopilotDecision autopilot;
+};
 
 // ============================================================================
 // KV and timers - value types (PLAN_KV_TIMERS.md §5, §4)
@@ -3257,9 +3454,15 @@ private:
     std::string group_;
     QueueConfig config_;
     
-    // Consume options
+    // Consume options.
+    //
+    // batch_ / max_partitions_ hold the USER's value, and 0 means the setter was
+    // never called -- which is the dimension pop autopilot gets to choose. The
+    // client-side defaults are applied at emission time (util::pop_sizing), not
+    // here, because filling them in here would erase the difference between
+    // "never called batch()" and "called batch(1)".
     int concurrency_ = 1;
-    int batch_ = 1;
+    int batch_ = 0;
     int limit_ = 0;
     int idle_millis_ = 0;
     bool auto_ack_ = true;
@@ -3270,8 +3473,10 @@ private:
     std::string subscription_mode_;
     std::string subscription_from_;
     bool each_ = false;
-    int max_partitions_ = 1;
+    int max_partitions_ = 0;
     bool conflation_ = false;
+    /// Per-builder override: unset = the client default.
+    std::optional<bool> autopilot_;
 
     // Buffer options
     std::optional<BufferOptions> buffer_options_;
@@ -3394,8 +3599,12 @@ public:
         return *this;
     }
     
+    // Pin the message budget for one pop. Leave it unset and the broker sizes it
+    // (see autopilot below), where it used to mean the client-side default of 1.
+    // batch(0) is not "a batch of zero" and never was: it is the absence of an
+    // opinion, so it reads as unset.
     QueueBuilder& batch(int size) {
-        batch_ = std::max(1, size);
+        batch_ = size > 0 ? size : 0;
         return *this;
     }
 
@@ -3403,9 +3612,33 @@ public:
     // partitions(N), batch(B) becomes a global cap on total messages
     // returned across all claimed partitions. All N share one leaseId,
     // so a single renew() call extends them all atomically.
-    // Default 1 = legacy single-partition behavior.
+    // Leave it unset and the broker chooses the sweep width (see autopilot
+    // below); partitions(1) pins the legacy single-partition behaviour, which is
+    // a decision the broker is told about and never overrides.
     QueueBuilder& partitions(int n) {
-        max_partitions_ = std::max(1, n);
+        max_partitions_ = n > 0 ? n : 0;
+        return *this;
+    }
+
+    /**
+     * Turn broker-side pop sizing on or off for this builder.
+     *
+     * On (the default) the broker chooses batch and partitions for the pops of
+     * this builder, per pop, from state this client cannot see. Even then, a
+     * knob set explicitly travels on the wire as it always did and is never
+     * second-guessed: autopilot only ever fills the knobs left unset.
+     *
+     * autopilot(false) restores this SDK's pre-1.2 behaviour byte for byte: the
+     * client-side defaults come back (batch 1, partitions 1) and no autopilot
+     * parameter is sent. QUEEN_SDK_POP_AUTOPILOT=off does the same for a whole
+     * process; an explicit call here outranks the environment in both
+     * directions.
+     *
+     * Setting BOTH batch and partitions leaves autopilot nothing to decide, so
+     * no autopilot parameter is sent in that case either, whatever this says.
+     */
+    QueueBuilder& autopilot(bool enabled = true) {
+        autopilot_ = enabled;
         return *this;
     }
     
@@ -3477,6 +3710,13 @@ public:
     
     // Consume method
     void consume(std::function<void(const json&)> handler, std::atomic<bool>* stop_signal = nullptr);
+
+    /**
+     * This builder's resolved autopilot decision: its own flag when set,
+     * otherwise the client-wide default settled in the QueenClient constructor.
+     * Defined out of line, below QueenClient, because it reads the client.
+     */
+    bool autopilot_enabled() const;
     // Implementation will be defined after QueenClient declaration
     
     // Pop methods
@@ -3486,6 +3726,27 @@ public:
     }
     
     json pop() {
+        return pop_with_decision().messages;
+    }
+
+    /**
+     * Claim messages and report what the broker chose for this pop.
+     *
+     * The same call as pop() -- this is the shape that also carries the additive
+     * `autopilot` echo:
+     *
+     *   auto res = client.queue("events").group("workers").pop_result();
+     *   if (res.autopilot.present) {
+     *       std::cout << res.autopilot.partitions << " partitions, batch "
+     *                 << res.autopilot.batch << "\n";
+     *   }
+     */
+    PopResult pop_result() {
+        return pop_with_decision();
+    }
+
+private:
+    PopResult pop_with_decision() {
         std::stringstream path;
         
         if (!queue_name_.empty()) {
@@ -3501,9 +3762,23 @@ public:
             throw std::runtime_error("Must specify queue, namespace, or task for pop operation");
         }
         
+        // Batch, partitions and with them the autopilot flag. The RULE for which
+        // of the three travel lives in one place (util::pop_sizing) because
+        // consume() builds its query string separately; only the PLACEMENT is
+        // here, and it is the pre-autopilot placement so an autopilot-off request
+        // is byte-identical to the one this SDK used to send.
+        const util::PopSizing sizing =
+            util::pop_sizing(batch_, max_partitions_, 1, autopilot_enabled());
+
         std::stringstream params;
-        params << "?batch=" << batch_;
-        params << "&wait=" << (wait_ ? "true" : "false");
+        params << "?";
+        if (sizing.autopilot) {
+            params << "autopilot=true&";
+        }
+        if (sizing.has_batch) {
+            params << "batch=" << sizing.batch << "&";
+        }
+        params << "wait=" << (wait_ ? "true" : "false");
         params << "&timeout=" << timeout_millis_;
         
         if (!group_.empty()) {
@@ -3521,9 +3796,11 @@ public:
         if (!subscription_from_.empty()) {
             params << "&subscriptionFrom=" << util::url_encode(subscription_from_);
         }
-        // v4 multi-partition pop: drain up to N sparse partitions per call.
-        if (max_partitions_ > 1) {
-            params << "&partitions=" << max_partitions_;
+        // v4 multi-partition pop: drain up to N sparse partitions per call. Under
+        // autopilot a pinned width travels even when it is 1, because 1 is then a
+        // decision and not the absence of one.
+        if (sizing.has_partitions) {
+            params << "&partitions=" << sizing.partitions;
         }
         // PLAN_CONFLATION §3.1: emitted ONLY when true. `conflation=false` is
         // never sent -- it would read as "turn this group's policy off", which a
@@ -3549,11 +3826,18 @@ public:
                 conflation_, result,
                 util::pop_target_label(queue_name_, namespace_, task_), group_);
 
+            // The broker's own account of how it sized this pop, when the
+            // request engaged autopilot and the answer had a body to carry it (a
+            // bodiless 204 cannot, so an empty short pop reports nothing).
+            PopResult out;
+            out.autopilot = util::parse_autopilot_decision(result);
+
             if (result.is_null() || !result.contains("messages")) {
-                return json::array();
+                return out;
             }
 
-            return result["messages"];
+            out.messages = result["messages"];
+            return out;
         } catch (const ConflationUnsupportedError&) {
             // Deliberately NOT swallowed into the [] contract below. This method
             // returns [] for anything the caller can retry through; a broker that
@@ -3567,12 +3851,14 @@ public:
             // contract.
             util::log_error("QueueBuilder.pop", std::string("Error: ") + e.what() +
                 " (status=" + std::to_string(e.status_code()) + ", code=" + e.code() + ")");
-            return json::array();
+            return PopResult{};
         } catch (const std::exception& e) {
             util::log_error("QueueBuilder.pop", std::string("Error: ") + e.what());
-            return json::array();
+            return PopResult{};
         }
     }
+
+public:
     
     // Buffer management
     /**
@@ -3609,6 +3895,12 @@ private:
     std::shared_ptr<HttpClient> http_client_;
     std::shared_ptr<BufferManager> buffer_manager_;
     std::atomic<bool> shutdown_requested_{false};
+    // Process-wide kill switch for pop autopilot, settled at construction from
+    // QUEEN_SDK_POP_AUTOPILOT. Read ONCE rather than on every pop: it is a
+    // deployment-level rollback, and re-reading it per request would let a
+    // running process change wire shape halfway through. A per-builder
+    // .autopilot(..) still outranks it.
+    bool autopilot_off_ = util::autopilot_disabled_by_env();
     
     void setup_graceful_shutdown() {
         // Register signal handlers
@@ -3665,6 +3957,15 @@ public:
     
     QueueBuilder queue(const std::string& name = "") {
         return QueueBuilder(this, http_client_, buffer_manager_, name);
+    }
+
+    /**
+     * Whether pop autopilot is off for this client because the environment
+     * asked (util::ENV_POP_AUTOPILOT). Read by the builders; a per-call
+     * .autopilot(..) still outranks it.
+     */
+    bool is_autopilot_off() const {
+        return autopilot_off_;
     }
     
     TransactionBuilder transaction() {
@@ -3973,10 +4274,25 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
         throw std::runtime_error("Must specify queue, namespace, or task");
     }
     
-    // Build params
+    // Build params. Batch, partitions and with them the autopilot flag: 0 means
+    // the user set nothing (QueueBuilder leaves it that way on purpose), which is
+    // the dimension the broker gets to choose. THE RULE lives in one place
+    // (util::pop_sizing) precisely because this is the SECOND parameter builder;
+    // only the placement of the keys is here, and it is the pre-autopilot
+    // placement so an autopilot-off request is byte-identical.
+    const util::PopSizing sizing = util::pop_sizing(
+        options.batch, options.max_partitions, 1,
+        options.autopilot.value_or(!queen_->is_autopilot_off()));
+
     std::stringstream params;
-    params << "?batch=" << options.batch;
-    params << "&wait=" << (options.wait ? "true" : "false");
+    params << "?";
+    if (sizing.autopilot) {
+        params << "autopilot=true&";
+    }
+    if (sizing.has_batch) {
+        params << "batch=" << sizing.batch << "&";
+    }
+    params << "wait=" << (options.wait ? "true" : "false");
     params << "&timeout=" << options.timeout_millis;
     
     if (!options.group.empty()) {
@@ -3994,9 +4310,11 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
     if (!options.subscription_from.empty()) {
         params << "&subscriptionFrom=" << util::url_encode(options.subscription_from);
     }
-    // v4 multi-partition pop: drain up to N sparse partitions per call.
-    if (options.max_partitions > 1) {
-        params << "&partitions=" << options.max_partitions;
+    // v4 multi-partition pop: drain up to N sparse partitions per call. Under
+    // autopilot a pinned width travels even when it is 1, because 1 is then a
+    // decision and not the absence of one.
+    if (sizing.has_partitions) {
+        params << "&partitions=" << sizing.partitions;
     }
     // PLAN_CONFLATION §3.1, emitted only when true. This is the SECOND place the
     // flag has to be spelled onto the wire in this SDK: consume() and pop() build
@@ -4072,7 +4390,13 @@ inline void ConsumerManager::start(std::function<void(const json&)> handler,
                     if (options.wait) {
                         continue; // Long polling timeout, retry
                     } else {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        // The broker's advised pacing when this pop engaged
+                        // autopilot and the broker had an opinion (it knows the
+                        // arrival rate on this queue and this client does not),
+                        // otherwise the historical 100ms.
+                        std::this_thread::sleep_for(std::chrono::milliseconds(
+                            util::empty_poll_delay_millis(
+                                util::parse_autopilot_decision(result))));
                         continue;
                     }
                 }
@@ -4248,10 +4572,20 @@ inline void QueueBuilder::consume(std::function<void(const json&)> handler,
     options.each = each_;
     options.max_partitions = max_partitions_;
     options.conflation = conflation_;
+    // Resolved here so ConsumerManager sees a decision and not an empty
+    // optional. batch and max_partitions keep their 0 when autopilot is on, and
+    // that 0 has to survive all the way to the param builder: it is the ONLY
+    // record that the user said nothing about that dimension.
+    options.autopilot = autopilot_enabled();
     options.stop_signal = stop_signal;
     
     ConsumerManager consumer_manager(http_client_, queen_);
     consumer_manager.start(handler, options);
+}
+
+inline bool QueueBuilder::autopilot_enabled() const {
+    if (autopilot_.has_value()) return *autopilot_;
+    return queen_ == nullptr || !queen_->is_autopilot_off();
 }
 
 } // namespace queen

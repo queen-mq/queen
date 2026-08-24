@@ -240,9 +240,14 @@ export class Runner {
       .timeoutMillis(this.maxWaitMillis)
       .group(this.consumerGroup)
 
-    if (this.maxPartitions > 1) {
-      qb = qb.partitions(this.maxPartitions)
-    }
+    // Unconditional, and it has to be: the runtime has already defaulted
+    // maxPartitions (to 4), so this is always a decision the streams layer
+    // made. Skipping the call for maxPartitions === 1 used to be a harmless
+    // optimisation -- 1 was what an omitted `partitions` meant on the wire --
+    // but with pop autopilot an omitted `partitions` means "broker, you
+    // choose", which would widen a query that explicitly asked for one
+    // partition per pop.
+    qb = qb.partitions(this.maxPartitions)
     if (this.subscriptionMode) qb = qb.subscriptionMode(this.subscriptionMode)
     if (this.subscriptionFrom) qb = qb.subscriptionFrom(this.subscriptionFrom)
     if (this.conflation) qb = qb.conflation(true)
