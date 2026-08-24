@@ -3,6 +3,33 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## Unreleased
+
+**Boot-time schema apply can no longer deadlock or dam traffic on a busy cluster.** Rolling a
+broker whose schema files had gained `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` on a hot table
+crash-looped FATAL on a loaded cell (2026-08-24, 1060 push tx/s, 827k partitions, 10 of 10 boot
+attempts): the applier ran each `.sql` file as ONE multi-statement transaction, and because DDL
+takes its relation lock *before* evaluating `IF NOT EXISTS`, even a no-op re-apply held
+`ShareLock` on the hottest table while the next statement waited for `AccessExclusiveLock` —
+a guaranteed lock-upgrade cycle against any push transaction mid `FOR UPDATE`→`UPDATE`. The
+applier now runs **one statement per transaction** (dollar-quote-aware splitting, so function
+bodies are safe), under a **2s `lock_timeout` with bounded backoff retries** on `40P01`/`55P03`
+instead of failing the boot; consecutive `DROP`s stay grouped with the statement that follows
+them so drop-then-recreate remains atomic for live HA peers; and `CREATE INDEX CONCURRENTLY`
+is now supported in schema files (run outside a transaction, no `lock_timeout`) — which is how
+a NEW index must be added to an already-populated hot table from now on. The advisory-locked
+single-applier discipline and last-boot-wins re-apply are unchanged, and the applier warns
+about `INVALID` leftover indexes after every apply. Errors now carry the file, statement,
+SQLSTATE and server message instead of a bare "db error".
+
+**Operational procedure for images WITHOUT this fix** (any broker up to 1.2.0-beta.2), when a
+roll must add columns/indexes to a hot table on a live cluster: apply each `ALTER TABLE` manually
+as its own single-statement transaction with `SET lock_timeout = '2s'` (single statements succeed
+first try — the killer was the multi-statement transaction, not the lock), build indexes with
+`CREATE INDEX CONCURRENTLY`, apply changed procedure files via `psql -f`, then boot the broker
+with `QUEEN_APPLY_SCHEMA=false`. Remember to remove `QUEEN_APPLY_SCHEMA=false` once an image with
+this fix is deployed — with it set, new schema files never apply.
+
 ## 1.1.0 (2026-08-21) — conflation
 
 **Last-value delivery, as a consumer-group policy.** `conflation=true` on any pop route makes a

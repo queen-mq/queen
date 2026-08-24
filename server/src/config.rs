@@ -433,6 +433,26 @@ pub struct Config {
     /// worker holds one maintenance-lane admission slot and one pooled
     /// connection while it runs, so raise QUEEN_ADMISSION_SHARE_MAINT with it.
     pub retention_parallelism: usize,
+    /// Ceiling on the DUE PARTITIONS one cycle pulls per queue per rule
+    /// (QUEEN_RETENTION_DUE_CAP; 0 = derive, see `load`). The work list is
+    /// ordered oldest-watermark-first, so anything past the cap is simply the
+    /// next cycle's head — the bound costs latency on a backlog, never
+    /// coverage. Sized against the measured cell: ~500 newly-eligible
+    /// segments/s over a 5 s cycle is ~2500 partition visits, at 2-5 ms a step
+    /// call, so the default leaves ~2x headroom at `retention_parallelism = 1`
+    /// and scales with the workers that have to execute those calls.
+    pub retention_due_cap: usize,
+    /// Cadence of the retention WATERMARK SAFETY WALK
+    /// (QUEEN_RETENTION_SAFETY_WALK_MS, default 86_400_000 = daily). The walk
+    /// re-derives `log_partitions.oldest_live_at` / `oldest_txn_at` from
+    /// reality and repairs drift, so the per-cycle work list is allowed to
+    /// trust a cached fact (001_log_schema). It is ALSO the one-time BACKFILL
+    /// that makes those columns non-NULL in the first place.
+    ///
+    /// 0 disables the RECURRING walk only — the first walk still runs, because
+    /// a broker that skipped it would have an empty work list and retention
+    /// would stop with nothing in the log to say so. See retention.rs.
+    pub retention_safety_walk_ms: u64,
     pub metrics_retention_days: i32,
     pub partition_cleanup_days: i32,
     pub partition_cleanup_enabled: bool,
@@ -775,7 +795,7 @@ pub struct Config {
     // while a late KV prune is invisible (the `kv_live_v1` predicate already hides the
     // expired row on the first read) and costs only table size.
     //
-    // LEADERLESS, unlike retention: retention takes session advisory lock 737_001 and
+    // LEADERLESS, unlike retention: retention takes xact advisory lock 737_001 and
     // one replica works per cycle; the sweeper must be the opposite on both axes,
     // due-driven and leaderless, so every replica drains in parallel sharing the work
     // through `SKIP LOCKED`. It takes NO advisory lock, so it consumes no new number
@@ -1174,6 +1194,13 @@ pub fn log_effective(cfg: &Config) {
         retention_interval_ms = cfg.retention_interval_ms,
         retention_batch_size = cfg.retention_batch_size,
         retention_parallelism = cfg.retention_parallelism,
+        // The number ACTUALLY in force, never the formula (the derived-value
+        // rule the kv/timers block below states): an operator reading this line
+        // is trying to explain a delete rate, and "0 = derive" explains nothing.
+        retention_due_cap = cfg.retention_due_cap,
+        // 0 here means "recurring walk off, backfill still runs" — the WARN
+        // above says so at the same boot, so the number can stay bare.
+        retention_safety_walk_ms = cfg.retention_safety_walk_ms,
         metrics_retention_days = cfg.metrics_retention_days,
         partition_cleanup = cfg.partition_cleanup_enabled,
         partition_cleanup_days = cfg.partition_cleanup_days,
@@ -1467,6 +1494,16 @@ pub fn load() -> Config {
         pop_fusion_max_inflight: env_int("QUEEN_POP_FUSION_CONCURRENCY", 1).max(1) as u32,
         retention_batch_size: env_int("RETENTION_BATCH_SIZE", 1000).max(1) as usize,
         retention_parallelism: env_int("RETENTION_PARALLELISM", 1).max(1) as usize,
+        // 0 = derive from the two knobs above; resolved right after the struct
+        // is built so the boot line and every reader see the number in force.
+        // Range-CHECKED below, not clamped, for the reason the autopilot batch
+        // is: a due cap nobody chose is how a fleet ends up quietly falling
+        // behind on retention again.
+        retention_due_cap: env_int("QUEEN_RETENTION_DUE_CAP", 0).max(0) as usize,
+        // Range-checked below too. 0 is a legal value here and means "no
+        // recurring walk" — NOT "no walk at all" (retention.rs).
+        retention_safety_walk_ms: env_int("QUEEN_RETENTION_SAFETY_WALK_MS", 86_400_000).max(0)
+            as u64,
         metrics_retention_days: env_int("METRICS_RETENTION_DAYS", 90).max(1) as i32,
         partition_cleanup_days: env_int("PARTITION_CLEANUP_DAYS", 30).max(1) as i32,
         partition_cleanup_enabled: env_bool("QUEEN_PARTITION_CLEANUP_ENABLED", true),
@@ -1636,6 +1673,47 @@ pub fn load() -> Config {
     ) {
         crate::obs::fatal(e);
     }
+    // RETENTION WORK LIST (retention.rs / 001_log_schema): same rule again for
+    // the two knobs that govern how much of the due list a cycle takes and how
+    // often the watermarks are re-derived from reality. Both are integers whose
+    // wrong value is INVISIBLE in operation — a due cap of "1O" (letter O)
+    // silently means the default, and a safety walk of "1d" silently means
+    // daily-by-accident — so an unparseable value is fatal rather than
+    // defaulted.
+    for (key, max) in [
+        ("QUEEN_RETENTION_DUE_CAP", crate::retention::DUE_CAP_MAX as i64),
+        ("QUEEN_RETENTION_SAFETY_WALK_MS", crate::retention::SAFETY_WALK_MAX_MS as i64),
+    ] {
+        let raw = std::env::var(key).ok();
+        if let Err(e) = nonneg_env_verdict(key, raw.as_deref(), max) {
+            crate::obs::fatal(e);
+        }
+    }
+    // 0 = derive. batch_size x parallelism x DUE_CAP_FACTOR: the batch size is
+    // the operator's declared appetite for maintenance work per step call, and
+    // the parallelism is how many of those calls a cycle can actually execute
+    // in its period, so the product is the honest budget. At the defaults
+    // (1000 x 1 x 5) that is 5000 due partitions per queue per rule per cycle,
+    // ~2x the ~2500 visits the measured cell needs to keep pace with ~500
+    // newly-eligible segments/s at a 5 s cadence.
+    if cfg.retention_due_cap == 0 {
+        cfg.retention_due_cap = cfg
+            .retention_batch_size
+            .saturating_mul(cfg.retention_parallelism)
+            .saturating_mul(crate::retention::DUE_CAP_FACTOR)
+            .clamp(1, crate::retention::DUE_CAP_MAX);
+    }
+    if cfg.retention_safety_walk_ms == 0 {
+        // Not a lie about "0 disables": the RECURRING walk is what stops. The
+        // first one still has to run or the work list is empty and retention
+        // stops dead with nothing in the log to say so, so the schedule is
+        // pushed a year out rather than switched off (retention.rs).
+        tracing::warn!(target: "boot",
+            "QUEEN_RETENTION_SAFETY_WALK_MS=0 disables the RECURRING retention watermark \
+             walk; the one-time backfill still runs (without it the retention work list \
+             is empty and nothing is ever deleted), and drift introduced later will not \
+             self-heal until the knob is set again");
+    }
     let requested_window_ms = cfg.hotlist_reseed_window_ms;
     cfg.hotlist_reseed_window_ms =
         resolve_reseed_window_ms(requested_window_ms, cfg.hotlist_reseed_ms);
@@ -1761,6 +1839,22 @@ fn resolve_reseed_window_ms(requested: i64, reseed_ms: i64) -> i64 {
 /// A typo here is worse than elsewhere: the default is 0, so an unparseable value
 /// silently resolving to it would leave the bypass OFF on the exact cell an operator
 /// just turned it on for, with not a word in the log.
+/// Shared verdict for the plain "non-negative integer, 0 has a meaning, there is
+/// a sane ceiling" knobs (the two retention work-list knobs). Same posture as
+/// `burst_cap_verdict`: unset / present-but-empty keeps the documented default,
+/// anything else must parse and be in range or the boot dies naming the value.
+fn nonneg_env_verdict(key: &str, raw: Option<&str>, max: i64) -> Result<(), String> {
+    let set = raw.map(str::trim).filter(|v| !v.is_empty());
+    match set.map(|v| v.parse::<i64>()) {
+        Some(Err(_)) => Err(format!(
+            "{key}=\"{}\" is not an integer (expected 0..={max})",
+            set.unwrap_or_default()
+        )),
+        Some(Ok(v)) if !(0..=max).contains(&v) => Err(format!("{key}={v} is outside 0..={max}")),
+        _ => Ok(()),
+    }
+}
+
 fn burst_cap_verdict(raw: Option<&str>) -> Result<(), String> {
     use crate::pop_autopilot::{BURST_CAP_MAX, BURST_CAP_MIN};
     let set = raw.map(str::trim).filter(|v| !v.is_empty());
@@ -1781,6 +1875,36 @@ fn burst_cap_verdict(raw: Option<&str>) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two retention work-list knobs are range-CHECKED at boot for the same
+    /// reason every other enumerated knob is: `env_int` resolves an
+    /// unparseable value to the DEFAULT silently, so a typo would run the fleet
+    /// on a number nobody chose with not a word in the log — and both of these
+    /// are invisible in operation (`QUEEN_RETENTION_DUE_CAP=1O` would just look
+    /// like a slower-than-expected delete rate).
+    #[test]
+    fn the_retention_work_list_knobs_are_range_checked() {
+        let key = "QUEEN_RETENTION_DUE_CAP";
+        let max = crate::retention::DUE_CAP_MAX as i64;
+        // Unset and present-but-empty keep the documented default, like every
+        // other knob.
+        assert_eq!(nonneg_env_verdict(key, None, max), Ok(()));
+        assert_eq!(nonneg_env_verdict(key, Some("   "), max), Ok(()));
+        // 0 is legal and MEANINGFUL on both knobs (derive / no recurring walk).
+        assert_eq!(nonneg_env_verdict(key, Some("0"), max), Ok(()));
+        assert_eq!(nonneg_env_verdict(key, Some(" 5000 "), max), Ok(()));
+        assert!(nonneg_env_verdict(key, Some("1O"), max).is_err(), "letter O must not pass");
+        assert!(nonneg_env_verdict(key, Some("-1"), max).is_err());
+        assert!(nonneg_env_verdict(key, Some(&(max + 1).to_string()), max).is_err());
+        // The safety-walk ceiling is a year: past it the walk is
+        // indistinguishable from off, and off has its own spelling (0).
+        let walk_max = crate::retention::SAFETY_WALK_MAX_MS as i64;
+        assert_eq!(walk_max, 365 * 24 * 3_600_000);
+        assert_eq!(
+            nonneg_env_verdict("QUEEN_RETENTION_SAFETY_WALK_MS", Some("86400000"), walk_max),
+            Ok(())
+        );
+    }
 
     /// The burst-bypass ceiling is range-CHECKED at boot, not clamped: 0 (disabled)
     /// and 64 (the checkout ceiling) are the ends of the accepted interval, and both
