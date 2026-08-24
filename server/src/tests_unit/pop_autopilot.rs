@@ -1076,3 +1076,208 @@ fn the_kill_switch_parses_the_spellings_it_documents() {
     assert_eq!(Mode::parse("shaddow"), None);
     assert_eq!(Mode::parse(""), None);
 }
+
+// ------------------------------------------------- feed-forward burst bypass
+
+/// A controller whose bypass ceiling is `cap`, with everything else at defaults.
+fn burst_controller(cap: i32) -> Arc<PopAutopilot> {
+    PopAutopilot::new(Knobs {
+        burst_cap: cap,
+        ..Knobs::defaults()
+    })
+}
+
+/// Converge a lane onto W_steady = 1 the way the soak cell did: a quiet lane
+/// holding one ready partition at a time, served promptly, for long enough that
+/// the dwell has committed the width. Returns the clock to continue from — inside
+/// `IDLE_MS` of the last claim, so the next pop reads the STORED width and not the
+/// feed-forward division.
+fn converged_at_width_one(ap: &Arc<PopAutopilot>) -> i64 {
+    let mut t = 1_000i64;
+    for _ in 0..40 {
+        t += 600;
+        pop(ap, ask_auto(), 1, 1, 5, 3, t);
+    }
+    t + 600
+}
+
+/// THE DEFAULT IS THE OLD BROKER. With the ceiling at 0 the bypass is not merely
+/// equal to the feedback loop's answer — it is the same expression, so a lane that
+/// has converged to 1 still claims 1 in front of a ring holding 393.
+#[test]
+fn the_burst_bypass_is_off_by_default_and_the_plan_is_unchanged() {
+    assert_eq!(Knobs::defaults().burst_cap, 0, "ships dark");
+
+    let off = burst_controller(0);
+    let deflt = controller(Mode::On);
+    let t_off = converged_at_width_one(&off);
+    let t_def = converged_at_width_one(&deflt);
+
+    // The same burst, through both: a lane at W=1 suddenly facing 393 ready.
+    let a = pop(&off, ask_auto(), 393, 1, 5, 3, t_off).unwrap();
+    let b = pop(&deflt, ask_auto(), 393, 1, 5, 3, t_def).unwrap();
+    assert_eq!(a, b, "an explicit cap of 0 is the shipped default");
+    assert_eq!(
+        a.partitions, 1,
+        "with the bypass off the width is the loop's own, ring depth notwithstanding"
+    );
+}
+
+/// The bypass itself, as algebra — `W_eff = max(W_steady, min(ready, cap))` clamped
+/// to [1, 64]. The three pinned cases are the ones the design names: the soak
+/// cell's 393-deep burst on a lane converged to 1, a shallow ring that must move
+/// the width by exactly what it holds, and the parked path where nothing is ready.
+#[test]
+fn the_burst_width_is_the_ready_set_capped_never_a_guess() {
+    // 393 ready, W_steady 1, ceiling 64 ⇒ the ceiling.
+    assert_eq!(burst_width(1, 393, 64, Mode::On), 64);
+    // …and 2 ready is worth exactly 2, not the ceiling: it can never claim more
+    // than exists at this instant, which is why the W=5000 speculative-scan class
+    // is structurally impossible here.
+    assert_eq!(burst_width(1, 2, 64, Mode::On), 2);
+    // The parked path: an empty ring carries no burst, so the loop's width stands.
+    assert_eq!(burst_width(1, 0, 64, Mode::On), 1);
+    assert_eq!(burst_width(7, 0, 64, Mode::On), 7);
+}
+
+/// The invariants, over the whole grid rather than at three points: never below
+/// what the feedback loop chose, never above the checkout ceiling, and never above
+/// the operator's ceiling when that is the binding term.
+#[test]
+fn the_burst_width_never_shrinks_never_exceeds_the_ceiling_and_never_exceeds_the_cap() {
+    for w_steady in [1, 2, 5, 17, 64] {
+        for ready in [0usize, 1, 2, 9, 100, 393, 100_000] {
+            for cap in [0, 1, 8, 64] {
+                let w = burst_width(w_steady, ready, cap, Mode::On);
+                assert!(
+                    w >= w_steady,
+                    "W_eff must only ever RAISE: {w} < {w_steady} (ready={ready} cap={cap})"
+                );
+                assert!(
+                    (1..=W_CEILING).contains(&w),
+                    "W_eff out of [1,{W_CEILING}]: {w}"
+                );
+                if cap > 0 && (cap as usize) < ready {
+                    assert!(
+                        w <= w_steady.max(cap),
+                        "the cap binds when it is under the ready count: {w} (cap={cap})"
+                    );
+                }
+                if cap == 0 {
+                    assert_eq!(w, w_steady, "cap 0 is byte-identity");
+                }
+            }
+        }
+    }
+}
+
+/// `shadow` must keep reporting what the FEEDBACK loop would choose — the rollout
+/// position stops measuring the law the moment a second term rides it — and `off`
+/// has no plan at all. Only `on` acts.
+#[test]
+fn the_bypass_acts_only_in_the_on_position() {
+    for mode in [Mode::Off, Mode::Shadow] {
+        assert_eq!(burst_width(1, 393, 64, mode), 1, "{mode:?} must not act");
+    }
+    assert_eq!(burst_width(1, 393, 64, Mode::On), 64);
+
+    // …and through the controller, where `shadow` also answers with no plan.
+    let shadow = PopAutopilot::new(Knobs {
+        mode: Mode::Shadow,
+        burst_cap: 64,
+        ..Knobs::defaults()
+    });
+    let t = converged_at_width_one(&shadow);
+    assert!(pop(&shadow, ask_auto(), 393, 1, 5, 3, t).is_none());
+}
+
+/// A client-sent `partitions` is sacred, and the bypass is one more thing that
+/// cannot reach it — at any ceiling, in front of any ring depth.
+#[test]
+fn a_client_sent_width_is_never_touched_by_the_bypass() {
+    for cap in [0, 1, 64] {
+        let ap = burst_controller(cap);
+        let t = converged_at_width_one(&ap);
+        let plan = pop(
+            &ap,
+            Ask {
+                autopilot: true,
+                partitions: Some(3),
+                default_partitions: 3,
+                ..ask_plain()
+            },
+            393,
+            1,
+            5,
+            3,
+            t,
+        )
+        .unwrap();
+        assert_eq!(plan.partitions, 3, "cap={cap}: the client's own width");
+        assert!(!plan.chose_partitions);
+
+        // And a request that never opted in has no plan to carry it either.
+        let ap2 = burst_controller(cap);
+        let t2 = converged_at_width_one(&ap2);
+        assert!(pop(&ap2, ask_plain(), 393, 1, 5, 3, t2).is_none());
+    }
+}
+
+/// End to end through the controller: the same lane, the same burst, the ceiling
+/// as the only variable — and the claim knobs the handler evaluates follow.
+#[test]
+fn a_burst_widens_within_one_round_trip_instead_of_four_dwell_periods() {
+    let ap = burst_controller(64);
+    let t = converged_at_width_one(&ap);
+
+    let plan = pop(&ap, ask_auto(), 393, 1, 5, 3, t).unwrap();
+    assert_eq!(plan.partitions, 64, "one round trip, not four dwells");
+    assert_eq!(
+        claim_knobs(Some(plan), DEF_B, DEF_W).1,
+        64,
+        "the handler's own expression carries it into the claim"
+    );
+    assert_eq!(
+        plan.batch, AUTO_BATCH_DEFAULT,
+        "the batch dimension is untouched — a wider claim visits more partitions \
+         for the SAME message budget"
+    );
+}
+
+/// THE FEEDBACK MACHINERY IS UNTOUCHED, proved by lockstep rather than by reading
+/// the private state: two controllers differing ONLY in the ceiling, fed the exact
+/// same observations, must satisfy `W_capped == max(W_steady, min(ready, cap))` at
+/// EVERY step — where `W_steady` is what the cap-0 controller planned, i.e. the
+/// loop's own answer. The identity can hold across a whole sequence only if the
+/// bypass wrote nothing: no dwell consumed, no EWMA moved, no stored width
+/// ratcheted. (Note what the loop legitimately does on its own here: after a
+/// 393-deep sample the ready EWMA jumps to ~99 and the ready-pressure arm widens
+/// to the ceiling. That is the existing law, identically in both arms.)
+#[test]
+fn the_bypass_is_a_per_request_term_and_writes_nothing_back() {
+    let steady = burst_controller(0);
+    let capped = burst_controller(64);
+    let mut t = converged_at_width_one(&steady);
+    let t2 = converged_at_width_one(&capped);
+    assert_eq!(t, t2, "same warm-up, same clock");
+
+    // A burst, then the shapes that follow one: a shallow ring, a parked poll, a
+    // second burst, and quiet.
+    for (ready, claimed) in [(393, 64), (2, 2), (0, 0), (120, 64), (1, 1), (1, 1)] {
+        t += 100;
+        let a = pop(&steady, ask_auto(), ready, claimed, 5, claimed, t).unwrap();
+        let b = pop(&capped, ask_auto(), ready, claimed, 5, claimed, t).unwrap();
+        assert_eq!(
+            b.partitions,
+            a.partitions.max((ready.min(64)) as i32),
+            "ready={ready}: W_eff must be max(W_steady={}, min(ready,64))",
+            a.partitions
+        );
+        assert_eq!(a.batch, b.batch, "the batch dimension never sees the cap");
+    }
+    assert_eq!(
+        steady.adjust_count(),
+        capped.adjust_count(),
+        "the two lanes changed their stored width the same number of times"
+    );
+}

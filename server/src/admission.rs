@@ -445,6 +445,15 @@ pub enum Mode {
 pub struct Admission {
     cfg: AdmissionCfg,
     core: Mutex<Core>,
+    /// BURST-RESOLVED TELEMETRY (soak cell 2026-08-24, see `hotlist::BurstStats`).
+    /// The high-water mark of the POP lane's waiting queue since the last `rates`
+    /// line — the SPREAD regime's witness, and the one number `adm_lanes=pop:6/9w0`
+    /// structurally cannot carry: `w` is the depth at the instant the reporter
+    /// looked, and a burst that queues nine pops for 40 ms is invisible to a probe
+    /// once per 10 s. Outside `Core` on purpose: the enqueue site already holds the
+    /// core lock, so the `fetch_max` costs one relaxed atomic and the reporter's
+    /// reset never has to take the lock at all.
+    pop_wait_max: std::sync::atomic::AtomicU64,
 }
 
 /// One admitted write transaction. Dropping it releases the slot (never
@@ -533,6 +542,7 @@ impl Admission {
                 mode: Mode::Normal,
                 last_change: "init",
             }),
+            pop_wait_max: std::sync::atomic::AtomicU64::new(0),
         });
         adm.clone().spawn_adapter();
         adm
@@ -577,6 +587,15 @@ impl Admission {
             c.lane_saturated[lane as usize] = true;
             let (tx, rx) = oneshot::channel();
             c.waiting[lane as usize].push_back(Waiter { lane, tx });
+            // The ONLY point a waiter is ever enqueued (`try_acquire` refuses
+            // instead of queueing), so this is where the pop lane's queue depth
+            // reaches its per-burst maximum — see `pop_wait_max`.
+            if lane == Lane::Pop {
+                self.pop_wait_max.fetch_max(
+                    c.waiting[lane as usize].len() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
             rx
         };
         match rx.await {
@@ -877,6 +896,14 @@ impl Admission {
                 return;
             }
         }
+    }
+
+    /// Read and RESET the pop lane's waiter high-water mark (see `pop_wait_max`).
+    /// One reader, the `rates` reporter: a second one would halve what the first
+    /// saw, the same discipline `hotlist::BurstStats::take_window` states.
+    pub fn take_pop_wait_max(&self) -> u64 {
+        self.pop_wait_max
+            .swap(0, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Feed the pop-lane objective signal (see LaneSignal). Cheap: one lock.

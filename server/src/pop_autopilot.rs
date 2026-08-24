@@ -205,6 +205,15 @@ pub const AUTO_BATCH_DEFAULT: i32 = 100;
 pub const AUTO_BATCH_MIN: i32 = 1;
 pub const AUTO_BATCH_MAX: i32 = 10_000;
 
+/// Bounds on `QUEEN_POP_AUTOPILOT_BURST_CAP` (see `Knobs::burst_cap` and
+/// `burst_width`). 0 is the DEFAULT and means the bypass is disabled — the plan is
+/// then byte-identical to the pre-bypass controller — and 64 is the same measured
+/// checkout ceiling `W_CEILING` is: a cap above it could not raise a width the
+/// clamp brings straight back down, so allowing one would only let an operator
+/// write a number that does nothing.
+pub const BURST_CAP_MIN: i32 = 0;
+pub const BURST_CAP_MAX: i32 = W_CEILING;
+
 /// A divergence line repeats for the same lane only after this long (24h): it is
 /// a diagnostic about a client's static configuration, and a static
 /// configuration does not need saying twice a day.
@@ -289,6 +298,10 @@ pub struct Knobs {
     pub dwell_ms: i64,
     /// … or once per this many pops, whichever comes FIRST. Both directions.
     pub dwell_pops: u32,
+    /// FEED-FORWARD BURST BYPASS ceiling (`QUEEN_POP_AUTOPILOT_BURST_CAP`, see
+    /// `burst_width`). 0 — the default — disables the bypass and leaves the plan
+    /// byte-identical to the feedback loop's own answer.
+    pub burst_cap: i32,
     /// Hard bound on live lanes. There are deployments with ~100k queues, and a
     /// lane is created by any grouped pop — including a pop of a queue that does
     /// not exist. Past the cap the controller simply stops creating lanes (it
@@ -305,9 +318,61 @@ impl Knobs {
             auto_batch: AUTO_BATCH_DEFAULT,
             dwell_ms: 500,
             dwell_pops: 16,
+            // OFF by default: the bypass is a new behaviour on the claim path and
+            // it ships dark, exactly as the controller itself shipped in `shadow`.
+            burst_cap: 0,
             max_lanes: 50_000,
         }
     }
+}
+
+/// FEED-FORWARD BURST BYPASS (soak cell, 2026-08-24) — the per-REQUEST width, from
+/// the feedback loop's steady width and the ready set that exists THIS INSTANT.
+///
+/// `W_eff = max(W_steady, min(ap_ready, burst_cap))`, clamped to `[1, W_CEILING]`.
+///
+/// ## Why a second term at all, when the loop already widens on ready pressure
+///
+/// Because the loop widens on the SMOOTHED count, one step per dwell. Measured on
+/// the soak cell: e2e p99 330-470 ms while the client's own push RTT p99 was 46-88
+/// ms, i.e. the time is spent READY-BUT-UNCLAIMED — global `ring_oldest_ms` p99 276
+/// / max 387 and `ring_depth` p99 172 / max 393, against per-lane samples of ready=0
+/// through the same 10 s window. A spike drains at ~9 concurrent pop queries x W=1 x
+/// ~7 ms RTT ~= 1100 partitions/s, so 393 entries cost ~360 ms. The loop's answer
+/// arrives four dwell periods later, by which time the burst is over and it is
+/// shrinking again. This term responds within ONE ROUND TRIP instead.
+///
+/// ## Why it cannot misfire
+///
+///   * It can never exceed what EXISTS at this instant (`ap_ready` is the lane's
+///     live ready count from `HotList::ready_peek`), so the `partitions=5000`
+///     speculative-scan class — the 475x tail regression this whole file exists to
+///     prevent — is structurally impossible: there is nothing to speculate on.
+///   * It cannot lengthen a client's drain, because `batch` still caps the messages
+///     one pop returns. A wider claim visits more partitions for the SAME message
+///     budget; it does not hand the consumer a deeper checkout.
+///   * It cannot flap. The failure mode of reacting late is burst -> age EWMA spike
+///     -> widen after the fact -> shrink once the age relaxes; claiming the entries
+///     BEFORE the age spike forms removes the input that drives the cycle. The
+///     feedback machinery is untouched — no dwell is consumed, no EWMA is written,
+///     `LaneState::w` never sees this number — so with the cap at 0 the plan is the
+///     old plan, bit for bit.
+///   * It only ever RAISES (`max` with the steady width), so it cannot undo a
+///     widening the loop decided on its own.
+///
+/// Gated on `Mode::On`: `shadow` must keep reporting what the FEEDBACK loop would
+/// choose, or the rollout position stops measuring the thing it is there to measure.
+#[inline]
+fn burst_width(w_steady: i32, ap_ready: usize, burst_cap: i32, mode: Mode) -> i32 {
+    // Disabled, or a position that does not act: return the steady width UNTOUCHED
+    // (not merely equal — the same expression the pre-bypass controller evaluated).
+    if burst_cap <= 0 || mode != Mode::On {
+        return w_steady;
+    }
+    // `burst_cap > 0` past the guard, so the cast is total and the `min` is what
+    // makes the term unable to name a partition the ring does not hold.
+    let burst = ap_ready.min(burst_cap as usize) as i32;
+    clamp_w(w_steady.max(burst))
 }
 
 /// One reading of a lane's ready set, straight from `HotList::ready_peek`.
@@ -702,8 +767,13 @@ impl PopAutopilot {
             let chose_batch = ask.autopilot && ask.batch.is_none();
             let ap_batch = self.k.auto_batch;
             let plan = Plan {
+                // The feed-forward burst bypass rides HERE and only here: on the
+                // controller-chosen width, from the instantaneous ready count the
+                // peek already put in `ready.parts`. A client-sent `partitions`
+                // takes the other arm and is never looked at — the bypass is one
+                // more thing that cannot reach it. See `burst_width`.
                 partitions: if chose_partitions {
-                    star
+                    burst_width(star, ready.parts, self.k.burst_cap, self.k.mode)
                 } else {
                     ask.default_partitions
                 },

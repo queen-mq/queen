@@ -559,11 +559,20 @@ pub struct Config {
     // measured 200 at +35% p99. The full argument, and the drain-aware successor
     // this constant is standing in for, are at
     // `pop_autopilot::AUTO_BATCH_DEFAULT`.
+    //
+    // `BURST_CAP` is the FEED-FORWARD BURST BYPASS ceiling (0..=64, default 0 =
+    // disabled). With it set, a delegated width becomes `max(W_steady, min(ready,
+    // cap))` for that ONE request: the feedback loop still owns the steady width and
+    // its dwell, but a lane that has 393 partitions ready right now no longer drains
+    // them at width 1 for four dwell periods. It can never exceed what exists at that
+    // instant, so it cannot produce the speculative wide scan the controller exists
+    // to prevent. The full argument is at `pop_autopilot::burst_width`.
     pub pop_autopilot_mode: String,
     pub pop_autopilot_batch: i32,
     pub pop_autopilot_target_age_ms: f64,
     pub pop_autopilot_dwell_ms: i64,
     pub pop_autopilot_dwell_pops: u32,
+    pub pop_autopilot_burst_cap: i32,
     pub pop_autopilot_max_lanes: usize,
     // LOGGING_PLAN.md Phase 1: cadence of the periodic `rates`/`sizes` aggregate
     // log blocks (ms), and how many hot queues the per-queue lines rank & show.
@@ -1131,6 +1140,7 @@ pub fn log_effective(cfg: &Config) {
         pop_autopilot_target_age_ms = cfg.pop_autopilot_target_age_ms,
         pop_autopilot_dwell_ms = cfg.pop_autopilot_dwell_ms,
         pop_autopilot_dwell_pops = cfg.pop_autopilot_dwell_pops,
+        pop_autopilot_burst_cap = cfg.pop_autopilot_burst_cap,
         pop_autopilot_max_lanes = cfg.pop_autopilot_max_lanes,
         admission = %format!(
             "{}/{}/{}", cfg.admission_min, cfg.admission_init, cfg.admission_max),
@@ -1497,6 +1507,11 @@ pub fn load() -> Config {
         pop_autopilot_target_age_ms: env_f64("QUEEN_POP_AUTOPILOT_TARGET_AGE_MS", 25.0).max(1.0),
         pop_autopilot_dwell_ms: env_int("QUEEN_POP_AUTOPILOT_DWELL_MS", 500).max(1),
         pop_autopilot_dwell_pops: env_int("QUEEN_POP_AUTOPILOT_DWELL_POPS", 16).max(1) as u32,
+        // 0 = the bypass is off and the plan is byte-identical to the feedback
+        // loop's own answer. Range-checked below like `_BATCH`, never clamped: a
+        // ceiling that silently corrects itself is how a value nobody chose reaches
+        // production.
+        pop_autopilot_burst_cap: env_int("QUEEN_POP_AUTOPILOT_BURST_CAP", 0) as i32,
         pop_autopilot_max_lanes: env_int("QUEEN_POP_AUTOPILOT_MAX_LANES", 50_000).max(0) as usize,
         log_rates_ms: env_int("QUEEN_LOG_RATES_MS", 10000).max(1000) as u64,
         log_top_n_queues: env_int("QUEEN_LOG_TOPN_QUEUES", 10).max(1) as usize,
@@ -1613,6 +1628,14 @@ pub fn load() -> Config {
             _ => {}
         }
     }
+    // Same rule, same reason, for the burst-bypass ceiling.
+    if let Err(e) = burst_cap_verdict(
+        std::env::var("QUEEN_POP_AUTOPILOT_BURST_CAP")
+            .ok()
+            .as_deref(),
+    ) {
+        crate::obs::fatal(e);
+    }
     let requested_window_ms = cfg.hotlist_reseed_window_ms;
     cfg.hotlist_reseed_window_ms =
         resolve_reseed_window_ms(requested_window_ms, cfg.hotlist_reseed_ms);
@@ -1661,6 +1684,14 @@ impl Config {
             target_age_ms: self.pop_autopilot_target_age_ms,
             dwell_ms: self.pop_autopilot_dwell_ms,
             dwell_pops: self.pop_autopilot_dwell_pops,
+            // Clamped for the same reason `auto_batch` is: `load()` has already
+            // refused an out-of-range value, so this only keeps a hand-assembled
+            // test `Config` from handing the claim path a ceiling above the checkout
+            // limit. 0 stays 0, which is the bypass disabled.
+            burst_cap: self.pop_autopilot_burst_cap.clamp(
+                crate::pop_autopilot::BURST_CAP_MIN,
+                crate::pop_autopilot::BURST_CAP_MAX,
+            ),
             max_lanes: self.pop_autopilot_max_lanes,
         }
     }
@@ -1721,9 +1752,64 @@ fn resolve_reseed_window_ms(requested: i64, reseed_ms: i64) -> i64 {
     want.max(floor).min(RESEED_WINDOW_CEILING_MS)
 }
 
+/// The boot verdict on `QUEEN_POP_AUTOPILOT_BURST_CAP` — the same rule the `_BATCH`
+/// block above applies inline (reject a typo rather than resolving it to the
+/// default; reject rather than clamp), returned as a VALUE so it is unit-testable.
+/// `load()` turns an `Err` into the identical `obs::fatal`, which exits the process
+/// and can therefore never be exercised from a test.
+///
+/// A typo here is worse than elsewhere: the default is 0, so an unparseable value
+/// silently resolving to it would leave the bypass OFF on the exact cell an operator
+/// just turned it on for, with not a word in the log.
+fn burst_cap_verdict(raw: Option<&str>) -> Result<(), String> {
+    use crate::pop_autopilot::{BURST_CAP_MAX, BURST_CAP_MIN};
+    let set = raw.map(str::trim).filter(|v| !v.is_empty());
+    match set.map(|v| v.parse::<i32>()) {
+        Some(Err(_)) => Err(format!(
+            "QUEEN_POP_AUTOPILOT_BURST_CAP=\"{}\" is not an integer (expected \
+             {BURST_CAP_MIN}..={BURST_CAP_MAX}, 0 = disabled)",
+            set.unwrap_or_default()
+        )),
+        Some(Ok(v)) if !(BURST_CAP_MIN..=BURST_CAP_MAX).contains(&v) => Err(format!(
+            "QUEEN_POP_AUTOPILOT_BURST_CAP={v} is outside {BURST_CAP_MIN}..={BURST_CAP_MAX} \
+             (0 = disabled)"
+        )),
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The burst-bypass ceiling is range-CHECKED at boot, not clamped: 0 (disabled)
+    /// and 64 (the checkout ceiling) are the ends of the accepted interval, and both
+    /// a value past it and a value that is not a number at all are fatal.
+    #[test]
+    fn the_burst_cap_accepts_its_range_and_refuses_everything_else() {
+        assert_eq!(crate::pop_autopilot::BURST_CAP_MIN, 0);
+        assert_eq!(
+            crate::pop_autopilot::BURST_CAP_MAX,
+            crate::pop_autopilot::W_CEILING,
+            "a cap above the checkout ceiling could not raise any width"
+        );
+        // Unset and present-but-empty both mean "leave it at the default", the same
+        // rule every other knob follows.
+        assert_eq!(burst_cap_verdict(None), Ok(()));
+        assert_eq!(burst_cap_verdict(Some("  ")), Ok(()));
+        for ok in ["0", "1", "64", " 64 "] {
+            assert_eq!(burst_cap_verdict(Some(ok)), Ok(()), "{ok:?} is in range");
+        }
+        for bad in ["65", "-1", "1000"] {
+            let err = burst_cap_verdict(Some(bad)).unwrap_err();
+            assert!(err.contains("is outside 0..=64"), "{bad:?} -> {err}");
+        }
+        for bad in ["abc", "64.0", "sixty-four"] {
+            let err = burst_cap_verdict(Some(bad)).unwrap_err();
+            assert!(err.contains("is not an integer"), "{bad:?} -> {err}");
+            assert!(err.contains(bad), "the message quotes the value: {err}");
+        }
+    }
 
     #[test]
     fn parses_every_accepted_spelling_case_insensitively() {

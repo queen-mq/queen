@@ -53,6 +53,7 @@
 use std::collections::BinaryHeap;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::sync::Arc;
 
@@ -542,6 +543,167 @@ impl QueueIntern {
     }
 }
 
+// ----------------------------------------------------------- burst telemetry
+
+/// How an entry ENTERED a ready list — the provenance half of the burst window
+/// below. Three sources, because three is what the question has: did a producer
+/// make this partition ready, did a scheduled deadline come due, or did the
+/// reseed floor learn it from PostgreSQL?
+///
+/// The mapping of the twelve `ready_push_tail` call sites onto the three, since
+/// two of them are not obvious from the name:
+///   * `Mark` — `mark_ring`'s four arms AND every `checkin` re-append (a mark that
+///     raced the dispatch, a budget-skipped `Requeue`, an auto-ack `Took` re-arm).
+///     All of them assert the same fact from the same side: this partition holds
+///     data, said by a write or by a claim that did not consume it.
+///   * `Wheel` — `wheel_drain_due`, plus `promote_ack`'s WHEEL branch, which is
+///     the same promotion with its deadline cut short by an ack.
+///   * `Reseed` — `reseed_row`, the only path that learns from PostgreSQL.
+///
+/// Together they cover EVERY entry into a ready list, so the three window counters
+/// sum to the entries that arrived — which is what makes them readable against
+/// `ring_depth_max` on the same log line.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReadySrc {
+    Mark,
+    Wheel,
+    Reseed,
+}
+
+/// BURST-RESOLVED TELEMETRY (soak cell, 2026-08-24).
+///
+/// e2e p99 ran 330-470 ms while the client's own push RTT p99 was 46-88 ms. The
+/// difference is time an entry spends READY-BUT-UNCLAIMED, and nothing in the log
+/// could see it: the `sizes` line samples `ring_sizes` once per 10 s window and the
+/// per-lane lines reported ready=0 through that same window, while the global
+/// `ring_oldest_ms` ran p99 276 ms / max 387 and `ring_depth` p99 172 / max 393.
+/// The bursts live and die INSIDE one sampling interval — a 10 s sample of a 400 ms
+/// event is not a measurement of it.
+///
+/// So these are WINDOWED MAXIMA: `fetch_max`ed on the paths that ALREADY hold the
+/// value and reset when the `rates` line is emitted. The cost is one relaxed
+/// `fetch_max` per ring transition — no clock read (every caller already carries
+/// `now_ms` or is stamping one), no lock of its own (each update happens under a
+/// sub-ring lock the caller is holding), no allocation.
+///
+/// `max_lane_ready` is THE DISCRIMINATOR between the two regimes that a global
+/// depth of 393 cannot tell apart:
+///   * CONCENTRATED — one lane briefly holds 100+ ready, so the per-request claim
+///     WIDTH is the binder (the burst bypass in `pop_autopilot.rs`).
+///   * SPREAD — 229 lanes at ~1.7 ready each, so the ~9-slot pop admission lane is,
+///     and `pop_wait_max` (admission.rs, same log line) is that regime's witness.
+///
+/// Global drain is ~9 concurrent pop queries x W=1 x ~7 ms RTT ~= 1100 partitions/s,
+/// which is why a spike of 393 costs ~360 ms whichever regime produced it.
+///
+/// One instance per [`HotList`], not a process static: two hot lists in one test
+/// binary must not pollute each other's window (the `FLOOR_*` statics above are the
+/// counter-example, and they are cumulative rather than windowed).
+pub struct BurstStats {
+    /// LIVE count of entries across every ready list of this hot list, maintained
+    /// at exactly the two points `SubRing::len_ready` is (+1 in `ready_push_tail`,
+    /// -1 in `ready_unlink`) plus the whole-list subtraction in `Drop for SubRing`
+    /// — without which `trim_unserved` dropping a standby's 827 000-entry ring
+    /// would leak the gauge upward for the process lifetime.
+    live_ready: AtomicI64,
+    depth_max: AtomicI64,
+    oldest_max_ms: AtomicI64,
+    lane_ready_max: AtomicI64,
+    from_mark: AtomicU64,
+    from_wheel: AtomicU64,
+    from_reseed: AtomicU64,
+}
+
+/// One window's worth of [`BurstStats`], read and reset together.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BurstWindow {
+    pub depth_max: u64,
+    pub oldest_max_ms: i64,
+    pub lane_ready_max: u64,
+    pub from_mark: u64,
+    pub from_wheel: u64,
+    pub from_reseed: u64,
+}
+
+impl BurstStats {
+    fn new() -> Arc<BurstStats> {
+        Arc::new(BurstStats {
+            live_ready: AtomicI64::new(0),
+            depth_max: AtomicI64::new(0),
+            oldest_max_ms: AtomicI64::new(0),
+            lane_ready_max: AtomicI64::new(0),
+            from_mark: AtomicU64::new(0),
+            from_wheel: AtomicU64::new(0),
+            from_reseed: AtomicU64::new(0),
+        })
+    }
+
+    /// One entry entered a ready list. The increment and its `fetch_max` run under
+    /// the caller's sub-ring lock, so they cannot interleave with another entry of
+    /// the SAME sub-ring; across sub-rings a racing pair only ever loses the lower
+    /// of two maxima, which is the direction that cannot invent a burst.
+    #[inline]
+    fn entered(&self, src: ReadySrc) {
+        let live = self.live_ready.fetch_add(1, Ordering::Relaxed) + 1;
+        self.depth_max.fetch_max(live, Ordering::Relaxed);
+        match src {
+            ReadySrc::Mark => &self.from_mark,
+            ReadySrc::Wheel => &self.from_wheel,
+            ReadySrc::Reseed => &self.from_reseed,
+        }
+        .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `n` entries left the ready lists — one on an unlink, a whole list when a
+    /// sub-ring is dropped. Nothing to `fetch_max`: a departure can never raise a
+    /// maximum.
+    #[inline]
+    fn left(&self, n: i64) {
+        if n != 0 {
+            self.live_ready.fetch_sub(n, Ordering::Relaxed);
+        }
+    }
+
+    /// One LANE's instantaneous ready count, from a caller holding it already
+    /// (`ready_peek`, and `take_batch`'s pre-claim pass over the sub-rings).
+    #[inline]
+    pub fn note_lane_ready(&self, ready: usize) {
+        self.lane_ready_max
+            .fetch_max(ready as i64, Ordering::Relaxed);
+    }
+
+    /// The age of a ready entry a caller just read, ms — `ready_peek`'s head age
+    /// and `take_batch`'s per-candidate `ready_age_ms`, both already computed.
+    #[inline]
+    pub fn note_oldest_ms(&self, age_ms: i64) {
+        if age_ms > 0 {
+            self.oldest_max_ms.fetch_max(age_ms, Ordering::Relaxed);
+        }
+    }
+
+    /// Read and RESET the window. Called once per `rates` line and nowhere else: a
+    /// second reader would silently halve every maximum the first one saw.
+    pub fn take_window(&self) -> BurstWindow {
+        BurstWindow {
+            depth_max: self.depth_max.swap(0, Ordering::Relaxed).max(0) as u64,
+            oldest_max_ms: self.oldest_max_ms.swap(0, Ordering::Relaxed).max(0),
+            lane_ready_max: self.lane_ready_max.swap(0, Ordering::Relaxed).max(0) as u64,
+            from_mark: self.from_mark.swap(0, Ordering::Relaxed),
+            from_wheel: self.from_wheel.swap(0, Ordering::Relaxed),
+            from_reseed: self.from_reseed.swap(0, Ordering::Relaxed),
+        }
+    }
+
+    /// The live gauge itself — the instantaneous global ready depth, without the
+    /// 10 s sampling `ring_sizes` imposes. Test-only for now (`adjust_count` in
+    /// pop_autopilot.rs is the precedent): the log line wants the WINDOWED maximum,
+    /// and an unused public reader would be dead code on every build.
+    #[cfg(test)]
+    pub fn live_ready(&self) -> i64 {
+        self.live_ready.load(Ordering::Relaxed)
+    }
+}
+
 // ------------------------------------------------------------------- ring
 
 /// One sub-ring: the flat intrusive arrays + ready list + wheel for the subset
@@ -573,11 +735,17 @@ struct SubRing {
     // rescheduled) are skipped lazily on drain.
     wheel: BinaryHeap<Reverse<(i64, u32)>>,
     len_ready: usize,
+    // The hot list's burst window (see `BurstStats`). Held here rather than passed
+    // down from `HotList` on every call because the two mutation points ARE these
+    // two methods: an `Arc` in the struct keeps all twelve `ready_push_tail` call
+    // sites and `Drop` honest without threading a parameter through any of them.
+    burst: Arc<BurstStats>,
 }
 
 impl SubRing {
-    fn new() -> Self {
+    fn new(burst: Arc<BurstStats>) -> Self {
         SubRing {
+            burst,
             next: Vec::new(),
             prev: Vec::new(),
             epoch: Vec::new(),
@@ -610,7 +778,8 @@ impl SubRing {
         }
     }
 
-    fn ready_push_tail(&mut self, l: u32) {
+    fn ready_push_tail(&mut self, l: u32, src: ReadySrc) {
+        self.burst.entered(src);
         self.ready_since[l as usize] = crate::util::now_epoch_ms();
         self.next[l as usize] = NIL;
         self.prev[l as usize] = self.ready_tail;
@@ -640,6 +809,7 @@ impl SubRing {
         self.next[l as usize] = NIL;
         self.prev[l as usize] = NIL;
         self.len_ready -= 1;
+        self.burst.left(1);
     }
 
     fn ready_pop_head(&mut self) -> Option<u32> {
@@ -671,7 +841,7 @@ impl SubRing {
                 continue;
             }
             self.revisit_at[l as usize] = 0;
-            self.ready_push_tail(l);
+            self.ready_push_tail(l, ReadySrc::Wheel);
             promoted += 1;
         }
         promoted
@@ -685,6 +855,18 @@ impl SubRing {
         } else {
             false
         }
+    }
+}
+
+impl Drop for SubRing {
+    /// Every ring-drop path funnels through here — `evict_idle` (which demands an
+    /// empty ready list, so 0), `forget_group`, a `QueueState` replaced under a
+    /// reseed walk, and above all `trim_unserved`, which drops rings that are FULL
+    /// by design (the standby broker of 2026-08-24 held 827 000 ready entries).
+    /// Subtracting here rather than at each of those call sites is what makes the
+    /// global gauge impossible to leak.
+    fn drop(&mut self) {
+        self.burst.left(self.len_ready as i64);
     }
 }
 
@@ -759,10 +941,10 @@ struct GroupRing {
 }
 
 impl GroupRing {
-    fn new(shards: usize) -> Self {
+    fn new(shards: usize, burst: &Arc<BurstStats>) -> Self {
         let mut subs = Vec::with_capacity(shards);
         for _ in 0..shards {
-            subs.push(Mutex::new(SubRing::new()));
+            subs.push(Mutex::new(SubRing::new(burst.clone())));
         }
         GroupRing {
             subs,
@@ -830,11 +1012,15 @@ struct QueueState {
     // Epoch-ms of the first trim pass that found `served` unset; 0 = "being served".
     // Written and read ONLY by `trim_unserved`, which already holds a clock.
     unserved_since_ms: std::sync::atomic::AtomicI64,
+    // The owning hot list's burst window, carried so `group` can hand it to a ring
+    // it creates without the six `s.group(...)` call sites growing a parameter.
+    burst: Arc<BurstStats>,
 }
 
 impl QueueState {
-    fn new() -> Self {
+    fn new(burst: Arc<BurstStats>) -> Self {
         QueueState {
+            burst,
             intern: Mutex::new(QueueIntern::new()),
             cfg: Mutex::new(DeferCfg::default()),
             groups: Mutex::new(HashMap::new()),
@@ -855,7 +1041,7 @@ impl QueueState {
         if let Some(r) = g.get(group) {
             return r.clone();
         }
-        let r = Arc::new(GroupRing::new(shards));
+        let r = Arc::new(GroupRing::new(shards, &self.burst));
         g.insert(group.to_string(), r.clone());
         r
     }
@@ -922,6 +1108,9 @@ impl LapStats {
 
 pub struct HotList {
     pub lap: LapStats,
+    /// The windowed burst maxima + provenance counters (see [`BurstStats`]). Read
+    /// and reset once per `rates` line by `obs::spawn_reporter`.
+    pub burst: Arc<BurstStats>,
     enabled: bool,
     shards: usize,
     // windowBuffer early-promotion threshold (§6): batch_count >= this ⇒ promote
@@ -1003,6 +1192,7 @@ impl HotList {
     ) -> Arc<HotList> {
         Arc::new(HotList {
             lap: LapStats::new(),
+            burst: BurstStats::new(),
             enabled,
             shards: shards.max(1),
             window_batch: window_batch.max(1),
@@ -1076,7 +1266,7 @@ impl HotList {
             s.active.store(true, std::sync::atomic::Ordering::Relaxed);
             return s.clone();
         }
-        let s = Arc::new(QueueState::new());
+        let s = Arc::new(QueueState::new(self.burst.clone()));
         q.insert(qkey.to_string(), s.clone());
         drop(q);
         if self.tenancy {
@@ -1203,14 +1393,14 @@ impl HotList {
                     // §6: windowBuffer ⇒ hold until first_mark + W, unless the
                     // batch is already fat (early promotion).
                     if sub.batch_count[local as usize] >= self.window_batch {
-                        sub.ready_push_tail(local);
+                        sub.ready_push_tail(local, ReadySrc::Mark);
                         woke = true;
                     } else {
                         let at = now_ms + cfg.window as i64 * 1000;
                         sub.wheel_schedule(local, at);
                     }
                 } else {
-                    sub.ready_push_tail(local);
+                    sub.ready_push_tail(local, ReadySrc::Mark);
                     woke = true;
                 }
             }
@@ -1224,7 +1414,7 @@ impl HotList {
                 {
                     // stale heap entry is skipped lazily on drain.
                     sub.revisit_at[local as usize] = 0;
-                    sub.ready_push_tail(local);
+                    sub.ready_push_tail(local, ReadySrc::Mark);
                     woke = true;
                 } else if cfg.window == 0
                     && cfg.delayed == 0
@@ -1244,7 +1434,7 @@ impl HotList {
                     // Canaries for the herd risk: `leased`/`empty` verdict
                     // rates and pop_empty_pct must not rise.
                     sub.revisit_at[local as usize] = 0;
-                    sub.ready_push_tail(local);
+                    sub.ready_push_tail(local, ReadySrc::Mark);
                     woke = true;
                 }
             }
@@ -1556,7 +1746,7 @@ impl HotList {
                     FLOOR_PROMOTE_CLEAR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 } else {
                     sub.revisit_at[local as usize] = 0;
-                    sub.ready_push_tail(local);
+                    sub.ready_push_tail(local, ReadySrc::Wheel);
                     drop(sub);
                     self.wake(qkey);
                     FLOOR_PROMOTE_REQUEUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1612,12 +1802,22 @@ impl HotList {
         s.served.store(true, std::sync::atomic::Ordering::Relaxed);
         let ring = s.group(group, self.shards);
         // Drain due wheel entries into the ready ring across all sub-rings.
+        //
+        // The `lane_ready` sum rides this pass for free: the burst window's
+        // discriminator is ONE lane's instantaneous ready count (see `BurstStats`),
+        // and here every sub-ring lock is already held for the wheel probe. Taken
+        // AFTER the drain and BEFORE the claim, so it is exactly the set this pop is
+        // about to compete for — and it covers pops the autopilot never sees
+        // (`ready_peek` is skipped entirely when QUEEN_POP_AUTOPILOT=off).
+        let mut lane_ready = 0usize;
         for sub in ring.subs.iter() {
             let mut sg = sub.lock().unwrap();
             if sg.wheel_peek_due(now_ms) {
                 sg.wheel_drain_due(now_ms);
             }
+            lane_ready += sg.len_ready;
         }
+        self.burst.note_lane_ready(lane_ready);
         let intern = s.intern.lock().unwrap();
         let want = want.max(1) as u64;
         let mut got: u64 = 0;
@@ -1633,6 +1833,11 @@ impl HotList {
                     empty_streak = 0;
                     let age_ms = now_ms - sub.ready_since[local as usize];
                     self.lap.record_age(age_ms as f64);
+                    // Same sample, kept as a windowed MAX rather than a percentile
+                    // over a 4096-slot ring: `ready_age_p95` is a distribution over
+                    // the claims that happened, which is precisely what a burst
+                    // shorter than the window hides (see `BurstStats`).
+                    self.burst.note_oldest_ms(age_ms);
                     sub.state[local as usize] = INFLIGHT;
                     // drained is a claim-scoped fact: reset here so only THIS
                     // claim's Took checkin can re-assert it. Without the reset a
@@ -1765,10 +1970,16 @@ impl HotList {
                 }
             }
         }
+        // Both numbers into the burst window on the way out, where they are already
+        // in hand: this is the ONE reader that sees a whole lane's ready set without
+        // claiming any of it, so it is where `max_lane_ready` is exact.
+        self.burst.note_lane_ready(n);
         if oldest_ms == i64::MAX {
             return (n, 0);
         }
-        (n, (now_ms - oldest_ms).max(0))
+        let oldest = (now_ms - oldest_ms).max(0);
+        self.burst.note_oldest_ms(oldest);
+        (n, oldest)
     }
 
     /// TASK M — how many messages a `take_batch` right now would plausibly be
@@ -1913,13 +2124,13 @@ impl HotList {
                     if cfg.window > 0 && cfg.delayed == 0 {
                         sub.wheel_schedule(local, now_ms + cfg.window as i64 * 1000);
                     } else {
-                        sub.ready_push_tail(local);
+                        sub.ready_push_tail(local, ReadySrc::Mark);
                     }
                 }
                 Verdict::Requeue => {
                     // Budget/cap-skipped, un-leased: re-append promptly (never window).
                     sub.batch_count[local as usize] = 0;
-                    sub.ready_push_tail(local);
+                    sub.ready_push_tail(local, ReadySrc::Mark);
                 }
                 Verdict::Leased(until_ms) => {
                     // Never clear a leased candidate (§7): wheel at T + pad, but
@@ -1956,7 +2167,7 @@ impl HotList {
                         }
                     } else {
                         // A mark raced during dispatch — re-append (§4).
-                        sub.ready_push_tail(local);
+                        sub.ready_push_tail(local, ReadySrc::Mark);
                     }
                 }
             }
@@ -2152,12 +2363,12 @@ impl HotList {
                 if cfg.delayed > 0 {
                     sub.wheel_schedule(local, now_ms + cfg.delayed as i64 * 1000 + pad_ms());
                 } else {
-                    sub.ready_push_tail(local);
+                    sub.ready_push_tail(local, ReadySrc::Reseed);
                 }
             }
             WHEEL if !cfg.is_deferral() => {
                 sub.revisit_at[local as usize] = 0;
-                sub.ready_push_tail(local);
+                sub.ready_push_tail(local, ReadySrc::Reseed);
             }
             _ => { /* READY, or a deferral-queue WHEEL: keep the live deadline. */ }
         }
@@ -2824,6 +3035,151 @@ mod tests {
         // Dashes are ignored wherever they fall — this is a value parser, not a format
         // validator, and the only producer is Postgres.
         assert_eq!(parse_uuid16("--0000000000000000000000000000000a"), parse_uuid16("0000000000000000000000000000000a"));
+    }
+
+    // ------------------------------------------------ burst-resolved telemetry
+
+    // The window's provenance counters and its three maxima, driven through the
+    // three ways an entry can ever reach a ready list. This is the log line the
+    // 2026-08-24 soak cell had no way of writing: `ring_depth`/`ring_oldest_ms` are
+    // one SAMPLE per 10s window, and the bursts that produced a 330-470 ms e2e p99
+    // formed and drained inside it.
+    #[test]
+    fn the_burst_window_attributes_every_entry_and_peaks_at_the_real_depth() {
+        let h = hl1();
+        reg(&h, "q", "g");
+
+        // 1) MARK — three partitions made ready by a push.
+        for p in 0..3 {
+            h.mark_local("q", &format!("p{p}"), 1, 0);
+        }
+        // 2) WHEEL — a deferred partition promoted when its deadline came due.
+        h.set_queue_cfg("q", 2, 0, 0, 0); // delayed 2s ⇒ the mark parks in the wheel
+        h.mark_local("q", "w0", 1, 0);
+        assert_eq!(h.burst.live_ready(), 3, "a wheel park is not ready yet");
+        h.tick(2400); // past commit + D + pad
+
+        // 3) RESEED — a row the §8 floor found in PostgreSQL. Back to a plain
+        // queue, or the deferral config would wheel the row instead of readying it.
+        h.set_queue_cfg("q", 0, 0, 0, 0);
+        walk(&h, "q", "g", 0, &[(ID0, "r0")]);
+
+        assert_eq!(h.burst.live_ready(), 5, "3 marks + 1 wheel + 1 reseed");
+        // The lane peek is where `max_lane_ready` is exact, and it is also the
+        // discriminator: 5 entries in ONE lane, not 5 lanes holding one each. The
+        // clock is the real one (`ready_push_tail` stamps `now_epoch_ms`), so the
+        // age has to be measured against it.
+        let now = crate::util::now_epoch_ms() + 250;
+        assert_eq!(h.ready_peek("q", "g", now).0, 5);
+
+        let w = h.burst.take_window();
+        assert_eq!(w.from_mark, 3, "{w:?}");
+        assert_eq!(w.from_wheel, 1, "{w:?}");
+        assert_eq!(w.from_reseed, 1, "{w:?}");
+        assert_eq!(w.depth_max, 5, "the window's high-water depth");
+        assert_eq!(w.lane_ready_max, 5, "one lane held all five");
+        assert!(
+            w.oldest_max_ms >= 250,
+            "the head's age at the peek: {}",
+            w.oldest_max_ms
+        );
+
+        // Emitting the line RESETS the window — that is what makes it a window and
+        // not a since-boot maximum. The live gauge is not a window and does not move.
+        let after = h.burst.take_window();
+        assert_eq!(
+            after,
+            BurstWindow::default(),
+            "reset on emission: {after:?}"
+        );
+        assert_eq!(
+            h.burst.live_ready(),
+            5,
+            "the live gauge is not part of the reset"
+        );
+
+        // A NEW window peaks at what happens inside it, from zero, even though the
+        // ring never emptied: the entries that were already standing are not
+        // arrivals, so only the depth the next transition reaches is recorded.
+        h.mark_local("q", "p9", 1, 0);
+        let w2 = h.burst.take_window();
+        assert_eq!(w2.from_mark, 1);
+        assert_eq!(w2.from_wheel, 0);
+        assert_eq!(w2.from_reseed, 0);
+        assert_eq!(w2.depth_max, 6, "the live gauge is global and cumulative");
+    }
+
+    // The maxima are FETCH_MAX, not last-write: a burst that has already drained by
+    // the time the reporter looks must still be in the line. This is precisely the
+    // failure the feature exists to fix — `ring_depth` sampled 0 while the tail was
+    // being made.
+    #[test]
+    fn the_maxima_survive_a_burst_that_is_over_before_the_line_is_written() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        for p in 0..40 {
+            h.mark_local("q", &format!("p{p}"), 1, 0);
+        }
+        // …and the whole burst is claimed away again, well before any reporter tick.
+        let claimed = h.take_batch("q", "g", 64, u32::MAX, crate::util::now_epoch_ms());
+        assert_eq!(claimed.len(), 40);
+        assert_eq!(h.burst.live_ready(), 0, "the ring is empty again");
+        assert_eq!(h.ready_peek("q", "g", crate::util::now_epoch_ms()).0, 0);
+
+        let w = h.burst.take_window();
+        assert_eq!(w.depth_max, 40, "the peak, not the value at reporting time");
+        assert_eq!(
+            w.lane_ready_max, 40,
+            "take_batch sees the lane before it claims"
+        );
+        assert_eq!(w.from_mark, 40);
+    }
+
+    // The gauge is LIVE, so every path that removes entries has to be on it — and the
+    // one that matters is `trim_unserved`, which drops rings that are FULL by design
+    // (827 000 ready entries on the standby of the incident). `Drop for SubRing` is
+    // what makes that impossible to forget.
+    #[test]
+    fn dropping_a_ring_full_of_ready_entries_returns_the_gauge_to_zero() {
+        let h = hl_trim(30_000);
+        reg(&h, "q", "g");
+        for p in 0..25 {
+            h.mark_local("q", &format!("p{p}"), 1, 10_000);
+        }
+        assert_eq!(h.burst.live_ready(), 25);
+        assert_eq!(
+            trim_twice(&h, 10_000, 30_000),
+            1,
+            "the unserved ring is dropped"
+        );
+        assert_eq!(h.queue_count(), 0);
+        assert_eq!(
+            h.burst.live_ready(),
+            0,
+            "a dropped ring must not leak its depth into the gauge forever"
+        );
+        // …and the window's arrivals are unaffected: they DID arrive.
+        assert_eq!(h.burst.take_window().from_mark, 25);
+    }
+
+    // Two hot lists in one process keep separate windows. The `FLOOR_*` statics above
+    // are the counter-example this avoids: a per-process gauge would make one test's
+    // ring pollute another's maxima, and on a broker it would make the number
+    // unattributable.
+    #[test]
+    fn each_hot_list_owns_its_own_burst_window() {
+        let a = hl1();
+        let b = hl1();
+        reg(&a, "q", "g");
+        reg(&b, "q", "g");
+        for p in 0..7 {
+            a.mark_local("q", &format!("p{p}"), 1, 0);
+        }
+        b.mark_local("q", "p0", 1, 0);
+        assert_eq!(a.burst.live_ready(), 7);
+        assert_eq!(b.burst.live_ready(), 1);
+        assert_eq!(a.burst.take_window().depth_max, 7);
+        assert_eq!(b.burst.take_window().depth_max, 1);
     }
 
     // A trim-armed hot-list. Single shard so the ring walk is deterministic.
