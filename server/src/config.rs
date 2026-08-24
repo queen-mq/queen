@@ -481,6 +481,39 @@ pub struct Config {
     // an unbounded number of distinct queues. 0 disables the sweep (unbounded growth —
     // only for a single-tenant deployment that wants the pre-eviction behaviour).
     pub hotlist_idle_sweep_ms: u64,
+    // POP AUTOPILOT (server/src/pop_autopilot.rs) — the broker choosing `partitions`
+    // (and echoing `batch`) for a grouped wildcard pop that opted in with
+    // `?autopilot=true`. A request that does not carry the parameter is treated
+    // byte-identically in every one of the three switch positions, so this knob is
+    // about what the controller may DO, never about whether the surface exists.
+    //
+    // `QUEEN_POP_AUTOPILOT` (on | shadow | off, default on; the boolean spellings
+    // are accepted and mean on/off): `shadow` computes the decision and reports it
+    // without applying it — the rollout position — and `off` removes the controller
+    // entirely, including its in-memory lane state and its logs.
+    //
+    // The rest are the law's constants. `TARGET_AGE_MS` is the ready-age the width
+    // loop steers to (a quarter of it is the shrink threshold); the two DWELL knobs
+    // bound how often one (tenant, queue, group) may change its width, in BOTH
+    // directions, and exist to stop the multiplicative loop from limit-cycling;
+    // `MAX_LANES` bounds the in-memory state on a cell with a very large number of
+    // queues (past it the controller stops creating lanes, which degrades to
+    // today's defaults rather than evicting a live one).
+    //
+    // `BATCH` is the batch handed to a consumer that DELEGATED that dimension, and
+    // only to such a consumer — a client that sends its own `batch` is never
+    // touched by it. It is 100 rather than the 200 an absent field resolves to in
+    // the handler because 100 is what the fleet has actually run (every SDK
+    // defaults to it client-side) and because the matched arms of 2026-08-24
+    // measured 200 at +35% p99. The full argument, and the drain-aware successor
+    // this constant is standing in for, are at
+    // `pop_autopilot::AUTO_BATCH_DEFAULT`.
+    pub pop_autopilot_mode: String,
+    pub pop_autopilot_batch: i32,
+    pub pop_autopilot_target_age_ms: f64,
+    pub pop_autopilot_dwell_ms: i64,
+    pub pop_autopilot_dwell_pops: u32,
+    pub pop_autopilot_max_lanes: usize,
     // LOGGING_PLAN.md Phase 1: cadence of the periodic `rates`/`sizes` aggregate
     // log blocks (ms), and how many hot queues the per-queue lines rank & show.
     pub log_rates_ms: u64,
@@ -992,6 +1025,15 @@ pub fn log_effective(cfg: &Config) {
         pop_wait_backoff_threshold = cfg.pop_wait_backoff_threshold,
         pop_wait_backoff_multiplier = cfg.pop_wait_backoff_multiplier,
         pop_wait_max_ms = cfg.pop_wait_max_interval_ms,
+        // POP AUTOPILOT: on the pop line rather than a block of its own — it is a
+        // pop knob, and §14.4's rule is that a third periodic block is a line
+        // nobody reads.
+        pop_autopilot = %cfg.pop_autopilot_mode,
+        pop_autopilot_batch = cfg.pop_autopilot_batch,
+        pop_autopilot_target_age_ms = cfg.pop_autopilot_target_age_ms,
+        pop_autopilot_dwell_ms = cfg.pop_autopilot_dwell_ms,
+        pop_autopilot_dwell_pops = cfg.pop_autopilot_dwell_pops,
+        pop_autopilot_max_lanes = cfg.pop_autopilot_max_lanes,
         admission = %format!(
             "{}/{}/{}", cfg.admission_min, cfg.admission_init, cfg.admission_max),
         admission_pool_reserve = cfg.admission_pool_reserve,
@@ -1341,6 +1383,21 @@ pub fn load() -> Config {
         // so the boot line and every reader see the number actually in force.
         hotlist_reseed_window_ms: env_int("QUEEN_HOTLIST_RESEED_WINDOW_MS", 0).max(0),
         hotlist_idle_sweep_ms: env_int("QUEEN_HOTLIST_IDLE_SWEEP_MS", 300_000).max(0) as u64,
+        // POP AUTOPILOT (server/src/pop_autopilot.rs). The mode string is
+        // validated below, next to the other enumerated knobs — an unrecognised
+        // value is fatal rather than silently resolving to the default, the same
+        // rule `env_bool` applies to every boolean in the broker.
+        pop_autopilot_mode: env_str("QUEEN_POP_AUTOPILOT", "on"),
+        // Keep the literal in step with `pop_autopilot::AUTO_BATCH_DEFAULT` — it
+        // is spelled out here because the generated environment reference reads
+        // the default off this call site. Range-checked below, not clamped: a
+        // batch knob that silently corrects itself is how a fat-fingered value
+        // reaches production unnoticed.
+        pop_autopilot_batch: env_int("QUEEN_POP_AUTOPILOT_BATCH", 100) as i32,
+        pop_autopilot_target_age_ms: env_f64("QUEEN_POP_AUTOPILOT_TARGET_AGE_MS", 25.0).max(1.0),
+        pop_autopilot_dwell_ms: env_int("QUEEN_POP_AUTOPILOT_DWELL_MS", 500).max(1),
+        pop_autopilot_dwell_pops: env_int("QUEEN_POP_AUTOPILOT_DWELL_POPS", 16).max(1) as u32,
+        pop_autopilot_max_lanes: env_int("QUEEN_POP_AUTOPILOT_MAX_LANES", 50_000).max(0) as usize,
         log_rates_ms: env_int("QUEEN_LOG_RATES_MS", 10000).max(1000) as u64,
         log_top_n_queues: env_int("QUEEN_LOG_TOPN_QUEUES", 10).max(1) as usize,
         tenancy_header,
@@ -1420,6 +1477,42 @@ pub fn load() -> Config {
     // §8 windowed reseed: derive it when unset, then clamp it — see
     // resolve_reseed_window_ms. Resolved here, before anything reads the field, so the
     // boot line and every consumer see the number actually in force.
+    // POP AUTOPILOT: reject a mis-spelled kill switch at boot instead of resolving
+    // it to the default. `QUEEN_POP_AUTOPILOT=shaddow` silently meaning `on` is the
+    // exact failure `env_bool` was rewritten to stop (a knob that reads as set and
+    // behaves as unset, with not a word in the log).
+    if crate::pop_autopilot::Mode::parse(&cfg.pop_autopilot_mode).is_none() {
+        crate::obs::fatal(format!(
+            "QUEEN_POP_AUTOPILOT=\"{}\" is not a mode (expected on/shadow/off, or the \
+             boolean spellings {BOOL_SPELLINGS} for on/off)",
+            cfg.pop_autopilot_mode
+        ));
+    }
+    // Same rule for the delegated batch, and for the same reason the boolean
+    // parser stopped being permissive: `env_int` resolves an unparseable value to
+    // the default silently, so a typo would run the fleet on a number nobody
+    // chose, with not a word in the log. Reject rather than clamp — an operator
+    // who asked for a batch of a million has a misunderstanding a clamp would
+    // hide.
+    {
+        use crate::pop_autopilot::{AUTO_BATCH_MAX, AUTO_BATCH_MIN};
+        let raw = std::env::var("QUEEN_POP_AUTOPILOT_BATCH").ok();
+        let set = raw.as_deref().map(str::trim).filter(|v| !v.is_empty());
+        let parsed = set.map(|v| v.parse::<i32>());
+        match parsed {
+            Some(Err(_)) => crate::obs::fatal(format!(
+                "QUEEN_POP_AUTOPILOT_BATCH=\"{}\" is not an integer (expected \
+                 {AUTO_BATCH_MIN}..={AUTO_BATCH_MAX})",
+                set.unwrap_or_default()
+            )),
+            Some(Ok(v)) if !(AUTO_BATCH_MIN..=AUTO_BATCH_MAX).contains(&v) => {
+                crate::obs::fatal(format!(
+                    "QUEEN_POP_AUTOPILOT_BATCH={v} is outside {AUTO_BATCH_MIN}..={AUTO_BATCH_MAX}"
+                ))
+            }
+            _ => {}
+        }
+    }
     let requested_window_ms = cfg.hotlist_reseed_window_ms;
     cfg.hotlist_reseed_window_ms =
         resolve_reseed_window_ms(requested_window_ms, cfg.hotlist_reseed_ms);
@@ -1447,6 +1540,30 @@ pub fn load() -> Config {
         }
     }
     cfg
+}
+
+impl Config {
+    /// POP AUTOPILOT knobs, resolved once. ONE owner for the mode parse, so the
+    /// two boot paths (`main.rs` and `embedded/boot.rs`) cannot disagree about
+    /// what `QUEEN_POP_AUTOPILOT` said. `load()` has already refused an
+    /// unrecognised value, so the fallback here is unreachable in a booted broker
+    /// and exists only for a `Config` assembled by hand in a test.
+    pub fn pop_autopilot_knobs(&self) -> crate::pop_autopilot::Knobs {
+        crate::pop_autopilot::Knobs {
+            mode: crate::pop_autopilot::Mode::parse(&self.pop_autopilot_mode)
+                .unwrap_or(crate::pop_autopilot::Knobs::defaults().mode),
+            // Clamped here and range-CHECKED in `load()`: the check is what an
+            // operator sees, this is what keeps a hand-assembled `Config` in a
+            // test from handing the claim path a zero.
+            auto_batch: self
+                .pop_autopilot_batch
+                .clamp(crate::pop_autopilot::AUTO_BATCH_MIN, crate::pop_autopilot::AUTO_BATCH_MAX),
+            target_age_ms: self.pop_autopilot_target_age_ms,
+            dwell_ms: self.pop_autopilot_dwell_ms,
+            dwell_pops: self.pop_autopilot_dwell_pops,
+            max_lanes: self.pop_autopilot_max_lanes,
+        }
+    }
 }
 
 /// The widest windowed-reseed lookback that is still a lookback (C1,

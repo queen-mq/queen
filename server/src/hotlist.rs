@@ -343,6 +343,13 @@ pub struct Candidate {
     pub name: String,
     /// epoch snapshot for the empty-path CAS (§4).
     pub epoch: u32,
+    /// READY-AGE at checkout: `now - ready_since`, i.e. how long this servable
+    /// lane waited for a pop to visit it. The SAME number `take_batch` feeds to
+    /// `LapStats::record_age` for the admission arbiter — carried out to the
+    /// caller so the POP AUTOPILOT (server/src/pop_autopilot.rs) can steer on the
+    /// arbiter's own variable per (queue, group) without measuring it a second
+    /// time. Costs one i64 per candidate and no extra lock.
+    pub ready_age_ms: i64,
 }
 
 /// The tri-state verdict (§7) the handler feeds back per candidate.
@@ -1475,8 +1482,8 @@ impl HotList {
             match sub.ready_pop_head() {
                 Some(local) => {
                     empty_streak = 0;
-                    self.lap
-                        .record_age((now_ms - sub.ready_since[local as usize]) as f64);
+                    let age_ms = now_ms - sub.ready_since[local as usize];
+                    self.lap.record_age(age_ms as f64);
                     sub.state[local as usize] = INFLIGHT;
                     // drained is a claim-scoped fact: reset here so only THIS
                     // claim's Took checkin can re-assert it. Without the reset a
@@ -1495,6 +1502,7 @@ impl HotList {
                         out.push(Candidate {
                             name: name.to_string(),
                             epoch: ep,
+                            ready_age_ms: age_ms,
                         });
                     } else {
                         // interning lost the name (should not happen) - drop it.
@@ -1541,6 +1549,68 @@ impl HotList {
             }
         }
         false
+    }
+
+    /// POP AUTOPILOT (server/src/pop_autopilot.rs) — the two ring facts the width
+    /// controller steers on, read in ONE pass: how many PARTITIONS are ready in
+    /// the (queue, group) ring, and how long the OLDEST of them has been waiting.
+    ///
+    /// Both are measured over the whole ready set, which is the point. The
+    /// controller's first law sampled ready-age at CLAIM time, on the partitions
+    /// the sweep visited — so at width 1 it only ever measured the promptly-served
+    /// head and reported health while the rest of the ring starved (the bench A/B
+    /// of 2026-08-23; the numbers are in the pop_autopilot module note). These two
+    /// see the partitions nobody visited, which is the population that matters.
+    ///
+    /// O(shards), with no scan and no new bookkeeping: `len_ready` is maintained
+    /// by the list itself, and the ready list is a FIFO stamped on entry
+    /// (`ready_push_tail`), so its HEAD is by construction its oldest entry — one
+    /// pointer dereference per sub-ring. Same non-destructive discipline as
+    /// [`has_ready`], whose shape this is: one brief lock per sub-ring, no
+    /// partition state touched, no ring ever created (a pop of a queue nobody has
+    /// pushed to must allocate nothing).
+    ///
+    /// Deliberately does NOT count due WHEEL entries, which `take_batch` promotes
+    /// on its way in: counting them would mean walking the heap, and the bias is
+    /// the safe direction — it can only make the controller narrower than the ring
+    /// could serve, which the feedback loop then corrects. The caller smooths
+    /// both; the instantaneous count is 0 right after a claim took everything
+    /// INFLIGHT.
+    ///
+    /// Returns `(ready partitions, age in ms of the oldest ready entry)`; the age
+    /// is 0 when the ring holds nothing ready, which the caller reads as "no
+    /// sample" rather than "age zero".
+    pub fn ready_peek(&self, qkey: &str, group: &str, now_ms: i64) -> (usize, i64) {
+        if !self.enabled {
+            return (0, 0);
+        }
+        let s = match self.qstate_existing(qkey) {
+            Some(s) => s,
+            None => return (0, 0),
+        };
+        let ring = {
+            let g = s.groups.lock().unwrap();
+            match g.get(group) {
+                Some(r) => r.clone(),
+                None => return (0, 0),
+            }
+        };
+        let mut n = 0usize;
+        let mut oldest_ms = i64::MAX;
+        for sub in ring.subs.iter() {
+            let sg = sub.lock().unwrap();
+            n += sg.len_ready;
+            if sg.ready_head != NIL {
+                let since = sg.ready_since[sg.ready_head as usize];
+                if since < oldest_ms {
+                    oldest_ms = since;
+                }
+            }
+        }
+        if oldest_ms == i64::MAX {
+            return (n, 0);
+        }
+        (n, (now_ms - oldest_ms).max(0))
     }
 
     /// TASK M — how many messages a `take_batch` right now would plausibly be

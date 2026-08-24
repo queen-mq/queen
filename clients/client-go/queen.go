@@ -21,6 +21,12 @@ type Queen struct {
 	httpClient    *HttpClient
 	bufferManager *BufferManager
 	admin         *Admin
+
+	// autopilotOff is the process-wide kill switch for pop autopilot, read
+	// from EnvPopAutopilot once here rather than on every pop: it is a
+	// deployment decision, and re-reading it per request would let a pop's
+	// wire shape change under a running consumer.
+	autopilotOff bool
 }
 
 // New creates a new Queen client.
@@ -59,6 +65,7 @@ func New(config interface{}) (*Queen, error) {
 	return &Queen{
 		httpClient:    httpClient,
 		bufferManager: NewBufferManager(),
+		autopilotOff:  popAutopilotDisabledByEnv(),
 	}, nil
 }
 

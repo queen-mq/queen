@@ -132,6 +132,13 @@ pub struct AppState {
     // conditional field would be a second way to express the same "no peers".
     pub peers: Arc<crate::peerclient::PeerClient>,
     pub hotlist: Arc<crate::hotlist::HotList>,
+    // POP AUTOPILOT (server/src/pop_autopilot.rs): the per-(tenant, queue, group)
+    // width controller for grouped wildcard pops that opted in with
+    // `?autopilot=true`. In-memory only, zero database traffic anywhere on the pop
+    // path, and inert (one relaxed comparison) with QUEEN_POP_AUTOPILOT=off. A
+    // request that does not carry the parameter is treated byte-identically in
+    // every switch position.
+    pub autopilot: Arc<crate::pop_autopilot::PopAutopilot>,
     // §8 reseed/cold-start interval (ms). QUEEN_HOTLIST_RESEED_MS (default 30s).
     pub hotlist_reseed_ms: i64,
     // §8 how often that reseed is a FULL walk instead of the windowed one, and how

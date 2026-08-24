@@ -216,13 +216,21 @@ pub fn spawn_idle_sweep(state: Arc<AppState>, sweep_ms: u64) {
             tokio::time::sleep(interval).await;
             let rings = state.hotlist.evict_idle();
             let gates = state.notifier.evict_idle();
-            if rings > 0 || gates > 0 {
+            // POP AUTOPILOT lanes ride the SAME sweep as the rings and gates they
+            // shadow: a lane is one (tenant, queue, group) of in-memory controller
+            // state, it is created by any grouped pop (including a pop of a queue
+            // that does not exist), and this is what bounds the map on a shared
+            // cell — exactly the argument in `hotlist_idle_sweep_ms`.
+            let lanes = state.autopilot.evict_idle();
+            if rings > 0 || gates > 0 || lanes > 0 {
                 tracing::debug!(
                     target: "reconcile",
                     rings_evicted = rings,
                     gates_evicted = gates,
+                    autopilot_lanes_evicted = lanes,
                     rings_live = state.hotlist.queue_count(),
                     gates_live = state.notifier.gate_count(),
+                    autopilot_lanes_live = state.autopilot.lane_count(),
                     "idle sweep"
                 );
             }

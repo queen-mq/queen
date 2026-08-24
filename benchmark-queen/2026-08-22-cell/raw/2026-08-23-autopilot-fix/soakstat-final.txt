@@ -1,0 +1,1 @@
+push=1060  pop=1062  readyAge95=5ms     pool=300/300  wait=0   | parts=827000  segs=43324244 db=17378MB dead=173866  disk=21%

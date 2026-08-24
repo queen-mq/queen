@@ -97,8 +97,8 @@ func TestRunnerAppliesConflationToTheSource(t *testing.T) {
 }
 
 func TestRunnerLeavesConflationAloneWhenOff(t *testing.T) {
-	// Same discipline as SubscriptionMode/Partitions above it: an unset option
-	// touches nothing, so a streams query that never heard of conflation makes
+	// Same discipline as SubscriptionMode above it: an unset option touches
+	// nothing, so a streams query that never heard of conflation makes
 	// byte-identical pops.
 	r, rec := newConflationRunner(t, RunOptions{})
 

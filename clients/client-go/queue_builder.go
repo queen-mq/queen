@@ -33,6 +33,12 @@ type QueueBuilder struct {
 	each             bool
 	maxPartitions    int
 	conflation       bool
+	// autopilot is the per-call override for pop autopilot: nil = the client
+	// default (on unless EnvPopAutopilot turned it off). batch and
+	// maxPartitions stay at 0 when the user never called their setters, and
+	// that zero is load-bearing — it is what "let the broker decide this one"
+	// looks like all the way down to buildPopParams.
+	autopilot *bool
 }
 
 // NewQueueBuilder creates a new QueueBuilder.
@@ -96,7 +102,17 @@ func (qb *QueueBuilder) Concurrency(count int) *QueueBuilder {
 	return qb
 }
 
-// Batch sets the batch size for consume/pop operations.
+// Batch sets the batch size for consume/pop operations, and pins it: an
+// explicit size is sent on the wire exactly as before and the broker never
+// second-guesses it.
+//
+// LEAVING IT UNSET IS NOW A CHOICE, not an omission. A builder that never calls
+// Batch asks the broker to size the batch (see Autopilot), instead of the
+// client-side default of 1 this SDK used to substitute. Batch(0) means the same
+// thing as never calling it.
+//
+// Requires broker >= 1.2 for the unset case; an older broker ignores the
+// autopilot parameter and applies its own server-side default (200) instead.
 func (qb *QueueBuilder) Batch(size int) *QueueBuilder {
 	qb.batch = size
 	return qb
@@ -108,13 +124,52 @@ func (qb *QueueBuilder) Batch(size int) *QueueBuilder {
 // to N partitions, in one network round-trip. All N share a single leaseId,
 // so a single Renew call extends them all atomically.
 //
-// Default 1 = legacy single-partition behavior.
+// An explicit N is a pin, N=1 included: Partitions(1) holds the claim to a
+// single partition for good. LEAVING IT UNSET now hands the sweep width to the
+// broker (see Autopilot), where it used to mean the client-side default of 1.
+//
+// Requires broker >= 1.2 for the unset case; an older broker ignores the
+// autopilot parameter and claims 1 partition, which is what unset used to mean.
 func (qb *QueueBuilder) Partitions(n int) *QueueBuilder {
 	if n < 1 {
 		n = 1
 	}
 	qb.maxPartitions = n
 	return qb
+}
+
+// Autopilot turns broker-side pop sizing on or off for this builder.
+//
+// It is ON by default and it only ever touches the knobs you did NOT set:
+// with autopilot on, a Batch or Partitions you set explicitly travels on the
+// wire unchanged and stays yours, while the one you left alone is omitted and
+// the broker picks it from state the client cannot see (ready partitions, the
+// age of the oldest ready message, arrival rate).
+//
+//	client.Queue("events").Group("workers").Partitions(1).  // pinned
+//	    Consume(ctx, handler).Execute(ctx)                  // batch: broker's
+//
+// Autopilot(false) restores this SDK's pre-1.2 behavior byte for byte: the
+// client-side defaults come back (batch 1, partitions 1) and no autopilot
+// parameter is sent. Use it to pin a workload to the old sizing without
+// spelling both knobs out. The QUEEN_SDK_POP_AUTOPILOT=off environment variable
+// (see EnvPopAutopilot) does the same for a whole process; an explicit call
+// here wins over it in both directions.
+//
+// Setting BOTH Batch and Partitions leaves autopilot nothing to decide, so no
+// autopilot parameter is sent in that case either, whatever this flag says.
+func (qb *QueueBuilder) Autopilot(enabled bool) *QueueBuilder {
+	qb.autopilot = &enabled
+	return qb
+}
+
+// autopilotEnabled resolves this builder's autopilot decision: its own
+// override if it has one, otherwise the client-wide default settled at New.
+func (qb *QueueBuilder) autopilotEnabled() bool {
+	if qb.autopilot != nil {
+		return *qb.autopilot
+	}
+	return qb.queen == nil || !qb.queen.autopilotOff
 }
 
 // Limit sets the maximum number of messages to process.
@@ -209,11 +264,41 @@ func (qb *QueueBuilder) Push(payload interface{}) *PushBuilder {
 	return NewPushBuilder(qb, payload)
 }
 
+// PopResult is the full answer to a pop: the messages, plus the additive
+// metadata the broker sends alongside them.
+//
+// Pop returns the messages alone, which is what almost every caller wants. This
+// exists for the ones that also want to see what the broker decided.
+type PopResult struct {
+	// Messages is what Pop returns, unchanged.
+	Messages []*Message
+	// Autopilot is what the broker chose for this pop, or nil when this pop
+	// did not engage autopilot or the broker is older than 1.2.
+	Autopilot *AutopilotDecision
+}
+
 // Pop pops messages from the queue.
 func (qb *QueueBuilder) Pop(ctx context.Context) ([]*Message, error) {
+	res, err := qb.PopResult(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return res.Messages, nil
+}
+
+// PopResult pops messages and reports the broker's autopilot decision with
+// them. Identical to Pop on the wire — same request, same error behavior — it
+// simply does not throw away the sizing the broker echoed back.
+//
+//	res, err := client.Queue("events").Group("workers").PopResult(ctx)
+//	if res.Autopilot != nil {
+//	    log.Printf("broker swept %d partitions for up to %d messages",
+//	        res.Autopilot.Partitions, res.Autopilot.Batch)
+//	}
+func (qb *QueueBuilder) PopResult(ctx context.Context) (PopResult, error) {
 	// Validate queue name
 	if qb.queueName == "" && qb.namespace == "" && qb.task == "" {
-		return nil, fmt.Errorf("queue name, namespace, or task is required")
+		return PopResult{}, fmt.Errorf("queue name, namespace, or task is required")
 	}
 
 	// Build path
@@ -257,7 +342,7 @@ func (qb *QueueBuilder) Pop(ctx context.Context) ([]*Message, error) {
 	// Make request
 	result, err := qb.queen.httpClient.Get(ctx, path, timeout, "", opts...)
 	if err != nil {
-		return nil, fmt.Errorf("pop request failed: %w", err)
+		return PopResult{}, fmt.Errorf("pop request failed: %w", err)
 	}
 
 	// Conflation is verified BEFORE the messages are handed to the caller: a
@@ -266,7 +351,7 @@ func (qb *QueueBuilder) Pop(ctx context.Context) ([]*Message, error) {
 	// prevent (PLAN_CONFLATION.md §4).
 	if cerr := checkConflationEcho(result, qb.conflation,
 		conflationTarget(qb.queueName, qb.namespace, qb.task), qb.consumerGroup); cerr != nil {
-		return nil, cerr
+		return PopResult{}, cerr
 	}
 
 	// Parse response
@@ -277,19 +362,28 @@ func (qb *QueueBuilder) Pop(ctx context.Context) ([]*Message, error) {
 		"count":   len(messages),
 	})
 
-	return messages, nil
+	return PopResult{Messages: messages, Autopilot: parseAutopilotDecision(result)}, nil
 }
 
 // buildPopParams builds the query parameters for pop requests.
+//
+// THIS BUILDER IS SEPARATE FROM ConsumerManager.buildParams (PLAN_CONFLATION.md
+// §4) — any option added here must be added there too. The batch/partitions
+// half is the exception, and deliberately so: both builders hand it to
+// popSizing.apply, which owns the autopilot emission rule outright so the two
+// cannot drift on it.
 func (qb *QueueBuilder) buildPopParams() string {
 	params := url.Values{}
 
-	// Batch size
-	batch := qb.batch
-	if batch == 0 {
-		batch = PopDefaults.Batch
-	}
-	params.Set("batch", strconv.Itoa(batch))
+	// Batch and partitions, and with them the autopilot flag. qb.batch and
+	// qb.maxPartitions are the user's own values: 0 means the setter was never
+	// called, which is what autopilot acts on.
+	popSizing{
+		Batch:         qb.batch,
+		MaxPartitions: qb.maxPartitions,
+		FallbackBatch: PopDefaults.Batch,
+		Autopilot:     qb.autopilotEnabled(),
+	}.apply(params)
 
 	// Wait (long polling)
 	wait := qb.wait
@@ -324,11 +418,6 @@ func (qb *QueueBuilder) buildPopParams() string {
 	// Subscription from
 	if qb.subscriptionFrom != "" {
 		params.Set("subscriptionFrom", qb.subscriptionFrom)
-	}
-
-	// v4 multi-partition pop: drain up to N sparse partitions per call.
-	if qb.maxPartitions > 1 {
-		params.Set("partitions", strconv.Itoa(qb.maxPartitions))
 	}
 
 	// Conflation: last-value delivery for this group. Emitted ONLY when true,
@@ -381,6 +470,8 @@ func (qb *QueueBuilder) getBufferKey() string {
 
 // getConsumeOptions returns the consume options from the builder configuration.
 func (qb *QueueBuilder) getConsumeOptions() ConsumeOptions {
+	autopilot := qb.autopilotEnabled()
+
 	opts := ConsumeOptions{
 		Queue:            qb.queueName,
 		Partition:        qb.partition,
@@ -399,20 +490,29 @@ func (qb *QueueBuilder) getConsumeOptions() ConsumeOptions {
 		Each:             qb.each,
 		MaxPartitions:    qb.maxPartitions,
 		Conflation:       qb.conflation,
+		Autopilot:        &autopilot,
 	}
 
 	// Apply defaults
 	if opts.Concurrency == 0 {
 		opts.Concurrency = ConsumeDefaults.Concurrency
 	}
-	if opts.Batch == 0 {
-		opts.Batch = ConsumeDefaults.Batch
-	}
 	if opts.TimeoutMillis == 0 {
 		opts.TimeoutMillis = ConsumeDefaults.TimeoutMillis
 	}
-	if opts.MaxPartitions < 1 {
-		opts.MaxPartitions = 1
+	// Batch and MaxPartitions keep their zero when autopilot is on, and the
+	// zero has to survive all the way to buildParams: it is the ONLY record
+	// that the user said nothing about that dimension. Filling it here — which
+	// is what this function did before autopilot — would erase the difference
+	// between "never called Batch" and "called Batch(1)" and hand the broker a
+	// pin the user never asked for.
+	if !autopilot {
+		if opts.Batch == 0 {
+			opts.Batch = ConsumeDefaults.Batch
+		}
+		if opts.MaxPartitions < 1 {
+			opts.MaxPartitions = 1
+		}
 	}
 
 	// Auto ack

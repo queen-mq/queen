@@ -462,6 +462,10 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
         ephemeral: ephemeral.clone(),
         peers: Arc::new(crate::peerclient::PeerClient::new()),
         hotlist: hotlist.clone(),
+        // POP AUTOPILOT (server/src/pop_autopilot.rs) — same construction as
+        // main.rs (KEEP IN SYNC): built unconditionally because it is a kill
+        // switch and not a boot gate, and it costs an empty map when off.
+        autopilot: crate::pop_autopilot::PopAutopilot::new(cfg.pop_autopilot_knobs()),
         hotlist_reseed_ms: cfg.hotlist_reseed_ms,
         hotlist_reseed_full_ms: cfg.hotlist_reseed_full_ms,
         hotlist_reseed_window_ms: cfg.hotlist_reseed_window_ms,
@@ -705,11 +709,13 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
                 tokio::time::sleep(interval).await;
                 let rings = state.hotlist.evict_idle();
                 let gates = state.notifier.evict_idle();
-                if rings > 0 || gates > 0 {
+                let lanes = state.autopilot.evict_idle();
+                if rings > 0 || gates > 0 || lanes > 0 {
                     tracing::debug!(
                         target: "reconcile",
                         rings_evicted = rings,
                         gates_evicted = gates,
+                        autopilot_lanes_evicted = lanes,
                         "idle sweep"
                     );
                 }

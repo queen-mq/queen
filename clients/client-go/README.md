@@ -116,6 +116,7 @@ for runnable starting points.
 - **Consumer Groups** - Kafka-style consumer groups
 - **Transactions** - Atomic ack + push operations
 - **Lease Renewal** - Automatic lease renewal for long-running tasks
+- **Pop Autopilot** - The broker sizes the knobs you did not set
 - **Tracing** - Built-in message tracing support
 
 ## Configuration
@@ -192,7 +193,7 @@ client.Queue("my-queue").FlushBuffer(ctx)
 ### Pop Messages
 
 ```go
-// Pop single message
+// Pop, broker-sized (see Pop Autopilot)
 messages, err := client.Queue("my-queue").Pop(ctx)
 
 // Pop with long polling
@@ -292,11 +293,63 @@ per-tenant work queues, per-device telemetry). Reduces network round-trips
 from O(P) to O(P / N) while preserving per-partition FIFO ordering.
 
 **When not to use:** few partitions, or each one busy enough to fill
-`Batch(B)` on its own. Default is `Partitions(1)` which preserves the
-legacy single-partition behaviour.
+`Batch(B)` on its own. Leaving `Partitions()` unset hands the sweep width to
+the broker (see Pop Autopilot below); `Partitions(1)` pins the legacy
+single-partition behaviour.
 
 `.Partitions(N)` only applies to **wildcard** pops; specifying
 `.Partition("name")` ignores the cap.
+
+### Pop Autopilot (Let the Broker Size the Pop)
+
+Since 1.2, `Batch` and `Partitions` that you do **not** set are chosen by the
+broker, per pop, from state the client cannot see: how many partitions of the
+group are ready, how old their oldest ready message is, how fast messages are
+arriving. The knobs you *do* set are never touched.
+
+```go
+// Both knobs are the broker's: it picks the sweep width and the budget.
+client.Queue("events").Group("workers").
+    Consume(ctx, handler).Execute(ctx)
+
+// One knob pinned, one delegated: this consumer stays on one partition
+// forever, and the broker sizes the batch for it.
+client.Queue("events").Group("workers").Partitions(1).
+    Consume(ctx, handler).Execute(ctx)
+```
+
+The request carries `autopilot=true` and simply omits the delegated knobs.
+Setting both leaves nothing to decide, so nothing changes on the wire at all.
+
+**Two ways to switch it off**, both restoring the previous client-side
+defaults (batch 1, partitions 1) byte for byte:
+
+```go
+client.Queue("events").Autopilot(false).Consume(ctx, handler).Execute(ctx)
+```
+
+```bash
+QUEEN_SDK_POP_AUTOPILOT=off   # whole process, read once at client creation
+```
+
+**What the broker chose** rides back on the response and is there for the
+reading, along with an optional pacing hint the consume loop honours in place
+of its own delay between empty polls:
+
+```go
+res, err := client.Queue("events").Group("workers").PopResult(ctx)
+if res.Autopilot != nil {
+    log.Printf("%d partitions, batch %d, poll again in %dms",
+        res.Autopilot.Partitions, res.Autopilot.Batch, res.Autopilot.WaitMillis)
+}
+```
+
+**Requires broker >= 1.2.** An older broker ignores the parameter, so the
+omitted knobs take *its* defaults (batch 200, partitions 1) instead of the old
+client-side ones. That is a sizing difference and nothing else — no message is
+lost, reordered or duplicated — so unlike conflation it degrades silently and
+on purpose. Pin the values explicitly, or turn autopilot off, if you need the
+old numbers against an old broker.
 
 ### Conflation (Last-Value Delivery)
 
@@ -623,6 +676,7 @@ go test ./tests/... -v
 - `SurfaceError` - Error envelope of the kv/timer surfaces (`Code`, `Reason`, `Detail`)
 - `Admin` - Administrative API
 - `Message` - Message structure
+- `PopResult` - Messages plus the broker's `AutopilotDecision` (`PopResult(ctx)`)
 - `ClientConfig` - Client configuration
 - `QueueConfig` - Queue configuration
 - `BufferConfig` - Buffer configuration
@@ -636,7 +690,9 @@ go test ./tests/... -v
 | Retry delay | 1 second (exponential) |
 | Load balancing | affinity |
 | Concurrency | 1 |
-| Batch size | 1 |
+| Batch size | broker-chosen (autopilot); 1 with autopilot off |
+| Partitions per pop | broker-chosen (autopilot); 1 with autopilot off |
+| Pop autopilot | on (`QUEEN_SDK_POP_AUTOPILOT=off` to disable) |
 | Auto-ack | true |
 | Wait (long poll) | true (consume), false (pop) |
 | Buffer count | 100 |

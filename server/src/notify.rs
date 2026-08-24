@@ -199,6 +199,40 @@ impl Notifier {
     /// Returns true if a push woke the gate, false if `dur` elapsed first — the
     /// caller uses this to reset (on wake) vs advance (on timeout) its long-poll
     /// backoff (RUSTFIX item 19).
+    /// ---------------------------------------------------------------------
+    /// SELECTIVE WAKE — assessed 2026-08-23 alongside the POP AUTOPILOT
+    /// (server/src/pop_autopilot.rs) and DELIBERATELY NOT DONE. The idea: a
+    /// readiness event wakes `min(needed, parked)` waiters in FIFO order instead
+    /// of every parked pop on the queue. Three things stand in the way, and the
+    /// first two are structural rather than effort:
+    ///
+    ///   1. THE GATE IS PER (tenant, queue), NOT PER GROUP. Every consumer group
+    ///      of a queue parks on this one `Notify`, and neither `wake_local_hint`
+    ///      nor `hotlist::wake_tick` knows WHICH group's ring a mark made ready
+    ///      (a push marks them all; a group-scoped mesh hint marks one). Waking a
+    ///      bounded subset would therefore routinely wake pops of a group with
+    ///      nothing to take while the group that actually received data stays
+    ///      parked until its own backoff re-poll — up to
+    ///      `POP_WAIT_MAX_INTERVAL_MS` of added delivery latency on precisely the
+    ///      multi-group queues the product exists for. Fixing that means a gate
+    ///      per (tenant, queue, group), which is a different cardinality for the
+    ///      map, the eviction sweep and the mesh receive path.
+    ///   2. "NEEDED" IS NOT AVAILABLE AT THE WAKE SITE. The C1 coalescing that
+    ///      removed the O(parked) wake storm reduced the push path's signal to
+    ///      ONE atomic store (`QueueState::wake_pending`, a bool). Recovering a
+    ///      count means per-group counters written on the push path — undoing the
+    ///      thing that made the push path cheap.
+    ///   3. `Notify::notify_one` STORES A PERMIT when nobody is parked, while
+    ///      `notify_waiters` does not (the same trap noted at the sweeper's
+    ///      `notify_one` call site). N x notify_one would bank permits through
+    ///      quiet periods and hand the next parking pop an instant spurious wake.
+    ///
+    /// What makes it survivable meanwhile: the fan-out is already coalesced to
+    /// ~one wake per queue per 5 ms tick, and a woken pop with nothing to take
+    /// short-circuits on the hot list's in-memory quiet gate WITHOUT touching the
+    /// admission budget or the pool (`hotlist_pop_attempt`), so a redundant wake
+    /// costs a task poll and no database work at all. That is why this is a
+    /// documented follow-up and not a blocker for the autopilot.
     pub async fn wait_queue(&self, qkey: &str, dur: Duration) -> bool {
         let gate = self.gate(qkey);
         let notified = gate.notify.notified();

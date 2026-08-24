@@ -317,8 +317,18 @@ func runCloudMode(args []string) {
 			baseURL = "http://127.0.0.1:6632"
 		}
 	}
-	if *pushBatch <= 0 || *popBatch <= 0 {
-		fmt.Println("goload -mode cloud: -push-batch and -pop-batch must be > 0")
+	// -pop-batch 0 is LEGAL and means "let the broker size the batch": the SDK
+	// treats Batch(0) as never having called Batch, which is what engages pop
+	// autopilot for that dimension (autopilot.go: batchSet := s.Batch > 0).
+	// Likewise -pop-partitions 1 skips the Partitions() call below, leaving the
+	// sweep width to the broker. Passing both is how this harness drives a fully
+	// autopilot pop; any explicit value pins that dimension instead.
+	if *pushBatch <= 0 {
+		fmt.Println("goload -mode cloud: -push-batch must be > 0")
+		os.Exit(2)
+	}
+	if *popBatch < 0 {
+		fmt.Println("goload -mode cloud: -pop-batch must be >= 0 (0 = broker-sized)")
 		os.Exit(2)
 	}
 	faults, ferr := parseFaults(*fault)

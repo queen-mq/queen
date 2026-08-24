@@ -1,0 +1,4 @@
+cell-pg 10297 MB
+cell-broker-a 1609 MB
+cell-broker-b 1757 MB
+cell-proxy 725 MB

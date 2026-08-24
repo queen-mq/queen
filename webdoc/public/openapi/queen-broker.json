@@ -444,6 +444,14 @@
             }
           },
           {
+            "name": "autopilot",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
             "name": "x-queen-tenant",
             "in": "header",
             "required": false,
@@ -594,6 +602,14 @@
           },
           {
             "name": "conflation",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "autopilot",
             "in": "query",
             "required": false,
             "schema": {
@@ -1130,6 +1146,14 @@
         "summary": "GET /api/v1/resources/queues",
         "parameters": [
           {
+            "name": "stats",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "x-queen-tenant",
             "in": "header",
             "required": false,
@@ -1166,7 +1190,7 @@
         "x-queen-access-level": "read-only",
         "x-queen-tenant-scoped": true,
         "x-queen-handler": "server/src/handlers/queues.rs::handle_list_queues",
-        "x-queen-query-params": "none",
+        "x-queen-query-params": "typed",
         "security": [
           {
             "bearerAuth": []

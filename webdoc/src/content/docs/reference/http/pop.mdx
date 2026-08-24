@@ -54,6 +54,7 @@ query string, have access level **read-write**, and return the same response sha
 | `subscriptionMode` | string | `new` (`DEFAULT_SUBSCRIPTION_MODE`) | all three |
 | `subscriptionFrom` | string | empty | all three |
 | `conflation` | boolean | `false` | all three |
+| `autopilot` | boolean | `false` | queue-scoped, with a `consumerGroup` |
 | `namespace` | string | empty | discovery only |
 | `task` | string | empty | discovery only |
 
@@ -189,6 +190,32 @@ consumer's queue name now leaves an empty queue behind rather than nothing.
 | `partitionsClaimed` | integer | how many partitions this call claimed |
 | `conflation` | boolean | present, and always `true`, only when this pop was served under [conflation](#conflation) |
 | `conflationConflict` | boolean | present, and always `true`, only when this request declared a conflation policy the group does not have |
+| `autopilot` | object | present only when this request sent `autopilot=true` and the broker resolved at least one knob for it: `partitions` and `batch` are the values the claim actually used, and `waitMs` is the pacing the broker advises for an empty-poll loop |
+
+### Autopilot
+
+`autopilot=true` asks the broker to choose the knobs you did **not** send.
+`partitions` is the sweep width of one claim, and its right value is a fact about
+the broker (how many partitions of this queue currently hold work for your group,
+and how long they have been waiting) rather than about your consumer. It also
+moves: a queue's partition count grows for years, so a number that was right when
+it was typed is wrong later. On a measured cloud cell the same workload ran at a
+2376 ms ready-age tail with `partitions=5000` and at 5 ms with `partitions=10`.
+
+The choice is **per parameter**. A knob you send is yours and is never
+overridden: `autopilot=true&partitions=1` is a manual width of 1 with an
+automatic batch. Send neither and both are chosen. Send both and nothing is,
+which is exactly the request you would have sent without the flag.
+
+Omitting `autopilot` entirely keeps today's behaviour byte for byte, response
+included, which is what every existing consumer does. The broker applies the
+choice on the queue-scoped route for a pop that names a `consumerGroup`; the
+pinned-partition and discovery routes accept the parameter and ignore it, since a
+pinned pop is one partition by definition and has no width to choose. Operators
+can disable the whole thing with `QUEEN_POP_AUTOPILOT=off`, or watch what it
+would choose without letting it act with `QUEEN_POP_AUTOPILOT=shadow`; in both
+positions a request that sent the flag simply gets today's defaults and no
+`autopilot` object in the response.
 
 ### Conflation in the response
 

@@ -56,11 +56,15 @@ func (cm *ConsumerManager) startWorkers(ctx context.Context, opts ConsumeOptions
 		"task":        opts.Task,
 		"group":       opts.Group,
 		"concurrency": opts.Concurrency,
-		"batch":       opts.Batch,
-		"limit":       opts.Limit,
-		"autoAck":     opts.AutoAck,
-		"wait":        opts.Wait,
-		"each":        opts.Each,
+		// batch/maxPartitions are the USER's values here, so 0 reads as
+		// "the broker sizes this one" rather than as a bogus zero.
+		"batch":         opts.Batch,
+		"maxPartitions": opts.MaxPartitions,
+		"autopilot":     cm.autopilotEnabled(opts),
+		"limit":         opts.Limit,
+		"autoAck":       opts.AutoAck,
+		"wait":          opts.Wait,
+		"each":          opts.Each,
 	})
 
 	// Start workers
@@ -268,11 +272,15 @@ func (cm *ConsumerManager) worker(
 			if opts.Wait {
 				continue // Long polling timeout, retry
 			}
-			// Short delay before retry
+			// Short delay before retry -- the broker's advised pacing when this
+			// pop engaged autopilot and the broker had an opinion (it knows the
+			// arrival rate on this queue and this client does not), otherwise
+			// the historical 100ms. Still a select on ctx, so the advice can
+			// never outlive a cancellation.
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(100 * time.Millisecond):
+			case <-time.After(emptyPollDelay(parseAutopilotDecision(result))):
 				continue
 			}
 		}
@@ -335,7 +343,11 @@ func (cm *ConsumerManager) worker(
 				}
 			}
 		} else {
-			// Process as batch (or single message if batch=1)
+			// Process as batch (or single message if batch=1). Under autopilot
+			// opts.Batch is 0 (the broker sized this pop), so this takes the
+			// batch arm even for a single message — which is the same call for
+			// a one-element slice: Queen.Ack collapses a one-message batch onto
+			// /api/v1/ack, and processedCount grows by the same 1.
 			if opts.Batch == 1 && len(messages) == 1 {
 				// For batch=1, pass single message (not array) - wrap in single-element batch
 				_, processErr = cm.processMessage(ctx, messages[0], handler, opts.AutoAck, opts.Group)
@@ -613,10 +625,29 @@ func (cm *ConsumerManager) buildPath(opts ConsumeOptions) string {
 }
 
 // buildParams builds the query parameters.
+//
+// THIS BUILDER IS SEPARATE FROM QueueBuilder.buildPopParams (PLAN_CONFLATION.md
+// §4) — any option added here must be added there too. The batch/partitions
+// half is the exception, and deliberately so: both builders hand it to
+// popSizing.apply, which owns the autopilot emission rule outright so the two
+// cannot drift on it.
 func (cm *ConsumerManager) buildParams(opts ConsumeOptions) string {
 	params := url.Values{}
 
-	params.Set("batch", strconv.Itoa(opts.Batch))
+	// Batch and partitions, and with them the autopilot flag. Zero means the
+	// user set nothing (getConsumeOptions leaves it that way on purpose when
+	// autopilot is on), which is the dimension the broker gets to choose.
+	// FallbackBatch is 0 and not ConsumeDefaults.Batch because this builder has
+	// always emitted opts.Batch verbatim -- defaults, when they apply at all,
+	// are put there upstream -- and an autopilot-off request has to be
+	// byte-identical to the pre-autopilot one.
+	popSizing{
+		Batch:         opts.Batch,
+		MaxPartitions: opts.MaxPartitions,
+		FallbackBatch: 0,
+		Autopilot:     cm.autopilotEnabled(opts),
+	}.apply(params)
+
 	params.Set("wait", strconv.FormatBool(opts.Wait))
 	params.Set("timeout", strconv.Itoa(opts.TimeoutMillis))
 
@@ -635,20 +666,27 @@ func (cm *ConsumerManager) buildParams(opts ConsumeOptions) string {
 	if opts.Task != "" {
 		params.Set("task", opts.Task)
 	}
-	// v4 multi-partition pop: drain up to N sparse partitions per call.
-	if opts.MaxPartitions > 1 {
-		params.Set("partitions", strconv.Itoa(opts.MaxPartitions))
-	}
 	// Conflation: last-value delivery for this group. Emitted ONLY when true so
 	// a consumer that does not opt in sends the request it sent before this
-	// option existed. This builder is SEPARATE from QueueBuilder.buildPopParams
-	// (PLAN_CONFLATION.md §4) - any option added here must be added there too.
+	// option existed.
 	if opts.Conflation {
 		params.Set("conflation", "true")
 	}
 	// NEVER send autoAck for consume - client always manages acking
 
 	return params.Encode()
+}
+
+// autopilotEnabled resolves the autopilot decision for one consume: the
+// caller's explicit ConsumeOptions.Autopilot if there is one, otherwise the
+// client-wide default settled at New. The builder path has already resolved it
+// (getConsumeOptions fills the field); the nil case is for callers that drive
+// ConsumerManager with a ConsumeOptions of their own.
+func (cm *ConsumerManager) autopilotEnabled(opts ConsumeOptions) bool {
+	if opts.Autopilot != nil {
+		return *opts.Autopilot
+	}
+	return cm.queen == nil || !cm.queen.autopilotOff
 }
 
 // getAffinityKey generates the affinity key for consistent routing.

@@ -1,4 +1,5 @@
 mod ack_fusion;
+mod pop_autopilot;
 mod pop_fusion;
 mod ack_registry;
 mod auth;
@@ -386,6 +387,12 @@ async fn main() {
         );
     }
 
+    // POP AUTOPILOT (server/src/pop_autopilot.rs). Constructed unconditionally —
+    // it is a kill switch, not a boot gate (switches.rs's module note), so `off`
+    // is a controller that declines rather than a controller that is absent. Costs
+    // an empty map.
+    let autopilot = pop_autopilot::PopAutopilot::new(cfg.pop_autopilot_knobs());
+
     // EPHEMERAL_QUEUES.md §3.2 — the RAM-class engine. No pool, no schema read,
     // no mesh: it is ready the instant it is constructed, which is why it is
     // built here and not behind any of the boot awaits above.
@@ -475,6 +482,7 @@ async fn main() {
         ephemeral: ephemeral.clone(),
         peers: Arc::new(crate::peerclient::PeerClient::new()),
         hotlist: hotlist.clone(),
+        autopilot: autopilot.clone(),
         hotlist_reseed_ms: cfg.hotlist_reseed_ms,
         hotlist_reseed_full_ms: cfg.hotlist_reseed_full_ms,
         hotlist_reseed_window_ms: cfg.hotlist_reseed_window_ms,

@@ -74,7 +74,12 @@ handing back the whole backlog.
 		} else if popLimit > 0 {
 			qb = qb.Batch(popLimit)
 		}
-		if popMaxParts > 1 {
+		// A TYPED --max-partitions is a pin, 1 included; an untouched flag
+		// passes nothing and lets the SDK's pop autopilot ask the broker for a
+		// sweep width. The old `> 1` gate cannot tell the two apart, and since
+		// an omitted `partitions` stopped meaning 1, it would have handed
+		// `--max-partitions 1` to the autopilot to widen.
+		if cmd.Flags().Changed("max-partitions") {
 			qb = qb.Partitions(popMaxParts)
 		}
 		if popSubMode != "" {
@@ -143,7 +148,7 @@ func init() {
 	popCmd.Flags().StringVar(&popPartition, "partition", "", "specific partition")
 	popCmd.Flags().IntVarP(&popLimit, "limit", "n", 1, "maximum messages to print")
 	popCmd.Flags().IntVar(&popBatch, "batch", 0, "batch size sent to server (defaults to --limit)")
-	popCmd.Flags().IntVar(&popMaxParts, "max-partitions", 1, "claim up to N partitions in one call")
+	popCmd.Flags().IntVar(&popMaxParts, "max-partitions", 1, "claim up to N partitions in one call; pass it to pin the sweep, leave it out and the broker sizes it")
 	popCmd.Flags().BoolVar(&popAutoAck, "auto-ack", false, "ack server-side")
 	popCmd.Flags().BoolVar(&popWait, "wait", true, "long-poll until messages arrive or timeout")
 	popCmd.Flags().DurationVar(&popTimeout, "timeout", 10*time.Second, "long-poll timeout")

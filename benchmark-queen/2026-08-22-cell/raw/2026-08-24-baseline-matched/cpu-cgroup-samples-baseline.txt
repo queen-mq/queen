@@ -1,0 +1,15 @@
+Cell CPU, baseline arm (W=10 B=100 pinned), cgroup v2, 60 s windows.
+samples/soak.csv broker columns are still 0.000 (roll-broker.sh changed the
+container ids on 2026-08-23; sampler.sh caches cgroup paths at startup).
+
+utc_end    pg     brk-a  brk-b  proxy  lb     TOTAL   %of800
+22:53:40   4.503  0.934  0.092  0.443  0.369  6.341   79.3
+23:02:53   4.566  0.893  0.066  0.441  0.367  6.333   79.2
+23:12:01   4.241  0.896  0.072  0.439  0.364  6.012   75.1
+23:21:14   4.297  0.902  0.067  0.441  0.366  6.073   75.9
+23:30:24   4.589  0.913  0.065  0.440  0.366  6.373   79.7
+23:39:33   4.113  0.898  0.066  0.429  0.358  5.864   73.3
+MEAN       4.385  0.906  0.071  0.439  0.365  6.166   77.1
+
+Fix arm  (autopilot on, same day): 4.157 0.879 0.070 0.439 0.363  5.907  73.8
+Broken   (autopilot on, pre-roll): 4.221 0.838 0.115 0.446 0.370  5.991  74.9

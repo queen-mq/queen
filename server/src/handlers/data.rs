@@ -623,6 +623,21 @@ pub struct PopParams {
     // (§1.1/§3.3). Absent ⇒ off ⇒ byte-identical behaviour.
     #[serde(rename = "conflation")]
     conflation: Option<bool>,
+    // POP AUTOPILOT (server/src/pop_autopilot.rs) — "choose the knobs I did not
+    // send". Emitted ONLY when true, the `conflation` shape and for the same
+    // reason: a consumer that does not opt in sends the request it sent before
+    // this option existed, byte for byte.
+    //
+    // It has to be a NEW parameter and could not be "field absent ⇒ broker
+    // decides": absent `partitions` already MEANS 1 and absent `batch` already
+    // MEANS 200, and today's SDKs omit both at their defaults (the Go SDK only
+    // sends `partitions` when > 1), so the absent-field encoding would silently
+    // change the behaviour of every consumer in the field that never touched the
+    // knob. Per DIMENSION: `autopilot=true&partitions=1` is a manual width of 1
+    // with an automatic batch, and the controller never touches a dimension the
+    // client sent. Absent ⇒ off ⇒ byte-identical behaviour.
+    #[serde(rename = "autopilot")]
+    autopilot: Option<bool>,
 }
 
 /// PLAN_CONFLATION §3.1/§3.3 — what the response has to say about conflation.
@@ -889,9 +904,57 @@ pub async fn handle_pop(
     // broker-side candidate ring instead of the SQL candidate scan. Flag off ⇒
     // this branch is never taken and the path below is byte-identical.
     if st.hotlist.enabled() {
+        // ── POP AUTOPILOT (server/src/pop_autopilot.rs). v1 is the RING path
+        // only: every input the controller reads is a hot-list fact (ready
+        // partitions, the per-candidate ready-age `take_batch` already samples
+        // for the arbiter), and the legacy SQL candidate scan has none of them.
+        // On that path the parameter is accepted and resolves to today's defaults
+        // — the branch below is untouched.
+        //
+        // Conflation is exempt on purpose and it is not an oversight: with
+        // `cfl.on`, `partitions` is not a sweep width at all but the message
+        // budget (a conflating pop yields at most ONE message per partition, §3.2
+        // above), so a controller width would silently shrink what the consumer
+        // asked for. The feature that already owns that dimension keeps it.
+        let ap_now = crate::util::now_epoch_ms();
+        // ONE pass over the ready set for both of the controller's ring inputs:
+        // how many partitions are servable, and how long the oldest of them has
+        // waited. Read here, before the claim, and never on the quiet
+        // empty-re-poll short-circuit inside the attempt.
+        let ap_ready = if st.autopilot.active() && !cfl.on {
+            let (parts, oldest_ms) = st.hotlist.ready_peek(&qkey, &group, ap_now);
+            crate::pop_autopilot::ReadyPeek { parts, oldest_ms }
+        } else {
+            crate::pop_autopilot::ReadyPeek::default()
+        };
+        let ticket = if cfl.on {
+            crate::pop_autopilot::PopTicket::inert()
+        } else {
+            st.autopilot.begin(
+                &qkey,
+                &group,
+                crate::pop_autopilot::Ask {
+                    autopilot: p.autopilot == Some(true),
+                    partitions: p.partitions,
+                    batch: p.batch,
+                    default_partitions: max_parts,
+                    default_batch: batch,
+                },
+                ap_ready,
+                ap_now,
+            )
+        };
+        // The ONE place the controller's answer becomes the claim's knobs. The
+        // `None` arm is the pre-autopilot code path verbatim, which is what makes
+        // "a request without the parameter is byte-identical" structural rather
+        // than asserted: with no plan there is nothing here to get wrong.
+        let (batch, max_parts) = match ticket.plan() {
+            Some(pl) => (pl.batch, pl.partitions),
+            None => (batch, max_parts),
+        };
         return serve_pop_hotlist(
             &st, &qkey, &queue, &group, batch, max_parts, auto_ack, wait, deadline, lease_seconds,
-            &sub_mode, &sub_from, &worker, tenant.as_str(), cfl,
+            &sub_mode, &sub_from, &worker, tenant.as_str(), cfl, &ticket,
         )
         .await;
     }
@@ -1291,6 +1354,12 @@ async fn serve_pop_hotlist(
     // PLAN_CONFLATION §3.2: resolved once by handle_pop and threaded, never
     // re-resolved per poll iteration.
     cfl: Conflation,
+    // POP AUTOPILOT: this request's controller state, resolved once by handle_pop
+    // (its `batch`/`max_parts` are already the ticket's answer). Threaded rather
+    // than re-derived so the claim observations and the outcome record cost no map
+    // lookup, and so the lane's live-worker count is released by ONE Drop —
+    // including on a dropped request future.
+    ticket: &crate::pop_autopilot::PopTicket,
 ) -> Response {
     let lease_id: &str = if auto_ack { "" } else { worker };
     let mut backoff_count: u32 = 0;
@@ -1370,7 +1439,7 @@ async fn serve_pop_hotlist(
 
         let (body, count, meta, rtt) = match hotlist_pop_attempt(
             st, qkey, queue, group, batch, max_parts, auto_ack, lease_seconds, sub_mode, sub_from,
-            worker, lease_id, tenant, cfl,
+            worker, lease_id, tenant, cfl, ticket,
         )
         .await
         {
@@ -1437,7 +1506,35 @@ async fn serve_pop_hotlist(
                 queue, group, wtag, count, t_rq.elapsed().as_millis(),
                 crate::hotlist::trace_now_ms());
         }
-        return json(pop_status(count, cfl), body);
+        // ── POP AUTOPILOT: the loop closes HERE, once per request (never per poll
+        // iteration) — measure at the end of pop N, apply at the start of pop
+        // N+1. `count / batch` is the fill ratio; the ready-age half arrived
+        // earlier, from the claim itself.
+        ticket.record(batch, count, crate::util::now_epoch_ms());
+        let status = pop_status(count, cfl);
+        let mut body = body;
+        // The additive echo, emitted if and only if this request opted in AND the
+        // broker resolved at least one dimension. Note what it cannot do: a 204
+        // carries no body at all (handlers::json, RFC 9110 §15.3.5), so an EMPTY
+        // pop's advice is not deliverable without changing that status — and
+        // changing it for autopilot requests would be a second wire change on top
+        // of an additive one. The advice is stable across pops, so a client learns
+        // it from the first response that carries messages and keeps it.
+        if let Some(plan) = ticket.plan() {
+            if status != StatusCode::NO_CONTENT {
+                crate::pop_autopilot::append_echo(
+                    &mut body,
+                    plan,
+                    // Advisory pacing for the client's empty-poll loop: the
+                    // broker's OWN long-poll re-query interval (RUSTFIX item 19,
+                    // POP_WAIT_INITIAL_INTERVAL_MS). No new machinery — a client
+                    // polling faster than the broker re-checks is spending round
+                    // trips on nothing.
+                    st.pop_wait_initial_interval_ms,
+                );
+            }
+        }
+        return json(status, body);
     }
 }
 
@@ -1482,6 +1579,25 @@ impl Drop for InflightGuard {
     }
 }
 
+// POP AUTOPILOT: hand one claim's READY-AGE to the width controller. The MAX
+// over the claim, not the mean: the oldest servable partition this claim reached
+// is the wait a consumer actually feels, and the mean hides exactly the lane the
+// feature exists for (`ready_age_p95` is the number the soak cell was judged on).
+//
+// Free by construction — `take_batch` computed each candidate's `now -
+// ready_since` on its way past for the arbiter's LapStats, so this is a fold over
+// a slice already in hand, with no lock and no allocation. Inert (one Option
+// check) when the switch is off.
+#[inline]
+fn note_claim_ages(
+    ticket: &crate::pop_autopilot::PopTicket,
+    cands: &[crate::hotlist::Candidate],
+    now_ms: i64,
+) {
+    let max_age = cands.iter().map(|c| c.ready_age_ms).max().unwrap_or(0);
+    ticket.note_claim(cands.len(), max_age, now_ms);
+}
+
 // One ring-serve attempt: (lazily) refresh the queue deferral config, take K
 // candidates from the (queue, group) ring, call queen.log_pop_list_v1 on them,
 // check the tri-state verdicts back into the ring (§4/§6/§7), and render. An
@@ -1515,6 +1631,9 @@ async fn hotlist_pop_attempt(
     lease_id: &str,
     tenant: &str,
     cfl: Conflation,
+    // POP AUTOPILOT: receives this claim's ring observation (see `note_claim`
+    // below). Inert on every broker where the switch is off.
+    ticket: &crate::pop_autopilot::PopTicket,
 ) -> Result<(String, usize, PopMeta, Duration), Response> {
     let now_ms = crate::util::now_epoch_ms();
     let empty = || render_pop_parts(&[], None, queue, group, lease_id, &st.encryption, cfl);
@@ -1644,6 +1763,7 @@ async fn hotlist_pop_attempt(
             let (b, c, m) = empty();
             return Ok((b, c, m, Duration::ZERO));
         }
+        note_claim_ages(ticket, &cands, now_ms);
         let names: Vec<String> = cands.iter().map(|c| c.name.clone()).collect();
         let skip_window = st.hotlist.skip_window(qkey);
         let lease_ms = lease_seconds.max(1) as i64 * 1000;
@@ -1799,6 +1919,7 @@ async fn hotlist_pop_attempt(
         let (b, c, m) = empty();
         return Ok((b, c, m, Duration::ZERO));
     }
+    note_claim_ages(ticket, &cands, now_ms);
 
     let names: Vec<String> = cands.iter().map(|c| c.name.clone()).collect();
     let skip_window = st.hotlist.skip_window(qkey);
@@ -6134,6 +6255,82 @@ mod protocol_conformance {
         let parsed: qp::PopResponse = serde_json::from_str(&plain).unwrap();
         assert!(!parsed.conflation_applied());
         assert!(!parsed.has_conflation_conflict());
+    }
+
+    /// POP AUTOPILOT — the opt-in is a query parameter the broker must read under
+    /// exactly the name the SDKs send, and (the whole compatibility argument)
+    /// ABSENCE must be distinguishable from `false`: absent means "the client
+    /// knows nothing about this option", which is every consumer in the field.
+    #[test]
+    fn the_autopilot_opt_in_is_read_from_the_query() {
+        let uri: axum::http::Uri =
+            "http://x/api/v1/pop/queue/q?consumerGroup=w&autopilot=true".parse().unwrap();
+        let axum::extract::Query(p) =
+            axum::extract::Query::<PopParams>::try_from_uri(&uri).unwrap();
+        assert_eq!(p.autopilot, Some(true));
+        // Per-dimension: the opt-in rides alongside an explicit knob, and the
+        // explicit knob still arrives intact for the handler to honour.
+        let uri: axum::http::Uri =
+            "http://x/api/v1/pop/queue/q?autopilot=true&partitions=1".parse().unwrap();
+        let axum::extract::Query(p) =
+            axum::extract::Query::<PopParams>::try_from_uri(&uri).unwrap();
+        assert_eq!(p.autopilot, Some(true));
+        assert_eq!(p.partitions, Some(1));
+        // An old client sends neither.
+        let uri: axum::http::Uri = "http://x/api/v1/pop/queue/q".parse().unwrap();
+        let axum::extract::Query(p) =
+            axum::extract::Query::<PopParams>::try_from_uri(&uri).unwrap();
+        assert_eq!(p.autopilot, None, "absent is not false");
+    }
+
+    /// POP AUTOPILOT — the response side of the same contract. The rendered pop
+    /// body is byte-identical to the pre-feature one, and the echo (when there is
+    /// one) is purely ADDITIVE: appended after every existing field, nothing
+    /// reordered or retyped, still parseable by the client's own response type.
+    #[test]
+    fn the_autopilot_echo_is_additive_and_absent_by_default() {
+        let (plain, count, _meta) = render_pop_parts(
+            &[],
+            None,
+            "orders",
+            "workers",
+            "lease-1",
+            &crate::encryption::Encryption::from_env(),
+            Conflation::OFF,
+        );
+        assert_eq!(count, 0);
+        assert!(
+            !plain.contains("autopilot"),
+            "a pop that did not opt in says nothing about autopilot: {plain}"
+        );
+
+        let mut echoed = plain.clone();
+        crate::pop_autopilot::append_echo(
+            &mut echoed,
+            crate::pop_autopilot::Plan {
+                partitions: 12,
+                batch: crate::pop_autopilot::AUTO_BATCH_DEFAULT,
+                chose_partitions: true,
+                chose_batch: true,
+            },
+            100,
+        );
+        assert!(
+            echoed.starts_with(&plain[..plain.len() - 1]),
+            "every existing field is where it was: {echoed}"
+        );
+        // Still the same response to a client that ignores the new key…
+        let parsed: qp::PopResponse = serde_json::from_str(&echoed).unwrap();
+        assert!(parsed.success);
+        assert!(parsed.is_empty());
+        // …and the new key carries the two dimensions plus the pacing advice.
+        let v: serde_json::Value = serde_json::from_str(&echoed).unwrap();
+        assert_eq!(v["autopilot"]["partitions"], 12);
+        assert_eq!(
+            v["autopilot"]["batch"],
+            crate::pop_autopilot::AUTO_BATCH_DEFAULT
+        );
+        assert_eq!(v["autopilot"]["waitMs"], 100);
     }
 
     /// A minimal client (everything defaulted) must still produce a query the
