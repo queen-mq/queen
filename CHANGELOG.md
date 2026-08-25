@@ -3,32 +3,41 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
-## Unreleased
+## 1.2.0 — 2026-08-25
 
-**Boot-time schema apply can no longer deadlock or dam traffic on a busy cluster.** Rolling a
-broker whose schema files had gained `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` on a hot table
-crash-looped FATAL on a loaded cell (2026-08-24, 1060 push tx/s, 827k partitions, 10 of 10 boot
-attempts): the applier ran each `.sql` file as ONE multi-statement transaction, and because DDL
-takes its relation lock *before* evaluating `IF NOT EXISTS`, even a no-op re-apply held
-`ShareLock` on the hottest table while the next statement waited for `AccessExclusiveLock` —
-a guaranteed lock-upgrade cycle against any push transaction mid `FOR UPDATE`→`UPDATE`. The
-applier now runs **one statement per transaction** (dollar-quote-aware splitting, so function
-bodies are safe), under a **2s `lock_timeout` with bounded backoff retries** on `40P01`/`55P03`
-instead of failing the boot; consecutive `DROP`s stay grouped with the statement that follows
-them so drop-then-recreate remains atomic for live HA peers; and `CREATE INDEX CONCURRENTLY`
-is now supported in schema files (run outside a transaction, no `lock_timeout`) — which is how
-a NEW index must be added to an already-populated hot table from now on. The advisory-locked
-single-applier discipline and last-boot-wins re-apply are unchanged, and the applier warns
-about `INVALID` leftover indexes after every apply. Errors now carry the file, statement,
-SQLSTATE and server message instead of a bare "db error".
+**Pop autopilot (server-advised pop sizing).** New SDKs omit `partitions`/`batch` and send
+`autopilot=true`; the broker sizes the sweep from hot-list state (ready count, ready-age,
+burst bypass under `QUEEN_POP_AUTOPILOT_BURST_CAP`). An explicit client value is a hard pin,
+old clients are byte-identical, kill switch `QUEEN_POP_AUTOPILOT=on|shadow|off`, and an
+`autopilot` echo + divergence log make the choices observable. Ported to all seven SDKs
+(Go, JS, Python, Rust, PHP/Laravel, C++, queenctl) plus `queen-protocol`.
 
-**Operational procedure for images WITHOUT this fix** (any broker up to 1.2.0-beta.2), when a
-roll must add columns/indexes to a hot table on a live cluster: apply each `ALTER TABLE` manually
-as its own single-statement transaction with `SET lock_timeout = '2s'` (single statements succeed
-first try — the killer was the multi-statement transaction, not the lock), build indexes with
-`CREATE INDEX CONCURRENTLY`, apply changed procedure files via `psql -f`, then boot the broker
-with `QUEEN_APPLY_SCHEMA=false`. Remember to remove `QUEEN_APPLY_SCHEMA=false` once an image with
-this fix is deployed — with it set, new schema files never apply.
+**Retention is now O(deletable), not O(partitions).** Per-partition watermarks
+(`oldest_live_at`/`oldest_txn_at`, maintained by the push allocator and the retention steps)
+turn the work list into per-queue indexed probes; a batched daily safety walk doubles as the
+one-time backfill. Measured on an 827k-partition cell: 20 → 663 seg/s, cycle 172 s → 0.7 s.
+Knobs: `QUEEN_RETENTION_DUE_CAP`, `QUEEN_RETENTION_SAFETY_WALK_MS`. The cycle's advisory
+lock is transaction-scoped on a dedicated holder that takes no table locks, so a timed-out
+or dying cycle can never leave retention deadlocked cluster-wide.
+
+**Boot-time schema apply is safe on a busy cluster.** One statement per transaction
+(dollar-quote-aware splitting), 2 s `lock_timeout` slices with jittered bounded retries
+(~3 min patience, never >2 s of traffic stall), `CREATE INDEX CONCURRENTLY` support, and —
+on exhaustion — a diagnostic that names the blocking sessions (robust to `pg_stat_activity`
+privilege masking). Proven live: full apply in 443–724 ms against 1000+ tx/s.
+
+**Hot-list memory is bounded.** A broker serving no pops for a queue (standby, failover
+leftover) drops that ring after `QUEEN_HOTLIST_UNSERVED_TRIM_MS` and releases the pages
+(`malloc_trim`); the partition intern went from four heap allocations per entry to one.
+Measured: standby broker 2.1 GB → tens of MB; active plateau roughly halved.
+
+**Observability.** Burst-resolved pop telemetry on the rates line (`ring_depth_max`,
+`ring_oldest_max_ms`, `max_lane_ready`, `pop_wait_max`, ready-entry provenance).
+
+Operational note for rolling upgrades from ≤1.2.0-beta.2 under heavy load: apply new
+hot-table DDL manually first (single-statement `ALTER` with `lock_timeout`, indexes via
+`CREATE INDEX CONCURRENTLY`) or boot once with `QUEEN_APPLY_SCHEMA=false`; from this
+release onward the applier handles it unaided.
 
 ## 1.1.0 (2026-08-21) — conflation
 
