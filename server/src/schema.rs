@@ -309,7 +309,9 @@ pub async fn apply(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
     // into request traffic, turning ordinary row-lock waits into 55P03 errors.
     // Dropping the taken client closes the connection instead; the pool
     // re-creates the slot lazily.
-    let client = deadpool_postgres::Client::take(pool.get().await?);
+    let client = deadpool_postgres::Client::take(pool.get().await.map_err(|e| {
+        format!("getting the apply connection from the pool: {e}")
+    })?);
 
     // Named so the AccessExclusive waits this connection produces during a
     // rolling boot are attributable in pg_stat_activity and the server log.
@@ -327,9 +329,52 @@ pub async fn apply(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
 
     // Serialize DDL across replicas. Session-level lock held on THIS connection;
     // released below (and, belt-and-braces, when the connection closes).
+    //
+    // lock_timeout is EXPLICITLY cleared first: lock_timeout applies to
+    // advisory locks too, and a pooled connection can arrive carrying session
+    // state from an earlier apply attempt. A replica arriving second on a
+    // VIRGIN database waits here for the whole first apply (schema + every
+    // procedure + CIC — seconds), which is exactly the wait this lock exists
+    // for; timing it out turned the two-broker fresh-boot into a FATAL race
+    // (caught by the mesh/ha suite, 2026-08-25).
     client
-        .execute("SELECT pg_advisory_lock($1)", &[&SCHEMA_LOCK_KEY])
-        .await?;
+        .execute("SET lock_timeout = 0", &[])
+        .await
+        .map_err(|e| format!("clearing lock_timeout before the schema lock: {}", pg_error_text(&e)))?;
+    // POLL, never block: a blocking `pg_advisory_lock` wait is itself a live
+    // (implicit) transaction holding a snapshot, and the peer's
+    // CREATE INDEX CONCURRENTLY must wait for every older snapshot to end —
+    // so two brokers cold-booting a virgin database deadlocked, provably:
+    //   Process 76 waits for advisory lock; blocked by 75.
+    //   Process 75 (CIC) waits for virtual transaction of 76.
+    // (mesh/ha suite, 2026-08-25; PG killed the second applier every time.)
+    // Each try below is a sub-millisecond statement, so between polls this
+    // session holds NO snapshot and the peer's CIC sails past it.
+    let waited = std::time::Instant::now();
+    loop {
+        let got: bool = client
+            .query_one("SELECT pg_try_advisory_lock($1)", &[&SCHEMA_LOCK_KEY])
+            .await
+            .map_err(|e| format!("trying the schema apply advisory lock: {}", pg_error_text(&e)))?
+            .get(0);
+        if got {
+            break;
+        }
+        if waited.elapsed() > std::time::Duration::from_secs(600) {
+            return Err("another replica has held the schema apply lock for over \
+                        10 minutes; its apply is stuck or its session leaked the \
+                        lock — inspect pg_locks for objid 778120010"
+                .into());
+        }
+        if waited.elapsed().as_secs() % 10 == 0 {
+            tracing::info!(
+                target: "schema",
+                waited_s = waited.elapsed().as_secs(),
+                "waiting for another replica's schema apply to finish"
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
 
     let result = apply_all(&client).await;
 

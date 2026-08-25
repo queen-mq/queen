@@ -1057,6 +1057,11 @@ mod tests {
     /// naturally, which is why the segment is a catch-all at all), and percent
     /// escapes are decoded once by the extractor, so a key with a literal `/`
     /// in it is expressible as `%2F`.
+    // axum::serve lives behind the `server` feature (axum/tokio); the lean
+    // embedded build (--no-default-features) has no serve stack, so this
+    // routing proof only compiles with it. Caught by CI's server-msrv-and-lean
+    // on 2026-08-25 — the first lean compile after the test was added.
+    #[cfg(feature = "server")]
     #[tokio::test]
     async fn the_catch_all_key_arrives_without_a_leading_slash() {
         use axum::routing::get;
