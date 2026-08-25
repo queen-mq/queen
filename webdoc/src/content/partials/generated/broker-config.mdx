@@ -10,7 +10,7 @@ description: "Every environment variable the broker reads, with the default the 
       - server/src/fusion.rs (fusion-only overrides)
 */}
 
-The broker is configured entirely through environment variables: 158 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
+The broker is configured entirely through environment variables: 160 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
 
 Two columns record what a variable falls back to. **Also read as** is an older name for the same setting: either name configures the same thing, and the row's name wins when both are set. **Default inherited from** is a different knob whose value this one starts at when it is unset: setting that knob moves this variable and everything else that inherits from it, while setting this variable moves only this one.
 
@@ -236,6 +236,8 @@ Two columns record what a variable falls back to. **Also read as** is an older n
 | `QUEEN_EPHEMERAL_RATE` | integer | `5000` |  |  |
 | `QUEEN_EPHEMERAL_REQUIRE_GRANT` | boolean | `tenancy_header` |  |  |
 | `QUEEN_EPHEMERAL_RETRY_LIMIT` | integer | `5` |  |  |
+| `QUEEN_RETENTION_DUE_CAP` | integer | `0` |  |  |
+| `QUEEN_RETENTION_SAFETY_WALK_MS` | integer | `86_400_000` |  |  |
 
 ### Experiment-only
 

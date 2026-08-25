@@ -87,6 +87,15 @@ nothing; moving a group that has read is seek's job.
 pop answers `204` with no body, so never parse it. Batches, timeouts and delayed visibility are
 in [defaults](/reference/defaults) and [queue options](/reference/queue-options).
 
+You do not have to size the pop yourself. Leave the batch and the partition width unset and the
+broker chooses both, per pop, from what it can see and you cannot: how many partitions of your
+group hold work right now, and how long the oldest has been waiting. The right width is a fact
+about the broker rather than about your consumer, and it moves, because a queue's partition count
+grows for years. What you do set stays yours: the choice is per knob, so pinning the width to one
+partition and letting the broker size the batch is an ordinary thing to ask for, and the pinned
+half is never adjusted. Every SDK exposes an off switch that restores its old client-side defaults
+exactly. See [pop autopilot](/reference/http/pop#autopilot).
+
 One rule shapes every deployment: one leased batch per (partition, group). Parallelism inside a
 group is bounded by partitions, not workers: twenty workers on a single-partition queue is one
 worker's throughput and nineteen idle pollers. Add lanes, not workers.

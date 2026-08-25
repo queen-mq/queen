@@ -211,11 +211,20 @@ Omitting `autopilot` entirely keeps today's behaviour byte for byte, response
 included, which is what every existing consumer does. The broker applies the
 choice on the queue-scoped route for a pop that names a `consumerGroup`; the
 pinned-partition and discovery routes accept the parameter and ignore it, since a
-pinned pop is one partition by definition and has no width to choose. Operators
-can disable the whole thing with `QUEEN_POP_AUTOPILOT=off`, or watch what it
-would choose without letting it act with `QUEEN_POP_AUTOPILOT=shadow`; in both
-positions a request that sent the flag simply gets today's defaults and no
-`autopilot` object in the response.
+pinned pop is one partition by definition and has no width to choose. Two more
+positions accept it and do nothing with it, for the same kind of reason. A
+conflating pop keeps its own meaning for `partitions`, the message budget rather
+than a sweep width, so the feature that already owns that dimension keeps it. And
+the controller reads the hot-list ring for every input it has, so a deployment
+running the legacy candidate scan with `QUEEN_HOTLIST=0` has nothing for it to
+read: there too the request resolves to the defaults below.
+
+Operators can disable the whole thing with `QUEEN_POP_AUTOPILOT=off`, or watch
+what it would choose without letting it act with `QUEEN_POP_AUTOPILOT=shadow`; in
+both positions a request that sent the flag simply gets today's defaults and no
+`autopilot` object in the response. The six constants that tune the law, and what
+the broker logs about its own decisions, are in the
+[configuration reference](/reference/config).
 
 ### Conflation in the response
 

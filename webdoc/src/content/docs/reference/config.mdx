@@ -148,6 +148,7 @@ practice a deployment sets variables from these groups only.
 | Change the maintenance cadence | `RETENTION_INTERVAL` |
 | Delete faster than one partition at a time | `RETENTION_PARALLELISM`, raised together with `QUEEN_ADMISSION_SHARE_MAINT` |
 | Put N pop claims in one transaction | `QUEEN_POP_FUSION` |
+| Watch, or stop, the broker sizing the pops it was asked to size | `QUEEN_POP_AUTOPILOT`. See [pop autopilot](/reference/http/pop#autopilot) |
 | Accept larger request bodies | `QUEEN_MAX_BODY_BYTES` |
 | Encrypt payloads at rest | `QUEEN_ENCRYPTION_KEY` |
 | Shape the logs | `LOG_LEVEL`, `QUEEN_LOG_JSON`, `QUEEN_LOG_RATES_MS` |
@@ -176,7 +177,7 @@ throughput, and the table says how much of what.
 
 | Accelerator | Variable | Default | What the off switch reverts to, and what it costs |
 | --- | --- | --- | --- |
-| Wildcard candidate hot list | `QUEEN_HOTLIST` | on | The per-pop SQL candidate scan, which is the pre-hot-list path. Candidate scans reappear in the PostgreSQL profile. It also takes `windowBuffer` back to the SQL-only debounce, which has no early promotion, so a partition written to more often than every `windowBuffer` seconds stops being delivered at all. |
+| Wildcard candidate hot list | `QUEEN_HOTLIST` | on | The per-pop SQL candidate scan, which is the pre-hot-list path. Candidate scans reappear in the PostgreSQL profile. It also takes `windowBuffer` back to the SQL-only debounce, which has no early promotion, so a partition written to more often than every `windowBuffer` seconds stops being delivered at all. It also takes pop autopilot with it: the controller reads the ring and nothing else, so on the SQL scan an opted-in request resolves to the server-side defaults. |
 | Windowed hot-list reseed | `QUEEN_HOTLIST_RESEED_FULL_MS` | `300000` ms | `0` makes every reseed a full walk over every partition of the queue again, and switches off the repair paths that exist only because a windowed pass cannot see a cursor move. |
 | Ack registry | `QUEEN_ACK_REGISTRY` | on, `64` MB (`QUEEN_ACK_REGISTRY_MB`) | Every ack takes `queen.log_ack_by_hash_v1` and resolves its hashes in PostgreSQL, instead of a full-batch completed ack becoming one positional cursor advance. Under the cap the registry already evicts whole entries onto that same path, so the switch only makes it unconditional. |
 | Ack fusion | `QUEEN_ACK_FUSION` | on | The synchronous `queen.log_ack_at_v1` fast path, byte-identical to the pre-fusion behaviour: one commit and one fsync per ack rather than one per flush for N cursor advances. |
@@ -184,6 +185,35 @@ throughput, and the table says how much of what.
 | Retention fan-out | `RETENTION_PARALLELISM` | `1` | `1` is already the off position, the historical serial cycle, so an upgrade changes nothing until you raise it. That serial cycle measured about 13,800 step rows per second on the 2026-08-10 rig, just under the roughly 14,600 that sustaining 1,000,000 msg/s needs, which is what raising it (ceiling 16) buys. Each worker holds one maintenance-lane admission slot and one pooled connection while it runs. |
 | Pop fusion | `QUEEN_POP_FUSION` | off | The only accelerator that ships off. Set it and N pop claim legs share one transaction and one commit, and the Pop lane takes one admission slot per fused flush instead of one per claim. |
 | Partition cleanup | `QUEEN_PARTITION_CLEANUP_ENABLED` | on | Empty partitions idle for `PARTITION_CLEANUP_DAYS` (30) are kept forever instead of being deleted. |
+| Pop autopilot | `QUEEN_POP_AUTOPILOT` | on | The server-side defaults for the knobs an opted-in client left out: batch 200, one partition. A client that does not send `autopilot=true` is unaffected in every position, so this switch is about what the controller may do, never about whether the surface exists. It is the one switch here with a third position, described below. |
+
+Pop autopilot is the one entry with three positions rather than two, and the
+third is the reason to reach for it. `shadow` computes the decision, reports it
+and does not apply it, so a deployment can read what the controller would have
+chosen for a week before letting it choose. `off` removes the controller
+outright, including its in-memory lane state and its logs. Both positions answer
+an opted-in request with today's defaults and no `autopilot` object in the
+response, which is exactly what a broker older than 1.2 does, so a client needs
+no capability check either way.
+
+Six constants tune the law rather than switch it. `QUEEN_POP_AUTOPILOT_BATCH`
+(100) is the batch handed to a consumer that delegated that dimension, and only
+to such a consumer: a client that sends its own `batch` is never touched by it.
+`QUEEN_POP_AUTOPILOT_TARGET_AGE_MS` (25) is the ready-age the width loop steers
+to. `QUEEN_POP_AUTOPILOT_DWELL_MS` (500) and `QUEEN_POP_AUTOPILOT_DWELL_POPS`
+(16) bound how often one `(tenant, queue, group)` may change its width in either
+direction, which is what stops the loop limit-cycling.
+`QUEEN_POP_AUTOPILOT_MAX_LANES` (50000) bounds the in-memory state on a cell with
+very many queues; past it the controller stops creating lanes and those lanes
+degrade to today's defaults rather than a live one being evicted.
+`QUEEN_POP_AUTOPILOT_BURST_CAP` (0, disabled) lets a delegated width jump for one
+request to what is ready at that instant, capped, without the feedback loop
+losing ownership of the steady width.
+
+Two of these are validated at boot rather than corrected. A
+`QUEEN_POP_AUTOPILOT` that is not a mode, and a `QUEEN_POP_AUTOPILOT_BATCH`
+outside its range, both kill the boot naming the value. Resolving a typo to the
+default silently is how a fleet ends up running on a number nobody chose.
 
 One accelerator is absent from that table because it has no switch: **push fusion
 has no enable flag**. Cross-request push fusion is always on, and
@@ -193,10 +223,19 @@ has no enable flag**. Cross-request push fusion is always on, and
 The boot block prints the resolved state of most of these, so a deployment that
 thinks it turned one off can confirm it without inferring from throughput:
 `config: engine` carries `hotlist`, `dedup_cache`, `ack_registry`, `ack_fusion`
-and the reseed intervals, and `config: jobs` carries `retention_parallelism` and
-`partition_cleanup`. `QUEEN_POP_FUSION` is the exception: it prints nothing at
-boot in either state and has no counter of its own, so the deployment's own
-environment is the only record of whether it is on.
+and the reseed intervals, `config: jobs` carries `retention_parallelism` and
+`partition_cleanup`, and `config: flow` carries all seven `pop_autopilot` knobs
+next to the pop and admission ones. `QUEEN_POP_FUSION` is the exception: it
+prints nothing at boot in either state and has no counter of its own, so the
+deployment's own environment is the only record of whether it is on.
+
+Pop autopilot also says what it is doing while it runs, on its own `autopilot`
+log target. A rate-limited `info` line carries the mode, the width and batch it
+last chose, and running counts of requests, adjustments and live lanes, each line
+reporting how many it suppressed. A `warn` line fires once per lane, re-armed
+daily, when a client's explicit width and the controller's choice diverge widely:
+that one is diagnostic only, and it says so, because an explicit value is never
+overridden.
 
 ## The variables
 

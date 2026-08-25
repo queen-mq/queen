@@ -145,8 +145,9 @@ is reset to the value in this table, not left alone. See
 
 | Endpoint | Parameter | Default |
 | --- | --- | --- |
-| `GET /api/v1/pop/queue/:queue` | `batch` | `200` |
-| | `partitions` | `1` |
+| `GET /api/v1/pop/queue/:queue` | `batch` | `200`, unless the request delegated it with `autopilot` |
+| | `partitions` | `1`, unless the request delegated it with `autopilot` |
+| | `autopilot` | absent; `true` asks the broker to size the knobs the request did not send, per parameter |
 | | `autoAck` | `false` |
 | | `wait` | `false` |
 | | `timeout` | the configured pop timeout (30000 ms) |
