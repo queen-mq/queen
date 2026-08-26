@@ -1,0 +1,4 @@
+t_sec,wall_utc,phase,offered_msg_s,pushed_msg_s,popped_msg_s,acked_msg_s,shed_msg_s,inflight,e2e_p50_ms,e2e_p99_ms,push_p50_ms,push_p99_ms,err_push,err_pop,err_ack,err_429,err_403,err_5xx,err_timeout,err_conn,empty_pops,cross_tenant,goroutines
+300.0,2026-08-23T06:03:08Z,load,55.0,55.0,54.9,54.9,0.0,0,11.328,132.096,4.960,33.024,0,0,0,0,0,0,0,0,0,0,102
+600.0,2026-08-23T06:08:08Z,load,55.0,55.0,55.0,55.0,0.0,0,13.248,160.768,5.536,33.536,0,0,0,0,0,0,0,0,0,0,102
+900.0,2026-08-23T06:13:08Z,drain,55.0,55.0,55.0,55.0,0.0,0,12.480,224.256,5.216,34.560,0,0,0,0,0,0,0,0,0,0,91

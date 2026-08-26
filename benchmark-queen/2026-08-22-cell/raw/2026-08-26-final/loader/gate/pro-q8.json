@@ -1,0 +1,292 @@
+{
+  "runId": "pro-q8",
+  "tool": "goload -mode cloud",
+  "startedAt": "2026-08-23T05:58:08Z",
+  "endedAt": "2026-08-23T06:14:08Z",
+  "loadSec": 900.000784725,
+  "drainSec": 60.000531072,
+  "config": {
+    "autoAck": false,
+    "brokerTenantHeader": false,
+    "completedRetentionSeconds": 604800,
+    "consumersPerTenant": 2,
+    "dedupWindowSeconds": 0,
+    "drainDeliveries": 1,
+    "drainLast2sDeliveries": 0,
+    "drainSec": 60,
+    "durationSec": 900,
+    "fault": "",
+    "group": "workers",
+    "idleConnsPerClient": 8,
+    "leaseTime": 30,
+    "maxInflight": 256,
+    "minPopWaitTime": 0,
+    "note": "",
+    "offeredMsgPerSecPerTenant": 5,
+    "offeredMsgPerSecTotal": 35,
+    "partitions": 5000,
+    "payloadBytes": 256,
+    "popBatch": 100,
+    "popPartitions": 10,
+    "popTimeoutMs": 5000,
+    "popWait": true,
+    "producersPerTenant": 1,
+    "pushBatch": 1,
+    "queue": "pro-q8",
+    "retentionSeconds": 604800,
+    "retries": 0,
+    "retry429Attempts": 1,
+    "sharedQueue": true,
+    "target": "proxy",
+    "tenants": 7,
+    "tenantsFile": "/root/soak/t-pro.json",
+    "timeoutMs": 30000,
+    "url": "http://10.114.0.2:6711",
+    "verify": true
+  },
+  "offered": {
+    "msgPerSec": 34.99996948294327,
+    "reqPerSec": 34.99996948294327,
+    "msgs": 31500,
+    "reqs": 31500,
+    "shedMsgs": 0,
+    "shedReqs": 0
+  },
+  "achieved": {
+    "pushMsgPerSec": 34.99996948294327,
+    "popMsgPerSecLoadPhase": 34.99663615251633,
+    "popMsgPerSecWholeRun": 32.810371696053494,
+    "ackMsgPerSecWholeRun": 32.810371696053494,
+    "pushedMsgs": 31500,
+    "poppedMsgs": 31498,
+    "ackedMsgs": 31498,
+    "pushReqs": 31500,
+    "popReqs": 31491,
+    "ackReqs": 31311,
+    "emptyPops": 166
+  },
+  "latency": {
+    "ackRtt": {
+      "samples": 31311,
+      "p50Ms": 4.512,
+      "p95Ms": 14.016,
+      "p99Ms": 22.4,
+      "p999Ms": 48.384,
+      "maxMs": 272.16
+    },
+    "e2eFromSchedule": {
+      "samples": 31498,
+      "p50Ms": 12.864,
+      "p95Ms": 65.28,
+      "p99Ms": 171.008,
+      "p999Ms": 577.536,
+      "maxMs": 1545.949
+    },
+    "e2eFromSend": {
+      "samples": 31498,
+      "p50Ms": 12.352,
+      "p95Ms": 64.768,
+      "p99Ms": 171.008,
+      "p999Ms": 577.536,
+      "maxMs": 1545.547
+    },
+    "pushRtt": {
+      "samples": 31500,
+      "p50Ms": 5.536,
+      "p95Ms": 18.304,
+      "p99Ms": 34.048,
+      "p999Ms": 171.008,
+      "maxMs": 1094.147
+    }
+  },
+  "errors": {
+    "ack": {
+      "total": 0,
+      "byKind": {},
+      "byCode": {},
+      "retryAfterSamples": 0,
+      "retryAfterAvgSec": 0,
+      "retryAfterMaxSec": 0,
+      "firstMessage": {}
+    },
+    "configure": {
+      "total": 0,
+      "byKind": {},
+      "byCode": {},
+      "retryAfterSamples": 0,
+      "retryAfterAvgSec": 0,
+      "retryAfterMaxSec": 0,
+      "firstMessage": {}
+    },
+    "pop": {
+      "total": 0,
+      "byKind": {
+        "canceled": 14
+      },
+      "byCode": {},
+      "retryAfterSamples": 0,
+      "retryAfterAvgSec": 0,
+      "retryAfterMaxSec": 0,
+      "firstMessage": {}
+    },
+    "push": {
+      "total": 0,
+      "byKind": {},
+      "byCode": {},
+      "retryAfterSamples": 0,
+      "retryAfterAvgSec": 0,
+      "retryAfterMaxSec": 0,
+      "firstMessage": {}
+    }
+  },
+  "bytes": {
+    "perMsgNominalBytes": 292,
+    "pushedNominalBytes": 9198000,
+    "deliveredNominalBytes": 9197416,
+    "note": "nominal = JSON-encoded payload size x messages; excludes HTTP framing and the envelope the broker adds. The authoritative wire bytes are the proxy's own metered bytes_in/bytes_out."
+  },
+  "verify": {
+    "enabled": true,
+    "verdict": "FAIL",
+    "sentOk": 31500,
+    "received": 31498,
+    "missing": 2,
+    "duplicate": 0,
+    "extra": 0,
+    "crossTenant": 0,
+    "undecodable": 0,
+    "tenants": [
+      {
+        "idx": 0,
+        "tenant": "sp-0000",
+        "cluster": "sp-0000",
+        "queue": "pro-q8",
+        "seqAssigned": 4500,
+        "sentOk": 4500,
+        "sentFail": 0,
+        "sentLostFaultInjected": 0,
+        "received": 4500,
+        "missing": 0,
+        "duplicate": 0,
+        "extra": 0,
+        "crossTenantIn": 0,
+        "undecodable": 0,
+        "ok": true
+      },
+      {
+        "idx": 1,
+        "tenant": "sp-0001",
+        "cluster": "sp-0001",
+        "queue": "pro-q8",
+        "seqAssigned": 4500,
+        "sentOk": 4500,
+        "sentFail": 0,
+        "sentLostFaultInjected": 0,
+        "received": 4500,
+        "missing": 0,
+        "duplicate": 0,
+        "extra": 0,
+        "crossTenantIn": 0,
+        "undecodable": 0,
+        "ok": true
+      },
+      {
+        "idx": 2,
+        "tenant": "sp-0002",
+        "cluster": "sp-0002",
+        "queue": "pro-q8",
+        "seqAssigned": 4500,
+        "sentOk": 4500,
+        "sentFail": 0,
+        "sentLostFaultInjected": 0,
+        "received": 4499,
+        "missing": 1,
+        "duplicate": 0,
+        "extra": 0,
+        "crossTenantIn": 0,
+        "undecodable": 0,
+        "firstMissingSeqs": [
+          1
+        ],
+        "ok": false
+      },
+      {
+        "idx": 3,
+        "tenant": "sp-0003",
+        "cluster": "sp-0003",
+        "queue": "pro-q8",
+        "seqAssigned": 4500,
+        "sentOk": 4500,
+        "sentFail": 0,
+        "sentLostFaultInjected": 0,
+        "received": 4499,
+        "missing": 1,
+        "duplicate": 0,
+        "extra": 0,
+        "crossTenantIn": 0,
+        "undecodable": 0,
+        "firstMissingSeqs": [
+          1
+        ],
+        "ok": false
+      },
+      {
+        "idx": 4,
+        "tenant": "sp-0004",
+        "cluster": "sp-0004",
+        "queue": "pro-q8",
+        "seqAssigned": 4500,
+        "sentOk": 4500,
+        "sentFail": 0,
+        "sentLostFaultInjected": 0,
+        "received": 4500,
+        "missing": 0,
+        "duplicate": 0,
+        "extra": 0,
+        "crossTenantIn": 0,
+        "undecodable": 0,
+        "ok": true
+      },
+      {
+        "idx": 5,
+        "tenant": "sp-0005",
+        "cluster": "sp-0005",
+        "queue": "pro-q8",
+        "seqAssigned": 4500,
+        "sentOk": 4500,
+        "sentFail": 0,
+        "sentLostFaultInjected": 0,
+        "received": 4500,
+        "missing": 0,
+        "duplicate": 0,
+        "extra": 0,
+        "crossTenantIn": 0,
+        "undecodable": 0,
+        "ok": true
+      },
+      {
+        "idx": 6,
+        "tenant": "sp-0006",
+        "cluster": "sp-0006",
+        "queue": "pro-q8",
+        "seqAssigned": 4500,
+        "sentOk": 4500,
+        "sentFail": 0,
+        "sentLostFaultInjected": 0,
+        "received": 4500,
+        "missing": 0,
+        "duplicate": 0,
+        "extra": 0,
+        "crossTenantIn": 0,
+        "undecodable": 0,
+        "ok": true
+      }
+    ]
+  },
+  "faultsInjected": {
+    "dropAck": 0,
+    "dupPush": 0,
+    "loseMsg": 0
+  },
+  "verdict": "FAIL"
+}

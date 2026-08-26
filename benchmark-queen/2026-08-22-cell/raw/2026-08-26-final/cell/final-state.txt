@@ -1,0 +1,15 @@
+captured_at=2026-08-26T08:38:40Z
+broker_a_version=listening version="1.2.0"
+broker_a_started=2026-08-24T16:02:38.830683471Z
+broker_b_started=2026-08-24T16:01:25.883374702Z
+image=sha256:9f86367cdd337ba9b0a9d0641c9958cb78770dc2328606d395b79c11213e9901
+db_bytes=114176767679
+segments=228824208
+partitions=827000
+queues=230
+tenants=36
+consumers=832000
+segments_deleted_total=17124418
+oldest_live_h=69.45
+disk=/dev/vda1       484G  375G  109G  78% /
+mem=Mem:           15991       11909         305        4280        8395        4082

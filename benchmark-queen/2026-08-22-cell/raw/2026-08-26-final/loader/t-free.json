@@ -1,0 +1,178 @@
+{
+  "cell": "cell-01",
+  "plan": "free",
+  "prefix": "sf",
+  "generatedAt": "2026-08-23T11:11:27Z",
+  "tenants": [
+    {
+      "idx": 0,
+      "tenantSlug": "sf-0000",
+      "clusterSlug": "sf-0000",
+      "tenantId": "c452a467-f66b-4377-88ea-87e0e03ff229",
+      "clusterId": "4debc30b-361a-4f6c-b063-3012ff4c27c5",
+      "brokerTenant": "aa2772d6-9afc-4a49-bbc7-79dbb059523f",
+      "apiKey": "qk_live_m8HeUTAEs3p1j5QgTZCx3Qaj6Y5X7maNEEkCIW__qZQ",
+      "plan": "free"
+    },
+    {
+      "idx": 1,
+      "tenantSlug": "sf-0001",
+      "clusterSlug": "sf-0001",
+      "tenantId": "023528f4-5538-448e-813f-ecf37b5781c1",
+      "clusterId": "473d80e4-1c2c-4ca6-9773-a1ec80c4467c",
+      "brokerTenant": "b70430bf-b042-48af-b6aa-b535562a0057",
+      "apiKey": "qk_live_bBk5Z_4otm1NjfWkga58OgC8Jt5ccFrWjHDwzOv05pg",
+      "plan": "free"
+    },
+    {
+      "idx": 2,
+      "tenantSlug": "sf-0002",
+      "clusterSlug": "sf-0002",
+      "tenantId": "49f3a468-3805-4f86-8684-e025997d4a36",
+      "clusterId": "49dd9ebe-2f4b-41c7-b21b-330cc04e71da",
+      "brokerTenant": "32962fba-83d5-402d-8054-7b08f3a6e35d",
+      "apiKey": "qk_live_q2H9ZuUhtLMFXLBWmZxlhe_0gvK9ckAgxGCm809Imdk",
+      "plan": "free"
+    },
+    {
+      "idx": 3,
+      "tenantSlug": "sf-0003",
+      "clusterSlug": "sf-0003",
+      "tenantId": "88c9b553-5d99-411a-b4b8-755826de6624",
+      "clusterId": "ff044d9d-22cd-44c1-b5f6-35f45b4a45f1",
+      "brokerTenant": "a30546d7-27b5-4008-9b69-1983821c681d",
+      "apiKey": "qk_live_YJSBdHg_tDv0bPLuUlj_Fq2NdgQTGKZek0A1rmuw3_0",
+      "plan": "free"
+    },
+    {
+      "idx": 4,
+      "tenantSlug": "sf-0004",
+      "clusterSlug": "sf-0004",
+      "tenantId": "1470f238-ed36-4204-96e4-149536992c4e",
+      "clusterId": "b1f31b89-05b1-49e1-8ed9-fa9469c79fe2",
+      "brokerTenant": "cc2540aa-0ef1-46e5-80a5-266ecc38f1da",
+      "apiKey": "qk_live_g-kXZqDADSAAN-NkrWzZKaI72UJSToAKYHMun5zYo5k",
+      "plan": "free"
+    },
+    {
+      "idx": 5,
+      "tenantSlug": "sf-0005",
+      "clusterSlug": "sf-0005",
+      "tenantId": "000523f2-8bec-4b6c-8515-1982fdebfabb",
+      "clusterId": "4fee2efd-bd3d-4967-a19e-3d277351ed24",
+      "brokerTenant": "8b950876-009e-49ba-87b1-5c4db5961538",
+      "apiKey": "qk_live_yBFPn1r1VUlk-kE9aRoRuxRoFnVkNPd-DIFWdjy-lwg",
+      "plan": "free"
+    },
+    {
+      "idx": 6,
+      "tenantSlug": "sf-0006",
+      "clusterSlug": "sf-0006",
+      "tenantId": "b0ac9bd5-546a-47c6-a2c0-80cc4cb1d8ab",
+      "clusterId": "463aae8d-4a94-4c60-a20e-17972740c828",
+      "brokerTenant": "bb36a3d4-6e7d-4a08-b653-2174341e376a",
+      "apiKey": "qk_live_lmzgGlDmPFY2lxYhGSQaeDVya-qNnuqGmBNL3Y7VDsM",
+      "plan": "free"
+    },
+    {
+      "idx": 7,
+      "tenantSlug": "sf-0007",
+      "clusterSlug": "sf-0007",
+      "tenantId": "8ba94a83-2f2d-457a-b3c6-084551890d5c",
+      "clusterId": "aedd53a1-fb43-42e2-8bab-993cd60512d7",
+      "brokerTenant": "0aa25b70-d69b-48b1-969f-ba1e54e879a5",
+      "apiKey": "qk_live_-gXSO0tMVYyXKtKM42KhsZs702yhaqGxbwt7YEoR8kg",
+      "plan": "free"
+    },
+    {
+      "idx": 8,
+      "tenantSlug": "sf-0008",
+      "clusterSlug": "sf-0008",
+      "tenantId": "9870d2a3-a23c-49d4-bad5-019ed08517da",
+      "clusterId": "4eb2d8d1-2a21-4352-be9d-63afdf53971e",
+      "brokerTenant": "a15ae441-edbd-439b-915d-096f9618376a",
+      "apiKey": "qk_live_jrju5H4GEjnzmhi6KCs2YcRx5nfva1UQRI44SjcBO3c",
+      "plan": "free"
+    },
+    {
+      "idx": 9,
+      "tenantSlug": "sf-0009",
+      "clusterSlug": "sf-0009",
+      "tenantId": "8b87cf7e-526c-4d93-a535-abd84d11c45a",
+      "clusterId": "3a06c73e-9b34-4a0a-a7b8-237afcf6d032",
+      "brokerTenant": "6ffca9d4-62ca-424e-a154-373830d5ba90",
+      "apiKey": "qk_live_qI7Smmkg-_hUWom5jE0HBmrVAYVZNhnKbmqDt1CMcCs",
+      "plan": "free"
+    },
+    {
+      "idx": 10,
+      "tenantSlug": "sf-0010",
+      "clusterSlug": "sf-0010",
+      "tenantId": "f3dd9094-549c-473d-95a4-80ddbc3dae26",
+      "clusterId": "39995375-a117-4df0-a4da-68b99dff0df6",
+      "brokerTenant": "7e8d41e2-e605-4de6-a445-4e3c8ab469c0",
+      "apiKey": "qk_live_pL1yrTRngSY87TB5LkG05G0rnDVlLmHQczQtBaS3Ql0",
+      "plan": "free"
+    },
+    {
+      "idx": 11,
+      "tenantSlug": "sf-0011",
+      "clusterSlug": "sf-0011",
+      "tenantId": "ffe7b1c7-db3b-449d-b557-80b46fe1eaea",
+      "clusterId": "8960da48-0692-4c58-8d88-b87cb125fa6a",
+      "brokerTenant": "874ac93e-c423-4ecd-ab2a-2c468c8e8ec3",
+      "apiKey": "qk_live_ucN-y9GzP-lcy7MelWuil2fYqRamszzfwyU9R028Hns",
+      "plan": "free"
+    },
+    {
+      "idx": 12,
+      "tenantSlug": "sf-0012",
+      "clusterSlug": "sf-0012",
+      "tenantId": "dd1a51a5-f980-45be-afa0-fb13212a6d8a",
+      "clusterId": "0fa13d3e-50ed-4182-ba0f-13c26c865f82",
+      "brokerTenant": "2cedb20a-01b9-4e56-b27c-174423679cf9",
+      "apiKey": "qk_live_zmPET7vi3jdF3CyK0_So-zo3kV0Dl8qOdGnI_VSBgYs",
+      "plan": "free"
+    },
+    {
+      "idx": 13,
+      "tenantSlug": "sf-0013",
+      "clusterSlug": "sf-0013",
+      "tenantId": "39df9e1f-a95e-4eba-b1fe-c983cd004548",
+      "clusterId": "7cad3fca-62c8-4c40-b84c-3296b7e9b04a",
+      "brokerTenant": "6e5ad443-016a-43ab-800e-078ad97d9427",
+      "apiKey": "qk_live_ZWoqRC09aDVMMzxGKNa6CsAH_WCzSAxE1kpydN5pnKw",
+      "plan": "free"
+    },
+    {
+      "idx": 14,
+      "tenantSlug": "sf-0014",
+      "clusterSlug": "sf-0014",
+      "tenantId": "59378755-89fe-427c-a365-98336b330061",
+      "clusterId": "7b9cf9f3-79f0-468f-a282-6018dc0daa83",
+      "brokerTenant": "615a231f-0c31-44a0-b38f-604d178ea14d",
+      "apiKey": "qk_live_6SsWTI-QSxka35YL-qRTccHDYUFkbr7Jz_hCiJP0Njs",
+      "plan": "free"
+    },
+    {
+      "idx": 15,
+      "tenantSlug": "sf-0015",
+      "clusterSlug": "sf-0015",
+      "tenantId": "21dc4e36-b95f-4b68-bde1-7819832d6628",
+      "clusterId": "aaf84c28-9973-4245-9d62-deb468f456f0",
+      "brokerTenant": "b6e87210-0114-4a6b-8319-21463c242cab",
+      "apiKey": "qk_live_jEE6eAn3obJw3-GV2Be6eBzxLFmjU6iYoCkBI7Mwaws",
+      "plan": "free"
+    },
+    {
+      "idx": 16,
+      "tenantSlug": "sf-0016",
+      "clusterSlug": "sf-0016",
+      "tenantId": "72b8d53a-da4f-4a9a-8454-3adbc54b85f1",
+      "clusterId": "28f13fee-3913-490e-9333-d8cf71553b45",
+      "brokerTenant": "d20e6b8a-7e63-4d09-9f26-801bd33de8c3",
+      "apiKey": "qk_live_9c6bPYkrvAhEh2IWYkFZN_MZ149LTaoByhogq91r0mI",
+      "plan": "free"
+    }
+  ]
+}

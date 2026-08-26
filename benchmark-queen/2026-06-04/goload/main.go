@@ -115,6 +115,7 @@ func runMaxMode(args []string) {
 	consumers := fs.Int("consumers", 150, "consumer goroutines")
 	pushBatch := fs.Int("push-batch", 10, "messages per push request")
 	popBatch := fs.Int("pop-batch", 200, "max messages per pop request")
+	popAutopilot := fs.Bool("pop-autopilot", false, "leave the pop BATCH to the broker (pop autopilot). The partitions/sweep-width knob is already unset by this loader, so with -pop-autopilot BOTH dimensions are broker-chosen and the SDK emits autopilot=true; without it the SDK sends an explicit batch and, per clients/client-go/autopilot.go, autopilot is only engaged for the dimensions the caller leaves unset")
 	popWildcard := fs.Bool("pop-wildcard", true, "consumers use queue-level WILDCARD pop (broker drains any partition -> full batches, few consumers) instead of pinned per-partition pop")
 	popPartitions := fs.Int("pop-partitions", 1, "multi-partition pop: claim up to N partitions per pop call (>1 enables v4 multi-partition wildcard -> up to pop-batch msgs gathered across N partitions)")
 	popWait := fs.Bool("pop-wait", false, "long-poll pop (Wait=true): an empty pop parks server-side and re-checks (POP_WAIT_* cadence) instead of spinning a wasted round-trip")
@@ -170,7 +171,7 @@ func runMaxMode(args []string) {
 			"completedRetentionSeconds": *completedRet,
 			"retentionSeconds":          *pendingRet,
 			"leaseTime":                 30,
-			"dedupWindowSeconds":        *dedupWindow, // 0 = off; set here at t=0 so tests never flip dedup mid-run
+			"dedupWindowSeconds":        *dedupWindow,                       // 0 = off; set here at t=0 so tests never flip dedup mid-run
 			"encryptionEnabled":         os.Getenv("GOLOAD_ENCRYPT") == "1", // enables per-queue encryption (C++)
 		},
 	}); cerr != nil {
@@ -253,7 +254,10 @@ func runMaxMode(args []string) {
 				}
 				// -manual-ack -> lease (AutoAck=false) and commit explicitly below;
 				// otherwise server-side autoAck (original max behavior, unchanged).
-				msgs, e := qb.Batch(*popBatch).AutoAck(!*manualAck).Pop(ctx)
+				if !*popAutopilot {
+					qb = qb.Batch(*popBatch)
+				}
+				msgs, e := qb.AutoAck(!*manualAck).Pop(ctx)
 				if e != nil {
 					if ctx.Err() != nil {
 						return
@@ -355,11 +359,11 @@ func runMaxMode(args []string) {
 // never race a reset and never pay for one. The same buckets also yield the
 // cumulative (whole-run) percentiles for the final line.
 const (
-	olLinearMax  = 1024               // µs; unit-resolution region [0,1024)
-	olSubBits    = 6                  // 2^6 = 64 sub-buckets per octave
-	olSubCount   = 1 << olSubBits    // 64
-	olBaseOctave = 10                 // log2(olLinearMax)
-	olMaxOctave  = 26                 // 2^26 µs ≈ 67.1s ceiling
+	olLinearMax  = 1024           // µs; unit-resolution region [0,1024)
+	olSubBits    = 6              // 2^6 = 64 sub-buckets per octave
+	olSubCount   = 1 << olSubBits // 64
+	olBaseOctave = 10             // log2(olLinearMax)
+	olMaxOctave  = 26             // 2^26 µs ≈ 67.1s ceiling
 	olNumBuckets = olLinearMax + (olMaxOctave-olBaseOctave+1)*olSubCount
 )
 
@@ -444,6 +448,7 @@ func runOpenLoopMode(args []string) {
 	rampSec := fs.Int("ramp-sec", 0, "OPEN-LOOP: linear ramp of the offered rate from 0 to -rate over N seconds (0 = full rate from t=0). Avoids the cold-start storm: pool dial-up, first-contact seeding and dedup-cache hydration happen under partial load.")
 	pushBatch := fs.Int("push-batch", 10, "messages per push request (offered request rate = rate/push-batch)")
 	popBatch := fs.Int("pop-batch", 200, "max messages per pop request")
+	popAutopilot := fs.Bool("pop-autopilot", false, "leave the pop BATCH to the broker (pop autopilot). The partitions/sweep-width knob is already unset by this loader, so with -pop-autopilot BOTH dimensions are broker-chosen and the SDK emits autopilot=true; without it the SDK sends an explicit batch and, per clients/client-go/autopilot.go, autopilot is only engaged for the dimensions the caller leaves unset")
 	popWildcard := fs.Bool("pop-wildcard", true, "consumers use queue-level WILDCARD pop instead of pinned per-partition pop")
 	popPartitions := fs.Int("pop-partitions", 1, "multi-partition pop: claim up to N partitions per pop call (>1 enables v4 multi-partition wildcard)")
 	popWait := fs.Bool("pop-wait", false, "long-poll pop (Wait=true)")
@@ -717,7 +722,10 @@ func runOpenLoopMode(args []string) {
 				}
 				// -manual-ack -> lease (AutoAck=false) and commit explicitly below;
 				// otherwise server-side autoAck (original openloop behavior).
-				msgs, e := qb.Batch(*popBatch).AutoAck(!*manualAck).Pop(ctx)
+				if !*popAutopilot {
+					qb = qb.Batch(*popBatch)
+				}
+				msgs, e := qb.AutoAck(!*manualAck).Pop(ctx)
 				if e != nil {
 					if ctx.Err() != nil {
 						return
