@@ -141,6 +141,7 @@ does not affect the others.
 | `leaseReleased` | boolean | this ack ended the lease on that `(partition, group)`; the partition is claimable again |
 | `dlq` | boolean | this ack caused a dead-letter row to be filed |
 | `noop` | boolean | the ack was a harmless duplicate: it resolved at or below the committed cursor and changed nothing |
+| `conflated` | integer | present only when the acked lease was served under [conflation](/reference/http/pop#conflation) (1.1.0) and the ack completed cleanly: how many log positions the commit retired without delivering. Absent on every other ack, so a non-conflating result keeps its pre-1.1.0 shape |
 
 <Aside type="caution">
 `success: true` means "instruction executed", not "message completed". A `failed` nack that was

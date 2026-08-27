@@ -180,7 +180,9 @@ Two properties of the trace tables that will surprise you eventually:
 - **Nothing purges traces.** Retention, the DLQ purge and the metrics cleanup all
   leave `queen.message_traces` and `queen.message_trace_names` alone. Trace volume
   is entirely your writes; size the table accordingly, and prune it yourself if you
-  trace at message rate.
+  trace at message rate. The one exception is a full tenant wipe: the
+  operator-invoked `queen.delete_tenant_data_v1` deletes the wiped tenant's traces
+  queue by queue, because traces are payload-derived and may not outlive the tenant.
 - **Deleting a queue leaves its traces behind.** The foreign keys from
   `queen.message_traces` to the message and partition tables were dropped so the
   table could serve both engines, so a queue delete does not cascade. The orphaned

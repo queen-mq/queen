@@ -231,15 +231,21 @@ The allocation itself is one statement:
 
 ```sql
 UPDATE queen.log_partitions SET
-    last_offset   = last_offset + p_msg_count,
-    last_write_at = CASE WHEN clock_timestamp() - last_write_at > interval '1 second'
-                         THEN clock_timestamp() ELSE last_write_at END
+    last_offset    = last_offset + p_msg_count,
+    oldest_live_at = COALESCE(oldest_live_at, clock_timestamp()),
+    oldest_txn_at  = COALESCE(oldest_txn_at,  clock_timestamp()),
+    last_write_at  = CASE WHEN clock_timestamp() - last_write_at > interval '1 second'
+                          THEN clock_timestamp() ELSE last_write_at END
 WHERE id = v_pid
 RETURNING last_offset;
 ```
 
 `base_offset = last_offset - msg_count + 1`. The `CASE` is the quantization that keeps the update
-HOT despite `last_write_at` being indexed.
+HOT despite `last_write_at` being indexed. The two `COALESCE`s maintain the retention work-list
+watermarks (the `created_at` of the row at each purge watermark), which are indexed too: for a
+partition already holding data they write back the stored value byte-identically and the update
+stays HOT, so only the empty-to-non-empty transition, this push creating the partition's first
+live row, actually touches their indexes. [Retention](/internals/retention) is their reader.
 
 Finally two inserts: the segment, and the `log_txns` row (unconditional even with deduplication
 off; [the storage model](/internals/storage-model) has why).

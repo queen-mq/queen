@@ -45,7 +45,7 @@
 -- queen.delete_queue_v1 + the FK cascades off queen.queues(id) reach
 -- log_partitions -> log_segments/log_consumers, consumer_watermarks,
 -- queue-scoped consumer_groups_metadata, queue_lag_metrics and queen.stats.
--- That is the whole of a queue. It is NOT the whole of a TENANT: nine other
+-- That is the whole of a queue. It is NOT the whole of a TENANT: eleven other
 -- tables carry `tenant_id` and are not queue-scoped, so a loop over
 -- get_queues_v2 leaves every one of them behind. Two of those matter beyond
 -- tidiness:
@@ -60,8 +60,9 @@
 --     (schema.sql), which is exactly why they carry tenant_id, and exactly
 --     why no cascade can reach them.
 --
--- The other seven (kv, kv_quota, kv_usage, ephemeral_queues, ephemeral_quota,
--- hotlist_repairs, queue_parked_replica) are swept by tenant_id directly.
+-- The other nine (kv, kv_quota, kv_usage, ephemeral_queues, ephemeral_quota,
+-- hotlist_repairs, queue_parked_replica, and the streaming engine's
+-- queen_streams.queries + queen_streams.quota) are swept by tenant_id directly.
 --
 -- queen.consumer_watermarks is NOT in that list and must not be: it carries no
 -- tenant_id (its scoping is inherited through the queen.queues FK — the
@@ -85,26 +86,34 @@
 -- ---------------------------------------------------------------------------
 --
 -- `queen_streams` (002_streams_schema.sql) is a second schema, outside every
--- cascade here, and it holds two tables:
+-- cascade here, and it holds three tables. ALL THREE are purged — the previous
+-- revision of this section named queries as permanent residue that "CANNOT be
+-- purged, by construction", and that construction (a globally-unique, tenantless
+-- name) is gone as of 2026-08-27:
 --
---   * queen_streams.state — per-(query, partition, key) aggregate values. It is
---     keyed by a queen.log_partitions id with NO foreign key on purpose ("a
---     partition cleanup must not silently delete still-relevant state"), so
---     nothing above reaches it, and once the partitions are gone nothing can
---     attribute it to a tenant ever again. It is DERIVED FROM PAYLOADS, which
---     is the same argument that pulls message_traces into the queue loop, so it
---     is purged there too — before delete_queue_v1, while the partition ids
---     that name it still exist. (Deleting it also unblocks the purge:
---     log_partition_dead_v1 vetoes reclaiming a partition that still holds
---     stream state.)
---   * queen_streams.queries — the registered query metadata. This one is NOT
---     purged and CANNOT be, by construction: it carries no tenant, and its
---     `name` is globally UNIQUE across the whole database, so its rows are not
---     tenant-scoped at all and a delete keyed on a queue NAME would reach into
---     another tenant's query. It holds a query name, its source/sink queue
---     names and a config hash — no payload-derived data — and dropping a
---     query is the streaming application's own operation. Naming the residue is
---     the honest answer here; silently leaving it was not.
+--   * queen_streams.queries — the registered query metadata, now carrying
+--     `tenant_id`, with `name` unique PER TENANT. An ordinary phase-3 sweep,
+--     listed in C_TENANT_TABLES like any other tenant-carrying table.
+--   * queen_streams.quota — the per-tenant streams grant (one row). Same sweep.
+--     Purged for the same reason kv_quota is: the tenant it grants no longer
+--     exists, and a surviving grant row would silently re-authorize a recycled
+--     uuid.
+--   * queen_streams.state — per-(query, partition, key) aggregate values,
+--     DERIVED FROM PAYLOADS (the same argument that pulls message_traces into
+--     the queue loop). It is reached TWICE, on purpose:
+--       - PHASE 2, per queue, keyed by that queue's partition ids. The cheap,
+--         index-driven path (the state PK's partition prefix), and it STAYS:
+--         log_partition_dead_v1 vetoes reclaiming a partition that still holds
+--         stream state, so the state has to go before the partitions do.
+--       - PHASE 3, keyed through the `query_id` FK, BEFORE any queries row is
+--         deleted. This is the path that reaches ORPHAN state — rows whose
+--         partition ids no longer resolve, left by a routine queue delete or
+--         written by a pre-2026-08-27 cycle that accepted a bogus partition
+--         uuid. The partition-driven sweep structurally cannot see those.
+--     It carries no tenant_id and needs none: attribution is the FK to
+--     `queries`, which survives the partitions. That is why the old caveat here
+--     ("once the partitions are gone nothing can attribute it ever again") is
+--     retired — it was true only while queries itself was tenantless.
 --
 -- ---------------------------------------------------------------------------
 -- BATCHING
@@ -165,7 +174,10 @@
 --                 rows are still there. Nothing here issues an unbounded
 --                 DELETE; on a cell, the trace sweep of one busy queue is
 --                 otherwise the single statement that decides how long the wipe
---                 transaction runs.
+--                 transaction runs. queen_streams.state spends ONE budget
+--                 across both of its passes (the per-queue one and the
+--                 FK-keyed orphan sweep that opens phase 3), so a call cannot
+--                 delete 2 x p_max_rows state rows in one transaction.
 --
 -- Call until the result says {"done": true}. Re-running after completion is a
 -- no-op that answers done immediately; re-running after a partial failure
@@ -182,9 +194,9 @@ CREATE OR REPLACE FUNCTION queen.delete_tenant_data_v1(
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    -- EVERY table in schema `queen` that carries a tenant_id column. Verified
-    -- against the catalog on every call (see the coverage check below), so
-    -- this list cannot silently go stale.
+    -- EVERY table in schema `queen` OR `queen_streams` that carries a tenant_id
+    -- column. Verified against the catalog on every call (see the coverage check
+    -- below), so this list cannot silently go stale.
     C_TENANT_TABLES CONSTANT TEXT[] := ARRAY[
         -- Deleted by the queue loop, through queen.delete_queue_v1, NOT by the
         -- sweep: the queue delete has to clear the FK-less queen.log_txns and
@@ -201,7 +213,20 @@ DECLARE
         'queen.kv_quota',
         'queen.kv_usage',
         'queen.ephemeral_queues',
-        'queen.ephemeral_quota'
+        'queen.ephemeral_quota',
+        -- PHASE 3, and in a SECOND schema. These two are here because
+        -- 002_streams_schema gave queen_streams.queries a tenant_id and added
+        -- queen_streams.quota: the coverage check below scans BOTH schemas, so
+        -- shipping that column without these two lines makes EVERY wipe on
+        -- EVERY cell refuse, loudly, until someone adds them. That coupling is
+        -- the design working — the check exists precisely so a new
+        -- tenant-carrying table cannot be forgotten quietly.
+        --
+        -- Order matters for one of them: deleting a queries row CASCADEs into
+        -- queen_streams.state (002's FK), so the bounded orphan sweep that
+        -- opens phase 3 must empty the state first — see it below.
+        'queen_streams.queries',
+        'queen_streams.quota'
     ];
     C_DEFAULT_TENANT CONSTANT UUID := '00000000-0000-0000-0000-000000000001';
 
@@ -229,6 +254,35 @@ DECLARE
     -- queen_streams may legitimately be absent (a database whose schema apply
     -- has not reached 002_streams_schema yet). Checked once, not per queue.
     v_streams   BOOLEAN := to_regclass('queen_streams.state') IS NOT NULL;
+    -- UPGRADE WINDOW. This function's BODY and the streaming schema's SHAPE are
+    -- two different artifacts, installed by two different statements, and a cell
+    -- can hold a newer body than shape: schema apply is per-file and per-
+    -- statement, cells that run QUEEN_APPLY_SCHEMA=false get their SQL applied
+    -- BY HAND file by file, and on a mixed-version HA pair the last boot to
+    -- apply wins for a function body while an applied ALTER is never reverted
+    -- (an old binary's 002 cannot take `tenant_id` away again). So the two
+    -- queen_streams entries in the list above are PROBED, not assumed: on a cell
+    -- whose queries table predates tenancy, the generic sweep's
+    -- `DELETE ... WHERE tenant_id = $1` would fail at runtime with a 42703, mid
+    -- wipe, on the one code path that must not be surprised. Skipping them
+    -- instead is the same posture as v_streams above — do the part that exists.
+    --
+    -- pg_catalog, NOT information_schema, for the same reason as the coverage
+    -- check: information_schema is filtered by privilege, so a role that cannot
+    -- see the column would read "absent" and silently skip a table that is
+    -- really there, holding real customer rows.
+    v_streams_q BOOLEAN := EXISTS (
+        SELECT 1
+          FROM pg_attribute a
+          JOIN pg_class     cl ON cl.oid = a.attrelid
+          JOIN pg_namespace n  ON n.oid = cl.relnamespace
+         WHERE n.nspname = 'queen_streams'
+           AND cl.relname = 'queries'
+           AND cl.relkind = 'r'
+           AND a.attname = 'tenant_id'
+           AND a.attnum > 0
+           AND NOT a.attisdropped);
+    v_streams_quota BOOLEAN := to_regclass('queen_streams.quota') IS NOT NULL;
 BEGIN
     IF p_tenant IS NULL THEN
         RAISE EXCEPTION 'delete_tenant_data_v1: tenant is required';
@@ -313,13 +367,17 @@ BEGIN
          LIMIT p_max_queues
     LOOP
         -- Traces, retention audit rows and stream state all carry a
-        -- queen.log_partitions id and NO foreign key (each for its own stated
-        -- reason — schema.sql for the first two, 002_streams_schema for the
-        -- third), so no cascade reaches them and, once the partitions are gone,
-        -- nothing can attribute them to a tenant ever again. They are therefore
-        -- purged HERE, in the same transaction that deletes the queue, and
-        -- index-driven both ways (idx_message_traces_partition_id,
-        -- idx_retention_history_partition, the state PK's partition prefix).
+        -- queen.log_partitions id and NO foreign key to it (each for its own
+        -- stated reason — schema.sql for the first two, 002_streams_schema for
+        -- the third), so no queue cascade reaches them. For the first two, that
+        -- also means nothing can attribute them to a tenant once the partitions
+        -- are gone; stream state is the exception — its query FK still names an
+        -- owner, which is what phase 3a below sweeps. They are all purged HERE
+        -- anyway, in the same transaction that deletes the queue, because this
+        -- is the CHEAP path: index-driven both ways
+        -- (idx_message_traces_partition_id, idx_retention_history_partition,
+        -- the state PK's partition prefix), and log_partition_dead_v1 vetoes
+        -- reclaiming a partition that still holds stream state.
         --
         -- This is a deliberate exception to those "outlive the partition"
         -- rules, and it is narrow: they outlive a QUEUE delete, which is a
@@ -425,21 +483,84 @@ BEGIN
     END IF;
 
     -- ==================================================================
+    -- PHASE 3a — ORPHAN STREAM STATE, through the query FK.
+    --
+    -- Runs BEFORE the generic sweep, and the ordering is not cosmetic: deleting
+    -- a queen_streams.queries row CASCADEs into queen_streams.state (002's
+    -- `ON DELETE CASCADE`), and a cascade is NOT bounded by the LIMIT of the
+    -- statement that triggers it. Left to the generic loop, one "bounded"
+    -- delete of 20 000 query rows would drag an unbounded state delete into the
+    -- same transaction — the exact shape of the 2026-08-24 lock incident this
+    -- function's BATCHING section is written against. Emptying the state first
+    -- keeps that cascade empty by the time it fires.
+    --
+    -- It is also the ONLY sweep that reaches ORPHAN state: rows whose
+    -- partition_id no longer resolves (a routine queue delete took the
+    -- partitions, or a pre-2026-08-27 cycle wrote a bogus partition uuid). The
+    -- phase-2 pass is keyed BY partition and structurally cannot see them; this
+    -- one is keyed by the query FK, which is what makes every state row
+    -- tenant-attributable no matter what happened to its partition.
+    --
+    -- Index-driven: `query_id` is the leading column of the state PK.
+    -- Same budget as phase 2's per-queue pass (v_bud_state), deliberately —
+    -- one call, one p_max_rows worth of state deletes, however it is split.
+    -- ==================================================================
+    IF v_streams AND v_streams_q THEN
+        IF v_bud_state > 0 THEN
+            EXECUTE
+                'DELETE FROM queen_streams.state
+                  WHERE ctid = ANY (ARRAY(SELECT s.ctid FROM queen_streams.state s
+                                           WHERE s.query_id IN (SELECT id FROM queen_streams.queries
+                                                                 WHERE tenant_id = $1)
+                                           LIMIT $2
+                                           FOR UPDATE SKIP LOCKED))'
+                USING p_tenant, v_bud_state;
+            GET DIAGNOSTICS v_n = ROW_COUNT;
+            v_bud_state := v_bud_state - v_n;
+            v_rows := jsonb_set(v_rows, '{queen_streams.state}',
+                                to_jsonb(COALESCE((v_rows->>'queen_streams.state')::bigint, 0) + v_n));
+        END IF;
+
+        -- Budget spent, or a row another session holds: stop HERE, before the
+        -- generic loop deletes a single queries row. The caller commits and
+        -- calls again; the queries rows that attribute the rest are still there.
+        EXECUTE
+            'SELECT EXISTS (SELECT 1 FROM queen_streams.state s
+                             WHERE s.query_id IN (SELECT id FROM queen_streams.queries
+                                                   WHERE tenant_id = $1))'
+            INTO v_left USING p_tenant;
+        IF v_left THEN
+            RETURN jsonb_build_object(
+                'tenant', p_tenant, 'done', false, 'phase', 'streams-state',
+                'queues', jsonb_build_object('deleted', v_queues, 'remaining', 0),
+                'rows', v_rows);
+        END IF;
+    END IF;
+
+    -- ==================================================================
     -- PHASE 3 — the tables no queue delete can reach.
     --
     -- Order inside this phase carries no FK argument: none of these tables
     -- references another, by design (kv and log_timers are deliberately
     -- FK-free for the same reason log_txns is — the write path must never pay
-    -- FK-trigger cost). They are swept in the constant's order so the audit
-    -- trail in `rows` reads the same way every time.
+    -- FK-trigger cost). The one FK that does exist, queries -> state, is
+    -- handled by phase 3a above, which empties the child before the parent is
+    -- swept. They are swept in the constant's order so the audit trail in
+    -- `rows` reads the same way every time.
     -- ==================================================================
     FOREACH v_tbl IN ARRAY C_TENANT_TABLES LOOP
         CONTINUE WHEN v_tbl = 'queen.queues';       -- phase 2
         CONTINUE WHEN v_tbl = 'queen.log_timers';   -- phase 1
+        -- Upgrade window (see v_streams_q / v_streams_quota): a shape older
+        -- than this body has no tenant_id on queries and no quota table at all,
+        -- and the statement below would then fail with a 42703 / 42P01 mid
+        -- wipe. Skip what does not exist; there is nothing there to leave behind.
+        CONTINUE WHEN v_tbl = 'queen_streams.queries' AND NOT v_streams_q;
+        CONTINUE WHEN v_tbl = 'queen_streams.quota'   AND NOT v_streams_quota;
 
         -- Dynamic only in the table NAME, which comes from the constant above
         -- and never from an argument. The tenant is bound, not interpolated.
-        -- The alternative — nine hand-written DELETEs — drifts from the
+        -- The alternative — eleven hand-written DELETEs — drifts from the
         -- coverage check the moment someone edits one and not the other, and
         -- that drift is precisely the failure this function must not have.
         EXECUTE format(
@@ -457,6 +578,12 @@ BEGIN
     -- ==================================================================
     v_left := false;
     FOREACH v_tbl IN ARRAY C_TENANT_TABLES LOOP
+        -- Same two guards as the sweep above, and they must match it exactly: a
+        -- probe of a column the sweep skipped would raise instead of answering,
+        -- and a probe the sweep ran but this loop skipped would report `done`
+        -- over rows still sitting there.
+        CONTINUE WHEN v_tbl = 'queen_streams.queries' AND NOT v_streams_q;
+        CONTINUE WHEN v_tbl = 'queen_streams.quota'   AND NOT v_streams_quota;
         EXECUTE format('SELECT EXISTS (SELECT 1 FROM %s WHERE tenant_id = $1)', v_tbl)
         INTO v_left USING p_tenant;
         EXIT WHEN v_left;
@@ -474,10 +601,13 @@ END;
 $$;
 
 COMMENT ON FUNCTION queen.delete_tenant_data_v1(UUID, INT, INT, BOOLEAN) IS
-    'Purge one tenant''s data from the queen schema: timers first, then queues via '
-    'delete_queue_v1, then every tenant-carrying table no cascade reaches. Bounded per '
-    'call — loop until {"done": true}. Wipe order: queen_proxy.set_tenant_status(deleting) '
-    '-> queen.delete_tenant_data_v1 -> queen_proxy.delete_tenant.';
+    'Purge one tenant''s data from the queen AND queen_streams schemas: timers first, then '
+    'queues via delete_queue_v1 (with their traces, retention history and stream state), '
+    'then the orphan stream state reachable through the query FK, then every '
+    'tenant-carrying table no cascade reaches — including queen_streams.queries and '
+    'queen_streams.quota. Bounded per call — loop until {"done": true}. Wipe order: '
+    'queen_proxy.set_tenant_status(deleting) -> queen.delete_tenant_data_v1 -> '
+    'queen_proxy.delete_tenant.';
 
 -- Same grant as queen.delete_queue_v1 (013_analytics.sql), and the same
 -- reasoning: the broker connects as one role, so PUBLIC here is not a wider

@@ -35,11 +35,20 @@ fn unwrap_stream_result(txt: &str) -> serde_json::Value {
 }
 
 // POST /streams/v1/queries — idempotent query registration
-// (queen.streams_register_query_v1, unchanged SP). Body:
+// (queen.streams_register_query_v1). Body:
 //   {name, source_queue, sink_queue?, config_hash, reset?}
 // On success:false (config_hash mismatch without reset) → 409 so the SDK's
 // registerQuery surfaces the reset:true hint; else 200 with the inner result.
-pub async fn handle_streams_register(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
+//
+// Track B (§5): the request tenant scopes the name — query names are unique PER
+// TENANT (002_streams_schema) — and selects the grant row a FRESH registration
+// is checked against. A grant/quota refusal comes back as "denied":true and maps
+// to 403, see below.
+pub async fn handle_streams_register(
+    State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
+    body: Bytes,
+) -> Response {
     let mut root: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),
@@ -65,13 +74,28 @@ pub async fn handle_streams_register(State(st): State<Arc<AppState>>, body: Byte
         Ok(c) => c,
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
-    match db::streams_register(&client, &requests).await {
+    match db::streams_register(&client, &requests, tenant.as_str()).await {
         Ok(txt) => {
             let result = unwrap_stream_result(&txt);
             let ok = result.get("success").and_then(|x| x.as_bool()).unwrap_or(true);
-            // Any success:false out of register here is a config_hash mismatch
-            // (missing-field cases are rejected above) → 409, matching the C++ route.
-            let status = if ok { StatusCode::OK } else { StatusCode::CONFLICT };
+            // TWO failure classes, and they must not be conflated — a client
+            // retrying a 409 with reset:true is doing the right thing, and doing
+            // it against a 403 forever is not:
+            //   * "denied":true → the tenant has no streams grant, or is at its
+            //     max_queries cap (008's fresh-insert gate). 403: nothing the
+            //     caller can change in the request fixes it. Never raised for
+            //     the default tenant, so an OSS broker can only ever see 409.
+            //   * anything else with success:false → config_hash mismatch
+            //     (missing-field cases are rejected above) → 409, matching the
+            //     C++ route.
+            let denied = result.get("denied").and_then(|x| x.as_bool()).unwrap_or(false);
+            let status = if ok {
+                StatusCode::OK
+            } else if denied {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::CONFLICT
+            };
             json(status, result.to_string())
         }
         Err(e) => json(
@@ -82,14 +106,30 @@ pub async fn handle_streams_register(State(st): State<Arc<AppState>>, body: Byte
 }
 
 // POST /streams/v1/state/get — read state rows for one (query_id, partition_id)
-// (queen.streams_state_get_v1, unchanged SP). Read-only; keys defaults to [].
+// (queen.streams_state_get_v1). Read-only; keys defaults to [].
 // Body: {query_id, partition_id, keys?, key_prefix?, ripe_at_or_before?}. Returns
 // the inner result object {success, rows}.
-pub async fn handle_streams_state_get(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
+//
+// Track B (§5): BOTH addresses in that body are raw uuids off the wire, so both
+// are gated — the partition by the ownership pre-gate below, the query by the
+// SP's own EXISTS predicate (009), which is the authoritative backstop.
+pub async fn handle_streams_state_get(
+    State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
+    body: Bytes,
+) -> Response {
     let mut root: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),
     };
+    // Captured before the body is consumed by the requests array below; empty
+    // when absent, which the gate treats as not-owned and the SP would reject
+    // anyway ("query_id and partition_id are required").
+    let partition_id = root
+        .get("partition_id")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     if let Some(obj) = root.as_object_mut() {
         obj.insert("idx".to_string(), serde_json::json!(0));
         // Default keys:[] so the SP's COALESCE(r->'keys',...) always has a value.
@@ -103,7 +143,26 @@ pub async fn handle_streams_state_get(State(st): State<Arc<AppState>>, body: Byt
         Ok(c) => c,
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
-    match db::streams_state_get(&client, &requests).await {
+
+    // Track B (§5) OWNERSHIP GATE on the pid, same posture as the pid-addressed
+    // routes in messages.rs: a foreign partition gets the SAME 404 a missing one
+    // gets, so this endpoint cannot be probed for another tenant's partitions.
+    // No-op (no DB round trip) with tenancy off, and a cache hit skips it too;
+    // the SP's own query-ownership predicate is the authoritative backstop, this
+    // is the cheap fast path in front of it.
+    //
+    // An ABSENT partition_id skips the gate deliberately: there is nothing to
+    // own, and turning a malformed body into a 404 would replace the SP's
+    // "query_id and partition_id are required" 400 with a message that tells the
+    // caller nothing. (Unlike the cycle route, this handler has no earlier
+    // required-field check to lean on.)
+    if !partition_id.is_empty()
+        && !st.tenant_owns_partition(&client, &partition_id, tenant.as_str()).await
+    {
+        return json(StatusCode::NOT_FOUND, "{\"error\":\"not found\"}".to_string());
+    }
+
+    match db::streams_state_get(&client, &requests, tenant.as_str()).await {
         Ok(txt) => {
             // RUSTFIX item 25: mirror state_get.cpp:96-101 — 400 when the inner
             // result has success:false, 500 on an embedded error, else 200.
@@ -156,7 +215,16 @@ pub async fn handle_streams_state_get(State(st): State<Arc<AppState>>, body: Byt
 // no push/ack fast path runs it for us; skipping it strands sink emits until the
 // 30s reseed floor. This is the log-engine form of the retired rows-era
 // streams cycle's inline update_partition_lookup_v1.
-pub async fn handle_streams_cycle(State(st): State<Arc<AppState>>, body: Bytes) -> Response {
+//
+// Track B (§5): the request tenant scopes everything this handler and the SP
+// touch — the source partition (ownership gate before the SP call), the query
+// and every sink queue (SP-side), the encryption lookup, the metric attribution
+// and the hot-list ring keys below.
+pub async fn handle_streams_cycle(
+    State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
+    body: Bytes,
+) -> Response {
     let root: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),
@@ -240,14 +308,19 @@ pub async fn handle_streams_cycle(State(st): State<Arc<AppState>>, body: Bytes) 
 
     // RUSTFIX item 8: encrypt sink-push payloads for encryption-enabled queues
     // (warn + plaintext on failure — never fail the cycle).
-    // Track B (§5): streams stay plan-gated / dedicated-only in v1 (their name
-    // surfaces are scoped in a later pass), so the encryption flag is resolved on
-    // the default tenant here — the only tenant a dedicated streams cell serves.
+    // Track B (§5): the sink queue name is resolved PER TENANT (queue identity is
+    // (tenant_id, name)), so the encryption flag must be looked up on the request
+    // tenant — reading the default tenant's same-named queue would encrypt, or
+    // fail to encrypt, according to somebody else's configuration.
+    //
+    // NB this runs BEFORE the pool checkout and therefore before the ownership
+    // gate: a cycle addressed at a foreign partition pays the packing cost and
+    // then 404s. Accepted — packing is CPU on data the caller supplied, it
+    // touches no other tenant's rows, and moving the gate first would mean
+    // taking a connection before knowing there is anything to send.
     if st.encryption.is_enabled() {
         for (queue, _partition, frames) in groups.iter_mut() {
-            if frames.is_empty()
-                || !st.encryption_enabled_for(queue, crate::config::DEFAULT_TENANT).await
-            {
+            if frames.is_empty() || !st.encryption_enabled_for(queue, tenant.as_str()).await {
                 continue;
             }
             for f in frames.iter_mut() {
@@ -350,7 +423,19 @@ pub async fn handle_streams_cycle(State(st): State<Arc<AppState>>, body: Bytes) 
         Ok(c) => c,
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
     };
-    match db::streams_cycle(&client, &requests).await {
+
+    // Track B (§5) OWNERSHIP GATE on the SOURCE partition, after the checkout so
+    // it can use this connection, and after the admission slot so the ordering
+    // contract (slot BEFORE pool, admission.rs) is untouched. Same posture as the
+    // pid-addressed routes in messages.rs: a foreign pid gets the SAME 404 a
+    // missing one gets, never a 403 that would confirm it exists. The SP's own
+    // source/query/sink predicates are the authoritative backstop — this gate is
+    // the cached fast path that keeps a foreign cycle from reaching the SP at all.
+    if !st.tenant_owns_partition(&client, &partition_id, tenant.as_str()).await {
+        return json(StatusCode::NOT_FOUND, "{\"error\":\"not found\"}".to_string());
+    }
+
+    match db::streams_cycle(&client, &requests, tenant.as_str()).await {
         Ok(txt) => {
             let result = unwrap_stream_result(&txt);
             // 19-wildcard-hotlist §2/§7 (streams cycle): like the transaction wire —
@@ -386,11 +471,12 @@ pub async fn handle_streams_cycle(State(st): State<Arc<AppState>>, body: Bytes) 
                 // count. NOT gated on st.hotlist.enabled() — metrics are orthogonal
                 // to discoverability, so this sits ABOVE that if/else.
                 //
-                // Tenant is DEFAULT_TENANT, exactly as in the encryption lookup
-                // above and for the same reason: streams are plan-gated /
-                // dedicated-cell only in v1 (§5), so the default tenant is the only
-                // one a streams cell serves.
-                let mtenant = crate::config::DEFAULT_TENANT;
+                // Attributed to the REQUEST tenant, exactly as in the encryption
+                // lookup above and for the same reason (§5): per-queue metrics are
+                // keyed by (tenant, queue), and queue names are per-tenant — books
+                // kept against the default tenant would merge two tenants' traffic
+                // on any shared queue name and bill the wrong one.
+                let mtenant = tenant.as_str();
 
                 // Sink pushes. One push_request per DISTINCT sink queue plus its
                 // frame count as push_messages — handle_push's per_q rollup, which
@@ -458,14 +544,13 @@ pub async fn handle_streams_cycle(State(st): State<Arc<AppState>>, body: Bytes) 
                     // low-frequency path with no separate notify, so it must do the
                     // local wake itself. Also queues the coalesced mesh dirty hint,
                     // so peers discover sink emits too.
-                    // Track B (§5): streams stay dedicated-only in v1, so the ring key
-                    // is built on the default tenant — the same tenant the encryption
-                    // lookup above resolves against.
+                    // Track B (§5): the ring key is (tenant, queue) — the same tenant
+                    // the encryption lookup and the SP's sink resolve used. Marking
+                    // the default tenant's key would advertise this emit to consumers
+                    // of a DIFFERENT tenant's same-named queue, and leave the real
+                    // one invisible until the reseed floor.
                     for (q, p, n) in &sink_marks {
-                        let qkey = crate::handlers::tenant_queue_key(
-                            crate::config::DEFAULT_TENANT,
-                            q,
-                        );
+                        let qkey = crate::handlers::tenant_queue_key(tenant.as_str(), q);
                         st.hotlist.mark_local(&qkey, p, *n, now_ms);
                     }
                     // §7 promote-on-ack: the cycle's ack released the source lease
@@ -493,10 +578,7 @@ pub async fn handle_streams_cycle(State(st): State<Arc<AppState>>, body: Bytes) 
                                 consumer_group.as_str()
                             };
                             st.hotlist.promote_ack(
-                                &crate::handlers::tenant_queue_key(
-                                    crate::config::DEFAULT_TENANT,
-                                    sq,
-                                ),
+                                &crate::handlers::tenant_queue_key(tenant.as_str(), sq),
                                 group,
                                 &partition_id,
                                 now_ms,
@@ -511,13 +593,7 @@ pub async fn handle_streams_cycle(State(st): State<Arc<AppState>>, body: Bytes) 
                     let keys: Vec<(String, String)> = sink_marks
                         .iter()
                         .map(|(q, p, _)| {
-                            (
-                                crate::handlers::tenant_queue_key(
-                                    crate::config::DEFAULT_TENANT,
-                                    q,
-                                ),
-                                p.clone(),
-                            )
+                            (crate::handlers::tenant_queue_key(tenant.as_str(), q), p.clone())
                         })
                         .collect();
                     st.notifier.notify_pushed_batch(&keys);

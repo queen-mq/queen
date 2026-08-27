@@ -19,6 +19,7 @@ verifiedBy:
   - test/runners/tenancy/tenancy-check.sh
   - proxy/scripts/isolation-smoke.sh
   - test/run.sh
+  - server/tests/streams_tenant_isolation.rs
 ---
 
 Tenant isolation in Queen is split across two processes on purpose. The broker scopes
@@ -46,17 +47,19 @@ another tenant's same-named queue) is structurally unrepresentable, not merely
 guarded against. The retention work list, the analytics readers and the ownership gate
 below all join by id.
 
-Forty of the broker's sixty registered handlers resolve a tenant from the request and
-thread it into the SQL name-resolution functions. That covers the whole queue-shaped
+Forty-three of the broker's sixty registered handlers resolve a tenant from the request
+and thread it into the SQL name-resolution functions. That covers the whole queue-shaped
 surface: push, pop, ack, transactions, configure, seeks, subscriptions, queue and
 namespace listings, per-queue analytics, consumer groups, message and DLQ reads, trace
-reads. The [route table in the reference](/reference) marks each one.
+reads, and the three streams routes (registration, state reads and the cycle). The
+[route table in the reference](/reference) marks each one.
 
 ## The ownership gate
 
 Some operations do not name a queue. They name a **partition id** (an ack, a message
-read, a message delete, a trace lookup), and the stored procedures behind them address
-rows by partition UUID alone, carrying no tenant. Scoping by name cannot help there.
+read, a message delete, a trace lookup, a stream state read, a stream cycle), and the
+stored procedures behind them address rows by partition UUID alone. Scoping by name
+cannot help there.
 
 So the handler checks ownership first, before the procedure runs:
 
@@ -125,9 +128,8 @@ as a set of holes.
 | `GET /metrics/prometheus` | Per-queue series labelled by queue name with **no tenant label** |
 | `POST /api/v1/system/maintenance` | A switch that changes the behaviour of the whole cell |
 | `/internal/*` | The broker-to-broker surface |
-| `/streams/v1/*` | Stream definitions and state, resolved against the **default tenant** |
 
-Two of those deserve the detail.
+One of those deserves the detail.
 
 ### Prometheus sums across tenants
 
@@ -141,21 +143,45 @@ It is also classified `public` by the broker's own access-level table, so enabli
 does not close it. Restrict it at the network layer and scrape it from the operator
 side only. Never proxy it to a tenant.
 
-### Streams resolve the default tenant
+## Streams are tenant-scoped
 
-The stream handlers are written for a dedicated cell: the encryption lookup, the
-per-queue metrics attribution and the hot-list keys inside the stream cycle all use the
-default tenant constant, not the request's tenant. On top of that,
-`queen_streams.queries` and `queen_streams.state` are granted to `PUBLIC` at the
-database level, and nothing purges stream state.
+The streaming engine used to be the one name-addressed surface the tenant header did
+not reach: query names were global, the cycle resolved its sink queues on the default
+tenant, and stream state answered to anyone holding the right UUIDs. All of that is
+gone, and the family now carries the same guarantees as the queue surface:
 
-<Aside type="danger">
-Do not enable the `streams` feature for a cluster that shares a cell. Its stream
-definitions and stream state land in the default tenant's namespace, alongside every
-other streams-enabled cluster on the same cell. The seeded `pro` plan has
-`cell_class = shared` **and** `features.streams = true`; if you use that plan as shipped
-on a shared cell, that is the configuration this warning is about. Either place
-streams-enabled clusters on dedicated cells, or clear the feature.
+- **A query belongs to one tenant.** `queen_streams.queries` carries a `tenant_id` and
+  its `name` is unique per tenant, so two tenants can both register
+  `orders.per_customer_per_min` and neither can observe, update or reset the other's.
+  The 409 a `config_hash` conflict returns can only ever name the caller's own query.
+- **State reads and cycles pass the ownership gate.** Both routes address a partition
+  by raw UUID, so they take the same pre-gate as acks and message reads (a foreign
+  partition gets the same 404 a missing one gets), and the stored procedures check the
+  query's owner again before touching a state row. A foreign `query_id` reads as empty
+  rows, never as an error that would confirm it exists.
+- **Sink emits stay home.** Every sink queue the cycle resolves or lazily creates is
+  the caller's own: auto-created queues are stamped with the request tenant, exactly
+  like push auto-create.
+- **Registration is granted, not assumed.** With tenancy on, a tenant registers a new
+  query only if the cell database holds an enabled `queen_streams.quota` row for it,
+  and `max_queries` (when set) is an exact cap. Absence is a denial, the same posture
+  as the KV grant: provisioning a streams-enabled tenant means writing that row.
+  Re-registering an existing query is never gate-checked, so revoking the grant stops
+  new queries without stranding a Runner that is still draining.
+- **The tenant wipe covers it.** `queen.delete_tenant_data_v1` purges the tenant's
+  queries, its quota row and its state, and every state row is attributable through
+  the query foreign key even after its partition is gone.
+
+The default tenant is exempt from the grant and the cap, which is what keeps a
+single-tenant broker with tenancy off byte-identical to the pre-tenancy engine.
+
+<Aside type="caution">
+The scoping lives in the current broker. On a shared cell, enable the `streams`
+feature only once every broker in the cell runs a version that scopes streams: during
+a mixed-version window an older broker resolves the family on the default tenant,
+which is the pre-tenancy behaviour, not a crash, but it is not isolation either. And a
+tenant on a plan with `features.streams = true` still needs its `queen_streams.quota`
+row on the cell database, or every new registration answers 403.
 </Aside>
 
 ## Where the proxy is the boundary
@@ -213,6 +239,14 @@ blocked operator surfaces, the storage quota and the meters. Under shadow mode t
 three enforcement checks are reported as counted skips and never as silent passes,
 so the printed tally means the same thing whether `QUEEN_PROXY_ENFORCE` is on or
 off.
+
+`server/tests/streams_tenant_isolation.rs` plays the same adversarial shape against
+the streaming engine specifically: two tenants and the default tenant all holding the
+same query name and the same sink queue name, on one booted broker. It asserts both
+halves of every claim in the streams section above, denial for the foreigner and no
+side effect for the owner, including that a cycle aimed at a foreign shard writes
+nothing and that a sink emit touches only the caller's same-named queue. It runs
+`--ignored` against a disposable PostgreSQL, like the other `server/tests` suites.
 
 A third gate covers the case nobody thinks to test: the tenancy flag changing
 behaviour for a client that sends no header at all. `test/run.sh` runs each of its

@@ -2036,27 +2036,33 @@ pub async fn seg_seek_partition(
 // streams routes. `requests_json` is that already-built one-element array.
 
 // POST /streams/v1/queries -> queen.streams_register_query_v1
-// (008_streams_register_query_v1, unchanged from the seg era).
-// Returns the SP result array JSON as text.
+// (008_streams_register_query_v1).
+// Track B (§5): `tenant` scopes the name lookup/upsert and selects the grant
+// row; the default tenant skips the grant entirely, so an OSS broker is
+// byte-identical. Returns the SP result array JSON as text.
 pub async fn streams_register(
     client: &deadpool_postgres::Client,
     requests_json: &str,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
-    // $1::text::jsonb pins $1 to TEXT so a &str binds.
-    let stmt = "SELECT (queen.streams_register_query_v1($1::text::jsonb))::text";
-    let row = client.query_one(stmt, &[&requests_json]).await?;
+    // $1::text::jsonb pins $1 to TEXT so a &str binds; $2::text::uuid is the
+    // house pattern for every uuid argument (no `uuid` crate in the wire).
+    let stmt = "SELECT (queen.streams_register_query_v1($1::text::jsonb, $2::text::uuid))::text";
+    let row = client.query_one(stmt, &[&requests_json, &tenant]).await?;
     Ok(row.get(0))
 }
 
 // POST /streams/v1/state/get -> queen.streams_state_get_v1
-// (009_streams_state_get_v1, unchanged from the seg era).
-// Read-only. Returns the SP result array JSON as text.
+// (009_streams_state_get_v1).
+// Read-only. Track B (§5): `tenant` becomes the SP's ownership predicate on the
+// query, so a foreign query_id reads as an empty result set.
 pub async fn streams_state_get(
     client: &deadpool_postgres::Client,
     requests_json: &str,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
-    let stmt = "SELECT (queen.streams_state_get_v1($1::text::jsonb))::text";
-    let row = client.query_one(stmt, &[&requests_json]).await?;
+    let stmt = "SELECT (queen.streams_state_get_v1($1::text::jsonb, $2::text::uuid))::text";
+    let row = client.query_one(stmt, &[&requests_json, &tenant]).await?;
     Ok(row.get(0))
 }
 
@@ -2065,15 +2071,18 @@ pub async fn streams_state_get(
 // broker-packed (metas + base64 zstd blob). Returns the SP result array JSON as
 // text: [{idx, result:{success, query_id, partition_id, queueName,
 // state_ops_applied, push_results, ack_result}}].
+// Track B (§5): `tenant` scopes the source partition, the query, and every sink
+// queue resolve/auto-create inside the SP.
 pub async fn streams_cycle(
     client: &deadpool_postgres::Client,
     requests_json: &str,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let stmt = client
-        .prepare_cached("SELECT (queen.log_streams_cycle_v1($1::text::jsonb))::text")
+        .prepare_cached("SELECT (queen.log_streams_cycle_v1($1::text::jsonb, $2::text::uuid))::text")
         .await?;
     let t0 = std::time::Instant::now();
-    let row = client.query_one(&stmt, &[&requests_json]).await?;
+    let row = client.query_one(&stmt, &[&requests_json, &tenant]).await?;
     crate::admission::note_commit(crate::admission::Lane::Push, t0.elapsed());
     Ok(row.get(0))
 }

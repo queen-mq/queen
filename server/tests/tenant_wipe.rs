@@ -16,13 +16,18 @@
 //! What each section pins:
 //!
 //!   1. **The table list is checked against the catalog, not against a document.** The
-//!      first assertion enumerates `pg_attribute` for every `queen` table carrying
-//!      `tenant_id` and pins the set. It is ten tables, and `queen.consumer_watermarks`
-//!      is NOT one of them (its scoping is inherited through the `queen.queues` FK — the
-//!      2026-07-31 queue-identity merge). Any new tenant-carrying table fails here AND
-//!      inside the function's own coverage check, which is the point: the two must be
-//!      updated together.
-//!   2. **A queue-delete loop is not a tenant purge.** Nine of those ten tables are
+//!      first assertion enumerates `pg_attribute` for every `queen` **and
+//!      `queen_streams`** table carrying `tenant_id` and pins the set. It is twelve
+//!      tables — ten in `queen`, plus `queen_streams.queries` and
+//!      `queen_streams.quota` since the 2026-08-27 streams tenancy pass — and
+//!      `queen.consumer_watermarks` is NOT one of them (its scoping is inherited
+//!      through the `queen.queues` FK — the 2026-07-31 queue-identity merge). The probe
+//!      spans BOTH schemas because 031's own coverage check does: a tenant-carrying
+//!      table added to the second schema would otherwise be invisible to the only check
+//!      that keeps the list honest. Any new tenant-carrying table fails here AND inside
+//!      the function's own coverage check, which is the point: the two must be updated
+//!      together.
+//!   2. **A queue-delete loop is not a tenant purge.** Eleven of those twelve tables are
 //!      unreachable from `queen.queues(id)`, and the seed puts a row of the wiped tenant
 //!      in every one of them — including the `consumer_groups_metadata` DISCOVERY row
 //!      (`queue_id IS NULL`) that names no queue at all.
@@ -35,9 +40,33 @@
 //!      `retention_history`, `queen_streams.state`) — and a queue is never deleted
 //!      while its own residue is still there, because the partition ids that attribute
 //!      that residue die with it.
-//!   6. **The second schema.** `queen_streams.state` is payload-derived, keyed by a
-//!      partition id with no FK, and outside every cascade; `queen_streams.queries`
-//!      carries no tenant at all and is the documented residue.
+//!   6. **The second schema, and nothing left in it.** `queen_streams` is outside every
+//!      cascade off `queen.queues(id)` and holds three tables, all three of which the
+//!      purge must empty:
+//!        * `queen_streams.queries` — the registered query metadata. It CARRIES
+//!          `tenant_id` as of 2026-08-27 and its `name` is unique per tenant, so it is
+//!          an ordinary swept table now. The previous revision of this file asserted the
+//!          opposite — that it SURVIVES as "the documented residue", which was true only
+//!          while a query name was globally unique and tenantless. That assertion is
+//!          inverted here, and the sharp form of the new one is the same shape as the KV
+//!          check: **two tenants register the SAME query name, and after the wipe
+//!          exactly the other one's row is left.**
+//!        * `queen_streams.quota` — the per-tenant streams grant. Purged for the reason
+//!          `kv_quota` is: a surviving grant row silently re-authorizes a recycled uuid.
+//!        * `queen_streams.state` — payload-derived aggregate values keyed by a
+//!          partition id with no FK. Reached TWICE, and both passes are pinned: the
+//!          cheap per-queue one in phase 2, and the FK-keyed phase 3a that is the ONLY
+//!          sweep able to see ORPHAN state (rows whose `partition_id` resolves to
+//!          nothing). Phase 3a also has to run BEFORE a single `queries` row is deleted,
+//!          because that delete CASCADEs into state and a cascade obeys no `LIMIT` —
+//!          which is why "no queries row deleted yet" is asserted on the budgeted call,
+//!          not just "the phase name came back right".
+//!   7. **The upgrade window.** The function's BODY and the streaming SHAPE are two
+//!      artifacts installed by two statements, so 031 probes `pg_attribute` /
+//!      `to_regclass` before touching either queen_streams entry. The last section
+//!      downgrades the shape to its pre-tenancy form under the SAME booted broker and
+//!      pins that a purge then completes instead of raising 42703/42P01 mid-wipe.
+//!      Destructive, and therefore LAST.
 //!
 //! ONE test function, for the reason `embedded_smoke.rs` gives: the broker is booted
 //! once, so a single flow drives a single instance.
@@ -60,10 +89,15 @@ const TENANT_B: &str = "bbbbbbbb-0000-4000-8000-0000000000bb";
 /// A third tenant, owned by the trace-budget section alone: it leaves a half-purged queue
 /// behind, and the sections either side of it count A's and B's queues.
 const TENANT_C: &str = "cccccccc-0000-4000-8000-0000000000cc";
+/// A fourth, owned by the ORPHAN stream-state section alone. It has no queue and no
+/// timer on purpose: that is what makes a call fall straight through to phase 3a, where
+/// state rows whose `partition_id` resolves to nothing are the only thing left to find.
+const TENANT_D: &str = "dddddddd-0000-4000-8000-0000000000dd";
 
-/// Every table in schema `queen` that carries a `tenant_id` column, i.e. everything the
-/// purge has to reach by tenant rather than by cascade. Kept in the same order as
-/// `C_TENANT_TABLES` in 031_tenant_purge.sql so a diff between the two reads straight.
+/// Every table in schema `queen` OR `queen_streams` that carries a `tenant_id` column,
+/// i.e. everything the purge has to reach by tenant rather than by cascade. Kept in the
+/// same order as `C_TENANT_TABLES` in 031_tenant_purge.sql so a diff between the two reads
+/// straight.
 const TENANT_TABLES: &[&str] = &[
     "queen.queues",
     "queen.log_timers",
@@ -75,6 +109,12 @@ const TENANT_TABLES: &[&str] = &[
     "queen.kv_usage",
     "queen.ephemeral_queues",
     "queen.ephemeral_quota",
+    // The SECOND schema (002_streams_schema, 2026-08-27). `queries` gained `tenant_id`
+    // and `quota` is new; both are swept in phase 3 exactly like the ten above, and both
+    // are in 031's C_TENANT_TABLES for the same reason they are here — the coverage check
+    // scans both schemas, so omitting them makes every wipe on every cell refuse.
+    "queen_streams.queries",
+    "queen_streams.quota",
 ];
 
 async fn connect(host: &str, port: u16) -> Client {
@@ -130,10 +170,19 @@ async fn purge(c: &Client, tenant: &str, max_queues: i32) -> serde_json::Value {
 /// must cascade through, plus the two tables attributed only by `partition_id`.
 ///
 /// Real writers where a real writer exists (`configure_queue_v1`, `log_push_one_v1`,
-/// `kv_apply_v1`, `eph_config_set_v1`) and a direct INSERT where the only writer is the
-/// live engine — the same split `timers_support` makes, and for the same reason: this
-/// file is about the DELETE path, so the seed must depend on the schema, not on how many
-/// SPs it takes to reach a given row.
+/// `kv_apply_v1`, `eph_config_set_v1`, and now `streams_register_query_v1` +
+/// `log_streams_cycle_v1`) and a direct INSERT where the only writer is the live engine —
+/// the same split `timers_support` makes, and for the same reason: this file is about the
+/// DELETE path, so the seed must depend on the schema, not on how many SPs it takes to
+/// reach a given row.
+///
+/// The streaming rows are the one place that split is worth stating. They go through the
+/// real SPs deliberately: `queen_streams.queries.tenant_id` is stamped by the register
+/// path and `queen_streams.state` is attributed only through that row's FK, so a
+/// hand-written INSERT here would be the test asserting its OWN idea of who owns what
+/// instead of the engine's. Both tenants register the SAME query name (`sv-shared`) for
+/// the reason the rest of the fixture shares every name: per-tenant uniqueness means
+/// nothing unless something actually collides.
 async fn seed(c: &Client, tenant: &str, tag: &str) {
     for (queue, opts) in
         [("orders", r#"{"namespace":"shop","task":"pay"}"#), ("audit", "{}")]
@@ -157,7 +206,7 @@ async fn seed(c: &Client, tenant: &str, tag: &str) {
     c.batch_execute(&format!(
         r#"
         DO $seed$
-        DECLARE v_q1 UUID; v_pid UUID;
+        DECLARE v_q1 UUID; v_pid UUID; v_qid UUID; v_res JSONB;
         BEGIN
             SELECT id INTO v_q1 FROM queen.queues
              WHERE tenant_id = '{t}'::uuid AND name = 'orders';
@@ -228,16 +277,47 @@ async fn seed(c: &Client, tenant: &str, tag: &str) {
             INSERT INTO queen.retention_history(partition_id, messages_deleted, retention_type)
                 VALUES (v_pid, 4, 'ttl');
 
-            -- The streaming schema. `queries` is globally named (its `name` is UNIQUE
-            -- across the database and carries no tenant), so the two tenants get
-            -- different query names; `state` is per-partition and IS attributable, and
-            -- is what the purge must reach.
-            INSERT INTO queen_streams.queries(name, source_queue, config_hash)
-                VALUES ('sv-{g}', 'orders', 'h0') ON CONFLICT (name) DO NOTHING;
-            INSERT INTO queen_streams.state(query_id, partition_id, key, value)
-                SELECT id, v_pid, 'customer-42', '{{"total": 999}}'::jsonb
-                  FROM queen_streams.queries WHERE name = 'sv-{g}'
-                ON CONFLICT DO NOTHING;
+            -- The streaming schema, all three tables, written by the engine itself.
+            --
+            -- THE GRANT FIRST. With tenancy on, a non-default tenant with no
+            -- queen_streams.quota row cannot register anything at all (008's
+            -- fresh-insert gate answers denied), so this row is both a
+            -- precondition of the fixture and one of the things the purge must remove.
+            INSERT INTO queen_streams.quota(tenant_id, enabled, max_queries)
+                VALUES ('{t}'::uuid, true, NULL) ON CONFLICT (tenant_id) DO NOTHING;
+
+            -- The SAME name under both tenants. Uniqueness is (tenant_id, name) since
+            -- 002_streams_schema's queries_tenant_name_uk replaced the global UNIQUE, so
+            -- this is the collision that used to be impossible — and the one that makes
+            -- "the wipe took the right row" mean something.
+            SELECT (queen.streams_register_query_v1(
+                        jsonb_build_array(jsonb_build_object(
+                            'idx',          0,
+                            'name',         'sv-shared',
+                            'source_queue', 'orders',
+                            'config_hash',  'h-{g}')),
+                        '{t}'::uuid))->0->'result' INTO v_res;
+            IF COALESCE((v_res->>'success')::boolean, false) IS NOT TRUE THEN
+                RAISE EXCEPTION 'seed {g}: streams_register_query_v1 refused: %', v_res;
+            END IF;
+            v_qid := (v_res->>'query_id')::uuid;
+
+            -- State through the real cycle SP (idle-flush shape: state ops only, no ack
+            -- and no sink), so the row is keyed by the partition the engine would key it
+            -- by and owned through the query the engine stamped.
+            SELECT (queen.log_streams_cycle_v1(
+                        jsonb_build_array(jsonb_build_object(
+                            'idx',          0,
+                            'query_id',     v_qid::text,
+                            'partition_id', v_pid::text,
+                            'state_ops',    jsonb_build_array(jsonb_build_object(
+                                'type',  'upsert',
+                                'key',   'customer-42',
+                                'value', jsonb_build_object('total', 999, 'tag', '{g}'))))),
+                        '{t}'::uuid))->0->'result' INTO v_res;
+            IF COALESCE((v_res->>'success')::boolean, false) IS NOT TRUE THEN
+                RAISE EXCEPTION 'seed {g}: log_streams_cycle_v1 refused: %', v_res;
+            END IF;
         END;
         $seed$;
         "#,
@@ -283,7 +363,7 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
     // tests own the throwaway Postgres they are pointed at, which is what makes a blanket
     // clear acceptable — and DELETE, not TRUNCATE, because TRUNCATE takes ACCESS
     // EXCLUSIVE (the lock class the KV/timer tables set vacuum_truncate=off to avoid).
-    for t in [TENANT_A, TENANT_B, TENANT_C] {
+    for t in [TENANT_A, TENANT_B, TENANT_C, TENANT_D] {
         c.execute("SELECT queen.delete_tenant_data_v1($1::text::uuid, 1000, 1000000)", &[&t])
             .await
             .expect("pre-clean");
@@ -292,19 +372,24 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
     // ========================================================================
     section("the tenant-carrying table list is what the catalog says it is");
     // FINDINGS §2 lists eleven tables and includes queen.consumer_watermarks. The catalog
-    // says ten and excludes it: watermarks are keyed by queue_id and inherit their
-    // scoping through the FK (schema.sql, 2026-07-31 queue-identity merge). A purge
+    // says ten in `queen` and excludes it: watermarks are keyed by queue_id and inherit
+    // their scoping through the FK (schema.sql, 2026-07-31 queue-identity merge). A purge
     // statement written against a column that does not exist would fail at schema-apply
     // time, i.e. at every broker boot — so this is pinned here rather than discovered
     // there.
+    //
+    // BOTH SCHEMAS, matching 031's own coverage check verbatim. queen_streams.queries
+    // gained tenant_id and queen_streams.quota is new (002_streams_schema, 2026-08-27); a
+    // probe scoped to nspname = 'queen' would have reported the set UNCHANGED across that
+    // change, which is precisely the blind spot the check exists to close.
     // ========================================================================
     let rows = c
         .query(
-            "SELECT 'queen.' || cl.relname
+            "SELECT n.nspname || '.' || cl.relname
                FROM pg_attribute a
                JOIN pg_class     cl ON cl.oid = a.attrelid
                JOIN pg_namespace n  ON n.oid = cl.relnamespace
-              WHERE n.nspname = 'queen' AND cl.relkind = 'r'
+              WHERE n.nspname IN ('queen', 'queen_streams') AND cl.relkind = 'r'
                 AND a.attname = 'tenant_id' AND a.attnum > 0 AND NOT a.attisdropped
               ORDER BY 1",
             &[],
@@ -367,8 +452,9 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
     assert_eq!(res["phase"], serde_json::json!("complete"));
     assert_eq!(res["queues"]["deleted"], serde_json::json!(2));
     assert_eq!(res["queues"]["remaining"], serde_json::json!(0));
-    // The nine non-queue-scoped tables each reported work. This is the assertion that
-    // fails if someone "simplifies" the function into a queue-delete loop.
+    // The eleven non-queue-scoped tables each reported work — including the two in
+    // `queen_streams`, which no cascade off queen.queues(id) can reach at all. This is the
+    // assertion that fails if someone "simplifies" the function into a queue-delete loop.
     for t in TENANT_TABLES.iter().filter(|t| **t != "queen.queues") {
         assert!(
             res["rows"][*t].as_i64().unwrap_or(0) > 0,
@@ -381,18 +467,52 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
         res["rows"]["queen_streams.state"].as_i64().unwrap_or(0) > 0,
         "the streaming schema is outside every cascade; the purge must reach it: {res}"
     );
+    // A COMPLETED purge always carries a key for every table it swept, whether or not it
+    // found anything — so a caller summing `rows` across a loop never has to special-case
+    // a missing key, and an operator reading two results never has to wonder whether an
+    // absent key means "zero" or "not attempted". The three streaming ones are named
+    // explicitly because two of them are new and the third moved phase.
+    for k in ["queen_streams.state", "queen_streams.queries", "queen_streams.quota"] {
+        assert!(
+            res["rows"].get(k).is_some(),
+            "a completed purge must report a `rows` key for {k}: {res}"
+        );
+    }
 
-    // The DOCUMENTED residue, asserted so it stays a decision rather than a surprise:
-    // queen_streams.queries carries no tenant and its name is globally unique, so it
-    // cannot be scoped to one tenant at all. It holds a name, two queue names and a
-    // config hash — no payload-derived data — and dropping a query is the streaming
-    // application's own operation.
-    let queries_left: i64 =
-        count(&c, "SELECT count(*) FROM queen_streams.queries WHERE name = 'sv-A'", &[]).await;
+    // THE INVERSION. Until 2026-08-27 this asserted the opposite — that
+    // queen_streams.queries SURVIVES, as "the documented residue" — and that was correct
+    // only while a query name was globally unique and the row carried no tenant at all.
+    // It carries one now, so a surviving row is not residue, it is customer data left
+    // behind by a GDPR erasure.
+    //
+    // Both tenants registered the SAME name, so this is the streaming twin of the KV
+    // check below: only the tenant column separates the two rows, and exactly one of them
+    // must be gone.
+    let sv_rows = c
+        .query(
+            "SELECT tenant_id::text FROM queen_streams.queries WHERE name = 'sv-shared'",
+            &[],
+        )
+        .await
+        .expect("sv-shared rows");
+    let owners: Vec<String> = sv_rows.iter().map(|r| r.get::<_, String>(0)).collect();
     assert_eq!(
-        queries_left, 1,
-        "queen_streams.queries is the documented residue (031's header); if this changed, \
-         the header must change with it"
+        owners,
+        vec![TENANT_B.to_string()],
+        "exactly one 'sv-shared' row must be left and it must be B's — A's is customer \
+         data, not residue, and the two are told apart by nothing but tenant_id"
+    );
+    // The grant row is the other half, and it is purged for the same reason kv_quota is:
+    // a surviving grant silently re-authorizes the uuid if it is ever recycled.
+    assert_eq!(
+        tenant_rows(&c, "queen_streams.quota", TENANT_A).await,
+        0,
+        "A's streams grant row survived the wipe"
+    );
+    assert_eq!(
+        tenant_rows(&c, "queen_streams.quota", TENANT_B).await,
+        1,
+        "B's streams grant row was taken with A's"
     );
 
     // ========================================================================
@@ -403,8 +523,10 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
     }
 
     // ...and in everything reachable only through A's queue and partition ids, including
-    // the four FK-less tables that a cascade cannot touch and that would otherwise be
-    // left as orphans no query could ever attribute again.
+    // the four FK-less tables that a cascade cannot touch and that would otherwise be left
+    // as orphans no query could ever attribute again. `queen_streams.state` rides along in
+    // that list but is no longer one of those four: it stays attributable through its
+    // query FK, which is what phase 3a exists to use.
     for (label, n) in queue_scoped_counts(&c, &a_ids, &a_parts).await {
         assert_eq!(n, 0, "{label} still holds rows for A's queues");
     }
@@ -653,6 +775,150 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
     assert_eq!(tenant_rows(&c, "queen.kv", TENANT_A).await, 0, "the sweep drained");
 
     // ========================================================================
+    section("phase 3a: ORPHAN stream state, bounded, and BEFORE any queries row dies");
+    // The fourth return path, and the only sweep that can see this class of row at all.
+    //
+    // queen_streams.state is keyed by a partition id with NO foreign key (002 declines it
+    // on purpose), so a routine queue delete — or a pre-2026-08-27 cycle that accepted a
+    // bogus partition uuid — leaves rows whose partition_id resolves to NOTHING. Phase
+    // 2's pass is keyed BY partition and structurally cannot reach them. Phase 3a is
+    // keyed through the `query_id` FK, which is what makes every state row attributable
+    // no matter what happened to its partition — the exact property that retired the old
+    // "once the partitions are gone nothing can attribute this ever again" caveat.
+    //
+    // TENANT_D owns no queue and no timer, so a call falls straight through phases 1 and
+    // 2 and the only thing left to find is the orphan state.
+    //
+    // The bound is asserted as TWO facts, not one, because the phase name alone would
+    // pass with the dangerous implementation: deleting a `queries` row CASCADEs into
+    // state, and a cascade is not bounded by the LIMIT of the statement that triggers it.
+    // Emptying the state FIRST is what keeps that cascade empty — so the assertion that
+    // matters is "not one queries row deleted yet".
+    // ========================================================================
+    c.execute(
+        "INSERT INTO queen_streams.quota(tenant_id, enabled, max_queries)
+             VALUES ($1::text::uuid, true, NULL) ON CONFLICT (tenant_id) DO NOTHING",
+        &[&TENANT_D],
+    )
+    .await
+    .expect("D's streams grant");
+    let d_qid: String = c
+        .query_one(
+            "SELECT ((queen.streams_register_query_v1(
+                          jsonb_build_array(jsonb_build_object(
+                              'idx', 0, 'name', 'sv-orphan',
+                              'source_queue', 'a-queue-that-was-deleted',
+                              'config_hash', 'h0')),
+                          $1::text::uuid))->0->'result'->>'query_id')",
+            &[&TENANT_D],
+        )
+        .await
+        .expect("D's query")
+        .get(0);
+    // Five rows under D's query, each on a partition id that names nothing. Written by
+    // SQL because there is no engine path that produces an orphan on purpose — that is
+    // the whole point of the class.
+    c.execute(
+        "INSERT INTO queen_streams.state(query_id, partition_id, key, value)
+         SELECT $1::text::uuid, gen_random_uuid(), 'orphan-' || g, '{}'::jsonb
+           FROM generate_series(1, 5) g",
+        &[&d_qid],
+    )
+    .await
+    .expect("orphan state");
+    assert_eq!(
+        count(
+            &c,
+            "SELECT count(*) FROM queen_streams.state s
+              WHERE s.query_id = $1::text::uuid
+                AND NOT EXISTS (SELECT 1 FROM queen.log_partitions p
+                                 WHERE p.id = s.partition_id)",
+            &[&d_qid],
+        )
+        .await,
+        5,
+        "the fixture is meaningless unless the state really is unattributable by partition"
+    );
+
+    let row = c
+        .query_one(
+            // no queues, no timers -> phases 1 and 2 are empty and the call lands in 3a
+            "SELECT (queen.delete_tenant_data_v1($1::text::uuid, 100, 2))::text",
+            &[&TENANT_D],
+        )
+        .await
+        .expect("budgeted orphan-state purge");
+    let orphan: serde_json::Value = serde_json::from_str(&row.get::<_, String>(0)).expect("json");
+    assert_eq!(orphan["done"], serde_json::json!(false), "{orphan}");
+    assert_eq!(
+        orphan["phase"],
+        serde_json::json!("streams-state"),
+        "the call must stop in the streams-state phase, not carry on into the sweep: {orphan}"
+    );
+    assert_eq!(
+        orphan["rows"]["queen_streams.state"],
+        serde_json::json!(2),
+        "the FK-keyed state delete must respect p_max_rows: {orphan}"
+    );
+    assert_eq!(
+        tenant_rows(&c, "queen_streams.queries", TENANT_D).await,
+        1,
+        "not one queries row may be deleted while its state is still there: that DELETE \
+         CASCADEs into queen_streams.state, and a cascade obeys no LIMIT — the bounded \
+         call would drag an unbounded state delete into the same transaction"
+    );
+    assert_eq!(
+        tenant_rows(&c, "queen_streams.quota", TENANT_D).await,
+        1,
+        "phase 3a returns BEFORE the generic sweep, so the grant row is untouched too"
+    );
+    assert!(
+        orphan["rows"].get("queen_streams.queries").is_none(),
+        "an early return carries no `rows` key for a table it never reached — the full key \
+         set is a property of a COMPLETED purge, not of every result: {orphan}"
+    );
+
+    // ... and the loop converges on the same tight budget, which is the other half of the
+    // contract: bounded per call, and finished after enough calls.
+    let mut calls = 1;
+    loop {
+        let row = c
+            .query_one(
+                "SELECT (queen.delete_tenant_data_v1($1::text::uuid, 100, 2))::text",
+                &[&TENANT_D],
+            )
+            .await
+            .expect("budgeted orphan-state purge");
+        let r: serde_json::Value = serde_json::from_str(&row.get::<_, String>(0)).expect("json");
+        calls += 1;
+        assert!(calls <= 20, "the state budget did not converge in 20 calls: {r}");
+        if r["done"] == serde_json::json!(true) {
+            for k in ["queen_streams.state", "queen_streams.queries", "queen_streams.quota"] {
+                assert!(r["rows"].get(k).is_some(), "completed purge is missing {k}: {r}");
+            }
+            break;
+        }
+    }
+    assert!(
+        calls > 2,
+        "two rows per call cannot have drained five orphan state rows plus the query and \
+         the grant in {calls} call(s) — the LIMIT is not being applied"
+    );
+    assert_eq!(
+        count(
+            &c,
+            "SELECT count(*) FROM queen_streams.state WHERE query_id = $1::text::uuid",
+            &[&d_qid],
+        )
+        .await,
+        0,
+        "the orphan state the partition-keyed sweep cannot see is still there"
+    );
+    for t in TENANT_TABLES {
+        assert_eq!(tenant_rows(&c, t, TENANT_D).await, 0, "{t} still holds D rows");
+    }
+
+    // ========================================================================
     section("guard: the DEFAULT tenant is refused unless asked for twice");
     // On a single-tenant self-hosted broker the default tenant IS the installation.
     // ========================================================================
@@ -693,9 +959,99 @@ async fn a_tenant_wipe_removes_everything_of_one_tenant_and_nothing_of_another()
     );
     c.batch_execute("DROP TABLE queen.zz_wipe_probe").await.expect("drop probe");
 
+    // The SAME guard in the second schema, which is not a duplicate: the coverage check
+    // has to enumerate `queen` AND `queen_streams` for it to hold, and it was scoped to
+    // `queen` alone until 002 put a tenant_id in queen_streams.queries. A future
+    // tenant-carrying table added over there must be as loud as one added here.
+    c.batch_execute("CREATE TABLE queen_streams.zz_wipe_probe(tenant_id UUID NOT NULL, k TEXT)")
+        .await
+        .expect("streams probe table");
+    let err = c
+        .query_one("SELECT (queen.delete_tenant_data_v1($1::text::uuid))::text", &[&TENANT_A])
+        .await
+        .expect_err("an unknown tenant-carrying table in queen_streams must abort the purge");
+    let msg = db_message(&err);
+    assert!(
+        msg.contains("queen_streams.zz_wipe_probe") && msg.contains("C_TENANT_TABLES"),
+        "the coverage check must scan queen_streams too, and name the table it found, \
+         got: {msg}"
+    );
+    c.batch_execute("DROP TABLE queen_streams.zz_wipe_probe")
+        .await
+        .expect("drop streams probe");
+
     // And the purge works again once the schema is back to something it covers.
     let after = purge(&c, TENANT_A, 100).await;
     assert_eq!(after["done"], serde_json::json!(true), "{after}");
+
+    // ========================================================================
+    section("upgrade window: a body newer than the streaming SHAPE skips, never raises");
+    // LAST, and destructive: it downgrades queen_streams to its pre-tenancy form and
+    // nothing after it could rely on the new one.
+    //
+    // 031's body and 002's shape are two artifacts installed by two statements, and a
+    // cell can hold a newer body than shape — schema apply is per-file and per-statement,
+    // cells running QUEEN_APPLY_SCHEMA=false get their SQL applied BY HAND file by file,
+    // and on a mixed-version HA pair the last boot to apply wins for a function body
+    // while an applied ALTER is never reverted. So the two queen_streams entries in
+    // C_TENANT_TABLES are PROBED (pg_attribute for the column, to_regclass for the
+    // table), not assumed.
+    //
+    // Without those probes the phase-3 sweep issues `DELETE FROM queen_streams.queries
+    // WHERE tenant_id = $1` against a table that has no such column: a 42703 raised MID
+    // WIPE, on the one code path that must not be surprised — and note it would raise on
+    // an EMPTY tenant too, because the column is resolved at plan time, so "there was
+    // nothing to delete" is no protection at all. That is why this section needs no rows
+    // of its own to be meaningful; the surviving legacy row below is the second half,
+    // proving the sweep was SKIPPED rather than merely satisfied.
+    //
+    // This needs no reboot — it mutates the shape under the broker already running — so
+    // it costs the file's one-boot structure nothing.
+    // ========================================================================
+    c.batch_execute(
+        "ALTER TABLE queen_streams.queries DROP COLUMN tenant_id;
+         DROP TABLE queen_streams.quota;",
+    )
+    .await
+    .expect("downgrade queen_streams to its pre-tenancy shape");
+    c.execute(
+        "INSERT INTO queen_streams.queries(name, source_queue, config_hash)
+             VALUES ('sv-legacy', 'orders', 'h0')",
+        &[],
+    )
+    .await
+    .expect("a row in the pre-tenancy shape");
+
+    let row = c
+        .query_one(
+            "SELECT (queen.delete_tenant_data_v1($1::text::uuid, 100, 20000))::text",
+            &[&TENANT_A],
+        )
+        .await
+        .expect(
+            "a purge against the pre-tenancy streaming shape must COMPLETE, not raise \
+             42703/42P01 mid wipe",
+        );
+    let legacy: serde_json::Value = serde_json::from_str(&row.get::<_, String>(0)).expect("json");
+    assert_eq!(legacy["done"], serde_json::json!(true), "{legacy}");
+    assert_eq!(legacy["phase"], serde_json::json!("complete"), "{legacy}");
+    for k in ["queen_streams.queries", "queen_streams.quota"] {
+        assert!(
+            legacy["rows"].get(k).is_none(),
+            "a table the guard skipped must not appear in the audit as though it had been \
+             swept: {legacy}"
+        );
+    }
+    assert_eq!(
+        count(&c, "SELECT count(*) FROM queen_streams.queries WHERE name = 'sv-legacy'", &[]).await,
+        1,
+        "the pre-tenancy row survives — there is no tenant on it to attribute, and 'do the \
+         part that exists' is the same posture the absent-schema guard takes"
+    );
+    // The done-probe loop must skip exactly what the sweep skipped: a probe of a column
+    // the sweep did not touch raises instead of answering, and a probe skipped where the
+    // sweep ran reports `done` over rows still sitting there. `done: true` above is that
+    // assertion — it is reachable only if both loops agree.
 
     println!("\nOK — tenant wipe purges one tenant completely and leaves the other intact.");
 }
@@ -735,8 +1091,9 @@ async fn partition_ids(c: &Client, queue_ids: &[String]) -> Vec<String> {
 }
 
 /// Everything reachable ONLY through a set of queue/partition ids: what the FK cascades
-/// off `queen.queues(id)` own, plus the four FK-less tables nothing cascades to. Returned
-/// as an ordered `(label, count)` list so two snapshots compare directly.
+/// off `queen.queues(id)` own, plus the four FK-less tables nothing cascades to, plus
+/// `queen_streams.state` in the second schema. Returned as an ordered `(label, count)`
+/// list so two snapshots compare directly.
 ///
 /// Every probe binds the ids DIRECTLY rather than joining through `log_partitions` — a
 /// join would report 0 for an orphaned row just as happily as for a deleted one, and
@@ -769,7 +1126,14 @@ async fn queue_scoped_counts(
         // keyed by a partition id with no FK (002_streams_schema declines it on
         // purpose). Missed by the first version of the purge, which was scoped to
         // nspname = 'queen' — the rows survived and their partition_id then joined to
-        // nothing, which is data left behind AND permanently unattributable.
+        // nothing.
+        //
+        // What that leaves behind is no longer UNATTRIBUTABLE, and the difference is the
+        // whole of phase 3a: every state row hangs off a `query_id` whose FK reaches
+        // queen_streams.queries, and that row has carried `tenant_id` since 2026-08-27.
+        // The owner survives the partition. So a missed row here is still data left
+        // behind — it is simply data a later call CAN come back for, which is exactly
+        // what the ORPHAN section above makes it do.
         ("queen_streams.state", "queen_streams.state"),
     ];
 

@@ -27,7 +27,13 @@
 //!      check_msgs(n); POST /configure -> buffer body, retention ceiling +
 //!      registry.admit the created (queue, Default); POST /ephemeral/push ->
 //!      buffer body, check_msgs(messages.len()) and nothing else (no registry,
-//!      no retention: the RAM class creates no rows); Consume wait=true, and
+//!      no retention: the RAM class creates no rows); POST /streams/v1/cycle ->
+//!      ALWAYS buffer body, whole-cycle refusal when the cluster is blocked and
+//!      push_items is non-empty (§9.6), then the sink items answer the PRODUCE
+//!      caps in enforce_produce's own order — per-item payload cap,
+//!      registry.admit each distinct (queue,partition) (the cycle SP creates
+//!      those rows lazily, like push auto-create), check_msgs(sink items);
+//!      Consume wait=true, and
 //!      GET /ephemeral/pop wait=true -> parked_slot RAII guard held across the
 //!      upstream await
 //!   5. forward: rebuild URI on ctx.cell_base_url, strip hop-by-hop headers,
@@ -38,7 +44,9 @@
 //!      debit_deliveries, bytes in/out always; the same push parse feeds the
 //!      sampled §6.10 maintenance signal. The ephemeral push/pop pair meters as
 //!      Push/Delivery like its durable twin (EPHEMERAL_QUEUES.md Q6), off a
-//!      one-number 201 body instead of a status array
+//!      one-number 201 body instead of a status array. The streams cycle keeps
+//!      its reqs-only base sample and adds a SECOND Sample (op Push, reqs 0)
+//!      for the sink items its push_results confirm as `queued`
 //!   7. shadow mode: when !limits.enforcing(), Deny decisions are logged (target
 //!      `limits`, field `would_block`) but the request proceeds
 //!
@@ -281,9 +289,12 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
         }
     }
 
-    // §9.6: a `Mixed` batch is only inspected when something is actually
-    // blocking. On an unblocked cluster — the overwhelming majority — the body
-    // is never buffered and never parsed, exactly like today.
+    // §9.6: a kv/timers `Mixed` batch is only inspected when something is
+    // actually blocking. On an unblocked cluster — the overwhelming majority —
+    // the body is never buffered and never parsed, exactly like today. The
+    // streams cycle is the one `Mixed` route that reads its body either way
+    // (its sink items bill); this verdict is still what decides whether the
+    // cycle is REFUSED, which is why it is computed for the whole class.
     let mixed_block = match class {
         RouteClass::Gated(_, crate::routes::GatedOp::Mixed) => push_block_response(&st, &ctx),
         _ => None,
@@ -295,6 +306,13 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
     //           registry admission, msg bucket. Bytes forwarded verbatim. -----
     let mut produce_n: u64 = 0;
     let mut bytes_in: u64 = 0;
+    // The sink half of a streams cycle, read once on the way in (4b'''' below)
+    // and matched against `push_results` on the way out (step 6). It has to
+    // cross the whole pipeline because the two ends know different halves of
+    // the same fact: the response says which (queue, partition) GROUPS were
+    // written, and only the request knows how many messages each one carried.
+    let mut cycle_sinks = CycleSinks::default();
+    let is_cycle = is_streams_cycle(&parts.method, &path_only);
     let forward_body: Body = if class == RouteClass::Produce {
         // Body-total cap is the instance cap only; the per-item plan cap is
         // enforced per item inside enforce_produce (a batch of many small
@@ -328,9 +346,103 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
             return resp;
         }
         Body::from(buffered)
+    } else if is_cycle {
+        // 4b''''. The streams CYCLE — out of prime order deliberately: it is
+        // `Mixed` like a kv/timers batch (4b'' below), but it has to be matched
+        // BEFORE that arm, for two reasons, and both are load-bearing:
+        //
+        //  - that arm's sniffer (`mixed_batch_grows`) looks for an `operations`
+        //    array and reads a body without one as "does not grow". A cycle
+        //    body is an object with no such array, so the generic arm would
+        //    fail OPEN on every cycle, sink emits included.
+        //  - it buffers only when the cluster is blocked. The cycle must ALWAYS
+        //    buffer: its sink items are messages, and messages have to be
+        //    counted for the msg bucket here and for the meter at step 6,
+        //    blocked or not. That is the `/api/v1/ephemeral/push` precedent
+        //    directly above — a body whose items bill, so a body always read.
+        let buffered = match axum::body::to_bytes(body, st.cfg.max_body_bytes).await {
+            Ok(b) => b,
+            Err(_) => return errors::err_413("request body exceeds cap"),
+        };
+        bytes_in = buffered.len() as u64;
+        // Blocked FIRST, the produce caps after — the order Produce already
+        // gets, where `plan_gates` answers the push blocks at step 3 and the
+        // caps run at step 4. A request we refuse never reaches the broker, so
+        // it must neither debit the message bucket that shapes real traffic nor
+        // register a sink pair the broker will never be asked to create.
+        if let Some(blocked) = mixed_block {
+            if cycle_batch_grows(&buffered) {
+                tracing::info!(
+                    target: "limits", cluster = %ctx.slug, rid, path = %path_only,
+                    "gated batch refused whole: cluster blocked and the batch grows state"
+                );
+                return blocked;
+            }
+            // ...and an ack-/state-only cycle travels on. THE §9.6 point for
+            // this family: a blocked tenant has to keep draining its source, or
+            // the quota that was meant to stop its writes also freezes the
+            // backlog it needs to work through to get back under the quota.
+        }
+        cycle_sinks = count_cycle_push_items(&buffered);
+        // From here the sink half is enforced as PRODUCE, in `enforce_produce`'s
+        // own internal order: per-item size cap (hard), registry admission
+        // (shadow-aware), then the message bucket. A sink emit creates the same
+        // rows and stores the same bytes as a push, so it answers the same caps.
+        //
+        // §9.6 TENSION, acknowledged: a refusal here takes the ack down with the
+        // sink items, and this arm is the one that argued an ack must survive a
+        // storage block. The two are not the same case. A storage block is a
+        // state of the CLUSTER that the request did nothing to cause and can do
+        // nothing about except drain — so refusing its ack would lock the tenant
+        // out of the only exit. These denials are caused by THIS request's own
+        // sink set: an item over the payload cap, or a queue/partition the plan
+        // does not allow. The fix is in the caller's hands, it is the same
+        // answer the same items would get from `/api/v1/push`, and a runner that
+        // crash-loops on a 413 it can read is the honest surfacing. The
+        // alternative — drop the offending sinks, forward the ack — answers 200
+        // to a half-applied request and loses messages silently, which is the
+        // outcome the whole-batch rule exists to prevent.
+        if let Err(resp) =
+            cycle_payload_cap(&cycle_sinks, ctx.limits.max_payload_bytes.map(|p| p.max(0) as usize))
+        {
+            return resp;
+        }
+        // Registry admission for each DISTINCT sink pair. The cycle SP creates
+        // the queue and partition rows lazily in its sink pre-pass
+        // (007_log_streams §2), exactly as push's auto-create does, so the plan's
+        // max_queues / max_partitions_per_queue gate it here through the same
+        // function and with the same 403 `quota_exceeded`. `groups` is already
+        // distinct, which is the whole shape the admission wants.
+        if let Err(resp) = admit_pairs(
+            &st.registry,
+            st.limits.enforcing(),
+            &ctx,
+            cycle_sinks.groups.iter().map(sink_pair),
+            &rid,
+        )
+        .await
+        {
+            return resp;
+        }
+        if cycle_sinks.total > 0 {
+            match st.limits.check_msgs(&ctx, cycle_sinks.total) {
+                Decision::Allow => {}
+                Decision::Deny { retry_after_s, code } => {
+                    if st.limits.enforcing() {
+                        return errors::err_429(code, retry_after_s, "message rate limit exceeded");
+                    }
+                    // shadow deny: canonical would_block log emitted inside check_msgs
+                }
+            }
+        }
+        Body::from(buffered)
     } else if let Some(blocked) = mixed_block {
         // 4b''. A kv/timers batch on a blocked cluster (PLAN_KV_TIMERS.md
-        // §9.6). Both halves of the family arrive in ONE array, so the class
+        // §9.6) — and only those two families: the third `Mixed` route, the
+        // streams cycle, is taken by the arm above before this sniffer can
+        // fail open on a body shape it was never written for.
+        //
+        // Both halves of the family arrive in ONE array, so the class
         // alone cannot decide: a `cancel`-only or read/delete-only batch must
         // get through — it is how the tenant stops a fire and how it gets back
         // under its own quota — while a batch that schedules or writes is
@@ -621,6 +733,63 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
         return finalize(rparts, Body::new(rbody), &rid);
     }
 
+    // Streams cycle: the request's sink items, billed only where the response
+    // confirms the broker wrote them. Entered only when this cycle actually
+    // carried sink groups — an ack-/state-only cycle (the shape a stream that
+    // emits nothing sends all day) has nothing to match and falls through to
+    // the reqs-only arm below without buffering a response at all.
+    if is_cycle && status.is_success() && !cycle_sinks.groups.is_empty() {
+        let (rparts, rbody) = resp.into_parts();
+        let buffered = match axum::body::to_bytes(Body::new(rbody), RESP_BUFFER_CAP).await {
+            Ok(b) => b,
+            Err(_) => {
+                // The same 502 the push/txn/pop arms give a response they
+                // cannot buffer. Not a shape that reaches the cap in practice:
+                // a cycle response carries one `push_results` element per sink
+                // GROUP plus one ack result, never one per message.
+                tracing::warn!(target: "meter", cluster = %ctx.slug, rid, "cycle response too large to buffer");
+                return errors::err_502("cycle response too large");
+            }
+        };
+        let accepted = count_cycle_accepted(&buffered, &cycle_sinks.groups).unwrap_or_else(|| {
+            tracing::warn!(target: "meter", cluster = %ctx.slug, rid, "cycle response parse failed; msgs=0");
+            0
+        });
+        // TWO samples, not one. The base sample is the route's own class
+        // (`op_for` -> reqs-only `Read`, like every other gated surface): the
+        // HTTP request is booked exactly once, there.
+        st.meter.record(Sample {
+            cluster_id: ctx.cluster_id,
+            op,
+            reqs: 1,
+            msgs: 0,
+            bytes_in,
+            bytes_out: buffered.len() as u64,
+        });
+        // The second carries ONLY the messages — `reqs: 0` because this is the
+        // same HTTP request the line above already counted, and double-counting
+        // it would inflate the request side of every bill that has a cycle in
+        // it. Bytes are on the base sample for the same reason. `OpClass::Push`
+        // because that is what these items ARE: a sink emit grows retained
+        // bytes exactly like `/api/v1/push`, so it belongs in the same
+        // `usage_days` row a push lands in and in the monthly rollup the
+        // `monthly_msgs_quota` block is read from (`cluster_month_msgs`).
+        // Nothing else in the cycle bills as a message: the source pop was
+        // already metered as `Delivery` on its own request, and the ack
+        // advances a cursor — the reqs-only posture `/api/v1/ack` has.
+        if accepted > 0 {
+            st.meter.record(Sample {
+                cluster_id: ctx.cluster_id,
+                op: OpClass::Push,
+                reqs: 0,
+                msgs: accepted,
+                bytes_in: 0,
+                bytes_out: 0,
+            });
+        }
+        return finalize(rparts, Body::from(buffered), &rid);
+    }
+
     // Configure / queue-admin, reads, acks/leases, gated: reqs-only, bytes_out
     // from Content-Length, NEVER buffered (streaming straight through).
     st.meter.record(Sample {
@@ -685,39 +854,14 @@ async fn enforce_produce(
     }
 
     // Registry admission for each DISTINCT (queue, partition) in the batch.
-    let mut seen: HashSet<(&str, &str)> = HashSet::new();
-    for it in &items {
-        if !seen.insert((it.queue.as_str(), it.partition.as_str())) {
-            continue;
-        }
-        match st.registry.admit(ctx, &it.queue, &it.partition).await {
-            Admit::Allowed => {}
-            Admit::OverQueues { max } => {
-                if st.limits.enforcing() {
-                    return Err(errors::err_403(
-                        errors::CODE_QUOTA_EXCEEDED,
-                        &format!("queue limit reached ({max})"),
-                    ));
-                }
-                tracing::warn!(
-                    target: "limits", would_block = "queues", cluster = %ctx.slug,
-                    max, queue = %it.queue, rid, "shadow deny"
-                );
-            }
-            Admit::OverPartitions { max } => {
-                if st.limits.enforcing() {
-                    return Err(errors::err_403(
-                        errors::CODE_QUOTA_EXCEEDED,
-                        &format!("partition limit reached ({max})"),
-                    ));
-                }
-                tracing::warn!(
-                    target: "limits", would_block = "partitions", cluster = %ctx.slug,
-                    max, queue = %it.queue, partition = %it.partition, rid, "shadow deny"
-                );
-            }
-        }
-    }
+    admit_pairs(
+        &st.registry,
+        st.limits.enforcing(),
+        ctx,
+        items.iter().map(produce_pair),
+        rid,
+    )
+    .await?;
 
     // Message bucket — shadow-aware, same shape as check_req.
     match st.limits.check_msgs(ctx, n) {
@@ -731,6 +875,89 @@ async fn enforce_produce(
     }
 
     Ok(n)
+}
+
+/// The two projections into `admit_pairs`' pair set, as named functions rather
+/// than closures at the call sites. Not a style choice: a closure is inferred at
+/// ONE borrow lifetime, so mapping one into an `async fn`'s iterator argument
+/// makes the resulting future fail axum's higher-ranked `Send` bound with
+/// "implementation of `FnOnce` is not general enough" — at the router, pages
+/// away from the cause. A fn item is generic over its input lifetime and simply
+/// works, at no runtime cost and with a name that says what is being projected.
+fn produce_pair(it: &ItemInfo) -> (&str, &str) {
+    (it.queue.as_str(), it.partition.as_str())
+}
+fn sink_pair(g: &((String, String), u64)) -> (&str, &str) {
+    (g.0 .0.as_str(), g.0 .1.as_str())
+}
+
+/// Registry admission for a set of (queue, partition) pairs: the plan caps that
+/// bound how many queues and partitions a tenant may bring into existence.
+///
+/// Shared by every request that can CREATE one. Two do: the produce batch
+/// (`/api/v1/push` and `/api/v1/transaction`, via `enforce_produce`), whose
+/// auto-create is the classic case, and the streams cycle, whose sink pre-pass
+/// creates the queue and partition rows lazily in exactly the same way
+/// (007_log_streams §2, "lazily create queue/partition rows … like 003_log_push").
+/// One implementation on purpose: the two routes create the same rows, so they
+/// must not be able to drift into two different caps for the same act.
+/// `/configure` stays on its own single-pair call — it creates one known pair
+/// and its denial is logged in the canonical `log_configure_deny` shape.
+///
+/// Deduped HERE rather than at the call sites: a produce batch arrives as a flat
+/// item list with repeats and the cycle arrives pre-grouped, and re-hashing an
+/// already-distinct handful of pairs costs nothing next to one `admit` call.
+///
+/// Shadow-aware. The deny log deliberately keeps `enforce_produce`'s ORIGINAL
+/// field shape — the kind spelled into `would_block` itself, rather than the
+/// canonical `kind` + `would_block = true` pair `log_configure_deny` uses. This
+/// IS the produce path's line and the limits dashboards filter on it; making the
+/// new caller tidier would silently move it for every push.
+///
+/// Takes the registry and the enforcing flag rather than `St`: the decision
+/// needs exactly those two things, and a function that does not need an
+/// `AppState` can be unit-tested with a `Registry::new(None)`.
+async fn admit_pairs<'a>(
+    registry: &crate::registry::Registry,
+    enforcing: bool,
+    ctx: &ClusterCtx,
+    pairs: impl IntoIterator<Item = (&'a str, &'a str)>,
+    rid: &str,
+) -> Result<(), Response> {
+    let mut seen: HashSet<(&str, &str)> = HashSet::new();
+    for (queue, partition) in pairs {
+        if !seen.insert((queue, partition)) {
+            continue;
+        }
+        match registry.admit(ctx, queue, partition).await {
+            Admit::Allowed => {}
+            Admit::OverQueues { max } => {
+                if enforcing {
+                    return Err(errors::err_403(
+                        errors::CODE_QUOTA_EXCEEDED,
+                        &format!("queue limit reached ({max})"),
+                    ));
+                }
+                tracing::warn!(
+                    target: "limits", would_block = "queues", cluster = %ctx.slug,
+                    max, queue, rid, "shadow deny"
+                );
+            }
+            Admit::OverPartitions { max } => {
+                if enforcing {
+                    return Err(errors::err_403(
+                        errors::CODE_QUOTA_EXCEEDED,
+                        &format!("partition limit reached ({max})"),
+                    ));
+                }
+                tracing::warn!(
+                    target: "limits", would_block = "partitions", cluster = %ctx.slug,
+                    max, queue, partition, rid, "shadow deny"
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// STEP 4 for `POST /api/v1/configure`, the explicit queue-creation path.
@@ -1251,6 +1478,259 @@ fn mixed_batch_grows(body: &[u8]) -> bool {
     })
 }
 
+// ---------------------------------------------------------------------------
+// The streams CYCLE — routes.rs' other `Mixed` family
+//
+// One request carries both halves at once: the SOURCE ack, which only advances
+// a cursor, and the SINK `push_items`, which are produce — they grow retained
+// bytes exactly like `/api/v1/push`. The pop that fed the cycle already crossed
+// this proxy through `/api/v1/pop` and was metered there as `Delivery`, and the
+// ack is deliberately not message-metered (the posture `/api/v1/ack` has always
+// had: a cursor advance is a request, not a message). The sink items are
+// therefore the ONLY messages of the family this proxy would otherwise never
+// count — the gap these three functions close.
+//
+// Wire contract, both directions: server/src/handlers/streams.rs
+// (handle_streams_cycle) packs the request, server/sql/procedures/007_log_streams.sql
+// (log_streams_cycle_v1) writes it and builds the response.
+// ---------------------------------------------------------------------------
+
+/// The one cycle route. Named once and used twice — the ingress arm that counts
+/// the sink items, and the response arm that bills them.
+const STREAMS_CYCLE_PATH: &str = "/streams/v1/cycle";
+
+/// Is this THE cycle request? `classify` gives the path its own `Mixed` class
+/// only for POST; the same path with any other method falls into the family's
+/// `Open` bucket, so the method check lives here — the `is_configure`
+/// precedent, not the `EPH_PUSH_PATH` one (that path IS method-exact upstream).
+fn is_streams_cycle(method: &Method, path: &str) -> bool {
+    method == Method::POST && path == STREAMS_CYCLE_PATH
+}
+
+/// Does this cycle body carry the produce half of the family?
+///
+/// The cycle's twin of `mixed_batch_grows`, and it needs its own parser rather
+/// than that one: a cycle body is a JSON OBJECT with no `operations` array,
+/// which the kv/timers sniffer reads as "does not grow" — it would fail OPEN on
+/// every cycle, sink emits included.
+///
+/// Unlike kv/timers there is no op taxonomy to fail closed on. A cycle grows
+/// stored state exactly when it emits sink messages, so a non-empty
+/// `push_items` IS the predicate. Everything else in the body only advances or
+/// deletes — the source ack, the state upserts/deletes — and refusing those
+/// would strand a blocked tenant's backlog behind its own quota, which is the
+/// §9.6 trap `Mixed` exists to avoid.
+///
+/// UNPARSEABLE IS NOT GROWING, the same tolerance the kv sniffer takes: a body
+/// we cannot read travels to the broker's own 400 (`handle_streams_cycle`
+/// rejects it before the SP) rather than being half-enforced here as a 403
+/// about a quota. The blocked tenant gains nothing by it — nothing is written
+/// either way.
+///
+/// The predicate is the ARRAY, not the number of items the broker would keep:
+/// a `push_items` whose entries all have an empty queue is refused even though
+/// the broker would have skipped every one of them. Deliberate, and the same
+/// safe direction `mixed_batch_grows` takes on an op it has never heard of —
+/// the tenant can re-send the cycle without the degenerate array.
+fn cycle_batch_grows(body: &[u8]) -> bool {
+    #[derive(Deserialize)]
+    struct CycleGrowLite<'a> {
+        // Absent, `null`, or not an array all mean "no sink emits" — the same
+        // three shapes `handle_streams_cycle`'s `as_array()` reads as nothing
+        // to push. Borrowed raw elements: their payloads are never materialised.
+        #[serde(default, borrow)]
+        push_items: Option<Vec<&'a RawValue>>,
+    }
+    // A non-object body (array, scalar, garbage) fails this parse, which is
+    // also how "parses as a JSON object" is enforced.
+    match serde_json::from_slice::<CycleGrowLite>(body) {
+        Ok(c) => c.push_items.is_some_and(|items| !items.is_empty()),
+        Err(_) => false,
+    }
+}
+
+/// The sink half of a cycle request: what the message bucket must see, and the
+/// per-group counts the response cannot supply.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct CycleSinks {
+    /// Every item the broker will pack into a sink segment.
+    total: u64,
+    /// One entry per DISTINCT (queue, partition), first-seen order, with the
+    /// number of items in it. The response echoes ONE `push_results` element
+    /// per group and never says how many messages the group carried, so this is
+    /// the only place that number exists — it is threaded from step 4 to step 6.
+    groups: Vec<((String, String), u64)>,
+    /// `(index in push_items as sent, payload bytes)` of the HEAVIEST counted
+    /// item — everything the per-item payload cap needs, without a vector of
+    /// lengths. `enforce_produce` refuses the FIRST item over the cap; this
+    /// refuses the worst one, because the cap is not known down here (this is a
+    /// parse, not a limits decision) and carrying the maximum is the one number
+    /// that answers the question for any cap. The index is the position in the
+    /// array AS SENT, skipped items included, so it points at the element the
+    /// client can actually find.
+    heaviest: Option<(usize, usize)>,
+}
+
+/// Group a cycle body's `push_items` EXACTLY as the broker's own packer does
+/// (`handle_streams_cycle`): an item whose `queue` is missing, not a string, or
+/// empty is SKIPPED (there is no sink to push to), and a `partition` that is
+/// missing, not a string, or empty defaults to `Default`. Both defaults are
+/// load-bearing: `count_cycle_accepted` matches the response back by
+/// (queue, partition), so a divergence here either drops a group's messages
+/// from the bill or bills a group the broker never wrote.
+///
+/// Two-level parse on purpose. The outer pass captures each item as a raw
+/// slice, so the payloads — the bulk of the body — are never materialised; the
+/// inner pass reads only the two routing fields of one item, and an item it
+/// cannot read is SKIPPED rather than failing the whole count, because that is
+/// what the broker does with it (a non-object element has no `queue`, so it
+/// pushes nothing, and the items around it still travel). Both fields land in a
+/// `Value` rather than a `String` for the same reason: the broker reads them
+/// with `as_str()`, so a numeric `queue` is one skipped item there, not a
+/// rejected body — and a name written with JSON escapes unescapes to the same
+/// text on both sides.
+///
+/// The payload measure is the RAW JSON TEXT of the item's `payload` — the same
+/// basis `enforce_produce` uses (`ItemInfo::payload_len`, `RawValue::get().len()`),
+/// deliberately, so the identical bytes meet the identical cap whether a tenant
+/// sends them through `/api/v1/push` or emits them from a stream. `data` is the
+/// broker's accepted alias for the field and is measured the same; an item with
+/// neither is stored as `{}` and measures 0, which no cap can refuse. Measured
+/// only for items that COUNT: a skipped item never becomes a message, so
+/// refusing a body over its payload would refuse bytes the broker discards.
+///
+/// UNPARSEABLE COUNTS 0, the stance `count_ephemeral_push_items` takes on a
+/// body it cannot read: the broker answers its own 400 and nothing is stored,
+/// so a 429 about a rate the tenant never consumed would be the wrong answer.
+fn count_cycle_push_items(body: &[u8]) -> CycleSinks {
+    #[derive(Deserialize)]
+    struct CycleLite<'a> {
+        #[serde(default, borrow)]
+        push_items: Vec<&'a RawValue>,
+    }
+    #[derive(Deserialize)]
+    struct SinkItemLite<'a> {
+        #[serde(default)]
+        queue: serde_json::Value,
+        #[serde(default)]
+        partition: serde_json::Value,
+        // Borrowed from the item slice, which borrows from `body`: the payload
+        // is measured, never copied.
+        #[serde(borrow, default)]
+        payload: Option<&'a RawValue>,
+        #[serde(borrow, default)]
+        data: Option<&'a RawValue>,
+    }
+    let Ok(parsed) = serde_json::from_slice::<CycleLite>(body) else {
+        return CycleSinks::default();
+    };
+    let mut out = CycleSinks::default();
+    for (idx, raw) in parsed.push_items.into_iter().enumerate() {
+        let Ok(item) = serde_json::from_str::<SinkItemLite>(raw.get()) else {
+            continue;
+        };
+        let Some(queue) = item.queue.as_str().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let partition =
+            item.partition.as_str().filter(|s| !s.is_empty()).unwrap_or(DEFAULT_PARTITION);
+        out.total += 1;
+        // `payload`, else the broker's `data` alias, else the `{}` it stores.
+        let payload_len = item.payload.or(item.data).map(|p| p.get().len()).unwrap_or(0);
+        match out.heaviest {
+            Some((_, len)) if len >= payload_len => {}
+            _ => out.heaviest = Some((idx, payload_len)),
+        }
+        // Linear scan rather than a map: one cycle emits to a handful of sinks
+        // (the broker builds the same groups the same way), so a HashMap would
+        // cost two key clones per ITEM to save a walk over one or two entries.
+        match out.groups.iter_mut().find(|(k, _)| k.0 == queue && k.1 == partition) {
+            Some((_, n)) => *n += 1,
+            None => out.groups.push(((queue.to_string(), partition.to_string()), 1)),
+        }
+    }
+    out
+}
+
+/// The per-item payload cap for a cycle's sink items — `enforce_produce`'s
+/// first hard check, on the route that emits the same messages by another door.
+/// `Err` is the ready 413.
+///
+/// HARD, like every size cap in this file: enforced whether or not the cell is
+/// enforcing rate limits, because the caps bound what the proxy and the cell
+/// have to hold, not what the tenant is billed for.
+///
+/// The message names `push_items[i]` rather than push's `item {i}`: it is the
+/// field the client actually sent, and the index is the position in that array
+/// as sent (see `CycleSinks::heaviest`, which also explains why the item
+/// reported is the heaviest rather than the first over the cap).
+fn cycle_payload_cap(sinks: &CycleSinks, cap: Option<usize>) -> Result<(), Response> {
+    let (Some(cap), Some((idx, len))) = (cap, sinks.heaviest) else {
+        return Ok(());
+    };
+    if len > cap {
+        return Err(errors::err_413(&format!(
+            "push_items[{idx}]: payload {len} bytes exceeds max_payload_bytes ({cap})"
+        )));
+    }
+    Ok(())
+}
+
+/// Sink messages the broker CONFIRMS it wrote, read off a cycle 2xx response
+/// and the request groups that produced it. `None` on a shape we cannot read.
+///
+/// The response carries one `push_results` element per (queue, partition) group
+/// and no per-message count — that number exists only in the request, which is
+/// why `groups` is threaded through from step 4. A group whose element says
+/// `queued` bills every item the request put in it; `duplicate` bills nothing,
+/// because `log_push_one_v1` probes BEFORE it allocates and a duplicate verdict
+/// returns having written nothing at all (003_log_push: no allocator bump, no
+/// inserts, whole segment) — the same exclusion `count_push_statuses` applies
+/// on the push path. A group with no element at all is not confirmed and is not
+/// billed.
+///
+/// `success:false` is ZERO, not "count whatever echoed": the SP runs each
+/// element inside a savepoint and the inline sink pushes roll back with it
+/// (007_log_streams — that rollback is what makes the cycle exactly-once), so a
+/// failed cycle stored nothing however far it got. Same reasoning `txn_outcome`
+/// applies to a rolled-back transaction that answered HTTP 200.
+///
+/// Counting is driven from the REQUEST side, so a group can be billed at most
+/// once whatever the response repeats.
+fn count_cycle_accepted(bytes: &[u8], groups: &[((String, String), u64)]) -> Option<u64> {
+    #[derive(Deserialize)]
+    struct SinkResultLite {
+        #[serde(default)]
+        queue: String,
+        #[serde(default)]
+        partition: String,
+        #[serde(default)]
+        status: String,
+    }
+    #[derive(Deserialize)]
+    struct CycleRespLite {
+        // Required: a body without it is `None`, never assumed successful.
+        success: bool,
+        #[serde(default)]
+        push_results: Vec<SinkResultLite>,
+    }
+    let resp: CycleRespLite = serde_json::from_slice(bytes).ok()?;
+    if !resp.success {
+        return Some(0);
+    }
+    let mut accepted: u64 = 0;
+    for ((queue, partition), n) in groups {
+        let written = resp
+            .push_results
+            .iter()
+            .any(|r| r.status == "queued" && r.queue == *queue && r.partition == *partition);
+        if written {
+            accepted += n;
+        }
+    }
+    Some(accepted)
+}
+
 fn content_length(headers: &HeaderMap) -> u64 {
     headers
         .get(header::CONTENT_LENGTH)
@@ -1290,6 +1770,12 @@ fn is_pop_path(path: &str) -> bool {
 
 /// Map a (path, class) to the metering op class. Consume that is not a pop
 /// (ack / lease) and Gated surfaces meter as reqs-only `Read` — see report.
+///
+/// One gated surface bills messages WITHOUT changing class here: the streams
+/// cycle stays `Read` for its request, and `handle`'s cycle response arm
+/// records a SECOND `Push` sample for the sink items. It cannot be expressed as
+/// an arm below, because the count is not a function of (path, class): it needs
+/// the request's per-group item counts AND the response's per-group verdicts.
 fn op_for(path: &str, class: RouteClass) -> OpClass {
     match class {
         RouteClass::Produce if path == "/api/v1/push" => OpClass::Push,
@@ -1318,6 +1804,10 @@ fn op_for(path: &str, class: RouteClass) -> OpClass {
         // when it fires, so the promise has to be billed at schedule time, one
         // message per `schedule` op. That is F8 P4 and is NOT implemented here
         // — see the report. Until it is, timers are free.
+        //
+        // It also includes `POST /streams/v1/cycle`, whose reqs belong here and
+        // whose sink MESSAGES are billed by the extra `Push` sample described
+        // above the function. The cycle is no longer free; its class is.
         RouteClass::Gated(_, _) => OpClass::Read,
         // Operator surfaces are reqs-only reads like any other GET. They still
         // meter — against the cluster the operator is acting on — because the
@@ -1455,6 +1945,371 @@ mod tests {
         assert_eq!(count_push_statuses(b"[]"), Some(PushCounts::default()));
         // an error object (not an array) -> None (parse fail, msgs=0 at call site)
         assert_eq!(count_push_statuses(br#"{"error":"bad body"}"#), None);
+    }
+
+    // ---- the streams cycle: its sink items are the family's only messages ----
+
+    #[test]
+    fn cycle_grows_exactly_when_it_emits_sink_items() {
+        // A cycle that emits into a sink queue is produce, and on a blocked
+        // cluster it is refused WHOLE.
+        let emits = br#"{"query_id":"0189-q","partition_id":"0189-p","consumer_group":"g",
+            "state_ops":[],"push_items":[{"queue":"enriched","payload":{"a":1}}],
+            "ack":{"transactionId":"t","leaseId":"l","status":"completed","count":10}}"#;
+        assert!(cycle_batch_grows(emits));
+
+        // THE case the class exists for: this cycle only advances a cursor and
+        // deletes state, so a blocked tenant keeps draining its source. Refuse
+        // it and the quota freezes the very backlog the tenant has to work
+        // through to get back under the quota.
+        let ack_only = br#"{"query_id":"0189-q","partition_id":"0189-p",
+            "state_ops":[{"op":"delete","key":"k"}],"release_lease":true,
+            "ack":{"transactionId":"t","leaseId":"l","status":"completed","count":10}}"#;
+        assert!(!cycle_batch_grows(ack_only));
+        // the three spellings of "no sink emits" the broker's own `as_array()`
+        // reads as nothing to push
+        assert!(!cycle_batch_grows(br#"{"query_id":"q","push_items":[]}"#));
+        assert!(!cycle_batch_grows(br#"{"query_id":"q","push_items":null}"#));
+        assert!(!cycle_batch_grows(br#"{"query_id":"q","push_items":7}"#));
+    }
+
+    #[test]
+    fn an_unreadable_cycle_body_is_left_to_the_broker() {
+        // Same tolerance as the kv sniffer: a body we cannot read gets the
+        // broker's named 400, not a 403 about a quota, and neither one writes.
+        assert!(!cycle_batch_grows(b"not json"));
+        assert!(!cycle_batch_grows(b""));
+        // a non-object body is not a cycle at all (handle_streams_cycle 400s on
+        // the missing query_id before the SP is called)
+        assert!(!cycle_batch_grows(br#"[{"queue":"q"}]"#));
+        assert!(!cycle_batch_grows(b"42"));
+
+        // ...and THIS is why the cycle needs its own sniffer and its own arm
+        // ahead of the generic `Mixed` one: a cycle body has no `operations`
+        // array, so the kv/timers sniffer reads a sink emit as "does not grow"
+        // and would let it straight past a storage block.
+        let emits = br#"{"query_id":"q","push_items":[{"queue":"enriched","payload":1}]}"#;
+        assert!(!mixed_batch_grows(emits));
+        assert!(cycle_batch_grows(emits));
+    }
+
+    #[test]
+    fn cycle_sink_items_group_like_the_broker_packs_them() {
+        let body = br#"{"query_id":"q","partition_id":"p","push_items":[
+            {"queue":"enriched","payload":{"a":1}},
+            {"queue":"enriched","partition":"shard-1","payload":{"a":2}},
+            {"queue":"enriched","partition":"","payload":{"a":3}},
+            {"queue":"audit","payload":{"a":4}},
+            {"queue":"enriched","partition":"shard-1","payload":{"a":5}}
+        ]}"#;
+        let sinks = count_cycle_push_items(body);
+        // the message bucket sees every item...
+        assert_eq!(sinks.total, 5);
+        // ...and the meter sees them grouped exactly as the broker packs its
+        // sink_segments: a missing partition AND an empty one both default to
+        // `Default`, which is the key the response is matched back on.
+        assert_eq!(
+            sinks.groups,
+            vec![
+                (("enriched".to_string(), "Default".to_string()), 2),
+                (("enriched".to_string(), "shard-1".to_string()), 2),
+                (("audit".to_string(), "Default".to_string()), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn cycle_items_without_a_queue_are_skipped_like_the_broker_skips_them() {
+        // "no sink queue -> nothing to push" (handle_streams_cycle), so the
+        // item is neither bucketed nor billed. A non-string queue is the same
+        // verdict there (`as_str()` -> None) and must not take its neighbours
+        // down with it.
+        let body = br#"{"push_items":[
+            {"payload":{"a":1}},
+            {"queue":"","payload":{"a":2}},
+            {"queue":42,"payload":{"a":3}},
+            {"queue":"kept","payload":{"a":4}}
+        ]}"#;
+        let sinks = count_cycle_push_items(body);
+        assert_eq!(sinks.total, 1);
+        assert_eq!(sinks.groups, vec![(("kept".to_string(), "Default".to_string()), 1)]);
+
+        // an element that is not an object at all: skipped, neighbours kept —
+        // a whole-body parse would have counted 0 and under-billed the rest
+        assert_eq!(count_cycle_push_items(br#"{"push_items":[7,{"queue":"kept","payload":1}]}"#).total, 1);
+
+        // nothing to count: unreadable, no sink half, or an empty one
+        assert_eq!(count_cycle_push_items(b"not json"), CycleSinks::default());
+        assert_eq!(count_cycle_push_items(br#"{"query_id":"q"}"#), CycleSinks::default());
+        assert_eq!(count_cycle_push_items(br#"{"push_items":[]}"#), CycleSinks::default());
+    }
+
+    /// The response says WHICH groups were written; the request says how many
+    /// messages each one carried. Billing is the join of the two.
+    #[test]
+    fn cycle_bills_only_the_groups_the_response_confirms() {
+        let groups = vec![
+            (("enriched".to_string(), "Default".to_string()), 3),
+            (("enriched".to_string(), "shard-1".to_string()), 2),
+            (("audit".to_string(), "Default".to_string()), 5),
+        ];
+        // queued -> the group's whole request count; duplicate -> nothing (the
+        // probe returns before allocating: that segment wrote no rows at all);
+        // a group the response never mentions -> not confirmed, not billed.
+        let resp = br#"{"success":true,"query_id":"q","partition_id":"p","queueName":"src",
+            "state_ops_applied":2,"push_results":[
+              {"queue":"enriched","partition":"Default","status":"queued","baseOffset":41},
+              {"queue":"enriched","partition":"shard-1","status":"duplicate","dups":[{"i":0,"off":7}]}
+            ],"ack_result":{"success":true,"count":10,"lease_released":true,"dlq":false}}"#;
+        assert_eq!(count_cycle_accepted(resp, &groups), Some(3));
+
+        // everything confirmed: the full 3 + 2 + 5
+        let all_queued = br#"{"success":true,"push_results":[
+              {"queue":"enriched","partition":"Default","status":"queued"},
+              {"queue":"enriched","partition":"shard-1","status":"queued"},
+              {"queue":"audit","partition":"Default","status":"queued"}
+            ],"ack_result":null}"#;
+        assert_eq!(count_cycle_accepted(all_queued, &groups), Some(10));
+
+        // the key is matched EXACTLY, defaults included: a response that spelled
+        // the defaulted partition differently confirms nothing, rather than
+        // being billed against the wrong group
+        let wrong_key = br#"{"success":true,"push_results":[
+              {"queue":"enriched","partition":"","status":"queued"}]}"#;
+        assert_eq!(count_cycle_accepted(wrong_key, &groups), Some(0));
+        // a group we never sent contributes nothing either
+        let stranger = br#"{"success":true,"push_results":[
+              {"queue":"other","partition":"Default","status":"queued"}]}"#;
+        assert_eq!(count_cycle_accepted(stranger, &groups), Some(0));
+
+        // an ack-only cycle has no groups, so nothing can be billed (the call
+        // site does not even buffer this response)
+        assert_eq!(count_cycle_accepted(all_queued, &[]), Some(0));
+    }
+
+    #[test]
+    fn a_failed_cycle_bills_nothing_and_an_unreadable_one_charges_nothing() {
+        let groups = vec![(("enriched".to_string(), "Default".to_string()), 4)];
+        // success:false is HTTP 200 too. The SP runs the element inside a
+        // savepoint and the inline sink push rolls back with it, so whatever
+        // push_results already echoed, nothing was stored.
+        let failed = br#"{"success":false,"query_id":"q","partition_id":"p",
+            "state_ops_applied":0,"push_results":[
+              {"queue":"enriched","partition":"Default","status":"queued"}],
+            "ack_result":null,"error":"lease expired"}"#;
+        assert_eq!(count_cycle_accepted(failed, &groups), Some(0));
+
+        // Never assumed successful: no `success` key, not JSON, or the wrong
+        // top-level shape all come back None -> warn + msgs=0 at the call site.
+        assert_eq!(count_cycle_accepted(br#"{"push_results":[]}"#, &groups), None);
+        assert_eq!(count_cycle_accepted(b"not json", &groups), None);
+        assert_eq!(count_cycle_accepted(br#"[{"success":true}]"#, &groups), None);
+        assert_eq!(count_cycle_accepted(b"", &groups), None);
+        // a readable success with no push_results at all is a confirmed zero,
+        // not a parse failure
+        assert_eq!(count_cycle_accepted(br#"{"success":true}"#, &groups), Some(0));
+    }
+
+    // ---- the cycle's sink half answers the PRODUCE caps ----
+
+    fn cycle_ctx(max_queues: Option<i64>, max_partitions_per_queue: Option<i64>) -> ClusterCtx {
+        ClusterCtx {
+            cluster_id: uuid::Uuid::from_u128(42),
+            tenant_id: uuid::Uuid::from_u128(43),
+            broker_tenant: uuid::Uuid::from_u128(44),
+            slug: "cycle-test".to_string(),
+            cell_base_url: "http://127.0.0.1:1".to_string(),
+            cell_token: None,
+            status: ClusterStatus::Active,
+            limits: crate::state::EffectiveLimits {
+                max_queues,
+                max_partitions_per_queue,
+                ..Default::default()
+            },
+            features: crate::state::Features::default(),
+        }
+    }
+
+    /// The `{error, code}` envelope of a refusal, so a test can pin the code a
+    /// Track C client switches on rather than just the status line.
+    async fn err_body(resp: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.expect("body");
+        serde_json::from_slice(&bytes).expect("json envelope")
+    }
+
+    const SINK_BODY: &[u8] = br#"{"query_id":"q","partition_id":"p","push_items":[
+        {"queue":"enriched","payload":{"a":1}},
+        {"queue":"audit","partition":"shard-1","payload":{"a":2}},
+        {"queue":"enriched","payload":{"a":3}},
+        {"queue":"audit","partition":"shard-1","payload":{"a":4}},
+        {"queue":"enriched","partition":"shard-2","payload":{"a":5}}
+    ],"ack":{"transactionId":"t","leaseId":"l","status":"completed","count":9}}"#;
+
+    /// The sink pre-pass of the cycle SP creates queue and partition rows
+    /// exactly as push's auto-create does, so the same plan caps have to see
+    /// them — one admission per DISTINCT pair, which is the shape the meter's
+    /// grouping already produces.
+    #[tokio::test]
+    async fn cycle_sink_pairs_are_admitted_once_each() {
+        let sinks = count_cycle_push_items(SINK_BODY);
+        assert_eq!(sinks.total, 5);
+        let pairs: Vec<(&str, &str)> = sinks.groups.iter().map(sink_pair).collect();
+        assert_eq!(
+            pairs,
+            vec![("enriched", "Default"), ("audit", "shard-1"), ("enriched", "shard-2")],
+            "five items, three admissions"
+        );
+
+        // Two queues and two partitions each: everything fits, and a second
+        // identical cycle takes the in-process fast path without creating more.
+        let reg = crate::registry::Registry::new(None);
+        let ctx = cycle_ctx(Some(2), Some(2));
+        for _ in 0..2 {
+            assert!(admit_pairs(&reg, true, &ctx, sinks.groups.iter().map(sink_pair), "rid")
+                .await
+                .is_ok());
+        }
+    }
+
+    /// A cap the sink set does not fit refuses the WHOLE cycle, with the answer
+    /// the same items would have got from `/api/v1/push`: 403 `quota_exceeded`.
+    #[tokio::test]
+    async fn a_sink_over_a_registry_cap_refuses_the_whole_cycle() {
+        let sinks = count_cycle_push_items(SINK_BODY);
+
+        // One partition per queue: `enriched`'s second partition is over.
+        let reg = crate::registry::Registry::new(None);
+        let ctx = cycle_ctx(Some(9), Some(1));
+        let refused = admit_pairs(&reg, true, &ctx, sinks.groups.iter().map(sink_pair), "rid")
+            .await
+            .expect_err("over the partition cap");
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+        let body = err_body(refused).await;
+        assert_eq!(body["code"], errors::CODE_QUOTA_EXCEEDED);
+        assert_eq!(body["error"], "partition limit reached (1)");
+
+        // One queue: the second distinct queue is over.
+        let reg = crate::registry::Registry::new(None);
+        let ctx = cycle_ctx(Some(1), Some(9));
+        let refused = admit_pairs(&reg, true, &ctx, sinks.groups.iter().map(sink_pair), "rid")
+            .await
+            .expect_err("over the queue cap");
+        let body = err_body(refused).await;
+        assert_eq!(body["code"], errors::CODE_QUOTA_EXCEEDED);
+        assert_eq!(body["error"], "queue limit reached (1)");
+
+        // Shadow mode: the same cycle over the same cap is logged, not refused
+        // — the rate/quota posture the whole file shares.
+        let reg = crate::registry::Registry::new(None);
+        let ctx = cycle_ctx(Some(1), Some(1));
+        assert!(admit_pairs(&reg, false, &ctx, sinks.groups.iter().map(sink_pair), "rid")
+            .await
+            .is_ok());
+    }
+
+    /// The dedup lives in `admit_pairs` and serves BOTH callers: extracting it
+    /// must not turn a 1000-item push into one queue into 1000 admissions.
+    #[tokio::test]
+    async fn repeated_produce_pairs_are_still_one_admission() {
+        let items: Vec<ItemInfo> = (0..5)
+            .map(|_| ItemInfo {
+                queue: "orders".to_string(),
+                partition: DEFAULT_PARTITION.to_string(),
+                payload_len: 1,
+            })
+            .collect();
+        let reg = crate::registry::Registry::new(None);
+        // room for exactly one queue and one partition: five copies of one pair
+        let ctx = cycle_ctx(Some(1), Some(1));
+        assert!(admit_pairs(&reg, true, &ctx, items.iter().map(produce_pair), "rid").await.is_ok());
+    }
+
+    /// The per-item payload cap, on the same basis `enforce_produce` measures:
+    /// the raw JSON text of the item's payload.
+    #[tokio::test]
+    async fn a_sink_item_over_the_payload_cap_refuses_the_cycle() {
+        let sinks = count_cycle_push_items(
+            br#"{"push_items":[
+                {"queue":"a","payload":"tiny"},
+                {"queue":"b","payload":{"k":"vvvvvvvvvvvvvvvvvvvv"}}
+            ]}"#,
+        );
+        assert_eq!(sinks.heaviest, Some((1, r#"{"k":"vvvvvvvvvvvvvvvvvvvv"}"#.len())));
+        assert!(cycle_payload_cap(&sinks, Some(64)).is_ok(), "under the cap");
+        assert!(cycle_payload_cap(&sinks, None).is_ok(), "no cap configured");
+
+        let refused = cycle_payload_cap(&sinks, Some(8)).expect_err("over the cap");
+        assert_eq!(refused.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = err_body(refused).await;
+        assert_eq!(body["code"], errors::CODE_PAYLOAD_TOO_LARGE);
+        assert_eq!(body["error"], "push_items[1]: payload 28 bytes exceeds max_payload_bytes (8)");
+    }
+
+    #[test]
+    fn the_cycle_payload_measure_mirrors_the_broker_field_by_field() {
+        // `data` is the broker's accepted alias for `payload` and measures the
+        // same; an item with neither is stored as `{}` and can never be over.
+        assert_eq!(
+            count_cycle_push_items(br#"{"push_items":[{"queue":"a","data":[1,2,3]}]}"#).heaviest,
+            Some((0, "[1,2,3]".len()))
+        );
+        let bare = count_cycle_push_items(br#"{"push_items":[{"queue":"a"}]}"#);
+        assert_eq!(bare.heaviest, Some((0, 0)));
+        assert!(cycle_payload_cap(&bare, Some(0)).is_ok());
+
+        // The index is the position AS SENT: a skipped item still occupies one,
+        // so the number points at the element the client can find.
+        let with_skip = count_cycle_push_items(
+            br#"{"push_items":[{"payload":"skipped, no queue"},{"queue":"a","payload":"yyyy"}]}"#,
+        );
+        assert_eq!(with_skip.heaviest, Some((1, r#""yyyy""#.len())));
+        // and a skipped item's payload is never measured — the broker discards
+        // those bytes, so a cap must not refuse the body over them
+        let heavy_skip = count_cycle_push_items(
+            br#"{"push_items":[{"payload":"aaaaaaaaaaaaaaaaaaaaaaaaaaaa"},{"queue":"a","payload":1}]}"#,
+        );
+        assert_eq!(heavy_skip.heaviest, Some((1, 1)));
+    }
+
+    /// The §9.6 line, now that refusals exist on this route: a cycle carrying
+    /// only an ack and state ops answers NONE of the produce caps, so a tenant
+    /// at every one of them can still drain its source.
+    #[tokio::test]
+    async fn an_ack_only_cycle_answers_none_of_the_produce_caps() {
+        let sinks = count_cycle_push_items(
+            br#"{"query_id":"q","partition_id":"p","state_ops":[{"op":"delete","key":"k"}],
+                "ack":{"transactionId":"t","leaseId":"l","status":"completed","count":10}}"#,
+        );
+        assert_eq!(sinks.total, 0);
+        assert!(sinks.groups.is_empty());
+        assert_eq!(sinks.heaviest, None, "nothing to measure");
+        assert!(cycle_payload_cap(&sinks, Some(1)).is_ok());
+
+        // caps of zero: no pair to admit, so nothing to refuse
+        let reg = crate::registry::Registry::new(None);
+        let ctx = cycle_ctx(Some(0), Some(0));
+        assert!(admit_pairs(&reg, true, &ctx, sinks.groups.iter().map(sink_pair), "rid")
+            .await
+            .is_ok());
+    }
+
+    /// The cycle bills messages WITHOUT changing its op class: the request
+    /// stays on the gated reqs-only `Read` sample and the sink items ride a
+    /// second `Push` one. If this ever flips to `Push` here, every cycle would
+    /// also be counted as a push REQUEST on top of the messages.
+    #[test]
+    fn cycle_keeps_the_gated_read_class_for_its_request() {
+        use crate::routes::{Feature, GatedOp};
+        assert_eq!(
+            op_for(STREAMS_CYCLE_PATH, RouteClass::Gated(Feature::Streams, GatedOp::Mixed)),
+            OpClass::Read
+        );
+        // POST-only: `classify` hands every other method on the path the
+        // family's `Open` class, so the cycle arm must not take them.
+        assert!(is_streams_cycle(&Method::POST, STREAMS_CYCLE_PATH));
+        assert!(!is_streams_cycle(&Method::GET, STREAMS_CYCLE_PATH));
+        assert!(!is_streams_cycle(&Method::POST, "/streams/v1/queries"));
+        assert!(!is_streams_cycle(&Method::POST, "/streams/v1/cycle/extra"));
     }
 
     #[test]

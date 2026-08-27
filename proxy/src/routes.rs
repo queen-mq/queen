@@ -46,13 +46,19 @@ pub enum GatedOp {
     /// Write-level authorization and never quota-blocked. Two populations:
     /// the DELETE/cancel paths, which are how a full tenant gets back under
     /// its quota and how a firing timer gets stopped (§9.5, §9.6); and the
-    /// pre-existing gated surfaces (streams, traces), which have never been
-    /// on the storage gate and must not silently join it here.
+    /// pre-existing gated surfaces (traces, and the streams register/state
+    /// routes), which have never been on the storage gate. The streams CYCLE
+    /// left this class deliberately (2026-08-27 tenant-compat decision): its
+    /// sink emits are produce, so it is `Mixed` below — that is not the
+    /// "silent join" this doc used to warn against, it is the feature.
     Open,
-    /// One array, both halves: `POST /api/v1/kv` and `POST /api/v1/timers`.
-    /// Blocked only when the body really contains a growing op, and then the
-    /// WHOLE batch is refused with a named reason rather than half of it
-    /// silently dropped (§9.6).
+    /// One array, both halves: `POST /api/v1/kv`, `POST /api/v1/timers` and
+    /// `POST /streams/v1/cycle` (sink push_items + the source ack in one
+    /// body). Blocked only when the body really contains a growing op, and
+    /// then the WHOLE batch is refused with a named reason rather than half
+    /// of it silently dropped (§9.6). For the cycle the growing half is a
+    /// non-empty `push_items`; an ack-/state-only cycle always passes, or a
+    /// blocked tenant could never drain its source backlog.
     Mixed,
 }
 
@@ -179,9 +185,18 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
     }
 
     // --- gated features ---
-    // Streams and traces predate the GatedOp split and are `Open`: they have
-    // never been on the storage gate, and giving them one here would be a
-    // silent behaviour change smuggled in with an unrelated feature.
+    // Traces and the streams register/state routes predate the GatedOp split
+    // and stay `Open` (never storage-gated). The streams CYCLE is different
+    // since the tenant-compat pass: its `push_items` are the produce half of
+    // the family — they grow retained bytes exactly like `/api/v1/push` — so
+    // it is `Mixed`, storage/monthly-blocked ONLY when the body actually
+    // grows (gateway's cycle sniffer). The same request carries the source
+    // ack and state deletes a draining tenant needs, which is precisely the
+    // §9.6 trap `Mixed` exists for; classifying it Produce would strand a
+    // blocked tenant's backlog behind its own quota.
+    if p == "/streams/v1/cycle" && *m == Method::POST {
+        return RouteClass::Gated(Feature::Streams, GatedOp::Mixed);
+    }
     if p.starts_with("/streams/") {
         return RouteClass::Gated(Feature::Streams, GatedOp::Open);
     }
@@ -371,6 +386,17 @@ mod tests {
         );
         assert_eq!(
             classify(&Method::GET, "/streams/v1/queries"),
+            RouteClass::Gated(Feature::Streams, GatedOp::Open)
+        );
+        // The cycle is the produce half of the streams family (tenant-compat
+        // pass): Mixed, so the storage/monthly blocks apply only when the body
+        // actually grows. Register and state stay Open.
+        assert_eq!(
+            classify(&Method::POST, "/streams/v1/cycle"),
+            RouteClass::Gated(Feature::Streams, GatedOp::Mixed)
+        );
+        assert_eq!(
+            classify(&Method::POST, "/streams/v1/state/get"),
             RouteClass::Gated(Feature::Streams, GatedOp::Open)
         );
         assert_eq!(classify(&Method::GET, "/"), RouteClass::Read);

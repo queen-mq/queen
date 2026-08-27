@@ -40,11 +40,14 @@ Every view is tenant-scoped except System, and the exception is labelled on scre
 - **Dashboard**, `/`: the resource overview, namespaces and tasks
 - **Queue Operations**, `/operations`: per-queue throughput, lag and consumer health
 - **Queues**, `/queues` and `/queues/:queueName`: the list, one queue's configuration, delete
+- **Ephemeral**, `/ephemeral`: the [in-memory queue class](/use/ephemeral), a separate page
+  because its rows have no pending, no retained bytes and no dead letters
 - **Consumer Groups**, `/consumers`: lag, the lagging list, subscription changes, seek, delete
 - **Messages**, `/messages`: listing, single-message inspection, delete
 - **Traces**, `/traces`: the trace names that exist, and the timeline for one
 - **Analytics**, `/analytics`: status over time, lag and ops series, retention volume
-- **Dead Letter**, `/dlq`: the dead-letter listing, with per-row purge
+- **Dead Letter**, `/dlq`: the dead-letter listing, a failure breakdown that filters it, and
+  per-row purge
 - **System**, `/system`: cell-level host CPU and memory, worker metrics, PostgreSQL internals,
   the disk spool, the maintenance switch
 
@@ -71,7 +74,7 @@ see is one moment.
 <Screenshot
   src="dashboard-dlq"
   alt="The dead letter view. Three tiles summarise the messages on the page, the partitions they came from and the most frequent error. A table lists each dead-lettered message with its queue, consumer group, error text, retry count, time of failure and a single Purge action."
-  caption="Purge is the only action on a row. The tiles also say they are computed from the page, not from a broker-side total."
+  caption="Purge is the only action on a row, and the summary is computed from the page, not from a broker-side total. Since this capture the tiles have become a failure breakdown that also filters the table."
 />
 
 ## The PostgreSQL panel

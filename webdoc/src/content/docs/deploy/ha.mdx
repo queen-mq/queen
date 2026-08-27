@@ -22,7 +22,7 @@ digest: >-
   between brokers, no quorum, no serving leader, no split-brain. They cover a broker dying, a
   rolling restart, one node's network, not PostgreSQL, the failure domain. Three brokers is the
   designed ceiling: replicas × `DB_POOL_SIZE` must fit `max_connections`. Every replica serves
-  every route, so a pop from one broker is acked to another. Leader election is an advisory lock:
+  every route, so a pop from one broker is acked to another. Leader election is a lease claim:
   retention sweep and statistics reconciler run on one replica per cycle. `QUEEN_MESH_PORT`
   carries hints only. While PostgreSQL is unreachable a push spools to disk, answered `201` with
   `status: "buffered"` per item; pops, acks and `POST /api/v1/transaction` fail. The spool is
@@ -33,7 +33,8 @@ digest: >-
 Brokers hold no authoritative state, so a second broker is another copy of the same binary pointed
 at the same PostgreSQL. Messages, offsets, leases, deduplication, queue configuration and the
 dead-letter queue are all rows: nothing to replicate between brokers, no quorum, no serving leader,
-no split-brain.
+no split-brain. The one deliberate exception is the [ephemeral](/reference/http/ephemeral) queue
+family, whose contents live in a single broker's RAM and die with it, by contract.
 
 That also says what replicas cover. A broker process dying, a rolling restart, one node's network:
 yes. Losing PostgreSQL: no. The database is the failure domain, and keeping it alive is
@@ -82,11 +83,14 @@ hint:
 - hot-list marks, telling a peer that a partition went from empty to pending
 - maintenance-mode flips
 - queue-config invalidations, the instruction to forget a cached value and never the value itself
+- ephemeral admin fan-out (a RAM-class queue's reset, delete or config change), healed by the
+  periodic re-read when a frame is dropped
 
 Messages, offsets, acks, leases and deduplication state never cross it. They belong to PostgreSQL,
 which is why deduplication stays exact across replicas with no coordination at all, and why leader
-election is an advisory lock rather than a protocol: the retention sweep and the statistics
-reconciler each run on exactly one replica per cycle.
+election is a row rather than a protocol: the retention sweep and the statistics reconciler each
+claim a lease row per cycle, an advisory lock stays inside the cycle as a belt, and each runs on
+exactly one replica per cycle.
 
 The [sweeper](/internals/sweeper) is the one background component that elects nothing. Every replica
 fires timers and prunes expired KV rows in parallel, sharing the work with `FOR UPDATE ... SKIP LOCKED`

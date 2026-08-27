@@ -76,8 +76,8 @@ project's is not. That is the main thing this page is for.
 
 | Path | What it is |
 | --- | --- |
-| `server/` | The broker. Crate `queen`, binary `queen`. Axum 0.7 + tokio + deadpool-postgres. |
-| `server/sql/` | `schema.sql` plus 23 `procedures/*.sql` files (001–023). All queue semantics live here, and all of it is embedded in the binary. |
+| `server/` | The broker. Crate `queen-engine`, import path `queen`, binary `queen`. Axum 0.7 + tokio + deadpool-postgres. |
+| `server/sql/` | `schema.sql` plus 31 `procedures/*.sql` files (001–031). All queue semantics live here, and all of it is embedded in the binary. |
 | `server/webapp/dist/` | The built dashboard the binary embeds. Gitignored, so a clean clone does not have it. |
 | `server/server.json` | Name and version. The single source of the version string. |
 | `proxy/` | The multi-tenant gateway, one per cell. Binary `queen-proxy`, its own PostgreSQL schema under `migrations/`. |
@@ -163,7 +163,7 @@ const SCHEMA_SQL: &str = include_str!("../sql/schema.sql");
 
 const PROCEDURES: &[(&str, &str)] = &[
     ("001_log_schema.sql", include_str!("../sql/procedures/001_log_schema.sql")),
-    // ... 22 more, in the order they must be applied
+    // ... 30 more, in the order they must be applied
 ];
 ```
 
@@ -174,9 +174,9 @@ so a hand-applied `psql` fix is silently reverted by the next restart. Always
 `cargo build` after a SQL edit, then restart.
 </Aside>
 
-The applier re-applies this list idempotently at every boot, in lexical order, under an advisory
-lock; the [schema catalogue](/internals/schema) covers the apply rules, the always-virgin
-deployment model, why the order is load-bearing, and `QUEEN_APPLY_SCHEMA=0`.
+The applier re-applies this list idempotently at every boot, statement by statement in lexical
+order, under an advisory lock; the [schema catalogue](/internals/schema) covers the apply rules,
+the always-virgin deployment model, why the order is load-bearing, and `QUEEN_APPLY_SCHEMA=0`.
 
 The dashboard has the opposite failure mode and it is worth knowing the difference: a `debug`
 `rust_embed` build reads assets from disk, so a dashboard change *appears* to take effect
@@ -218,7 +218,12 @@ development cell instead. `proxy/scripts/dev-cell.sh up` builds both binaries in
 starts two PostgreSQL containers (the proxy's own state database on 5465 and a cell database
 on 5466), starts the broker on 6710 with `QUEEN_TENANCY_HEADER=true`, starts the proxy on
 6711, and seeds a development tenant, cluster and API key. It writes logs and pid files under
-`proxy/.devcell/`, which is gitignored. The proxy comes up in shadow mode by default;
+`proxy/.devcell/`, which is gitignored. Two defaults exist for the cell's own smoke tests:
+`shared.local` is configured as a shared host (`QUEEN_PROXY_SHARED_HOSTS`), the routing mode
+where the cluster comes from the API key rather than from the Host header, and the broker's
+retained-bytes refresh is shortened (`RETAINED_BYTES_INTERVAL_MS=5000`, against a ten-minute
+default) so storage-quota reads move within a test run. The proxy comes up in shadow mode by
+default;
 `QUEEN_PROXY_ENFORCE=true scripts/dev-cell.sh up` turns real rate-limit responses on, which
 is what the 429 checks need.
 

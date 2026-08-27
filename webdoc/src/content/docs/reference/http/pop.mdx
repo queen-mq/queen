@@ -79,7 +79,7 @@ like any other, and two consumers that both omit `consumerGroup` share it.
 
 `subscriptionMode` and `subscriptionFrom` **seed a cursor that does not exist yet** and are
 ignored for a `(partition, group)` that has already been contacted. `subscriptionMode=all`
-(the default) starts at the oldest retained message; `new` skips the existing backlog.
+starts at the oldest retained message; `new` (the default) skips the existing backlog.
 `subscriptionFrom` takes `now` or an ISO-8601 timestamp; an unparseable timestamp is ignored.
 Queue mode is deliberately excluded from seeding, so a queue-mode pop never skips backlog even
 if it carries these parameters. When a group registered a durable subscription, that record wins

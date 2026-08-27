@@ -74,7 +74,7 @@ await client.ack(messages, true, { group: 'billing' })
 
 - Without `.each()` the handler receives the array of popped messages, even when `batch` is `1`.
 - `.onSuccess()` or `.onError()` turn `autoAck` off: if your callback never acks, the lease expires.
-- `pop()` swallows every failure into `[]`, so an empty array is not an empty queue: use `consume()` when failures must surface.
+- `pop()` swallows every failure into `[]` except a conflation the broker cannot honour, so an empty array is not an empty queue: use `consume()` when failures must surface.
 - `close()` is not optional, because the `undici` keep-alive sockets pin the event loop and the process never exits.
 - `headers: { Host }` is dropped silently by `fetch`, so the client maps it onto `hostHeader` and warns.
 

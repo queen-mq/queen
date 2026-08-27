@@ -60,7 +60,9 @@ Two checks run on every request. The hash must resolve to a live key, and that k
 cluster must be the cluster the request resolved to:
 
 - Unknown or revoked hash → `401 {"code":"unauthorized"}`.
-- A valid key belonging to a different cluster → `403` with `key/cluster mismatch`.
+- A valid key belonging to a different cluster → `403` with `key/cluster mismatch`. On a
+  [shared host](#shared-hosts) there is nothing to mismatch: the key itself names the
+  cluster.
 
 Revocation propagates two ways: the mutating SQL function fires the invalidation
 notification, which drops the cached entry immediately, and the positive cache entry
@@ -86,6 +88,12 @@ A session is a JWT the proxy itself mints and verifies. Claims are
 | `cluster` claim | **Absent** on a session cookie |
 | `role` claim | A placeholder (`viewer`) on a session cookie |
 | Revocation | The `jti` goes on the `revoked_tokens` deny-list at logout, checked on every verify |
+
+Key material also decides what a host can do at all. `QUEEN_PROXY_JWT_ED25519_PUB_PEM` alone
+makes a verify-only host: it accepts sessions the auth host minted and mints none. No material
+at all is the API-key-only proxy, which boots with a warning and answers every login with
+`503 {"code":"not_configured"}` naming the variables to set. Material that is supplied but
+unusable to its mode is refused at boot.
 
 The two blanks are the point. A session token grants nothing on its own: because it
 carries no `cluster` and its `role` is a placeholder, the effective role is looked up
@@ -142,7 +150,7 @@ checks the deny-list first, so a logged-out cookie cannot produce a new one.
 | `GET /auth/login` | The login page, carrying a validated `next` |
 | `POST /auth/login` | Email and password, verified against the bcrypt hash in `users.password_hash` |
 | `POST /auth/logout` | Revoke and clear |
-| `GET /auth/me` | What the browser's session is: identity, tenant, clusters, operator bit. Cookie only |
+| `GET /auth/me` | What the browser's session is: identity, tenant, clusters, operator bit, and `acting_cluster`, the cluster this very request would act on (`null` when none is named). Cookie only |
 | `GET /auth/session-token` | A 15-minute bearer for the SPA |
 | `GET /auth/google` → `GET /auth/google/callback` | Authorization code plus OIDC `id_token` |
 | `GET /auth/github` → `GET /auth/github/callback` | OAuth2 without OIDC |
@@ -203,7 +211,8 @@ matched against the principal. This table is the whole policy:
 | `consume` | `consume` | `admin` or `consumer` |
 | `queue admin` | `admin` | `admin` |
 | `read` | `read` or `admin` | any role, including `viewer` |
-| `gated` (streams, traces) | `produce` or `consume` | any role except `viewer` |
+| `gated` writes (streams, traces, kv, timers, ephemeral) | `produce` or `consume` | any role except `viewer` |
+| `gated` reads (the GET surfaces of kv, timers, ephemeral) | any scope | any role, including `viewer` |
 | `operator` | never | only a **live operator** |
 | `blocked` | never | never |
 
@@ -211,9 +220,9 @@ Refusals are `403 {"code":"forbidden"}`, except for the operator class, which an
 the same `404` a blocked route gives, so a tenant admin is never told there is a
 capability to go looking for.
 
-Note the two asymmetries. An API key with only `produce` cannot read anything, not even
-a queue listing, while a `viewer` session can read everything on the cluster and write
-nothing. And `read` is open to every role because there is nothing tenant-external
+Note the two asymmetries. An API key with only `produce` cannot touch the `read` class,
+not even a queue listing, while a `viewer` session can read everything on the cluster and
+write nothing. And `read` is open to every role because there is nothing tenant-external
 behind it: the read class is the tenant-scoped surface, by construction.
 
 Feature gating happens *before* authorization: a plan without `features.streams` gets
@@ -260,6 +269,23 @@ An unresolvable cluster reference and an unauthorized one return the **same** `4
 with the same message. That is deliberate: distinguishing them would turn the header
 into a way to enumerate every tenant's cluster slugs.
 
+### Shared hosts
+
+A host listed in `QUEEN_PROXY_SHARED_HOSTS` fronts many clusters, so the `Host` label
+names nothing and resolution inverts: the credential names the cluster. An API key acts
+on the one cluster it is bound to, with no header needed and the header still refused.
+A session must name one, through `x-queen-act-cluster` or a `cluster` claim, and is then
+checked against `cluster_roles` by exactly the matrix above; a session that names none
+is `403` with `this host serves several clusters; name one with x-queen-act-cluster`,
+which is what the dashboard's cluster selector exists to answer. No credential is `401`,
+never `421`: there is no wrong host to report.
+
+Configuring any shared host also changes what the whole listener tells strangers. The
+`421` for a hostname that resolves to no cluster is withheld until the caller presents a
+live credential, and the pre-auth status gates wait for authentication too, so an
+anonymous caller behind the wildcard record cannot enumerate cluster slugs or read a
+tenant's lifecycle state. On a proxy with no shared hosts configured, nothing moves.
+
 ## Failure reference
 
 | Status | Code | Meaning |
@@ -270,7 +296,8 @@ into a way to enumerate every tenant's cluster slugs.
 | 403 | `cluster_suspended` | Tenant or cluster suspended or deleting |
 | 403 | `not_provisioned` | OAuth identity with no account, auto-provision off |
 | 404 | `route_blocked` | Blocked route, or an operator route without a live operator |
-| 421 | `cluster_unknown` | The `Host` label matched no cluster |
+| 421 | `cluster_unknown` | The `Host` label matched no cluster. With shared hosts configured, answered only to a live credential; an anonymous caller gets `401` |
+| 503 | `not_configured` | A login or session-token mint on a proxy that holds no JWT signer |
 
 Bodies are `{"error": "<human>", "code": "<machine>"}`. The codes are load-bearing:
 the SDKs branch on them rather than on message text.

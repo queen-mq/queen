@@ -3663,7 +3663,18 @@
           "Streams"
         ],
         "summary": "POST /streams/v1/queries",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
         "responses": {
           "200": {
             "description": "OK",
@@ -3678,6 +3689,16 @@
           },
           "400": {
             "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Streams not granted for this tenant, or its max_queries cap is reached. The body carries denied: true.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3708,7 +3729,7 @@
           }
         },
         "x-queen-access-level": "read-write",
-        "x-queen-tenant-scoped": false,
+        "x-queen-tenant-scoped": true,
         "x-queen-handler": "server/src/handlers/streams.rs::handle_streams_register",
         "x-queen-query-params": "none",
         "security": [
@@ -3724,6 +3745,9 @@
                 "type": "object",
                 "properties": {
                   "success": {
+                    "description": "See the reference page for this route."
+                  },
+                  "denied": {
                     "description": "See the reference page for this route."
                   }
                 },
@@ -3743,7 +3767,18 @@
           "Streams"
         ],
         "summary": "POST /streams/v1/state/get",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
         "responses": {
           "200": {
             "description": "OK",
@@ -3766,6 +3801,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error.",
             "content": {
@@ -3778,7 +3823,7 @@
           }
         },
         "x-queen-access-level": "read-only",
-        "x-queen-tenant-scoped": false,
+        "x-queen-tenant-scoped": true,
         "x-queen-handler": "server/src/handlers/streams.rs::handle_streams_state_get",
         "x-queen-query-params": "none",
         "security": [
@@ -3793,6 +3838,9 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "partition_id": {
+                    "description": "See the reference page for this route."
+                  },
                   "error": {
                     "description": "See the reference page for this route."
                   },
@@ -3816,7 +3864,18 @@
           "Streams"
         ],
         "summary": "POST /streams/v1/cycle",
-        "parameters": [],
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
         "responses": {
           "200": {
             "description": "OK",
@@ -3839,6 +3898,16 @@
               }
             }
           },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Internal error.",
             "content": {
@@ -3851,7 +3920,7 @@
           }
         },
         "x-queen-access-level": "read-write",
-        "x-queen-tenant-scoped": false,
+        "x-queen-tenant-scoped": true,
         "x-queen-handler": "server/src/handlers/streams.rs::handle_streams_cycle",
         "x-queen-query-params": "none",
         "security": [

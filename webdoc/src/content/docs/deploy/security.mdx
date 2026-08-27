@@ -27,7 +27,7 @@ digest: >-
   `QUEEN_ENCRYPTION_KEY` plus the queue's `encryptionEnabled`; one alone stores plaintext, no
   error. On `QUEEN_MESH_PORT`, frames after the replayable HMAC `HELLO` handshake are
   unauthenticated JSON; firewalling is mandatory. `002_streams_schema.sql` grants
-  `queen_streams.queries` and `queen_streams.state` to `PUBLIC`. With native tenancy on,
+  every `queen_streams` table to `PUBLIC`. With native tenancy on,
   `x-queen-tenant` is checked for shape, never authority, and `QUEEN_TENANCY_HEADER=1` refuses to
   boot unless `QUEEN_KV_TRUSTED_PROXY=1` is set with it.
 ---
@@ -137,9 +137,10 @@ named and only that one. `PG_SSL_REJECT_UNAUTHORIZED=false` remains as a last re
 that will not publish its CA, and it encrypts the connection without proving whose key answered
 ([PostgreSQL TLS](/reference/security/postgres-tls)).
 
-Inside the database, `002_streams_schema.sql` grants `queen_streams.queries` and
-`queen_streams.state` to `PUBLIC`, so any role that can connect reads and rewrites stream
-definitions and stream state whatever the HTTP layer allows ([the schema](/internals/schema)).
+Inside the database, `002_streams_schema.sql` grants `queen_streams.queries`,
+`queen_streams.state` and `queen_streams.quota` to `PUBLIC`, so any role that can connect reads
+and rewrites stream definitions, stream state and the per-tenant streams grants, whatever the
+HTTP layer allows ([the schema](/internals/schema)).
 
 ## The mesh port
 

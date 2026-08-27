@@ -715,8 +715,18 @@ Writes a completion script to stdout. Exactly one argument, from that list.
 
 ### `queenctl docs`
 
-Prints a list of documentation links, with `--open` to launch the site in the default browser and
-`--topic <name>` to deep-link.
+Prints a curated list of documentation links.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--open` | `false` | Launch the target in the default browser instead of printing it. |
+| `--topic <name>` | none | Deep-link one page. A short name such as `quickstart` or `http-api`, or any site path such as `reference/http/pop`. |
+| `--llms` | `false` | Print `https://queenmq.com/llms-brief.txt`, the self-contained summary written for AI agents, and `https://queenmq.com/llms.txt`, the page index. |
+
+`--topic` and `--llms` cannot be combined. The short names the previous flat site
+used (`concepts`, `architecture`, `server`, `sizing` and the rest) still resolve,
+onto whichever page that content moved to. With `-q`, `--llms` prints the two
+URLs alone, which is the form to pipe into a fetch.
 
 ## No `kv` and no `timers` commands
 

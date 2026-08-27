@@ -187,10 +187,11 @@ have two namespaces and no tool that merges them.
 ## Surfaces the header does not reach
 
 Some broker responses describe the cell rather than a tenant and ignore the header
-entirely: `GET /api/v1/status`, the system and PostgreSQL analytics, the Prometheus
-exposition (whose per-queue series sum across tenants), and all of `/streams/v1/*`
-(which resolves the default tenant internally). The proxy classifies each of them as
-operator or blocked for exactly that reason.
+entirely: `GET /api/v1/status`, the system and PostgreSQL analytics, and the Prometheus
+exposition (whose per-queue series sum across tenants). The proxy classifies each of
+them as operator or blocked for exactly that reason. The streams routes used to be on
+this list and no longer are: `/streams/v1/*` resolves the header like every other
+tenant surface ([Isolation](/reference/multi-tenant/isolation/#streams-are-tenant-scoped)).
 
 [Isolation](/reference/multi-tenant/isolation/) lists them with what each one would
 expose.

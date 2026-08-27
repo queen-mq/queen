@@ -92,9 +92,9 @@ Queen's broker registers **84 method + path pairs**. Every row below is read out
 
 | Method | Path | Access level | Tenant-scoped |
 | --- | --- | --- | --- |
-| `POST` | `/streams/v1/cycle` | read-write | no |
-| `POST` | `/streams/v1/queries` | read-write | no |
-| `POST` | `/streams/v1/state/get` | read-only | no |
+| `POST` | `/streams/v1/cycle` | read-write | yes |
+| `POST` | `/streams/v1/queries` | read-write | yes |
+| `POST` | `/streams/v1/state/get` | read-only | yes |
 
 ### Key/value state and timers
 
@@ -152,4 +152,4 @@ Queen's broker registers **84 method + path pairs**. Every row below is read out
 | `POST` | `/internal/api/notify` | admin | yes |
 | `GET` | `/internal/api/shared-state/stats` | admin | no |
 
-57 of these handlers resolve a tenant from the request; 15 `/api/v1/*` routes do not and are therefore cell-wide reads or operator surfaces.
+60 of these handlers resolve a tenant from the request; 15 `/api/v1/*` routes do not and are therefore cell-wide reads or operator surfaces.

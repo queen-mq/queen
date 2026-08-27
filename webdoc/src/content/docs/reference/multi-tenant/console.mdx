@@ -56,14 +56,18 @@ the gate is on the API, not on the assets.
 
 ## Human sessions only
 
-Every route runs the same four checks before its own logic, in this order.
+Every route runs the same five checks before its own logic, in this order.
 
 <Steps>
 
-1. **The `Host` header resolves to a cluster**, or the request is `421`
-   `{"code":"cluster_unknown"}`. The console resolves the cluster from `Host` alone: unlike
-   the data plane it does not consult `x-queen-act-cluster`, so one browser session on one
-   hostname acts on exactly one cluster.
+1. **The request resolves to a cluster**, or it is `421` `{"code":"cluster_unknown"}`. The
+   cluster comes from `Host`, through the same resolution the data plane uses. On a host
+   listed in `QUEEN_PROXY_SHARED_HOSTS` the label names nothing, so there, and only there,
+   the console honours the session's `x-queen-act-cluster`; on a per-cluster hostname the
+   header stays ignored, so one browser session on one hostname acts on exactly one
+   cluster, and an operator's console reach stays the Host's cluster. On a listener with
+   shared hosts, the `421` is also withheld until the caller proves a live credential
+   ([shared hosts](/reference/multi-tenant/auth#shared-hosts)).
 
 2. **pxdb is configured**, or the request is `503` `{"code":"not_configured"}`. There are no
    user or key tables to serve in the dev-static mode described in
@@ -77,7 +81,14 @@ Every route runs the same four checks before its own logic, in this order.
    every cluster, so the operator capability is also a console admin
    ([the operator capability](/reference/multi-tenant/auth)).
 
-4. **The principal is a human.** A cluster API key authenticates successfully and is then
+4. **The cluster is live.** A cluster that is suspended or mid-wipe (status `deleting`) is
+   refused with `403` `{"code":"cluster_suspended"}`, the same gate the data plane runs: a
+   wipe's first step is stopping the tenant's traffic, and a console that still minted keys
+   on it would undo that. A push-blocked cluster is deliberately not gated here, because
+   that tenant needs the console most: to read why pushes fail and to delete its way back
+   under quota.
+
+5. **The principal is a human.** A cluster API key authenticates successfully and is then
    refused with `403` and `api keys cannot access the console (human session required)`. A
    `qk_` credential can produce, consume and administer queues, and it can never read the
    console or issue another key.
@@ -85,7 +96,7 @@ Every route runs the same four checks before its own logic, in this order.
 </Steps>
 
 <Aside type="note">
-Step 4 is why the console is **always** `403` under `QUEEN_PROXY_DEV_INSECURE=true`: that mode
+Step 5 is why the console is **always** `403` under `QUEEN_PROXY_DEV_INSECURE=true`: that mode
 hands out a synthetic API-key principal before any credential is read, and an API-key principal
 is exactly what the console rejects.
 </Aside>
@@ -106,7 +117,7 @@ computed for the page.
   "push_block": null,
   "storage": { "max_retained_bytes": 107374182400, "over_quota": false },
   "limits": { "max_req_per_sec": 2000, "max_queues": 500 },
-  "features": { "streams": true, "traces": false }
+  "features": { "streams": true, "traces": false, "kv": false, "timers": false, "ephemeral": false }
 }
 ```
 
@@ -208,8 +219,9 @@ succeeds, because the key or the grant already exists either way. No console rou
 | `400` | `invalid_request` | Empty name, empty or unknown scope, unknown role, malformed email, malformed key uuid, or the last-admin guard |
 | `401` | `unauthorized` | No credential, a session that fails signature, expiry or the deny-list, or one whose user no longer exists |
 | `403` | `forbidden` | An API key, a session with no role on this cluster, or a non-admin on a `/keys` or `/members` route |
+| `403` | `cluster_suspended` | The cluster, or its tenant, is suspended or being deleted |
 | `404` | `not_found` | A key that is not this cluster's, a member with no grant here, or an email outside this tenant |
-| `421` | `cluster_unknown` | The `Host` header resolves to no cluster |
+| `421` | `cluster_unknown` | The request resolves to no cluster. On a listener with shared hosts, answered only to a live credential |
 | `502` | `bad_gateway` | pxdb accepted the connection and then failed the query |
 | `503` | `not_configured` | No pxdb is configured at all. This body is the bare `{"code":"not_configured"}`, with no `error` key |
 

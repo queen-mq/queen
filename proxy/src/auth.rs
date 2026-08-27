@@ -1532,7 +1532,18 @@ mod tests {
     }
 
     /// The pre-existing gated surfaces must come out of this change with the
-    /// exact matrix they had: `Open` is what preserves it.
+    /// exact matrix they had. For traces and the streams register/state routes
+    /// that is `Open`, untouched.
+    ///
+    /// The streams CYCLE is the one that moved: routes.rs classifies it
+    /// `Gated(Streams, Mixed)` since the tenant-compat pass, because its sink
+    /// emits are produce and a storage/monthly block must be able to refuse a
+    /// growing body. That is a QUOTA decision, and quotas are not credentials —
+    /// so the AUTHORIZATION of the cycle must be bit-for-bit what `Open` gave
+    /// it. It is, because both land on the same `Gated(_, non-Read)` arm, which
+    /// asks for produce ‖ consume (and, for users, "not Viewer"). Asserted as an
+    /// equivalence rather than as two plausible-looking outcomes: the claim
+    /// being made is "unchanged", so that is the claim under test.
     #[test]
     fn streams_and_traces_authorization_is_unchanged() {
         use crate::routes::{Feature, GatedOp};
@@ -1541,6 +1552,41 @@ mod tests {
         assert!(authorize(&read_only, RouteClass::Gated(Feature::Streams, GatedOp::Open)).is_err());
         assert!(authorize(&user(Role::Viewer, false), RouteClass::Gated(Feature::Traces, GatedOp::Open)).is_err());
         assert!(authorize(&user(Role::Consumer, false), RouteClass::Gated(Feature::Streams, GatedOp::Open)).is_ok());
+
+        // The cycle, principal by principal, before (`Open`) and after
+        // (`Mixed`).
+        let produce_key = Principal::ApiKey {
+            key_id: Uuid::new_v4(),
+            scopes: Scopes { produce: true, ..Default::default() },
+        };
+        let consume_key = Principal::ApiKey {
+            key_id: Uuid::new_v4(),
+            scopes: Scopes { consume: true, ..Default::default() },
+        };
+        for p in [
+            &read_only,
+            &produce_key,
+            &consume_key,
+            &Principal::ApiKey { key_id: Uuid::new_v4(), scopes: Scopes::all() },
+            &user(Role::Admin, false),
+            &user(Role::Producer, false),
+            &user(Role::Consumer, false),
+            &user(Role::Viewer, false),
+        ] {
+            assert_eq!(
+                authorize(p, RouteClass::Gated(Feature::Streams, GatedOp::Open)).is_ok(),
+                authorize(p, RouteClass::Gated(Feature::Streams, GatedOp::Mixed)).is_ok(),
+                "reclassifying the cycle must not move any credential: {p:?}"
+            );
+        }
+        // ...and the outcomes themselves, spelled out on the class the cycle
+        // actually carries now. A streaming job runs on one key, so BOTH halves
+        // of its wire — the source ack and the sink emits — have to be
+        // reachable with a produce-scoped key and with a consume-scoped one.
+        assert!(authorize(&produce_key, RouteClass::Gated(Feature::Streams, GatedOp::Mixed)).is_ok());
+        assert!(authorize(&consume_key, RouteClass::Gated(Feature::Streams, GatedOp::Mixed)).is_ok());
+        assert!(authorize(&read_only, RouteClass::Gated(Feature::Streams, GatedOp::Mixed)).is_err());
+        assert!(authorize(&user(Role::Viewer, false), RouteClass::Gated(Feature::Streams, GatedOp::Mixed)).is_err());
     }
 
     // ---- credential extraction ---------------------------------------------

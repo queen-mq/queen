@@ -20,7 +20,11 @@ segment lives in PostgreSQL, and every in-memory structure in the broker is a ca
 scheduler over it. That single fact is the key to reading this section: when an in-memory
 structure is stale, wrong, or lost to a restart, the outcome is extra work, not lost or
 misdelivered messages. Each page below states its own version of that argument, because each
-structure earns its place only by having one.
+structure earns its place only by having one. The one deliberate exception is the
+[ephemeral queue class](/use/ephemeral/), whose contents live in broker memory by contract: only
+the declared configuration is a PostgreSQL row, its hot verbs take neither an admission slot nor a
+pooled connection, and losing its contents on a restart is that class's documented trade, not a
+defect. Everything else in this section is state PostgreSQL owns.
 
 Read the [concept pages](/use) first if you want to know what Queen promises. This section
 explains how it keeps those promises, and where it pays for them.
@@ -29,7 +33,7 @@ explains how it keeps those promises, and where it pays for them.
 
 An HTTP request crosses the same five layers regardless of what it does.
 
-1. **The axum router** in `server/src/main.rs`. Sixty method-and-path pairs on one flat `Router`,
+1. **The axum router** in `server/src/main.rs`. Eighty-four method-and-path pairs on one flat `Router`,
    plus a fallback that serves the dashboard SPA compiled into the binary with `rust_embed` from
    `server/webapp/dist`. There is no runtime static-directory override. There is no TLS listener
    and no CORS layer: the broker speaks plaintext HTTP on `PORT` (6632) and expects a proxy in
@@ -84,7 +88,9 @@ row-by-row detail.
 Two further tables hang off nothing at all. `queen.kv` and `queen.log_timers` are created at every
 boot like the rest, and stay empty unless an operator switches their surfaces on. Neither names a
 partition, deliberately, which is what keeps them out of the per-partition maintenance scan; see
-[KV internals](/internals/kv) and [timer internals](/internals/timers).
+[KV internals](/internals/kv) and [timer internals](/internals/timers). The ephemeral class keeps
+two more (`queen.ephemeral_queues`, `queen.ephemeral_quota`): declared configuration and quota
+rows only, never message contents.
 
 All of that DDL is `include_str!`-embedded in the binary and re-applied idempotently at every
 boot, under an advisory lock and with no migrations, because the deployment model is
@@ -100,7 +106,7 @@ against old-image pods.
 
 | Loop | Cadence | Leader gate | What it does |
 | --- | --- | --- | --- |
-| Retention | `RETENTION_INTERVAL`, 5000 ms | claim row `retention` + session lock `737001` as belt | bounded autocommitting delete steps ([Retention](/internals/retention)) |
+| Retention | `RETENTION_INTERVAL`, 5000 ms | claim row `retention` + transaction lock `737001` as belt | bounded autocommitting delete steps ([Retention](/internals/retention)) |
 | Stats reconciler | `STATS_INTERVAL_MS`, 10000 ms | claim row `stats_refresh` + transaction lock `737002` as belt | recomputes `queen.stats` from the log tables ([Stats](/internals/stats)) |
 | Retained-bytes lane | `RETAINED_BYTES_INTERVAL_MS`, 600000 ms | claim row `retained_bytes` + transaction lock `737003` as belt | recomputes `queen.stats.retained_bytes` from live segments ([Stats](/internals/stats)) |
 | Metrics collector | `METRICS_FLUSH_MS`, 60000 ms | none, by design | per-replica rows in `worker_metrics` and `system_metrics` |
@@ -110,6 +116,7 @@ against old-image pods.
 | Hot-list full reseed | per ring, `QUEEN_HOTLIST_RESEED_FULL_MS`, 300000 ms | none | the same over every partition of the queue, the floor for pendingness no write explains |
 | Reconcile | `QUEEN_CACHE_REFRESH_INTERVAL_MS`, 60000 ms | none | re-reads maintenance flags, drops per-queue caches, applies the hot-list repair markers a seek or a group delete published |
 | Idle sweep | `QUEEN_HOTLIST_IDLE_SWEEP_MS`, 300000 ms | none | drops rings and wake gates for queues nobody touched |
+| Unserved-ring trim | `QUEEN_HOTLIST_UNSERVED_TRIM_MS`, 30000 ms | none | drops rings this broker serves no pops for, the standby-broker bound on ring memory |
 | Spool drain | `FILE_BUFFER_FLUSH_MS`, 100 ms | none | replays disk-spooled pushes once the database is reachable |
 | Sweeper | due-driven, 5 ms to 1000 ms | none, by design | fires due timers into the log and prunes expired KV rows ([the sweeper](/internals/sweeper)) |
 
@@ -124,9 +131,11 @@ surfaces it serves are on every replica; `QUEEN_SWEEPER=false` is the only thing
 
 ## The mesh
 
-With `QUEEN_MESH_PEERS` set, replicas form a full mesh over framed TCP. It carries three
-things: a wake for a parked pop when a push commits on another replica, maintenance-mode
-flips, and queue-config cache invalidation. Nothing it carries is authoritative: PostgreSQL
+With `QUEEN_MESH_PEERS` set, replicas form a full mesh over framed TCP. It carries wakes for
+parked pops when a push commits on another replica, hot-list pending marks, maintenance-mode
+flips, queue-config cache invalidation, and the admin fan-out for ephemeral queues (whose data
+verbs travel broker-to-broker over plain HTTP instead, to the owner the HELLO handshake
+advertised). Nothing it carries is authoritative: PostgreSQL
 is re-read every `QUEEN_CACHE_REFRESH_INTERVAL_MS` and a parked pop re-polls on its own
 backoff, so a dropped frame costs latency only. It also has a security boundary you must
 enforce yourself: see [The mesh](/internals/mesh).

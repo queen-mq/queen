@@ -73,8 +73,8 @@ though pop maintenance is what produced it.
 | `204` | A pop with no messages, and any pop while pop maintenance is on. |
 | `400` | A body that is not valid JSON; a missing required field; a transaction with no operations array or with an operation that is not a push or an ack; a discovery pop with neither `namespace` nor `task`; a malformed `x-queen-tenant` header when tenancy is on; a streams state read whose inner result reports `success:false`. |
 | `401` | Authentication is enabled and the token is absent, unparseable, badly signed, expired, not yet valid, issued in the future, or carries a rejected issuer, audience, algorithm or key id. |
-| `403` | A valid token whose roles do not satisfy the route's required level. |
-| `404` | Any unmatched path under `/api/`, and any non-`GET`/`HEAD` request that reaches the fallback; a message, queue or trace that does not exist; a stored procedure whose error text contains "not found". |
+| `403` | A valid token whose roles do not satisfy the route's required level; a streams registration by a non-default tenant with no enabled `queen_streams.quota` grant or at its `max_queries` cap. |
+| `404` | Any unmatched path under `/api/`, and any non-`GET`/`HEAD` request that reaches the fallback; a message, queue or trace that does not exist; a stored procedure whose error text contains "not found"; with tenancy on, a streams state read or cycle naming a partition that is missing or another tenant's (deliberately the same answer). |
 | `409` | `POST /streams/v1/queries` with a `config_hash` that does not match the registered query, and no `reset`. |
 | `413` | A request body larger than `QUEEN_MAX_BODY_BYTES` (64 MiB by default). |
 | `500` | A pool acquisition failure (`{"error":"pool"}`); a statement error or statement timeout; a stored-procedure error that is not a "not found"; a push diverted to the spool during maintenance whose spool write failed; a JWT configuration fault discovered per-request, such as an `HS256` token with no configured secret or an unparseable public-key PEM. |
@@ -193,17 +193,22 @@ to contain "not found" is reported as a 404.
 ## Authentication and authorization errors
 
 With `JWT_ENABLED=false` (the default) the middleware is a pass-through and
-neither code occurs.
+neither code occurs from it. The streams registration denial below is the one 403
+minted outside the middleware, so it exists with authentication off too, though
+only for a non-default tenant, which in practice means behind a proxy.
 
 `401` bodies carry a fixed short message: `Authentication required`,
 `Bad token header`, `Invalid token signature`, `Token has expired`,
 `Token not yet valid`, `Token issued in the future`, `Invalid token issuer`,
 `Invalid token audience`, `Unsupported token algorithm`, `Unknown key ID`.
 
-`403` is always `{"error":"Insufficient permissions"}`. The route's required
-level is compared against the token's role *set*, not a numeric ladder, and
+A role-check `403` is always `{"error":"Insufficient permissions"}`. The route's
+required level is compared against the token's role *set*, not a numeric ladder, and
 `WriteOnly` is not below `ReadOnly`: a write-only role passes `POST /api/v1/push`
 and is rejected with 403 on every read and consume route, including pop and ack.
+The one other broker 403 is the streams registration denial, whose body is the
+procedure's own result carrying `denied: true` and an error naming the grant or
+the cap ([streams routes](/reference/http/streams)).
 
 Three endpoints can never return either code: `/health`, `/metrics` and
 `/metrics/prometheus` are `public` in the route table, and the level check

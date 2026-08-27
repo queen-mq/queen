@@ -28,7 +28,9 @@ POST /api/v1/ack/batch  {consumerGroup?, acknowledgments:[{transactionId, partit
 ```
 
 Both answer with a **top-level array**, one element per ack in request order, each carrying
-`index`, `transactionId`, `success`, `error`, `leaseReleased`, `dlq` and `noop`.
+`index`, `transactionId`, `success`, `error`, `leaseReleased`, `dlq` and `noop`, plus
+`conflated` (log positions retired without being delivered) when the acked lease was served
+under [conflation](/reference/http/pop#conflation); every other ack keeps the pre-1.1.0 shape.
 
 ## Resolution: transactionId to hash to offset
 
@@ -78,6 +80,15 @@ aggregate:
 
 The new cursor is the maximum acked-ok offset *clamped below the signal*, and `acked` is pure
 arithmetic: `new_committed - old_committed`.
+
+One lease kind overrides that arithmetic. A conflating lease delivered exactly one frame, at
+`batch_end`, standing in for the whole leased span, so a clean ack of it sets the cursor to
+`batch_end` directly. Without the override, the MIN-in-span rule above would resolve a repeated
+`transactionId` to its lowest in-span occurrence, leave the cursor short of the delivered frame,
+and redeliver the same tail forever. The skipped positions come back as `conflated`, and
+`total_consumed` counts positions retired rather than frames delivered. An explicit `failed`,
+`dlq` or `retry` still takes its normal branch: the override is reachable only on the clean
+commit.
 
 ### The two honesty guarantees
 
@@ -249,7 +260,7 @@ Three verdicts come back per row:
 
 | Verdict | Meaning | Client sees |
 | --- | --- | --- |
-| `Committed` | the cursor advanced durably | success, lease released |
+| `Committed` | the cursor advanced durably | success, lease released; carries the `conflated` count through when the lease was a conflating one |
 | `Rejected` | the row was rejected (stale or expired lease, batch clamp) but the flush committed | falls back to the hash path for that one client |
 | `FlushErr` | the whole flush failed: pool, infrastructure, timeout, parse | an error; the lease expires and the batch redelivers |
 
@@ -300,18 +311,25 @@ never-existent one.
 
 ## Acks inside a transaction
 
-[`POST /api/v1/transaction`](/reference/http/transaction/) bundles pushes and acks into one
-`queen.log_transaction_wire_v1` call, one PostgreSQL transaction, all or nothing. Its ack elements
+[`POST /api/v1/transaction`](/reference/http/transaction/) bundles pushes and acks, plus the
+optional KV and timer rider arrays, into one `queen.log_transaction_wire_v1` call, one PostgreSQL
+transaction, all or nothing. Its ack elements
 come in both forms: positional (`uptoOff`)
 when the pop was served by this process, and hash-resolved (an `acks` array of hex tokens) when it was
 not, for instance when another broker answered the pop, so there is no local registry entry.
 
 Every failure raises, which rolls back everything else in the batch: a duplicate push escalates to
-`unique_violation` with a `QDUP` message, and an ack soft failure (`ok: false` for an invalid or
-expired lease, or a position beyond the leased batch) escalates likewise. The lock discipline is the
-same total order used everywhere: provisioning, then partition rows ascending by id, then consumer
-rows ascending by `(partition_id, group)`. Consumer locks are only ever taken after all partition
-locks, so the two lock spaces cannot form a cycle.
+`unique_violation` with a `QDUP` message, an ack soft failure (`ok: false` for an invalid or
+expired lease, or a position beyond the leased batch) escalates likewise, and so does an acked hash
+that resolves nowhere at all: on this route pushes ride along, so an unresolvable ack must abort
+the bundle rather than redeliver. That last check moved from a broker-side pre-probe into the SP in
+1.0.5, because `log_ack_by_hash_v1` already computes the fact in its one bounded pass while the
+pre-probe re-derived it over the partition's whole `log_txns` history per hash. Below-cursor
+duplicates stay `noop`/`stale`, so a replayed relay resolves as a duplicate instead of a rollback.
+The lock discipline is the [one global order](/internals/schema#the-one-global-lock-order): the KV
+and timer riders acquire `queen.kv` and `queen.log_timers` rows first, then provisioning, then
+partition rows ascending by id, then consumer rows ascending by `(partition_id, group)`. Consumer
+locks are only ever taken after all partition locks, so the lock spaces cannot form a cycle.
 
 The transaction is atomic, but it is not exactly-once end to end. A lost response plus a client retry
 still duplicates unless the `transactionId` is deterministic and the retry lands inside the

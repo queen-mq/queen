@@ -12,15 +12,18 @@ sourceOfTruth:
   - server/src/config.rs
 ---
 
-The sweeper is one background task that does two jobs: it fires due timers out of `queen.log_timers`
-into the log, and it prunes expired rows out of `queen.kv`. It is spawned on every broker, because the
-surfaces it serves are on every broker.
+The sweeper is one background task that does three jobs: it fires due timers out of `queen.log_timers`
+into the log, it prunes expired rows out of `queen.kv`, and it runs the in-RAM backstop of the
+ephemeral queue family (lease expiry, ttl head-drop and implicit-queue collection on the rings nobody
+is touching). It is spawned on every broker, because the surfaces it serves are on every broker.
 
 <Aside type="note">
 `QUEEN_SWEEPER=false` is the one boot-time knob left in this area, and it decides whether this task is
 spawned, not whether the surfaces exist. With it off keys are never pruned and timers never fire: they
-are not lost, they wait, and the choice is logged at boot. It is for a cell whose maintenance is being
-carried elsewhere, and for the tests that stand in for the sweeper themselves.
+are not lost, they wait, and the choice is logged at boot. An idle ephemeral ring also stops
+reclaiming, though nothing is served wrongly: expiry, ttl and GC all run again on the next touch. It
+is for a cell whose maintenance is being carried elsewhere, and for the tests that stand in for the
+sweeper themselves.
 </Aside>
 
 ## Two clocks, and the asymmetry is a principle
@@ -46,8 +49,8 @@ the passes where it deletes nothing.
 
 ## Leaderless, which is the opposite of retention
 
-`retention.rs` takes session advisory lock `737001` and exactly one replica sweeps per cycle. The
-stats reconciler takes `737002`. The sweeper is deliberately the opposite on both axes: due-driven
+`retention.rs` takes transaction-scoped advisory lock `737001` and exactly one replica sweeps per
+cycle. The stats reconciler takes `737002`. The sweeper is deliberately the opposite on both axes: due-driven
 instead of interval-driven, and **leaderless**, because every replica has to drain in parallel while
 sharing the work.
 
@@ -83,7 +86,7 @@ instead of a scan, and a starting point that differs per broker.
 ```text
 A. PROBE       one read-only call, one server now(), returns nextInMs, due count, lateness
 B. DRAIN       claim and fire in the SAME iteration, under a lease budget
-C. SUB-CLOCKS  usage rollup, then KV prune, each on its own gate
+C. SUB-CLOCKS  usage rollup, then KV prune, then the ephemeral backstop, each on its own gate
 D. SLEEP       due-driven, clamped, interruptible by the local wake
 ```
 
@@ -106,6 +109,15 @@ another broker is draining it. Returning to the 5 ms floor is a spin: five broke
 drains and four probe two hundred times a second each, which is roughly eight hundred extra queries
 per second landing exactly while the fire is writing WAL. The empty claim lands in a jittered 25 ms to
 200 ms band instead, and the floor applies only when work is genuinely available.
+
+**The ephemeral backstop is the phase without a database.** Every RAM-class ring already runs its
+lease expiry, its ttl head-drop and its implicit GC opportunistically on every touch, so this pass
+only ever finds work on rings nobody is touching, and for those the deadline that matters is the
+lease, which the local wake already rings to the millisecond. It runs at most once a second, a
+constant rather than a knob, because it is not a lever on anything an operator can observe: one
+second is simply the floor under a lost hint. It takes no connection, no lane slot and no lock
+outside the engine's own maps, and it deliberately does not feed the idle backoff, whose job is to
+keep an empty timer table from spinning the loop.
 
 The sleep itself is computed from four bands and nothing else, with no clock and no randomness inside
 the function, so both ends of every band are assertable in a test rather than sampled and hoped over.
@@ -138,7 +150,11 @@ never an appointment. Nobody may tie the correctness of this feature to the mesh
 
 ## Priority, and what the sweeper is allowed to drop
 
-Internal priority, from the top: **fire, then usage rollup, then KV prune**. It sheds from the bottom.
+Internal priority, from the top: **fire, then usage rollup, then KV prune**. It sheds from the
+bottom. The ephemeral backstop sits outside this ladder entirely: every rung is a response to
+database pressure, and shedding a phase that costs the database nothing would relieve nothing while
+letting a cell under pressure stop reclaiming the one resource with no database behind it to absorb
+the overrun.
 
 The prune goes first because its cost is purely disk while reads stay correct. The rollup goes second
 because it is precision, not delivery. Both are allowed to be skipped entirely: on a configuration

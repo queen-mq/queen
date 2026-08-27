@@ -148,10 +148,11 @@ enum ActPolicy {
 ///
 /// On a shared host the header is the ONLY way a session can name its cluster,
 /// so there it is honoured — that is decision z, and it is what the whole
-/// single-URL console rests on. (The SPA attaches the header to `/api/v1/*`
-/// only — app/src/api/client.js — so nothing in the shipped console sends it on
-/// these routes on any host today; a shared-host console needs that widened on
-/// the SPA side, not here.)
+/// single-URL console rests on. (The console SPA — proxy/console — matches this
+/// policy from the other side: it reads `/auth/me` at boot and attaches the
+/// header only when `acting_cluster` is null, i.e. exactly on a shared host, so
+/// on a per-cluster hostname it sends nothing the data plane's any-host
+/// honouring could act on either.)
 pub async fn resolve_route_console(st: &St, headers: &HeaderMap) -> Result<Route, Response> {
     route(st, headers, ActPolicy::SharedHostOnly).await
 }

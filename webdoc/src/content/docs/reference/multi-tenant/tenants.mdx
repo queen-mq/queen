@@ -100,6 +100,22 @@ until you set one. The mechanism exists and is described in
 [Usage metering](/reference/multi-tenant/metering/); it simply has no value to compare
 against out of the box.
 
+`features.streams` opens the routes but is not the whole grant: the broker refuses a
+non-default tenant's **new** query registrations until the cell database holds an
+enabled `queen_streams.quota` row for that cluster's `broker_tenant_uuid`, with an
+optional `max_queries` cap (`NULL` is unlimited). Provisioning a streams-enabled
+cluster therefore means one insert on the **cell** database, not on `queen_proxy`:
+
+```sql
+INSERT INTO queen_streams.quota (tenant_id, max_queries)
+VALUES ('<broker_tenant_uuid>', 100);
+```
+
+Absence is a denial by design, the same posture as the KV grant, because the tenant
+header is opaque and a fail-open default would hand query space to any invented id.
+[Isolation](/reference/multi-tenant/isolation/#streams-are-tenant-scoped) covers what
+the streams family guarantees once granted.
+
 Per-cluster deltas live in `clusters.limit_overrides`, a jsonb object whose keys match
 the plan column names one-to-one. The merge has exactly three cases:
 

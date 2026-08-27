@@ -147,9 +147,9 @@ The route classification is prefix-based:
 | --- | --- |
 | `public` | `/health`, `/metrics`, `/metrics/prometheus`, `/`, `/assets/*`, `/favicon*`, plus `/auth/me`, `/auth/login`, `/auth/logout`, public so they can answer the auth question rather than be blocked by it (with JWT on, `/auth/me` returns `401` from its own handler) |
 | `admin` | Everything under `/api/v1/system/` and `/internal/`, every `DELETE /api/v1/consumer-groups/*`, every `DELETE /api/v1/resources/queues/*`, and `/api/v1/stats/refresh` |
-| `read-only` | `GET` on `/status`, `/api/v1/status*`, `/api/v1/analytics*`, `/api/v1/resources/*`, `/api/v1/messages*`, `/api/v1/consumer-groups*`, `/api/v1/dlq*`, `/api/v1/traces*`, plus `/streams/v1/state/get` |
-| `write-only` | `POST /api/v1/push`, and only that |
-| `read-write` | Everything else: pop, ack, transaction, lease extension, `/configure`, seeks, subscription changes, `POST /api/v1/traces`, message deletes, and any route not listed above |
+| `read-only` | `GET` on `/status`, `/api/v1/status*`, `/api/v1/analytics*`, `/api/v1/resources/*`, `/api/v1/messages*`, `/api/v1/consumer-groups*`, `/api/v1/dlq*`, `/api/v1/traces*`, `/api/v1/kv*`, `/api/v1/timers*` and `/api/v1/ephemeral/queues*` (the two ephemeral status reads), plus `/streams/v1/state/get` |
+| `write-only` | `POST /api/v1/push`, `POST /api/v1/timers` (scheduling a timer is a produce operation), and `POST /api/v1/ephemeral/push` |
+| `read-write` | Everything else: pop, ack, transaction, lease extension, `/configure`, seeks, subscription changes, `POST /api/v1/traces`, message deletes, KV and timer writes (the timer cancel included), the remaining ephemeral verbs, and any route not listed above |
 
 The last row is the important one: an unrecognised path defaults to `read-write`,
 not to `public`. The per-route table is the [route table](/reference/http/routes/).

@@ -107,9 +107,9 @@ All three are hard.
 
 | Cap | From | Applied to | Response |
 | --- | --- | --- | --- |
-| Per-item payload | `max_payload_bytes` | Each item in a push or transaction, measured as the byte length of the payload's raw JSON text | `413 payload_too_large`, naming the item index |
-| Batch items | `max_batch_items`, else `QUEEN_PROXY_MAX_BATCH_ITEMS` (10000) | Number of counted push items in the request | `413 payload_too_large` |
-| Request body | `QUEEN_PROXY_MAX_BODY_BYTES` (16 MiB) | The whole buffered body of a produce or `/configure` request | `413 payload_too_large` |
+| Per-item payload | `max_payload_bytes` | Each item in a push or transaction, and each sink item of a streams cycle, measured as the byte length of the payload's raw JSON text | `413 payload_too_large`, naming the item index |
+| Batch items | `max_batch_items`, else `QUEEN_PROXY_MAX_BATCH_ITEMS` (10000) | Number of counted push items in the request. Not applied to a cycle's sink items, whose count the body ceiling bounds | `413 payload_too_large` |
+| Request body | `QUEEN_PROXY_MAX_BODY_BYTES` (16 MiB) | The whole buffered body of any request the proxy buffers | `413 payload_too_large` |
 
 The per-item cap is deliberately not a body-total cap: a batch of many small items must
 not be refused by the single-item ceiling. The body ceiling is the instance's own
@@ -127,9 +127,10 @@ included counts.
 | `msgs_burst` | Capacity, defaulting to twice the rate |
 
 The charge is `n` tokens, where `n` is the number of push items the proxy counted in
-the body: `items[]` for `/api/v1/push`, and for `/api/v1/transaction` the flattened
+the body: `items[]` for `/api/v1/push`, for `/api/v1/transaction` the flattened
 push operations, both the flat `{queue, payload}` form and the nested `{items:[…]}`
-form. Ack operations are skipped; their ownership is checked by the broker.
+form, and for `/streams/v1/cycle` the sink `push_items`. Ack operations, and the
+cycle's source ack, are skipped; their ownership is checked by the broker.
 
 Two behaviours worth knowing:
 
@@ -153,11 +154,13 @@ Two behaviours worth knowing:
 | `max_partitions_per_queue` | Each distinct `(queue, partition)` pair |
 
 Both matter because **a push creates queues and partitions implicitly**. And a push
-is not the only implicit creator: on the broker, a wildcard pop or a subscription
-registration against a queue that does not exist provisions its `queen.queues`
-config row too, because subscribing before the first push has to work, so a consumer
-typo creates a queue row where it previously left only an orphan cursor. Such a
-row carries no partitions until something is pushed to it. The proxy
+is not the only implicit creator: a streams cycle lazily provisions the queue and
+partition rows its sink emits name, so each distinct sink `(queue, partition)` pair is
+admitted here exactly like a pushed one; and on the broker, a wildcard pop or a
+subscription registration against a queue that does not exist provisions its
+`queen.queues` config row too, because subscribing before the first push has to work,
+so a consumer typo creates a queue row where it previously left only an orphan cursor.
+Such a row carries no partitions until something is pushed to it. The proxy
 keeps the exact pairs it has admitted for the cluster in memory: a known pair is a set
 lookup with no database round trip, and a new one is evaluated under one lock and then
 recorded.
@@ -230,7 +233,10 @@ the request itself.
 
 4. Produce requests for a blocked cluster answer
    `403 {"code":"storage_quota_exceeded"}`. **Consumes stay allowed**: the way out of
-   a storage block is to drain, so blocking consumption would be a trap.
+   a storage block is to drain, so blocking consumption would be a trap. A streams
+   cycle is refused whole under the same code only when its body carries sink
+   `push_items`; an ack-only or state-only cycle passes, for the same drain reason,
+   so a blocked streaming worker can keep consuming its source.
 
 </Steps>
 
