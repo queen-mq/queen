@@ -10,7 +10,7 @@ description: "Every environment variable the broker reads, with the default the 
       - server/src/fusion.rs (fusion-only overrides)
 */}
 
-The broker is configured entirely through environment variables: 160 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
+The broker is configured entirely through environment variables: 161 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
 
 Two columns record what a variable falls back to. **Also read as** is an older name for the same setting: either name configures the same thing, and the row's name wins when both are set. **Default inherited from** is a different knob whose value this one starts at when it is unset: setting that knob moves this variable and everything else that inherits from it, while setting this variable moves only this one.
 
@@ -33,6 +33,7 @@ Two columns record what a variable falls back to. **Also read as** is an older n
 | `PG_PASSWORD` | string | `postgres` |  |  |
 | `PG_PORT` | integer | `5432` |  |  |
 | `PG_SSL_REJECT_UNAUTHORIZED` | boolean | `true` |  |  |
+| `PG_SSL_ROOT_CERT` | string | `(empty)` |  |  |
 | `PG_USE_SSL` | boolean | `false` |  |  |
 | `PG_USER` | string | `postgres` |  |  |
 | `QUEEN_STMT_TIMEOUT_MS` | integer | `30000` |  |  |

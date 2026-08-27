@@ -266,11 +266,15 @@ struct FlushCtx {
     // the cache would decline anyway (a disabled cache == always p_verified=-1).
     dedup: Arc<DedupCache>,
     dedup_enabled: bool,
-    // Postgres TLS mode (mirrors config.rs / db.rs). Needed to pick the right
-    // connector when best-effort cancelling a wedged server-side query on a
-    // flush timeout (CancelToken::cancel_query wants the same TLS as the pool).
-    pg_use_ssl: bool,
-    pg_ssl_reject_unauthorized: bool,
+    // Postgres TLS for an OUT-OF-BAND connection, built once by the caller from
+    // the same Config the pool was built from (db::cancel_connector). Needed to
+    // best-effort cancel a wedged server-side query on a flush timeout, because
+    // CancelToken::cancel_query dials a fresh connection and wants the same TLS
+    // — including the same `PG_SSL_ROOT_CERT` trust anchors — as the pool.
+    // `None` = the pool is plaintext. Carried rather than rebuilt per cancel:
+    // building a ClientConfig parses the whole root set, and a cancellation
+    // storm is precisely when that cost would land.
+    pg_cancel_tls: Option<tokio_postgres_rustls::MakeRustlsConnect>,
     // Per-shard PartMeta cache, keyed by the same composed queue+partition
     // string the shard map uses (group_key).
     part_meta: Mutex<FnvHashMap<String, PartMeta>>,
@@ -294,8 +298,7 @@ impl Fusion {
         stmt_timeout: Duration,
         dedup_cache_mb: usize,
         dedup_cache_enabled: bool,
-        pg_use_ssl: bool,
-        pg_ssl_reject_unauthorized: bool,
+        pg_cancel_tls: Option<tokio_postgres_rustls::MakeRustlsConnect>,
     ) -> Arc<Fusion> {
         // Distinct partitions a single shard will keep in-flight at once (the
         // C++ `QUEEN_PUSH_MAX_PARTITIONS_PER_BATCH` analogue). A fan-out fairness
@@ -375,8 +378,7 @@ impl Fusion {
                 stmt_timeout,
                 dedup: dedup.clone(),
                 dedup_enabled: dedup_cache_enabled,
-                pg_use_ssl,
-                pg_ssl_reject_unauthorized,
+                pg_cancel_tls: pg_cancel_tls.clone(),
                 part_meta: Mutex::new(FnvHashMap::default()),
             });
             tokio::spawn(shard_loop(rx, ctx, hold_ms, max_inflight, bundle_max, floor));
@@ -799,15 +801,11 @@ fn spawn_query_cancel(ctx: &Arc<FlushCtx>, token: tokio_postgres::CancelToken, w
     {
         tracing::warn!(target: "fusion", what, "bundle timed out; cancelling server-side query (best-effort)");
     }
-    let use_ssl = ctx.pg_use_ssl;
-    let reject = ctx.pg_ssl_reject_unauthorized;
+    let tls = ctx.pg_cancel_tls.clone();
     tokio::spawn(async move {
-        let res = if use_ssl {
-            token
-                .cancel_query(crate::pgtls::make_connector(reject))
-                .await
-        } else {
-            token.cancel_query(NoTls).await
+        let res = match tls {
+            Some(connector) => token.cancel_query(connector).await,
+            None => token.cancel_query(NoTls).await,
         };
         // Best-effort: a failed cancel just means the query completes on its own.
         let _ = res;

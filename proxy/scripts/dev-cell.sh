@@ -2,6 +2,12 @@
 # Dev cell for queen-proxy: pxdb (:5465) + cell PG (:5466) + broker (:6710) + proxy (:6711).
 # Usage: scripts/dev-cell.sh up|down|status|logs
 # Reserved elsewhere (do NOT reuse): 5432 5455 5457 5460 5464 6632 6682 6690 6702.
+#
+# `shared.local` is configured as a SHARED host (decision z): on it the cluster
+# comes from the credential, not from the Host label, so any cluster's key works
+# through it and lands in its own cluster. `QUEEN_PROXY_DEFAULT_CLUSTER=dev` is
+# also set below and must NOT absorb it -- that pairing is exactly what
+# isolation-smoke.sh section 20 asserts.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -47,8 +53,15 @@ up() {
   (cd "$PROXY_DIR" && cargo build 2>&1 | tail -2)
 
   echo "== starting broker :$BROKER_PORT (tenancy header ON)"
+  # RETAINED_BYTES_INTERVAL_MS: the slow lane that fills queen.stats.retained_bytes
+  # (028_retained_bytes) runs every TEN MINUTES by default, which is right for a
+  # cell and impossible for a smoke run -- the storage quota and every
+  # `retainedBytes` assertion read 0 for the whole life of the test and there is
+  # no way to tell "not measured yet" from "broken". Five seconds here, and this
+  # is a dev cell: the lane is a single aggregate over the tenant's own segments.
   ( PORT=$BROKER_PORT PG_HOST=127.0.0.1 PG_PORT=5466 PG_USER=postgres PG_PASSWORD=postgres \
     PG_DATABASE=queen QUEEN_TENANCY_HEADER=true QUEEN_KV_TRUSTED_PROXY=true \
+    RETAINED_BYTES_INTERVAL_MS="${RETAINED_BYTES_INTERVAL_MS:-5000}" \
     "$ROOT/server/target/debug/queen" >"$RUN_DIR/broker.log" 2>&1 & echo $! >"$RUN_DIR/broker.pid" )
 
   # Shadow by default (proxy default), so the cell mirrors a stock deployment.
@@ -72,6 +85,7 @@ up() {
     GOOGLE_CLIENT_ID="${GOOGLE_CLIENT_ID:-}" GOOGLE_CLIENT_SECRET="${GOOGLE_CLIENT_SECRET:-}" \
     GITHUB_CLIENT_ID="${GITHUB_CLIENT_ID:-}" GITHUB_CLIENT_SECRET="${GITHUB_CLIENT_SECRET:-}" \
     QUEEN_PROXY_DEFAULT_CLUSTER=dev QUEEN_PROXY_RECONCILE_MS=10000 \
+    QUEEN_PROXY_SHARED_HOSTS="${QUEEN_PROXY_SHARED_HOSTS:-shared.local}" \
     "$PROXY_DIR/target/debug/queen-proxy" >"$RUN_DIR/proxy.log" 2>&1 & echo $! >"$RUN_DIR/proxy.pid" )
 
   sleep 1.5

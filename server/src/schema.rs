@@ -201,6 +201,15 @@ const PROCEDURES: &[(&str, &str)] = &[
     // file is touched at boot, at `configure` and at `delete`, and NEVER by push,
     // pop or ack, which construct no SQL at all.
     ("030_ephemeral.sql", include_str!("../sql/procedures/030_ephemeral.sql")),
+    // The tenant purge (queen.delete_tenant_data_v1). LAST, and that position
+    // is load-bearing in one direction only: its body is plpgsql, so it
+    // resolves names at RUNTIME and could sit anywhere — but it names tables
+    // from 001 (hotlist_repairs), 019 (queue_parked_replica), 024 (kv,
+    // kv_quota, kv_usage), 025 (log_timers) and 030 (ephemeral_*) and calls
+    // queen.delete_queue_v1 from 013, so last is the position at which a
+    // reader can see that every one of them already exists. Rewriting it as
+    // LANGUAGE sql would make that a hard requirement instead of a courtesy.
+    ("031_tenant_purge.sql", include_str!("../sql/procedures/031_tenant_purge.sql")),
 ];
 
 /// Minimum PostgreSQL this schema can be applied to, as `server_version_num`

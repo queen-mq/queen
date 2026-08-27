@@ -119,19 +119,36 @@ async fn async_main(worker_threads: usize) {
     let cfg = config::Config::load();
 
     let db = match &cfg.pxdb {
-        Some(pxcfg) => match db::create_pool(pxcfg).await {
-            Ok(pool) => {
-                if let Err(e) = db::apply_migrations(&pool).await {
-                    tracing::error!("migrations failed: {e}");
+        Some(pxcfg) => {
+            // Before the connect, so a cell that fails to reach its pxdb still
+            // says on what terms it was trying to. `ssl_trust` is one of
+            // plaintext / webpki-roots / supplied-ca / accept-any, and
+            // `ssl_verified` is the single boolean a security review wants:
+            // the broker prints the identical pair for its own PostgreSQL.
+            tracing::info!(
+                target: "config",
+                host = %pxcfg.host,
+                port = pxcfg.port,
+                database = %pxcfg.dbname,
+                use_ssl = pxcfg.use_ssl,
+                ssl_trust = pxcfg.trust_label(),
+                ssl_verified = pxcfg.link_authenticated(),
+                "config: pxdb"
+            );
+            match db::create_pool(pxcfg).await {
+                Ok(pool) => {
+                    if let Err(e) = db::apply_migrations(&pool).await {
+                        tracing::error!("migrations failed: {e}");
+                        std::process::exit(1);
+                    }
+                    Some(pool)
+                }
+                Err(e) => {
+                    tracing::error!("pxdb unavailable: {e}");
                     std::process::exit(1);
                 }
-                Some(pool)
             }
-            Err(e) => {
-                tracing::error!("pxdb unavailable: {e}");
-                std::process::exit(1);
-            }
-        },
+        }
         None => {
             if cfg.dev_static.is_none() {
                 tracing::error!(
@@ -165,6 +182,44 @@ async fn async_main(worker_threads: usize) {
     meter.spawn_flush(db.clone());
     let registry = registry::Registry::new(db.clone());
     let keys = auth::Keys::from_config(&cfg);
+
+    // Identity material that WAS supplied must be able to serve the mode it is
+    // in, or the process stops here — alongside the pxdb and TLS gates above and
+    // below, and for the same reason. A proxy with a pxdb and no signer boots,
+    // passes every health check, serves the whole API-key data plane, and
+    // answers 500 to every console login; the first cloud cell shipped exactly
+    // that. Material that was never supplied is the API-key-only proxy and is
+    // WARNED about instead of refused, so `deploy/proxy.mdx`'s "PXDB_HOST is the
+    // only variable it refuses to start without" stays true. `jwt_boot`
+    // classifies; the policy and the messages live there, pinned by tests.
+    {
+        let boot = config::jwt_boot(config::JwtMaterial {
+            has_pxdb: cfg.pxdb.is_some(),
+            // Same emptiness rule the signer applies, so the mode the gate names
+            // is the mode auth::Keys actually built.
+            ed_private: cfg.jwt_ed25519_pem.as_deref().is_some_and(|s| !s.trim().is_empty()),
+            ed_public: config::jwt_ed25519_pub_pem().is_some(),
+            hs_secret: cfg.jwt_hs_secret.as_deref().is_some_and(|s| !s.trim().is_empty()),
+            can_mint: keys.can_mint(),
+            can_verify: keys.can_verify(),
+        });
+        if let Some(w) = &boot.warn {
+            tracing::warn!(target: "auth", "{w}");
+        }
+        match &boot.fatal {
+            Some(e) => {
+                tracing::error!(target: "auth", mode = boot.mode.as_str(), "{e}");
+                std::process::exit(1);
+            }
+            None => tracing::info!(
+                target: "auth",
+                mode = boot.mode.as_str(),
+                mint = keys.can_mint(),
+                verify = keys.can_verify(),
+                "jwt identity"
+            ),
+        }
+    }
 
     let st: St = Arc::new(AppState {
         cfg,
@@ -259,6 +314,10 @@ async fn async_main(worker_threads: usize) {
         addr,
         enforce = st.cfg.enforce,
         dev_static = st.cfg.dev_static.is_some(),
+        // Named, not counted: an operator debugging "why does my host 401"
+        // needs to see whether the name they configured is the name a client
+        // actually sends. These are public DNS labels, not secrets.
+        shared_hosts = ?st.cfg.shared_hosts,
         "queen-proxy up"
     );
     match tls {
@@ -464,6 +523,11 @@ async fn healthz(axum::extract::State(st): axum::extract::State<St>) -> axum::re
         "status": "ok",
         "enforce": st.limits.enforcing(),
         "tenant_header": st.cfg.send_tenant_header,
+        // Third switch that silently changes what this proxy DOES: on a shared
+        // host the cluster comes from the credential, not from Host. A COUNT,
+        // not the list — this endpoint is unauthenticated, and a harness only
+        // needs to know whether the feature is on.
+        "shared_hosts": st.cfg.shared_hosts.len(),
     });
     let mut resp = axum::response::IntoResponse::into_response(body.to_string());
     resp.headers_mut().insert(

@@ -528,15 +528,16 @@ impl WarnSampler {
 
 impl Keys {
     pub fn from_config(cfg: &crate::config::Config) -> Keys {
-        // New knob, read directly here (not via config.rs, which Agent C does not
-        // own): an OPTIONAL separately-supplied Ed25519 PUBLIC-key PEM. It lets a
+        // An OPTIONAL separately-supplied Ed25519 PUBLIC-key PEM. It lets a
         // verify-only host (data-plane proxy / console, per §10) hold only public
         // material, and it is a robustness override when public-from-private
         // derivation is undesirable. When absent, the public key is derived from
         // the private PEM with ring.
-        let pub_override = std::env::var("QUEEN_PROXY_JWT_ED25519_PUB_PEM")
-            .ok()
-            .filter(|s| !s.trim().is_empty());
+        //
+        // Read through config.rs rather than off the environment here: main.rs's
+        // boot gate classifies the deployment from the same knob, and two readers
+        // with two "is it set?" rules would print one mode and run another.
+        let pub_override = crate::config::jwt_ed25519_pub_pem();
         Keys::build(
             cfg.jwt_ed25519_pem.clone(),
             pub_override,
@@ -586,7 +587,18 @@ impl Keys {
                     hs_or_none(hs_secret)
                 }
             },
-            None => hs_or_none(hs_secret),
+            // No private key. HS256 still wins when a secret is set — that keeps
+            // every dev/bench cell on exactly today's behaviour — but with no
+            // secret either, a separately-supplied PUBLIC PEM makes this a
+            // VERIFY-ONLY host: it accepts sessions the auth host minted and
+            // mints nothing. That is the `enc: None` shape `Signer::Ed`
+            // documents, and until now nothing constructed it: a public-key-only
+            // host fell through to `Signer::None` and rejected every session it
+            // was configured to accept.
+            None => match hs_or_none(hs_secret) {
+                Signer::None => verify_only_ed(ed_pub_pem_override.as_deref()),
+                hs => hs,
+            },
         };
         Keys {
             signer,
@@ -903,6 +915,20 @@ impl Keys {
     /// The JWKS document served at `/.well-known/jwks.json`. EdDSA => a real
     /// one-key OKP/Ed25519 set; HS or unconfigured => `{"keys":[]}` (nothing
     /// public to publish).
+    /// Can this proxy ISSUE a session token? False on a verify-only host and on
+    /// one with no material at all. Read once, at boot (main.rs), so a cell that
+    /// serves a login it cannot satisfy refuses to start instead of 500ing every
+    /// login for as long as nobody tries one.
+    pub fn can_mint(&self) -> bool {
+        matches!(&self.signer, Signer::Ed { enc: Some(_), .. } | Signer::Hs { .. })
+    }
+
+    /// Can this proxy ACCEPT a session token? False when no verification key
+    /// could be built — every session then answers 401 with the data plane green.
+    pub fn can_verify(&self) -> bool {
+        matches!(&self.signer, Signer::Ed { dec: Some(_), .. } | Signer::Hs { .. })
+    }
+
     pub fn jwks_json(&self) -> String {
         match &self.signer {
             Signer::Ed { dec: Some(_), kid, x_b64, .. } => serde_json::json!({
@@ -979,6 +1005,27 @@ fn hs_or_none(hs_secret: Option<String>) -> Signer {
             dec: DecodingKey::from_secret(secret.as_bytes()),
             kid: "hs".to_string(),
         },
+        None => Signer::None,
+    }
+}
+
+/// Ed25519 signer built from a PUBLIC key alone: verifies, never mints.
+///
+/// A PEM that will not parse yields `Signer::None` rather than a guess, and
+/// main.rs's boot gate turns that into a refusal — a verify-only host that
+/// cannot verify 401s every session while looking perfectly healthy, which is
+/// the same failure class as a mint host that cannot mint.
+fn verify_only_ed(pub_pem: Option<&str>) -> Signer {
+    match pub_pem.and_then(ed_pub_pem_to_raw) {
+        Some(raw) => {
+            let kid = hex::encode(&Sha256::digest(&raw)[..16]);
+            Signer::Ed {
+                enc: None,
+                dec: Some(DecodingKey::from_ed_der(&raw)),
+                kid,
+                x_b64: B64_URL.encode(&raw),
+            }
+        }
         None => Signer::None,
     }
 }
@@ -1622,5 +1669,84 @@ mod tests {
         let keys = Keys::build(None, None, None, "queen-proxy".to_string());
         assert!(keys.mint_user_jwt(Uuid::new_v4(), "admin", None, 60).is_err());
         assert!(matches!(keys.verify_jwt_claims("x.y.z"), Err(JwtReject::NotConfigured)));
+        // What main.rs's boot gate reads, and the shape it refuses in mint mode.
+        assert!(!keys.can_mint());
+        assert!(!keys.can_verify());
+    }
+
+    // ---- capability, as the boot gate sees it (spec §9b) --------------------
+
+    /// A private key + the matching PEM-armored SPKI public key for it.
+    fn ed_pair() -> (String, String, Vec<u8>) {
+        let rng = SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let kp = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let raw_pub = kp.public_key().as_ref().to_vec();
+        let mut spki = vec![0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+        spki.extend_from_slice(&raw_pub);
+        (der_to_pem(pkcs8.as_ref(), "PRIVATE KEY"), der_to_pem(&spki, "PUBLIC KEY"), raw_pub)
+    }
+
+    #[test]
+    fn a_configured_signer_can_both_mint_and_verify() {
+        for keys in [ed_keys("queen-proxy"), hs_keys("queen-proxy")] {
+            assert!(keys.can_mint());
+            assert!(keys.can_verify());
+        }
+    }
+
+    /// The verify-only host: public key, no private key, no HS secret. It must
+    /// accept what the auth host minted and mint nothing itself — the shape
+    /// `Signer::Ed { enc: None }` has always documented and that nothing built,
+    /// so a public-key-only cell rejected every session it was configured for.
+    #[test]
+    fn a_public_key_alone_verifies_and_refuses_to_mint() {
+        let (priv_pem, pub_pem, raw_pub) = ed_pair();
+        let auth_host = Keys::build(Some(priv_pem), None, None, "queen-proxy".to_string());
+        let token = auth_host.mint_user_jwt(Uuid::new_v4(), "admin", None, 3600).unwrap();
+
+        let cell = Keys::build(None, Some(pub_pem), None, "queen-proxy".to_string());
+        assert!(cell.can_verify(), "a verify-only host must verify");
+        assert!(!cell.can_mint(), "a verify-only host holds no private key");
+        assert!(cell.verify_jwt_claims(&token).is_ok(), "the auth host's token must be accepted");
+        assert!(cell.mint_user_jwt(Uuid::new_v4(), "admin", None, 60).is_err());
+
+        // It publishes the verification key, which is the whole point of JWKS.
+        let j: serde_json::Value = serde_json::from_str(&cell.jwks_json()).unwrap();
+        assert_eq!(B64_URL.decode(j["keys"][0]["x"].as_str().unwrap()).unwrap(), raw_pub);
+        // Same kid as the minting host: a verifier can select the key.
+        assert_eq!(
+            j["keys"][0]["kid"],
+            serde_json::from_str::<serde_json::Value>(&auth_host.jwks_json()).unwrap()["keys"][0]
+                ["kid"]
+        );
+    }
+
+    #[test]
+    fn an_unparseable_public_pem_alone_configures_nothing() {
+        // Boot-gate input: `can_verify == false` in verify-only mode is what
+        // turns a typo'd CA-style paste into a refusal instead of a cell that
+        // 401s every session with a green data plane.
+        let keys = Keys::build(None, Some("-----BEGIN PUBLIC KEY-----\nnope\n-----END PUBLIC KEY-----\n".to_string()), None, "queen-proxy".to_string());
+        assert!(!keys.can_verify());
+        assert!(!keys.can_mint());
+    }
+
+    #[test]
+    fn an_hs_secret_still_wins_over_a_public_pem() {
+        // Unchanged behaviour, pinned: every dev and bench cell in this repo
+        // sets QUEEN_PROXY_JWT_SECRET, and the verify-only arm must not be able
+        // to take the signer out from under one that also carries a public key.
+        let (priv_pem, pub_pem, _) = ed_pair();
+        let keys =
+            Keys::build(None, Some(pub_pem), Some("dev-secret-value".into()), "queen-proxy".into());
+        assert!(keys.can_mint(), "HS256 mints");
+        let own = keys.mint_user_jwt(Uuid::new_v4(), "viewer", None, 60).unwrap();
+        assert!(keys.verify_jwt_claims(&own).is_ok());
+        // And the algorithm is still pinned to HS: the Ed token does not verify.
+        let ed = Keys::build(Some(priv_pem), None, None, "queen-proxy".to_string())
+            .mint_user_jwt(Uuid::new_v4(), "viewer", None, 60)
+            .unwrap();
+        assert!(keys.verify_jwt_claims(&ed).is_err());
     }
 }

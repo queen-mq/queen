@@ -17,7 +17,7 @@ digest: >-
   a deployment sets: PG_HOST, PG_PORT, PG_PASSWORD, PG_USER and PG_DATABASE to reach PostgreSQL,
   where PG_USER and PG_DATABASE both default to postgres, PG_PORT to 5432 and PG_HOST to
   localhost; DB_POOL_SIZE, default 160, with QUEEN_STMT_TIMEOUT_MS; PG_USE_SSL and
-  PG_SSL_REJECT_UNAUTHORIZED; PORT, default 6632; the JWT_ variables, with JWT_ENABLED false by
+  PG_SSL_ROOT_CERT; PORT, default 6632; the JWT_ variables, with JWT_ENABLED false by
   default so the middleware passes every request through; QUEEN_MESH_PORT, default 6633, with
   QUEEN_MESH_PEERS and QUEEN_SYNC_SECRET; FILE_BUFFER_DIR, default /var/lib/queen/buffers;
   RETENTION_INTERVAL, default 5000 milliseconds; QUEEN_MAX_BODY_BYTES, default 67108864, which is
@@ -140,7 +140,7 @@ practice a deployment sets variables from these groups only.
 | Size the connection pool and bound statements | `DB_POOL_SIZE`, `QUEEN_STMT_TIMEOUT_MS` |
 | Move the write-admission band, or reserve pool headroom | `QUEEN_ADMISSION_MIN`, `QUEEN_ADMISSION_MAX`, `QUEEN_ADMISSION_POOL_RESERVE`. See [flow control](/internals/flow-control/) |
 | Re-weight which lane wakes first when the budget is exhausted | `QUEEN_ADMISSION_SHARE_PUSH`, `QUEEN_ADMISSION_SHARE_POP`, `QUEEN_ADMISSION_SHARE_ACK`, `QUEEN_ADMISSION_SHARE_MAINT` |
-| Encrypt broker-to-PostgreSQL traffic | `PG_USE_SSL`, `PG_SSL_REJECT_UNAUTHORIZED` |
+| Encrypt broker-to-PostgreSQL traffic, and verify whose database answered | `PG_USE_SSL`, `PG_SSL_ROOT_CERT`, `PG_SSL_REJECT_UNAUTHORIZED`. See [PostgreSQL TLS](/reference/security/postgres-tls/) |
 | Serve on a different port | `PORT` |
 | Turn on authentication | `JWT_ENABLED`, `JWT_ALGORITHM`, then `JWT_SECRET` or `JWT_PUBLIC_KEY` or `JWT_JWKS_URL` |
 | Run more than one broker | `QUEEN_MESH_PEERS`, `QUEEN_MESH_PORT`, `QUEEN_SYNC_SECRET` |

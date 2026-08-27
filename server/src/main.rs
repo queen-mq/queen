@@ -242,8 +242,9 @@ async fn main() {
         cfg.stmt_timeout,
         cfg.dedup_cache_mb,
         cfg.dedup_cache_enabled,
-        cfg.pg_use_ssl,
-        cfg.pg_ssl_reject_unauthorized,
+        // Unreachable Err: config::load() already refused to boot on unusable
+        // CA material. Fatal rather than silently plaintext-cancelling.
+        db::cancel_connector(&cfg).unwrap_or_else(|e| obs::fatal(e)),
     );
 
     // Seed the maintenance flags from queen.system_state (parity with the C++

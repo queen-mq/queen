@@ -49,6 +49,7 @@ inside the engine, so either side saying no wins).
 | --- | --- | --- | --- |
 | `pg_host` / `pg_port` / `pg_user` / `pg_password` / `pg_database` | `PG_HOST`, `PG_PORT`, `PG_USER`, `PG_PASSWORD`, `PG_DATABASE` | localhost, 5432, postgres, postgres, postgres | The PostgreSQL to run on. |
 | `pg_use_ssl` / `pg_ssl_reject_unauthorized` | `PG_USE_SSL`, `PG_SSL_REJECT_UNAUTHORIZED` | false / true | TLS to PostgreSQL, and whether the chain is verified. |
+| none | `PG_SSL_ROOT_CERT` | unset | PEM content of a CA to verify the chain against instead of the compiled-in Mozilla roots, for a managed PostgreSQL on a private CA. Env only, with no builder field. Unusable material is a `StartError::Config` rather than the binary's boot exit. See [PostgreSQL TLS](/reference/security/postgres-tls/). |
 | `stmt_timeout_ms` | `QUEEN_STMT_TIMEOUT_MS` | 30000 | Per-statement timeout. |
 | `pool_size` | `DB_POOL_SIZE` | 160 | Connection pool size. Size it down for an application fleet: every instance owns a pool. |
 | `apply_schema` | `QUEEN_APPLY_SCHEMA` | true | Apply schema and procedures at start (advisory-locked, idempotent). Off, the role needs no DDL rights. Either side saying no wins: `QUEEN_APPLY_SCHEMA=0` skips the apply even with the field set true. |

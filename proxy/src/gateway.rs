@@ -1,7 +1,23 @@
 //! The data-plane pipeline. OWNER: Agent A.
 //!
 //! Pipeline per request (spec §4/§14 — the order is load-bearing):
-//!   1. resolve ClusterCtx from Host (miss -> 421)
+//!   1. resolve ClusterCtx from Host (miss -> 421). On a SHARED host
+//!      (QUEEN_PROXY_SHARED_HOSTS, decision z) there is no cluster to resolve
+//!      yet: steps 2 and the cluster-dependent half of 3 are deferred to just
+//!      after authentication, which is where the credential names the cluster.
+//!      The order among the gates is unchanged — only where authentication
+//!      sits relative to them. A missing or invalid credential there is 401,
+//!      never 421.
+//!
+//!      That deferral covers the WHOLE LISTENER as soon as any shared host is
+//!      configured, Host-named clusters included, and the 421 for a Host that
+//!      names nothing waits for a credential too. Otherwise the pre-auth
+//!      answers differ per Host — 401 for a slug that exists, 421 for one that
+//!      does not, 403 `cluster_suspended` for one being deleted — and a shared
+//!      host sits behind a wildcard record, so an anonymous caller could read
+//!      the whole tenant list and each tenant's lifecycle state off the front
+//!      door. With no shared hosts configured (every self-hosted proxy that
+//!      never sets the variable) the order below is byte-for-byte the old one.
 //!   2. cluster status gate (Suspended -> 403 suspended; Produce while blocked
 //!      -> 403 storage_quota_exceeded (live quota flag) or push_blocked (DB
 //!      lifecycle status) — two causes, two codes)
@@ -68,24 +84,92 @@ const HOP_BY_HOP: &[&str] = &[
 /// flagged as a conflict with STEP 6's "limite 64MiB safety".
 const RESP_BUFFER_CAP: usize = 64 * 1024 * 1024;
 
+/// Step 2, as a function so the shared-host path can run the SAME gate in the
+/// same place once the credential has named a cluster.
+fn status_gate(ctx: &ClusterCtx) -> Option<Response> {
+    match ctx.status {
+        ClusterStatus::Suspended | ClusterStatus::Deleting => {
+            Some(errors::err_403(errors::CODE_SUSPENDED, "cluster suspended"))
+        }
+        _ => None,
+    }
+}
+
+/// The half of step 3 that needs a cluster: the plan's feature gate and the
+/// push blocks. Extracted for the same reason as `status_gate` — one
+/// implementation, run in both orders, so a shared host cannot end up with a
+/// weaker gate than a per-cluster hostname.
+fn plan_gates(st: &St, ctx: &ClusterCtx, class: RouteClass) -> Option<Response> {
+    if let RouteClass::Gated(f, op) = class {
+        if !feature_enabled(f, &ctx.features) {
+            return Some(errors::err_403(errors::CODE_FEATURE_GATED, "not in your plan"));
+        }
+        // PLAN_KV_TIMERS.md §9.5: the growing half of a gated family answers
+        // the push blocks exactly like Produce, because it is the half that
+        // consumes the disk the storage quota bounds. `Read` and `Open` never
+        // do — a tenant that cannot read or delete cannot get back under its
+        // own quota, and a tenant that cannot cancel cannot stop a fire.
+        // `Mixed` is decided against the body, further down, because it is the
+        // only class where both halves arrive in one array (§9.6).
+        if op == crate::routes::GatedOp::Grow {
+            if let Some(resp) = push_block_response(st, ctx) {
+                return Some(resp);
+            }
+        }
+    }
+    if class == RouteClass::Produce {
+        if let Some(resp) = push_block_response(st, ctx) {
+            return Some(resp);
+        }
+    }
+    None
+}
+
 pub async fn handle(State(st): State<St>, req: Request) -> Response {
     // ----- 1. resolve the cluster this request acts on -----
-    // Host by default; `x-queen-act-cluster` when a human session names one
-    // (acting.rs owns that policy). Everything downstream — the status gate,
-    // the plan limits, the injected X-Queen-Tenant, the meter attribution —
-    // then follows the cluster picked here, which is the whole point of one
-    // webapp hostname fronting every cluster.
-    let ctx = match crate::acting::resolve_ctx(&st, req.headers()).await {
-        Ok(c) => c,
+    // Host by default; `x-queen-act-cluster` when a human session names one;
+    // and on a SHARED host (QUEEN_PROXY_SHARED_HOSTS) nothing at all until the
+    // credential is read — acting.rs owns that whole policy. Everything
+    // downstream — the status gate, the plan limits, the injected
+    // X-Queen-Tenant, the meter attribution — then follows the cluster picked
+    // here, whichever of the three named it.
+    let mut unknown_host = false;
+    let fixed = match crate::acting::resolve_route(&st, req.headers()).await {
+        Ok(crate::acting::Route::Fixed(ctx)) => Some(ctx),
+        // Shared host: steps 2 and the cluster-dependent half of 3 are deferred
+        // below, past authentication, because until the credential is read
+        // there is no cluster to gate. The ctx-FREE refusals (blocked route,
+        // operator flag) still answer before authentication, exactly as they do
+        // on every other host.
+        Ok(crate::acting::Route::FromCredential) => None,
+        // Only ever produced on a listener that HAS shared hosts: the Host
+        // named no cluster, and the 421 that says so is withheld until a
+        // credential proves live (acting.rs, decision z applied to the whole
+        // front door). Answered after the ctx-free refusals below so a blocked
+        // route stays a 404 here exactly as it is everywhere else.
+        Ok(crate::acting::Route::UnknownHost) => {
+            unknown_host = true;
+            None
+        }
         Err(resp) => return resp,
     };
 
     // ----- 2. cluster status gate -----
-    match ctx.status {
-        ClusterStatus::Suspended | ClusterStatus::Deleting => {
-            return errors::err_403(errors::CODE_SUSPENDED, "cluster suspended");
+    // On a shielded listener this waits for step 3's authentication, together
+    // with the plan gates: `status_gate` distinguishes an existing suspended
+    // cluster from an existing active one, so running it pre-auth beside a
+    // shared host would hand an anonymous caller each tenant's lifecycle state
+    // (measured: a `deleting` tenant answered 403 cluster_suspended to a
+    // request carrying no credential at all). Nothing moves on a listener with
+    // no shared hosts — `shielded` is false there and this is the same
+    // pre-auth gate it has always been.
+    let shielded = st.cfg.has_shared_hosts();
+    if !shielded {
+        if let Some(ctx) = &fixed {
+            if let Some(resp) = status_gate(ctx) {
+                return resp;
+            }
         }
-        _ => {}
     }
 
     // ----- 3. classify + feature gate + authn/authz -----
@@ -100,32 +184,55 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
         // on is the only thing that makes the class reachable at all.
         return errors::err_404(errors::CODE_ROUTE_BLOCKED, "not available");
     }
-    if let RouteClass::Gated(f, op) = class {
-        if !feature_enabled(f, &ctx.features) {
-            return errors::err_403(errors::CODE_FEATURE_GATED, "not in your plan");
-        }
-        // PLAN_KV_TIMERS.md §9.5: the growing half of a gated family answers
-        // the push blocks exactly like Produce, because it is the half that
-        // consumes the disk the storage quota bounds. `Read` and `Open` never
-        // do — a tenant that cannot read or delete cannot get back under its
-        // own quota, and a tenant that cannot cancel cannot stop a fire.
-        // `Mixed` is decided against the body, further down, because it is the
-        // only class where both halves arrive in one array (§9.6).
-        if op == crate::routes::GatedOp::Grow {
-            if let Some(resp) = push_block_response(&st, &ctx) {
+    if !shielded {
+        if let Some(ctx) = &fixed {
+            if let Some(resp) = plan_gates(&st, ctx, class) {
                 return resp;
             }
         }
     }
-    if class == RouteClass::Produce {
-        if let Some(resp) = push_block_response(&st, &ctx) {
-            return resp;
-        }
+    if unknown_host {
+        // 421 for a live credential, that credential's own 401 otherwise.
+        return crate::acting::unknown_host_refusal(&st, req.headers()).await;
     }
 
-    let principal = match crate::acting::authenticate_for(&st, req.headers(), &ctx).await {
-        Ok(p) => p,
-        Err(resp) => return resp,
+    let (ctx, principal) = match fixed {
+        Some(ctx) => {
+            let p = match crate::acting::authenticate_for(&st, req.headers(), &ctx).await {
+                Ok(p) => p,
+                Err(resp) => return resp,
+            };
+            // Deferred from step 2 on a shielded listener, in the same order
+            // and through the same two functions, so a Host-named cluster
+            // there gets exactly the gates it gets everywhere else — only
+            // after the caller has earned an answer about it.
+            if shielded {
+                if let Some(resp) = status_gate(&ctx) {
+                    return resp;
+                }
+                if let Some(resp) = plan_gates(&st, &ctx, class) {
+                    return resp;
+                }
+            }
+            (ctx, p)
+        }
+        None => {
+            let (ctx, p) = match crate::acting::resolve_from_credential(&st, req.headers()).await {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            // The same two gates, in the same order, now that the credential
+            // has named the cluster. A suspended tenant on a shared host is
+            // still a 403 `cluster_suspended`, and a Produce into a
+            // storage-blocked one is still a 403 `storage_quota_exceeded`.
+            if let Some(resp) = status_gate(&ctx) {
+                return resp;
+            }
+            if let Some(resp) = plan_gates(&st, &ctx, class) {
+                return resp;
+            }
+            (ctx, p)
+        }
     };
     if let Err(resp) = crate::auth::authorize(&principal, class) {
         // An operator route refused is answered as if it did not exist — the

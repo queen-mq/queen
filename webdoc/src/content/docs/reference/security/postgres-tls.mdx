@@ -13,7 +13,7 @@ sidebar:
 ---
 
 Every message Queen stores travels over the connection between the broker and
-PostgreSQL, and that connection is plaintext by default. Two variables control it,
+PostgreSQL, and that connection is plaintext by default. Three variables control it,
 and the difference between them is the difference between encryption and
 authenticated encryption.
 
@@ -21,10 +21,23 @@ authenticated encryption.
 | --- | --- | --- |
 | `PG_USE_SSL` | `false` | Wrap the connection in TLS at all |
 | `PG_SSL_REJECT_UNAUTHORIZED` | `true` | Validate the server's certificate chain |
+| `PG_SSL_ROOT_CERT` | unset | The PEM of the CA to validate that chain against |
 
 With `PG_USE_SSL=false` the broker connects with no TLS layer whatsoever: the
 connector is built only when the flag is on. There is no "prefer" or opportunistic
-mode: it is off, or it is on with one of the two verification behaviours below.
+mode: it is off, or it is on with one of the three trust behaviours below.
+
+The boot log states which one applies, so this never has to be inferred from
+behaviour:
+
+```text
+INFO boot: config: postgres host=... use_ssl=true ssl_reject_unauthorized=true
+     ssl_trust="supplied-ca" ssl_verified=true
+```
+
+`ssl_trust` is one of `plaintext`, `webpki-roots`, `supplied-ca` or `accept-any`,
+and `ssl_verified` answers the only question that matters: is this link
+authenticated, or merely encrypted?
 
 ## Verified TLS: the default when TLS is on
 
@@ -36,14 +49,52 @@ The broker builds a rustls client on the `ring` provider and trusts the Mozilla
 root set bundled into the binary at compile time (`webpki-roots`). The server's
 chain must validate against those roots and its name must match.
 
-This is the mode to want. It is also the mode that fails against most managed
-PostgreSQL offerings, because they present a chain rooted in their own private CA.
-The broker has no variable for adding a custom root certificate: the trust store
-is the compiled-in Mozilla set and nothing else. If your provider's chain is
-private, your options are the system trust of a sidecar or tunnel in front of
-PostgreSQL, or the encrypt-only mode below.
+This is the mode to want, and it is the right one for a PostgreSQL whose
+certificate comes from a public CA. It is not enough for most managed offerings,
+because they present a chain rooted in their own private CA. That is what the next
+section is for.
 
-## Encrypt-only: what managed PostgreSQL usually needs
+## A private CA: `PG_SSL_ROOT_CERT`
+
+```bash
+PG_USE_SSL=true
+PG_SSL_ROOT_CERT="$(cat /path/to/provider-ca.pem)"
+```
+
+The variable holds the **content** of the CA certificate, not a path to it, which
+is the same shape as every other credential the broker reads. Verification stays
+on: the chain must validate and the name must match, exactly as above.
+
+The supplied CA **replaces** the Mozilla set rather than joining it, which is what
+libpq's `sslrootcert` does and what the situation calls for. The reason to name a
+CA is that this database is signed by a private one, so a publicly trusted
+certificate for that host is not a fallback, it is an impersonation. The rule is
+one line: the CA you name is the CA you trust. A bundle is accepted, so a chain
+with an intermediate root is a matter of concatenating the PEMs.
+
+A malformed value is a **fatal boot error**, never a quiet fall back to the
+Mozilla set, and the message says what is wrong with it: a path instead of a PEM,
+a body that is not base64, a block that never closes.
+
+<Aside type="caution">
+**A multi-line value does not survive `docker --env-file`**, and it does not
+survive systemd's `EnvironmentFile` either. Both are line-oriented and stop the
+value at the first newline, leaving `-----BEGIN CERTIFICATE-----` alone in the
+variable, which is why the boot error for a truncated block says so. Pass it as
+`docker run -e PG_SSL_ROOT_CERT="$(cat ca.pem)"`, as a compose `environment:`
+block scalar, or from a Kubernetes secret. If the value has to live in a
+line-oriented file, put the PEM on one line with `\n` for the newlines: the
+parser un-escapes those, and a real PEM contains no backslash for it to corrupt.
+</Aside>
+
+Setting `PG_SSL_ROOT_CERT` alongside `PG_SSL_REJECT_UNAUTHORIZED=false` is
+allowed, and the CA wins: verification is on and the boot log warns that the
+flag has become dead weight. That ordering is deliberate. The flag exists only
+because there was once no way to supply a CA, and honouring it over a CA would
+mean the fix quietly did nothing on exactly the deployments that carry the flag
+from before the upgrade.
+
+## Encrypt-only: what managed PostgreSQL used to need
 
 ```bash
 PG_USE_SSL=true
@@ -81,7 +132,9 @@ against someone becoming the other end of it.
 
 <Aside type="caution">
 `PG_SSL_REJECT_UNAUTHORIZED=false` is a deliberate mode, never a default, and the
-code says so. Use it when the network path between broker and database is itself
+code says so: it now also warns at every boot, because `PG_SSL_ROOT_CERT` has
+made it avoidable. Reach for it only when your provider will not give you its CA
+certificate at all, when the network path between broker and database is itself
 trusted (a private VPC subnet, a service mesh, a host-local socket path), and the
 only thing you actually need TLS for is the provider's requirement that
 connections be encrypted. Do not use it across the public internet.
@@ -101,24 +154,35 @@ connections be encrypted. Do not use it across the public internet.
    fails to connect.
 
 3. **Managed PostgreSQL with a private CA chain.** `PG_USE_SSL=true` plus
-   `PG_SSL_REJECT_UNAUTHORIZED=false`, and treat the network path as part of your
-   trust boundary. Document that it is, because the certificate no longer proves
-   anything about it.
+   `PG_SSL_ROOT_CERT` holding that provider's CA certificate. Verify by breaking
+   it on purpose once: supply a different CA and confirm the broker refuses to
+   start. Fall back to `PG_SSL_REJECT_UNAUTHORIZED=false` only if the provider
+   will not publish its CA, and then treat the network path as part of your trust
+   boundary and document that it is, because the certificate proves nothing about
+   it.
 
-4. **Across an untrusted network.** Do not rely on either mode. Terminate the
-   trust decision somewhere that can validate a private root: a TLS-terminating
-   proxy next to the broker, or a VPN.
+4. **Across an untrusted network.** Supply the CA. `PG_SSL_REJECT_UNAUTHORIZED=false`
+   is not an option here: it defends against reading the wire and not against
+   becoming the other end of it. If you cannot obtain a CA to pin, terminate the
+   trust decision somewhere that can: a TLS-terminating proxy next to the broker,
+   or a VPN.
 
 </Steps>
 
 ## How it applies
 
 The setting affects the broker's whole PostgreSQL surface: the deadpool connection
-pool, the boot-time connection that applies the embedded schema, and the
-maintenance connections all go through the same connector, with no separate knob
-for the migration connection. The flags are read once at boot. A failure to
-establish TLS surfaces as a connection error at boot or as pool checkout failures
-at runtime; the broker does not silently fall back to plaintext.
+pool, the boot-time connection that applies the embedded schema, the maintenance
+connections, and the out-of-band connection that cancels a wedged server-side
+query all go through the same connector, built from the same material, with no
+separate knob for the migration connection. The variables are read once at boot.
+A failure to establish TLS surfaces as a connection error at boot or as pool
+checkout failures at runtime; the broker does not silently fall back to plaintext.
+
+The embedded engine (`queen::Broker`) reads the same three variables. It has
+builder fields for the two flags but not for the CA, which is env-only, and where
+the binary exits on unusable CA material the library returns
+`StartError::Config` instead.
 
 ## Related
 
