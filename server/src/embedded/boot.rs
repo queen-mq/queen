@@ -98,6 +98,11 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
         config::env_bool_checked(k, false).map_err(StartError::Config)?;
     }
 
+    // Same contract for the one NON-boolean knob whose value `config::load()`
+    // refuses to guess at: a malformed PG_SSL_ROOT_CERT is `obs::fatal` in the
+    // binary, and a library must not take the host process down with it.
+    config::check_pg_ssl_root_cert().map_err(StartError::Config)?;
+
     // Same env-driven defaults as the binary (QUEEN_* tuning knobs keep
     // working), with the BrokerConfig fields winning over env where set.
     let mut cfg = config::load();
@@ -211,7 +216,11 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
     pg.pool = Some(deadpool_postgres::PoolConfig::new(cfg.pool_size));
     let pool = if cfg.pg_use_ssl {
         pg.ssl_mode = Some(deadpool_postgres::SslMode::Require);
-        let connector = crate::pgtls::make_connector(cfg.pg_ssl_reject_unauthorized);
+        let connector = crate::pgtls::make_connector(
+            cfg.pg_ssl_reject_unauthorized,
+            cfg.pg_ssl_root_cert.as_deref(),
+        )
+        .map_err(|e| StartError::Config(format!("PG_SSL_ROOT_CERT: {e}")))?;
         pg.create_pool(Some(deadpool_postgres::Runtime::Tokio1), connector)
             .map_err(|e| StartError::Pool(e.to_string()))?
     } else {
@@ -297,8 +306,10 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
         cfg.stmt_timeout,
         cfg.dedup_cache_mb,
         cfg.dedup_cache_enabled,
-        cfg.pg_use_ssl,
-        cfg.pg_ssl_reject_unauthorized,
+        // Same connector the pool got, honouring a BrokerConfig::pg_use_ssl
+        // override; `Err` cannot happen after the pre-pass above, and is an
+        // error rather than an exit because this is the library path.
+        db::cancel_connector(&cfg).map_err(StartError::Config)?,
     );
 
     let (init_maint, init_pop_maint) = match pool.get().await {

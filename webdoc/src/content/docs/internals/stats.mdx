@@ -25,7 +25,7 @@ There are four independent sources of numbers, and they answer different questio
 | Source | Cadence | Writes | Answers |
 | --- | --- | --- | --- |
 | Stats reconciler | `STATS_INTERVAL_MS`, 10000 ms | `queen.stats` | how much data exists and how far behind consumers are |
-| Retained-bytes lane | `RETAINED_BYTES_INTERVAL_MS`, 600000 ms | `queen.stats.retained_bytes` only | how many payload bytes each queue retains, for the storage quota |
+| Retained-bytes lane | `RETAINED_BYTES_INTERVAL_MS`, 600000 ms | `queen.stats.retained_bytes` and `segment_count` | how many payload bytes each queue retains (for the storage quota) and how many live segment rows (for the queue list) |
 | Metrics collector | `METRICS_FLUSH_MS`, 60000 ms | `queen.worker_metrics`, `queen.system_metrics`, `queen.queue_lag_metrics` | what this replica did, per minute |
 | In-process counters | live | nothing | `/metrics/prometheus` gauges and `queen_process_*` totals |
 | KV and timer usage rollup | `QUEEN_KV_USAGE_EVERY_MS`, 300000 ms | `queen.kv_usage` | how much state each tenant holds |
@@ -93,11 +93,15 @@ it is still a full heap scan of `log_segments`, and it feeds exactly one consequ
 proxy's storage quota, which is hysteretic by contract. So it does not run inside the reconciler
 cycle. A separate loop in `stats.rs` runs `queen.log_refresh_retained_bytes_v1()` every
 `RETAINED_BYTES_INTERVAL_MS` (default 600000 ms per replica), gated by its own advisory lock
-(`737003`), and writes only that one column; the reconciler self-assigns it and never computes it.
+(`737003`), and writes only the two columns it owns: `retained_bytes` and, counted inside the same
+scan, `segment_count`, the live `log_segments` rows behind each queue. The reconciler self-assigns
+both and never computes them. `segment_count` exists so the queue list stops counting segments per
+call: that count grew with the tenant's segment population on every list request, while the queue
+detail keeps the exact live count per click.
 
 The value measures the **compressed bytes as stored** (TOAST bookkeeping, indexes, WAL and the
-`log_txns` hash sidecar are all excluded). It lags up to one slow-lane period, and a newly created
-queue reads `0` until the lane's first pass over it.
+`log_txns` hash sidecar are all excluded). Both columns lag up to one slow-lane period, and a newly
+created queue reads `0` until the lane's first pass over it.
 
 ### Lag and rates
 
@@ -194,7 +198,10 @@ is the `queen.queues` id, the row carries a cascading foreign key to it (a delet
 rows go with the queue), and readers join `queen.queues` when they need the name. The upsert
 **sums** on conflict, so several replicas writing the same minute aggregate into one cluster-wide
 row. Each bucket carries pop count, push request and message counts, empty-pop count,
-transaction count, and ack request, success and failure counts.
+transaction count, ack request, success and failure counts, and a conflated count: log positions
+retired by conflation without a handler invocation, `0` on every queue whose groups do not conflate.
+The conflated count surfaces as `queen_queue_conflated_per_minute` beside the pop family, because
+the pair is the whole story of a conflating queue, what was handled and what was skipped.
 
 Two columns merge differently because summing them would be wrong. Lag merges as a weighted average
 (`SUM(avg × count) / SUM(count)`, the same identity the readers use across buckets) and the maximum

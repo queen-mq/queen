@@ -4,7 +4,7 @@
 # below keeps the import path `use queen::...` (and the [[bin]] keeps the
 # binary name) — nothing in the repo tooling or in user code changes.
 name = "queen-engine"
-version = "1.2.1"
+version = "1.3.0"
 edition = "2021"
 # Measured floor, not copied: `cargo +1.88 check` passes for both feature sets;
 # 1.86 fails because jsonwebtoken -> simple_asn1 floors `time` at 0.3.55, which
@@ -116,7 +116,7 @@ tracing-subscriber = { version = "0.3", optional = true, default-features = fals
 # conformance tests in `handlers::data::protocol_conformance` keep pinning the
 # hand-rendered bytes to these types, so a field that drifts on either side
 # fails a test instead of silently reaching a client.
-queen-protocol = { path = "../crates/queen-protocol", version = "1.2.0" }
+queen-protocol = { path = "../crates/queen-protocol", version = "1.3.0" }
 # EPHEMERAL_QUEUES.md §3.6 (M2) — the broker→broker forwarding client
 # (src/peerclient.rs). Same crates and same versions as the proxy's upstream
 # client, which is the repository's ONE HTTP client pattern: "no reqwest by

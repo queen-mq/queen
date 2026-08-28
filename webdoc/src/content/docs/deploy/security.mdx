@@ -22,14 +22,15 @@ digest: >-
   CORS layer. `JWT_ENABLED` is `false` by default; off, every route answers any caller, `DELETE
   /api/v1/resources/queues/:queue` included, dashboard as full admin. `/metrics/prometheus` is
   public, no switch; its per-queue series carry no tenant label. `PG_USE_SSL` is `false` by
-  default; on, most managed PostgreSQL fails the binary's Mozilla-root validation, and
-  `PG_SSL_REJECT_UNAUTHORIZED=false` encrypts without verifying the server. Encryption needs
+  default; on, most managed PostgreSQL fails Mozilla-root validation, so pin its CA in
+  `PG_SSL_ROOT_CERT`; `PG_SSL_REJECT_UNAUTHORIZED=false` skips verification entirely. Encryption needs
   `QUEEN_ENCRYPTION_KEY` plus the queue's `encryptionEnabled`; one alone stores plaintext, no
   error. On `QUEEN_MESH_PORT`, frames after the replayable HMAC `HELLO` handshake are
   unauthenticated JSON; firewalling is mandatory. `002_streams_schema.sql` grants
-  `queen_streams.queries` and `queen_streams.state` to `PUBLIC`. With native tenancy on,
+  every `queen_streams` table to `PUBLIC`. With native tenancy on,
   `x-queen-tenant` is checked for shape, never authority, and `QUEEN_TENANCY_HEADER=1` refuses to
   boot unless `QUEEN_KV_TRUSTED_PROXY=1` is set with it.
+# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
 ---
 
 The broker is one process with one plaintext listener. It binds `PORT` on `QUEEN_BIND_ADDR`, which
@@ -131,13 +132,16 @@ control that still holds when someone walks off with a database dump
 `PG_USE_SSL` is `false` by default, which means every message you store crosses a plaintext
 connection. Turn it on whenever the database is not on localhost. With it on, the broker validates
 the server's chain against the Mozilla roots compiled into the binary, and most managed PostgreSQL
-fails that check because its chain is rooted in a private CA; `PG_SSL_REJECT_UNAUTHORIZED=false`
-then encrypts the connection without proving whose key answered
+fails that check because its chain is rooted in a private CA. The answer is `PG_SSL_ROOT_CERT`,
+holding that provider's CA certificate as PEM content: verification stays on, against the CA you
+named and only that one. `PG_SSL_REJECT_UNAUTHORIZED=false` remains as a last resort for a provider
+that will not publish its CA, and it encrypts the connection without proving whose key answered
 ([PostgreSQL TLS](/reference/security/postgres-tls)).
 
-Inside the database, `002_streams_schema.sql` grants `queen_streams.queries` and
-`queen_streams.state` to `PUBLIC`, so any role that can connect reads and rewrites stream
-definitions and stream state whatever the HTTP layer allows ([the schema](/internals/schema)).
+Inside the database, `002_streams_schema.sql` grants `queen_streams.queries`,
+`queen_streams.state` and `queen_streams.quota` to `PUBLIC`, so any role that can connect reads
+and rewrites stream definitions, stream state and the per-tenant streams grants, whatever the
+HTTP layer allows ([the schema](/internals/schema)).
 
 ## The mesh port
 
@@ -148,8 +152,8 @@ answer empty. Bind the port to a private network and allow it only from the othe
 addresses. `QUEEN_SYNC_SECRET` raises the bar from connecting to capturing one handshake, and does
 not replace the firewall ([the mesh](/internals/mesh)).
 
-TLS in front, JWT on, `PG_USE_SSL` true, a key on the queues that need one, and a mesh port only
-the brokers can reach.
+TLS in front, JWT on, `PG_USE_SSL` true with a CA to verify it against, a key on the queues that
+need one, and a mesh port only the brokers can reach.
 
 <CardGrid>
   <LinkCard

@@ -8,7 +8,8 @@
 # CONTENT (not just HTTP 200), foreign-pid rejection on every MUTATING route,
 # trace-name isolation, cross-tenant retention, api-key scopes, key/session
 # revocation, key/cluster binding, blocked operator surfaces, storage quota,
-# meters -- plus a live 429 check when the proxy runs with
+# meters, SHARED-HOST key routing (section 20, decision z: one hostname, the
+# cluster from the credential) -- plus a live 429 check when the proxy runs with
 # QUEEN_PROXY_ENFORCE=true (`QUEEN_PROXY_ENFORCE=true scripts/dev-cell.sh up`).
 # In shadow mode those three checks are reported as COUNTED SKIPS, never as
 # silent passes, so the printed tally means the same thing in both modes.
@@ -137,10 +138,10 @@ cleanup() {
   # Drop this run's queues, so a long-lived dev cell does not accumulate ~10
   # queues per smoke run (and eventually meet the max_queues cap). Best-effort
   # and silent: a cleanup failure must not be mistaken for a check.
-  for q in "orders-$RUN" "ret-$RUN" "iso-a-$RUN" "adv-$RUN" "scope-$RUN" "quota-$RUN" "hot-$RUN" "hot4-$RUN"; do
+  for q in "orders-$RUN" "ret-$RUN" "iso-a-$RUN" "adv-$RUN" "scope-$RUN" "quota-$RUN" "hot-$RUN" "hot4-$RUN" "sh20-$RUN"; do
     req DELETE dev "$KEY_A" "/api/v1/resources/queues/$q" >/dev/null 2>&1
   done
-  for q in "orders-$RUN" "ret-$RUN" "iso-b-$RUN" "adv-$RUN" "txn-$RUN" "hot-$RUN"; do
+  for q in "orders-$RUN" "ret-$RUN" "iso-b-$RUN" "adv-$RUN" "txn-$RUN" "hot-$RUN" "sh20-$RUN" "sh20b-$RUN"; do
     [ -n "$KEY_B" ] && req DELETE two "$KEY_B" "/api/v1/resources/queues/$q" >/dev/null 2>&1
   done
   [ -n "$KEY_P1" ] && req DELETE pro1 "$KEY_P1" "/api/v1/resources/queues/tq-$RUN" >/dev/null 2>&1
@@ -389,10 +390,22 @@ req POST dev "$KEY_A" /api/v1/push "{\"items\":[{\"queue\":\"$ADVQ\",\"payload\"
 AQ_BEFORE=$(req GET dev "$KEY_A" "/api/v1/resources/queues/$ADVQ"); AQ_BEFORE=${AQ_BEFORE#*|}
 AQ_ID=$(j '.id' "$AQ_BEFORE")
 
-POP1=$(req GET dev "$KEY_A" "/api/v1/pop/queue/$ADVQ?batch=1&consumerGroup=$CG"); POP1=${POP1#*|}
+# subscriptionMode=all is LOAD-BEARING, not decoration. This group is created by
+# this very pop, and the broker's DEFAULT_SUBSCRIPTION_MODE is `new` (the flip
+# restored in server/src/config.rs), so a fresh group starts at the TAIL and this
+# pop answers 204 with no body -- the two messages above were pushed before the
+# group existed. Every check in this section then works on an empty lease/txn and
+# fails for a reason that has nothing to do with isolation. The group's mode is
+# persisted on its first registration, so the later pop on $CG inherits it.
+POP1=$(req GET dev "$KEY_A" "/api/v1/pop/queue/$ADVQ?batch=1&consumerGroup=$CG&subscriptionMode=all"); POP1=${POP1#*|}
 ADV_PID=$(j '.partitionId' "$POP1")
 ADV_TXN=$(j '.messages[0].transactionId' "$POP1")
 ADV_LEASE=$(j '.leaseId' "$POP1")
+if [ -n "$ADV_TXN" ] && [ "$ADV_TXN" != "null" ] && [ -n "$ADV_LEASE" ] && [ "$ADV_LEASE" != "null" ]; then
+  ok "section 9 fixture: A holds a real lease + transaction to attack"
+else
+  bad "section 9 fixture: pop returned no lease/txn ($(short "$POP1")); the checks below cannot mean anything"
+fi
 
 # 9a. DELETE queue
 req DELETE two "$KEY_B" "/api/v1/resources/queues/$ADVQ" >/dev/null
@@ -838,6 +851,176 @@ if [ "$R4MAX" -lt 250 ]; then
   ok "  ... on the wake, not the backoff floor (worst of 3:$R4DELTAS)"
 else
   bad "  ... only on the backoff floor (worst of 3:$R4DELTAS; a wake lands in <250ms)"
+fi
+
+# ============================================================================
+# 20. SHARED-HOST KEY ROUTING (decision z)
+#
+#     On a host listed in QUEEN_PROXY_SHARED_HOSTS the cluster is resolved from
+#     the CREDENTIAL, not from the Host label: an api key names its own cluster,
+#     a human session names one with x-queen-act-cluster and is checked against
+#     cluster_roles. dev-cell.sh configures `shared.local` for this.
+#
+#     Self-detecting, and the detector is itself the load-bearing assertion:
+#     WITHOUT the feature, dev-cell.sh's QUEEN_PROXY_DEFAULT_CLUSTER=dev turns
+#     any unresolvable Host into cluster `dev`, so B's key on `shared.local`
+#     would be a 403 key/cluster mismatch. A 200 means the shared path ran AND
+#     that the default cluster did not absorb the host -- the two knobs are
+#     different features and must not interact (decision z).
+# ============================================================================
+SH=shared.local
+SHQ="sh20-$RUN"          # the SAME queue name on both clusters
+SHB="sh20b-$RUN"         # exists on cluster `two` only
+cellpx() { docker exec -i qcell-pg psql -qtA -U postgres -d queen "$@"; }
+
+SHPROBE=$(req GET $SH "$KEY_B" /api/v1/resources/queues)
+if [ "${SHPROBE%%|*}" != "200" ]; then
+  skip "shared-host routing: QUEEN_PROXY_SHARED_HOSTS is not set on this proxy (got ${SHPROBE%%|*}; expected 200 for a shared host, 403 for the default-cluster fallback)"
+else
+  ok "a foreign cluster's key is accepted on the shared host (and DEFAULT_CLUSTER did not absorb it)"
+
+  # --- the data plane: the key decides which cluster, on ONE hostname --------
+  SHPA=$(req POST $SH "$KEY_A" /api/v1/push \
+    "{\"items\":[{\"queue\":\"$SHQ\",\"partition\":\"p0\",\"payload\":{\"sh\":\"A\"}}]}")
+  check "shared host + A's key: push accepted" 201 "${SHPA%%|*}"
+  SHPB=$(req POST $SH "$KEY_B" /api/v1/push \
+    "{\"items\":[{\"queue\":\"$SHQ\",\"partition\":\"p0\",\"payload\":{\"sh\":\"B\"}}]}")
+  check "shared host + B's key: push accepted into the SAME queue name" 201 "${SHPB%%|*}"
+
+  SHOA=$(req GET $SH "$KEY_A" "/api/v1/pop/queue/$SHQ?batch=10&autoAck=true")
+  check "shared host + A's key: pop served" 200 "${SHOA%%|*}"
+  want_in  "  ... it is A's own message" '"sh":"A"' "${SHOA#*|}"
+  want_out "  ... and never B's" '"sh":"B"' "${SHOA#*|}"
+  SHOB=$(req GET $SH "$KEY_B" "/api/v1/pop/queue/$SHQ?batch=10&autoAck=true")
+  check "shared host + B's key: pop served" 200 "${SHOB%%|*}"
+  want_in  "  ... it is B's own message" '"sh":"B"' "${SHOB#*|}"
+  want_out "  ... and never A's" '"sh":"A"' "${SHOB#*|}"
+
+  # The tenant-header injection, asserted where it actually lands: two rows of
+  # the same queue NAME in the cell, one per cluster's broker_tenant_uuid --
+  # both created through the one shared hostname.
+  SHTEN=$(cellpx -c "SELECT string_agg(tenant_id::text, ',' ORDER BY tenant_id::text) FROM queen.queues WHERE name='$SHQ'")
+  SHWANT=$(px -c "SELECT string_agg(broker_tenant_uuid::text, ',' ORDER BY broker_tenant_uuid::text) FROM queen_proxy.clusters WHERE slug IN ('dev','two')")
+  check "x-queen-tenant followed the key, not the host (broker rows)" "$SHWANT" "$SHTEN"
+
+  # --- scoped listings: content, not just status ----------------------------
+  req POST $SH "$KEY_B" /api/v1/push \
+    "{\"items\":[{\"queue\":\"$SHB\",\"partition\":\"p0\",\"payload\":{\"sh\":\"B\"}}]}" >/dev/null
+  SHLA=$(req GET $SH "$KEY_A" /api/v1/resources/queues)
+  want_out "shared host + A's key: B's queue is not in A's listing" "\"$SHB\"" "${SHLA#*|}"
+  SHLB=$(req GET $SH "$KEY_B" /api/v1/resources/queues)
+  want_in  "shared host + B's key: B's queue IS in B's listing" "\"$SHB\"" "${SHLB#*|}"
+  SHLB2=$(req GET two "$KEY_B" /api/v1/resources/queues)
+  # Names only: the two reads are back to back, but `retainedBytes`/segment
+  # counts are refreshed by a background lane and would make a whole-body
+  # comparison flaky for a reason that has nothing to do with routing.
+  check "the shared host and B's own hostname list the same queues" \
+        "$(j '[.queues[].name]|sort|@csv' "${SHLB#*|}")" \
+        "$(j '[.queues[].name]|sort|@csv' "${SHLB2#*|}")"
+
+  # --- the 401 contract: a missing/invalid key is NEVER a 421 ---------------
+  SHNO=$(curl -s -o "$BODYF" -w '%{http_code}' -H "Host: $SH" "$P/api/v1/resources/queues")
+  check "shared host, no credential at all: 401 (never 421)" 401 "$SHNO"
+  want_in "  ... with the unauthorized code" '"code":"unauthorized"' "$(cat "$BODYF")"
+  SHBAD=$(req GET $SH "qk_dev_$(printf 'z%.0s' $(seq 43))" /api/v1/resources/queues)
+  check "shared host, unknown api key: 401 (never 421, never 403)" 401 "${SHBAD%%|*}"
+  SHJUNK=$(req GET $SH "not-a-jwt-at-all" /api/v1/resources/queues)
+  check "shared host, garbage session token: 401" 401 "${SHJUNK%%|*}"
+
+  # A revoked key must fall to the same 401, not to a 403 or a 421.
+  R=$(issue_key "$CID_B" shrev "'read'"); SHREV=${R%%|*}; SHREV_ID=${R#*|}
+  SHRV=$(req GET $SH "$SHREV" /api/v1/resources/queues)
+  check "shared host, a fresh key of cluster two works" 200 "${SHRV%%|*}"
+  px -c "SELECT queen_proxy.revoke_api_key('$SHREV_ID'::uuid)" >/dev/null
+  say "  ...  waiting for the revocation to propagate (NOTIFY, worst case the 30s key TTL)"
+  DEADLINE=$((SECONDS+45)); SHRCODE=""
+  while [ $SECONDS -lt $DEADLINE ]; do
+    R=$(req GET $SH "$SHREV" /api/v1/resources/queues); SHRCODE=${R%%|*}
+    [ "$SHRCODE" != "200" ] && break
+    sleep 2
+  done
+  check "shared host, revoked key: 401 (never 421)" 401 "$SHRCODE"
+
+  # --- the same host, fully qualified --------------------------------------
+  # `shared.local.` is the SAME name (the trailing dot is the DNS root label,
+  # legal in a Host header and emitted by some clients). It used to miss
+  # is_shared_host, fall through to cache::resolve_host, and be absorbed by
+  # this cell's QUEEN_PROXY_DEFAULT_CLUSTER=dev -- so B's key answered 403
+  # key/cluster mismatch, silently routed to the WRONG cluster's ctx. One
+  # character defeating the classification the whole feature rests on.
+  SHFQ=$(curl -s -o "$BODYF" -w '%{http_code}' -H "Host: $SH." -H "Authorization: Bearer $KEY_B" \
+         "$P/api/v1/resources/queues")
+  check "the fully-qualified shared host routes by credential too" 200 "$SHFQ"
+  want_in "  ... to B's own cluster, not the default one" "\"$SHB\"" "$(cat "$BODYF")"
+  SHFQN=$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $SH." "$P/api/v1/resources/queues")
+  check "  ... and it is a 401 with no credential, like the portless form" 401 "$SHFQN"
+
+  # --- a key is never RETARGETED, on a shared host either -------------------
+  SHACT=$(curl -s -o "$BODYF" -w '%{http_code}' -H "Host: $SH" -H "Authorization: Bearer $KEY_B" \
+          -H 'x-queen-act-cluster: dev' "$P/api/v1/resources/queues")
+  check "shared host + key + act-as-cluster: 403, a key stays on its own cluster" 403 "$SHACT"
+
+  # --- non-shared hosts are untouched --------------------------------------
+  SHX=$(req GET two "$KEY_A" /api/v1/resources/queues)
+  check "non-shared host: A's key on cluster two is still a mismatch" 403 "${SHX%%|*}"
+  SHY=$(req GET dev "$KEY_A" /api/v1/resources/queues)
+  check "non-shared host: A's key on its own host still works" 200 "${SHY%%|*}"
+
+  # --- the console/webapp half: session identity + cluster_roles ------------
+  SHLOGIN=$(curl -s -o /dev/null -D "$HDRF" -w '%{http_code}' -H "Host: $SH" -X POST \
+            -d 'email=dev@localhost&password=devpass' "$P/auth/login")
+  SHCOOK=$(hdr set-cookie | cut -d';' -f1)
+  if [ "$SHLOGIN" = "303" ] && has 'queen_session=' "$SHCOOK"; then
+    ok "shared host: local login issues a session cookie"
+    SHME=$(creq GET $SH "$SHCOOK" /auth/me)
+    check "  ... /auth/me answers on the shared host" 200 "${SHME%%|*}"
+    check "  ... naming no acting cluster yet (the SPA's selector case)" "null" \
+          "$(j '.acting_cluster' "${SHME#*|}")"
+    want_in "  ... but listing the clusters the session may pick" '"slug":"dev"' "${SHME#*|}"
+    SHC0=$(creq GET $SH "$SHCOOK" /api/console/overview)
+    check "shared host: a session that names no cluster is 403 (not 401, not 421)" 403 "${SHC0%%|*}"
+    SHC1=$(curl -s -o "$BODYF" -w '%{http_code}' -H "Host: $SH" -H "Cookie: $SHCOOK" \
+           -H 'x-queen-act-cluster: dev' "$P/api/console/overview")
+    check "shared host + act-as-cluster: the console opens the named cluster" 200 "$SHC1"
+    want_in "  ... and it is that cluster's overview" '"slug":"dev"' "$(cat "$BODYF")"
+    SHC2=$(curl -s -o "$TMP/shc2" -w '%{http_code}' -H "Host: $SH" -H "Cookie: $SHCOOK" \
+           -H 'x-queen-act-cluster: two' "$P/api/console/overview")
+    check "shared host: a cluster the session holds no role on is 403" 403 "$SHC2"
+    SHC3=$(curl -s -o "$TMP/shc3" -w '%{http_code}' -H "Host: $SH" -H "Cookie: $SHCOOK" \
+           -H 'x-queen-act-cluster: nosuchcluster' "$P/api/console/overview")
+    check "  ... and a cluster that does not exist is the SAME 403" 403 "$SHC3"
+    check "  ... byte-identical, so the header cannot enumerate slugs" \
+          "$(cat "$TMP/shc2")" "$(cat "$TMP/shc3")"
+    SHC4=$(req GET $SH "$KEY_B" /api/console/overview)
+    check "shared host: the console still refuses an api key" 403 "${SHC4%%|*}"
+  else
+    skip "shared host: local login did not issue a cookie (code $SHLOGIN) -- console half not exercised"
+    skip "  ... (console act-as-cluster checks)"
+  fi
+
+  # --- limits still bucket PER CLUSTER on one hostname ----------------------
+  if [ "$ENFORCING" = "yes" ]; then
+    set_ovr "$CID_B" '{"max_req_per_sec":1,"req_burst":3,"max_queues":500}'
+    sleep 1
+    SH429=0; SHA200=0
+    for _ in $(seq 1 12); do
+      R=$(req GET $SH "$KEY_B" /api/v1/resources/queues)
+      [ "${R%%|*}" = "429" ] && SH429=$((SH429+1))
+    done
+    for _ in $(seq 1 12); do
+      R=$(req GET $SH "$KEY_A" /api/v1/resources/queues)
+      [ "${R%%|*}" = "200" ] && SHA200=$((SHA200+1))
+    done
+    if [ "$SH429" -gt 0 ]; then
+      ok "shared host: the narrowed cluster's own bucket still 429s ($SH429/12)"
+    else bad "shared host: the narrowed cluster never 429'd -- the bucket did not follow the key"; fi
+    check "  ... while the OTHER cluster on the same hostname is untouched" 12 "$SHA200"
+    set_ovr "$CID_B" "$WIDE"
+    sleep 1
+  else
+    skip "shared host: per-cluster rate limiting (proxy is in shadow mode)"
+    skip "  ... (the other cluster on the same hostname stays unthrottled)"
+  fi
 fi
 
 TOTAL=$((PASS+FAIL+SKIP))

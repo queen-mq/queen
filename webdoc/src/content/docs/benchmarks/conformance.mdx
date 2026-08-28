@@ -16,12 +16,13 @@ sourceOfTruth:
 verifiedBy:
   - test/run.sh
 digest: >-
-  Queen MQ's conformance evidence is `test/run.sh`: six client suites (JavaScript, Python, Go,
-  Rust, C++ and the queenctl CLI) on three topologies each, plus the broker's unit tests, an HA
-  mesh assertion and a two-tenant isolation suite, every cell its own throwaway Docker stack. The
-  `tenanted` lane reruns each client suite against a broker with tenant scoping on and no tenant
-  header, and any divergence from the flag-off lane fails the run either way. The recorded
-  isolation run is 45 assertions, 0 failures. The PHP SDK has no suite in the matrix.
+  Queen MQ's conformance evidence is `test/run.sh`: seven client suites (JavaScript, Python, Go,
+  Rust, C++, PHP and the queenctl CLI) on three topologies each, plus the broker's unit tests,
+  an HA mesh assertion, a two-tenant isolation suite and raw-HTTP kv/timer and conflation
+  suites, every cell its own throwaway Docker stack. The `tenanted` lane reruns each client
+  suite with tenant scoping on and no tenant header, and any divergence from the flag-off lane
+  fails the run either way. The recorded isolation run is 45 assertions, 0 failures.
+# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
 ---
 
 The throughput pages measure how fast one shape goes. This page is the other half of the
@@ -42,8 +43,8 @@ using.
 
 ## What runs
 
-Six client suites cover five SDK languages and the CLI, and each of the six runs on three
-topologies. Three more suites bring their own.
+Seven client suites cover six SDK languages and the CLI, and each of the seven runs on three
+topologies. Five more suites bring their own.
 
 | Suite | What it exercises | Topologies |
 | --- | --- | --- |
@@ -51,22 +52,22 @@ topologies. Three more suites bring their own.
 | `go` | the root-package unit tests, then `./tests/` and `./tests/streams_integration/` with `-count=1`, so a cached result never hides a live-broker failure | `single`, `ha`, `tenanted` |
 | `py` | the whole `pytest` tree under `clients/client-py/tests`, streams included | `single`, `ha`, `tenanted` |
 | `cli` | the `queenctl` end-to-end suite, with `QUEEN_E2E=1` and the PostgreSQL variables that turn on its database-side assertions | `single`, `ha`, `tenanted` |
-| `cpp` | `test_retry429` first, self-contained with no broker, then `test_client` against the broker | `single`, `ha`, `tenanted` |
+| `cpp` | the broker-free binaries first, `test_retry429`, `test_kv_timers` and `test_conflation`, then `test_client` against the broker | `single`, `ha`, `tenanted` |
+| `laravel` | the PHP client's `phpunit` run: the broker-free `Unit` suite that pins the exact JSON wire shape, then the `Integration` tree | `single`, `ha`, `tenanted` |
 | `rust-client` | `cargo test --locked` in `clients/client-rust`: the lib unit tests, then each integration binary in turn | `single`, `ha`, `tenanted` |
 | `rust` | the **broker's** own in-process unit tests, `cargo test`, no stack and no PostgreSQL | `unit` |
 | `mesh` | that both brokers of an HA pair report the peer connected with 0 handshake failures | `ha` |
 | `tenancy` | two-tenant isolation over the HA pair, driven at the brokers with the trusted `x-queen-tenant` header | `ha-tenanted` |
+| `http` | the kv/timer wire with no SDK in the way: a broker-free unit half, then the route-by-route check against the broker | `single` |
+| `conflation` | the conflation end-to-end scenarios, raw HTTP with no SDK in the path | `single` |
 
 The `rust` row is the broker, not the Rust client: the client suite is `rust-client`. The two are
 separate rows because they prove separate things, and only one of them needs a database.
 
-The **PHP SDK has no suite in this matrix.** It is a supported client with no automated
-conformance lane here, and that is a gap rather than an omission.
-
 Two entrypoint details are the difference between running and passing vacuously. The
 `rust-client` runner exports `QUEEN_TEST_URL` (without it every integration test skips) and
 `QUEEN_TEST_STRICT=1`, which makes the skip branch itself fatal, so an empty broker URL fails
-instead of reading like a green run of about 130 tests. The `cli` runner exports `QUEEN_E2E=1`,
+instead of reading like a green run of a few hundred tests. The `cli` runner exports `QUEEN_E2E=1`,
 without which `TestMain` exits 0 having run nothing.
 
 ## The topologies

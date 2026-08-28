@@ -18,7 +18,17 @@ pub fn create_pool(cfg: &Config) -> Pool {
         // is delegated to the rustls connector's ClientConfig, gated by
         // PG_SSL_REJECT_UNAUTHORIZED.
         pg.ssl_mode = Some(deadpool_postgres::SslMode::Require);
-        let connector = crate::pgtls::make_connector(cfg.pg_ssl_reject_unauthorized);
+        // `PG_SSL_ROOT_CERT` was already validated in `config::load()` (and, on
+        // the embedded path, in `embedded::boot`), so the error arm is
+        // unreachable here — it is `fatal` rather than a fall-back for the same
+        // reason it is fatal there: a CA that will not parse must never quietly
+        // become "trust the Mozilla set", which would connect to a different
+        // certificate than the operator authorised.
+        let connector = crate::pgtls::make_connector(
+            cfg.pg_ssl_reject_unauthorized,
+            cfg.pg_ssl_root_cert.as_deref(),
+        )
+        .unwrap_or_else(|e| crate::obs::fatal(format!("PG_SSL_ROOT_CERT: {e}")));
         pg.create_pool(Some(Runtime::Tokio1), connector)
             .expect("failed to create TLS pool")
     } else {
@@ -56,17 +66,50 @@ fn cancel_tls() -> CancelTls {
     CANCEL_TLS
         .get_or_init(|| {
             // Mirror config::load(): PG_USE_SSL / PG_SSL_REJECT_UNAUTHORIZED read
-            // through the SAME boolean parser, so the cancel connector can never
-            // disagree with the pool about what `PG_USE_SSL=on` means.
+            // through the SAME boolean parser, and PG_SSL_ROOT_CERT through the
+            // SAME reader, so the cancel connector can never disagree with the
+            // pool about what `PG_USE_SSL=on` means or about which CA is
+            // trusted. A CA added to the pool and not here would reintroduce
+            // exactly the disagreement this function's comment exists to
+            // prevent.
             let use_ssl = crate::config::env_bool("PG_USE_SSL", false);
             if use_ssl {
                 let reject = crate::config::env_bool("PG_SSL_REJECT_UNAUTHORIZED", true);
-                CancelTls::Rustls(crate::pgtls::make_connector(reject))
+                let root_ca = crate::config::pg_ssl_root_cert();
+                // `env_bool` above already exits the process on a malformed
+                // boolean in this very closure, so a malformed CA doing the same
+                // is the established behaviour of this lazy init — and it is
+                // unreachable anyway, `config::load()` validated it at boot.
+                CancelTls::Rustls(
+                    crate::pgtls::make_connector(reject, root_ca.as_deref())
+                        .unwrap_or_else(|e| crate::obs::fatal(format!("PG_SSL_ROOT_CERT: {e}"))),
+                )
             } else {
                 CancelTls::NoTls
             }
         })
         .clone()
+}
+
+/// The same out-of-band connector, built from a RESOLVED `Config` instead of
+/// from the environment — for the one caller (fusion.rs's best-effort query
+/// cancel) that must honour an embedded `BrokerConfig::pg_use_ssl` override,
+/// which `cancel_tls()` above cannot see because it reads env.
+///
+/// Built ONCE by the caller and carried, rather than rebuilt per cancel: a
+/// `ClientConfig` on the webpki set parses every bundled anchor, and a
+/// cancellation storm is exactly when that cost lands. `Err` only when the CA
+/// material is unusable, which `config::load()` / `embedded::boot` already
+/// refused to boot with — so the caller may treat it as a boot failure.
+pub fn cancel_connector(
+    cfg: &Config,
+) -> Result<Option<tokio_postgres_rustls::MakeRustlsConnect>, String> {
+    if !cfg.pg_use_ssl {
+        return Ok(None);
+    }
+    crate::pgtls::make_connector(cfg.pg_ssl_reject_unauthorized, cfg.pg_ssl_root_cert.as_deref())
+        .map(Some)
+        .map_err(|e| format!("PG_SSL_ROOT_CERT: {e}"))
 }
 
 /// Log at most once per 30s per event class, so a cancellation storm (exactly the
@@ -1663,11 +1706,16 @@ pub async fn cleanup_system_metrics(
     batch: usize,
 ) -> Result<u64, tokio_postgres::Error> {
     let batch = batch.max(1) as i64;
+    // ctid = ANY(ARRAY(...)) forces the subquery into an InitPlan (evaluated
+    // once), so LIMIT bounds the statement. The `ctid IN (SELECT ... LIMIT)`
+    // form lets the planner flatten the sublink into a semi-join that re-runs
+    // the inner query per outer row — unbounded delete, batch not applied (see
+    // the BATCHING header in sql/procedures/031_tenant_purge.sql).
     let stmt = "DELETE FROM queen.system_metrics \
-                WHERE ctid IN ( \
+                WHERE ctid = ANY (ARRAY( \
                     SELECT ctid FROM queen.system_metrics \
                     WHERE timestamp < NOW() - make_interval(days => $1) \
-                    LIMIT $2 )";
+                    LIMIT $2 ))";
     let mut total: u64 = 0;
     loop {
         let n = client.execute(stmt, &[&days, &batch]).await?;
@@ -1988,27 +2036,33 @@ pub async fn seg_seek_partition(
 // streams routes. `requests_json` is that already-built one-element array.
 
 // POST /streams/v1/queries -> queen.streams_register_query_v1
-// (008_streams_register_query_v1, unchanged from the seg era).
-// Returns the SP result array JSON as text.
+// (008_streams_register_query_v1).
+// Track B (§5): `tenant` scopes the name lookup/upsert and selects the grant
+// row; the default tenant skips the grant entirely, so an OSS broker is
+// byte-identical. Returns the SP result array JSON as text.
 pub async fn streams_register(
     client: &deadpool_postgres::Client,
     requests_json: &str,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
-    // $1::text::jsonb pins $1 to TEXT so a &str binds.
-    let stmt = "SELECT (queen.streams_register_query_v1($1::text::jsonb))::text";
-    let row = client.query_one(stmt, &[&requests_json]).await?;
+    // $1::text::jsonb pins $1 to TEXT so a &str binds; $2::text::uuid is the
+    // house pattern for every uuid argument (no `uuid` crate in the wire).
+    let stmt = "SELECT (queen.streams_register_query_v1($1::text::jsonb, $2::text::uuid))::text";
+    let row = client.query_one(stmt, &[&requests_json, &tenant]).await?;
     Ok(row.get(0))
 }
 
 // POST /streams/v1/state/get -> queen.streams_state_get_v1
-// (009_streams_state_get_v1, unchanged from the seg era).
-// Read-only. Returns the SP result array JSON as text.
+// (009_streams_state_get_v1).
+// Read-only. Track B (§5): `tenant` becomes the SP's ownership predicate on the
+// query, so a foreign query_id reads as an empty result set.
 pub async fn streams_state_get(
     client: &deadpool_postgres::Client,
     requests_json: &str,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
-    let stmt = "SELECT (queen.streams_state_get_v1($1::text::jsonb))::text";
-    let row = client.query_one(stmt, &[&requests_json]).await?;
+    let stmt = "SELECT (queen.streams_state_get_v1($1::text::jsonb, $2::text::uuid))::text";
+    let row = client.query_one(stmt, &[&requests_json, &tenant]).await?;
     Ok(row.get(0))
 }
 
@@ -2017,15 +2071,18 @@ pub async fn streams_state_get(
 // broker-packed (metas + base64 zstd blob). Returns the SP result array JSON as
 // text: [{idx, result:{success, query_id, partition_id, queueName,
 // state_ops_applied, push_results, ack_result}}].
+// Track B (§5): `tenant` scopes the source partition, the query, and every sink
+// queue resolve/auto-create inside the SP.
 pub async fn streams_cycle(
     client: &deadpool_postgres::Client,
     requests_json: &str,
+    tenant: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let stmt = client
-        .prepare_cached("SELECT (queen.log_streams_cycle_v1($1::text::jsonb))::text")
+        .prepare_cached("SELECT (queen.log_streams_cycle_v1($1::text::jsonb, $2::text::uuid))::text")
         .await?;
     let t0 = std::time::Instant::now();
-    let row = client.query_one(&stmt, &[&requests_json]).await?;
+    let row = client.query_one(&stmt, &[&requests_json, &tenant]).await?;
     crate::admission::note_commit(crate::admission::Lane::Push, t0.elapsed());
     Ok(row.get(0))
 }

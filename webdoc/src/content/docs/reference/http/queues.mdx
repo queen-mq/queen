@@ -26,6 +26,7 @@ verifiedBy:
   - clients/client-js/test-v2/queue.js
   - clients/client-js/test-v2/retention.js
   - test/runners/tenancy/tenancy-check.sh
+# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
 ---
 
 A queue does not have to be created before it is used: the first push to a queue
@@ -209,12 +210,17 @@ Lists the tenant's queues.
 }
 ```
 
-Two different clocks feed one object, and the difference matters when you read
+Three different clocks feed one object, and the difference matters when you read
 these numbers:
 
-- `partitions`, `segments` and `messages.total` are computed live per request
-  from `queen.log_partitions` / `queen.log_segments` (`log_queue_stats_all_v1`).
+- `partitions` and `messages.total` are computed live per request from
+  `queen.log_partitions` watermark arithmetic (`log_queue_stats_all_v1`), at a
+  cost proportional to the tenant's partition count, never its segment count.
   `messages.total` is the count of **retained** frames, not the backlog.
+- `segments` is read from `queen.stats.segment_count`, which the retained-bytes
+  lane fills out of the one `log_segments` scan it already makes. It is as stale
+  as that lane's cadence and reads `0` on a queue the lane has not passed over
+  yet; the per-queue detail route below keeps the exact live count.
 - `messages.pending` and `messages.processing` come from `queen.stats`, which a
   background reconciler refreshes every `STATS_INTERVAL_MS` (default `10000` ms)
   on whichever replica claims the `stats_refresh` row in
@@ -222,10 +228,16 @@ these numbers:
   values the overview sums, so the list agrees with the rest of the dashboard
   rather than with a fresher count.
 
+`?stats=cached` skips the live enrichment entirely and serves the cached
+`queen.stats` view as it stands, so nothing is computed per call. It exists for
+pollers whose fields are all in the cached view anyway, such as the proxy's
+reconciler, which sends it unconditionally; a broker older than the parameter
+ignores it and enriches as before.
+
 <Aside type="caution">
-`namespace` and `task` query parameters are accepted and **ignored**. The handler
-takes no query extractor at all: it always serves the full list for the tenant.
-Filter client-side, or use `GET /api/v1/status/queues`, which does apply
+`namespace` and `task` query parameters are accepted and **ignored**. `stats` is
+the only query parameter the handler reads: it always serves the full list for
+the tenant. Filter client-side, or use `GET /api/v1/status/queues`, which does apply
 `queue`, `namespace` and `task`. See [Status and metrics](/reference/http/status-metrics).
 </Aside>
 
@@ -263,14 +275,15 @@ Notes that follow from the log engine: `pending` is measured against the **worst
 (lowest) committed cursor across the queue's consumer groups, so a single lagging
 group holds the number up; `failed` is always `null` because there is no
 per-message failure state; and `retainedBytes` is a `queen.stats` value, refreshed
-by the retained-bytes lane (`RETAINED_BYTES_INTERVAL_MS`, default 10 minutes per
-replica), so it can lag by up to one lane period and reads `0` on a queue created
+by the retained-bytes lane (`RETAINED_BYTES_INTERVAL_MS`, default 10 minutes, on
+whichever replica claims the `retained_bytes` row in `queen.maintenance_leases`),
+so it can lag by up to one lane period and reads `0` on a queue created
 since the lane's last pass. A queue with no `queen.queues` row answers `404` with
 `{"error":"Queue not found"}`.
 
 ## GET /api/v1/resources/queues/:queue/depth
 
-Access level **read**. The minimal backlog read for relays and schedulers: one call to
+Access level **read-only**. The minimal backlog read for relays and schedulers: one call to
 `queen.log_queue_depth_v1` (`011_log_stats`), which computes per-partition pending with the
 watermark arithmetic only. No `log_segments` scan, no timestamps, no DLQ join: against the
 console-grade detail route above this is one index-only read, computed live per request (never
@@ -397,6 +410,7 @@ listings.
 | `POST /api/v1/configure` | read-write |
 | `GET /api/v1/resources/queues` | read-only |
 | `GET /api/v1/resources/queues/:queue` | read-only |
+| `GET /api/v1/resources/queues/:queue/depth` | read-only |
 | `DELETE /api/v1/resources/queues/:queue` | admin |
 | `GET /api/v1/resources/overview` | read-only |
 | `GET /api/v1/resources/namespaces` | read-only |

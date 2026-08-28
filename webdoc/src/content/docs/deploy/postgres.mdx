@@ -20,12 +20,13 @@ digest: >-
   DISTINCT, which PostgreSQL 14 does not have; the test matrix runs against PostgreSQL 16.
   PostgreSQL is the storage engine rather than a dependency, so sizing PostgreSQL is sizing Queen,
   and every queue semantic runs in stored procedures inside the database. A pooler in transaction or
-  statement mode breaks the session advisory locks the boot-time schema apply and the maintenance
-  leader election hold, and the prepared statements the hot paths prepare once per connection;
+  statement mode breaks the session advisory lock the boot-time schema apply holds, and the
+  prepared statements the hot paths prepare once per connection;
   PgBouncer in session mode is supported. DB_POOL_SIZE defaults to 160 per broker, so replicas times
   DB_POOL_SIZE plus superuser_reserved_connections plus tooling has to stay under max_connections:
   three brokers at the default want 480 connections where a stock PostgreSQL allows 100, and the
   mismatch answers 500 with an error of pool.
+# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
 ---
 
 PostgreSQL is not a dependency of Queen, it is Queen's storage engine. Messages, offsets, the
@@ -43,7 +44,7 @@ CREATE ROLE queen LOGIN PASSWORD 'change-me';
 CREATE DATABASE queen OWNER queen;
 ```
 
-Point the `PG_*` variables at it. The broker applies `schema.sql` and 23 procedure files at every
+Point the `PG_*` variables at it. The broker applies `schema.sql` and 31 procedure files at every
 boot, from text compiled into the binary, under an advisory lock that serialises replicas. That
 needs `CREATE` on the database, ownership of what it creates and the right to issue grants, which
 the owner role above has.
@@ -52,17 +53,19 @@ Where policy forbids DDL from an application role, `QUEEN_APPLY_SCHEMA=0` starts
 straight into serving against a schema you applied yourself, in the same file order, and matching
 it to the binary becomes your job.
 
-One grant is worth knowing about on a shared database: the `queen_streams` schema and its two
-tables are granted to `PUBLIC`, so every role that can log in can read and write stream state.
+One grant is worth knowing about on a shared database: the `queen_streams` schema and its three
+tables (queries, state and the per-tenant quota) are granted to `PUBLIC`, so every role that can
+log in can read and write stream state.
 
 ## Give it a direct connection
 
 The broker must keep the same backend for the life of a pooled connection, and a pooler in
 transaction or statement mode takes that away. Two mechanisms break:
 
-- **Session advisory locks.** The boot-time schema apply holds one across the whole DDL, and the
-  maintenance cycle holds another across many autocommitting calls: that lock is how exactly one
-  replica sweeps per cycle.
+- **Session advisory locks.** The boot-time schema apply holds one across the whole DDL and
+  releases it explicitly, so a pooler that swaps the backend underneath leaves it held. The
+  maintenance cycle no longer depends on that shape: it elects one replica per cycle through a
+  claim row, and the advisory lock it keeps as belt is transaction-scoped.
 - **Prepared statements.** The hot paths prepare once per connection, and transaction-mode pooling
   invalidates that cache on every checkout, so every push, pop and ack pays a parse and a plan.
 
@@ -71,9 +74,10 @@ connection per client for the life of that connection, so neither mechanism abov
 and it is a supported way to run. Two things decide whether it earns its place in front of a
 broker. It multiplexes nothing here, because the broker's own pool holds its connections open for
 the process lifetime: 28 client connections were measured against 28 backends. And a server
-connection recycled underneath a held session advisory lock surfaces as
-`pg_advisory_unlock reported not-held` in the retention logs. The deployments those numbers came
-from point `PG_PORT` at PostgreSQL directly for that reason. Give each broker its own backends.
+connection recycled underneath a held session advisory lock strands it: that surfaced as
+`pg_advisory_unlock reported not-held` in the retention logs until the maintenance lanes moved to
+transaction-scoped locks, which leaves the boot-time schema apply as the last session-lock holder.
+The deployments those numbers came from point `PG_PORT` at PostgreSQL directly for that reason. Give each broker its own backends.
 
 ## Size the pool before you scale out
 

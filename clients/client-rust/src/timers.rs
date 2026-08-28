@@ -264,13 +264,8 @@ impl ScheduleBuilder {
             )
         })?;
         let txn = self.txn.unwrap_or_else(uuid::uuidv7);
-        let mut op = TimerOperation::schedule(
-            &self.queue,
-            &self.timer_key,
-            self.delay_ms,
-            txn,
-            &payload,
-        );
+        let mut op =
+            TimerOperation::schedule(&self.queue, &self.timer_key, self.delay_ms, txn, &payload);
         if let Some(p) = self.partition {
             op = op.partition(p);
         }
@@ -323,7 +318,12 @@ impl ListQuery {
             path.push('?');
             path.push_str(&crate::queue::encode_pairs(&params));
         }
-        let out: Option<TimerPage> = self.timers.inner.http.get_json(&path, &Opts::default()).await?;
+        let out: Option<TimerPage> = self
+            .timers
+            .inner
+            .http
+            .get_json(&path, &Opts::default())
+            .await?;
         Ok(out.unwrap_or_default())
     }
 }

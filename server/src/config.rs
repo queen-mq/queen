@@ -12,6 +12,21 @@ pub const DEFAULT_TENANT: &str = "00000000-0000-0000-0000-000000000001";
 /// against anything (it is opaque; the trust is network — the cell boundary).
 pub const TENANT_HEADER: &str = "x-queen-tenant";
 
+/// The `JWT_ALGORITHM` values the broker accepts, in the order the boot error
+/// lists them. This is the ONE spelling of the set: `AuthConfig::validate` is
+/// matched against it and its "not supported" message is BUILT from it, so the
+/// message can no longer name a set the validation does not enforce.
+///
+/// `auth.rs::check_alg_allowed` is the other half of the contract — the value
+/// accepted at boot must be a value the verifier accepts at request time. The
+/// two used to disagree about HS384/HS512 (refused here, implemented there,
+/// which left pinning HS512 impossible and pushed operators to the strictly
+/// wider `auto`); `auth::tests::boot_and_the_verifier_accept_the_same_algorithms`
+/// now fails if they ever drift apart again.
+pub const SUPPORTED_JWT_ALGORITHMS: &[&str] = &[
+    "HS256", "HS384", "HS512", "RS256", "RS384", "RS512", "EdDSA", "auto",
+];
+
 /// JWT auth configuration, mirroring the C++ `AuthConfig` (server/include/queen/config.hpp).
 /// When `enabled` is false (the default) the auth middleware passes every request
 /// through untouched — this is how the whole existing test-suite runs.
@@ -94,10 +109,14 @@ impl AuthConfig {
             return Ok(());
         }
         match self.algorithm.as_str() {
-            "HS256" | "auto" => {
+            // The whole HMAC family, not just HS256: `auth.rs` verifies HS384 and
+            // HS512 off the same `JWT_SECRET` bytes, so refusing them here only
+            // denied operators the ability to PIN one — `auto`, the workaround,
+            // accepts all seven algorithms and is the weaker posture.
+            "HS256" | "HS384" | "HS512" | "auto" => {
                 if self.secret.is_empty() && self.jwks_url.is_empty() && self.public_key.is_empty() {
                     return Err(format!(
-                        "JWT_ENABLED=true with JWT_ALGORITHM={} but no key material: set JWT_SECRET (HS256), or JWT_PUBLIC_KEY / JWT_JWKS_URL (RS256/EdDSA)",
+                        "JWT_ENABLED=true with JWT_ALGORITHM={} but no key material: set JWT_SECRET (HS256/HS384/HS512), or JWT_PUBLIC_KEY / JWT_JWKS_URL (RS256/EdDSA)",
                         self.algorithm
                     ));
                 }
@@ -111,9 +130,11 @@ impl AuthConfig {
                 }
             }
             other => {
-                return Err(format!(
-                    "JWT_ALGORITHM={other} is not supported (use HS256, RS256, RS384, RS512, EdDSA, or auto)"
-                ));
+                let mut list = SUPPORTED_JWT_ALGORITHMS.join(", ");
+                if let Some(i) = list.rfind(", ") {
+                    list.replace_range(i..i + 2, ", or ");
+                }
+                return Err(format!("JWT_ALGORITHM={other} is not supported (use {list})"));
             }
         }
         Ok(())
@@ -320,6 +341,27 @@ pub struct Config {
     // verification disabled iff `pg_ssl_reject_unauthorized` is false.
     pub pg_use_ssl: bool,
     pub pg_ssl_reject_unauthorized: bool,
+    /// `PG_SSL_ROOT_CERT` — the PEM **CONTENT** of the CA that signed the
+    /// database's certificate, not a path to it (same family shape as
+    /// `PG_PASSWORD`: the value IS the material). Set it and the chain is
+    /// verified against exactly that CA instead of the compiled-in Mozilla set,
+    /// which is what a managed PostgreSQL on a private CA needs — Scaleway RDB,
+    /// Cloud SQL and Aiven all present private chains, and before this knob
+    /// existed the only way to connect at all was
+    /// `PG_SSL_REJECT_UNAUTHORIZED=false`, i.e. encryption with no
+    /// authentication.
+    ///
+    /// A supplied CA REPLACES the Mozilla set and outranks
+    /// `PG_SSL_REJECT_UNAUTHORIZED=false`; both rules, and why, are in
+    /// `pgtls.rs`'s header. Malformed PEM is fatal at boot, never a silent
+    /// fall-back.
+    ///
+    /// **Trap:** a multi-line value does not survive `docker --env-file` or
+    /// systemd's `EnvironmentFile` — they stop at the first newline. Use
+    /// `-e PG_SSL_ROOT_CERT="$(cat ca.pem)"`, a compose block scalar, or a
+    /// Kubernetes secret; or put the PEM on one line with `\n` for the
+    /// newlines, which the parser un-escapes.
+    pub pg_ssl_root_cert: Option<String>,
     pub stmt_timeout: Duration,
     pub zstd_level: i32,
     // Admission arbiter (admission.rs): one budget of concurrent write
@@ -1087,6 +1129,21 @@ pub fn log_effective(cfg: &Config) {
         database = %cfg.pg.dbname.clone().unwrap_or_default(),
         use_ssl = cfg.pg_use_ssl,
         ssl_reject_unauthorized = cfg.pg_ssl_reject_unauthorized,
+        // What the pool ACTUALLY trusts, from the same pure functions db.rs
+        // feeds the connector — `plaintext` / `webpki-roots` / `supplied-ca` /
+        // `accept-any`. `ssl_verified` is the one question a security review
+        // asks of this line: is the link to the database AUTHENTICATED, or
+        // merely encrypted? The proxy prints the identical pair for the pxdb.
+        ssl_trust = crate::pgtls::trust_label(
+            cfg.pg_use_ssl,
+            cfg.pg_ssl_root_cert.is_some(),
+            cfg.pg_ssl_reject_unauthorized,
+        ),
+        ssl_verified = crate::pgtls::link_authenticated(
+            cfg.pg_use_ssl,
+            cfg.pg_ssl_root_cert.is_some(),
+            cfg.pg_ssl_reject_unauthorized,
+        ),
         "config: postgres"
     );
     tracing::info!(
@@ -1326,6 +1383,47 @@ const EXTERNAL_BOOL_KEYS: &[(&str, bool)] = &[
     ("QUEEN_V2_BUNDLE_LOG", false),
 ];
 
+/// `PG_SSL_ROOT_CERT` as raw PEM, or `None`. Whitespace-only counts as unset —
+/// an env file that leaves the variable blank must mean "not configured", not
+/// "configured with nothing", which would otherwise boot-fail every deployment
+/// that templates the variable in unconditionally.
+///
+/// Read through this ONE function everywhere (`load`, `db::cancel_tls`, the
+/// embedded pre-pass) so the pool, the cancel connector and the boot gate cannot
+/// disagree about whether a CA is configured — the same discipline the comment
+/// on `cancel_tls` already applies to the two booleans.
+pub(crate) fn pg_ssl_root_cert() -> Option<String> {
+    // Deliberately `env_str` and not a bare `std::env::var`: the webdoc's
+    // config reference is SCRAPED from the env_bool/env_int/env_f64/env_str
+    // call sites in this file (webdoc/scripts/gen-config.mjs), so a knob read
+    // any other way ships undocumented.
+    Some(env_str("PG_SSL_ROOT_CERT", "")).filter(|v| !v.trim().is_empty())
+}
+
+/// Validate the CA material and report the anchor count, WITHOUT exiting: the
+/// binary turns an `Err` into `obs::fatal` in `load()`, the embedded library
+/// path turns it into `StartError::Config` before `load()` can be reached
+/// (`embedded/boot.rs`, exactly as it pre-validates the booleans).
+///
+/// Validated whenever the variable is SET, even with `PG_USE_SSL=false`: a
+/// variable that is set is a statement of intent, and finding out at boot that
+/// the PEM is truncated beats finding out at the next TLS handshake.
+pub(crate) fn check_pg_ssl_root_cert() -> Result<Option<usize>, String> {
+    match pg_ssl_root_cert() {
+        None => Ok(None),
+        Some(pem) => match crate::pgtls::root_store_from_pem(&pem) {
+            Ok(roots) => Ok(Some(roots.len())),
+            Err(e) => Err(format!(
+                "PG_SSL_ROOT_CERT is set but unusable: {e}. It takes the PEM CONTENT of the CA \
+                 certificate that signed the database's certificate — not a path, and not a \
+                 fingerprint. Fix it or unset it; it is not ignored, because a database link \
+                 believed to be verified and silently is not is the failure this variable exists \
+                 to remove."
+            )),
+        },
+    }
+}
+
 pub fn load() -> Config {
     for (k, def) in EXTERNAL_BOOL_KEYS {
         let _ = env_bool(k, *def);
@@ -1408,13 +1506,37 @@ pub fn load() -> Config {
         );
     }
 
+    // --- Postgres TLS trust (spec §0: PG_SSL_ROOT_CERT) --------------------
+    // Malformed CA material is FATAL here, next to the other boot gates. It is
+    // never a fall-back to the compiled-in Mozilla set: falling back would be a
+    // downgrade with no signal, which is precisely what the default of
+    // PG_SSL_REJECT_UNAUTHORIZED=true exists to prevent.
+    let pg_use_ssl = env_bool("PG_USE_SSL", false);
+    let pg_ssl_reject_unauthorized = env_bool("PG_SSL_REJECT_UNAUTHORIZED", true);
+    let pg_ssl_root_cert = pg_ssl_root_cert();
+    let ca_anchors = match check_pg_ssl_root_cert() {
+        Ok(n) => n,
+        Err(e) => crate::obs::fatal(e),
+    };
+    // The legal-but-probably-wrong combinations, worded once in pgtls.rs and
+    // used identically by the proxy against PXDB_*.
+    if let Some(msg) = crate::pgtls::boot_advisory(
+        pg_use_ssl,
+        pg_ssl_root_cert.is_some(),
+        pg_ssl_reject_unauthorized,
+        crate::pgtls::BROKER_VARS,
+    ) {
+        tracing::warn!(target: "boot", anchors = ca_anchors, "{msg}");
+    }
+
     let mut cfg = Config {
         port: env_str("PORT", "6632"),
         bind_addr: http_bind_addr(),
         pg,
         pool_size,
-        pg_use_ssl: env_bool("PG_USE_SSL", false),
-        pg_ssl_reject_unauthorized: env_bool("PG_SSL_REJECT_UNAUTHORIZED", true),
+        pg_use_ssl,
+        pg_ssl_reject_unauthorized,
+        pg_ssl_root_cert,
         stmt_timeout: Duration::from_millis(env_int("QUEEN_STMT_TIMEOUT_MS", 30000) as u64),
         zstd_level: env_int("QUEEN_V2_ZSTD_LEVEL", 3) as i32,
         admission_init: env_int("QUEEN_ADMISSION_INIT", admission_floor).max(1) as u64,

@@ -140,15 +140,18 @@ func TestDLQ_DrainDryRun(t *testing.T) {
 	}
 }
 
-// TestDLQ_ManualRequeueViaPushAndDelete proves the documented requeue
-// workflow when the broker has no server-side retry endpoint:
+// TestDLQ_ManualRequeueViaPushAndDelete proves the CLIENT-SIDE requeue
+// workflow:
 //
 //  1. capture the DLQ row's payload
 //  2. push it back to the live queue
 //  3. delete the DLQ row
 //
-// The JS / Py SDKs offer a built-in dlq().requeue() helper; here we drive
-// the same outcome through three pure-CLI calls.
+// This is not the only way to replay any more -- the broker has a
+// server-side route and `dlq retry` wraps it (see the test below). The
+// three-call version is still worth pinning: it is what you fall back to
+// when the snapshot needs editing before it goes back on the queue, and it
+// is the only shape available to a client too old for the route.
 func TestDLQ_ManualRequeueViaPushAndDelete(t *testing.T) {
 	q := uniqueQueue(t, "dlq-manual-requeue")
 	runOK(t, "queue", "configure", q, "--retry-limit", "1", "--lease-time", "5")
@@ -195,6 +198,77 @@ func TestDLQ_ManualRequeueViaPushAndDelete(t *testing.T) {
 }
 
 // listDLQRows wraps `queenctl dlq list --queue` and returns the row slice.
+// TestDLQ_ServerSideRetryReplaysAndClearsRow drives `dlq retry`, the wrapper
+// over POST /api/v1/messages/:p/:tx/retry, and pins the property that makes
+// the command non-idempotent: the replayed message comes back with a
+// DIFFERENT transaction id. The broker mints a fresh one deliberately (the
+// original would be swallowed by the dedup window), which is exactly why two
+// runs produce two copies and why the command demands --yes. If this
+// assertion ever flips to "same id", the idempotency warnings on
+// Admin.RetryMessage and in `dlq retry --help` need revisiting.
+func TestDLQ_ServerSideRetryReplaysAndClearsRow(t *testing.T) {
+	q := uniqueQueue(t, "dlq-retry")
+	runOK(t, "queue", "configure", q, "--retry-limit", "1", "--lease-time", "5")
+	pushOne(t, q, "", map[string]any{"replay": "me"})
+
+	for i := 0; i < 3; i++ {
+		got := popN(t, q, 1, "--cg", "ct-retry", "--from-mode", "all", "--timeout", "5s")
+		if len(got) == 0 {
+			break
+		}
+		m := got[0]
+		run("ack", m.TransactionID,
+			"--partition-id", m.PartitionID, "--lease-id", m.LeaseID,
+			"--cg", "ct-retry", "--failed", "--error", "forced into the DLQ",
+		)
+	}
+
+	var rows []map[string]any
+	retry(t, 5*time.Second, func() error {
+		rows = listDLQRows(t, q)
+		if len(rows) == 0 {
+			return fmtErr("DLQ empty")
+		}
+		return nil
+	})
+	pid, _ := rows[0]["partitionId"].(string)
+	tx, _ := rows[0]["transactionId"].(string)
+	if pid == "" || tx == "" {
+		t.Fatalf("DLQ row missing ids: %v", rows[0])
+	}
+
+	// The guard fires before anything is sent.
+	if _, _, code := run("dlq", "retry", pid, tx); code != 1 {
+		t.Errorf("dlq retry without --yes -> exit %d, want 1", code)
+	}
+	if rows := listDLQRows(t, q); len(rows) != 1 {
+		t.Fatalf("the refused retry changed the DLQ: %d rows", len(rows))
+	}
+
+	runOK(t, "dlq", "retry", pid, tx, "--yes")
+
+	// The DLQ row is gone...
+	retry(t, 5*time.Second, func() error {
+		if n := len(listDLQRows(t, q)); n != 0 {
+			return fmtErr("DLQ still has %d rows", n)
+		}
+		return nil
+	})
+
+	// ...and the payload is back on the queue under a NEW transaction id.
+	got := popN(t, q, 1, "--cg", "ct-retry-after", "--from-mode", "all", "--timeout", "10s")
+	if len(got) != 1 {
+		t.Fatalf("replayed message not poppable: got %d", len(got))
+	}
+	if got[0].TransactionID == tx {
+		t.Errorf("replay reused transaction id %s: the dedup window would drop it, "+
+			"and the non-idempotency notes assume a fresh id", tx)
+	}
+	if got[0].Data["replay"] != "me" {
+		t.Errorf("replayed payload = %v, want {replay: me}", got[0].Data)
+	}
+}
+
 func listDLQRows(t *testing.T, queue string) []map[string]any {
 	t.Helper()
 	out := runOK(t, "dlq", "list", "--queue", queue, "--limit", "100", "-o", "json")

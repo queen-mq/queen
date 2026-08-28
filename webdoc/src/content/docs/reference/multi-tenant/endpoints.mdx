@@ -25,7 +25,7 @@ string, and it is written to fail closed.
 <Steps>
 
 1. **The operator subset is checked first**, because the prefix blocks below would
-   otherwise swallow two of its entries. It is a closed list of seven paths. Matching
+   otherwise swallow two of its entries. It is a closed list of eight paths. Matching
    it opens nothing on its own: reaching one still needs a live operator principal, and
    on a cell with `QUEEN_PROXY_OPERATOR_ENABLED` off the route answers `404` before
    authentication runs at all.
@@ -37,7 +37,9 @@ string, and it is written to fail closed.
 
 3. **Data plane, then queue admin, then gated features, then reads**, by exact path or
    prefix, and for some routes by method: a `DELETE` under `/api/v1/resources/queues/`
-   is queue admin, while a `GET` on the same prefix is a read.
+   is queue admin, while a `GET` on the same prefix is a read. The gated families
+   (streams, traces, kv, timers, ephemeral) are method-exact: a verb the broker does not
+   register for a path fails closed here rather than travelling upstream to a `405`.
 
 4. **Anything else under `/api/` is blocked.** An unrecognised API-shaped path is never
    forwarded, so a broker route added upstream does not become reachable by accident.
@@ -51,16 +53,26 @@ A blocked or unauthorized-operator route answers `404 {"code":"route_blocked"}`,
 `403`. A tenant learns that a path does not exist for them rather than that it exists
 and is forbidden.
 
-## Two classes with extra behaviour
+## Classes with extra behaviour
 
-**`produce`** is the only class whose request body is parsed. The body is buffered so
-items can be counted, per-item payload sizes checked, each `(queue, partition)` admitted
-against the plan caps, and message tokens taken. It is forwarded byte for byte: the
-proxy never rewrites a body.
+**`produce`** is buffered and parsed: items are counted, per-item payload sizes checked,
+each `(queue, partition)` admitted against the plan caps, and message tokens taken.
+Whatever is buffered is forwarded byte for byte: the proxy never rewrites a body.
+
+Produce is no longer the only class read on the way in. `POST /api/v1/configure` is
+buffered as the explicit creation path, so the created queue passes the same registry
+admission plus the plan's retention ceiling. The streams cycle is always buffered,
+because its sink `push_items` are messages: they answer the produce caps, and a blocked
+cluster refuses whole any cycle that grows while an ack-only or state-only one passes. A
+kv or timers batch is buffered only while its cluster is push-blocked, to refuse whole a
+batch that grows stored state while letting cancels and deletes through. And
+`POST /api/v1/ephemeral/push` is buffered so its items debit the message bucket, the one
+limit that applies to the RAM class ([quotas](/reference/multi-tenant/quotas/)).
 
 **`consume`** with `wait=true` holds a parked-consumer slot for the duration of the
 upstream call, and the long-poll timeout is recomputed as the client's requested wait,
-clamped to `QUEEN_PROXY_LONGPOLL_MAX_MS`, plus `QUEEN_PROXY_LONGPOLL_MARGIN_MS`.
+clamped to `QUEEN_PROXY_LONGPOLL_MAX_MS`, plus `QUEEN_PROXY_LONGPOLL_MARGIN_MS`. The
+ephemeral `wait=true` pop parks on the same slot.
 
 ## The table
 
@@ -71,7 +83,9 @@ clamped to `QUEEN_PROXY_LONGPOLL_MAX_MS`, plus `QUEEN_PROXY_LONGPOLL_MARGIN_MS`.
 - A tenant's normal working set is `produce`, `consume`, `queue admin` and `read`.
   Those four cover the whole documented HTTP API for building on Queen.
 - `gated` routes exist on the broker for every tenant and are opened by the plan's
-  `features` object, not by the credential's scopes.
+  `features` object, not by the credential's scopes. The kv, ephemeral and streams
+  families are double-gated: the broker holds a per-tenant grant of its own behind the
+  plan flag ([isolation](/reference/multi-tenant/isolation/)).
 - `operator` and `blocked` are the two classes a tenant can never reach. They are
   cell-wide surfaces that the broker does not tenant-scope, which is precisely why the
   proxy exists. [Isolation](/reference/multi-tenant/isolation/) explains what each of

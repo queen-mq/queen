@@ -18,9 +18,10 @@ digest: >-
   stateless and scale horizontally as one to three identical replicas; the database does not
   scale, and it is simultaneously the durability story, the coordination substrate, the throughput
   ceiling and the single point of failure, so high availability means PostgreSQL high
-  availability. Nothing is installed into either required part: the DDL and the 27
+  availability. Nothing is installed into either required part: the DDL and the 31
   stored-procedure files are compiled into the binary and re-applied idempotently at every boot
   under an advisory lock, so there is no migration step, no version table and no extension.
+# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
 ---
 
 A Queen deployment is one process and one database. The broker is a single stateless Rust binary
@@ -36,7 +37,7 @@ Four parts, of which two are required:
 - `queen_proxy`, optional, a separate binary that fronts the broker with API keys, quotas and
   tenants
 
-Nothing is installed into either required part. The DDL and the 27 stored-procedure files are
+Nothing is installed into either required part. The DDL and the 31 stored-procedure files are
 compiled into the binary and re-applied idempotently at every boot under an advisory lock, so
 there is no migration step and no extension. The dashboard, `queenctl` and the PostgreSQL client
 tools travel inside the same image.

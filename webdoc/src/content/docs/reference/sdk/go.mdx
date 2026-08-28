@@ -34,7 +34,7 @@ verifiedBy:
 
 Import path `github.com/smartpricing/queen/clients/client-go`, package name `queen`. Requires Go
 1.24 or newer. Every network method takes a `context.Context` as its first argument. Version
-1.0.0, aligned with the broker.
+1.2.0, aligned with the broker's 1.2 line.
 
 ```go
 import queen "github.com/smartpricing/queen/clients/client-go"
@@ -318,9 +318,12 @@ not as silent loss.
 | `From(timestamp)` / `To(timestamp)` | Time filters. |
 | `Get(ctx) (*DLQResponse, error)` | `DLQResponse{Messages []Message, Total int}` |
 
-Read-only. `Admin.RetryMessage` exists but returns an error without making a request, so replay
-from Go means reading the row and pushing the payload again, or calling
-`POST /api/v1/messages/{partitionId}/{transactionId}/retry` directly.
+The listing is read-only, but `Admin.RetryMessage(ctx, partitionID, transactionID)` replays: the
+broker re-pushes the dead-letter payload snapshot to its own queue and partition and drops the DLQ
+row once that push is accepted. Only dead-lettered addresses replay, and a live one answers `404`.
+It is **not idempotent**, so the client sends it with failover retry disabled and a caller that
+sees a failure has to re-read the DLQ before trying again rather than repeating the call.
+`Admin.MoveMessageToDLQ` is still a stub, because the broker registers no force-move route.
 
 ## `*TransactionBuilder`
 
@@ -519,7 +522,7 @@ new `*Stream`.
 | Windows | `WindowTumbling(seconds float64, opts ...WindowOption)`, `WindowSliding(size, slide float64, opts ...)`, `WindowSession(gap float64, opts ...)`, `WindowCron(every string, opts ...)` |
 | Reduce | `Reduce(ReduceFn, initial interface{})`, `Aggregate(map[string]ExtractorFn, fieldOrder ...string)` |
 | Gate | `Gate(GateFn)` |
-| Sink | `To(Sink)`, `Foreach(ForeachFn)` |
+| Sink | `To(Sink)`, `ToPartitioned(Sink, resolver)`, `Foreach(ForeachFn)` |
 | Terminal | `Run(ctx, opts RunOptions) (*Runner, error)`, `Compile() (*runtime.CompiledStream, error)` |
 
 Every `WindowX` constructor takes the same five `WindowOption` values, which control when a window
@@ -532,6 +535,13 @@ closes and what happens to whatever arrives after it did:
 | `WithEventTime(fn EventTimeFn)` | none | Switches bucketing from the broker's `createdAt` to your own timestamp, and turns on a per-partition watermark. |
 | `WithAllowedLateness(seconds float64)` | `0` | Event-time mode only. Seconds of out-of-orderness tolerated before an event is called late, measured against that partition's watermark. |
 | `WithOnLate(policy string)` | `"drop"` | What happens to an event older than the watermark minus the allowed lateness. `"drop"` is the only value that keeps emits exact. `"include"` accumulates it anyway, which for an already-flushed window recreates the state row and produces a second emit for it. |
+
+`To(sink)` reuses the source partition name for each push; `ToPartitioned(sink, resolver)`
+chooses the destination partition instead, `resolver` being a fixed partition string or a
+`func(value interface{}) string` called per emit (anything else panics), the mirror of the
+JavaScript `.to(queue, { partition })` form. The resolver is not part of the config hash, so
+switching between the two, or changing the resolver, neither trips the registration mismatch
+check nor resets query state.
 
 `streams/helpers` provides `TokenBucketGate(TokenBucketGateOptions)` and
 `SlidingWindowGate(SlidingWindowGateOptions)`, both returning a `GateFn`.

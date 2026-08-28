@@ -15,7 +15,10 @@ export PG_HOST="$QUEEN_PG_HOST" PG_PORT="$QUEEN_PG_PORT" \
 /usr/local/bin/wait-for-broker
 
 cd /src/clients/client-cli
-# Retention tests skip unless QUEEN_RETENTION_INTERVAL_MS is set to match the
-# broker's RETENTION_INTERVAL; we leave the broker at its default so it never
-# sweeps other suites mid-run, so those few tests skip by design.
+# The retention tests need QUEEN_RETENTION_INTERVAL_MS to know the broker's
+# sweep cadence; the compose runner env supplies it. The old note here said we
+# left it unset "so it never sweeps other suites mid-run" -- that was wrong on
+# its own terms: the var configures the TESTS, not the broker, and the broker
+# sweeps every RETENTION_INTERVAL (5s default) whether or not it is set. All it
+# ever bought was two tests that skipped silently.
 exec go test -v ./tests/... -timeout 10m

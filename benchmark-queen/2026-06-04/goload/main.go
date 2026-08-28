@@ -115,6 +115,7 @@ func runMaxMode(args []string) {
 	consumers := fs.Int("consumers", 150, "consumer goroutines")
 	pushBatch := fs.Int("push-batch", 10, "messages per push request")
 	popBatch := fs.Int("pop-batch", 200, "max messages per pop request")
+	token := fs.String("token", "", "API key sent as `Authorization: Bearer`. REQUIRED when -url points at a queen-proxy (public hostname); unnecessary when pointing straight at a broker, which is why the pre-proxy load tests never set it.")
 	popAutopilot := fs.Bool("pop-autopilot", false, "leave the pop BATCH to the broker (pop autopilot). The partitions/sweep-width knob is already unset by this loader, so with -pop-autopilot BOTH dimensions are broker-chosen and the SDK emits autopilot=true; without it the SDK sends an explicit batch and, per clients/client-go/autopilot.go, autopilot is only engaged for the dimensions the caller leaves unset")
 	popWildcard := fs.Bool("pop-wildcard", true, "consumers use queue-level WILDCARD pop (broker drains any partition -> full batches, few consumers) instead of pinned per-partition pop")
 	popPartitions := fs.Int("pop-partitions", 1, "multi-partition pop: claim up to N partitions per pop call (>1 enables v4 multi-partition wildcard -> up to pop-batch msgs gathered across N partitions)")
@@ -153,6 +154,7 @@ func runMaxMode(args []string) {
 		TimeoutMillis:       *timeoutMs,
 		MaxIdleConnsPerHost: *idleConns,
 		RetryAttempts:       retryAttempts,
+		BearerToken:         *token,
 	})
 	if err != nil {
 		fmt.Printf("client init failed: %v\n", err)
@@ -448,6 +450,7 @@ func runOpenLoopMode(args []string) {
 	rampSec := fs.Int("ramp-sec", 0, "OPEN-LOOP: linear ramp of the offered rate from 0 to -rate over N seconds (0 = full rate from t=0). Avoids the cold-start storm: pool dial-up, first-contact seeding and dedup-cache hydration happen under partial load.")
 	pushBatch := fs.Int("push-batch", 10, "messages per push request (offered request rate = rate/push-batch)")
 	popBatch := fs.Int("pop-batch", 200, "max messages per pop request")
+	token := fs.String("token", "", "API key sent as `Authorization: Bearer`. REQUIRED when -url points at a queen-proxy (public hostname); unnecessary when pointing straight at a broker, which is why the pre-proxy load tests never set it.")
 	popAutopilot := fs.Bool("pop-autopilot", false, "leave the pop BATCH to the broker (pop autopilot). The partitions/sweep-width knob is already unset by this loader, so with -pop-autopilot BOTH dimensions are broker-chosen and the SDK emits autopilot=true; without it the SDK sends an explicit batch and, per clients/client-go/autopilot.go, autopilot is only engaged for the dimensions the caller leaves unset")
 	popWildcard := fs.Bool("pop-wildcard", true, "consumers use queue-level WILDCARD pop instead of pinned per-partition pop")
 	popPartitions := fs.Int("pop-partitions", 1, "multi-partition pop: claim up to N partitions per pop call (>1 enables v4 multi-partition wildcard)")
@@ -518,6 +521,7 @@ func runOpenLoopMode(args []string) {
 		TimeoutMillis:       *timeoutMs,
 		MaxIdleConnsPerHost: *idleConns,
 		RetryAttempts:       -1,
+		BearerToken:         *token,
 	})
 	if err != nil {
 		fmt.Printf("client init failed: %v\n", err)

@@ -15,8 +15,9 @@ verifiedBy:
 ---
 
 The C++ client is one header, `clients/client-cpp/queen_client.hpp`: message plane,
-transactions, the dead-letter query, client-side buffering, load balancing and a thread-pool
-consumer. It needs C++17, and everything is synchronous and returns `nlohmann::json`.
+transactions, the key/value, timer and ephemeral surfaces, the dead-letter query, client-side
+buffering, load balancing and a thread-pool consumer. It needs C++17, and everything is
+synchronous and returns `nlohmann::json`.
 
 Three headers have to be on the include path first: `json.hpp` and `httplib.h`, both
 third-party and gitignored, and the vendored `threadpool.hpp`. The test runner's Dockerfile is
@@ -27,12 +28,13 @@ mkdir -p clients/server/vendor clients/server/include
 curl -fsSL https://raw.githubusercontent.com/nlohmann/json/v3.11.3/single_include/nlohmann/json.hpp -o clients/server/vendor/json.hpp
 curl -fsSL https://raw.githubusercontent.com/yhirose/cpp-httplib/v0.27.0/httplib.h -o /usr/local/include/httplib.h
 cp test/vendor/cpp/threadpool.hpp clients/server/include/threadpool.hpp
-make -C clients/client-cpp test retry429
+make -C clients/client-cpp test unit
 ```
 
-That builds `bin/test_client`, which takes the broker URL as `argv[1]`, and `bin/test_retry429`,
-the proxy-contract suite, which serves its own responses and needs no broker. In your own
-project, satisfy the three includes however your build system prefers.
+That builds `bin/test_client`, which takes the broker URL as `argv[1]`, and the broker-free wire
+suites, `bin/test_retry429` for the proxy contract among them, which serve their own responses
+and need no broker. In your own project, satisfy the three includes however your build system
+prefers.
 
 ```cpp
 #include "queen_client.hpp"
@@ -104,7 +106,8 @@ Call `client.close()` on the way out. It stops the consume workers and flushes t
 ## What differs here
 
 - `pop()` catches every failure, logs it and returns an empty array, so an empty result is not
-  an empty queue.
+  an empty queue; the one exception is a requested conflation the broker cannot honour, which
+  throws.
 - The long poll is a fixed 30 seconds, and `.wait(false)` is the only way to shorten it.
 - `renew_lease()` on the consume builder is inert: a handler slower than the lease has to call
   `client.renew(messages)` from its own timer.

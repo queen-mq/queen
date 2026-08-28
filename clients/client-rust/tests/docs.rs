@@ -70,13 +70,7 @@ async fn docs_examples() {
 
     // A raw pop on another cursor still sees the message: groups are fan-out.
     // docs:start(rust-pop)
-    let messages = q
-        .queue("orders")
-        .batch(10)
-        .wait(true)
-        .pop()
-        .await
-        .unwrap();
+    let messages = q.queue("orders").batch(10).wait(true).pop().await.unwrap();
     // docs:end
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].data["orderId"], 9137);
@@ -89,7 +83,11 @@ async fn docs_examples() {
     .partition("customer-42")
     .transaction_id("order-9137-paid");
 
-    let first = q.queue("payments").push_items(vec![paid.clone()]).await.unwrap();
+    let first = q
+        .queue("payments")
+        .push_items(vec![paid.clone()])
+        .await
+        .unwrap();
     let retry = q.queue("payments").push_items(vec![paid]).await.unwrap();
     // retry[0].status is Duplicate: the second push wrote nothing
     // and answers with the first message's id.

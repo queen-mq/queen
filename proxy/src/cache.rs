@@ -25,6 +25,19 @@ const KEY_POSITIVE_TTL: Duration = Duration::from_secs(30);
 /// truth for "does this hash exist"), while capping how hard a hot loop of
 /// bad keys can hit pxdb.
 const KEY_NEGATIVE_TTL: Duration = Duration::from_secs(5);
+/// Ceiling on NEGATIVE api-key entries (unknown/revoked hashes). Their cache
+/// key is attacker-chosen, so this is the difference between a memo and an
+/// unbounded allocation an anonymous caller drives; see the `Lookup::Absent`
+/// arm of `apply_key_lookup`. At ~230 B per entry this caps them near 2.5 MB,
+/// while still absorbing any realistic burst of retries from one broken client
+/// (a 5 s TTL means the cap is only reached by ~10 000 DISTINCT bad keys inside
+/// one window).
+///
+/// It doubles as the trigger for the prune pass, which is why it is compared
+/// against the WHOLE map's length: a cell with more live api keys than this
+/// would prune on every unknown key instead of every TTL, which costs a walk
+/// and never costs correctness. Positive entries are never dropped by it.
+const KEY_NEGATIVE_MAX: usize = 10_000;
 /// After a refresh pxdb failed to answer, how long an expired entry keeps
 /// being served before another refresh is attempted for it. Bounds the cost
 /// of an outage to one (failing) lookup per entry per second, not per request.
@@ -667,12 +680,67 @@ fn apply_key_lookup(cache: &KeyMap, touched: &Touched, hash_hex: &str, looked: &
         // pxdb answered: this hash is unknown or revoked. The negative entry
         // both denies and replaces any expired positive, so the grace window
         // can never resurrect a revoked key.
+        //
+        // BOUNDED, unlike the positive side: the key is a sha256 of whatever
+        // the caller presented, so an unauthenticated caller chooses it, and
+        // nothing else ever removes these — `invalidate_caches` deliberately
+        // retains them (a cluster's invalidation has nothing to say about a
+        // garbage hash) and there is no TTL sweeper. Measured before this cap:
+        // 20 000 distinct garbage bearer tokens grew the process by ~4.6 MB
+        // (~230 B/key) and a sustained single-connection flood reached 99 MB in
+        // about two minutes, monotonically. The shared host is what makes it
+        // reachable with no Host gate in front (there, the key lookup IS the
+        // routing decision), and `limits.check_req` runs after authorize, so
+        // nothing else bounds it.
+        //
+        // `apply_host_lookup` answers the same problem by not caching a miss at
+        // all. Here the miss is worth caching — without it every request
+        // carrying a garbage key is a pxdb round trip — so it is capped
+        // instead: expired negatives are dropped first (they are only worth one
+        // avoided lookup each), and if the cap still holds, this one is simply
+        // not cached. The request is denied either way; only the memo is lost.
         Lookup::Absent => {
             let now = Instant::now();
-            cache.write().unwrap().insert(
-                hash_hex.to_string(),
-                KeyEntry { value: None, expires_at: now + KEY_NEGATIVE_TTL, refresh_after: now + KEY_NEGATIVE_TTL },
-            );
+            let mut w = cache.write().unwrap();
+            let entry =
+                KeyEntry { value: None, expires_at: now + KEY_NEGATIVE_TTL, refresh_after: now + KEY_NEGATIVE_TTL };
+            // Replacing an entry (including an expired POSITIVE one, which is
+            // the revoked-key case) never grows the map, so it is never capped.
+            if w.contains_key(hash_hex) {
+                w.insert(hash_hex.to_string(), entry);
+                return;
+            }
+            // The O(1) length check is the trigger; the pass below is the only
+            // O(n) work, and it both prunes and counts, so a request never
+            // walks the map twice. Under a flood it runs once per ~TTL worth of
+            // keys (the entries it drops are the expired ones), not once per
+            // request.
+            if w.len() >= KEY_NEGATIVE_MAX {
+                let mut negatives = 0usize;
+                // Positives past their TTL are KEPT: the stale-while-revalidate
+                // grace window (`fallback`) is what serves them through a pxdb
+                // outage, and dropping them here would turn a flood into a
+                // fail-CLOSED for live keys. Only expired negatives go, and
+                // only they are counted against the cap.
+                w.retain(|_, e| {
+                    if e.value.is_some() {
+                        return true;
+                    }
+                    if e.expires_at <= now {
+                        return false;
+                    }
+                    negatives += 1;
+                    true
+                });
+                if negatives >= KEY_NEGATIVE_MAX {
+                    tracing::debug!(
+                        negatives,
+                        "negative api-key cache at its cap; denying without caching"
+                    );
+                    return;
+                }
+            }
+            w.insert(hash_hex.to_string(), entry);
         }
         Lookup::Unavailable => {
             if !cache.read().unwrap().contains_key(hash_hex) {
@@ -772,7 +840,15 @@ async fn listen_once(pxcfg: &PxdbConfig, host_cache: &Arc<HostMap>, key_cache: &
     let listen_stmt = format!("LISTEN {INVAL_CHANNEL}");
 
     if pxcfg.use_ssl {
-        let connector = crate::pgtls::make_connector(pxcfg.ssl_reject_unauthorized);
+        // Same trust as the pool, from the same validated material — a LISTEN
+        // connection that trusted a different root set than the pool would be
+        // the worst kind of divergence: invalidations arriving over a link
+        // nobody audited.
+        let connector = crate::pgtls::make_connector(
+            pxcfg.ssl_reject_unauthorized,
+            pxcfg.ssl_root_cert.as_deref(),
+        )
+        .map_err(|e| format!("PXDB_SSL_ROOT_CERT: {e}"))?;
         let (client, connection) = pg.connect(connector).await.map_err(|e| format!("connect: {e}"))?;
         run_listen_session(client, connection, &listen_stmt, host_cache, key_cache, true).await
     } else {
@@ -1062,19 +1138,17 @@ fn parse_features(json: &str) -> Features {
     }
 }
 
-/// First DNS label of a Host header, with the port stripped. Lowercased
-/// (DNS is case-insensitive; clusters.slug is stored lowercase). Only
-/// strips a trailing `:port` when what follows the colon is all-digits, so
-/// a colon that isn't a port separator doesn't get silently swallowed.
+/// First DNS label of a Host header, with the port and the DNS root label
+/// stripped. Lowercased (DNS is case-insensitive; clusters.slug is stored
+/// lowercase). The strip is `config::canonical_host` — the SAME one
+/// `Config::is_shared_host` uses, so a host cannot be shared for one of them
+/// and a slug for the other.
 fn slug_from_host(host: &str) -> Option<String> {
     let host = host.trim();
     if host.is_empty() {
         return None;
     }
-    let without_port = match host.rsplit_once(':') {
-        Some((h, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => h,
-        _ => host,
-    };
+    let without_port = crate::config::canonical_host(host);
     let label = without_port.split('.').next()?;
     if label.is_empty() {
         None
@@ -1094,6 +1168,12 @@ mod tests {
         assert_eq!(slug_from_host("acme").as_deref(), Some("acme"));
         assert_eq!(slug_from_host(""), None);
         assert_eq!(slug_from_host(":6711"), None); // empty label once the port is stripped
+        // Fully-qualified: the same name, so the same slug. (The first label
+        // was never affected by the root dot; this pins that the shared
+        // `canonical_host` did not change it either.)
+        assert_eq!(slug_from_host("acme.eu1.queenmq.cloud.").as_deref(), Some("acme"));
+        assert_eq!(slug_from_host("acme.:6711").as_deref(), Some("acme"));
+        assert_eq!(slug_from_host("."), None);
     }
 
     #[test]
@@ -1376,5 +1456,52 @@ mod tests {
         apply_key_lookup(&cache, &touched, "h2", &Lookup::Unavailable);
         assert!(cache.read().unwrap()["h2"].value.is_none());
         assert_eq!(touched.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_flood_of_unknown_keys_cannot_grow_the_cache_without_bound() {
+        // The cache key is a sha256 of what the CALLER presented, so its
+        // cardinality is chosen by an unauthenticated client — on a shared host
+        // with no Host gate in front of the lookup. Measured before the cap:
+        // ~230 B per distinct garbage token, growing monotonically for as long
+        // as the flood lasted.
+        let cache: Arc<KeyMap> = Arc::new(RwLock::new(HashMap::new()));
+        let touched: Arc<Touched> = Arc::new(Mutex::new(HashSet::new()));
+
+        // A live key, cached before the flood starts.
+        let key_id = Uuid::from_u128(7);
+        apply_key_lookup(&cache, &touched, "live", &Lookup::Found((ctx(1), key_id, Scopes::all())));
+
+        for i in 0..(KEY_NEGATIVE_MAX * 2) {
+            apply_key_lookup(&cache, &touched, &format!("{i:064x}"), &Lookup::Absent);
+        }
+        let map = cache.read().unwrap();
+        let negatives = map.values().filter(|e| e.value.is_none()).count();
+        assert!(negatives <= KEY_NEGATIVE_MAX, "negatives unbounded: {negatives}");
+        // The flood must not be able to evict a live key: that would turn a
+        // memory problem into a fail-closed one for real traffic.
+        assert!(map["live"].value.is_some(), "the flood evicted a live key");
+    }
+
+    #[test]
+    fn re_denying_a_hash_already_cached_is_never_capped() {
+        // One broken client retrying the same wrong key forever occupies one
+        // entry, so it must keep being memoised however full the map is —
+        // otherwise the cap turns exactly that case into a pxdb round trip per
+        // request.
+        let cache: Arc<KeyMap> = Arc::new(RwLock::new(HashMap::new()));
+        let touched: Arc<Touched> = Arc::new(Mutex::new(HashSet::new()));
+        for i in 0..KEY_NEGATIVE_MAX {
+            apply_key_lookup(&cache, &touched, &format!("{i:064x}"), &Lookup::Absent);
+        }
+        let hash = format!("{:064x}", 3);
+        apply_key_lookup(&cache, &touched, &hash, &Lookup::Absent);
+        assert!(cache.read().unwrap().contains_key(&hash));
+        // And a REVOKED key still replaces its positive at the cap, or the
+        // grace window would keep serving it.
+        let key_id = Uuid::from_u128(9);
+        apply_key_lookup(&cache, &touched, "revoked", &Lookup::Found((ctx(2), key_id, Scopes::all())));
+        apply_key_lookup(&cache, &touched, "revoked", &Lookup::Absent);
+        assert!(cache.read().unwrap()["revoked"].value.is_none(), "a revoked key must not survive");
     }
 }

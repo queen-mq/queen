@@ -637,6 +637,7 @@ mod tests {
             dev_insecure: true,
             dev_static: None,
             default_cluster: None,
+            shared_hosts: Vec::new(),
             send_tenant_header: true,
             max_body_bytes: 1024,
             default_max_batch_items: 100,
@@ -683,6 +684,7 @@ mod tests {
             dbname: "queen_proxy".to_string(),
             use_ssl: false,
             ssl_reject_unauthorized: false,
+            ssl_root_cert: None,
             pool_size: 4,
             timeout_ms: 5_000,
         };

@@ -180,3 +180,8 @@ services:
       QUEEN_PG_USER: postgres
       QUEEN_PG_PASSWORD: postgres
       QUEEN_PG_DB: postgres
+      # Tells the CLI suite's retention tests what cadence the broker above runs
+      # at -- it configures NOTHING, it only sizes their wait. Unset, they
+      # t.Skip, which is how they sat dead in CI since they were written.
+      # Must equal the broker's RETENTION_INTERVAL (unset above = 5000 default).
+      QUEEN_RETENTION_INTERVAL_MS: "5000"

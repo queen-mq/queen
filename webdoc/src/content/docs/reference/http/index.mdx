@@ -26,6 +26,7 @@ digest: >-
   deterministic transactionIds; a pop never is, because a retry is a new claim rather than a
   repeat; and a kv incr never is, because it has no precondition and counts twice. Every 204 has
   no body at all, deliberately.
+# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
 ---
 
 Queen's broker speaks plain HTTP/1.1 with JSON bodies. There is no binary protocol, no
@@ -98,11 +99,12 @@ different capability. This matters most for producers.
 | `read-write` | `read-write`, `admin` | `read-only`, `write-only` |
 | `admin` | `admin` | everything else |
 
-`POST /api/v1/push` is the only `write-only` route. So a token whose single role is
-`write-only` can produce and can do nothing else: every read route and every consume route
-(`/pop`, `/ack`, `/transaction`, `/lease/:leaseId/extend`) is `read-write` and returns 403 for
-it. Conversely a `read-only` token cannot pop, because popping takes a lease and mutates a
-cursor.
+Three routes are `write-only`, and all three are pure produce operations: `POST /api/v1/push`,
+`POST /api/v1/timers` (scheduling a timer produces the message it becomes) and
+`POST /api/v1/ephemeral/push`. So a token whose single role is `write-only` can produce and can
+do nothing else: every read route and every consume route (`/pop`, `/ack`, `/transaction`,
+`/lease/:leaseId/extend`) is `read-write` and returns 403 for it. Conversely a `read-only` token
+cannot pop, because popping takes a lease and mutates a cursor.
 
 Role names come from the `role` claim and the `roles` array claim, and both the claim names and
 the four role names are configurable. A path the access table does not recognise defaults to

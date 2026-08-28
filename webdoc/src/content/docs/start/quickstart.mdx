@@ -24,6 +24,7 @@ digest: >-
   `-v queen-spool:/var/lib/queen/buffers` persists the outage spool. Nothing is installed into
   PostgreSQL and there is no migration to run. The same binary serves its dashboard on the same
   port.
+# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
 ---
 
 Docker and five minutes. At the end you have a PostgreSQL, a broker, and one message that went
@@ -63,7 +64,7 @@ DDL and its stored procedures, and applies them at boot.
    ```
 
    ```json
-   {"status":"healthy","database":"connected","engine":"segments-rust","version":"1.0.2"}
+   {"status":"healthy","database":"connected","engine":"segments-rust","version":"1.2.1"}
    ```
 
    An empty answer on the first try means the broker is still waiting for PostgreSQL. Run it

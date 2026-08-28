@@ -49,6 +49,12 @@ Routing is a DNS label. The proxy reads the cluster slug from the first label of
 header, so `acme-prod.eu1.example.com` is the cluster `acme-prod`, and one wildcard record
 covers every cluster on the cell.
 
+The exception is a hostname listed in `QUEEN_PROXY_SHARED_HOSTS`: one URL fronting many
+clusters, where the label names nothing and the credential does the routing instead. An API
+key acts on the cluster it is bound to, a browser session names one with
+`x-queen-act-cluster`, and a missing or invalid credential answers `401`, never `421`
+([credentials](/reference/multi-tenant/auth)).
+
 ## Bring up a cell
 
 <Steps>
@@ -84,9 +90,9 @@ covers every cluster on the cell.
    `QUEEN_KV_TRUSTED_PROXY=true` is you stating that step 3 is what supplies the header and
    strips the client's. If that is not true of your deployment, do not run with the header.
 
-3. **Run the proxy.** `PXDB_HOST` is the only variable it refuses to start without, and the six
-   migrations that create the `queen_proxy` schema are embedded in the binary and applied at
-   boot. Generate `QUEEN_PROXY_JWT_SECRET` once and reuse it: sessions are signed with it, so
+3. **Run the proxy.** `PXDB_HOST` is the only variable it refuses to start without, and the
+   eight migrations that create the `queen_proxy` schema are embedded in the binary and applied
+   at boot. Generate `QUEEN_PROXY_JWT_SECRET` once and reuse it: sessions are signed with it, so
    changing it logs every human out.
 
    ```bash
@@ -99,7 +105,7 @@ covers every cluster on the cell.
    ```
 
    ```json
-   {"enforce":false,"status":"ok","tenant_header":true}
+   {"enforce":false,"shared_hosts":0,"status":"ok","tenant_header":true}
    ```
 
    How to run it in production, with Docker or Kubernetes, and why it stays on one replica:
@@ -141,9 +147,11 @@ SELECT queen_proxy.bootstrap_tenant(
 );
 ```
 
-It returns `{tenant_id, cluster_id, user_id, api_key}`. The key is plaintext, shown exactly
-once, and only its sha256 hash is stored; a re-run on the same slugs returns the existing ids
-with a null key.
+It returns `{tenant_id, cluster_id, user_id, api_key, password_set, can_login}`. The key is
+plaintext, shown exactly once, and only its sha256 hash is stored; a re-run on the same slugs
+returns the existing ids with a null key. `can_login` is false when the admin has neither a
+password nor a linked OAuth identity, and the call raises a warning saying so: legal for
+API-key-only onboarding, a silent lockout otherwise.
 
 That key is everything a client needs. Same routes, same SDKs, same wire format as a bare
 broker, with the hostname doing the routing:
@@ -170,7 +178,7 @@ SELECT queen_proxy.create_user(:tenant_id, 'dev@acme.example', NULL, 'google');
 SELECT queen_proxy.grant_cluster_role(:cluster_id, 'dev@acme.example', 'admin');
 
 -- a second API key, for a service that should be revocable on its own
-SELECT queen_proxy.issue_api_key(:cluster_id, 'ingest-worker', :key_hash, ARRAY['push']);
+SELECT queen_proxy.issue_api_key(:cluster_id, 'ingest-worker', :key_hash, ARRAY['produce']);
 ```
 
 A password hash of `NULL` is the OAuth-only user: they exist, they have a role, and they can

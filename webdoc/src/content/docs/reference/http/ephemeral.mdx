@@ -200,7 +200,9 @@ describes the outcome of the call, never the verdict of the predicate.
 ## The two status reads
 
 Both are pure in-memory gauges. They open no database connection and count nothing, which is what
-makes them safe to poll every second, and safe to poll during the incident they exist for.
+makes them safe to poll every second, and safe to poll during the incident they exist for. They
+are also this broker's own view and do not relay: in a cell of more than one broker, each answers
+with the partitions this broker owns.
 
 `GET /api/v1/ephemeral/queues` returns every queue of the tenant, declared and implicit:
 
@@ -268,6 +270,8 @@ on it and never on the prose, which is written for a human reading a log.
 | `429` | `rate_limited` | the tenant is over its messages-per-second allowance, with `Retry-After` |
 | `500` | `ephemeral_configure_failed`, `ephemeral_delete_failed` | the declaration could not be written or removed |
 | `503` | `ephemeral_unavailable` | the broker is at `QUEEN_EPHEMERAL_MAX_BYTES`, or no database connection was available for a declaration write |
+| `503` | `owner_moved` | more than one broker only: ownership of the partition moved while the request was in flight, and it was not served |
+| `503` | `ephemeral_forward_failed` | more than one broker only: the broker that owns the partition could not be reached |
 | `503` | `ephemeral_disabled` | an operator paused the surface, with `Retry-After`. See [the kill switch](/reference/http/system) |
 
 The same one-sentence rule separates the three refusals as on the [KV routes](/reference/http/kv):
@@ -277,6 +281,14 @@ changes, `503` means it is the cell and not you.
 `queue_full` is a `429` and not a `507` or a `403` deliberately. It is backpressure: the producer
 that waits and retries gets in, because a consumer is draining the ring behind it. That is also
 the shape every SDK's bounded push buffer already knows how to drain against.
+
+Two of the `503`s exist only in a cell of more than one broker. Each `(queue, partition)` lives on
+the one broker that owns it, and a push, pop or ack that lands elsewhere is relayed to the owner
+invisibly. `owner_moved` is a relay that arrived while ownership was mid-move, and
+`ephemeral_forward_failed` is an owner that could not be reached; both mean come back, and the
+move has emptied the partition anyway, which is the loss the class already declares. The admin
+verbs (`configure`, `reset`, `delete`) are not relayed: each broker applies them to its own copy.
+[Ephemeral queues](/use/ephemeral) covers what an ownership move does to the contents.
 
 The refusals are checked outermost first, so the answer names the reason an operator would act on:
 the kill switch before the grant, the grant before the rate, the rate before the queue's own

@@ -27,6 +27,7 @@ digest: >-
   plus a failed spool write. Commits are per `(queue, partition)` group, not per request. Dedup:
   on by default, exact, per partition, keyed on `transactionId` within the queue's
   `dedupWindowSeconds` (default 3600, `0` disables).
+# sourceOfTruth re-read 2026-08-27 (through a6cbac22 + working tree): page matches the code.
 ---
 
 One call writes one or more messages to one or more queues. Access level **write-only**, which

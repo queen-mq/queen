@@ -13,7 +13,11 @@
 //! "API key qk_ NON valide qui, solo umani").
 //!
 //! Auth path (mirrors `auth::authenticate`, does not reimplement any of its
-//! logic): resolve the cluster from Host (421 if unknown), require pxdb (503
+//! logic): resolve the cluster through `acting::resolve_route_console` — the
+//! Host label, or the session's `x-queen-act-cluster` on a SHARED host, and a
+//! Host that names nothing is a 421 (withheld until the credential is valid on
+//! a listener that has shared hosts) — refuse a cluster that is suspended or
+//! being deleted, exactly as the data plane does, require pxdb (503
 //! `{"code":"not_configured"}` in dev-static mode — there is no user/key
 //! table to serve without it), then lift the session cookie into a synthetic
 //! `Authorization: Bearer` header when the request has no Authorization
@@ -91,18 +95,54 @@ pub fn router() -> Router<St> {
 /// via a real `cluster_roles` row (see module doc), so callers needing "any
 /// member" need no extra check; admin-only endpoints call `require_admin`.
 async fn console_ctx(st: &St, headers: &HeaderMap) -> Result<(Arc<ClusterCtx>, Uuid, Role), Response> {
-    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("");
-    let ctx = match st.cache.resolve_host(host).await {
-        Some(c) => c,
-        None => return Err(errors::err_421("unknown cluster")),
-    };
+    // Through `acting`, not `cache::resolve_host` directly — one answer to
+    // "which cluster is this request for", shared with the data plane. That is
+    // what makes the console work on a SHARED host (decision z: session
+    // identity + `x-queen-act-cluster` + `cluster_roles`), where a Host label
+    // names no cluster at all. `resolve_route_console`, not `resolve_route`:
+    // the act-as header is honoured only where the Host cannot name the
+    // cluster, so this does not widen what an existing operator account can
+    // reach on a per-cluster hostname (see acting.rs).
+    let route = crate::acting::resolve_route_console(st, headers).await?;
     require_db(st)?;
 
-    // `auth::authenticate` reads the session cookie itself now
-    // (auth::read_credential), so the console no longer lifts it into a
-    // synthetic Authorization header of its own — one implementation of
-    // "which credential is this", shared with the data plane.
-    let principal = auth::authenticate(st, headers, ctx.cluster_id).await?;
+    // Credential reading, JWT verification, the revocation deny-list and the
+    // `cluster_roles` lookup all come from acting.rs/auth.rs — one
+    // implementation of "which credential is this", shared with the data plane.
+    let (ctx, principal) = match route {
+        crate::acting::Route::Fixed(ctx) => {
+            let p = crate::acting::authenticate_for(st, headers, &ctx).await?;
+            (ctx, p)
+        }
+        crate::acting::Route::FromCredential => {
+            crate::acting::resolve_from_credential(st, headers).await?
+        }
+        crate::acting::Route::UnknownHost => {
+            return Err(crate::acting::unknown_host_refusal(st, headers).await)
+        }
+    };
+    // The SAME gate the data plane runs (gateway::status_gate), and it runs
+    // here for the same reason: a wipe's first step is
+    // `set_tenant_status(deleting)`, which is documented — in
+    // proxy/migrations/007_tenant_delete.sql and in the broker's
+    // 031_tenant_purge.sql — as the step that stops the tenant's traffic. It
+    // did not stop the console: /api/console/* is nested separately in main.rs
+    // and never reaches gateway::handle, so an admin session on a tenant
+    // mid-wipe could still read the console AND mint live API keys on it. A
+    // suspended tenant is refused for the same reason: the console mutates
+    // (keys, members, roles), and "suspended" that still issues credentials is
+    // not a suspension.
+    //
+    // `push_blocked` is deliberately NOT gated: that tenant needs the console
+    // most, to see why its pushes are failing and to delete its way back under
+    // quota.
+    if matches!(ctx.status, ClusterStatus::Suspended | ClusterStatus::Deleting) {
+        tracing::debug!(
+            target: "console", cluster = %ctx.slug, status = ?ctx.status,
+            "console refused: cluster not active"
+        );
+        return Err(errors::err_403(errors::CODE_SUSPENDED, "cluster suspended"));
+    }
     match principal {
         Principal::ApiKey { .. } => {
             Err(errors::err_403(errors::CODE_FORBIDDEN, "api keys cannot access the console (human session required)"))

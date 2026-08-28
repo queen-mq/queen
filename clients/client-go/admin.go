@@ -193,22 +193,48 @@ func (a *Admin) DeleteMessage(ctx context.Context, partitionID, transactionID st
 	return a.httpClient.Delete(ctx, path)
 }
 
-// RetryMessage retries a failed message.
+// RetryMessage replays a DEAD-LETTERED message: the broker re-pushes the
+// queen.log_dlq payload snapshot to its own queue and partition, then drops the
+// DLQ row once that push has been accepted. Only dead-lettered addresses can be
+// replayed; a live message 404s. The dashboard does not call this route (its
+// dead-letter view offers Purge only), so the admin SDKs and `queenctl dlq
+// retry` are its only callers.
 //
-// NOTE: not implemented server-side. The corresponding endpoint
-// POST /api/v1/messages/:partitionId/:transactionId/retry is not registered
-// in server/src/routes/messages.cpp - only GET and DELETE exist there. The
-// method is kept as a stub for SDK API stability; calling it returns a
-// clear error so callers don't silently misinterpret 404s.
+// NOT IDEMPOTENT. Calling it twice for one address can replay the message
+// twice, so it is sent with WithoutFailoverRetry and callers must not retry it
+// on failure without re-reading the DLQ first. Four independent reasons, all in
+// the current broker:
+//
+//  1. The replay is minted with a FRESH transaction id (handlers/messages.rs)
+//     because reusing the original would be dropped by the dedup window. Two
+//     replays are therefore two distinct messages that nothing collapses.
+//  2. The read (db::dlq_row_for_replay, a plain SELECT with no FOR UPDATE) and
+//     the delete (queen.delete_message_v1) are separate statements outside any
+//     transaction, so two concurrent calls can both see the row and both push.
+//  3. When the push is accepted but the DLQ cleanup then fails, the broker
+//     answers 500 with {"replayed":true,"dlqRowRemoved":false} -- the message
+//     is now BOTH replayed and still dead-lettered, and the next call replays
+//     it again.
+//  4. queen.delete_message_v1 deletes every consumer group's snapshot for the
+//     address while the replay pushes only the most recent one, so on a
+//     multi-group address one call replays one payload and erases them all.
+//
+// The replayed copy also lands at the partition tail with a new id, so it is
+// out of order with respect to its own key.
 func (a *Admin) RetryMessage(ctx context.Context, partitionID, transactionID string) (map[string]interface{}, error) {
-	return nil, fmt.Errorf("RetryMessage is not implemented server-side; messages must be re-published from the DLQ via push")
+	path := fmt.Sprintf("/api/v1/messages/%s/%s/retry",
+		url.PathEscape(partitionID), url.PathEscape(transactionID))
+	return a.httpClient.Post(ctx, path, map[string]interface{}{}, WithoutFailoverRetry())
 }
 
 // MoveMessageToDLQ moves a message to the dead letter queue.
 //
-// NOTE: not implemented server-side (same situation as RetryMessage). The
-// broker moves messages to the DLQ automatically when retryLimit is
-// exceeded - manual force-move is currently unsupported.
+// NOTE: genuinely not implemented server-side -- unlike RetryMessage above,
+// which the broker has. server/src/main.rs registers exactly three routes under
+// this prefix (GET and DELETE on the address, plus POST .../retry) and no
+// force-move among them. The broker moves messages to the DLQ on its own when
+// retryLimit is exceeded; the stub is kept so callers get this sentence instead
+// of a bare 404.
 func (a *Admin) MoveMessageToDLQ(ctx context.Context, partitionID, transactionID string) (map[string]interface{}, error) {
 	return nil, fmt.Errorf("MoveMessageToDLQ is not implemented server-side; ack with --failed to drive a message into the DLQ via the retry-limit path")
 }

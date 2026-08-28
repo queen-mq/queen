@@ -150,9 +150,10 @@ async fn a_key_with_slashes_stays_one_key() {
     // the same row the raw form would, because the catch-all is decoded once —
     // and encoding is the only form that is also safe for a key containing a
     // literal slash.
-    let broker =
-        FakeBroker::start(vec![kv_element(r#"{"index":0,"op":"get","found":false,"key":"x"}"#)])
-            .await;
+    let broker = FakeBroker::start(vec![kv_element(
+        r#"{"index":0,"op":"get","found":false,"key":"x"}"#,
+    )])
+    .await;
 
     client(&broker)
         .kv()
@@ -198,7 +199,8 @@ async fn an_unfenced_delete_sends_an_empty_object() {
 
     client(&broker).kv().delete("ns", "k").send().await.unwrap();
     assert_eq!(
-        broker.hits()[0].body, "{}",
+        broker.hits()[0].body,
+        "{}",
         "no expect means no precondition, not expect:0 — which would mean \
          `must not exist`"
     );
@@ -293,7 +295,10 @@ async fn a_prefix_scan_lives_in_the_body_and_never_in_the_url() {
 
     let hit = &broker.hits()[0];
     assert_eq!(hit.path, "/api/v1/kv", "no query string, ever");
-    assert!(!hit.path.contains("saga"), "the prefix must not reach a URL");
+    assert!(
+        !hit.path.contains("saga"),
+        "the prefix must not reach a URL"
+    );
     assert_eq!(
         hit.body,
         r#"{"operations":[{"op":"getPrefix","ns":"orders","prefix":"saga:","after":"saga:0","limit":50,"keysOnly":true}]}"#
@@ -312,7 +317,12 @@ async fn a_lost_race_is_returned_with_the_winners_value_rather_than_raised() {
 
     let res = client(&broker)
         .kv()
-        .put_if_absent("orders", "idem:9137", serde_json::json!(true), Expiry::seconds(60))
+        .put_if_absent(
+            "orders",
+            "idem:9137",
+            serde_json::json!(true),
+            Expiry::seconds(60),
+        )
         .send()
         .await
         .expect("losing a putIfAbsent is not an error");
@@ -349,7 +359,12 @@ async fn a_required_write_that_lost_comes_back_as_the_verdict_it_is() {
 
     let res = client(&broker)
         .kv()
-        .put_if_absent("orders", "idem:9137", serde_json::json!(true), Expiry::seconds(60))
+        .put_if_absent(
+            "orders",
+            "idem:9137",
+            serde_json::json!(true),
+            Expiry::seconds(60),
+        )
         .required()
         .send()
         .await
@@ -704,7 +719,10 @@ async fn the_riders_are_top_level_fields_of_the_request() {
 
     let body: serde_json::Value = broker.hits()[0].json();
     assert!(body["kv"].is_array(), "kv must be a top-level field");
-    assert!(body["timers"].is_array(), "timers must be a top-level field");
+    assert!(
+        body["timers"].is_array(),
+        "timers must be a top-level field"
+    );
     for op in body["operations"].as_array().unwrap() {
         assert_eq!(op["type"], "push");
     }
@@ -766,7 +784,12 @@ async fn commit_returns_on_a_lost_precondition_and_does_not_raise() {
         .transaction()
         .push("q", serde_json::json!(1))
         .unwrap()
-        .kv_put_if_absent("orders", "idem:9137", serde_json::json!(true), Expiry::seconds(60))
+        .kv_put_if_absent(
+            "orders",
+            "idem:9137",
+            serde_json::json!(true),
+            Expiry::seconds(60),
+        )
         .unwrap()
         .commit()
         .await
@@ -866,11 +889,7 @@ async fn a_riders_only_bundle_is_a_legal_transaction() {
 #[tokio::test]
 async fn a_transaction_that_stages_nothing_at_all_is_still_refused() {
     let broker = FakeBroker::start(vec![Reply::ok("{}")]).await;
-    let err = client(&broker)
-        .transaction()
-        .commit()
-        .await
-        .unwrap_err();
+    let err = client(&broker).transaction().commit().await.unwrap_err();
     assert!(err.to_string().contains("at least one operation"), "{err}");
     assert_eq!(broker.hit_count(), 0, "it never reached the network");
 }

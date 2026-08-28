@@ -11,6 +11,7 @@ sourceOfTruth:
   - proxy/src/main.rs
   - proxy/src/console.rs
   - proxy/src/oauth.rs
+# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
 ---
 
 Two OpenAPI 3.1 documents are published with this site. Neither is written by hand: both are
@@ -118,13 +119,16 @@ is the one documented on the route page.
 
 The broker document describes every route the **router declares**, and for the data plane that is
 also every route a broker answers: the router is not conditional, so the eight KV and timer
-operations are registered on every cell and a client generated from this document finds them there.
+operations and the eight ephemeral-queue operations are registered on every cell and a client
+generated from this document finds them there.
 What configuration still changes is the *verdict* a route gives, not its existence, so a generated
 method can meet a `403` from a quota or a `503` from an operator's kill switch.
 
 <Aside type="note">
 The proxy document describes only what the proxy itself serves. Every other path is forwarded
-to the broker of the cluster addressed by the request's first DNS label. Which of the broker's
+to the broker of the cluster the request addresses: by the first DNS label of the host, or, on a
+host listed in `QUEEN_PROXY_SHARED_HOSTS`, by the credential itself (an API key names the cluster
+it was issued on; a console session names one with `x-queen-act-cluster`). Which of the broker's
 routes a tenant credential can actually reach is a separate question, answered by the
 route-class table in [Self-hosting](/deploy/).
 </Aside>

@@ -35,6 +35,7 @@ digest: >-
   every KV write carries an expiry, deliverAt is a floor and not an appointment, there is no
   recurrence, and a cancel after the fire answers absent, meaning no longer pending and never not
   delivered.
+# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
 ---
 
 This page states Queen's opinions in one place: the design decisions, how to
@@ -303,9 +304,11 @@ routes are on
   `partition_id` and declines the foreign key on purpose, so partition cleanup
   checks it explicitly and refuses to delete: it is one of three vetoes, with
   dead-letter rows and a live lease ([Retention](/internals/retention)). The
-  limitation that follows is that accumulators have no TTL. Nothing purges
-  `queen_streams.queries` or `queen_streams.state`, and both are `GRANT`ed to
-  `PUBLIC`.
+  limitation that follows is that accumulators have no TTL. Nothing time-based
+  purges `queen_streams.queries` or `queen_streams.state`: state goes only when
+  its query is reset or deleted (the foreign key cascades), or when a tenant
+  wipe removes the tenant's streams rows wholesale. All three `queen_streams`
+  tables are `GRANT`ed to `PUBLIC`.
 - **The bundled dashboard and JWT auth do not combine broker-direct.** With auth
   off the broker serves a fully working dashboard as an anonymous operator; with
   `JWT_ENABLED=true` it serves an explanation page instead, because the app

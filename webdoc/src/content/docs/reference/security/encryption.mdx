@@ -13,6 +13,7 @@ sourceOfTruth:
   - server/src/handlers/streams.rs
   - server/src/db.rs
   - server/sql/procedures/012_configure.sql
+# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
 ---
 
 Queen can encrypt message payloads with AES-256-GCM before they are written to
@@ -62,7 +63,12 @@ Encryption applies when the key is loaded **and** the flag is true, on all four
 write paths: `POST /api/v1/push`, `POST /api/v1/transaction`, the stream emit
 path, and the disk spool the broker falls back to when PostgreSQL is unreachable,
 so a payload buffered to local disk during an outage is enveloped before it is
-written, not after it is replayed.
+written, not after it is replayed. A timer payload is enveloped too, at
+**schedule** time rather than at fire, on the timers route and on a
+transaction's timer operations alike: the fire runs inside the sweeper,
+possibly days later, so a late envelope would leave the payload in cleartext at
+rest until then. The consequences of encrypting early are declared on
+[timers](/reference/http/timers/#encryption-happens-at-schedule).
 
 Two cases resolve to "no encryption", both without an error: a queue with no
 `queen.queues` row yet (created implicitly by a push, never `/configure`d), and a
@@ -72,9 +78,10 @@ flag lookup that could not reach the database.
 `POST /streams/v1/cycle` packs a cycle's `push_items`, the broker resolves
 `encryptionEnabled` for each sink queue and encrypts that queue's payloads, so a
 closed window lands in the log as ciphertext exactly as a pushed message does. The
-flag is resolved on the default tenant on this path, which is the only tenant a
-streams deployment serves. Consumers of the sink queue decrypt by shape on the way
-out, so nothing downstream has to know a stream produced the message.
+flag is resolved on the request's tenant, never on another tenant's same-named
+queue, so a sink is enveloped by its owner's own configuration. Consumers of the
+sink queue decrypt by shape on the way out, so nothing downstream has to know a
+stream produced the message.
 
 Only the payload is enveloped. The `transactionId`, trace name, queue and
 partition names, offsets, timestamps, `producerSub`, consumer-group cursors and

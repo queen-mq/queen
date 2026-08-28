@@ -541,7 +541,12 @@ mod tests {
                 return Verdict::Raise("server-owned field");
             }
         }
-        if obj.get("queue").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+        if obj
+            .get("queue")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .is_empty()
+        {
             return Verdict::Raise("queue is required");
         }
         if obj
@@ -565,7 +570,12 @@ mod tests {
             if !obj.get("delayMs").map(|v| v.is_number()).unwrap_or(false) {
                 return Verdict::Raise("delayMs is required");
             }
-            if obj.get("txn").and_then(|v| v.as_str()).unwrap_or("").is_empty() {
+            if obj
+                .get("txn")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .is_empty()
+            {
                 return Verdict::Raise("txn is required");
             }
             if !obj.get("payload").map(|v| v.is_string()).unwrap_or(false) {

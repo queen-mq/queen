@@ -1028,7 +1028,10 @@ mod tests {
         let body = serde_json::to_string(&req).unwrap();
         let root: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(root["kv"].is_array(), "kv must be top-level: {body}");
-        assert!(root["timers"].is_array(), "timers must be top-level: {body}");
+        assert!(
+            root["timers"].is_array(),
+            "timers must be top-level: {body}"
+        );
         for op in root["operations"].as_array().unwrap() {
             let ty = op.get("type").and_then(|t| t.as_str()).unwrap_or("");
             assert!(
@@ -1076,7 +1079,11 @@ mod tests {
         assert_eq!(seen.kv_base, 3);
         assert_eq!(seen.timers_base, 5);
         assert_eq!(seen.flat, 6);
-        assert_eq!(req.rider_bases(3), (3, 5), "the type agrees with the broker");
+        assert_eq!(
+            req.rider_bases(3),
+            (3, 5),
+            "the type agrees with the broker"
+        );
     }
 
     #[test]
@@ -1114,7 +1121,10 @@ mod tests {
             kv[0].index, 0,
             "a KV result's index is its ordinal in the kv array, not the flat one"
         );
-        assert_eq!(got.results[1].index, 1, "the flat ordinal stays on the entry");
+        assert_eq!(
+            got.results[1].index, 1,
+            "the flat ordinal stays on the entry"
+        );
 
         let timers = got.timer_results();
         assert_eq!(timers.len(), 1);
@@ -1124,7 +1134,10 @@ mod tests {
             Some("0198f0aa-0000-7000-8000-000000000001"),
             "messageId is the one key a timer shares with a push result"
         );
-        assert_eq!(timers[0].deliver_at.as_deref(), Some("2026-08-17T10:15:00.000000Z"));
+        assert_eq!(
+            timers[0].deliver_at.as_deref(),
+            Some("2026-08-17T10:15:00.000000Z")
+        );
     }
 
     #[test]

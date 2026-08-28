@@ -153,7 +153,10 @@ async fn spelling_out_the_default_changes_nothing() {
 /// opinion, which now means the broker decides.
 #[tokio::test]
 async fn a_zero_batch_is_unset() {
-    assert_eq!(pop_query(|b| b.batch(0)).await, format!("autopilot=true&{TAIL}"));
+    assert_eq!(
+        pop_query(|b| b.batch(0)).await,
+        format!("autopilot=true&{TAIL}")
+    );
 }
 
 /// This client renders pop and consume through one `PopParams`; the assertion is
@@ -177,7 +180,11 @@ async fn consume_sends_the_same_query_as_pop() {
         .iter()
         .find(|h| h.route().starts_with("/api/v1/pop"))
         .expect("consume made no pop request");
-    let query = pop.path.split_once('?').expect("a pop always has a query").1;
+    let query = pop
+        .path
+        .split_once('?')
+        .expect("a pop always has a query")
+        .1;
     assert_eq!(query, format!("autopilot=true&{TAIL}&partitions=1"));
 }
 
@@ -187,9 +194,10 @@ async fn consume_sends_the_same_query_as_pop() {
 
 #[tokio::test]
 async fn pop_result_reports_what_the_broker_chose() {
-    let broker =
-        FakeBroker::start(vec![one_message(r#","autopilot":{"partitions":8,"batch":200,"waitMs":25}"#)])
-            .await;
+    let broker = FakeBroker::start(vec![one_message(
+        r#","autopilot":{"partitions":8,"batch":200,"waitMs":25}"#,
+    )])
+    .await;
     let out = client(&broker)
         .queue("orders")
         .group("workers")
@@ -259,8 +267,10 @@ async fn an_echo_this_client_does_not_understand_never_fails_the_pop() {
     assert_eq!((ap.partitions, ap.batch, ap.wait_ms), (2, 10, Some(5)));
 
     // A field of the wrong type is dropped, not fatal.
-    let broker = FakeBroker::start(vec![one_message(r#","autopilot":{"partitions":"eight","batch":10}"#)])
-        .await;
+    let broker = FakeBroker::start(vec![one_message(
+        r#","autopilot":{"partitions":"eight","batch":10}"#,
+    )])
+    .await;
     let out = client(&broker)
         .queue("orders")
         .group("workers")
@@ -311,7 +321,8 @@ async fn the_brokers_pacing_advice_replaces_the_historical_delay() {
         broker.hits().len()
     }
 
-    let advised = pops_in_a_window(r#","autopilot":{"partitions":1,"batch":100,"waitMs":400}"#).await;
+    let advised =
+        pops_in_a_window(r#","autopilot":{"partitions":1,"batch":100,"waitMs":400}"#).await;
     let historical = pops_in_a_window("").await;
 
     assert!(

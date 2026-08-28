@@ -133,7 +133,7 @@ All of them work normally when the context points straight at a broker.
 | Group | Commands |
 |---|---|
 | Top-level | `ping` `version` `status` `lag` `tail` `push` `pop` `ack` `apply` `replay` |
-| Resources | `queue [list\|describe\|configure\|delete\|clear\|stats]` `partition [list\|describe\|seek\|clear]` `messages [list\|get\|delete\|retry\|dlq\|traces]` `cg [list\|describe\|lag\|seek\|delete\|refresh-stats]` `dlq [list\|describe\|requeue\|drain]` `namespace list` `task list` |
+| Resources | `queue [list\|describe\|configure\|delete\|clear\|stats]` `partition [list\|describe\|seek\|clear]` `messages [list\|get\|delete\|traces]` `cg [list\|describe\|lag\|seek\|delete\|refresh-stats]` `dlq [list\|describe\|retry\|drain]` `namespace list` `task list` |
 | Ops | `tx -f` `lease extend` `maintenance [get\|on\|off]` `metrics [--prometheus]` `analytics [overview\|queue-lag\|queue-ops\|queue-parked\|retention\|system\|worker\|postgres]` `traces [names\|by-name\|by-message]` `bench` |
 | Plumbing | `config [view\|get-contexts\|use-context\|set-context\|delete-context]` `login` `logout` `completion` `docs` |
 

@@ -84,7 +84,7 @@ There is no `storage` engine-selector column. One engine, nothing to select; the
 ### queen.log_partitions
 
 One row per partition. This row is the write serializer for the partition, and its columns are
-three watermarks plus bookkeeping.
+three offset watermarks, two retention timestamps derived from them, and bookkeeping.
 
 | Column | Type | Meaning |
 | --- | --- | --- |
@@ -94,6 +94,8 @@ three watermarks plus bookkeeping.
 | `last_offset` | `BIGINT` | **the allocator.** Highest allocated offset; starts at `-1`, so the next base offset is `last_offset + 1` |
 | `log_start` | `BIGINT` | segment retention watermark, starts at 0: every offset below it has been deleted |
 | `txns_start` | `BIGINT` | hash-sidecar purge watermark, starts at 0: every `log_txns` row below it has been purged |
+| `oldest_live_at` | `TIMESTAMPTZ` | retention work-list fact: `created_at` of the segment sitting at `log_start`; `NULL` means no live segments, so retention can never have work here |
+| `oldest_txn_at` | `TIMESTAMPTZ` | the same for the sidecar: `created_at` of the `log_txns` row at `txns_start`; `NULL` means fully purged |
 | `last_write_at` | `TIMESTAMPTZ` | last write time, indexed, **quantized to at most one real change per second** |
 | `created_at` | `TIMESTAMPTZ` | creation time |
 
@@ -103,6 +105,19 @@ wildcard pop range-scan only recently written partitions instead of the whole se
 quantization exists precisely because that index is there: bumping an indexed column makes the
 allocator `UPDATE` non-HOT, so push only writes a new value when more than a second has
 elapsed. The candidate scan absorbs the staleness by allowing two minutes of slack.
+
+The two `oldest_*` columns are the retention work-list, and they exist so retention's cost scales
+with deletable work rather than with the partition count. `created_at` is monotone within a
+partition (invariant 2 below), so "this partition holds something deletable under cutoff `C`" is
+exactly "the row at its watermark is older than `C`": one range scan over a partial index,
+`(queue_id, oldest_live_at)` or `(queue_id, oldest_txn_at)` with a `NOT NULL` predicate, instead of
+one probe per partition. Each is a fact, never a policy (cutoffs stay computed from queue config at
+query time), and each is maintained in the same transaction, under the same row lock, as the
+watermark it mirrors: the retention step moves `oldest_live_at` with `log_start`, the sidecar purge
+moves `oldest_txn_at` with `txns_start`, and push only fills them on the empty-to-non-empty
+transition (`COALESCE`), so the allocator `UPDATE` stays HOT for a partition that already holds
+data. These two indexes are also the ones the schema apply builds `CONCURRENTLY`, because they
+arrive on an already-populated hot table.
 
 The table is also tuned against churn, and the reasoning is worth knowing because it explains a
 class of latency spike. Every push updates this row, so between autovacuum passes the dead
@@ -128,8 +143,9 @@ The messages.
 broker already compressed. **`log_segments` carries zero secondary indexes**, and that is a
 property of this one table rather than of the model: its primary key is also the pop path, so
 every read is a range scan or a backward step on it. The other tables here do carry an index
-where a scan needs one, `log_partitions` on `(queue_id, last_write_at)` and `log_dlq` on
-`(partition_id, failed_at DESC)`.
+where a scan needs one: `log_partitions` on `(queue_id, last_write_at)` plus the two partial
+retention-work-list indexes on `(queue_id, oldest_live_at)` and `(queue_id, oldest_txn_at)`, and
+`log_dlq` on `(partition_id, failed_at DESC)`.
 
 Autovacuum on this table is set by measurement, and the numbers are recorded with their dates in
 `001_log_schema.sql`. The earlier factors, 0.02 for vacuum and 0.05 for insert, re-fired vacuum
@@ -194,6 +210,7 @@ model.
 | `worker_id` | `TEXT` | the lease holder, the same value the client receives as `leaseId` |
 | `lease_expires_at`, `lease_acquired_at` | `TIMESTAMPTZ` | lease window; `lease_acquired_at` is also the queue detail's `lastActivity` source |
 | `batch_retry_count` | `INTEGER` | the retry budget, charged only by an explicit `failed` ack |
+| `lease_conflated` | `BOOLEAN` | whether the lease this row holds was a conflating one; written by the pop that took the lease, read by the ack that closes it, non-indexed so the lease `UPDATE` stays HOT |
 | `attempt_offset`, `attempt_count` | `BIGINT`, `INTEGER` | redelivery telemetry: the batch's first delivered offset and how many times that same start has been delivered |
 | `total_consumed` | `BIGINT` | lifetime counter |
 | `created_at` | `TIMESTAMPTZ` | first contact |

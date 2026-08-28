@@ -60,7 +60,7 @@ the sweeper reads only `timers_fire_enabled`, never the maintenance flag, and no
 reads that flag on its behalf.
 
 A maintenance window therefore does not make the log static. Ordinary pushes wait on disk and land
-when the window closes, while every timer that comes due inside it commits into `queen.seg_segments`
+when the window closes, while every timer that comes due inside it commits into `queen.log_segments`
 throughout, which also reverses their order: a push accepted early in the window is appended after a
 timer that fired later in it. If the window is open because the database is going away, the fires
 fail transiently instead, spend no delivery attempt, and drain oldest first when it returns.
@@ -91,14 +91,17 @@ whole-segment, so a window is a floor on what is kept, not a ceiling. `/configur
 replace: a later call that omits these keys turns retention back off, so send the whole set from
 [queue options](/reference/queue-options).
 
-The sweep runs every `RETENTION_INTERVAL` ms, default 5000, on one replica elected by an advisory
-lock, and logs only when it actually deleted something:
+The sweep runs every `RETENTION_INTERVAL` ms, default 5000, on the one replica per cycle that wins
+the `queen.maintenance_leases` claim, and logs only when it actually deleted something:
 
 ```text
-INFO retention  swept queues=12 segments_deleted=340 txns_purged=340 max_wait_evicted=0 partitions_deleted=0 metrics_purge=… elapsed_ms=47
+INFO retention  swept queues=12 due=27 backed_off=15 segments_deleted=340 txns_purged=340 max_wait_evicted=0 partitions_deleted=0 metrics_purge=… elapsed_ms=47
 ```
 
-Silence on a growing deployment means nothing is being deleted. Two things the sweep never
+Silence on a growing deployment means nothing is being deleted. `due` and `backed_off` explain a
+delete rate that looks too slow: `due` pinned at its cap every cycle means the cycle is capped
+rather than idle, and a large `backed_off` means the due partitions are held back by a group's
+cursor rather than deletable. Two things the sweep never
 touches: dead letters, which leave one at a time through
 `DELETE /api/v1/messages/:partitionId/:transactionId`, and streaming state in
 `queen_streams.state`. The loop step by step is in [retention internals](/internals/retention).
@@ -144,8 +147,9 @@ Same-version restarts and replacements need no coordination. Start the replaceme
 from `/health`, take the old instance out of the load balancer, SIGTERM, repeat. Shutdown drains
 in-flight requests, and a leased batch nobody acked redelivers once its lease expires.
 
-A version change is different, because the boot-time DDL only creates: it never reshapes an
-existing schema, so pointing a new build at an old database is unsupported.
+A version change is different, because the boot-time apply is not a migration engine: every boot
+re-applies the same idempotent corpus a fresh database gets, and there is no upgrade path, so
+pointing a new build at an old database is unsupported.
 
 <Steps>
 
