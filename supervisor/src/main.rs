@@ -56,8 +56,28 @@ struct QueenConfig {
     urls: Vec<String>,
     #[serde(default)]
     bearer_token: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_headers")]
     headers: HashMap<String, String>,
+}
+
+fn deserialize_headers<'de, D>(deserializer: D) -> Result<HashMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Headers {
+        Map(HashMap<String, String>),
+        Sequence(Vec<serde_json::Value>),
+    }
+
+    match Headers::deserialize(deserializer)? {
+        Headers::Map(headers) => Ok(headers),
+        Headers::Sequence(headers) if headers.is_empty() => Ok(HashMap::new()),
+        Headers::Sequence(_) => Err(serde::de::Error::custom(
+            "headers must be a JSON object or an empty legacy array",
+        )),
+    }
 }
 
 #[derive(Deserialize)]
@@ -2359,6 +2379,24 @@ mod tests {
         assert_eq!(supervisor.stable_after, 60);
         assert!(supervisor.quiet);
         validate_config(&config).unwrap();
+    }
+
+    #[test]
+    fn header_maps_accept_objects_and_only_empty_legacy_arrays() {
+        let object: QueenConfig = serde_json::from_value(serde_json::json!({
+            "headers": {"x-tenant": "orders"}
+        }))
+        .unwrap();
+        assert_eq!(object.headers["x-tenant"], "orders");
+
+        let legacy: QueenConfig =
+            serde_json::from_value(serde_json::json!({"headers": []})).unwrap();
+        assert!(legacy.headers.is_empty());
+
+        let invalid = serde_json::from_value::<QueenConfig>(serde_json::json!({
+            "headers": ["not-a-map"]
+        }));
+        assert!(invalid.is_err());
     }
 
     #[test]

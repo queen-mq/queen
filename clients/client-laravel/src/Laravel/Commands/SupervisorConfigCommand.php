@@ -22,6 +22,7 @@ class SupervisorConfigCommand extends Command
         if (!$this->option('for-engine')) {
             $resolved = $this->redact($resolved);
         }
+        $resolved = $this->normalizeJsonMaps($resolved);
 
         $flags = JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR;
         if ($this->option('pretty')) {
@@ -48,6 +49,24 @@ class SupervisorConfigCommand extends Command
         foreach ($config['queen']['headers'] ?? [] as $name => $_value) {
             $config['queen']['headers'][$name] = '[redacted]';
         }
+        return $config;
+    }
+
+    private function normalizeJsonMaps(array $config): array
+    {
+        // PHP encodes an empty array as `[]`, but the v2 contract declares
+        // headers as a string map and Rust correctly expects a JSON object.
+        // Preserve non-empty associative maps and make the empty shape
+        // unambiguous for every engine consuming this command.
+        if (($config['queen']['headers'] ?? null) === []) {
+            $config['queen']['headers'] = new \stdClass();
+        }
+        foreach (array_keys($config['connections'] ?? []) as $connectionName) {
+            if (($config['connections'][$connectionName]['headers'] ?? null) === []) {
+                $config['connections'][$connectionName]['headers'] = new \stdClass();
+            }
+        }
+
         return $config;
     }
 }

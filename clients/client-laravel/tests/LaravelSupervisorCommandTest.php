@@ -43,11 +43,15 @@ class LaravelSupervisorCommandTest extends TestCase
         $output = new BufferedOutput();
         $exitCode = $this->app->make(\Illuminate\Contracts\Console\Kernel::class)
             ->call('queen:supervisor-config', [], $output);
-        $document = json_decode(trim($output->fetch()), true, 512, JSON_THROW_ON_ERROR);
+        $json = trim($output->fetch());
+        $document = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
+        $object = json_decode($json, false, 512, JSON_THROW_ON_ERROR);
 
         $this->assertSame(0, $exitCode);
         $this->assertSame(2, $document['version']);
         $this->assertSame(256, $document['process_limit']);
+        $this->assertInstanceOf(\stdClass::class, $object->queen->headers);
+        $this->assertInstanceOf(\stdClass::class, $object->connections->queen->headers);
     }
 
     public function testConfigurationExportRedactsSecretsUnlessRequestedForAnEngine(): void
