@@ -1,0 +1,10 @@
+FROM --platform=$TARGETPLATFORM rust:1.88-alpine AS build
+
+RUN apk add --no-cache musl-dev
+WORKDIR /source
+COPY supervisor/Cargo.toml supervisor/Cargo.lock ./
+COPY supervisor/src ./src
+RUN cargo build --release --locked
+
+FROM scratch AS artifact
+COPY --from=build /source/target/release/queen-supervisor /queen-supervisor

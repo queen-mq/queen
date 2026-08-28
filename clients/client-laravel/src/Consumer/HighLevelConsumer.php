@@ -59,13 +59,14 @@ class HighLevelConsumer
         $batch = $this->options['batch'] ?? 1;
         $wait = $this->options['wait'] ?? true;
         $timeoutMillis = $this->options['timeoutMillis'] ?? 30000;
+        $leaseSeconds = $this->options['leaseSeconds'] ?? null;
         $subscriptionMode = $this->options['subscriptionMode'] ?? null;
         $subscriptionFrom = $this->options['subscriptionFrom'] ?? null;
         $maxPartitions = $this->options['maxPartitions'] ?? 1;
         $conflation = $this->options['conflation'] ?? false;
 
         $this->popPath = $this->buildPath($queue, $partition, $namespace, $task);
-        $this->baseParams = $this->buildParams($batch, $wait, $timeoutMillis, $group, $subscriptionMode, $subscriptionFrom, $namespace, $task, $maxPartitions, $conflation);
+        $this->baseParams = $this->buildParams($batch, $wait, $timeoutMillis, $group, $subscriptionMode, $subscriptionFrom, $namespace, $task, $maxPartitions, $conflation, $leaseSeconds);
         $this->affinityKey = $this->getAffinityKey($queue, $partition, $namespace, $task, $group);
         $this->conflationScope = [$conflation, $queue, $group, $namespace, $task];
         $this->subscribed = true;
@@ -343,9 +344,10 @@ class HighLevelConsumer
     {
         if ($queue !== null) {
             if ($partition !== null) {
-                return "/api/v1/pop/queue/{$queue}/partition/{$partition}";
+                return '/api/v1/pop/queue/' . rawurlencode($queue)
+                    . '/partition/' . rawurlencode($partition);
             }
-            return "/api/v1/pop/queue/{$queue}";
+            return '/api/v1/pop/queue/' . rawurlencode($queue);
         }
         if ($namespace !== null || $task !== null) {
             return '/api/v1/pop';
@@ -364,6 +366,7 @@ class HighLevelConsumer
         ?string $task,
         int $maxPartitions = 1,
         bool $conflation = false,
+        ?int $leaseSeconds = null,
     ): string {
         $params = [
             'batch' => (string) $batch,
@@ -373,6 +376,9 @@ class HighLevelConsumer
 
         if ($group !== null) {
             $params['consumerGroup'] = $group;
+        }
+        if ($leaseSeconds !== null) {
+            $params['leaseSeconds'] = (string) $leaseSeconds;
         }
         if ($subscriptionMode !== null) {
             $params['subscriptionMode'] = $subscriptionMode;

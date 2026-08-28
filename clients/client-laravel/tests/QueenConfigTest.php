@@ -55,6 +55,60 @@ class QueenConfigTest extends TestCase
         new Queen(['bearerToken' => 'test']);
     }
 
+    public function testInvalidUrlsAndRetryBudgetsFailFast(): void
+    {
+        foreach ([
+            ['urls' => []],
+            ['url' => 'queen.test:6632'],
+            ['url' => 'http://queen.test:6632', 'retryAttempts' => 0],
+            ['url' => 'http://queen.test:6632', 'timeoutMillis' => 0],
+            ['url' => 'http://queen.test:6632', 'loadBalancingStrategy' => 'random'],
+        ] as $config) {
+            try {
+                new Queen($config);
+                $this->fail('Invalid Queen client configuration was accepted.');
+            } catch (\InvalidArgumentException) {
+                $this->addToAssertionCount(1);
+            }
+        }
+    }
+
+    public function testUnsafeHeadersCredentialsAndRetry429TyposFailFast(): void
+    {
+        foreach ([
+            ['url' => 'http://user:secret@queen.test:6632'],
+            ['url' => 'http://queen.test:6632?redirect=elsewhere'],
+            ['url' => 'http://queen.test:6632#fragment'],
+            ['url' => 'http://queen.test:6632', 'bearerToken' => "token\r\nInjected: yes"],
+            ['url' => 'http://queen.test:6632', 'bearerToken' => 'token with spaces'],
+            ['url' => 'http://queen.test:6632', 'headers' => ["X-Queen\nInjected" => 'yes']],
+            ['url' => 'http://queen.test:6632', 'headers' => ['X-Queen' => "ok\r\nInjected: yes"]],
+            ['url' => 'http://queen.test:6632', 'retry429' => ['baseMillis' => 5]],
+            ['url' => 'http://queen.test:6632', 'retry429' => ['maxAttempts' => -1]],
+            ['url' => 'http://queen.test:6632', 'retry429' => ['capMs' => 1.5]],
+            ['url' => 'http://queen.test:6632', 'timeoutMillis' => '999999999999999999999999'],
+            ['url' => 'http://queen.test:6632', 'headers' => ['Bad,Header' => 'value']],
+        ] as $config) {
+            try {
+                new Queen($config);
+                $this->fail('Unsafe or misspelled Queen client configuration was accepted.');
+            } catch (\InvalidArgumentException) {
+                $this->addToAssertionCount(1);
+            }
+        }
+    }
+
+    public function testHeaderListsAndNumericRetry429StringsAreNormalized(): void
+    {
+        $queen = new Queen([
+            'url' => 'https://queen.test/base',
+            'headers' => ['X-Queen-Tenant' => ['one', 'two']],
+            'retry429' => ['maxAttempts' => '3', 'baseMs' => '0', 'capMs' => '50'],
+        ]);
+
+        $this->assertInstanceOf(\Queen\Builders\QueueBuilder::class, $queen->queue('test'));
+    }
+
     public function testAdminIsSingleton(): void
     {
         $queen = new Queen('http://localhost:6632');

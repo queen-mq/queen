@@ -10,6 +10,7 @@
 --   queen.log_timers_dlq_v1        archive an exhausted timer straight into queen.log_dlq
 --   queen.log_timers_peek_v1       one key, with payload
 --   queen.log_timers_list_v1       keyset over the PK, QUEUE MANDATORY
+--   queen.log_timers_count_v1      exact pending count for one queue + literal prefix
 --
 -- A timer cannot live in the log, and that is a proof and not a preference
 -- (§1.1): the pop is a CONTIGUOUS offset scan from committed+1, so a future
@@ -1541,6 +1542,94 @@ $$;
 
 
 -- ============================================================================
+-- log_timers_count_v1 — exact count for ONE queue and ONE LITERAL key prefix.
+--
+-- This is deliberately a separate read mode rather than a `count` added to
+-- every list page. A list has a bounded cost (LIMIT 1001); an exact count walks
+-- every matching INDEX ENTRY, so callers must opt into that cost and receive no
+-- payload or row-shaped JSON in return. The Laravel queue adapter uses the
+-- namespace `laravel:` and can therefore add delayed timers to Queue::size()
+-- with one database round trip instead of downloading every timer page.
+--
+-- THE PRIMARY KEY IS THE INDEX:
+--     (tenant_id, queue, timer_key COLLATE "C")
+-- The first two equalities select one queue, then the explicit lower/upper
+-- bounds drive a range scan on timer_key. `starts_with` carries the semantics,
+-- so `%` and `_` are ordinary bytes rather than LIKE metacharacters. The range
+-- is only an index driver and may omit its upper half for the one Unicode edge
+-- where no successor exists; the lower bound remains valid and starts_with()
+-- still makes the answer exact. `kv_prefix_end_v1` is defined by 024_kv.sql,
+-- immediately before this file in schema.rs, and handles surrogate/U+10FFFF
+-- boundaries rather than inventing a broken `prefix || chr(255)` sentinel.
+--
+-- A non-empty, bounded prefix is load-bearing. An empty prefix turns this into
+-- a full queue count behind a request whose rate may be controlled by somebody
+-- else's application traffic; an unbounded prefix bloats planning/query memory
+-- without making the index range more selective. The HTTP edge enforces the
+-- same 128-BYTE ceiling, and the SP repeats it because direct SQL callers are
+-- part of the supported deployment model.
+--
+-- `count` means every PENDING timer row matching the prefix, including claimed
+-- and backed-off rows. A successfully fired/cancelled timer is deleted in the
+-- same transaction and therefore no longer counts.
+-- ============================================================================
+CREATE OR REPLACE FUNCTION queen.log_timers_count_v1(
+    p_tenant UUID,
+    p_queue  TEXT,
+    p_prefix TEXT
+) RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    v_end   TEXT;
+    v_count BIGINT;
+BEGIN
+    IF p_tenant IS NULL THEN
+        RAISE EXCEPTION 'QTIMER count needs a tenant' USING ERRCODE = '22023';
+    END IF;
+    IF COALESCE(p_queue, '') = '' THEN
+        RAISE EXCEPTION 'QTIMER count needs a queue' USING ERRCODE = '22023';
+    END IF;
+    IF COALESCE(p_prefix, '') = '' THEN
+        RAISE EXCEPTION 'QTIMER count needs a non-empty prefix' USING ERRCODE = '22023';
+    END IF;
+    IF octet_length(p_prefix) > 128 THEN
+        RAISE EXCEPTION 'QTIMER count prefix exceeds 128 bytes' USING ERRCODE = '22023';
+    END IF;
+
+    v_end := queen.kv_prefix_end_v1(p_prefix);
+
+    -- Two statements instead of `(v_end IS NULL OR timer_key < v_end)`. Once
+    -- plpgsql promotes a frequently called statement to a generic plan, that
+    -- OR can no longer be folded from the parameter value and may cease to be
+    -- an upper Index Cond. Keeping the normal bounded path free of the OR
+    -- preserves both sides of the btree range for every execution.
+    IF v_end IS NULL THEN
+        SELECT count(*)
+          INTO v_count
+          FROM queen.log_timers t
+         WHERE t.tenant_id = p_tenant
+           AND t.queue = p_queue
+           AND t.timer_key >= p_prefix
+           AND starts_with(t.timer_key, p_prefix);
+    ELSE
+        SELECT count(*)
+          INTO v_count
+          FROM queen.log_timers t
+         WHERE t.tenant_id = p_tenant
+           AND t.queue = p_queue
+           AND t.timer_key >= p_prefix
+           AND t.timer_key < v_end
+           AND starts_with(t.timer_key, p_prefix);
+    END IF;
+
+    RETURN jsonb_build_object('count', v_count);
+END;
+$$;
+
+
+-- ============================================================================
 -- GRANTs. The type list must be COMPLETE and EXACT: a wrong list fails the
 -- apply, and a failed apply kills the process (fail-fast boot).
 -- ============================================================================
@@ -1555,3 +1644,4 @@ GRANT EXECUTE ON FUNCTION queen.log_timers_dlq_v1(
     UUID[], TEXT[], TEXT[], JSONB[], TEXT[], INT, TIMESTAMPTZ) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.log_timers_peek_v1(UUID, TEXT, TEXT) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.log_timers_list_v1(UUID, TEXT, TEXT, INT) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.log_timers_count_v1(UUID, TEXT, TEXT) TO PUBLIC;

@@ -11,7 +11,7 @@
 //! for old-broker detection hangs off exactly that key), the
 //! `"conflationConflict":true` echo (§3.3), the two 400 refusals (§3.3), the
 //! `conflated` skipped-count in the ack result (§2.4, pinned by §7.1.2), and
-//! the three new `/depth` fields (§2.5/§5.3). None of that is observable from
+//! the `/depth` backlog/lease fields (§2.5/§5.3). None of that is observable from
 //! the SQL alone. The embedded facade cannot spell the flag at all today (its
 //! params are typed and the field does not exist yet — using it would not
 //! compile, which is the wrong kind of red), and calling the new SP signatures
@@ -47,9 +47,10 @@
 //!     `queen.log_consumers.lease_conflated BOOLEAN` (§2.2). Both are read here
 //!     via `to_jsonb(row)` so their ABSENCE today reads as a failed assertion
 //!     ("no such key"), never as a 42703 that would masquerade as a fixture bug.
-//!   * depth: `GET /api/v1/resources/queues/:q/depth?group=g` gains
-//!     `partitionsPending`, `conflation`, `effectivePending` (§2.5, §5.3);
-//!     `pending` stays log depth.
+//!   * depth: `GET /api/v1/resources/queues/:q/depth?group=g` reports log depth,
+//!     live leased `processing`, unleased `ready`, partition counts for both,
+//!     and conflation-adjusted effective depths. Queue-level depth keeps the
+//!     named-group-over-queue-mode worst-cursor precedence.
 //!   * sizing (M5/§3.2): a conflating pop with `batch=B` and no `partitions`
 //!     param claims up to B partitions, hard ceiling 64, one tail each. The
 //!     sizing cases use ONE message per partition on purpose: the hot-list
@@ -1004,9 +1005,9 @@ async fn c07_sizing_batch_partitions(h: &Http, c: &Client) -> Case {
     Ok(())
 }
 
-// §2.5 / §5.3 — depth. For a conflating group `pending` stays LOG depth while
-// `effectivePending` is WORK depth (= partitions with work), plus the
-// `partitionsPending` count and the `conflation` echo.
+// §2.5 / §5.3 — depth. `pending` remains positional LOG depth; `processing`
+// counts live leased spans and `ready` is their unleased remainder. Conflating
+// groups expose partition-count effective depths rather than positional ones.
 async fn c08_depth_fields(h: &Http, c: &Client) -> Case {
     let q = unique("cfl-depth");
     let g = "workers";
@@ -1033,6 +1034,13 @@ async fn c08_depth_fields(h: &Http, c: &Client) -> Case {
         "fixture: exactly A and B must be pending for {g} at this point"
     );
 
+    // Hold A's conflating tail unacked. Its lease covers the entire positional
+    // span (-1, 99], so all 100 pending positions are processing even though
+    // only one tail message was delivered. B remains ready.
+    let (code, v) = pop_part(h, &q, "A", &format!("consumerGroup={g}&conflation=true")).await?;
+    chk!(code == 200, "pinned pop of A -> {code}: {v}");
+    chk!(msgs(&v).len() == 1, "A's conflating lease delivers one tail: {v}");
+
     let (code, d) = h
         .req("GET", &format!("/api/v1/resources/queues/{q}/depth?group={g}"), None)
         .await?;
@@ -1055,9 +1063,107 @@ async fn c08_depth_fields(h: &Http, c: &Client) -> Case {
         "effectivePending for a conflating group is WORK depth — partitions with work \
          (2), NOT log depth (101) (§2.5/§5.3): {d}"
     );
+    chk!(
+        d.get("processing").and_then(|x| x.as_i64()) == Some(100),
+        "only A's live leased span is processing: {d}"
+    );
+    chk!(
+        d.get("ready").and_then(|x| x.as_i64()) == Some(1),
+        "ready is pending minus processing, leaving only B: {d}"
+    );
+    chk!(
+        d.get("partitionsReady").and_then(|x| x.as_i64()) == Some(1),
+        "only B has unleased work: {d}"
+    );
+    chk!(
+        d.get("effectiveReady").and_then(|x| x.as_i64()) == Some(1),
+        "a conflating group's effectiveReady is its number of ready partitions: {d}"
+    );
     // The pre-existing shape must survive underneath the new fields.
     let parts = d.get("partitions").and_then(|p| p.as_array()).cloned().unwrap_or_default();
     chk!(parts.len() == 3, "the per-partition array keeps listing all 3 partitions: {d}");
+    let a = parts.iter().find(|p| p.get("partition").and_then(Value::as_str) == Some("A"));
+    chk!(
+        a.and_then(|p| p.get("processing")).and_then(Value::as_i64) == Some(100)
+            && a.and_then(|p| p.get("ready")).and_then(Value::as_i64) == Some(0),
+        "partition A is fully leased, not ready: {parts:?}"
+    );
+
+    // Expired lease state can retain batch_end until the next pop. Depth must
+    // ignore it immediately rather than treating stale ownership as processing.
+    c.execute(
+        "UPDATE queen.log_consumers lc SET lease_expires_at = NOW() - INTERVAL '1 second' \
+         FROM queen.log_partitions p JOIN queen.queues q ON q.id = p.queue_id \
+         WHERE lc.partition_id = p.id AND q.name = $1 AND q.tenant_id = $2::text::uuid \
+           AND p.name = 'A' AND lc.consumer_group = $3",
+        &[&q, &TENANT, &g],
+    )
+    .await
+    .map_err(|e| format!("expire A lease: {e}"))?;
+    let (code, expired) = h
+        .req("GET", &format!("/api/v1/resources/queues/{q}/depth?group={g}"), None)
+        .await?;
+    chk!(code == 200, "depth after expiry -> {code}: {expired}");
+    chk!(
+        expired.get("processing").and_then(Value::as_i64) == Some(0)
+            && expired.get("ready").and_then(Value::as_i64) == Some(101)
+            && expired.get("partitionsReady").and_then(Value::as_i64) == Some(2)
+            && expired.get("effectiveReady").and_then(Value::as_i64) == Some(2),
+        "an expired lease contributes no processing; both pending partitions become ready: {expired}"
+    );
+
+    // A regular group leases B's one message. Non-conflating effectiveReady is
+    // positional ready depth, not the number of ready partitions.
+    let audit = "audit";
+    let (code, v) = pop_part(h, &q, "B", &format!("consumerGroup={audit}&subscriptionMode=all")).await?;
+    chk!(code == 200 && msgs(&v).len() == 1, "audit leases B: {code}: {v}");
+    let (code, regular) = h
+        .req("GET", &format!("/api/v1/resources/queues/{q}/depth?group={audit}"), None)
+        .await?;
+    chk!(code == 200, "regular depth -> {code}: {regular}");
+    chk!(
+        regular.get("pending").and_then(Value::as_i64) == Some(102)
+            && regular.get("processing").and_then(Value::as_i64) == Some(1)
+            && regular.get("ready").and_then(Value::as_i64) == Some(101)
+            && regular.get("partitionsReady").and_then(Value::as_i64) == Some(2)
+            && regular.get("effectiveReady").and_then(Value::as_i64) == Some(101),
+        "non-conflating effectiveReady must equal ready, with only B processing: {regular}"
+    );
+
+    // Give C an abandoned queue-mode cursor and a live lease behind the named
+    // group's completed cursor. Queue-level pending must keep the historical
+    // named-group cursor precedence; processing is capped by that zero pending.
+    c.execute(
+        "INSERT INTO queen.log_consumers \
+             (partition_id, consumer_group, committed, batch_end, worker_id, lease_expires_at) \
+         SELECT p.id, '__QUEUE_MODE__', -1, 0, 'stale-queue-mode', NOW() + INTERVAL '5 minutes' \
+         FROM queen.log_partitions p JOIN queen.queues q ON q.id = p.queue_id \
+         WHERE q.name = $1 AND q.tenant_id = $2::text::uuid AND p.name = 'C' \
+         ON CONFLICT (partition_id, consumer_group) DO UPDATE SET \
+             committed = EXCLUDED.committed, batch_end = EXCLUDED.batch_end, \
+             worker_id = EXCLUDED.worker_id, lease_expires_at = EXCLUDED.lease_expires_at",
+        &[&q, &TENANT],
+    )
+    .await
+    .map_err(|e| format!("seed queue-mode precedence guard: {e}"))?;
+    let (code, queue_depth) = h
+        .req("GET", &format!("/api/v1/resources/queues/{q}/depth"), None)
+        .await?;
+    chk!(code == 200, "queue depth -> {code}: {queue_depth}");
+    let queue_parts = queue_depth
+        .get("partitions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let c_part = queue_parts
+        .iter()
+        .find(|p| p.get("partition").and_then(Value::as_str) == Some("C"));
+    chk!(
+        c_part.and_then(|p| p.get("pending")).and_then(Value::as_i64) == Some(0)
+            && c_part.and_then(|p| p.get("processing")).and_then(Value::as_i64) == Some(0)
+            && c_part.and_then(|p| p.get("ready")).and_then(Value::as_i64) == Some(0),
+        "named C cursor must override the behind queue-mode cursor, and processing cannot exceed pending: {queue_depth}"
+    );
     Ok(())
 }
 

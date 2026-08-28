@@ -9,6 +9,7 @@ server/target
 **/.venv
 **/__pycache__
 **/vendor
+clients/client-laravel/composer.lock
 **/.phpunit.cache
 **/*.log
 benchmark-queen

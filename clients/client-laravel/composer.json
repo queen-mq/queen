@@ -17,7 +17,7 @@
     "support": {
         "issues": "https://github.com/queen-mq/queen/issues",
         "source": "https://github.com/queen-mq/queen",
-        "docs": "https://queenmq.com/use/clients/php-laravel"
+        "docs": "https://queenmq.com/reference/sdk/php/"
     },
     "require": {
         "php": "^8.3",
@@ -27,6 +27,13 @@
     "require-dev": {
         "phpunit/phpunit": "^11.0|^12.0",
         "orchestra/testbench": "^9.0|^10.0"
+    },
+    "suggest": {
+        "illuminate/queue": "Required to use Queen as a Laravel queue connection",
+        "illuminate/support": "Required for Laravel service-provider and facade integration",
+        "illuminate/console": "Required by the Laravel Artisan commands",
+        "symfony/process": "Required by the PHP worker supervisor",
+        "ext-pcntl": "Required by the PHP worker supervisor on Unix"
     },
     "autoload": {
         "psr-4": {
@@ -46,6 +53,11 @@
             "aliases": {
                 "Queen": "Queen\\Laravel\\QueenFacade"
             }
+        }
+    },
+    "config": {
+        "platform": {
+            "php": "8.3.0"
         }
     },
     "minimum-stability": "stable",

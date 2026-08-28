@@ -288,12 +288,12 @@ class Queen
     public function deleteConsumerGroup(string $consumerGroup, bool $deleteMetadata = true): mixed
     {
         $dm = $deleteMetadata ? 'true' : 'false';
-        return $this->httpClient->delete("/api/v1/consumer-groups/" . urlencode($consumerGroup) . "?deleteMetadata={$dm}");
+        return $this->httpClient->delete('/api/v1/consumer-groups/' . rawurlencode($consumerGroup) . "?deleteMetadata={$dm}");
     }
 
     public function updateConsumerGroupTimestamp(string $consumerGroup, string $timestamp): mixed
     {
-        return $this->httpClient->post("/api/v1/consumer-groups/" . urlencode($consumerGroup) . "/subscription", [
+        return $this->httpClient->post('/api/v1/consumer-groups/' . rawurlencode($consumerGroup) . '/subscription', [
             'subscriptionTimestamp' => $timestamp,
         ]);
     }
@@ -319,12 +319,14 @@ class Queen
     private function normalizeConfig(string|array $config): array
     {
         if (is_string($config)) {
-            return array_merge(Defaults::CLIENT_DEFAULTS, ['urls' => [$config]]);
+            $normalized = array_merge(Defaults::CLIENT_DEFAULTS, ['urls' => [$config]]);
+            return $this->validateConfig($normalized);
         }
 
         // Array of URLs (sequential numeric keys)
         if (isset($config[0])) {
-            return array_merge(Defaults::CLIENT_DEFAULTS, ['urls' => $config]);
+            $normalized = array_merge(Defaults::CLIENT_DEFAULTS, ['urls' => $config]);
+            return $this->validateConfig($normalized);
         }
 
         // Config array
@@ -338,7 +340,115 @@ class Queen
             throw new \InvalidArgumentException('Must provide urls or url in configuration');
         }
 
-        return $normalized;
+        return $this->validateConfig($normalized);
+    }
+
+    private function validateConfig(array $config): array
+    {
+        if (!is_array($config['urls']) || $config['urls'] === []) {
+            throw new \InvalidArgumentException('urls must be a non-empty array');
+        }
+
+        $config['urls'] = array_values(array_map(function (mixed $url): string {
+            if (!is_string($url) || trim($url) === '') {
+                throw new \InvalidArgumentException('Every Queen URL must be a non-empty string');
+            }
+            $url = rtrim(trim($url), '/');
+            $parts = parse_url($url);
+            if (!is_array($parts)
+                || !in_array(strtolower((string) ($parts['scheme'] ?? '')), ['http', 'https'], true)
+                || !is_string($parts['host'] ?? null)
+                || $parts['host'] === ''
+                || preg_match('/[\x00-\x20\x7F]/', $parts['host']) === 1
+                || isset($parts['user'])
+                || isset($parts['pass'])
+                || isset($parts['query'])
+                || isset($parts['fragment'])) {
+                throw new \InvalidArgumentException("Invalid Queen URL [{$url}]; expected http:// or https://");
+            }
+            return $url;
+        }, $config['urls']));
+
+        foreach ([
+            'timeoutMillis' => 1,
+            'retryAttempts' => 1,
+            'retryDelayMillis' => 0,
+            'affinityHashRing' => 1,
+            'healthRetryAfterMillis' => 0,
+        ] as $name => $minimum) {
+            $config[$name] = $this->normalizeInteger($config[$name] ?? null, $name, $minimum);
+        }
+
+        if (!in_array($config['loadBalancingStrategy'], ['affinity', 'round-robin', 'session'], true)) {
+            throw new \InvalidArgumentException('loadBalancingStrategy must be affinity, round-robin, or session');
+        }
+        if (!is_bool($config['enableFailover'])) {
+            throw new \InvalidArgumentException('enableFailover must be a boolean');
+        }
+        if ($config['bearerToken'] !== null && (
+            !is_string($config['bearerToken'])
+            || $config['bearerToken'] === ''
+            || preg_match('/[\x00-\x20\x7F]/', $config['bearerToken']) === 1
+        )) {
+            throw new \InvalidArgumentException('bearerToken must be a non-empty header-safe string or null');
+        }
+        if (!is_array($config['headers'])) {
+            throw new \InvalidArgumentException('headers must be an array');
+        }
+        foreach ($config['headers'] as $name => $value) {
+            if (!is_string($name)
+                || preg_match('/^[!#$%&\'*+\-.^_`|~0-9A-Za-z]+$/D', $name) !== 1) {
+                throw new \InvalidArgumentException('Header names must be non-empty HTTP token strings');
+            }
+
+            $values = is_array($value) ? $value : [$value];
+            if ($values === []) {
+                throw new \InvalidArgumentException("Header [{$name}] must contain at least one value");
+            }
+            foreach ($values as $headerValue) {
+                if (!is_scalar($headerValue) || preg_match('/[\r\n]/', (string) $headerValue) === 1) {
+                    throw new \InvalidArgumentException("Header [{$name}] contains an invalid value");
+                }
+            }
+            $config['headers'][$name] = is_array($value)
+                ? array_map(static fn (mixed $item): string => (string) $item, $values)
+                : (string) $value;
+        }
+        if (!is_array($config['retry429'])) {
+            throw new \InvalidArgumentException('retry429 must be an array');
+        }
+        $unknownRetryKeys = array_diff(array_keys($config['retry429']), ['maxAttempts', 'baseMs', 'capMs']);
+        if ($unknownRetryKeys !== []) {
+            throw new \InvalidArgumentException('retry429 contains unknown option [' . reset($unknownRetryKeys) . ']');
+        }
+        foreach ($config['retry429'] as $name => $value) {
+            $config['retry429'][$name] = $this->normalizeInteger($value, "retry429.{$name}", 0);
+        }
+
+        return $config;
+    }
+
+    private function normalizeInteger(mixed $value, string $name, int $minimum): int
+    {
+        $integer = false;
+        if (is_int($value)) {
+            $integer = $value;
+        } elseif (is_string($value) && preg_match('/^-?\d+$/D', $value) === 1) {
+            $negative = str_starts_with($value, '-');
+            $digits = ltrim($value, '-0');
+            $digits = $digits === '' ? '0' : $digits;
+            $canonical = $negative && $digits !== '0' ? '-' . $digits : $digits;
+            $integer = filter_var($canonical, FILTER_VALIDATE_INT);
+        }
+
+        if ($integer === false) {
+            throw new \InvalidArgumentException("{$name} must be an integer");
+        }
+        if ($integer < $minimum) {
+            throw new \InvalidArgumentException("{$name} must be at least {$minimum}");
+        }
+
+        return $integer;
     }
 
     private function createHttpClient(): HttpClient

@@ -11,12 +11,28 @@ sourceOfTruth:
   - clients/client-laravel/src/Builders/QueueBuilder.php
   - clients/client-laravel/src/Builders/PushBuilder.php
   - clients/client-laravel/src/Consumer/ConsumerManager.php
+  - clients/client-laravel/src/Timers.php
   - clients/client-laravel/src/Laravel/QueenServiceProvider.php
+  - clients/client-laravel/src/Laravel/Queue/QueenQueue.php
+  - clients/client-laravel/src/Laravel/Queue/QueenJob.php
   - clients/client-laravel/src/Laravel/Commands/ConsumeCommand.php
+  - clients/client-laravel/src/Laravel/Commands/SuperviseCommand.php
+  - clients/client-laravel/src/Laravel/Commands/SupervisorConfigCommand.php
+  - clients/client-laravel/src/Laravel/Commands/SupervisorControlCommand.php
+  - clients/client-laravel/src/Laravel/Supervisor/SupervisorConfiguration.php
+  - clients/client-laravel/src/Laravel/Supervisor/PhpSupervisor.php
+  - clients/client-laravel/src/Laravel/Supervisor/AutoScaler.php
+  - clients/client-laravel/src/Laravel/Supervisor/WorkerTelemetry.php
+  - clients/client-laravel/config/queen.php
+  - supervisor/src/main.rs
 verifiedBy:
   - clients/client-laravel/tests/QueueBuilderTest.php
   - clients/client-laravel/tests/HighLevelConsumerTest.php
   - clients/client-laravel/tests/HttpClientTest.php
+  - clients/client-laravel/tests/TimersTest.php
+  - clients/client-laravel/tests/LaravelQueueDriverTest.php
+  - clients/client-laravel/tests/LaravelServiceProviderTest.php
+  - clients/client-laravel/tests/LaravelSupervisorTest.php
 ---
 
 The PHP client is a plain PSR-4 library, `Queen\` mapped onto `src/`, with an optional Laravel
@@ -94,9 +110,83 @@ and everything after it in that batch comes back. A rejected ack still arrives a
   the class or call `Queen::queue('orders')->push(...)->execute();`.
 - `php artisan vendor:publish --tag=queen-config` publishes `config/queen.php`, which reads
   `QUEEN_URL`, `QUEEN_BEARER_TOKEN` and the retry and load-balancing variables.
+- Set `QUEUE_CONNECTION=queen` and run the normal
+  `php artisan queue:work queen --timeout=60`; Laravel jobs, delayed dispatch,
+  backoff and failed-job events then use Queen as their backend. Keep
+  `QUEEN_RETRY_AFTER` longer than the worker timeout.
+- Laravel monitoring separates total `pending`, live-lease `processing` and
+  claimable `ready`: `size()` includes total pending plus Laravel timers,
+  `pendingSize()` reports ready, and `reservedSize()` reports processing. The
+  delayed part uses one indexed timer count for the literal `laravel:` prefix;
+  it pages old timer listings after an explicit `no_such_route`/`unsupported`
+  or an exact legacy list page returned during a rolling upgrade, never after
+  a transient or malformed response. The
+  oldest-ready timestamp is a conservative queue-detail approximation; when
+  ready is zero the driver skips that expensive detail request entirely.
+- `php artisan queen:supervise` runs the Laravel/PHP supervisor. The separate
+  `queen-supervisor` binary runs the same pools with a low-memory Rust master.
+  The broker still owns no PHP process lifecycle.
 - `php artisan queen:consume orders "App\\Queen\\OrderHandler" --group=processors --auto-ack`
   runs a handler class as a worker; without `--auto-ack` it acknowledges nothing and every
   message is redelivered.
+
+### Laravel worker supervisor
+
+Both engines consume the versioned configuration printed by:
+
+```bash
+php artisan queen:supervisor-config --pretty
+```
+
+This inspection form redacts tokens and header values. `--for-engine` includes
+the credentials needed by a supervisor engine.
+
+`balance=auto` dynamically distributes workers, `simple` keeps a fixed evenly
+spread pool, and `off` gives every worker the ordered comma-separated queue list.
+With `strategy=size`, the target follows group-specific `effectivePending` and
+`target_jobs_per_process`. With `strategy=time`, it follows
+`effectivePending × observed job runtime` and `target_clear_seconds`; worker
+telemetry is best effort and falls back to `default_runtime_seconds`.
+Both engines cap exponential restart backoff. The Rust engine alone opens a
+circuit after five consecutive crashes and admits one probe after its cooldown;
+the PHP engine keeps retrying at `restart_backoff_max` without an open/probe
+state.
+
+Run either engine from the Laravel application directory:
+
+```bash
+php artisan queen:supervise
+queen-supervisor --php php --artisan artisan
+```
+
+Inspect or control either one through the shared private state directory:
+
+```bash
+php artisan queen:supervisor status --json
+php artisan queen:supervisor status --check # non-zero unless live
+php artisan queen:supervisor pause
+php artisan queen:supervisor continue
+php artisan queen:supervisor terminate
+```
+
+These process controls target Unix and require PHP `pcntl`. Configure multiple
+broker endpoints with `QUEEN_URLS`. Both v2 engines build isolated depth clients
+directly from each pool's resolved Queen `connections` entry, including its
+endpoints and validated headers; neither reuses a worker's live Laravel client.
+`QUEEN_SUPERVISOR_READ_BEARER_TOKEN` may replace the worker token with one that
+has read access only. Both engines poll in waves of at most 16 concurrent depth
+requests and fail over network/5xx errors. The resolved JSON contains the token
+and custom headers only with `--for-engine`; prefer the one-shot Artisan pipe
+and protect any credential-bearing persisted config with mode `0600`.
+
+<Aside type="danger">
+Run one supervisor replica per application/consumer group. The state-directory
+lock excludes a second local process only; it is not a distributed leader
+lease. Until Queen exposes a fenced supervisor lease, two masters on different
+hosts can each react to the same global backlog and over-scale. Kubernetes
+deployments should use one replica without surge overlap (for example,
+`Recreate`). This restriction applies to the master, not to its worker count.
+</Aside>
 
 ## What differs here
 

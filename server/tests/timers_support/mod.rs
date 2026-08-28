@@ -659,6 +659,24 @@ pub async fn list(c: &Client, tenant: &str, queue: &str, after: Option<&str>, li
     serde_json::from_str(&txt).expect("list result is JSON")
 }
 
+/// `log_timers_count_v1` — one exact count over the existing composite primary
+/// key, scoped by tenant + queue + literal timer-key prefix.
+pub async fn count_timers(
+    c: &Client,
+    tenant: &str,
+    queue: &str,
+    prefix: &str,
+) -> Result<serde_json::Value, tokio_postgres::Error> {
+    let row = c
+        .query_one(
+            "SELECT (queen.log_timers_count_v1($1::text::uuid, $2, $3))::text",
+            &[&tenant, &queue, &prefix],
+        )
+        .await?;
+    let txt: String = row.get(0);
+    Ok(serde_json::from_str(&txt).expect("count result is JSON"))
+}
+
 /// `kv_apply_v1(p_ops JSONB, p_tenant UUID, p_now TIMESTAMPTZ, p_in_wire BOOLEAN)` — the
 /// signature is spelled out in §6.1. `p_in_wire = false` is the standalone surface.
 pub async fn kv_apply(

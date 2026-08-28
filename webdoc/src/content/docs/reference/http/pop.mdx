@@ -22,7 +22,7 @@ digest: >-
   `batch` 200 (call-wide budget), `partitions` 1, `autoAck` and `wait` false, `timeout` 30000 ms
   (needs `wait=true`), `consumerGroup` `__QUEUE_MODE__`, `subscriptionMode` `new` (seeds absent
   cursors, never in queue mode), `leaseSeconds` the queue's `leaseTime`, else 60. 200 gives
-  `leaseId`, `messages` of `id`, `transactionId`, `data`, `partitionId`, no offset/attempt count;
+  `leaseId`, `messages` of `id`, `transactionId`, `data`, `partitionId`, `deliveryAttempt`, no offset;
   ack per-message `partitionId`. A bare `204` covers idle, `delayedProcessing`/`windowBuffer`
   holdback, pop maintenance, procedure errors, `wait=true` timeouts. One live leased batch per
   `(partition, group)` caps parallelism at the partition count; expiry redelivers, `autoAck=true`
@@ -236,6 +236,12 @@ message's own `partitionId`.
 | `partition` | string | this message's partition name |
 | `leaseId` | string | repeated on every message for convenience; empty on `autoAck` |
 | `consumerGroup` | string | repeated on every message |
+| `deliveryAttempt` | integer | 1-based delivery count for this consumer group's current partition batch; increments when the same batch is redelivered after a nack or lease expiry, and is always `1` with `autoAck` |
+
+`deliveryAttempt` belongs to the `(partition, consumerGroup)` claim, not to the stored message.
+Every message from the same claimed partition in one response therefore carries the same value;
+another partition in that response may carry a different one. Once the group advances to fresh
+work, the count resets to `1`.
 
 ### What a popped message does not carry
 
@@ -244,10 +250,6 @@ These absences are deliberate and each one has a consequence:
 - **No offset or position.** The message's place in the partition is never exposed. You cannot
   ack "up to offset N" over HTTP; you ack a `transactionId` and the broker resolves it to an
   offset.
-- **No delivery or attempt count.** A handler cannot tell from the message whether this is the
-  first delivery or the fourth. Redelivery telemetry exists inside the broker, but it is not on
-  the wire. If your logic needs an attempt count, carry it in your own payload or read the
-  per-message management route.
 - **No lease expiry timestamp.** You know the lease id, not when it dies. Use `leaseSeconds` (or
   the queue's `leaseTime`) as the budget you plan against, and
   [extend the lease](/reference/http/lease) if you need more.
@@ -256,8 +258,9 @@ These absences are deliberate and each one has a consequence:
   a discovery consumer that needs to know which queue a message came from must map it from
   `partitionId` itself.
 - **No headers or metadata envelope.** There is exactly one user-controlled field, `data`.
-- **No status, retry count, or DLQ flag.** Message state is not per-message state; it is a
-  cursor per `(partition, group)`.
+- **No status or DLQ flag.** `deliveryAttempt` describes redelivery of the current group claim;
+  the remaining message state is a cursor per `(partition, group)`, not mutable state stored on
+  the message.
 
 `createdAt` is the **segment's** creation timestamp, not the message's. A segment holds many
 frames, and the broker coalesces concurrent pushes to the same partition into one segment, so

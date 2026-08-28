@@ -39,7 +39,11 @@ fn sql() -> &'static str {
         let mut i = 0;
         let (mut line_comment, mut block_comment) = (false, false);
         while i < b.len() {
-            let two = if i + 1 < b.len() { &b[i..i + 2] } else { &b[i..i + 1] };
+            let two = if i + 1 < b.len() {
+                &b[i..i + 2]
+            } else {
+                &b[i..i + 1]
+            };
             if line_comment {
                 if b[i] == b'\n' {
                     line_comment = false;

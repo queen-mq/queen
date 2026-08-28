@@ -1,0 +1,94 @@
+name: Release Queen Supervisor
+
+on:
+  push:
+    tags:
+      - 'supervisor/v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing supervisor/vX.Y.Z tag to release'
+        required: true
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Verify release version
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          case "$RELEASE_TAG" in
+            supervisor/v*) ;;
+            *) echo "tag must match supervisor/vX.Y.Z" >&2; exit 1 ;;
+          esac
+          tag_version="${RELEASE_TAG#supervisor/v}"
+          crate_version=$(awk -F'"' '/^version[[:space:]]*=/{print $2; exit}' supervisor/Cargo.toml)
+          test "$tag_version" = "$crate_version"
+          echo "version=$tag_version" >> "$GITHUB_OUTPUT"
+      - name: Build static Linux binary
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: supervisor/Dockerfile.release
+          target: artifact
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=local,dest=dist
+          cache-from: type=gha,scope=supervisor-${{ matrix.arch }}
+          cache-to: type=gha,scope=supervisor-${{ matrix.arch }},mode=max
+      - name: Smoke test and package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          chmod 0755 dist/queen-supervisor
+          install -m 0644 supervisor/dist/queen-supervisor.service.example dist/
+          install -m 0644 LICENSE.md dist/
+          if [ "$ARCH" = amd64 ]; then
+            dist/queen-supervisor --version
+            dist/queen-supervisor --help >/dev/null
+          fi
+          archive="queen-supervisor-${VERSION}-linux-${ARCH}.tar.gz"
+          tar -C dist -czf "$archive" queen-supervisor queen-supervisor.service.example LICENSE.md
+          sha256sum "$archive" > "$archive.sha256"
+      - name: Attest release archive
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: queen-supervisor-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: queen-supervisor-linux-${{ matrix.arch }}
+          path: |
+            queen-supervisor-*.tar.gz
+            queen-supervisor-*.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: queen-supervisor-linux-*
+          path: dist
+          merge-multiple: true
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: gh release create "$RELEASE_TAG" dist/* --verify-tag --generate-notes --title "Queen Supervisor ${RELEASE_TAG#supervisor/v}"

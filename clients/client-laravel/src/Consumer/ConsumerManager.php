@@ -35,6 +35,7 @@ class ConsumerManager
         $autoAck = $options['autoAck'] ?? true;
         $wait = $options['wait'] ?? true;
         $timeoutMillis = $options['timeoutMillis'] ?? 30000;
+        $leaseSeconds = $options['leaseSeconds'] ?? null;
         $renewLease = $options['renewLease'] ?? false;
         $renewLeaseIntervalMillis = $options['renewLeaseIntervalMillis'] ?? null;
         $each = $options['each'] ?? false;
@@ -44,7 +45,7 @@ class ConsumerManager
         $conflation = $options['conflation'] ?? false;
 
         $path = $this->buildPath($queue, $partition, $namespace, $task);
-        $baseParams = $this->buildParams($batch, $wait, $timeoutMillis, $group, $subscriptionMode, $subscriptionFrom, $namespace, $task, $maxPartitions, $conflation);
+        $baseParams = $this->buildParams($batch, $wait, $timeoutMillis, $group, $subscriptionMode, $subscriptionFrom, $namespace, $task, $maxPartitions, $conflation, $leaseSeconds);
         $affinityKey = $this->getAffinityKey($queue, $partition, $namespace, $task, $group);
         // The identity the conflation checks report against: what was asked for,
         // and which (queue, group) pair a declaration conflict belongs to.
@@ -524,9 +525,10 @@ class ConsumerManager
     {
         if ($queue !== null) {
             if ($partition !== null) {
-                return "/api/v1/pop/queue/{$queue}/partition/{$partition}";
+                return '/api/v1/pop/queue/' . rawurlencode($queue)
+                    . '/partition/' . rawurlencode($partition);
             }
-            return "/api/v1/pop/queue/{$queue}";
+            return '/api/v1/pop/queue/' . rawurlencode($queue);
         }
 
         if ($namespace !== null || $task !== null) {
@@ -547,6 +549,7 @@ class ConsumerManager
         ?string $task,
         int $maxPartitions = 1,
         bool $conflation = false,
+        ?int $leaseSeconds = null,
     ): string {
         $params = [
             'batch' => (string) $batch,
@@ -556,6 +559,9 @@ class ConsumerManager
 
         if ($group !== null) {
             $params['consumerGroup'] = $group;
+        }
+        if ($leaseSeconds !== null) {
+            $params['leaseSeconds'] = (string) $leaseSeconds;
         }
         if ($subscriptionMode !== null) {
             $params['subscriptionMode'] = $subscriptionMode;

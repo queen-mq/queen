@@ -13,6 +13,71 @@ return [
     'health_retry_after' => env('QUEEN_HEALTH_RETRY_AFTER', 30000),
     'headers' => [],
 
+    // Laravel queue driver. Use with QUEUE_CONNECTION=queen and Laravel's
+    // standard `php artisan queue:work queen` worker.
+    'queue' => env('QUEEN_QUEUE', 'default'),
+    'consumer_group' => env('QUEEN_CONSUMER_GROUP', 'laravel'),
+    // Fixed stripes preserve concurrency without creating one partition per
+    // job. Jobs implementing QueenPartitionable override the stripe with an
+    // explicit per-entity ordering key.
+    'partitions' => env('QUEEN_PARTITIONS', 64),
+    'partition_prefix' => env('QUEEN_PARTITION_PREFIX', 'laravel'),
+    // Must be longer than the Laravel worker/job timeout.
+    'retry_after' => env('QUEEN_RETRY_AFTER', 90),
+    // Seconds to long-poll. Keep 0 when workers consume priority queues in a
+    // comma-separated list, otherwise the first empty queue delays the rest.
+    'block_for' => env('QUEEN_BLOCK_FOR', 0),
+    'after_commit' => env('QUEEN_AFTER_COMMIT', false),
+    // Keep Laravel failed_jobs as the command index while retaining Queen DLQ
+    // snapshots. Retry/forget/flush/prune remove the matching DLQ row.
+    'sync_failed_jobs' => env('QUEEN_SYNC_FAILED_JOBS', true),
+
+    // Local process orchestration. The PHP and Rust engines consume the same
+    // resolved JSON contract exposed by `queen:supervisor-config`.
+    'supervisor' => [
+        'poll_interval' => env('QUEEN_SUPERVISOR_POLL_INTERVAL', 3),
+        'http_timeout' => env('QUEEN_SUPERVISOR_HTTP_TIMEOUT', 5),
+        'read_bearer_token' => env('QUEEN_SUPERVISOR_READ_BEARER_TOKEN'),
+        'shutdown_grace' => env('QUEEN_SUPERVISOR_SHUTDOWN_GRACE', 75),
+        'process_limit' => env('QUEEN_SUPERVISOR_PROCESS_LIMIT', 256),
+        'state_directory' => env('QUEEN_SUPERVISOR_STATE_DIRECTORY', storage_path('queen-supervisor')),
+        'telemetry_ttl' => env('QUEEN_SUPERVISOR_TELEMETRY_TTL', 300),
+        'supervisors' => [
+            'default' => [
+                'connection' => 'queen',
+                'consumer_group' => env('QUEEN_CONSUMER_GROUP', 'laravel'),
+                'queues' => [env('QUEEN_QUEUE', 'default')],
+                'balance' => env('QUEEN_SUPERVISOR_BALANCE', 'auto'),
+                'strategy' => env('QUEEN_SUPERVISOR_STRATEGY', 'size'),
+                'min_processes' => env('QUEEN_SUPERVISOR_MIN_PROCESSES', 1),
+                'max_processes' => env('QUEEN_SUPERVISOR_MAX_PROCESSES', 10),
+                'target_jobs_per_process' => env('QUEEN_SUPERVISOR_TARGET_JOBS', 10),
+                'target_clear_seconds' => env('QUEEN_SUPERVISOR_TARGET_CLEAR_SECONDS', 60),
+                'default_runtime_seconds' => env('QUEEN_SUPERVISOR_DEFAULT_RUNTIME_SECONDS', 1),
+                'balance_cooldown' => env('QUEEN_SUPERVISOR_BALANCE_COOLDOWN', 3),
+                'balance_max_shift' => env('QUEEN_SUPERVISOR_BALANCE_MAX_SHIFT', 1),
+                // Require a lower target to remain stable before removing
+                // capacity; worker crashes use a separate capped backoff.
+                'scale_down_delay' => env('QUEEN_SUPERVISOR_SCALE_DOWN_DELAY', 10),
+                'restart_backoff' => env('QUEEN_SUPERVISOR_RESTART_BACKOFF', 1),
+                'restart_backoff_max' => env('QUEEN_SUPERVISOR_RESTART_BACKOFF_MAX', 30),
+                'stable_after' => env('QUEEN_SUPERVISOR_STABLE_AFTER', 60),
+                'sleep' => 1,
+                'timeout' => 60,
+                'retry_after' => env('QUEEN_RETRY_AFTER', 90),
+                'tries' => 3,
+                'memory' => 128,
+                'backoff' => 0,
+                'max_jobs' => 0,
+                'max_time' => 0,
+                'rest' => 0,
+                'force' => false,
+                // Avoid per-job console I/O in daemon mode.
+                'quiet' => true,
+            ],
+        ],
+    ],
+
     // Backoff for HTTP 429 (rate limited by the proxy), independent of the
     // retry_attempts above. Nulls keep the per-request-kind defaults: 10
     // attempts for ordinary requests, unbounded for long-poll pops, 500ms

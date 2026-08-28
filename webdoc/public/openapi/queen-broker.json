@@ -4998,6 +4998,14 @@
             }
           },
           {
+            "name": "mode",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "after",
             "in": "query",
             "required": false,
@@ -5007,6 +5015,14 @@
           },
           {
             "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "prefix",
             "in": "query",
             "required": false,
             "schema": {
@@ -5040,7 +5056,7 @@
         "x-queen-access-level": "read-write",
         "x-queen-tenant-scoped": true,
         "x-queen-handler": "server/src/handlers/timers.rs::handle_timers_list",
-        "x-queen-query-params": "adhoc",
+        "x-queen-query-params": "typed",
         "security": [
           {
             "bearerAuth": []

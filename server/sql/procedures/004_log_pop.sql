@@ -23,10 +23,11 @@
 -- lookup disappear; a segment covers [base_offset, end_offset] and slicing is
 -- pure offset subtraction.
 --
--- Wire compat (§11): the JSON keys are UNCHANGED. `seq` now carries
+-- Segment wire compat (§11): the segment JSON keys are unchanged. `seq` carries
 -- base_offset and `startOff` carries the start frame index inside the segment
 -- — clients treat both as opaque; `take`/`msgCount`/`createdAt`/`partition`/
--- `partitionId` are identical.
+-- `partitionId` are identical. Each claimed partition additionally reports the
+-- group-scoped `deliveryAttempt` that the broker copies onto every message.
 -- ============================================================================
 
 -- ----------------------------------------------------------------------------
@@ -601,6 +602,7 @@ AS $$
 DECLARE
     v_segments JSONB;
     v_pid UUID;
+    v_attempt INTEGER := 1;
 BEGIN
     -- Claim first (same call db::pop_specific made, p_skip_window_debounce FALSE).
     SELECT COALESCE(jsonb_agg(jsonb_build_object(
@@ -619,15 +621,23 @@ BEGIN
     -- Resolve the partition id AFTER the claim: this command's snapshot is at
     -- least as new as any snapshot the claim used, so a delivery can never be
     -- rendered with an empty partitionId.
-    SELECT p.id INTO v_pid
+    SELECT p.id,
+           CASE WHEN p_auto_ack THEN 1
+                ELSE GREATEST(COALESCE(c.attempt_count, 1), 1) END
+    INTO v_pid, v_attempt
     FROM queen.log_partitions p JOIN queen.queues q ON q.id = p.queue_id
+    LEFT JOIN queen.log_consumers c
+      ON c.partition_id = p.id AND c.consumer_group = p_group
     WHERE q.name = p_queue AND p.name = p_partition AND q.tenant_id = p_tenant;
 
-    -- Same wire shape db::pop_specific assembled ("attempt" is shape compat).
+    -- attempt_count belongs to (partition, consumer group), not to the stored
+    -- frame. Read it only after log_pop_v1 has completed its lease UPDATE so a
+    -- lease-expiry / nack redelivery reports the incremented value. autoAck has
+    -- no redelivery episode and is therefore always delivery 1.
     RETURN jsonb_build_object(
         'segments', v_segments,
         'partitionId', COALESCE(v_pid::text, ''),
-        'attempt', 0);
+        'deliveryAttempt', v_attempt);
 END;
 $$;
 
@@ -642,6 +652,7 @@ $$;
 -- non-blocking. All claimed partitions share p_worker, mirroring v1
 -- pop_unified_batch_v4's one-lease-id-per-batch semantics.
 -- Returns {"partitions":[{"partition":name,"partitionId":uuid,
+--                         "deliveryAttempt":count,
 --                         "segments":[{seq,startOff,take,msgCount,createdAt,
 --                                      blob(b64)}, ...]}, ...]}
 -- (`seq` carries base_offset — opaque to clients, §11).
@@ -682,6 +693,7 @@ DECLARE
     v_out JSONB := '[]'::jsonb;
     v_segments JSONB;
     v_taken INTEGER;
+    v_attempt INTEGER := 1;
     v_now TIMESTAMPTZ := clock_timestamp();
     v_watermark TIMESTAMPTZ;
     v_cand_cap INTEGER;
@@ -905,9 +917,19 @@ BEGIN
                               p_sub_mode, p_sub_from, FALSE, p_tenant, v_conflate_eff);
 
         IF v_taken > 0 THEN
+            IF p_auto_ack THEN
+                v_attempt := 1;
+            ELSE
+                SELECT GREATEST(COALESCE(c.attempt_count, 1), 1)
+                INTO v_attempt
+                FROM queen.log_consumers c
+                WHERE c.partition_id = v_p.id AND c.consumer_group = p_group;
+                v_attempt := GREATEST(COALESCE(v_attempt, 1), 1);
+            END IF;
             v_out := v_out || jsonb_build_object(
                 'partition', v_p.name,
                 'partitionId', v_p.id,
+                'deliveryAttempt', v_attempt,
                 'segments', v_segments);
             v_claimed := v_claimed + 1;   -- only partitions that yielded rows
             v_remaining := v_remaining - v_taken;
@@ -1003,6 +1025,7 @@ DECLARE
     v_part_blobs BYTEA[];
     v_all_blobs BYTEA[] := '{}'::bytea[];
     v_taken INTEGER;
+    v_attempt INTEGER := 1;
     v_now TIMESTAMPTZ := clock_timestamp();
     v_watermark TIMESTAMPTZ;
     v_cand_cap INTEGER;
@@ -1170,9 +1193,19 @@ BEGIN
                               p_sub_mode, p_sub_from, FALSE, p_tenant, v_conflate_eff);
 
         IF v_taken > 0 THEN
+            IF p_auto_ack THEN
+                v_attempt := 1;
+            ELSE
+                SELECT GREATEST(COALESCE(c.attempt_count, 1), 1)
+                INTO v_attempt
+                FROM queen.log_consumers c
+                WHERE c.partition_id = v_p.id AND c.consumer_group = p_group;
+                v_attempt := GREATEST(COALESCE(v_attempt, 1), 1);
+            END IF;
             v_out := v_out || jsonb_build_object(
                 'partition', v_p.name,
                 'partitionId', v_p.id,
+                'deliveryAttempt', v_attempt,
                 'segments', v_segments);
             v_all_blobs := v_all_blobs || v_part_blobs;
             v_claimed := v_claimed + 1;
@@ -1284,6 +1317,7 @@ DECLARE
     v_out JSONB := '[]'::jsonb;
     v_segments JSONB;
     v_taken INTEGER;
+    v_attempt INTEGER := 1;
     v_now TIMESTAMPTZ := clock_timestamp();
     v_watermark TIMESTAMPTZ;
     v_cand_cap INTEGER;
@@ -1494,9 +1528,19 @@ BEGIN
                               p_sub_mode, p_sub_from, FALSE, p_tenant, v_p.conflate);
 
         IF v_taken > 0 THEN
+            IF p_auto_ack THEN
+                v_attempt := 1;
+            ELSE
+                SELECT GREATEST(COALESCE(c.attempt_count, 1), 1)
+                INTO v_attempt
+                FROM queen.log_consumers c
+                WHERE c.partition_id = v_p.id AND c.consumer_group = p_group;
+                v_attempt := GREATEST(COALESCE(v_attempt, 1), 1);
+            END IF;
             v_out := v_out || jsonb_build_object(
                 'partition', v_p.pname,
                 'partitionId', v_p.id,
+                'deliveryAttempt', v_attempt,
                 'segments', v_segments);
             v_claimed := v_claimed + 1;   -- only partitions that yielded rows
             v_remaining := v_remaining - v_taken;
@@ -1884,6 +1928,10 @@ DECLARE
     e_sfrom INTEGER[] := '{}';
     e_scnt  INTEGER[] := '{}';
     e_lastoff BIGINT[] := '{}';   -- slow: filled inline; fast: from RETURNING
+    -- One group-scoped delivery count per served partition. Fast leased rows
+    -- are filled from UPDATE ... RETURNING attempt_count; slow rows read the
+    -- value written by log_pop_v1. autoAck remains delivery 1.
+    e_attempt INTEGER[] := '{}';
 
     slow_blobs BYTEA[] := '{}'::bytea[];
 
@@ -1918,6 +1966,7 @@ DECLARE
     v_segments JSONB;
     v_part_blobs BYTEA[];
     v_sp_taken INTEGER;
+    v_sp_attempt INTEGER := 1;
     v_pid2 UUID;
     v_lo2 BIGINT;
     v_flworker TEXT;
@@ -2206,6 +2255,7 @@ BEGIN
                 e_sfrom := e_sfrom || 0;  -- unused for fast
                 e_scnt := e_scnt || 0;
                 e_lastoff := e_lastoff || NULL::bigint;  -- from RETURNING below
+                e_attempt := e_attempt || 1;             -- overwritten for leased fast rows
                 v_remaining := v_remaining - v_taken;
                 v_claimed := v_claimed + 1;
             ELSE
@@ -2237,8 +2287,13 @@ BEGIN
                                   p_conflate);
 
             IF v_sp_taken > 0 THEN
-                SELECT p.id, p.last_offset INTO v_pid2, v_lo2
+                SELECT p.id, p.last_offset,
+                       CASE WHEN p_auto_ack THEN 1
+                            ELSE GREATEST(COALESCE(c.attempt_count, 1), 1) END
+                INTO v_pid2, v_lo2, v_sp_attempt
                 FROM queen.log_partitions p
+                LEFT JOIN queen.log_consumers c
+                  ON c.partition_id = p.id AND c.consumer_group = p_group
                 WHERE p.queue_id = v_qid AND p.name = v_name;
                 e_kind := array_append(e_kind, 'w');
                 e_ord  := e_ord || v_ord;
@@ -2252,6 +2307,7 @@ BEGIN
                 e_sfrom := e_sfrom || (COALESCE(array_length(slow_blobs, 1), 0) + 1);
                 e_scnt := e_scnt || COALESCE(array_length(v_part_blobs, 1), 0);
                 e_lastoff := e_lastoff || v_lo2;
+                e_attempt := e_attempt || v_sp_attempt;
                 slow_blobs := slow_blobs || v_part_blobs;
                 v_remaining := v_remaining - v_sp_taken;
                 v_claimed := v_claimed + 1;
@@ -2391,9 +2447,10 @@ BEGIN
                       WHERE e_kind[ei] = 'f') u
                 JOIN queen.log_partitions p ON p.id = u.pid
                 WHERE c.partition_id = u.pid AND c.consumer_group = p_group
-                RETURNING u.ei, p.last_offset
+                RETURNING u.ei, p.last_offset, c.attempt_count
             LOOP
                 e_lastoff[rec.ei] := rec.last_offset;
+                e_attempt[rec.ei] := GREATEST(COALESCE(rec.attempt_count, 1), 1);
             END LOOP;
         END IF;
 
@@ -2413,6 +2470,7 @@ BEGIN
         v_out := v_out || jsonb_build_object(
             'partition', v_parts[e_ord[i]],
             'partitionId', e_pid[i],
+            'deliveryAttempt', e_attempt[i],
             'segments', e_segj[i]);
         v_states := v_states || jsonb_build_object(
             'p', v_parts[e_ord[i]], 's', 'took',

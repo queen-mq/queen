@@ -1,0 +1,23 @@
+[package]
+name = "queen-supervisor"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Low-memory process supervisor for Queen-backed Laravel workers"
+license = "Apache-2.0"
+
+[[bin]]
+name = "queen-supervisor"
+path = "src/main.rs"
+
+[dependencies]
+ctrlc = { version = "3", features = ["termination"] }
+libc = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

@@ -17,6 +17,7 @@ use Psr\Http\Message\RequestInterface;
 class PlanHandler
 {
     public array $requests = [];
+    public array $options = [];
 
     public function __construct(private array $plan = [], private ?array $default = null)
     {
@@ -25,6 +26,7 @@ class PlanHandler
     public function __invoke(RequestInterface $request, array $options): PromiseInterface
     {
         $this->requests[] = $request;
+        $this->options[] = $options;
 
         $descriptor = array_shift($this->plan) ?? $this->default ?? ['status' => 200, 'json' => []];
 
