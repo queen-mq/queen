@@ -95,9 +95,9 @@ have runtime observations. Do not warm one lane and leave another cold.
 
 The application writes no result rows to Redis or PostgreSQL. Completion events
 go to a dedicated Docker volume, keeping the measured queue backends out of the
-common result path. Sampler output goes to a separate 128 MiB `tmpfs` and is
-copied only after measurement, so its flushes do not contend on the worker
-result volume. A dispatch is started with:
+common result path. Sampler output goes to a separate named volume and is
+copied only after measurement, so it never locks or appends to the worker
+result files. A dispatch is started with:
 
 ```console
 php artisan bench:dispatch \

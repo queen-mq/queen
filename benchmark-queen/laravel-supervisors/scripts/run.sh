@@ -37,6 +37,7 @@ CURRENT_PROJECT=""
 CURRENT_ENGINE=""
 CURRENT_MONITOR=""
 CURRENT_VOLUME=""
+CURRENT_STATS_VOLUME=""
 CURRENT_HOST_RUN=""
 
 usage() {
@@ -251,10 +252,14 @@ cleanup_lane() {
     if [ -n "$CURRENT_VOLUME" ] && docker volume inspect "$CURRENT_VOLUME" >/dev/null 2>&1; then
         docker volume rm "$CURRENT_VOLUME" >/dev/null 2>&1 || true
     fi
+    if [ -n "$CURRENT_STATS_VOLUME" ] && docker volume inspect "$CURRENT_STATS_VOLUME" >/dev/null 2>&1; then
+        docker volume rm "$CURRENT_STATS_VOLUME" >/dev/null 2>&1 || true
+    fi
     CURRENT_PROJECT=""
     CURRENT_ENGINE=""
     CURRENT_MONITOR=""
     CURRENT_VOLUME=""
+    CURRENT_STATS_VOLUME=""
     CURRENT_HOST_RUN=""
 }
 
@@ -263,10 +268,14 @@ finish_lane() {
     if docker volume inspect "$CURRENT_VOLUME" >/dev/null 2>&1; then
         docker volume rm "$CURRENT_VOLUME" >/dev/null
     fi
+    if docker volume inspect "$CURRENT_STATS_VOLUME" >/dev/null 2>&1; then
+        docker volume rm "$CURRENT_STATS_VOLUME" >/dev/null
+    fi
     CURRENT_PROJECT=""
     CURRENT_ENGINE=""
     CURRENT_MONITOR=""
     CURRENT_VOLUME=""
+    CURRENT_STATS_VOLUME=""
     CURRENT_HOST_RUN=""
 }
 
@@ -453,6 +462,7 @@ run_lane() {
     CURRENT_ENGINE="$engine"
     CURRENT_MONITOR="qlb-monitor-${project_suffix}"
     CURRENT_VOLUME="qlb-results-${project_suffix}"
+    CURRENT_STATS_VOLUME="qlb-stats-${project_suffix}"
     CURRENT_HOST_RUN="${campaign_dir}/${engine}/${profile}/${repetition_label}"
     mkdir -p "$CURRENT_HOST_RUN"
 
@@ -479,9 +489,16 @@ run_lane() {
         --label "queen.benchmark.campaign=${campaign_id}" \
         --label "queen.benchmark.run=${run_id}" \
         "$CURRENT_VOLUME" >/dev/null
+    docker volume create \
+        --label "queen.benchmark.campaign=${campaign_id}" \
+        --label "queen.benchmark.run=${run_id}" \
+        "$CURRENT_STATS_VOLUME" >/dev/null
     docker run --rm --user 0:0 \
         --mount "type=volume,src=${CURRENT_VOLUME},dst=/results" \
         "$APP_IMAGE" sh -ceu 'chown 1000:1000 /results; chmod 0770 /results'
+    docker run --rm --user 0:0 \
+        --mount "type=volume,src=${CURRENT_STATS_VOLUME},dst=/stats" \
+        "$APP_IMAGE" sh -ceu 'chown 1000:1000 /stats; chmod 0700 /stats'
 
     producer php artisan bench:config --no-ansi >"${CURRENT_HOST_RUN}/configuration.json"
     compose_current config >"${CURRENT_HOST_RUN}/compose-resolved.yml"
@@ -517,7 +534,7 @@ run_lane() {
         SAMPLER_OPTIONS+=(--pss)
     fi
 
-    docker run --detach \
+    docker run --detach --rm \
         --name "$CURRENT_MONITOR" \
         --pid host \
         --cgroupns host \
@@ -527,7 +544,7 @@ run_lane() {
         --read-only \
         --mount type=bind,src=/sys/fs/cgroup,dst=/sys/fs/cgroup,readonly \
         --mount "type=bind,src=${SCRIPT_DIR},dst=/bench,readonly" \
-        --tmpfs /stats:rw,nosuid,nodev,noexec,size=128m,mode=0700,uid=1000,gid=1000 \
+        --mount "type=volume,src=${CURRENT_STATS_VOLUME},dst=/stats" \
         "$APP_IMAGE" \
         python3 /bench/sample.py \
         "${SAMPLER_TARGETS[@]}" \
@@ -584,9 +601,11 @@ run_lane() {
     fi
 
     docker stop --time 10 "$CURRENT_MONITOR" >/dev/null
-    docker cp "${CURRENT_MONITOR}:${sampler_output}" "${CURRENT_HOST_RUN}/stats.jsonl"
-    docker rm "$CURRENT_MONITOR" >/dev/null
     CURRENT_MONITOR=""
+    docker run --rm --user 0:0 \
+        --mount "type=volume,src=${CURRENT_STATS_VOLUME},dst=/from,readonly" \
+        --mount "type=bind,src=${CURRENT_HOST_RUN},dst=/to" \
+        "$APP_IMAGE" sh -ceu 'cp "/from/$1" /to/stats.jsonl' sh "${run_id}.jsonl"
 
     capture_lane_diagnostics
     docker run --rm --user 0:0 \
