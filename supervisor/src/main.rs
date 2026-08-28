@@ -1571,7 +1571,15 @@ fn reconcile(
     restarts: &mut RestartStates,
     draining: &mut Draining,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut budget = options.balance_max_shift;
+    let supervised_processes = options.queues.iter().fold(0usize, |total, queue| {
+        total.saturating_add(
+            pools
+                .get(&(name.to_owned(), queue.clone()))
+                .map(Vec::len)
+                .unwrap_or(0),
+        )
+    });
+    let mut budget = reconcile_budget(options, supervised_processes);
     let active_processes = pools
         .values()
         .fold(0usize, |total, pool| total.saturating_add(pool.len()));
@@ -1641,6 +1649,19 @@ fn reconcile(
         }
     }
     Ok(())
+}
+
+fn reconcile_budget(options: &SupervisorConfig, active: usize) -> usize {
+    // balance_max_shift bounds elastic changes, but baseline capacity must be
+    // established and restored without waiting through several cooldowns.
+    let baseline = if options.balance == "simple" {
+        options.processes
+    } else {
+        options.min_processes
+    };
+    options
+        .balance_max_shift
+        .max(baseline.saturating_sub(active))
 }
 
 fn remaining_process_slots(limit: usize, active: usize, draining: usize) -> usize {
@@ -2109,6 +2130,18 @@ mod tests {
         let got = desired(&options("simple"), &HashMap::new(), &HashMap::new());
         assert_eq!(got["high"], 3);
         assert_eq!(got["default"], 3);
+    }
+
+    #[test]
+    fn reconcile_budget_immediately_establishes_baseline_capacity() {
+        let simple = options("simple");
+        assert_eq!(reconcile_budget(&simple, 0), 6);
+        assert_eq!(reconcile_budget(&simple, 3), 3);
+        assert_eq!(reconcile_budget(&simple, 6), 1);
+
+        let auto = options("auto");
+        assert_eq!(reconcile_budget(&auto, 0), 2);
+        assert_eq!(reconcile_budget(&auto, 2), 1);
     }
 
     #[test]

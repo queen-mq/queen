@@ -142,6 +142,9 @@ and support these balancing modes:
 workers; `default_runtime_seconds` is used until samples are available. Both
 strategies are bounded by `min_processes`, `max_processes`,
 `balance_cooldown`, `balance_max_shift` and the aggregate `process_limit`.
+The supervisor establishes `processes` in `simple` mode, or at least
+`min_processes` otherwise, immediately; `balance_max_shift` applies only to
+elastic changes above that baseline.
 Both engines cap exponential worker-restart backoff. Only the Rust engine opens
 a circuit after five consecutive crashes and allows a single probe after the
 cooldown; the PHP engine has no open/one-probe state and keeps retrying at

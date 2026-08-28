@@ -473,6 +473,28 @@ class LaravelSupervisorProductionTest extends TestCase
         );
     }
 
+    public function testReconcileBudgetImmediatelyEstablishesBaselineCapacity(): void
+    {
+        $supervisor = new PhpSupervisor(
+            $this->createStub(QueueManager::class),
+            ['state_directory' => $this->temporaryDirectory()],
+        );
+        $method = new ReflectionMethod(PhpSupervisor::class, 'reconcileBudget');
+        $simple = [
+            'balance' => 'simple',
+            'processes' => 6,
+            'min_processes' => 2,
+            'balance_max_shift' => 1,
+        ];
+        $auto = [...$simple, 'balance' => 'auto'];
+
+        $this->assertSame(6, $method->invoke($supervisor, $simple, 0));
+        $this->assertSame(3, $method->invoke($supervisor, $simple, 3));
+        $this->assertSame(1, $method->invoke($supervisor, $simple, 6));
+        $this->assertSame(2, $method->invoke($supervisor, $auto, 0));
+        $this->assertSame(1, $method->invoke($supervisor, $auto, 2));
+    }
+
     public function testRepeatedWorkerCrashesReceiveCappedExponentialBackoff(): void
     {
         $supervisor = new PhpSupervisor(

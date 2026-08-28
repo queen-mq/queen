@@ -52,6 +52,9 @@ work as `effectivePending × observed runtime` and targets clearance within
 private state directory; `default_runtime_seconds` is used until samples exist.
 Both strategies remain bounded by `min_processes`, `max_processes`,
 `balance_cooldown` and `balance_max_shift`.
+Startup and recovery establish `processes` in `simple` mode, or at least
+`min_processes` otherwise, without spreading baseline capacity across several
+cooldown windows. `balance_max_shift` limits subsequent elastic changes.
 `scale_down_delay` suppresses short-lived downscales, while
 `restart_backoff`, `restart_backoff_max` and `stable_after` bound crash loops.
 Scale-up remains immediate; downscale is applied only after the lower target

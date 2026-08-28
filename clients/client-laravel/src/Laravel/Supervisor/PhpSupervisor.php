@@ -246,7 +246,8 @@ final class PhpSupervisor
 
     private function reconcile(string $name, array $options, array $desired, ?int $maximumShift = null): void
     {
-        $budget = $maximumShift ?? (int) $options['balance_max_shift'];
+        $active = array_sum(array_map('count', $this->processes[$name] ?? []));
+        $budget = $maximumShift ?? $this->reconcileBudget($options, $active);
 
         // Free capacity first. Termination is asynchronous, so a single
         // reconcile never blocks for N * shutdown_grace.
@@ -274,6 +275,18 @@ final class PhpSupervisor
                 }
             }
         }
+    }
+
+    private function reconcileBudget(array $options, int $active): int
+    {
+        // balance_max_shift bounds elastic changes, but it must never make a
+        // supervisor take several cooldown windows to establish or restore
+        // its configured baseline capacity.
+        $baseline = $options['balance'] === 'simple'
+            ? (int) $options['processes']
+            : (int) $options['min_processes'];
+
+        return max((int) $options['balance_max_shift'], $baseline - $active);
     }
 
     private function startWorker(string $name, string $queue, array $options): Process
