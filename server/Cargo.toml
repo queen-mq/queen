@@ -4,7 +4,7 @@
 # below keeps the import path `use queen::...` (and the [[bin]] keeps the
 # binary name) — nothing in the repo tooling or in user code changes.
 name = "queen-engine"
-version = "1.3.0-beta.1"
+version = "1.3.0"
 edition = "2021"
 # Measured floor, not copied: `cargo +1.88 check` passes for both feature sets;
 # 1.86 fails because jsonwebtoken -> simple_asn1 floors `time` at 0.3.55, which

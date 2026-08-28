@@ -318,9 +318,12 @@ not as silent loss.
 | `From(timestamp)` / `To(timestamp)` | Time filters. |
 | `Get(ctx) (*DLQResponse, error)` | `DLQResponse{Messages []Message, Total int}` |
 
-Read-only. `Admin.RetryMessage` exists but returns an error without making a request, so replay
-from Go means reading the row and pushing the payload again, or calling
-`POST /api/v1/messages/{partitionId}/{transactionId}/retry` directly.
+The listing is read-only, but `Admin.RetryMessage(ctx, partitionID, transactionID)` replays: the
+broker re-pushes the dead-letter payload snapshot to its own queue and partition and drops the DLQ
+row once that push is accepted. Only dead-lettered addresses replay, and a live one answers `404`.
+It is **not idempotent**, so the client sends it with failover retry disabled and a caller that
+sees a failure has to re-read the DLQ before trying again rather than repeating the call.
+`Admin.MoveMessageToDLQ` is still a stub, because the broker registers no force-move route.
 
 ## `*TransactionBuilder`
 

@@ -26,6 +26,7 @@ digest: >-
   deterministic transactionIds; a pop never is, because a retry is a new claim rather than a
   repeat; and a kv incr never is, because it has no precondition and counts twice. Every 204 has
   no body at all, deliberately.
+# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
 ---
 
 Queen's broker speaks plain HTTP/1.1 with JSON bodies. There is no binary protocol, no

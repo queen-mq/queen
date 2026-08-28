@@ -107,9 +107,16 @@ func TestTumblingAggregateAllStats(t *testing.T) {
 	_, _ = testClient.Queue(src).Create().Execute(context.Background())
 	_, _ = testClient.Queue(sink).Create().Execute(context.Background())
 
-	for _, v := range []int{10, 5, 30, 2, 3} {
-		_, _ = testClient.Queue(src).Partition("p").Push(map[string]interface{}{"v": v}).Execute(context.Background())
-	}
+	// One batched push = one segment = one timestamp, so the five messages
+	// cannot straddle a 3-second window boundary. The sequential loop this
+	// replaces could split them across two windows, and since the assertion
+	// below reads only the FIRST emit, a straddle closed a partial window and
+	// failed the run: that is the `tenanted` lane going red on its own while
+	// `single` passed, reported as a tenancy divergence it never was. Same
+	// hazard, same fix, as TestTumblingIdleFlushClosesQuietPartitions below.
+	_, _ = testClient.Queue(src).Partition("p").Push([]map[string]interface{}{
+		{"v": 10}, {"v": 5}, {"v": 30}, {"v": 2}, {"v": 3},
+	}).Execute(context.Background())
 
 	stream := streams.From(testClient.Queue(src).AsStreamSource()).
 		WindowTumbling(3, streams.WithIdleFlushMs(500)).

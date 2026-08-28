@@ -128,8 +128,15 @@ async def test_tumblingAggregateAllStats(client):
     await client.queue(src).create()
     await client.queue(sink).create()
 
-    for v in (10, 5, 30, 2, 3):
-        await client.queue(src).partition("p").push([{"data": {"v": v}}])
+    # One batched push = one segment = one timestamp, so the five values cannot
+    # straddle a 3-second window boundary. The bucket is absolute-aligned
+    # (floor(ts / 3000) * 3000), so sequential pushes milliseconds apart still
+    # split when a boundary falls between them, and the assertion below reads
+    # only the FIRST emit.
+    await client.queue(src).partition("p").push([
+        {"data": {"v": 10}}, {"data": {"v": 5}}, {"data": {"v": 30}},
+        {"data": {"v": 2}}, {"data": {"v": 3}},
+    ])
 
     handle = await (
         Stream.from_(client.queue(src))

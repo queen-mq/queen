@@ -60,7 +60,7 @@ export const HOME_SUMMARY =
   "conditions they were measured under.";
 
 /** The eyebrow above the headline. */
-const HOME_EYEBROW = "Queen MQ 1.1 · Apache 2.0";
+const HOME_EYEBROW = "Queen MQ · Apache 2.0";
 
 /**
  * The hero paragraph, with the page's `<strong>` spans as markdown emphasis

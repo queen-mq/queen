@@ -28,6 +28,7 @@ digest: >-
   `status: "buffered"` per item; pops, acks and `POST /api/v1/transaction` fail. The spool is
   node-local, drained only by its broker, uncapped in size and age: a long outage fills the disk
   and pushes report `failed`.
+# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
 ---
 
 Brokers hold no authoritative state, so a second broker is another copy of the same binary pointed
