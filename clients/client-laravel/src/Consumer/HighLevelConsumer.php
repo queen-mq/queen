@@ -34,7 +34,7 @@ class HighLevelConsumer
 
     private string $popPath;
     private string $baseParams;
-    private ?string $affinityKey;
+    private ?string $affinityKey = null;
     /** [requested, queue, group, namespace, task] — see ConflationGuard. */
     private array $conflationScope = [false, null, null, null, null];
 
@@ -241,6 +241,9 @@ class HighLevelConsumer
         $group = $this->options['group'] ?? null;
         if ($group !== null) {
             $context['group'] = $group;
+        }
+        if ($this->affinityKey !== null) {
+            $context['affinityKey'] = $this->affinityKey;
         }
 
         return $this->queen->ack($message, $success, $context);

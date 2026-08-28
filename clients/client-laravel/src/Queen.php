@@ -135,6 +135,10 @@ class Queen
      */
     public function ack(array|string $message, bool|string $status = true, array $context = []): array
     {
+        $affinityKey = is_string($context['affinityKey'] ?? null) && $context['affinityKey'] !== ''
+            ? $context['affinityKey']
+            : null;
+
         // Batch ack
         $isBatch = is_array($message) && (isset($message[0]) || empty($message));
 
@@ -159,7 +163,7 @@ class Queen
                 $result = $this->httpClient->post('/api/v1/ack/batch', [
                     'acknowledgments' => $acknowledgments,
                     'consumerGroup' => $context['group'] ?? null,
-                ]);
+                ], affinityKey: $affinityKey);
 
                 if (is_array($result) && isset($result['error'])) {
                     return ['success' => false, 'error' => $result['error']];
@@ -200,7 +204,7 @@ class Queen
         }
 
         try {
-            $result = $this->httpClient->post('/api/v1/ack', $body);
+            $result = $this->httpClient->post('/api/v1/ack', $body, affinityKey: $affinityKey);
 
             if (is_array($result) && isset($result['error'])) {
                 return ['success' => false, 'error' => $result['error']];

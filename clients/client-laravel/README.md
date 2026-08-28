@@ -36,6 +36,10 @@ QUEEN_QUEUE=default
 QUEEN_CONSUMER_GROUP=laravel
 QUEEN_RETRY_AFTER=90
 QUEEN_BLOCK_FOR=5
+# Optional throughput profile for short, idempotent jobs:
+# QUEEN_PREFETCH=16
+# QUEEN_ACK_BATCH=16
+# QUEEN_BULK_BATCH=100
 ```
 
 Run the ordinary Laravel worker:
@@ -53,6 +57,21 @@ orchestration remains outside the Queen broker.
 non-blocking but keeps the normal 30-second request budget; positive values set
 the broker deadline in seconds. The HTTP client adds five seconds of transport
 slack, so an idle broker response does not race the network timeout.
+
+The default `QUEEN_PREFETCH=1` and `QUEEN_ACK_BATCH=1` preserve Laravel's
+ordinary synchronous reserve/delete boundary. For short, idempotent jobs, an
+opt-in prefetch claims several jobs in one broker request and `ACK_BATCH`
+commits successful jobs together; setting both to the same value lets Queen use
+its whole-lease ACK fast path. Delivery remains at least once, but a process
+crash can redeliver up to the unflushed batch and can leave unprocessed
+prefetched jobs leased until `retry_after`. Size that lease for the worst-case
+time to process the complete batch. Keep both values at `1` for long-running
+jobs, strict per-job ACK confirmation, or comma-separated priority queues.
+Reentrant `pop()` while a prefetched job is still active is rejected.
+
+Laravel's `Queue::bulk()` uses bounded, multi-partition Queen requests instead
+of looping over singleton pushes. `QUEEN_BULK_BATCH` bounds each request and
+defaults to `100`; it does not change ordinary `dispatch()` calls.
 
 By default, jobs are spread deterministically across up to 64 partitions. This
 allows concurrent processing without creating a partition for every job. To
@@ -923,6 +942,9 @@ return [
     'partition_prefix' => env('QUEEN_PARTITION_PREFIX', 'laravel'),
     'retry_after' => env('QUEEN_RETRY_AFTER', 90),
     'block_for' => env('QUEEN_BLOCK_FOR', 0),
+    'prefetch' => env('QUEEN_PREFETCH', 1),
+    'ack_batch' => env('QUEEN_ACK_BATCH', 1),
+    'bulk_batch' => env('QUEEN_BULK_BATCH', 100),
     'after_commit' => env('QUEEN_AFTER_COMMIT', false),
     'sync_failed_jobs' => env('QUEEN_SYNC_FAILED_JOBS', true),
     'retry_429' => [

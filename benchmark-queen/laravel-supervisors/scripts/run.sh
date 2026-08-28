@@ -19,6 +19,12 @@ MAX_WORKERS=4
 RUNS=3
 SLEEP_MS=10
 CPU_ITERATIONS=0
+DISPATCH_MODE="${BENCH_DISPATCH_MODE:-single}"
+QUEEN_PREFETCH="${QUEEN_PREFETCH:-1}"
+QUEEN_ACK_BATCH="${QUEEN_ACK_BATCH:-1}"
+QUEEN_BULK_BATCH="${QUEEN_BULK_BATCH:-100}"
+QUEEN_PARTITIONS="${QUEEN_PARTITIONS:-64}"
+QUEEN_POP_FUSION="${QUEEN_POP_FUSION:-0}"
 WARMUP_JOBS=50
 SAMPLE_INTERVAL="0.50"
 WAIT_TIMEOUT=300
@@ -57,6 +63,12 @@ Options:
   --runs N                      Repetitions per engine/profile (default: 3)
   --sleep-ms N                  Sleep in every job (default: 10)
   --cpu-iterations N            SHA-256 rounds in every job (default: 0)
+  --dispatch-mode single|bulk   Producer API shape (default: single)
+  --queen-prefetch N            Jobs claimed by each Queen pop (default: 1)
+  --queen-ack-batch N           Deferred Queen ACK batch; <= prefetch (default: 1)
+  --queen-bulk-batch N          Jobs per bulk producer call/request (default: 100)
+  --queen-partitions N          Queen partitions scanned per pop (default: 64)
+  --queen-pop-fusion 0|1        Broker pop-transaction fusion (default: 0)
   --warmup-jobs N               Warm-up jobs before each sample (default: 50)
   --sample-interval SECONDS     cgroup/process sampling period (default: 0.50)
   --timeout SECONDS             Completion timeout per run (default: 300)
@@ -71,6 +83,9 @@ Options:
 
 The load generator is intentionally outside the measured cgroups. Every lane
 uses a fresh Compose project, backend and named result volume.
+Optimization defaults may also be set with BENCH_DISPATCH_MODE,
+QUEEN_PREFETCH, QUEEN_ACK_BATCH, QUEEN_BULK_BATCH, QUEEN_PARTITIONS and
+QUEEN_POP_FUSION. Explicit CLI options take precedence.
 EOF
 }
 
@@ -139,6 +154,12 @@ while [ "$#" -gt 0 ]; do
         --runs) RUNS="${2:?--runs requires a value}"; shift 2 ;;
         --sleep-ms) SLEEP_MS="${2:?--sleep-ms requires a value}"; shift 2 ;;
         --cpu-iterations) CPU_ITERATIONS="${2:?--cpu-iterations requires a value}"; shift 2 ;;
+        --dispatch-mode) DISPATCH_MODE="${2:?--dispatch-mode requires a value}"; shift 2 ;;
+        --queen-prefetch) QUEEN_PREFETCH="${2:?--queen-prefetch requires a value}"; shift 2 ;;
+        --queen-ack-batch) QUEEN_ACK_BATCH="${2:?--queen-ack-batch requires a value}"; shift 2 ;;
+        --queen-bulk-batch) QUEEN_BULK_BATCH="${2:?--queen-bulk-batch requires a value}"; shift 2 ;;
+        --queen-partitions) QUEEN_PARTITIONS="${2:?--queen-partitions requires a value}"; shift 2 ;;
+        --queen-pop-fusion) QUEEN_POP_FUSION="${2:?--queen-pop-fusion requires a value}"; shift 2 ;;
         --warmup-jobs) WARMUP_JOBS="${2:?--warmup-jobs requires a value}"; shift 2 ;;
         --sample-interval) SAMPLE_INTERVAL="${2:?--sample-interval requires a value}"; shift 2 ;;
         --timeout) WAIT_TIMEOUT="${2:?--timeout requires a value}"; shift 2 ;;
@@ -179,12 +200,23 @@ require_positive_int "--max-workers" "$MAX_WORKERS"
 require_positive_int "--runs" "$RUNS"
 require_uint "--sleep-ms" "$SLEEP_MS"
 require_uint "--cpu-iterations" "$CPU_ITERATIONS"
+require_positive_int "--queen-prefetch" "$QUEEN_PREFETCH"
+require_positive_int "--queen-ack-batch" "$QUEEN_ACK_BATCH"
+require_positive_int "--queen-bulk-batch" "$QUEEN_BULK_BATCH"
+require_positive_int "--queen-partitions" "$QUEEN_PARTITIONS"
+require_uint "--queen-pop-fusion" "$QUEEN_POP_FUSION"
 require_uint "--warmup-jobs" "$WARMUP_JOBS"
 require_positive_int "--timeout" "$WAIT_TIMEOUT"
 require_positive_int "--target-jobs" "$TARGET_JOBS_PER_PROCESS"
 require_decimal "--sample-interval" "$SAMPLE_INTERVAL"
 require_decimal "--target-clear" "$TARGET_CLEAR_SECONDS"
 [ "$MIN_WORKERS" -le "$MAX_WORKERS" ] || die "--min-workers must not exceed --max-workers"
+[ "$QUEEN_PREFETCH" -le 1000 ] || die "--queen-prefetch must not exceed 1000"
+[ "$QUEEN_ACK_BATCH" -le "$QUEEN_PREFETCH" ] || die "--queen-ack-batch must not exceed --queen-prefetch"
+[ "$QUEEN_BULK_BATCH" -le 1000 ] || die "--queen-bulk-batch must not exceed 1000"
+[ "$QUEEN_PARTITIONS" -le 64 ] || die "--queen-partitions must not exceed 64"
+[ "$QUEEN_POP_FUSION" -le 1 ] || die "--queen-pop-fusion must be 0 or 1"
+case "$DISPATCH_MODE" in single|bulk) ;; *) die "--dispatch-mode must be single or bulk" ;; esac
 case "$SCALING_STRATEGY" in size|time) ;; *) die "--strategy must be size or time" ;; esac
 if [ "$POST_DRAIN_SECONDS" != "auto" ]; then
     require_uint "--post-drain" "$POST_DRAIN_SECONDS"
@@ -376,12 +408,23 @@ export BENCHMARK_MAX_WORKERS="$MAX_WORKERS"
 export BENCHMARK_RUNS="$RUNS"
 export BENCHMARK_SLEEP_MS="$SLEEP_MS"
 export BENCHMARK_CPU_ITERATIONS="$CPU_ITERATIONS"
+export BENCHMARK_DISPATCH_MODE="$DISPATCH_MODE"
+export BENCHMARK_QUEEN_PREFETCH="$QUEEN_PREFETCH"
+export BENCHMARK_QUEEN_ACK_BATCH="$QUEEN_ACK_BATCH"
+export BENCHMARK_QUEEN_BULK_BATCH="$QUEEN_BULK_BATCH"
+export BENCHMARK_QUEEN_PARTITIONS="$QUEEN_PARTITIONS"
+export BENCHMARK_QUEEN_POP_FUSION="$QUEEN_POP_FUSION"
 export BENCHMARK_SAMPLE_INTERVAL="$SAMPLE_INTERVAL"
 export BENCHMARK_STRATEGY="$SCALING_STRATEGY"
 export BENCHMARK_BALANCE_COOLDOWN="$BALANCE_COOLDOWN"
 export BENCHMARK_BALANCE_MAX_SHIFT="$BALANCE_MAX_SHIFT"
 export BENCHMARK_TARGET_JOBS="$TARGET_JOBS_PER_PROCESS"
 export BENCHMARK_TARGET_CLEAR="$TARGET_CLEAR_SECONDS"
+export QUEEN_PREFETCH
+export QUEEN_ACK_BATCH
+export QUEEN_BULK_BATCH
+export QUEEN_PARTITIONS
+export QUEEN_POP_FUSION
 
 python3 - <<'PY'
 import datetime as dt
@@ -406,6 +449,12 @@ settings = {
     "runs": int(os.environ["BENCHMARK_RUNS"]),
     "sleep_ms": int(os.environ["BENCHMARK_SLEEP_MS"]),
     "cpu_iterations": int(os.environ["BENCHMARK_CPU_ITERATIONS"]),
+    "dispatch_mode": os.environ["BENCHMARK_DISPATCH_MODE"],
+    "queen_prefetch": int(os.environ["BENCHMARK_QUEEN_PREFETCH"]),
+    "queen_ack_batch": int(os.environ["BENCHMARK_QUEEN_ACK_BATCH"]),
+    "queen_bulk_batch": int(os.environ["BENCHMARK_QUEEN_BULK_BATCH"]),
+    "queen_partitions": int(os.environ["BENCHMARK_QUEEN_PARTITIONS"]),
+    "queen_pop_fusion": os.environ["BENCHMARK_QUEEN_POP_FUSION"] == "1",
     "sample_interval_seconds": float(os.environ["BENCHMARK_SAMPLE_INTERVAL"]),
     "autoscaling_strategy": os.environ["BENCHMARK_STRATEGY"],
     "balance_cooldown_seconds": int(os.environ["BENCHMARK_BALANCE_COOLDOWN"]),
@@ -478,6 +527,7 @@ run_lane() {
     export BENCH_STRATEGY="$SCALING_STRATEGY"
     export BENCH_TARGET_JOBS_PER_PROCESS="$TARGET_JOBS_PER_PROCESS"
     export BENCH_TARGET_CLEAR_SECONDS="$TARGET_CLEAR_SECONDS"
+    export BENCH_DISPATCH_MODE="$DISPATCH_MODE"
     if [ "$engine" = "horizon" ]; then
         export BENCH_CONNECTION="redis"
     else
@@ -565,7 +615,8 @@ run_lane() {
                 --run-id="$warmup_id" \
                 --jobs="$WARMUP_JOBS" \
                 --sleep-ms="$SLEEP_MS" \
-                --cpu-iterations="$CPU_ITERATIONS" >/dev/null
+                --cpu-iterations="$CPU_ITERATIONS" \
+                --dispatch-mode="$DISPATCH_MODE" >/dev/null
             producer php artisan bench:results --no-ansi "$warmup_id" \
                 --expected="$WARMUP_JOBS" --wait="$WAIT_TIMEOUT" --poll-ms=500 >/dev/null
             if [ "$profile" = "auto" ]; then
@@ -580,7 +631,8 @@ run_lane() {
         --run-id="$run_id" \
         --jobs="$JOBS" \
         --sleep-ms="$SLEEP_MS" \
-        --cpu-iterations="$CPU_ITERATIONS" >"${CURRENT_HOST_RUN}/dispatch-command.json"
+        --cpu-iterations="$CPU_ITERATIONS" \
+        --dispatch-mode="$DISPATCH_MODE" >"${CURRENT_HOST_RUN}/dispatch-command.json"
 
     set +e
     producer php artisan bench:results --no-ansi "$run_id" \

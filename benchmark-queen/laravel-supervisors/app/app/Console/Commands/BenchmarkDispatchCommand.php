@@ -5,6 +5,7 @@ namespace App\Console\Commands;
 use App\Jobs\BenchmarkJob;
 use App\Support\JsonlResultSink;
 use Illuminate\Console\Command;
+use Illuminate\Contracts\Queue\Factory as QueueFactory;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
 use JsonException;
@@ -18,11 +19,12 @@ final class BenchmarkDispatchCommand extends Command
         {--cpu-iterations=0 : SHA-256 rounds performed by every job}
         {--connection= : Queue connection; defaults to BENCH_CONNECTION}
         {--queue= : Queue name; defaults to BENCH_QUEUE}
+        {--dispatch-mode= : single or bulk; defaults to BENCH_DISPATCH_MODE}
         {--metadata= : Dispatch manifest path; defaults to <results>/<run-id>/dispatch.json}';
 
     protected $description = 'Dispatch one deterministic benchmark burst and print its JSON manifest';
 
-    public function handle(JsonlResultSink $sink): int
+    public function handle(JsonlResultSink $sink, QueueFactory $queues): int
     {
         $runId = $this->option('run-id');
         $runId = is_string($runId) && $runId !== '' ? $runId : (string) Str::uuid();
@@ -33,20 +35,45 @@ final class BenchmarkDispatchCommand extends Command
         $cpuIterations = $this->integerOption('cpu-iterations', 0, 10_000_000);
         $connection = $this->stringOption('connection', (string) config('benchmark.connection'));
         $queue = $this->stringOption('queue', (string) config('benchmark.queue'));
+        $dispatchMode = $this->stringOption('dispatch-mode', (string) config('benchmark.dispatch_mode'));
         $this->identifier($connection, 'connection');
         $this->identifier($queue, 'queue', forbidComma: true);
+        if (!in_array($dispatchMode, ['single', 'bulk'], true)) {
+            throw new InvalidArgumentException('--dispatch-mode must be single or bulk.');
+        }
 
         $sink->reserveRun($runId);
         $startedAt = hrtime(true);
-        for ($index = 0; $index < $jobs; ++$index) {
-            $jobId = sprintf('%09d', $index);
-            BenchmarkJob::dispatch(
-                runId: $runId,
-                jobId: $jobId,
-                enqueuedAtNs: hrtime(true),
-                sleepMs: $sleepMs,
-                cpuIterations: $cpuIterations,
-            )->onConnection($connection)->onQueue($queue);
+        if ($dispatchMode === 'single') {
+            for ($index = 0; $index < $jobs; ++$index) {
+                $jobId = sprintf('%09d', $index);
+                BenchmarkJob::dispatch(
+                    runId: $runId,
+                    jobId: $jobId,
+                    enqueuedAtNs: hrtime(true),
+                    sleepMs: $sleepMs,
+                    cpuIterations: $cpuIterations,
+                )->onConnection($connection)->onQueue($queue);
+            }
+        } else {
+            $batchSize = (int) config('benchmark.queen_bulk_batch');
+            $connectionQueue = $queues->connection($connection);
+            for ($offset = 0; $offset < $jobs; $offset += $batchSize) {
+                $batch = [];
+                $limit = min($jobs, $offset + $batchSize);
+                for ($index = $offset; $index < $limit; ++$index) {
+                    $job = new BenchmarkJob(
+                        runId: $runId,
+                        jobId: sprintf('%09d', $index),
+                        enqueuedAtNs: hrtime(true),
+                        sleepMs: $sleepMs,
+                        cpuIterations: $cpuIterations,
+                    );
+                    $job->onConnection($connection)->onQueue($queue);
+                    $batch[] = $job;
+                }
+                $connectionQueue->bulk($batch, '', $queue);
+            }
         }
         $completedAt = hrtime(true);
 
@@ -55,6 +82,10 @@ final class BenchmarkDispatchCommand extends Command
             'jobs' => $jobs,
             'connection' => $connection,
             'queue' => $queue,
+            'dispatch_mode' => $dispatchMode,
+            'dispatch_batch_size' => $dispatchMode === 'bulk'
+                ? (int) config('benchmark.queen_bulk_batch')
+                : 1,
             'sleep_ms' => $sleepMs,
             'cpu_iterations' => $cpuIterations,
             'dispatch_started_ns' => $startedAt,

@@ -66,6 +66,12 @@ if ($retryAfter <= $timeout) {
     throw new \InvalidArgumentException('BENCH_RETRY_AFTER must be longer than BENCH_TIMEOUT.');
 }
 
+$queenPrefetch = $integer('QUEEN_PREFETCH', 1, 1, 1_000);
+$queenAckBatch = $integer('QUEEN_ACK_BATCH', 1, 1, 1_000);
+if ($queenAckBatch > $queenPrefetch) {
+    throw new \InvalidArgumentException('QUEEN_ACK_BATCH must not exceed QUEEN_PREFETCH.');
+}
+
 return [
     'profile' => $profile,
     'connection' => $oneOf('BENCH_CONNECTION', 'redis', ['redis', 'queen']),
@@ -88,4 +94,10 @@ return [
     'retry_after' => $retryAfter,
     'worker_memory' => $integer('BENCH_WORKER_MEMORY', 128, 16, 32_768),
     'results_directory' => (string) env('BENCH_RESULTS_DIRECTORY', '/results'),
+    'dispatch_mode' => $oneOf('BENCH_DISPATCH_MODE', 'single', ['single', 'bulk']),
+    'queen_prefetch' => $queenPrefetch,
+    'queen_ack_batch' => $queenAckBatch,
+    'queen_bulk_batch' => $integer('QUEEN_BULK_BATCH', 100, 1, 1_000),
+    'queen_partitions' => $integer('QUEEN_PARTITIONS', 64, 1, 64),
+    'queen_pop_fusion' => $integer('QUEEN_POP_FUSION', 0, 0, 1) === 1,
 ];

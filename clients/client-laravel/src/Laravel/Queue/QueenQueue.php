@@ -15,6 +15,26 @@ use UnexpectedValueException;
 
 class QueenQueue extends BaseQueue implements QueueContract
 {
+    /** @var array<string, array{messages: list<array>, next: int}> */
+    private array $prefetched = [];
+
+    /** @var array<string, string> Delivery key to local pop-batch id. */
+    private array $deliveryBatches = [];
+
+    /** @var array<string, string> Queue name to the delivery currently handed to Laravel. */
+    private array $activeDeliveries = [];
+
+    /** @var array<string, string> Delivery key to its Laravel queue name. */
+    private array $deliveryQueues = [];
+
+    /** @var array<string, int> Number of jobs from a pop batch not handled yet. */
+    private array $batchOutstanding = [];
+
+    /** @var list<array{message: array, group: string, affinity_key: ?string}> */
+    private array $pendingAcknowledgements = [];
+
+    private int $nextBatchId = 0;
+
     public function __construct(
         private Queen $queen,
         private string $defaultQueue = 'default',
@@ -24,8 +44,29 @@ class QueenQueue extends BaseQueue implements QueueContract
         private int $retryAfter = 90,
         private int $blockFor = 0,
         bool $dispatchAfterCommit = false,
+        private int $prefetch = 1,
+        private int $ackBatch = 1,
+        private int $bulkBatch = 100,
     ) {
         $this->dispatchAfterCommit = $dispatchAfterCommit;
+    }
+
+    public function __destruct()
+    {
+        if ($this->pendingAcknowledgements === []) {
+            return;
+        }
+
+        try {
+            $this->flushAcknowledgements();
+        } catch (\Throwable $exception) {
+            // Destructors cannot safely surface an exception to Laravel's
+            // worker. The unacknowledged leases remain durable and will be
+            // redelivered; keep an operator-visible diagnostic for graceful
+            // shutdowns. SIGKILL has the same at-least-once outcome naturally.
+            error_log('Queen Laravel worker could not flush batched acknowledgements during shutdown: '
+                . $exception->getMessage());
+        }
     }
 
     public function size($queue = null): int
@@ -212,6 +253,84 @@ class QueenQueue extends BaseQueue implements QueueContract
         return $jobId;
     }
 
+    /**
+     * Push immediate Laravel jobs in bounded Queen batches.
+     *
+     * Jobs with a delay or after-commit contract retain Laravel's ordinary
+     * one-at-a-time path because their scheduling/transaction boundary is part
+     * of the job contract, not a transport optimization.
+     */
+    public function bulk($jobs, $data = '', $queue = null): void
+    {
+        $jobs = array_values((array) $jobs);
+        if ($jobs === []) {
+            return;
+        }
+
+        $requiresIndividualDispatch = false;
+        foreach ($jobs as $job) {
+            $requiresIndividualDispatch = $requiresIndividualDispatch
+                || isset($job->delay)
+                || $this->shouldDispatchAfterCommit($job);
+        }
+        if ($requiresIndividualDispatch) {
+            foreach ($jobs as $job) {
+                if (isset($job->delay)) {
+                    $this->later($job->delay, $job, $data, $queue);
+                } else {
+                    $this->push($job, $data, $queue);
+                }
+            }
+            return;
+        }
+
+        $queue = $this->getQueue($queue);
+        foreach (array_chunk($jobs, $this->bulkBatch) as $jobChunk) {
+            $chunk = [];
+            foreach ($jobChunk as $job) {
+                $payload = $this->createPayload($job, $queue, $data);
+                $decoded = $this->decodePayload($payload);
+                $partition = $this->partitionForPayload($decoded);
+                $decoded['_queen'] = array_replace(
+                    ['attempts' => 0],
+                    is_array($decoded['_queen'] ?? null) ? $decoded['_queen'] : [],
+                    ['partition' => $partition],
+                );
+                $jobId = (string) ($decoded['uuid'] ?? Uuid::v7());
+
+                $chunk[] = [
+                    'job' => $job,
+                    'payload' => $payload,
+                    'job_id' => $jobId,
+                    'item' => [
+                        'data' => $decoded,
+                        'partition' => $partition,
+                        'transactionId' => $jobId,
+                    ],
+                ];
+                $this->raiseJobQueueingEvent($queue, $job, $payload, null);
+            }
+
+            $items = array_column($chunk, 'item');
+            $result = $this->queen->queue($queue)
+                ->partition($items[0]['partition'])
+                ->push($items)
+                ->execute();
+
+            $this->assertBulkPushAccepted($result, count($chunk));
+
+            foreach ($chunk as $entry) {
+                $this->raiseJobQueuedEvent(
+                    $queue,
+                    $entry['job_id'],
+                    $entry['job'],
+                    $entry['payload'],
+                    null,
+                );
+            }
+        }
+    }
+
     public function later($delay, $job, $data = '', $queue = null): mixed
     {
         $queue = $this->getQueue($queue);
@@ -228,6 +347,17 @@ class QueenQueue extends BaseQueue implements QueueContract
     public function pop($queue = null): ?QueenJob
     {
         $queue = $this->getQueue($queue);
+        if ($this->prefetch > 1 && isset($this->activeDeliveries[$queue])) {
+            throw new RuntimeException(
+                "Queen Laravel prefetch cannot pop [{$queue}] again before the current job is deleted or released.",
+            );
+        }
+
+        $message = $this->takePrefetched($queue);
+        if ($message !== null) {
+            return $this->makeJob($message, $queue);
+        }
+
         // QueueBuilder gives the HTTP request a further 5 s of slack. For a
         // non-blocking Laravel worker retain the normal 30 s request budget
         // instead of producing a pathological timeout=1 query.
@@ -236,7 +366,7 @@ class QueenQueue extends BaseQueue implements QueueContract
             ->group($this->consumerGroup)
             ->conflation(false)
             ->subscriptionMode('all')
-            ->batch(1)
+            ->batch($this->prefetch)
             ->partitions($this->partitionCount)
             ->autoAck(false)
             ->leaseSeconds($this->retryAfter)
@@ -248,28 +378,113 @@ class QueenQueue extends BaseQueue implements QueueContract
             return null;
         }
 
+        $this->registerPopBatch($messages);
+        if (count($messages) > 1) {
+            $this->prefetched[$queue] = ['messages' => $messages, 'next' => 1];
+        }
+
+        return $this->makeJob($messages[0], $queue);
+    }
+
+    private function makeJob(array $message, string $queue): QueenJob
+    {
+        if ($this->prefetch > 1) {
+            $key = $this->deliveryKey($message);
+            $this->activeDeliveries[$queue] = $key;
+            $this->deliveryQueues[$key] = $queue;
+        }
+
         return new QueenJob(
             $this->container,
             $this,
-            $messages[0],
+            $message,
             $this->connectionName,
             $queue,
             $this->consumerGroup,
         );
     }
 
-    public function deleteReserved(array $message, string $group, bool $failed = false, ?\Throwable $exception = null): void
+    public function deleteReserved(
+        array $message,
+        string $group,
+        bool $failed = false,
+        ?\Throwable $exception = null,
+        ?string $queue = null,
+    ): void
     {
-        $result = $this->queen->ack(
-            $message,
-            $failed ? 'dlq' : 'completed',
-            array_filter([
+        $affinityKey = $queue !== null ? "{$queue}:Default:{$group}" : null;
+        if (!$failed && $this->ackBatch > 1) {
+            $this->pendingAcknowledgements[] = [
+                'message' => $message,
                 'group' => $group,
-                'error' => $exception?->getMessage(),
-            ], fn ($value) => $value !== null),
-        );
+                'affinity_key' => $affinityKey,
+            ];
+            $batchComplete = $this->markDeliveryHandled($message);
 
-        $this->assertSuccessful($result, $failed ? 'dead-letter job' : 'acknowledge job');
+            if (count($this->pendingAcknowledgements) >= $this->ackBatch || $batchComplete) {
+                $this->flushAcknowledgements();
+            }
+            return;
+        }
+
+        try {
+            // A failed job must reach the DLQ synchronously. Flush earlier
+            // success acknowledgements first so a later batch failure cannot
+            // obscure it. A DLQ transition invalidates same-partition tails.
+            if ($failed) {
+                $this->flushAcknowledgements();
+                $this->discardPrefetchedSiblings($message);
+            }
+
+            $result = $this->queen->ack(
+                $message,
+                $failed ? 'dlq' : 'completed',
+                array_filter([
+                    'group' => $group,
+                    'error' => $exception?->getMessage(),
+                    'affinityKey' => $affinityKey,
+                ], fn ($value) => $value !== null),
+            );
+
+            $this->assertSuccessful($result, $failed ? 'dead-letter job' : 'acknowledge job');
+        } catch (\Throwable $acknowledgementFailure) {
+            $this->discardPrefetchedSiblings($message);
+            $this->markDeliveryHandled($message);
+            throw $acknowledgementFailure;
+        }
+        $this->markDeliveryHandled($message);
+    }
+
+    /** Flush successful ACKs deferred by ack_batch. */
+    public function flushAcknowledgements(): void
+    {
+        while ($this->pendingAcknowledgements !== []) {
+            $group = $this->pendingAcknowledgements[0]['group'];
+            $affinityKey = $this->pendingAcknowledgements[0]['affinity_key'];
+            $count = 0;
+            $messages = [];
+            foreach ($this->pendingAcknowledgements as $entry) {
+                if ($entry['group'] !== $group || $entry['affinity_key'] !== $affinityKey) {
+                    break;
+                }
+                $messages[] = $entry['message'];
+                $count++;
+            }
+
+            $result = $this->queen->ack($messages, 'completed', array_filter([
+                'group' => $group,
+                'affinityKey' => $affinityKey,
+            ], fn ($value) => $value !== null));
+            try {
+                $this->assertBatchAcknowledged($result, $count);
+            } catch (\Throwable $acknowledgementFailure) {
+                foreach ($messages as $message) {
+                    $this->discardPrefetchedSiblings($message);
+                }
+                throw $acknowledgementFailure;
+            }
+            array_splice($this->pendingAcknowledgements, 0, $count);
+        }
     }
 
     public function releaseReserved(
@@ -280,32 +495,46 @@ class QueenQueue extends BaseQueue implements QueueContract
         int $delay,
         int $attempts,
     ): void {
-        $decoded = $this->decodePayload($payload);
-        $partition = (string) ($message['partition'] ?? $this->partitionForPayload($decoded));
-        $decoded['_queen'] = array_replace(
-            is_array($decoded['_queen'] ?? null) ? $decoded['_queen'] : [],
-            ['partition' => $partition, 'attempts' => $attempts],
-        );
+        try {
+            $this->flushAcknowledgements();
 
-        $releaseId = Uuid::v7();
-        $transaction = $this->queen->transaction();
-        $transaction->ack($message, 'completed', ['consumerGroup' => $group]);
-
-        if ($delay > 0) {
-            $timerKey = 'laravel:release:' . ($decoded['uuid'] ?? $message['id'] ?? $releaseId) . ':' . $releaseId;
-            $transaction->timers($queue)->schedule(
-                $timerKey,
-                $delay * 1000,
-                $decoded,
-                ['txn' => $releaseId, 'partition' => $partition],
+            $decoded = $this->decodePayload($payload);
+            $partition = (string) ($message['partition'] ?? $this->partitionForPayload($decoded));
+            $decoded['_queen'] = array_replace(
+                is_array($decoded['_queen'] ?? null) ? $decoded['_queen'] : [],
+                ['partition' => $partition, 'attempts' => $attempts],
             );
-        } else {
-            $transaction->queue($queue)
-                ->partition($partition)
-                ->push([['data' => $decoded, 'transactionId' => $releaseId]]);
+
+            $releaseId = Uuid::v7();
+            $transaction = $this->queen->transaction();
+            $transaction->ack($message, 'completed', ['consumerGroup' => $group]);
+
+            if ($delay > 0) {
+                $timerKey = 'laravel:release:' . ($decoded['uuid'] ?? $message['id'] ?? $releaseId) . ':' . $releaseId;
+                $transaction->timers($queue)->schedule(
+                    $timerKey,
+                    $delay * 1000,
+                    $decoded,
+                    ['txn' => $releaseId, 'partition' => $partition],
+                );
+            } else {
+                $transaction->queue($queue)
+                    ->partition($partition)
+                    ->push([['data' => $decoded, 'transactionId' => $releaseId]]);
+            }
+
+            $transaction->commit();
+        } catch (\Throwable $releaseFailure) {
+            // The transaction outcome is ambiguous. Never execute a locally
+            // buffered sibling whose partition lease may already have moved.
+            $this->discardPrefetchedSiblings($message);
+            $this->markDeliveryHandled($message);
+            throw $releaseFailure;
         }
 
-        $transaction->commit();
+        // A successful completed ACK advances only through this message and
+        // keeps the remaining same-partition lease valid.
+        $this->markDeliveryHandled($message);
     }
 
     public function getQueen(): Queen
@@ -526,6 +755,146 @@ class QueenQueue extends BaseQueue implements QueueContract
                     : 'unexpected status ' . (is_scalar($status) ? (string) $status : get_debug_type($status))
             ));
         }
+    }
+
+    private function assertBulkPushAccepted(mixed $result, int $expected): void
+    {
+        if (!is_array($result) || count($result) !== $expected) {
+            throw new RuntimeException('Queen returned a malformed response for the Laravel bulk push.');
+        }
+
+        foreach ($result as $item) {
+            $status = is_array($item) ? ($item['status'] ?? null) : null;
+            if (!is_string($status) || !in_array($status, ['queued', 'duplicate', 'buffered'], true)) {
+                throw new RuntimeException('Queen did not accept a Laravel bulk job: ' . (
+                    is_array($item) && is_string($item['error'] ?? null)
+                        ? $item['error']
+                        : 'unexpected status ' . (is_scalar($status) ? (string) $status : get_debug_type($status))
+                ));
+            }
+        }
+    }
+
+    private function assertBatchAcknowledged(array $result, int $expected): void
+    {
+        if (($result['success'] ?? null) === false) {
+            throw new RuntimeException('Unable to acknowledge jobs: ' . ($result['error'] ?? 'Queen rejected the operation'));
+        }
+
+        $items = [];
+        foreach ($result as $key => $item) {
+            if (is_int($key)) {
+                $items[] = $item;
+            }
+        }
+        if (count($items) !== $expected) {
+            throw new RuntimeException('Unable to acknowledge jobs: Queen returned a malformed batch acknowledgement');
+        }
+        foreach ($items as $item) {
+            if (!is_array($item) || !($item['success'] ?? false)) {
+                throw new RuntimeException('Unable to acknowledge jobs: ' . (
+                    is_array($item) ? ($item['error'] ?? 'Queen rejected the operation') : 'malformed acknowledgement'
+                ));
+            }
+        }
+    }
+
+    private function takePrefetched(string $queue): ?array
+    {
+        $state = $this->prefetched[$queue] ?? null;
+        if ($state === null) {
+            return null;
+        }
+
+        $message = $state['messages'][$state['next']] ?? null;
+        $state['next']++;
+        if ($state['next'] >= count($state['messages'])) {
+            unset($this->prefetched[$queue]);
+        } else {
+            $this->prefetched[$queue] = $state;
+        }
+
+        return is_array($message) ? $message : null;
+    }
+
+    /** @param list<array> $messages */
+    private function registerPopBatch(array $messages): void
+    {
+        $batchId = 'batch-' . (++$this->nextBatchId);
+        $this->batchOutstanding[$batchId] = count($messages);
+        foreach ($messages as $message) {
+            $this->deliveryBatches[$this->deliveryKey($message)] = $batchId;
+        }
+    }
+
+    /** Return true when every delivery from the original pop has been handled. */
+    private function markDeliveryHandled(array $message): bool
+    {
+        $key = $this->deliveryKey($message);
+        $queue = $this->deliveryQueues[$key] ?? null;
+        if ($queue !== null && ($this->activeDeliveries[$queue] ?? null) === $key) {
+            unset($this->activeDeliveries[$queue]);
+        }
+        unset($this->deliveryQueues[$key]);
+
+        $batchId = $this->deliveryBatches[$key] ?? null;
+        if ($batchId === null) {
+            return true;
+        }
+
+        unset($this->deliveryBatches[$key]);
+        $remaining = max(0, ($this->batchOutstanding[$batchId] ?? 1) - 1);
+        if ($remaining === 0) {
+            unset($this->batchOutstanding[$batchId]);
+            return true;
+        }
+
+        $this->batchOutstanding[$batchId] = $remaining;
+        return false;
+    }
+
+    /**
+     * Drop only unhandled local messages whose partition lease may have been
+     * closed or made ambiguous by a nack, release or failed ACK. Other
+     * partitions from the same multi-partition pop remain safe to process.
+     */
+    private function discardPrefetchedSiblings(array $message): void
+    {
+        $partitionId = (string) ($message['partitionId'] ?? $message['partition_id'] ?? '');
+        $leaseId = (string) ($message['leaseId'] ?? $message['lease_id'] ?? '');
+        if ($partitionId === '' || $leaseId === '') {
+            return;
+        }
+
+        foreach ($this->prefetched as $queue => $state) {
+            $kept = [];
+            $count = count($state['messages']);
+            for ($index = $state['next']; $index < $count; ++$index) {
+                $candidate = $state['messages'][$index];
+                $candidatePartitionId = (string) ($candidate['partitionId'] ?? $candidate['partition_id'] ?? '');
+                $candidateLeaseId = (string) ($candidate['leaseId'] ?? $candidate['lease_id'] ?? '');
+                if ($candidatePartitionId === $partitionId && $candidateLeaseId === $leaseId) {
+                    $this->markDeliveryHandled($candidate);
+                    continue;
+                }
+                $kept[] = $candidate;
+            }
+
+            if ($kept === []) {
+                unset($this->prefetched[$queue]);
+            } else {
+                $this->prefetched[$queue] = ['messages' => $kept, 'next' => 0];
+            }
+        }
+    }
+
+    private function deliveryKey(array $message): string
+    {
+        return implode("\0", [
+            (string) ($message['partitionId'] ?? $message['partition_id'] ?? ''),
+            (string) ($message['transactionId'] ?? $message['transaction_id'] ?? $message['id'] ?? ''),
+            (string) ($message['leaseId'] ?? $message['lease_id'] ?? ''),
+        ]);
     }
 
     private function deleteFailedSource(array $source): void

@@ -114,6 +114,11 @@ and everything after it in that batch comes back. A rejected ack still arrives a
   `php artisan queue:work queen --timeout=60`; Laravel jobs, delayed dispatch,
   backoff and failed-job events then use Queen as their backend. Keep
   `QUEEN_RETRY_AFTER` longer than the worker timeout.
+- `QUEEN_PREFETCH` and `QUEEN_ACK_BATCH` default to `1`. Matching values greater
+  than one amortize pop and ACK round trips for short, idempotent jobs, while
+  widening the at-least-once crash/redelivery window; the lease must cover a
+  whole prefetched batch. `Queue::bulk()` also uses bounded multi-partition
+  pushes controlled by `QUEEN_BULK_BATCH` (default `100`).
 - Laravel monitoring separates total `pending`, live-lease `processing` and
   claimable `ready`: `size()` includes total pending plus Laravel timers,
   `pendingSize()` reports ready, and `reservedSize()` reports processing. The

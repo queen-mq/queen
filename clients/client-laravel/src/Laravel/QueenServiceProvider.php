@@ -93,6 +93,9 @@ class QueenServiceProvider extends ServiceProvider
             'partition_prefix' => $queen['partition_prefix'] ?? 'laravel',
             'retry_after' => $queen['retry_after'] ?? 90,
             'block_for' => $queen['block_for'] ?? 0,
+            'prefetch' => $queen['prefetch'] ?? 1,
+            'ack_batch' => $queen['ack_batch'] ?? 1,
+            'bulk_batch' => $queen['bulk_batch'] ?? 100,
             'after_commit' => $queen['after_commit'] ?? false,
         ];
         $existing = $this->app['config']->get('queue.connections.queen', []);

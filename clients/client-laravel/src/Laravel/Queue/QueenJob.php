@@ -11,6 +11,7 @@ class QueenJob extends Job implements JobContract
 {
     private ?\Throwable $failureException = null;
     private ?string $manualRetryId = null;
+    private ?string $rawBody = null;
 
     public function __construct(
         Container $container,
@@ -50,6 +51,7 @@ class QueenJob extends Job implements JobContract
             $this->consumerGroup,
             $this->hasFailed(),
             $this->failureException,
+            $this->queue,
         );
     }
 
@@ -81,31 +83,42 @@ class QueenJob extends Job implements JobContract
 
     public function getRawBody(): string
     {
-        $data = $this->message['data'] ?? $this->message['payload'] ?? [];
-
-        if ($this->manualRetryId !== null) {
-            $data = is_string($data)
-                ? json_decode($data, true, 512, JSON_THROW_ON_ERROR)
-                : $data;
-            if (is_array($data)) {
-                $data['_queen'] = array_replace(
-                    is_array($data['_queen'] ?? null) ? $data['_queen'] : [],
-                    [
-                        'manual_retry' => $this->manualRetryId,
-                        'failed_source' => [
-                            'partition_id' => $this->message['partitionId'] ?? $this->message['partition_id'] ?? null,
-                            'transaction_id' => $this->message['transactionId'] ?? $this->message['transaction_id'] ?? null,
-                        ],
-                    ],
-                );
-            }
+        $rawBody = $this->baseRawBody();
+        if ($this->manualRetryId === null) {
+            return $rawBody;
         }
 
-        return is_string($data) ? $data : json_encode($data, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+        $data = json_decode($rawBody, true, 512, JSON_THROW_ON_ERROR);
+        if (is_array($data)) {
+            $data['_queen'] = array_replace(
+                is_array($data['_queen'] ?? null) ? $data['_queen'] : [],
+                [
+                    'manual_retry' => $this->manualRetryId,
+                    'failed_source' => [
+                        'partition_id' => $this->message['partitionId'] ?? $this->message['partition_id'] ?? null,
+                        'transaction_id' => $this->message['transactionId'] ?? $this->message['transaction_id'] ?? null,
+                    ],
+                ],
+            );
+        }
+
+        return json_encode($data, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
     }
 
     public function getQueenMessage(): array
     {
         return $this->message;
+    }
+
+    private function baseRawBody(): string
+    {
+        if ($this->rawBody !== null) {
+            return $this->rawBody;
+        }
+
+        $data = $this->message['data'] ?? $this->message['payload'] ?? [];
+        return $this->rawBody = is_string($data)
+            ? $data
+            : json_encode($data, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
     }
 }

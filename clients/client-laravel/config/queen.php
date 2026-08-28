@@ -27,6 +27,15 @@ return [
     // Seconds to long-poll. Keep 0 when workers consume priority queues in a
     // comma-separated list, otherwise the first empty queue delays the rest.
     'block_for' => env('QUEEN_BLOCK_FOR', 0),
+    // Opt-in throughput controls. Prefetch leases multiple jobs in one broker
+    // request; ack_batch defers successful ACK confirmation until the threshold
+    // or the fetched lease is drained. Values greater than one preserve
+    // at-least-once delivery but widen the duplicate/recovery window, so size
+    // retry_after for the maximum time needed to process a prefetched batch.
+    'prefetch' => env('QUEEN_PREFETCH', 1),
+    'ack_batch' => env('QUEEN_ACK_BATCH', 1),
+    // Laravel Queue::bulk() is emitted as bounded multi-partition HTTP pushes.
+    'bulk_batch' => env('QUEEN_BULK_BATCH', 100),
     'after_commit' => env('QUEEN_AFTER_COMMIT', false),
     // Keep Laravel failed_jobs as the command index while retaining Queen DLQ
     // snapshots. Retry/forget/flush/prune remove the matching DLQ row.

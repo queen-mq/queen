@@ -53,6 +53,12 @@ class QueenConnectorValidationTest extends TestCase
             [['partitions' => 0], 'Queen Laravel partitions'],
             [['partitions' => 65], 'Queen Laravel partitions'],
             [['partitions' => 'many'], 'Queen Laravel partitions'],
+            [['prefetch' => 0], 'Queen Laravel prefetch'],
+            [['prefetch' => 1001], 'Queen Laravel prefetch'],
+            [['ack_batch' => 0], 'Queen Laravel ack_batch'],
+            [['prefetch' => 4, 'ack_batch' => 5], 'Queen Laravel ack_batch'],
+            [['bulk_batch' => 0], 'Queen Laravel bulk_batch'],
+            [['bulk_batch' => 1001], 'Queen Laravel bulk_batch'],
             [['after_commit' => 'false'], 'Queen Laravel after_commit'],
             [['timeout' => true], 'timeoutMillis'],
             [['enable_failover' => 'false'], 'enableFailover'],
@@ -103,6 +109,9 @@ class QueenConnectorValidationTest extends TestCase
             'partitions' => '064',
             'retry_after' => '090',
             'block_for' => '0',
+            'prefetch' => '008',
+            'ack_batch' => '008',
+            'bulk_batch' => '100',
         ]));
 
         $this->assertNull($queue->pop());
@@ -112,6 +121,7 @@ class QueenConnectorValidationTest extends TestCase
         $this->assertSame('/api/v1/pop/queue/orders%2Fv2', $request->getUri()->getPath());
         $this->assertSame('workers/v2', $query['consumerGroup']);
         $this->assertSame('64', $query['partitions']);
+        $this->assertSame('8', $query['batch']);
         $this->assertSame('90', $query['leaseSeconds']);
         $this->assertSame('false', $query['wait']);
     }

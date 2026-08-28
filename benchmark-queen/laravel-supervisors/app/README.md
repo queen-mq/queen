@@ -26,6 +26,13 @@ php artisan bench:dispatch --run-id=example --jobs=1000 \
   --sleep-ms=10 --cpu-iterations=0
 ```
 
+The default `--dispatch-mode=single` preserves the historical producer path.
+`--dispatch-mode=bulk` calls Laravel's queue `bulk()` API in bounded chunks;
+the chunk size is `QUEEN_BULK_BATCH` for every lane so the application-level
+arrival shape is held constant. The Queen connection additionally exposes
+`QUEEN_PREFETCH`, `QUEEN_ACK_BATCH`, `QUEEN_BULK_BATCH` and
+`QUEEN_PARTITIONS`. `QUEEN_ACK_BATCH` may not exceed `QUEEN_PREFETCH`.
+
 The command atomically publishes
 `$BENCH_RESULTS_DIRECTORY/<run-id>/dispatch.json`. Each worker appends to its
 own locked stream under `<run-id>/events/worker-<pid>.jsonl`. Every event has

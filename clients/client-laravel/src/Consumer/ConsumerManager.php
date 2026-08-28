@@ -240,7 +240,7 @@ class ConsumerManager
                             break;
                         }
                         $this->renewLeaseIfNeeded($messages, $leaseRenewalTime, $renewLeaseIntervalMillis);
-                        $this->processMessage($message, $handler, $autoAck, $group);
+                        $this->processMessage($message, $handler, $autoAck, $group, $affinityKey);
                         $workerProcessed[$w]++;
                         if ($perWorkerLimit !== null && $workerProcessed[$w] >= $perWorkerLimit) {
                             break;
@@ -248,7 +248,7 @@ class ConsumerManager
                     }
                 } else {
                     $this->renewLeaseIfNeeded($messages, $leaseRenewalTime, $renewLeaseIntervalMillis);
-                    $this->processBatch($messages, $handler, $autoAck, $group);
+                    $this->processBatch($messages, $handler, $autoAck, $group, $affinityKey);
                     $workerProcessed[$w] += count($messages);
                 }
             }
@@ -357,7 +357,7 @@ class ConsumerManager
                         }
 
                         $this->renewLeaseIfNeeded($messages, $leaseRenewalTime, $renewLeaseIntervalMillis);
-                        $this->processMessage($message, $handler, $autoAck, $group);
+                        $this->processMessage($message, $handler, $autoAck, $group, $affinityKey);
                         $processedCount++;
 
                         if ($limit !== null && $processedCount >= $limit) {
@@ -366,7 +366,7 @@ class ConsumerManager
                     }
                 } else {
                     $this->renewLeaseIfNeeded($messages, $leaseRenewalTime, $renewLeaseIntervalMillis);
-                    $this->processBatch($messages, $handler, $autoAck, $group);
+                    $this->processBatch($messages, $handler, $autoAck, $group, $affinityKey);
                     $processedCount += count($messages);
                 }
             } catch (\Throwable $error) {
@@ -407,18 +407,30 @@ class ConsumerManager
         }
     }
 
-    private function processMessage(array $message, \Closure $handler, bool $autoAck, ?string $group): void
+    private function processMessage(
+        array $message,
+        \Closure $handler,
+        bool $autoAck,
+        ?string $group,
+        ?string $affinityKey,
+    ): void
     {
         try {
             $handler($message);
 
             if ($autoAck) {
                 $context = $group !== null ? ['group' => $group] : [];
+                if ($affinityKey !== null) {
+                    $context['affinityKey'] = $affinityKey;
+                }
                 $this->queen->ack($message, true, $context);
             }
         } catch (\Throwable $error) {
             if ($autoAck) {
                 $context = $group !== null ? ['group' => $group] : [];
+                if ($affinityKey !== null) {
+                    $context['affinityKey'] = $affinityKey;
+                }
                 $this->queen->ack($message, false, $context);
                 return;
             }
@@ -426,18 +438,30 @@ class ConsumerManager
         }
     }
 
-    private function processBatch(array $messages, \Closure $handler, bool $autoAck, ?string $group): void
+    private function processBatch(
+        array $messages,
+        \Closure $handler,
+        bool $autoAck,
+        ?string $group,
+        ?string $affinityKey,
+    ): void
     {
         try {
             $handler($messages);
 
             if ($autoAck) {
                 $context = $group !== null ? ['group' => $group] : [];
+                if ($affinityKey !== null) {
+                    $context['affinityKey'] = $affinityKey;
+                }
                 $this->queen->ack($messages, true, $context);
             }
         } catch (\Throwable $error) {
             if ($autoAck) {
                 $context = $group !== null ? ['group' => $group] : [];
+                if ($affinityKey !== null) {
+                    $context['affinityKey'] = $affinityKey;
+                }
                 $this->queen->ack($messages, false, $context);
                 return;
             }

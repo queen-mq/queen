@@ -55,8 +55,6 @@ class PushBuilder
     {
         // Client-side buffering
         if ($this->bufferOptions !== null) {
-            $queueAddress = "{$this->queueName}/{$this->partition}";
-
             // addMessage applies backpressure now: it can raise because the
             // buffer is at its maxSize bound (the message was refused), or
             // because the inline flush it triggered could not land inside
@@ -67,6 +65,7 @@ class PushBuilder
             $accepted = [];
             try {
                 foreach ($this->formattedItems as $item) {
+                    $queueAddress = "{$item['queue']}/{$item['partition']}";
                     $this->bufferManager->addMessage($queueAddress, $item, $this->bufferOptions);
                     $accepted[] = $item;
                 }

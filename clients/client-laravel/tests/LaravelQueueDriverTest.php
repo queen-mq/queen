@@ -152,6 +152,77 @@ class LaravelQueueDriverTest extends TestCase
         $this->assertSame('job-123', $queue->pushRaw(json_encode($this->payload('job-123')), 'emails'));
     }
 
+    public function testBulkPushUsesOneMultiPartitionRequest(): void
+    {
+        $handler = new PlanHandler([['status' => 201, 'json' => [
+            ['status' => 'queued'],
+            ['status' => 'queued'],
+            ['status' => 'duplicate'],
+        ]]]);
+        [$queue] = $this->queueFor($handler, ['bulk_batch' => 100]);
+
+        $queue->bulk([
+            new PartitionedTestJob('customer-1'),
+            new PartitionedTestJob('customer-2'),
+            new PartitionedTestJob('customer-3'),
+        ], queue: 'orders');
+
+        $this->assertCount(1, $handler->requests);
+        $request = $handler->requests[0];
+        $body = json_decode((string) $request->getBody(), true);
+        $this->assertSame('/api/v1/push', $request->getUri()->getPath());
+        $this->assertSame(['customer-1', 'customer-2', 'customer-3'], array_column($body['items'], 'partition'));
+        $this->assertSame(['orders', 'orders', 'orders'], array_column($body['items'], 'queue'));
+        $this->assertCount(3, array_unique(array_column($body['items'], 'transactionId')));
+    }
+
+    public function testBulkPushUsesBoundedChunks(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 201, 'json' => [['status' => 'queued'], ['status' => 'queued']]],
+            ['status' => 201, 'json' => [['status' => 'queued']]],
+        ]);
+        [$queue] = $this->queueFor($handler, ['bulk_batch' => 2]);
+
+        $queue->bulk([
+            new PartitionedTestJob('customer-1'),
+            new PartitionedTestJob('customer-2'),
+            new PartitionedTestJob('customer-3'),
+        ], queue: 'orders');
+
+        $this->assertCount(2, $handler->requests);
+        $this->assertCount(2, json_decode((string) $handler->requests[0]->getBody(), true)['items']);
+        $this->assertCount(1, json_decode((string) $handler->requests[1]->getBody(), true)['items']);
+    }
+
+    public function testBulkFallbackPreservesDelayedJobs(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 201, 'json' => [['status' => 'queued']]],
+            ['status' => 200, 'json' => ['results' => [[
+                'ok' => true,
+                'status' => 'scheduled',
+                'queue' => 'orders',
+                'timerKey' => 'laravel:delay:delayed',
+                'txn' => 'delayed',
+            ]]]],
+        ]);
+        [$queue] = $this->queueFor($handler);
+
+        $queue->bulk([
+            new PartitionedTestJob('customer-1'),
+            new DelayedPartitionedTestJob('customer-2', 10),
+        ], queue: 'orders');
+
+        $this->assertSame([
+            '/api/v1/push',
+            '/api/v1/timers',
+        ], array_map(fn ($request) => $request->getUri()->getPath(), $handler->requests));
+        $timer = json_decode((string) $handler->requests[1]->getBody(), true);
+        $this->assertSame(10_000, $timer['operations'][0]['delayMs']);
+        $this->assertSame('customer-2', $timer['operations'][0]['partition']);
+    }
+
     public function testMalformedPushResponseIsRejected(): void
     {
         $handler = new PlanHandler([['status' => 200, 'json' => []]]);
@@ -290,6 +361,221 @@ class LaravelQueueDriverTest extends TestCase
         $this->assertSame('false', $query['wait']);
     }
 
+    public function testPrefetchAndAckBatchUseOnePopAndOneFullLeaseAcknowledgement(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popBatchResponse([
+                $this->payload('job-1'),
+                $this->payload('job-2'),
+                $this->payload('job-3'),
+            ])],
+            ['status' => 200, 'json' => [
+                ['success' => true, 'leaseReleased' => true],
+                ['success' => true, 'leaseReleased' => true],
+                ['success' => true, 'leaseReleased' => true],
+            ]],
+        ]);
+        [$queue] = $this->queueFor($handler, ['prefetch' => 3, 'ack_batch' => 3]);
+
+        $first = $queue->pop('emails');
+        $first->delete();
+        $this->assertCount(1, $handler->requests, 'the first successful ACK remains bounded in memory');
+
+        $second = $queue->pop('emails');
+        $second->delete();
+        $this->assertCount(1, $handler->requests, 'prefetched work avoids both an HTTP pop and a partial ACK');
+
+        $third = $queue->pop('emails');
+        $third->delete();
+
+        $this->assertSame(['job-1', 'job-2', 'job-3'], [
+            $first->getJobId(),
+            $second->getJobId(),
+            $third->getJobId(),
+        ]);
+        $this->assertCount(2, $handler->requests);
+        parse_str($handler->requests[0]->getUri()->getQuery(), $query);
+        $this->assertSame('3', $query['batch']);
+        $ack = json_decode((string) $handler->requests[1]->getBody(), true);
+        $this->assertSame('/api/v1/ack/batch', $handler->requests[1]->getUri()->getPath());
+        $this->assertSame(['transaction-1', 'transaction-2', 'transaction-3'],
+            array_column($ack['acknowledgments'], 'transactionId'));
+    }
+
+    public function testPrefetchRejectsReentrantPopUntilCurrentDeliveryIsHandled(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popBatchResponse([
+                $this->payload('job-1'),
+                $this->payload('job-2'),
+            ])],
+            ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => false]]],
+            ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => true]]],
+        ]);
+        [$queue] = $this->queueFor($handler, ['prefetch' => 2, 'ack_batch' => 1]);
+
+        $first = $queue->pop('emails');
+        try {
+            $queue->pop('emails');
+            $this->fail('A reentrant prefetched pop was accepted.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('before the current job is deleted or released', $exception->getMessage());
+        }
+        $this->assertCount(1, $handler->requests);
+
+        $first->delete();
+        $second = $queue->pop('emails');
+        $this->assertSame('job-2', $second->getJobId());
+        $second->delete();
+        $this->assertCount(3, $handler->requests);
+    }
+
+    public function testFailureDiscardsOnlyStalePrefetchedSiblingsFromItsPartition(): void
+    {
+        $response = $this->popBatchResponse([
+            $this->payload('job-a1'),
+            $this->payload('job-a2'),
+            $this->payload('job-b1'),
+        ]);
+        $response['messages'][2]['partitionId'] = '0298f2c1-4d3a-7c10-9f2b-6a1e5d0c7b83';
+        $response['messages'][2]['partition'] = 'job-0002';
+
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $response],
+            ['status' => 200, 'json' => [['success' => true, 'dlq' => true]]],
+            ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => true]]],
+        ]);
+        [$queue] = $this->queueFor($handler, ['prefetch' => 3, 'ack_batch' => 1]);
+
+        $failed = $queue->pop('emails');
+        $failed->markAsFailed();
+        $failed->delete();
+
+        $survivor = $queue->pop('emails');
+        $this->assertSame('job-b1', $survivor->getJobId(), 'same-partition stale tail was not returned');
+        $survivor->delete();
+        $this->assertCount(3, $handler->requests, 'the safe sibling remained local; no second pop was needed');
+    }
+
+    public function testShortPrefetchResponseFlushesAtLeaseBoundaryBeforeThreshold(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popBatchResponse([
+                $this->payload('job-1'),
+                $this->payload('job-2'),
+            ])],
+            ['status' => 200, 'json' => [
+                ['success' => true, 'leaseReleased' => true],
+                ['success' => true, 'leaseReleased' => true],
+            ]],
+        ]);
+        [$queue] = $this->queueFor($handler, ['prefetch' => 8, 'ack_batch' => 8]);
+
+        $queue->pop('emails')->delete();
+        $this->assertCount(1, $handler->requests);
+        $queue->pop('emails')->delete();
+
+        $this->assertCount(2, $handler->requests);
+        $this->assertSame('/api/v1/ack/batch', $handler->requests[1]->getUri()->getPath());
+    }
+
+    public function testReleaseFlushesEarlierDeferredSuccessBeforeItsTransaction(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popBatchResponse([
+                $this->payload('job-1'),
+                $this->payload('job-2'),
+            ])],
+            ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => true]]],
+            ['status' => 200, 'json' => ['success' => true, 'transactionId' => 'bundle-1']],
+        ]);
+        [$queue] = $this->queueFor($handler, ['prefetch' => 2, 'ack_batch' => 2]);
+
+        $queue->pop('emails')->delete();
+        $queue->pop('emails')->release();
+
+        $this->assertSame([
+            '/api/v1/pop/queue/emails',
+            '/api/v1/ack/batch',
+            '/api/v1/transaction',
+        ], array_map(fn ($request) => $request->getUri()->getPath(), $handler->requests));
+    }
+
+    public function testSuccessfulReleaseKeepsTheNextPrefetchedSiblingAvailable(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popBatchResponse([
+                $this->payload('job-1'),
+                $this->payload('job-2'),
+            ])],
+            ['status' => 200, 'json' => ['success' => true, 'transactionId' => 'bundle-1']],
+            ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => true]]],
+        ]);
+        [$queue] = $this->queueFor($handler, ['prefetch' => 2, 'ack_batch' => 1]);
+
+        $queue->pop('emails')->release();
+        $sibling = $queue->pop('emails');
+
+        $this->assertSame('job-2', $sibling->getJobId());
+        $this->assertCount(2, $handler->requests, 'the valid sibling stayed in the local prefetch buffer');
+        $sibling->delete();
+    }
+
+    public function testAmbiguousReleaseDiscardsItsTailAndDoesNotLeaveTheQueueReentrantlyLocked(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popBatchResponse([
+                $this->payload('job-1'),
+                $this->payload('job-2'),
+            ])],
+            ['status' => 503, 'json' => ['error' => 'database unavailable']],
+            ['status' => 503, 'json' => ['error' => 'database unavailable']],
+            ['status' => 503, 'json' => ['error' => 'database unavailable']],
+            ['status' => 200, 'json' => ['success' => true, 'messages' => []]],
+        ]);
+        [$queue] = $this->queueFor($handler, ['prefetch' => 2, 'ack_batch' => 1]);
+
+        try {
+            $queue->pop('emails')->release();
+            $this->fail('An ambiguous release was silently accepted.');
+        } catch (HttpException $exception) {
+            $this->assertSame(503, $exception->statusCode);
+        }
+
+        $this->assertNull($queue->pop('emails'));
+        $this->assertSame('/api/v1/pop/queue/emails', $handler->requests[array_key_last($handler->requests)]->getUri()->getPath());
+    }
+
+    public function testBatchAckFailureRemainsRetryableAndVisible(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popBatchResponse([
+                $this->payload('job-1'),
+                $this->payload('job-2'),
+            ])],
+            ['status' => 200, 'json' => [
+                ['success' => true, 'leaseReleased' => true],
+                ['success' => false, 'error' => 'lease expired'],
+            ]],
+            ['status' => 200, 'json' => [
+                ['success' => true, 'noop' => true],
+                ['success' => true, 'leaseReleased' => true],
+            ]],
+        ]);
+        [$queue] = $this->queueFor($handler, ['prefetch' => 2, 'ack_batch' => 2]);
+
+        $queue->pop('emails')->delete();
+        try {
+            $queue->pop('emails')->delete();
+            $this->fail('A partial batch ACK failure was silently accepted.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('lease expired', $exception->getMessage());
+        }
+
+        $queue->flushAcknowledgements();
+        $this->assertCount(3, $handler->requests, 'the complete idempotent batch is retried');
+    }
+
     public function testPopRejectsAConsumerGroupWithPersistedConflation(): void
     {
         $response = $this->popResponse($this->payload('job-123'));
@@ -329,6 +615,26 @@ class LaravelQueueDriverTest extends TestCase
         $this->assertSame('completed', $body['status']);
         $this->assertSame('workers', $body['consumerGroup']);
         $this->assertSame('lease-1', $body['leaseId']);
+    }
+
+    public function testPopAndAckUseTheSameBackendAffinity(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popResponse($this->payload('job-123'))],
+            ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => true]]],
+        ]);
+        [$queue] = $this->queueFor($handler, [
+            'urls' => ['http://queen-a.test:6632', 'http://queen-b.test:6632', 'http://queen-c.test:6632'],
+            'load_balancing_strategy' => 'affinity',
+        ]);
+
+        $queue->pop('emails')->delete();
+
+        $this->assertSame(
+            $handler->requests[0]->getUri()->getHost(),
+            $handler->requests[1]->getUri()->getHost(),
+            'the ACK should hit the broker whose process-local registry saw the pop',
+        );
     }
 
     public function testRejectedCompletionIsNotSilentlyAccepted(): void
@@ -792,6 +1098,28 @@ class LaravelQueueDriverTest extends TestCase
             ]],
         ];
     }
+
+    /** @param list<array> $payloads */
+    private function popBatchResponse(array $payloads): array
+    {
+        $response = $this->popResponse($payloads[0]);
+        $response['messages'] = [];
+        foreach ($payloads as $index => $payload) {
+            $number = $index + 1;
+            $response['messages'][] = [
+                'id' => "message-{$number}",
+                'transactionId' => "transaction-{$number}",
+                'partitionId' => '0198f2c1-4d3a-7c10-9f2b-6a1e5d0c7b83',
+                'partition' => 'job-0001',
+                'leaseId' => 'lease-1',
+                'consumerGroup' => 'workers',
+                'deliveryAttempt' => 1,
+                'data' => $payload,
+            ];
+        }
+
+        return $response;
+    }
 }
 
 class PartitionedTestJob implements QueenPartitionable
@@ -810,5 +1138,17 @@ class RetryableTestHandler
 {
     public function handle(): void
     {
+    }
+}
+
+class DelayedPartitionedTestJob implements QueenPartitionable
+{
+    public function __construct(private string $partition, public int $delay)
+    {
+    }
+
+    public function queenPartition(): string
+    {
+        return $this->partition;
     }
 }

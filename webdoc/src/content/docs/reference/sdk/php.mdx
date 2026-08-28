@@ -426,6 +426,9 @@ Publish the config with the `queen-config` tag; it lands at `config/queen.php`. 
 | `partition_prefix` | `QUEEN_PARTITION_PREFIX` | `laravel` |
 | `retry_after` | `QUEEN_RETRY_AFTER` | `90` seconds |
 | `block_for` | `QUEEN_BLOCK_FOR` | `0` seconds |
+| `prefetch` | `QUEEN_PREFETCH` | `1` job |
+| `ack_batch` | `QUEEN_ACK_BATCH` | `1` job (cannot exceed `prefetch`) |
+| `bulk_batch` | `QUEEN_BULK_BATCH` | `100` jobs |
 | `after_commit` | `QUEEN_AFTER_COMMIT` | `false` |
 | `sync_failed_jobs` | `QUEEN_SYNC_FAILED_JOBS` | `true` |
 | `supervisor.poll_interval` | `QUEEN_SUPERVISOR_POLL_INTERVAL` | `3` seconds |
@@ -471,6 +474,21 @@ timeout. `block_for` is the long-poll duration; leave it at `0` for a worker
 that scans a comma-separated priority queue list. Zero disables broker waiting
 but retains the normal 30-second request budget; positive values become the
 broker timeout and the HTTP client adds five seconds of transport slack.
+
+The default `prefetch=1` and `ack_batch=1` keep the per-job synchronous ACK
+boundary. Short, idempotent workloads can opt into a larger prefetch and set
+`ack_batch` to the same value: one pop then feeds the standard sequential
+Laravel worker, and the final delete commits the complete lease through
+`/ack/batch`. This is still at-least-once delivery, but it deliberately widens
+the crash duplicate window and unprocessed prefetched jobs can remain leased
+until `retry_after`. The lease must cover the worst-case runtime of the entire
+prefetched batch. Leave both at `1` for long jobs, strict per-job confirmation,
+or comma-separated priority queues. A reentrant `pop()` before the active
+prefetched job is deleted or released fails explicitly.
+
+Laravel `Queue::bulk()` is overridden with bounded multi-partition Queen push
+requests. `bulk_batch` limits each request; ordinary `dispatch()` remains a
+single-job operation.
 
 Ordinary jobs are assigned deterministically to a bounded set of partition
 stripes. A job implementing

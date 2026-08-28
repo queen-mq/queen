@@ -170,7 +170,7 @@ class QueueBuilder
 
             $result = [
                 'queue' => $this->queueName,
-                'partition' => $this->partition,
+                'partition' => $item['partition'] ?? $this->partition,
                 'payload' => $payloadValue,
                 'transactionId' => $item['transactionId'] ?? Uuid::v7(),
             ];

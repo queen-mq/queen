@@ -44,6 +44,40 @@ ignored by Git. The top-level report lists every raw run without cross-profile
 ratios; `reports/<profile>-rNN.{md,json}` contains the paired comparisons for
 each profile and repetition.
 
+### Controlled optimization factors
+
+The historical behaviour remains the default. Optimization campaigns can vary
+one declared factor at a time:
+
+```console
+scripts/run.sh --profile fixed --engines queen-php,queen-rust \
+  --queen-prefetch 16 --queen-ack-batch 16 \
+  --queen-bulk-batch 100 --queen-partitions 16 \
+  --queen-pop-fusion 0 --dispatch-mode bulk
+```
+
+| CLI option | Environment | Range | Baseline |
+| --- | --- | ---: | ---: |
+| `--queen-prefetch` | `QUEEN_PREFETCH` | 1..1000 | 1 |
+| `--queen-ack-batch` | `QUEEN_ACK_BATCH` | 1..prefetch | 1 |
+| `--queen-bulk-batch` | `QUEEN_BULK_BATCH` | 1..1000 | 100 |
+| `--queen-partitions` | `QUEEN_PARTITIONS` | 1..64 | 64 |
+| `--queen-pop-fusion` | `QUEEN_POP_FUSION` | 0 or 1 | 0 |
+| `--dispatch-mode` | `BENCH_DISPATCH_MODE` | single, bulk | single |
+
+Every factor is validated before image or container work begins and is written
+to campaign `metadata.json`, each lane's `configuration.json`, the resolved
+Compose file and the dispatch manifest. `bulk` uses the same bounded number of
+jobs per Laravel `bulk()` invocation in all lanes; the producer remains outside
+the measured cgroups.
+
+Prefetch and deferred acknowledgement change the lease-risk envelope even
+though delivery remains at least once: a killed worker can cause more already
+claimed jobs to be redelivered. Treat `ack_batch > 1` as a separately labelled
+performance profile, preserve crash-injection tests, and size `retry_after` for
+the worst-case time to process a complete prefetched batch. Pop fusion affects
+only Queen's broker and must not be presented as a Horizon setting.
+
 ## Test profiles
 
 ### Fixed

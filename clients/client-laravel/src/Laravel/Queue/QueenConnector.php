@@ -50,6 +50,9 @@ class QueenConnector implements ConnectorInterface
             0,
             intdiv(PHP_INT_MAX - 5000, 1000),
         );
+        $prefetch = self::boundedInteger($config['prefetch'] ?? 1, 'prefetch', 1, 1000);
+        $ackBatch = self::boundedInteger($config['ack_batch'] ?? 1, 'ack_batch', 1, $prefetch);
+        $bulkBatch = self::boundedInteger($config['bulk_batch'] ?? 100, 'bulk_batch', 1, 1000);
         $dispatchAfterCommit = self::boolean($config['after_commit'] ?? false, 'after_commit');
 
         $urls = $config['urls'] ?? null;
@@ -96,6 +99,9 @@ class QueenConnector implements ConnectorInterface
             retryAfter: $retryAfter,
             blockFor: $blockFor,
             dispatchAfterCommit: $dispatchAfterCommit,
+            prefetch: $prefetch,
+            ackBatch: $ackBatch,
+            bulkBatch: $bulkBatch,
         );
     }
 
