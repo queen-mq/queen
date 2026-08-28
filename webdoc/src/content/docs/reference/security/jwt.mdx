@@ -223,10 +223,12 @@ the broker's standard `{"error":"…"}` JSON shape:
 When `JWT_ENABLED=true`, the configuration is validated before the listener binds
 and a failure exits the process, naming what is missing:
 
-- `HS256` or `auto` with none of `JWT_SECRET`, `JWT_PUBLIC_KEY`, `JWT_JWKS_URL` set.
+- `HS256`, `HS384`, `HS512` or `auto` with none of `JWT_SECRET`,
+  `JWT_PUBLIC_KEY`, `JWT_JWKS_URL` set.
 - `RS256`, `RS384`, `RS512` or `EdDSA` with neither `JWT_PUBLIC_KEY` nor
   `JWT_JWKS_URL` set.
-- Any `JWT_ALGORITHM` value outside the supported list.
+- Any `JWT_ALGORITHM` outside `HS256`, `HS384`, `HS512`, `RS256`, `RS384`,
+  `RS512`, `EdDSA`, `auto`. The failure names the whole set.
 
 This is the one authentication mistake the broker refuses to start with.
 Everything else (a wrong secret, an unreachable JWKS endpoint, a role mapping that

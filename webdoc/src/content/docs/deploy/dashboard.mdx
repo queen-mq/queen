@@ -73,8 +73,8 @@ see is one moment.
 
 <Screenshot
   src="dashboard-dlq"
-  alt="The dead letter view. Three tiles summarise the messages on the page, the partitions they came from and the most frequent error. A table lists each dead-lettered message with its queue, consumer group, error text, retry count, time of failure and a single Purge action."
-  caption="Purge is the only action on a row, and the summary is computed from the page, not from a broker-side total. Since this capture the tiles have become a failure breakdown that also filters the table."
+  alt="The dead letter view. A failure breakdown heads the page: one thin bar divides the page's messages by error text, and under it two columns list each error with its count, beside a link to the ones past the top six. Below it a table lists each dead-lettered message with its queue, consumer group, error text, retry count, time of failure and a single Purge action."
+  caption="The breakdown is computed from the messages on this page, not from a broker-side total, and every row and bar segment narrows the table below it. Purge is the only action on a row."
 />
 
 ## The PostgreSQL panel

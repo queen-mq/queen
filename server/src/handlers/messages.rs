@@ -265,8 +265,10 @@ pub async fn handle_delete_message(
 // ------------------------------------- POST /api/v1/messages/:pid/:txn/retry
 // Replay a dead-lettered message: re-push the queen.log_dlq payload snapshot to
 // its own queue/partition, then drop the DLQ row. This is the DLQ's replay
-// action (the console's "Retry"); it exists ONLY for dead-lettered addresses —
-// a live message has nothing to replay and 404s.
+// action; it exists ONLY for dead-lettered addresses — a live message has
+// nothing to replay and 404s. NOT reached from the console: app/'s DeadLetter
+// view offers Purge only. Its callers are the admin SDKs and `queenctl dlq
+// retry`.
 //
 // The replayed frame gets a FRESH transaction id (the push path mints one from
 // the new message id): reusing the original would be seen by the dedup window

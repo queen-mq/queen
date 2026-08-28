@@ -101,6 +101,10 @@ type requestOptions struct {
 	// retryKind is "" (bounded, push-like default) or "pop" (long-poll,
 	// unbounded backoff by default). See HttpClient.retry429PolicyFor.
 	retryKind string
+
+	// noFailoverRetry suppresses the outer 5xx/network retry loop in
+	// doRequestRaw for THIS request. See WithoutFailoverRetry.
+	noFailoverRetry bool
 }
 
 // WithLongPollRetry marks a request as a long-poll pop (wait=true): on a
@@ -111,6 +115,24 @@ type requestOptions struct {
 // failure after a handful of tries.
 func WithLongPollRetry() RequestOption {
 	return func(o *requestOptions) { o.retryKind = "pop" }
+}
+
+// WithoutFailoverRetry turns off the outer 5xx/network retry loop for one
+// request, so it is attempted exactly once against exactly one backend.
+//
+// The default (RetryAttempts=3, so up to FOUR attempts) is right for the
+// requests this client mostly makes, which either did not happen or can happen
+// twice harmlessly. It is wrong for a request that is NOT idempotent, because
+// the loop cannot tell "the broker never ran this" from "the broker ran it and
+// then failed on the way back": a 500 or a dropped connection is retried either
+// way, and the second attempt re-runs the effect.
+//
+// Admin.RetryMessage is that request -- see the non-idempotency notes there.
+//
+// This does NOT touch the 429 policy (see WithLongPollRetry): a 429 is the
+// broker refusing to run the request at all, so retrying it re-runs nothing.
+func WithoutFailoverRetry() RequestOption {
+	return func(o *requestOptions) { o.noFailoverRetry = true }
 }
 
 func resolveRequestOptions(opts []RequestOption) requestOptions {
@@ -219,6 +241,10 @@ func (hc *HttpClient) doRequestRaw(ctx context.Context, method, path string, bod
 	// caller to request exactly one attempt. Clamp here so the loop runs once.
 	maxRetries := hc.config.RetryAttempts
 	if maxRetries < 0 {
+		maxRetries = 0
+	}
+	// A non-idempotent caller opts out entirely: one attempt, one backend.
+	if ro.noFailoverRetry {
 		maxRetries = 0
 	}
 	for attempt := 0; attempt <= maxRetries; attempt++ {

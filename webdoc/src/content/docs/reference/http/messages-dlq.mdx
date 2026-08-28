@@ -257,11 +257,15 @@ dead-letter queue. If the push succeeded but the DLQ cleanup failed, the body is
 `success: false` with `replayed: true` and `dlqRowRemoved: false`. The message now
 exists twice, once replayed and once still dead-lettered.
 
-The JavaScript, Rust and Laravel admin clients wrap this route as `retryMessage`,
-and the Python one as `retry_message`. Three surfaces still predate it: the Go
-client's `RetryMessage` returns `not implemented server-side`, `queenctl` registers
-no command for it, and the dashboard's dead-letter view offers purge only. On any
-of those three, call the route over HTTP yourself.
+The JavaScript, Go, Rust and Laravel admin clients wrap this route as `retryMessage`,
+and the Python one as `retry_message`. `queenctl dlq retry <partitionId> <transactionId>`
+wraps it too, and requires `--yes` because the route is not idempotent. One surface
+still predates it: the dashboard's dead-letter view offers purge only, so replay from
+there means calling the route over HTTP yourself.
+
+Because a resent request replays the message a second time, the Go client sends this
+one with `WithoutFailoverRetry()`, meaning exactly one attempt against one backend,
+rather than the default 5xx retry budget every other admin call uses.
 
 ## GET /api/v1/dlq
 

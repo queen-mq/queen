@@ -434,11 +434,8 @@ impl QueueBuilder {
         // of them travel, and what an unset one means. `to_pairs` then renders
         // it — unlike the other SDKs this client has a single param builder, so
         // pop and consume cannot drift apart on it.
-        let sizing = crate::autopilot::sizing(
-            self.batch,
-            self.max_partitions,
-            self.autopilot_enabled(),
-        );
+        let sizing =
+            crate::autopilot::sizing(self.batch, self.max_partitions, self.autopilot_enabled());
         PopParams {
             batch: sizing.batch,
             partitions: sizing.partitions,
@@ -942,7 +939,9 @@ mod tests {
             "neither knob was set, so both are the broker's: {pairs:?}"
         );
         assert!(
-            !pairs.iter().any(|(k, _)| *k == "batch" || *k == "partitions"),
+            !pairs
+                .iter()
+                .any(|(k, _)| *k == "batch" || *k == "partitions"),
             "a delegated knob does not travel: {pairs:?}"
         );
 

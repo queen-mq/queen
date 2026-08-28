@@ -24,7 +24,10 @@ var (
 var messagesCmd = &cobra.Command{
 	Use:     "messages",
 	Aliases: []string{"msg", "msgs"},
-	Short:   "Inspect, delete, retry, and DLQ-move individual messages",
+	// No `retry` or `dlq-move` here: replay is `queenctl dlq retry` (it only
+	// applies to dead-lettered addresses, so it belongs under `dlq`), and the
+	// broker has no force-move-to-DLQ route at all.
+	Short:   "Inspect, delete, and trace individual messages",
 }
 
 var messagesListCmd = &cobra.Command{

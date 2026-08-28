@@ -130,7 +130,12 @@ async fn a_version_fence_never_creates_the_key_it_was_guarding() {
 
     let fenced = q
         .kv()
-        .put(&ns, &key("saga"), serde_json::json!(1), Expiry::seconds(300))
+        .put(
+            &ns,
+            &key("saga"),
+            serde_json::json!(1),
+            Expiry::seconds(300),
+        )
         .expect(7)
         .send()
         .await
@@ -145,7 +150,12 @@ async fn a_version_fence_never_creates_the_key_it_was_guarding() {
     // ...and against a real version it is an ordinary optimistic lock.
     let created = q
         .kv()
-        .put(&ns, &key("saga"), serde_json::json!(1), Expiry::seconds(300))
+        .put(
+            &ns,
+            &key("saga"),
+            serde_json::json!(1),
+            Expiry::seconds(300),
+        )
         .send()
         .await
         .unwrap();
@@ -153,7 +163,12 @@ async fn a_version_fence_never_creates_the_key_it_was_guarding() {
 
     let stale = q
         .kv()
-        .put(&ns, &key("saga"), serde_json::json!(2), Expiry::seconds(300))
+        .put(
+            &ns,
+            &key("saga"),
+            serde_json::json!(2),
+            Expiry::seconds(300),
+        )
         .expect(version + 1)
         .send()
         .await
@@ -163,7 +178,12 @@ async fn a_version_fence_never_creates_the_key_it_was_guarding() {
 
     let ok = q
         .kv()
-        .put(&ns, &key("saga"), serde_json::json!(3), Expiry::seconds(300))
+        .put(
+            &ns,
+            &key("saga"),
+            serde_json::json!(3),
+            Expiry::seconds(300),
+        )
         .expect(version)
         .send()
         .await
@@ -182,7 +202,12 @@ async fn a_version_fence_never_creates_the_key_it_was_guarding() {
     );
     let stale_again = q
         .kv()
-        .put(&ns, &key("saga"), serde_json::json!(4), Expiry::seconds(300))
+        .put(
+            &ns,
+            &key("saga"),
+            serde_json::json!(4),
+            Expiry::seconds(300),
+        )
         .expect(version)
         .send()
         .await
@@ -211,7 +236,10 @@ async fn a_counter_admits_and_then_refuses_at_its_ceiling() {
             .send()
             .await
             .unwrap();
-        assert!(r.applied(), "increment {expected} should have been admitted");
+        assert!(
+            r.applied(),
+            "increment {expected} should have been admitted"
+        );
         assert_eq!(r.counter().unwrap(), expected);
     }
 
@@ -240,7 +268,10 @@ async fn a_counter_admits_and_then_refuses_at_its_ceiling() {
         .send()
         .await
         .unwrap();
-    assert!(!over.applied(), "10 against max 5 must not apply, even on a new key");
+    assert!(
+        !over.applied(),
+        "10 against max 5 must not apply, even on a new key"
+    );
     assert!(!q.kv().get(&fresh, &key("burst")).await.unwrap().found());
 
     purge_kv(&q, &ns, TEST_KEY_PREFIX).await;
@@ -302,7 +333,10 @@ async fn a_prefix_scan_pages_by_cursor() {
         .unwrap();
     assert_eq!(first.rows().len(), 2);
     assert!(first.truncated(), "five keys do not fit a page of two");
-    let cursor = first.next_after.clone().expect("a truncated page has a cursor");
+    let cursor = first
+        .next_after
+        .clone()
+        .expect("a truncated page has a cursor");
 
     let second = q
         .kv()
@@ -335,13 +369,8 @@ async fn a_write_with_no_expiry_is_refused_by_the_broker() {
     let q = broker!();
     let ns = ns("kv-noexp");
 
-    let mut op = KvOperation::put(
-        &ns,
-        &key("x"),
-        serde_json::json!(1),
-        Expiry::seconds(300),
-    )
-    .unwrap();
+    let mut op =
+        KvOperation::put(&ns, key("x"), serde_json::json!(1), Expiry::seconds(300)).unwrap();
     op.ttl_seconds = None;
 
     let err = q.kv().batch(vec![op]).await.unwrap_err();
@@ -358,7 +387,7 @@ async fn get_prefix_is_refused_inside_a_transaction() {
 
     let err = q
         .transaction()
-        .kv(KvOperation::get_prefix(&ns, &key("p")))
+        .kv(KvOperation::get_prefix(&ns, key("p")))
         .commit()
         .await
         .unwrap_err();
@@ -387,7 +416,12 @@ async fn the_purge_is_what_makes_this_suite_rerunnable() {
 
     let claim = q
         .kv()
-        .put_if_absent(ns, &key("marker"), serde_json::json!(1), Expiry::seconds(300))
+        .put_if_absent(
+            ns,
+            &key("marker"),
+            serde_json::json!(1),
+            Expiry::seconds(300),
+        )
         .send()
         .await
         .unwrap();
@@ -575,7 +609,13 @@ async fn a_riders_only_transaction_commits_both_arrays() {
 
     // Both are really there.
     assert!(q.kv().get(&ns, &key("state")).await.unwrap().found());
-    assert!(q.timers().peek(&queue, &key("timeout")).await.unwrap().found);
+    assert!(
+        q.timers()
+            .peek(&queue, &key("timeout"))
+            .await
+            .unwrap()
+            .found
+    );
 
     purge_kv(&q, &ns, TEST_KEY_PREFIX).await;
     purge_timers(&q, &queue).await;
@@ -764,23 +804,11 @@ async fn a_timer_batch_is_index_aligned_with_what_was_sent() {
     purge_timers(&q, &queue).await;
 
     let ops = vec![
-        queen_mq::TimerOperation::schedule(
-            &queue,
-            &key("b1"),
-            3_600_000,
-            "batch-1",
-            b"{\"n\":1}",
-        ),
-        queen_mq::TimerOperation::schedule(
-            &queue,
-            &key("b2"),
-            3_600_000,
-            "batch-2",
-            b"{\"n\":2}",
-        ),
+        queen_mq::TimerOperation::schedule(&queue, key("b1"), 3_600_000, "batch-1", b"{\"n\":1}"),
+        queen_mq::TimerOperation::schedule(&queue, key("b2"), 3_600_000, "batch-2", b"{\"n\":2}"),
         // A cancel of something absent, in the same call: the result array must
         // still line up with the request.
-        queen_mq::TimerOperation::cancel(&queue, &key("b3")),
+        queen_mq::TimerOperation::cancel(&queue, key("b3")),
     ];
     let results = q.timers().batch(ops).await.unwrap();
     assert_eq!(results.len(), 3);

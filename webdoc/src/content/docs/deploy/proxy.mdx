@@ -29,7 +29,7 @@ either way.
 ## What it needs
 
 One PostgreSQL of its own, *pxdb*, which can be a separate database or just a separate schema on
-the broker's. The proxy owns the `queen_proxy` schema there and applies its six migrations at
+the broker's. The proxy owns the `queen_proxy` schema there and applies its eight migrations at
 boot, so nothing has to be created first.
 
 Point it **directly at PostgreSQL, not through a pooler**. It holds a permanent dedicated

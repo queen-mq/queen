@@ -12,6 +12,21 @@ pub const DEFAULT_TENANT: &str = "00000000-0000-0000-0000-000000000001";
 /// against anything (it is opaque; the trust is network — the cell boundary).
 pub const TENANT_HEADER: &str = "x-queen-tenant";
 
+/// The `JWT_ALGORITHM` values the broker accepts, in the order the boot error
+/// lists them. This is the ONE spelling of the set: `AuthConfig::validate` is
+/// matched against it and its "not supported" message is BUILT from it, so the
+/// message can no longer name a set the validation does not enforce.
+///
+/// `auth.rs::check_alg_allowed` is the other half of the contract — the value
+/// accepted at boot must be a value the verifier accepts at request time. The
+/// two used to disagree about HS384/HS512 (refused here, implemented there,
+/// which left pinning HS512 impossible and pushed operators to the strictly
+/// wider `auto`); `auth::tests::boot_and_the_verifier_accept_the_same_algorithms`
+/// now fails if they ever drift apart again.
+pub const SUPPORTED_JWT_ALGORITHMS: &[&str] = &[
+    "HS256", "HS384", "HS512", "RS256", "RS384", "RS512", "EdDSA", "auto",
+];
+
 /// JWT auth configuration, mirroring the C++ `AuthConfig` (server/include/queen/config.hpp).
 /// When `enabled` is false (the default) the auth middleware passes every request
 /// through untouched — this is how the whole existing test-suite runs.
@@ -94,10 +109,14 @@ impl AuthConfig {
             return Ok(());
         }
         match self.algorithm.as_str() {
-            "HS256" | "auto" => {
+            // The whole HMAC family, not just HS256: `auth.rs` verifies HS384 and
+            // HS512 off the same `JWT_SECRET` bytes, so refusing them here only
+            // denied operators the ability to PIN one — `auto`, the workaround,
+            // accepts all seven algorithms and is the weaker posture.
+            "HS256" | "HS384" | "HS512" | "auto" => {
                 if self.secret.is_empty() && self.jwks_url.is_empty() && self.public_key.is_empty() {
                     return Err(format!(
-                        "JWT_ENABLED=true with JWT_ALGORITHM={} but no key material: set JWT_SECRET (HS256), or JWT_PUBLIC_KEY / JWT_JWKS_URL (RS256/EdDSA)",
+                        "JWT_ENABLED=true with JWT_ALGORITHM={} but no key material: set JWT_SECRET (HS256/HS384/HS512), or JWT_PUBLIC_KEY / JWT_JWKS_URL (RS256/EdDSA)",
                         self.algorithm
                     ));
                 }
@@ -111,9 +130,11 @@ impl AuthConfig {
                 }
             }
             other => {
-                return Err(format!(
-                    "JWT_ALGORITHM={other} is not supported (use HS256, RS256, RS384, RS512, EdDSA, or auto)"
-                ));
+                let mut list = SUPPORTED_JWT_ALGORITHMS.join(", ");
+                if let Some(i) = list.rfind(", ") {
+                    list.replace_range(i..i + 2, ", or ");
+                }
+                return Err(format!("JWT_ALGORITHM={other} is not supported (use {list})"));
             }
         }
         Ok(())

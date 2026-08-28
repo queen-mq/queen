@@ -509,23 +509,35 @@ so a replay can start slightly earlier than the instant you named, never later.
 | --- | --- | --- |
 | `list` | `ls` | none |
 | `describe <partitionId> <transactionId>` | `get` | exactly two |
+| `retry <partitionId> <transactionId>` | `requeue`, `replay` | exactly two |
 | `drain` | none | none |
 
 `list` and `drain` share the filters: `--queue`, `--cg`, `--partition`, `--from`, `--to`,
-`--limit` (`0`), `--offset` (`0`). `drain` adds `--dry-run` and `--yes`, and refuses to run without
-one of them.
+`--limit` (`0`), `--offset` (`0`). `drain` and `retry` both add `--dry-run` and `--yes`, and refuse
+to run without one of them.
 
 `drain` pages through the filtered set in `--limit`-sized pages, defaulting to 200 when `--limit`
 is `0`, and deletes every row it matches. **It is the bulk delete you run after deciding not to
-replay.** Replay itself is a broker route,
+replay.**
+
+`retry` is the replay, one address at a time. It wraps
 [`POST /api/v1/messages/:partitionId/:transactionId/retry`](/reference/http/messages-dlq), which
 re-pushes the dead-letter snapshot to its own queue and partition and drops the DLQ row only once
 that push has been accepted.
 
 <Aside type="danger">
-No `queenctl` command wraps that retry route, so `dlq drain` is deletion and nothing else, and a
-drained row is gone. To replay dead-lettered messages, call the route directly, or read the rows
-with `dlq list` or `messages get` and re-publish them with `queenctl push`.
+`dlq retry` is not idempotent, which is why it is one address per invocation and why there is no
+bulk replay. The broker mints a **fresh transaction id** for the replayed message, because the
+original would be dropped by the dedup window, so a second run puts a second copy on the queue and
+nothing collapses them. The replay also lands at the tail of the partition, out of order for its
+key. If the push is accepted but the DLQ cleanup then fails, the command reports that the message
+was replayed **and** is still dead-lettered: delete the row with `messages delete` rather than
+running `retry` again. `queenctl` sends this request exactly once and never resends it on a 5xx.
+</Aside>
+
+<Aside type="caution">
+On an address dead-lettered by several consumer groups, the broker replays the most recent snapshot
+but deletes every group's snapshot for that address.
 </Aside>
 
 ### `queenctl traces`

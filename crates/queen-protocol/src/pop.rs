@@ -767,7 +767,10 @@ mod tests {
         ))
         .unwrap();
         let echo = full.autopilot.expect("an object decodes");
-        assert_eq!((echo.partitions, echo.batch, echo.wait_ms), (8, 200, Some(25)));
+        assert_eq!(
+            (echo.partitions, echo.batch, echo.wait_ms),
+            (8, 200, Some(25))
+        );
 
         // waitMs is optional: the broker sends it only when it has an opinion.
         let no_wait: PopResponse = serde_json::from_str(&format!(
@@ -792,9 +795,8 @@ mod tests {
             r#""autopilot":true"#,
             r#""autopilot":[]"#,
         ] {
-            let got: PopResponse =
-                serde_json::from_str(&format!("{head}{tail},{body}}}"))
-                    .unwrap_or_else(|e| panic!("{body} must still decode: {e}"));
+            let got: PopResponse = serde_json::from_str(&format!("{head}{tail},{body}}}"))
+                .unwrap_or_else(|e| panic!("{body} must still decode: {e}"));
             let partitions = got.autopilot.map(|e| e.partitions).unwrap_or(0);
             assert_eq!(partitions, 0, "{body}");
         }

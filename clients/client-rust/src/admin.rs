@@ -106,14 +106,13 @@ impl Admin {
     /// So `pending: 4_000_000, effectivePending: 12` is a healthy conflating
     /// queue; the same two numbers on a non-conflating group are an incident.
     /// An older broker simply omits the three keys.
-    pub async fn queue_depth(
-        &self,
-        name: &str,
-        group: Option<&str>,
-    ) -> Result<serde_json::Value> {
+    pub async fn queue_depth(&self, name: &str, group: Option<&str>) -> Result<serde_json::Value> {
         let path = format!("/api/v1/resources/queues/{}/depth", urlencode(name));
         match group {
-            Some(g) => self.get(&with_query(&path, &[("group", g.to_string())])).await,
+            Some(g) => {
+                self.get(&with_query(&path, &[("group", g.to_string())]))
+                    .await
+            }
             None => self.get(&path).await,
         }
     }
