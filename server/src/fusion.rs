@@ -57,6 +57,15 @@ pub struct ItemResult {
     pub txn: String,
     pub queue: String,
     pub status: &'static str, // "queued" | "duplicate" | "error"
+    // C1 (PLAN_QUEEN_KAFKA.md): the ABSOLUTE offset this message occupies in its
+    // partition's log — `base_offset of the committed segment + the frame's
+    // index within it`, the same arithmetic every other reader of this engine
+    // uses. Set for a queued frame and for a DUPLICATE (where it is the
+    // PRE-EXISTING occurrence's offset, which is what makes a retried push
+    // report the same position rather than a new one). `None` whenever no
+    // offset was allocated: an errored bundle, a maintenance-buffered spool
+    // write, a failed one.
+    pub offset: Option<i64>,
     // Intra-request first-wins dedup (layer 1): a later item that repeats an
     // earlier item's (queue, partition, transactionId) is a follower of that
     // earlier "leader" item. Followers never produce a fusion frame; at render
@@ -677,9 +686,19 @@ struct BundleGroup {
     hashes: Vec<[u8; 16]>,
     leader_idx: Vec<usize>, // per-frame txn-leader index
     pending: Vec<usize>,    // kept frame indices still to push
-    verdict: FnvHashMap<usize, (&'static str, String)>,
+    verdict: FnvHashMap<usize, FrameVerdict>,
     total: usize,
     db_ok: bool,
+}
+
+// What the flush decided about ONE frame, keyed by frame index in `verdict`.
+// A struct rather than the tuple this was, because C1 added a third member and
+// `v.0`/`v.1`/`v.2` at the assignment site says nothing about which is which.
+struct FrameVerdict {
+    status: &'static str,
+    message_id: String,
+    // C1: the frame's absolute log offset — see `ItemResult::offset`.
+    offset: Option<i64>,
 }
 
 // Layer 2: intra-flush dedup by txn fingerprint (first-wins), comparing the 16B
@@ -1248,9 +1267,21 @@ fn spawn_bundle_flush(
                             ctx.dedup.on_push_committed(&keys[gi], *base, &hs, *created_ms);
                         }
                         let g = &mut gs[gi];
-                        for &fi in &g.pending {
+                        // C1: the segment was packed from `pending` IN ORDER
+                        // (build_hashes_and_blob walks the same slice), so the
+                        // frame at position p carries absolute offset base + p.
+                        // This is the ONE place that mapping exists, and it is
+                        // the same identity `log_txns` stores the hash at.
+                        for (p, &fi) in g.pending.iter().enumerate() {
                             let mid = uuid_bytes_to_string(&g.group.frames[fi].message_id);
-                            g.verdict.insert(fi, ("queued", mid));
+                            g.verdict.insert(
+                                fi,
+                                FrameVerdict {
+                                    status: "queued",
+                                    message_id: mid,
+                                    offset: Some(*base + p as i64),
+                                },
+                            );
                         }
                         g.pending.clear();
                     }
@@ -1280,10 +1311,22 @@ fn spawn_bundle_flush(
                         let g = &mut gs[gi];
                         // Mark the dups, then repack+retry the survivors.
                         let mut is_dup = vec![false; g.pending.len()];
-                        for ((i, _off), mid) in dups.iter().zip(mids) {
+                        for ((i, off), mid) in dups.iter().zip(mids) {
                             if *i < g.pending.len() {
                                 is_dup[*i] = true;
-                                g.verdict.insert(g.pending[*i], ("duplicate", mid));
+                                // C1: `off` is the ORIGINAL occurrence's
+                                // absolute offset (003_log_push's dups array),
+                                // which is exactly the position a retried push
+                                // must be told about — the message is at that
+                                // offset, not at a new one.
+                                g.verdict.insert(
+                                    g.pending[*i],
+                                    FrameVerdict {
+                                        status: "duplicate",
+                                        message_id: mid,
+                                        offset: Some(*off),
+                                    },
+                                );
                             }
                         }
                         let survivors: Vec<usize> = g
@@ -1353,38 +1396,43 @@ fn spawn_bundle_flush(
         // this bundle's partitions set PushState.pending = its group count, so it
         // must be signalled once for each of those groups here.
         for g in gs {
-            let mut per_state: FnvHashMap<usize, (Arc<PushState>, Vec<(usize, &'static str, String)>)> =
-                FnvHashMap::default();
+            let mut per_state: FnvHashMap<
+                usize,
+                (Arc<PushState>, Vec<(usize, &'static str, String, Option<i64>)>),
+            > = FnvHashMap::default();
             for (i, f) in g.group.frames.iter().enumerate() {
                 let l = g.leader_idx[i];
-                let (st, mid): (&'static str, String) = match g.verdict.get(&l) {
+                // C1: a layer-2 follower is the SAME stored message as its
+                // leader — it produced no frame of its own — so it inherits the
+                // leader's offset along with the leader's id.
+                let (st, mid, off): (&'static str, String, Option<i64>) = match g.verdict.get(&l) {
                     Some(v) => {
-                        let (s, m) = (v.0, &v.1);
                         if i == l {
-                            (s, m.clone())
-                        } else if s == "error" {
-                            ("error", m.clone())
+                            (v.status, v.message_id.clone(), v.offset)
+                        } else if v.status == "error" {
+                            ("error", v.message_id.clone(), None)
                         } else {
-                            ("duplicate", m.clone())
+                            ("duplicate", v.message_id.clone(), v.offset)
                         }
                     }
-                    None => ("error", uuid_bytes_to_string(&f.message_id)),
+                    None => ("error", uuid_bytes_to_string(&f.message_id), None),
                 };
                 let sk = Arc::as_ptr(&f.state) as usize;
                 per_state
                     .entry(sk)
                     .or_insert_with(|| (f.state.clone(), Vec::new()))
                     .1
-                    .push((f.item, st, mid));
+                    .push((f.item, st, mid, off));
             }
 
             for (_, (state, writes)) in per_state {
                 {
                     let mut r = state.results.lock().unwrap();
-                    for (item, st, mid) in writes {
+                    for (item, st, mid, off) in writes {
                         if item < r.len() {
                             r[item].status = st;
                             r[item].message_id = mid;
+                            r[item].offset = off;
                         }
                     }
                 }

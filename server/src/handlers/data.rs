@@ -168,6 +168,11 @@ fn resolve_push_followers(results: &mut [ItemResult]) {
             let leader_mid = results[l].message_id.clone();
             let leader_status = results[l].status;
             results[i].message_id = leader_mid;
+            // C1: a layer-1 follower never produced a frame — it IS the
+            // leader's message — so it reports the leader's offset too. Without
+            // this the second copy of a (queue, partition, txn) in one batch
+            // would come back with a message id but no position.
+            results[i].offset = results[l].offset;
             if leader_status == "error" {
                 results[i].status = "error";
             }
@@ -177,7 +182,8 @@ fn resolve_push_followers(results: &mut [ItemResult]) {
 
 fn render_push_results(results: &[ItemResult]) -> String {
     // ~150B/item with two 36-char ids + queue name; undersizing costs a full
-    // realloc+copy of the response on every push.
+    // realloc+copy of the response on every push. The C1 offset adds at most
+    // ~30B on the items that have one, which the existing 176 already covers.
     let mut out = String::with_capacity(results.len() * 176 + 2);
     out.push('[');
     for (i, item) in results.iter().enumerate() {
@@ -194,7 +200,18 @@ fn render_push_results(results: &[ItemResult]) -> String {
         json_escape_into(&mut out, &item.queue);
         out.push_str("\",\"status\":\"");
         out.push_str(item.status);
-        out.push_str("\"}");
+        out.push('"');
+        // C1 (PLAN_QUEEN_KAFKA.md): the assigned ABSOLUTE offset, ADDITIVE — the
+        // key is emitted only when the broker actually allocated one, so a
+        // buffered/failed/errored item's bytes are unchanged and every client
+        // that predates this key is unaffected (queen-protocol's PushResult
+        // models it as an Option that skips serializing when absent, and its
+        // wire tests pin that an unknown key never breaks a decode).
+        if let Some(off) = item.offset {
+            out.push_str(",\"offset\":");
+            out.push_str(&off.to_string());
+        }
+        out.push('}');
     }
     out.push(']');
     out
@@ -287,6 +304,9 @@ pub async fn handle_push(
                     txn,
                     queue,
                     status: "duplicate",
+                    // Provisional like the id above: `resolve_push_followers`
+                    // copies the leader's final offset once the flush lands.
+                    offset: None,
                     dup_of: Some(leader),
                 });
                 continue;
@@ -300,6 +320,9 @@ pub async fn handle_push(
             txn: txn.clone(),
             queue: queue.clone(),
             status: "queued",
+            // Filled by the flush that allocates it (fusion.rs); an item whose
+            // bundle never commits keeps None and renders no `offset` key.
+            offset: None,
             dup_of: None,
         });
 
@@ -577,6 +600,10 @@ async fn buffer_all(
             txn,
             queue: it.queue.as_str().to_string(),
             status: if ok { "buffered" } else { "failed" },
+            // A spooled message has no offset and must not pretend to: nothing
+            // was allocated, and the replay assigns one only when maintenance
+            // ends. The key is simply absent from the response.
+            offset: None,
             dup_of: None,
         });
     }
@@ -3137,7 +3164,9 @@ fn render_pop_parts(
 // Append raw bytes that are expected to be valid UTF-8 (payloads stored from
 // client JSON). std's from_utf8 validation is markedly cheaper than the lossy
 // chunk iterator; invalid bytes fall back to lossy replacement.
-fn push_utf8(out: &mut String, bytes: &[u8]) {
+// pub(crate) so the fetch renderer (handlers/fetch.rs) splices payloads through
+// the SAME function the pop renderer does — one lossy-UTF8 policy, not two.
+pub(crate) fn push_utf8(out: &mut String, bytes: &[u8]) {
     match std::str::from_utf8(bytes) {
         Ok(s) => out.push_str(s),
         Err(_) => out.push_str(&String::from_utf8_lossy(bytes)),
@@ -5980,6 +6009,7 @@ mod protocol_conformance {
                 txn: "txn-1".into(),
                 queue: "orders".into(),
                 status: "queued",
+                offset: Some(41),
                 dup_of: None,
             },
             ItemResult {
@@ -5989,6 +6019,8 @@ mod protocol_conformance {
                 txn: r#"weird"txn\2"#.into(),
                 queue: "orders".into(),
                 status: "duplicate",
+                // C1: a duplicate reports the PRE-EXISTING message's offset.
+                offset: Some(7),
                 dup_of: None,
             },
         ];
@@ -6002,10 +6034,100 @@ mod protocol_conformance {
         assert_eq!(parsed[0].transaction_id, "txn-1");
         assert_eq!(parsed[0].queue_name, "orders");
         assert_eq!(parsed[0].status, qp::PushStatus::Queued);
+        assert_eq!(parsed[0].offset, Some(41));
 
         assert_eq!(parsed[1].index, 1);
         assert_eq!(parsed[1].transaction_id, r#"weird"txn\2"#);
         assert_eq!(parsed[1].status, qp::PushStatus::Duplicate);
+        assert_eq!(parsed[1].offset, Some(7));
+    }
+
+    /// C1 (PLAN_QUEEN_KAFKA.md) is additive or it is a breaking change: an item
+    /// the broker allocated no offset for must render EXACTLY the bytes it
+    /// rendered before the field existed, key for key.
+    #[test]
+    fn an_item_without_an_offset_renders_the_pre_c1_bytes() {
+        let rendered = render_push_results(&[ItemResult {
+            message_id: "0190aaaa-0000-7000-8000-000000000001".into(),
+            txn: "txn-1".into(),
+            queue: "orders".into(),
+            status: "buffered",
+            offset: None,
+            dup_of: None,
+        }]);
+        assert_eq!(
+            rendered,
+            r#"[{"index":0,"message_id":"0190aaaa-0000-7000-8000-000000000001","transaction_id":"txn-1","queueName":"orders","status":"buffered"}]"#
+        );
+        // ...and the key is APPENDED when there is one, so nothing before it
+        // moves.
+        let rendered = render_push_results(&[ItemResult {
+            message_id: "0190aaaa-0000-7000-8000-000000000001".into(),
+            txn: "txn-1".into(),
+            queue: "orders".into(),
+            status: "queued",
+            offset: Some(0),
+            dup_of: None,
+        }]);
+        assert_eq!(
+            rendered,
+            r#"[{"index":0,"message_id":"0190aaaa-0000-7000-8000-000000000001","transaction_id":"txn-1","queueName":"orders","status":"queued","offset":0}]"#,
+            "offset 0 is a real offset — the first message of a partition — and \
+             must not be confused with an absent one"
+        );
+    }
+
+    /// The intra-request duplicate (layer 1) never produced a frame, so its
+    /// offset can only come from its leader. Without the copy it would come
+    /// back with a message id and no position — the one combination a client
+    /// cannot act on.
+    #[test]
+    fn a_layer_one_follower_inherits_the_leaders_offset() {
+        let mut results = vec![
+            ItemResult {
+                message_id: "leader-mid".into(),
+                txn: "same-txn".into(),
+                queue: "orders".into(),
+                status: "queued",
+                offset: Some(41),
+                dup_of: None,
+            },
+            ItemResult {
+                message_id: "provisional".into(),
+                txn: "same-txn".into(),
+                queue: "orders".into(),
+                status: "duplicate",
+                offset: None,
+                dup_of: Some(0),
+            },
+        ];
+        resolve_push_followers(&mut results);
+        assert_eq!(results[1].message_id, "leader-mid");
+        assert_eq!(results[1].offset, Some(41));
+
+        // A leader whose bundle failed has no offset to give, and the follower
+        // must inherit that too rather than keeping a stale one.
+        let mut results = vec![
+            ItemResult {
+                message_id: "leader-mid".into(),
+                txn: "same-txn".into(),
+                queue: "orders".into(),
+                status: "error",
+                offset: None,
+                dup_of: None,
+            },
+            ItemResult {
+                message_id: "provisional".into(),
+                txn: "same-txn".into(),
+                queue: "orders".into(),
+                status: "duplicate",
+                offset: Some(999),
+                dup_of: Some(0),
+            },
+        ];
+        resolve_push_followers(&mut results);
+        assert_eq!(results[1].status, "error");
+        assert_eq!(results[1].offset, None);
     }
 
     /// Every status the broker can stamp must be a variant the client can
@@ -6018,6 +6140,7 @@ mod protocol_conformance {
                 txn: "t".into(),
                 queue: "q".into(),
                 status,
+                offset: None,
                 dup_of: None,
             }]);
             let parsed: Vec<qp::PushResult> = serde_json::from_str(&rendered)
@@ -6515,6 +6638,7 @@ mod push_body_charset {
             txn: "a\"b\\c&d<e>f".into(),
             queue: "q\"1".into(),
             status: "queued",
+            offset: Some(3),
             dup_of: None,
         }];
         let rendered = render_push_results(&results);

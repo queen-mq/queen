@@ -506,6 +506,11 @@ mod kv;
 // where `/api/v1/ephemeral/*` is absent, so a 404 never means "feature off".
 mod ephemeral;
 mod timers;
+// PLAN_QUEEN_KAFKA.md C2 — `POST /api/v1/fetch`, the read-from-offset surface.
+// Its own module rather than another handler in `data`: it shares neither the
+// pop path's claim machinery nor its response shape, and the one thing it does
+// borrow (the payload splice) is imported by name.
+mod fetch;
 mod queues;
 mod messages;
 mod traces;
@@ -525,6 +530,7 @@ pub use data::*;
 pub use kv::*;
 pub use ephemeral::*;
 pub use timers::*;
+pub use fetch::*;
 pub use queues::*;
 pub use messages::*;
 pub use traces::*;

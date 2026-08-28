@@ -27,6 +27,7 @@ pub mod ack;
 pub mod admin;
 pub mod ephemeral;
 pub mod error;
+pub mod fetch;
 pub mod kv;
 pub mod pop;
 pub mod push;
@@ -49,6 +50,10 @@ pub use ephemeral::{
     EPHEMERAL_DEFAULT_WAIT_TIMEOUT_MILLIS, EPHEMERAL_KEY_PREFIX, EPHEMERAL_QUEUE_NOT_FOUND_CODE,
 };
 pub use error::{ErrorBody, ErrorCode};
+pub use fetch::{
+    FetchEntry, FetchEntryResult, FetchRecord, FetchRequest, FetchResponse,
+    ERR_OFFSET_OUT_OF_RANGE, ERR_UNKNOWN_TOPIC_OR_PARTITION,
+};
 pub use kv::{
     Expiry, KvDeleteBody, KvOpKind, KvOperation, KvPutBody, KvReason, KvRequest, KvResponse,
     KvResult, KvRow,

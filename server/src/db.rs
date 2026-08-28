@@ -1771,6 +1771,50 @@ pub async fn pop_wildcard_bin(
     Ok((row.get(0), row.get(1)))
 }
 
+// ------------------------------------------------------------------- fetch
+// PLAN_QUEEN_KAFKA.md C2 — batched multi-partition read-from-offset behind
+// `POST /api/v1/fetch` (queen.log_fetch_bin_v1, 032_log_fetch). NOT a pop: it
+// takes no lease, reads no consumer row and advances no cursor, so two callers
+// asking for the same offsets get the same records and neither disturbs a
+// concurrent consumer group.
+//
+// Shape mirrors `pop_wildcard_bin` deliberately: the meta JSON carries the
+// slicing bounds and the blobs come back as a NATIVE bytea[] flattened in the
+// meta's own traversal order (entries in input order, segments in base_offset
+// order), so the broker walks both with one shared index and pays no base64 on
+// either side.
+//
+// The three bounds are the CALLER's: the handler clamps them at the HTTP
+// boundary (handlers/fetch.rs) and passes them down, so an unbounded read is
+// not expressible here.
+#[allow(clippy::too_many_arguments)]
+pub async fn log_fetch_bin(
+    client: &deadpool_postgres::Client,
+    queues: &[String],
+    partitions: &[String],
+    offsets: &[i64],
+    max_bytes: &[i32],
+    budget: i64,
+    max_records: i32,
+    // Track B (§5): scopes the partition resolve, so a queue of another tenant
+    // answers the same 'UNKNOWN_TOPIC_OR_PARTITION' as one that does not exist.
+    tenant: &str,
+) -> Result<(String, Vec<Vec<u8>>), tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached(
+            "SELECT (t.meta)::text, t.blobs \
+             FROM queen.log_fetch_bin_v1($1,$2,$3,$4,$5::int8,$6::int,$7::text::uuid) t",
+        )
+        .await?;
+    let row = client
+        .query_one(
+            &stmt,
+            &[&queues, &partitions, &offsets, &max_bytes, &budget, &max_records, &tenant],
+        )
+        .await?;
+    Ok((row.get(0), row.get(1)))
+}
+
 // Namespace/task discovery pop — GET /api/v1/pop (no queue in path). Wildcard-pops
 // across every log queue whose queen.queues row matches the namespace/task
 // filter, returning the SAME {"partitions":[...]} shape as pop_wildcard. Empty

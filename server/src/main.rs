@@ -975,6 +975,12 @@ async fn main() {
             "/api/v1/pop/queue/:queue/partition/:partition",
             get(handlers::handle_pop_partition),
         )
+        // PLAN_QUEEN_KAFKA.md C2 — batched read-from-offset with long poll. It
+        // sits beside the pop routes because it is the other way to consume,
+        // and it is POST because the request is a batch of up to 1024
+        // (queue, partition, offset) triples that does not fit a query string.
+        // Nothing about it is destructive: no lease, no cursor, no claim.
+        .route("/api/v1/fetch", post(handlers::handle_fetch))
         .route("/api/v1/ack", post(handlers::handle_ack))
         .route("/api/v1/ack/batch", post(handlers::handle_ack_batch))
         .route("/api/v1/transaction", post(handlers::handle_transaction))

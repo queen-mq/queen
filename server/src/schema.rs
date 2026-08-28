@@ -210,6 +210,13 @@ const PROCEDURES: &[(&str, &str)] = &[
     // reader can see that every one of them already exists. Rewriting it as
     // LANGUAGE sql would make that a hard requirement instead of a courtesy.
     ("031_tenant_purge.sql", include_str!("../sql/procedures/031_tenant_purge.sql")),
+    // PLAN_QUEEN_KAFKA.md C2 — the read-from-offset surface behind
+    // `POST /api/v1/fetch`. Position carries no ordering argument in either
+    // direction: its body is plpgsql (names resolve at runtime) and it reads
+    // only queen.log_partitions and queen.log_segments, both from 001. It sits
+    // last because it is newest, and because nothing else may come to depend on
+    // it — it is a leaf of the corpus, like 030 was before 031 arrived.
+    ("032_log_fetch.sql", include_str!("../sql/procedures/032_log_fetch.sql")),
 ];
 
 /// Minimum PostgreSQL this schema can be applied to, as `server_version_num`
