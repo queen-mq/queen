@@ -232,7 +232,7 @@ BEGIN
     RETURN jsonb_build_object(
         'status', 'queued',
         'baseOffset', v_base,
-        'createdAt', to_char(v_now, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
+        'createdAt', to_char(v_now AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
 END;
 $$;
 

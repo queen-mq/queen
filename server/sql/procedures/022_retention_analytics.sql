@@ -95,7 +95,7 @@ BEGIN
     SELECT
         COALESCE(jsonb_agg(
             jsonb_build_object(
-                'bucket', to_char(bucket, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+                'bucket', to_char(bucket AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
                 'retentionMsgs', retention_msgs,
                 'completedRetentionMsgs', completed_retention_msgs,
                 'evictionMsgs', eviction_msgs,
@@ -115,8 +115,8 @@ BEGIN
 
     RETURN jsonb_build_object(
         'timeRange', jsonb_build_object(
-            'from', to_char(v_from_ts, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-            'to',   to_char(v_to_ts,   'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+            'from', to_char(v_from_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+            'to',   to_char(v_to_ts AT TIME ZONE 'UTC',   'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
         ),
         'bucketMinutes', v_bucket_minutes,
         'series', COALESCE(v_series, '[]'::jsonb),

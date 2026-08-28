@@ -3,7 +3,7 @@
 
 use kafka_protocol::error::ResponseError;
 use kafka_protocol::messages::api_versions_response::ApiVersion;
-use kafka_protocol::messages::ApiVersionsResponse;
+use kafka_protocol::messages::{ApiKey, ApiVersionsResponse};
 
 use crate::versions::ADVERTISED;
 
@@ -47,13 +47,34 @@ pub fn handle(request_version: i16) -> Rendered {
 /// v0 (non-flexible) at every version for the same reason, which
 /// `ApiKey::response_header_version` already knows.
 ///
-/// The body carries the error code alone, with no api_keys: that is what the
-/// broker sends (`ApiVersionsRequest.getErrorResponse`), and clients treat
-/// UNSUPPORTED_VERSION here as "retry at v0" regardless of the contents.
+/// The body carries the error code and ONE entry: this API's own window. That
+/// is what Apache Kafka sends (`ApiVersionsRequest.getErrorResponse`, which
+/// adds exactly the ApiVersions row when the error is UNSUPPORTED_VERSION), and
+/// it is the fact the client came for — `NetworkClient.handleApiVersionsResponse`
+/// looks the entry up to choose which version to retry at, and falls back to 0
+/// when the array is empty. Answering empty is not fatal, because 0 is always a
+/// version this API speaks; it is simply silent about something this facade
+/// knows ([`ADVERTISED`]), and it leaves a client with a newer floor than 0
+/// nothing to negotiate against.
+///
+/// Everything else stays out of it: a client that could not parse our
+/// ApiVersions request cannot be assumed to parse a whole table, and the one
+/// row it is defined to read is the one row it gets.
 pub fn unsupported_version() -> Rendered {
+    let api_keys = ADVERTISED
+        .iter()
+        .filter(|a| a.key == ApiKey::ApiVersions)
+        .map(|a| {
+            ApiVersion::default()
+                .with_api_key(a.key as i16)
+                .with_min_version(a.min)
+                .with_max_version(a.max)
+        })
+        .collect();
     Rendered {
         body: ApiVersionsResponse::default()
-            .with_error_code(ResponseError::UnsupportedVersion.code()),
+            .with_error_code(ResponseError::UnsupportedVersion.code())
+            .with_api_keys(api_keys),
         encode_version: 0,
     }
 }
@@ -76,11 +97,39 @@ mod tests {
         }
     }
 
+    /// The fallback is encoded at v0 — the layout that has never changed — and
+    /// carries the one row the client came for: which ApiVersions versions this
+    /// broker speaks. Without it a client is told to downgrade and told nothing
+    /// about what to downgrade TO.
     #[test]
-    fn the_fallback_is_error_only_at_v0() {
+    fn the_fallback_names_the_version_to_retry_at() {
         let r = unsupported_version();
         assert_eq!(r.encode_version, 0);
         assert_eq!(r.body.error_code, 35);
-        assert!(r.body.api_keys.is_empty());
+
+        let advertised =
+            versions::lookup(ApiKey::ApiVersions as i16).expect("ApiVersions is in the table");
+        assert_eq!(r.body.api_keys.len(), 1, "the fallback is not one entry");
+        assert_eq!(r.body.api_keys[0].api_key, ApiKey::ApiVersions as i16);
+        assert_eq!(r.body.api_keys[0].min_version, advertised.min);
+        assert_eq!(r.body.api_keys[0].max_version, advertised.max);
+    }
+
+    /// ...and the whole body survives the v0 encoding, which is the only one a
+    /// client that asked at an unknown version can read.
+    #[test]
+    fn the_fallback_round_trips_at_version_zero() {
+        use bytes::BytesMut;
+        use kafka_protocol::protocol::{Decodable, Encodable};
+
+        let r = unsupported_version();
+        let mut wire = BytesMut::new();
+        r.body.encode(&mut wire, r.encode_version).expect("encodes");
+        let mut buf = wire.freeze();
+        let back = ApiVersionsResponse::decode(&mut buf, r.encode_version).expect("decodes");
+        assert!(buf.is_empty(), "{} trailing bytes", buf.len());
+        assert_eq!(back.error_code, 35);
+        assert_eq!(back.api_keys.len(), 1);
+        assert_eq!(back.api_keys[0].api_key, ApiKey::ApiVersions as i16);
     }
 }

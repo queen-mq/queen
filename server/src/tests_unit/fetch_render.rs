@@ -183,6 +183,97 @@ fn an_empty_payload_still_counts_one_byte_towards_min_bytes() {
 }
 
 #[test]
+fn the_rendered_response_stops_at_the_memory_ceiling() {
+    // The bound the compressed budgets cannot express: zstd hides how much a
+    // segment costs to HOLD, so the render is what has to stop. Three entries,
+    // each one segment of four identical (highly compressible) 4 KiB payloads,
+    // against a 6 KiB ceiling.
+    let payload = format!("\"{}\"", "x".repeat(4094));
+    let frames: Vec<(&str, &[u8])> = vec![
+        ("t0", payload.as_bytes()),
+        ("t1", payload.as_bytes()),
+        ("t2", payload.as_bytes()),
+        ("t3", payload.as_bytes()),
+    ];
+    let meta = r#"{"entries":[
+        {"high":4,"logStart":0,"segments":[
+            {"base":0,"startIdx":0,"take":4,"createdAt":"2026-08-28T10:00:00.000000Z"}]},
+        {"high":4,"logStart":0,"segments":[
+            {"base":0,"startIdx":0,"take":4,"createdAt":"2026-08-28T10:00:00.000000Z"}]},
+        {"high":9,"logStart":2,"segments":[
+            {"base":0,"startIdx":0,"take":4,"createdAt":"2026-08-28T10:00:00.000000Z"}]}]}"#;
+    let qs = vec!["q".to_string(); 3];
+    let ps = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+    let blobs = vec![seg(&frames), seg(&frames), seg(&frames)];
+
+    let p = render_capped(meta, &blobs, &qs, &ps, &enc(), 6 * 1024).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&p.body).expect("still valid JSON");
+
+    // Two records fit under 6 KiB; the third would not, so it is not rendered.
+    let counts: Vec<usize> = (0..3)
+        .map(|i| v["entries"][i]["records"].as_array().unwrap().len())
+        .collect();
+    assert_eq!(counts, vec![2, 0, 0], "the ceiling is CALL-wide, not per entry");
+    // ...and every entry still reports its bounds, so the answer stays aligned
+    // with the request and a caller learns where each of its lanes stands.
+    assert_eq!(v["entries"][2]["highWatermark"], 9);
+    assert_eq!(v["entries"][2]["logStartOffset"], 2);
+    assert_eq!(v["entries"][2]["partition"], "c");
+    // Records are contiguous from startIdx, so the caller resumes at the first
+    // offset it did not get.
+    assert_eq!(v["entries"][0]["records"][0]["offset"], 0);
+    assert_eq!(v["entries"][0]["records"][1]["offset"], 1);
+    // The overshoot is one record plus the entry tails, never a second budget.
+    assert!(p.body.len() < 6 * 1024 + 8 * 1024, "{} bytes", p.body.len());
+}
+
+#[test]
+fn the_first_record_of_a_call_is_delivered_however_large_it_is() {
+    // Kafka's own rule, and the one 032_log_fetch applies to its first segment:
+    // a consumer that meets a record bigger than the whole budget must be able
+    // to step past it instead of stalling on it for ever.
+    let big = format!("\"{}\"", "x".repeat(100_000));
+    let blob = seg(&[("t0", big.as_bytes()), ("t1", big.as_bytes())]);
+    let meta = r#"{"entries":[{"high":2,"logStart":0,"segments":[
+        {"base":0,"startIdx":0,"take":2,"createdAt":"2026-08-28T10:00:00.000000Z"}]}]}"#;
+
+    let p = render_capped(meta, &[blob], &["q".to_string()], &["a".to_string()], &enc(), 1024)
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&p.body).unwrap();
+    let recs = v["entries"][0]["records"].as_array().unwrap();
+    assert_eq!(recs.len(), 1, "exactly one: the exemption is not a per-record one");
+    assert_eq!(recs[0]["offset"], 0);
+}
+
+/// The pair the long poll's permit-free re-probe gate compares against
+/// (`queen.log_fetch_changed_v1`). It has to be index-aligned with the request
+/// and it has to be what the entry REPORTED, or the gate compares the wrong
+/// lane's watermarks and either spins or misses a record for ever.
+#[test]
+fn the_probe_carries_every_entrys_watermarks_for_the_gate() {
+    let meta = r#"{"entries":[
+        {"high":103,"logStart":7,"segments":[]},
+        {"high":0,"logStart":0,"segments":[]},
+        {"error":"OFFSET_OUT_OF_RANGE","high":900,"logStart":800,"segments":[]}]}"#;
+    let qs = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+    let ps = vec!["0".to_string(), "1".to_string(), "2".to_string()];
+    let p = render_fetch(meta, &[], &qs, &ps, &enc()).unwrap();
+    assert_eq!(p.highs, vec![103, 0, 900]);
+    assert_eq!(p.starts, vec![7, 0, 800]);
+}
+
+/// The gate is SQL the handler names by string; a rename on either side is a
+/// silent fall back to "always re-read", which is the priority inversion this
+/// whole path exists to avoid.
+#[test]
+fn the_reprobe_gate_is_the_function_the_sql_defines() {
+    const FETCH_SQL: &str = include_str!("../../sql/procedures/032_log_fetch.sql");
+    assert!(FETCH_SQL.contains("CREATE FUNCTION queen.log_fetch_changed_v1("));
+    const DB: &str = include_str!("../db.rs");
+    assert!(DB.contains("queen.log_fetch_changed_v1($1,$2,$3,$4,$5::text::uuid)"));
+}
+
+#[test]
 fn a_misaligned_sp_answer_is_refused_rather_than_served() {
     // Fewer entries than were asked for would shift every echoed queue/partition
     // by one, handing a caller ANOTHER partition's watermarks to commit. That is
@@ -358,4 +449,9 @@ fn the_clamps_are_the_ceilings_the_module_documents() {
     );
     // The recheck ceiling is the plan's 100-250ms band.
     assert!((100..=250).contains(&RECHECK_MS));
+    // The memory ceiling is what render_fetch actually wires into render_capped;
+    // the truncation RULE is tested above against a small cap.
+    assert_eq!(MAX_RENDERED_BYTES, 64 * 1024 * 1024);
+    const SRC: &str = include_str!("../handlers/fetch.rs");
+    assert!(SRC.contains("render_capped(meta, blobs, queues, partitions, enc, MAX_RENDERED_BYTES)"));
 }

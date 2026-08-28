@@ -1,0 +1,49 @@
+---
+params: []
+description: "Every Kafka API the queen-kafka facade advertises, its version window, and the APIs it deliberately does not offer."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Regenerate with: pnpm --dir webdoc gen
+    Source of truth:
+      - queen-kafka/src/versions.rs (ADVERTISED)
+*/}
+
+The facade advertises **14 Kafka APIs**. Every row is read out of `queen-kafka/src/versions.rs` at build time, which is the same table the ApiVersions response is built from and the same table every incoming request is checked against.
+
+| API | Versions | Where the window ends, and why |
+| --- | --- | --- |
+| `ApiVersions` | v0–v3 | Ceiling: one below the schema, on purpose. v3 is what every client in the compatibility matrix negotiates against a 3.x broker, and it keeps the v0 fallback on a path a real client reaches. |
+| `Fetch` | v4–v6 | Ceiling: v7 introduces fetch sessions (KIP-227), which are per-connection broker state. The facade keeps none by design, so the cap deletes `session_id`, `session_epoch` and `forgotten_topics_data` rather than half-answering them. v4 is the schema's own floor. |
+| `FindCoordinator` | v0–v3 | Ceiling: v4 is the batched form, which exists for clusters where groups live on different brokers. Here the answer is this process, for every key, always. |
+| `Heartbeat` | v0–v2 | Ceiling: v3 carries `group_instance_id` (static membership, out of scope). |
+| `JoinGroup` | v0–v4 | Ceiling: v5 carries `group_instance_id` (static membership, out of scope). v4 is also where MEMBER_ID_REQUIRED lands, and that is implemented. |
+| `LeaveGroup` | v0–v2 | Ceiling: v3 carries `group_instance_id`, and is also where one request may remove several members at once. Below it a request is exactly one member, which is the shape the coordinator has. |
+| `ListOffsets` | v1–v5 | Ceiling: v7 adds the MAX_TIMESTAMP sentinel, a time-index question Queen cannot answer. v5 is the last version whose whole surface is the two watermark sentinels. v1 is the schema's own floor. |
+| `Metadata` | v0–v9 | Ceiling: v10 adds topic ids, and a client may then address a topic by a UUID this facade has no registry to resolve. v9 is already the flexible encoding and carries every field a client needs. |
+| `OffsetCommit` | v2–v6 | Ceiling: v7 carries `group_instance_id` (static membership, out of scope). Floor: v0 and v1 are the ZooKeeper-era offset store. |
+| `OffsetFetch` | v1–v7 | Ceiling: v8 fetches offsets for several groups in one request and changes the response shape. v7's `require_stable` is answered honestly, because there are no open transactions here to withhold anything from. |
+| `Produce` | v3–v9 | Floor: v3 is the first version whose records are RecordBatch v2. Ceiling: v10 adds the leader-change hint `current_leader`, which has no meaning against one broker with no elections, and v13 addresses topics by UUID. |
+| `SaslAuthenticate` | v0–v1 | Ceiling: v2 is the flexible encoding and adds no field. v1's `session_lifetime_ms` is answered 0, which is what stops every client re-authenticating on a timer this facade does not run. |
+| `SaslHandshake` | v0–v1 | Both versions, because they are the two SASL flows: after v0 the tokens travel as raw bytes in ordinary frames, after v1 inside SaslAuthenticate requests. Both are implemented. |
+| `SyncGroup` | v0–v2 | Ceiling: v3 carries `group_instance_id` (static membership, out of scope). |
+
+### Not offered
+
+A client that sends one of these gets no response frame at all: the connection closes, with the reason in the facade's log. That is Apache Kafka's own behaviour for an unparseable request, and it is unreachable for a client that read the ApiVersions answer, which is every client.
+
+| API | What a client wants it for | Why it is not here |
+| --- | --- | --- |
+| `InitProducerId` | Opens a transactional or idempotent producer session. | Transactions and exactly-once are excluded by plan. |
+| `AddPartitionsToTxn` | Enrols a partition in an open transaction. | Same exclusion. |
+| `EndTxn` | Commits or aborts a transaction. | Same exclusion. |
+| `TxnOffsetCommit` | Commits consumer offsets inside a transaction. | Same exclusion, and the reason Kafka Streams cannot run against the facade. |
+| `ConsumerGroupHeartbeat` | The KIP-848 broker-side rebalance protocol. | Excluded by plan; groups use the classic Join/Sync protocol. |
+| `CreateTopics` | Creates a topic explicitly, with a partition count. | Topics are auto-created on first Metadata instead. |
+| `DeleteTopics` | Deletes a topic. | Deleting a queue is a Queen operation. |
+| `DeleteGroups` | Deletes a consumer group and its committed offsets. | Nothing removes committed offsets through the facade yet. |
+| `DescribeConfigs` | Reads a topic's or broker's configuration. | Queue options are a Queen surface. |
+| `AlterConfigs` | Writes a topic's or broker's configuration. | Same. |
+| `DescribeGroups` | Lists a group's members and their assignments. | Membership is in-memory and not exposed. |
+| `ListGroups` | Lists the groups a broker coordinates. | Same. |
+| `DeleteRecords` | Truncates a partition below an offset. | Retention is a Queen queue option. |

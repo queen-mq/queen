@@ -1,6 +1,6 @@
 ---
 title: The documentation site
-description: "How this site is built: the content tree, the strict frontmatter contract, the seven generators that derive fact tables from the source, and the drift guards that fail the build."
+description: "How this site is built: the content tree, the strict frontmatter contract, the eight generators that derive fact tables from the source, and the drift guards that fail the build."
 type: how-to
 tier: internals
 sidebar:
@@ -17,6 +17,7 @@ sourceOfTruth:
   - webdoc/scripts/gen-metrics.mjs
   - webdoc/scripts/gen-proxy-routes.mjs
   - webdoc/scripts/gen-openapi.mjs
+  - webdoc/scripts/gen-kafka-apis.mjs
   - webdoc/scripts/gen-charts.mjs
   - webdoc/scripts/charts.py
   - webdoc/scripts/gen-snippets.mjs
@@ -81,8 +82,8 @@ whole tree is present in every rail with groups collapsed, so a reader can see t
 exists without having to guess: the group holding the current page opens itself.
 
 `src/content/partials/` holds fragments that pages pull in with `<Render file="…" />`. Both of
-its subdirectories are machine-written: `generated/` by five of the generators and `snippets/`
-by the sixth. Editing a file in either is pointless: the next `pnpm gen` overwrites it, and
+its subdirectories are machine-written: `generated/` by six of the generators and `snippets/`
+by the seventh. Editing a file in either is pointless: the next `pnpm gen` overwrites it, and
 `gen-snippets` deletes and rewrites its whole directory so that removing a marker in the source
 removes the partial.
 
@@ -151,10 +152,10 @@ plugins attached through the MDX integration are dropped, so Mermaid is not wire
 build-time plugin: diagrams are `<pre class="mermaid">` blocks in the page source, rendered in
 the browser by `src/scripts/mermaid.ts`, which the base layout loads on every page.
 
-## The seven generators
+## The eight generators
 
 `pnpm gen` runs `scripts/gen.mjs`, which shells out to each generator in turn.
-`pnpm gen:check` runs the same seven with `--check`, which compares instead of writing and exits
+`pnpm gen:check` runs the same eight with `--check`, which compares instead of writing and exits
 non-zero on any difference. Every generator writes through `emitPartial`, which stamps a banner
 naming the sources it read and the command to regenerate.
 
@@ -165,6 +166,7 @@ naming the sources it read and the command to regenerate.
 | `gen-metrics.mjs` | `generated/broker-metrics` | the Prometheus exposition assembled in `server/src/metrics.rs` and `server/src/handlers/status.rs` |
 | `gen-proxy-routes.mjs` | `generated/proxy-route-classes` | the request classifier in `proxy/src/routes.rs`, applied to the broker's real route list |
 | `gen-openapi.mjs` | `generated/openapi-coverage`, plus `public/openapi/queen-{broker,proxy}.json` | both routers, each handler's `Query<T>` extractor and body struct, the `StatusCode` variants each handler can return, and the access table |
+| `gen-kafka-apis.mjs` | `generated/kafka-support-matrix` | the `ADVERTISED` table in `queen-kafka/src/versions.rs`, which is both the ApiVersions answer and the gate every request is checked against |
 | `gen-charts.mjs` | `public/charts/*.svg` | the archived CSV and stdout artifacts under `benchmark-queen/`, plotted by `charts.py` |
 | `gen-snippets.mjs` | `snippets/*` and `snippets/index` | marked regions of the client test suites |
 
@@ -244,6 +246,21 @@ operation ids, path parameters that are templated but not declared, dangling `$r
 Rust-style `:param` leftovers all abort the run. That check earned its place immediately: it
 caught `/console` and `/console/` collapsing onto one operation id on the first run.
 
+### Kafka support matrix
+
+`queen-kafka/src/versions.rs` holds one `const ADVERTISED` table, and the Kafka facade both
+builds its `ApiVersions` answer from it and checks every incoming request against it. The
+generator parses that const into the published matrix, so an API the facade offers cannot be
+missing from the page and one it does not offer cannot appear.
+
+Two things on the page are not in the const, and both are pinned rather than trusted. The
+sentence beside each row says where the version window ends and why, which is prose about a
+number, so the whole const is fingerprinted: a raised ceiling fails the generator instead of
+leaving a reason attached to a boundary that has moved. And the second table, the APIs the
+facade deliberately does not offer, is asserted **absent** from the const, so implementing one
+of them fails the build rather than publishing a refusal that no longer happens. A newly
+advertised API with no sentence written for it is a hard error too.
+
 ### Benchmark figures
 
 A chart is a claim, so the figures are derived like everything else:
@@ -302,7 +319,10 @@ The scanned directories are the JavaScript, Python, Go, C++ and Rust client test
 
 Two of the generators cannot work by parsing alone: they need to *apply* a Rust rule, so they
 mirror it in JavaScript. A stale mirror would not fail. It would quietly publish a wrong table,
-which is the worst possible outcome. So each mirrored function is fingerprinted.
+which is the worst possible outcome. So each mirrored function is fingerprinted. A third case
+takes the same guard for a different reason: `gen-kafka-apis.mjs` parses its table faithfully but
+publishes a hand-written sentence beside each row explaining a number, and a sentence about a
+number that has changed is the same silent lie.
 
 `fingerprint()` strips line and block comments, collapses all whitespace, hashes with SHA-256
 and keeps the first 16 hex characters. Comment edits and reflows therefore do not trip the
@@ -315,6 +335,7 @@ new fingerprint in.
 | `route_access_level` in `server/src/auth.rs` | `gen-routes.mjs` (and re-derived in `gen-openapi.mjs`) |
 | `classify` in `proxy/src/routes.rs` | `gen-proxy-routes.mjs` |
 | `is_operator_route` in `proxy/src/routes.rs` | `gen-proxy-routes.mjs` |
+| `ADVERTISED` in `queen-kafka/src/versions.rs` | `gen-kafka-apis.mjs` |
 
 When a guard trips, the generator refuses to run at all. That is the intended behaviour: the
 build stops until a human has compared the two implementations.
@@ -324,7 +345,7 @@ build stops until a human has compared the two implementations.
 | Command | What it does |
 | --- | --- |
 | `pnpm dev` | Astro dev server |
-| `pnpm gen` | run all seven generators, writing partials, the OpenAPI documents and the figures |
+| `pnpm gen` | run all eight generators, writing partials, the OpenAPI documents and the figures |
 | `pnpm gen:check` | compare instead of writing; non-zero on drift |
 | `pnpm lint:docs` | the Nimbus linter over prose, MDX and frontmatter |
 | `pnpm lint:docs:fix` | the same, applying the fixable rules |

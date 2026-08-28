@@ -211,11 +211,17 @@ async fn async_main(worker_threads: usize) {
                 tracing::error!(target: "auth", mode = boot.mode.as_str(), "{e}");
                 std::process::exit(1);
             }
+            // The audience rides on this line because it is otherwise
+            // invisible: a cell whose `aud` does not match what the control
+            // plane stamps rejects every fleet token, and a cell with none
+            // configured accepts every sibling's. Both are worth being able to
+            // read off a boot log.
             None => tracing::info!(
                 target: "auth",
                 mode = boot.mode.as_str(),
                 mint = keys.can_mint(),
                 verify = keys.can_verify(),
+                aud = cfg.jwt_audience.as_deref().unwrap_or("<any>"),
                 "jwt identity"
             ),
         }

@@ -372,7 +372,7 @@ fn role_as_str(r: Role) -> &'static str {
 // ---------------------------------------------------------------------------
 
 /// Wire shape of a proxy-minted user token. `exp`/`iss` are validated by
-/// `jsonwebtoken`; `sub`/`jti`/`role`/`cluster` we validate by hand so the
+/// `jsonwebtoken`; `sub`/`jti`/`role`/`cluster`/`aud` we validate by hand so the
 /// broker-parity semantics (UUID subs, mandatory jti, closed role set) live
 /// here rather than being implied by serde.
 #[derive(Debug, Serialize, Deserialize)]
@@ -386,6 +386,67 @@ struct UserClaims {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     cluster: Option<String>,
+    /// OPTIONAL, and optional in both directions: this proxy does not mint it,
+    /// and a token without it verifies exactly as it did before the claim
+    /// existed. See `audience_ok` for the rule and why it is one-sided.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aud: Option<Audience>,
+}
+
+/// The two shapes RFC 7519 §4.1.3 allows `aud` to take: one string, or a list
+/// of them. Both are accepted because the minter is a different codebase (the
+/// control plane) and half the JWT libraries in existence emit the array form
+/// for a single audience. Parsing only the string would turn that choice into a
+/// token this proxy cannot even deserialize, which is a 401 on every session of
+/// a correctly-configured cell.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum Audience {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Audience {
+    /// The audiences actually named, blanks dropped. `""` and `[]` are legal
+    /// JSON but name nobody, so they are treated as an absent claim rather than
+    /// as an audience that can never match.
+    fn values(&self) -> impl Iterator<Item = &str> {
+        let all: &[String] = match self {
+            Audience::One(s) => std::slice::from_ref(s),
+            Audience::Many(v) => v,
+        };
+        all.iter().map(|s| s.trim()).filter(|s| !s.is_empty())
+    }
+}
+
+/// The audience rule, pure so the whole matrix is pinned by tests.
+///
+/// A verify-only cell holds the fleet's public key, so every sibling's token
+/// verifies here on signature and issuer alone: one token minted for cell A
+/// replays against cell B, C and D. `aud` is what binds a token to the cell it
+/// was issued for.
+///
+/// The rule is ONE-SIDED on purpose. A token that names an audience must name
+/// ours; a token that names none is accepted. Every token minted before this
+/// claim existed is in that second group, so this ships and takes effect on a
+/// fleet the moment the control plane starts stamping `aud`, with no window in
+/// which already-issued sessions are rejected and no ordering requirement
+/// between deploying the cells and deploying the minter. The cost is stated
+/// plainly: until the minter sets it, an unstamped token still replays, and the
+/// day the fleet is fully stamped is the day this becomes a real boundary.
+///
+/// `want == None` (no audience configured) accepts everything, which is what
+/// every self-hosted proxy that sets neither variable keeps getting.
+fn audience_ok(want: Option<&str>, aud: Option<&Audience>) -> bool {
+    let Some(want) = want else { return true };
+    let mut named = aud.into_iter().flat_map(Audience::values).peekable();
+    if named.peek().is_none() {
+        return true;
+    }
+    // Case-insensitive: the value is a hostname on both sides (config.rs
+    // lowercases what it resolves), and a minter that stamps `Cell-A` must not
+    // be refused by a cell configured as `cell-a`.
+    named.any(|a| a.eq_ignore_ascii_case(want))
 }
 
 /// Post-verification, shape-checked view handed back to `authenticate`.
@@ -407,6 +468,8 @@ pub(crate) enum JwtReject {
     NotConfigured,
     Expired,
     BadIssuer,
+    /// The token named an audience, and it was somebody else's cell.
+    BadAudience,
     BadSignature,
     Malformed,
     BadClaim(&'static str),
@@ -419,6 +482,7 @@ impl JwtReject {
             JwtReject::NotConfigured => "jwt signer not configured".to_string(),
             JwtReject::Expired => "token expired".to_string(),
             JwtReject::BadIssuer => "issuer mismatch".to_string(),
+            JwtReject::BadAudience => "audience mismatch (token minted for another cell)".to_string(),
             JwtReject::BadSignature => "signature invalid".to_string(),
             JwtReject::Malformed => "malformed token".to_string(),
             JwtReject::BadClaim(c) => format!("bad claim: {c}"),
@@ -474,6 +538,9 @@ enum Signer {
 pub struct Keys {
     signer: Signer,
     issuer: String,
+    /// The `aud` a token may name, or `None` to enforce none. Resolved once, by
+    /// `config::resolve_jwt_audience`.
+    audience: Option<String>,
     /// jti -> (revoked?, checked_at). 60s TTL; bounds revocation propagation.
     revoked_cache: Mutex<HashMap<String, (bool, Instant)>>,
     /// (user, cluster) -> (role, checked_at). 30s TTL; positive memberships only.
@@ -543,6 +610,7 @@ impl Keys {
             pub_override,
             cfg.jwt_hs_secret.clone(),
             cfg.jwt_issuer.clone(),
+            cfg.jwt_audience.clone(),
         )
     }
 
@@ -553,6 +621,7 @@ impl Keys {
         ed_pub_pem_override: Option<String>,
         hs_secret: Option<String>,
         issuer: String,
+        audience: Option<String>,
     ) -> Keys {
         let signer = match ed_priv_pem.as_ref().filter(|s| !s.trim().is_empty()) {
             Some(priv_pem) => match EncodingKey::from_ed_pem(priv_pem.as_bytes()) {
@@ -603,6 +672,7 @@ impl Keys {
         Keys {
             signer,
             issuer,
+            audience,
             revoked_cache: Mutex::new(HashMap::new()),
             role_cache: Mutex::new(HashMap::new()),
             operator_cache: Mutex::new(HashMap::new()),
@@ -638,6 +708,11 @@ impl Keys {
             jti: Uuid::new_v4().to_string(),
             role: role.to_string(),
             cluster: cluster.map(|c| c.to_string()),
+            // Not stamped here. This proxy mints for itself, and a token it
+            // both mints and verifies gains nothing from an audience; the
+            // claim exists for the CONTROL PLANE's fleet tokens, which are
+            // minted elsewhere and must not be replayable across cells.
+            aud: None,
         };
         self.sign(&claims)
     }
@@ -677,12 +752,18 @@ impl Keys {
         v.algorithms = vec![alg]; // pin — no alg confusion / downgrade
         v.validate_exp = true; // exp is mandatory (default required_spec_claims = {exp})
         v.validate_nbf = false;
-        v.validate_aud = false; // our tokens carry no aud
+        // `aud` is checked by hand below, not here: jsonwebtoken's own check
+        // REQUIRES the claim once an expected audience is set, and the whole
+        // point of this one is that a token without `aud` stays valid.
+        v.validate_aud = false;
         v.set_issuer(&[self.issuer.as_str()]);
 
         let data = decode::<UserClaims>(token, dec, &v).map_err(|e| map_jwt_err(&e))?;
         let c = data.claims;
 
+        if !audience_ok(self.audience.as_deref(), c.aud.as_ref()) {
+            return Err(JwtReject::BadAudience);
+        }
         if c.jti.trim().is_empty() {
             return Err(JwtReject::MissingClaim("jti"));
         }
@@ -1075,16 +1156,21 @@ fn now_secs() -> i64 {
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// Test fixtures shared with other modules' suites
 // ---------------------------------------------------------------------------
 
+/// Key material other modules' unit tests need but cannot build, because the
+/// PEM plumbing, `UserClaims` and `sign` are all private to this module.
+///
+/// It exists for `oauth.rs`'s dashboard-handoff suite, which has to exercise
+/// the real EdDSA verify against a real verify-only host: stubbing that out
+/// would test the branch and not the crypto, and the crypto is the thing.
 #[cfg(test)]
-mod tests {
+pub(crate) mod testkit {
     use super::*;
     use ring::rand::SystemRandom;
-    use ring::signature::{Ed25519KeyPair, KeyPair};
 
-    fn der_to_pem(der: &[u8], label: &str) -> String {
+    pub(crate) fn der_to_pem(der: &[u8], label: &str) -> String {
         let b64 = B64_STD.encode(der);
         let mut body = String::new();
         for chunk in b64.as_bytes().chunks(64) {
@@ -1094,15 +1180,86 @@ mod tests {
         format!("-----BEGIN {label}-----\n{body}-----END {label}-----\n")
     }
 
+    /// The two hosts a fleet handoff runs between, sharing one keypair: a
+    /// mint-capable auth host, and the VERIFY-ONLY cell that holds only its
+    /// public key. `audience` is the cell's expected `aud`.
+    ///
+    /// Two calls give two unrelated keypairs, which is how a suite gets the
+    /// "signed by somebody else's auth host" case.
+    pub(crate) fn ed_handoff_pair(issuer: &str, audience: Option<&str>) -> (Keys, Keys) {
+        let rng = SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
+        let kp = Ed25519KeyPair::from_pkcs8_maybe_unchecked(pkcs8.as_ref()).unwrap();
+        // SubjectPublicKeyInfo for Ed25519 is a fixed 12-byte prefix + the raw
+        // 32-byte key, the 44-byte shape `ed_pub_pem_to_raw` reads back.
+        let mut spki: Vec<u8> =
+            vec![0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+        spki.extend_from_slice(kp.public_key().as_ref());
+        let mint = Keys::build(
+            Some(der_to_pem(pkcs8.as_ref(), "PRIVATE KEY")),
+            None,
+            None,
+            issuer.to_string(),
+            audience.map(str::to_string),
+        );
+        let verify_only = Keys::build(
+            None,
+            Some(der_to_pem(&spki, "PUBLIC KEY")),
+            None,
+            issuer.to_string(),
+            audience.map(str::to_string),
+        );
+        (mint, verify_only)
+    }
+
+    /// Sign a session token with an explicit `exp`, for the expiry edges
+    /// `mint_user_jwt`'s `ttl_s: u64` cannot express. `aud` is stamped as the
+    /// control plane would stamp it, which no proxy mint ever does.
+    pub(crate) fn mint_at(
+        keys: &Keys,
+        user_id: Uuid,
+        exp: i64,
+        aud: Option<&str>,
+    ) -> Result<String, String> {
+        keys.sign(&UserClaims {
+            sub: user_id.to_string(),
+            iss: keys.issuer.clone(),
+            iat: Some(exp - 900),
+            exp,
+            jti: Uuid::new_v4().to_string(),
+            role: "viewer".to_string(),
+            cluster: None,
+            aud: aud.map(|a| Audience::One(a.to_string())),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ring::rand::SystemRandom;
+    use ring::signature::{Ed25519KeyPair, KeyPair};
+
+    use super::testkit::der_to_pem;
+
     fn ed_keys(issuer: &str) -> Keys {
+        ed_keys_aud(issuer, None)
+    }
+
+    /// `ed_keys` with an expected audience, for the `aud` matrix below.
+    fn ed_keys_aud(issuer: &str, audience: Option<&str>) -> Keys {
         let rng = SystemRandom::new();
         let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
         let pem = der_to_pem(pkcs8.as_ref(), "PRIVATE KEY");
-        Keys::build(Some(pem), None, None, issuer.to_string())
+        Keys::build(Some(pem), None, None, issuer.to_string(), audience.map(str::to_string))
     }
 
     fn hs_keys(issuer: &str) -> Keys {
-        Keys::build(None, None, Some("dev-secret-value".to_string()), issuer.to_string())
+        Keys::build(None, None, Some("dev-secret-value".to_string()), issuer.to_string(), None)
     }
 
     #[test]
@@ -1171,6 +1328,7 @@ mod tests {
             jti: Uuid::new_v4().to_string(),
             role: "viewer".to_string(),
             cluster: None,
+            aud: None,
         };
         let token = keys.sign(&claims).unwrap();
         let err = keys.verify_jwt_claims(&token).unwrap_err();
@@ -1189,10 +1347,154 @@ mod tests {
             jti: Uuid::new_v4().to_string(),
             role: "viewer".to_string(),
             cluster: None,
+            aud: None,
         };
         let token = keys.sign(&claims).unwrap();
         let err = keys.verify_jwt_claims(&token).unwrap_err();
         assert!(matches!(err, JwtReject::BadIssuer), "got {err:?}");
+    }
+
+    // ---- optional audience: binding a fleet token to one cell --------------
+
+    /// A token carrying exactly this `aud`. `mint_user_jwt` never stamps one
+    /// (the minter this claim exists for is the control plane, not a proxy), so
+    /// the fleet-token shape has to be built by hand here.
+    fn token_with_aud(keys: &Keys, aud: Option<Audience>) -> String {
+        let now = now_secs();
+        keys.sign(&UserClaims {
+            sub: Uuid::new_v4().to_string(),
+            iss: "queen-proxy".to_string(),
+            iat: Some(now),
+            exp: now + 3600,
+            jti: Uuid::new_v4().to_string(),
+            role: "viewer".to_string(),
+            cluster: None,
+            aud,
+        })
+        .unwrap()
+    }
+
+    /// Backward compatibility, and the reason the rule is one-sided: every
+    /// token any minter has ever produced carries no `aud`, and configuring an
+    /// audience must not reject a single one of them. Without this the change
+    /// is a flag day.
+    #[test]
+    fn a_token_with_no_audience_is_accepted_by_a_cell_that_has_one() {
+        let keys = ed_keys_aud("queen-proxy", Some("cell-a.queenmq.cloud"));
+        let token = keys.mint_user_jwt(Uuid::new_v4(), "admin", None, 3600).unwrap();
+        assert!(keys.verify_jwt_claims(&token).is_ok(), "an unstamped token must keep working");
+        // ... including the explicitly-empty shapes, which name nobody.
+        for empty in [Audience::One(String::new()), Audience::One("  ".into()), Audience::Many(vec![])] {
+            let t = token_with_aud(&keys, Some(empty));
+            assert!(keys.verify_jwt_claims(&t).is_ok(), "an empty aud names no cell");
+        }
+    }
+
+    #[test]
+    fn a_token_naming_this_cell_is_accepted() {
+        let keys = ed_keys_aud("queen-proxy", Some("cell-a.queenmq.cloud"));
+        for aud in [
+            Audience::One("cell-a.queenmq.cloud".into()),
+            // The array form, which plenty of JWT libraries emit for a single
+            // audience, and one naming several cells including this one.
+            Audience::Many(vec!["cell-a.queenmq.cloud".into()]),
+            Audience::Many(vec!["cell-b.queenmq.cloud".into(), "cell-a.queenmq.cloud".into()]),
+            // A hostname is case-insensitive; a minter that stamps it mixed-case
+            // must not lock the cell out of every session it was configured for.
+            Audience::One("Cell-A.QueenMQ.Cloud".into()),
+        ] {
+            let token = token_with_aud(&keys, Some(aud));
+            assert!(keys.verify_jwt_claims(&token).is_ok());
+        }
+    }
+
+    #[test]
+    fn a_token_naming_another_cell_is_refused() {
+        let keys = ed_keys_aud("queen-proxy", Some("cell-a.queenmq.cloud"));
+        for aud in [
+            Audience::One("cell-b.queenmq.cloud".into()),
+            Audience::Many(vec!["cell-b.queenmq.cloud".into(), "cell-c.queenmq.cloud".into()]),
+            // A suffix is not a match: the audience is a whole name, exactly as
+            // QUEEN_PROXY_SHARED_HOSTS is.
+            Audience::One("queenmq.cloud".into()),
+            Audience::One("evil-cell-a.queenmq.cloud".into()),
+        ] {
+            let token = token_with_aud(&keys, Some(aud));
+            let err = keys.verify_jwt_claims(&token).unwrap_err();
+            assert!(matches!(err, JwtReject::BadAudience), "got {err:?}");
+        }
+    }
+
+    /// The property the claim exists for, end to end. Two cells verify with the
+    /// SAME fleet public key, so today each accepts anything minted for the
+    /// other. Once the token names its cell, it stops crossing.
+    #[test]
+    fn a_stamped_token_does_not_replay_against_a_sibling_cell() {
+        let (priv_pem, pub_pem, _) = ed_pair();
+        let control_plane = Keys::build(Some(priv_pem), None, None, "queen-proxy".to_string(), None);
+        let cell = |aud: &str| {
+            Keys::build(None, Some(pub_pem.clone()), None, "queen-proxy".to_string(), Some(aud.into()))
+        };
+        let cell_a = cell("cell-a.queenmq.cloud");
+        let cell_b = cell("cell-b.queenmq.cloud");
+
+        let for_a = token_with_aud(&control_plane, Some(Audience::One("cell-a.queenmq.cloud".into())));
+        assert!(cell_a.verify_jwt_claims(&for_a).is_ok(), "the cell it was minted for accepts it");
+        assert!(
+            matches!(cell_b.verify_jwt_claims(&for_a).unwrap_err(), JwtReject::BadAudience),
+            "the sibling must refuse a token that names cell A"
+        );
+
+        // The same token against a cell with no audience configured: accepted,
+        // which is exactly the replay this closes and the behaviour every
+        // deployment keeps until it configures one.
+        let unconfigured = Keys::build(None, Some(pub_pem), None, "queen-proxy".to_string(), None);
+        assert!(unconfigured.verify_jwt_claims(&for_a).is_ok());
+    }
+
+    /// The rule itself, without crypto in the way.
+    #[test]
+    fn audience_matrix() {
+        // Nothing configured: every token passes, stamped or not.
+        assert!(audience_ok(None, None));
+        assert!(audience_ok(None, Some(&Audience::One("anything".into()))));
+        // Configured: absent or blank aud passes, ours passes, theirs does not.
+        let want = Some("cell-a");
+        assert!(audience_ok(want, None));
+        assert!(audience_ok(want, Some(&Audience::One(String::new()))));
+        assert!(audience_ok(want, Some(&Audience::Many(vec![]))));
+        assert!(audience_ok(want, Some(&Audience::One("cell-a".into()))));
+        assert!(audience_ok(want, Some(&Audience::One(" cell-a ".into()))));
+        assert!(audience_ok(want, Some(&Audience::Many(vec!["cell-b".into(), "cell-a".into()]))));
+        assert!(!audience_ok(want, Some(&Audience::One("cell-b".into()))));
+        assert!(!audience_ok(want, Some(&Audience::Many(vec!["cell-b".into(), "cell-c".into()]))));
+        // A blank entry beside a real one does not turn the claim into "absent".
+        assert!(!audience_ok(want, Some(&Audience::Many(vec!["".into(), "cell-b".into()]))));
+    }
+
+    /// `aud` is read off the wire, so both JSON shapes have to survive serde.
+    /// A string-only parse would fail the whole decode on the array form, which
+    /// reads as a malformed token rather than as the deserialization choice it
+    /// really is.
+    #[test]
+    fn both_audience_json_shapes_deserialize() {
+        let one: UserClaims = serde_json::from_str(
+            r#"{"sub":"s","iss":"i","exp":1,"jti":"j","role":"viewer","aud":"cell-a"}"#,
+        )
+        .unwrap();
+        assert!(matches!(one.aud, Some(Audience::One(ref s)) if s == "cell-a"));
+        let many: UserClaims = serde_json::from_str(
+            r#"{"sub":"s","iss":"i","exp":1,"jti":"j","role":"viewer","aud":["cell-a","cell-b"]}"#,
+        )
+        .unwrap();
+        assert!(matches!(many.aud, Some(Audience::Many(ref v)) if v.len() == 2));
+        let none: UserClaims =
+            serde_json::from_str(r#"{"sub":"s","iss":"i","exp":1,"jti":"j","role":"viewer"}"#)
+                .unwrap();
+        assert!(none.aud.is_none());
+        // And the mint path never writes the key at all.
+        let minted = serde_json::to_string(&none).unwrap();
+        assert!(!minted.contains("aud"), "{minted}");
     }
 
     #[test]
@@ -1275,7 +1577,7 @@ mod tests {
         spki.extend_from_slice(&raw_pub);
         let pub_pem = der_to_pem(&spki, "PUBLIC KEY");
 
-        let keys = Keys::build(Some(priv_pem), Some(pub_pem), None, "queen-proxy".to_string());
+        let keys = Keys::build(Some(priv_pem), Some(pub_pem), None, "queen-proxy".to_string(), None);
         let token = keys.mint_user_jwt(Uuid::new_v4(), "consumer", None, 3600).unwrap();
         assert!(keys.verify_jwt_claims(&token).is_ok());
 
@@ -1712,7 +2014,7 @@ mod tests {
 
     #[test]
     fn no_signer_configured_cannot_mint_or_verify() {
-        let keys = Keys::build(None, None, None, "queen-proxy".to_string());
+        let keys = Keys::build(None, None, None, "queen-proxy".to_string(), None);
         assert!(keys.mint_user_jwt(Uuid::new_v4(), "admin", None, 60).is_err());
         assert!(matches!(keys.verify_jwt_claims("x.y.z"), Err(JwtReject::NotConfigured)));
         // What main.rs's boot gate reads, and the shape it refuses in mint mode.
@@ -1748,10 +2050,10 @@ mod tests {
     #[test]
     fn a_public_key_alone_verifies_and_refuses_to_mint() {
         let (priv_pem, pub_pem, raw_pub) = ed_pair();
-        let auth_host = Keys::build(Some(priv_pem), None, None, "queen-proxy".to_string());
+        let auth_host = Keys::build(Some(priv_pem), None, None, "queen-proxy".to_string(), None);
         let token = auth_host.mint_user_jwt(Uuid::new_v4(), "admin", None, 3600).unwrap();
 
-        let cell = Keys::build(None, Some(pub_pem), None, "queen-proxy".to_string());
+        let cell = Keys::build(None, Some(pub_pem), None, "queen-proxy".to_string(), None);
         assert!(cell.can_verify(), "a verify-only host must verify");
         assert!(!cell.can_mint(), "a verify-only host holds no private key");
         assert!(cell.verify_jwt_claims(&token).is_ok(), "the auth host's token must be accepted");
@@ -1773,7 +2075,7 @@ mod tests {
         // Boot-gate input: `can_verify == false` in verify-only mode is what
         // turns a typo'd CA-style paste into a refusal instead of a cell that
         // 401s every session with a green data plane.
-        let keys = Keys::build(None, Some("-----BEGIN PUBLIC KEY-----\nnope\n-----END PUBLIC KEY-----\n".to_string()), None, "queen-proxy".to_string());
+        let keys = Keys::build(None, Some("-----BEGIN PUBLIC KEY-----\nnope\n-----END PUBLIC KEY-----\n".to_string()), None, "queen-proxy".to_string(), None);
         assert!(!keys.can_verify());
         assert!(!keys.can_mint());
     }
@@ -1785,12 +2087,12 @@ mod tests {
         // to take the signer out from under one that also carries a public key.
         let (priv_pem, pub_pem, _) = ed_pair();
         let keys =
-            Keys::build(None, Some(pub_pem), Some("dev-secret-value".into()), "queen-proxy".into());
+            Keys::build(None, Some(pub_pem), Some("dev-secret-value".into()), "queen-proxy".into(), None);
         assert!(keys.can_mint(), "HS256 mints");
         let own = keys.mint_user_jwt(Uuid::new_v4(), "viewer", None, 60).unwrap();
         assert!(keys.verify_jwt_claims(&own).is_ok());
         // And the algorithm is still pinned to HS: the Ed token does not verify.
-        let ed = Keys::build(Some(priv_pem), None, None, "queen-proxy".to_string())
+        let ed = Keys::build(Some(priv_pem), None, None, "queen-proxy".to_string(), None)
             .mint_user_jwt(Uuid::new_v4(), "viewer", None, 60)
             .unwrap();
         assert!(keys.verify_jwt_claims(&ed).is_err());

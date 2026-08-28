@@ -33,6 +33,13 @@
 //! so there is no ownership gate to run (the `handle_get_message` case): name
 //! resolution IS the gate.
 //!
+//! Only a missing QUEUE is that error. A queue that exists with a lane nothing
+//! has been pushed to yet answers as the empty log it is (`high` 0, `logStart`
+//! 0, no error), because `queen.log_partitions` rows are materialised lazily by
+//! the first push — see 032_log_fetch.sql. Calling those unknown would be
+//! false, and since any per-entry error releases the poll at once (below) one of
+//! them would defeat parking for a whole 1024-entry batch.
+//!
 //! ## Pop maintenance is deliberately NOT honoured here
 //!
 //! `pop_maintenance` pauses the CLAIM path — leases, cursor writes, redelivery
@@ -87,11 +94,34 @@ const MAX_BYTES_PER_ENTRY: i64 = 8 * 1024 * 1024;
 /// entry can prevent.
 const MAX_TOTAL_BYTES: i64 = 64 * 1024 * 1024;
 
-/// Per-entry record ceiling. `maxBytes` bounds the COMPRESSED read; this bounds
-/// the RENDERED response, which is what actually has to fit in memory — a
-/// partition of densely packed small messages can hold a lot of frames behind
-/// very few compressed bytes.
+/// Per-entry record ceiling, over the frames the SQL slices out of a segment.
+/// It bounds a single entry's contribution; the whole-call bound on the
+/// response is `MAX_RENDERED_BYTES` below.
 const MAX_RECORDS_PER_ENTRY: i32 = 10_000;
+
+/// Whole-call ceiling on the RENDERED response, and the only bound that is
+/// about MEMORY.
+///
+/// Every other ceiling here is spent in COMPRESSED segment bytes, which is the
+/// currency the SQL can count — and compressed bytes say nothing about what
+/// they cost to hold. Queen segments are zstd'd, and the payloads a queue
+/// carries are frequently near-identical (a heartbeat, a telemetry frame, one
+/// document re-pushed with a field changed), which is the shape zstd compresses
+/// 100:1 or better. Spending the 64 MiB `MAX_TOTAL_BYTES` on such a queue
+/// decompresses several GiB, and `render_fetch` splices ALL of it, verbatim,
+/// into ONE accumulating `String` before a byte of the response is written:
+/// without this bound a single legal read-only fetch is an out-of-memory of the
+/// broker process, once per admission slot.
+///
+/// Enforced the way the SQL enforces its own (§"Exactly ONE segment escapes"):
+/// the FIRST record of the call is always delivered, so a consumer that meets an
+/// over-large record steps past it instead of stalling for ever, and every
+/// record after it stops at the ceiling. Truncation is safe for exactly the
+/// reason the SQL's `v_take` truncation is — records are contiguous from
+/// `startIdx`, so the caller resumes at the first offset it did not get — and
+/// entries the ceiling cut short still report their bounds, so nothing a caller
+/// commits is ever wrong, only shorter than it asked for.
+const MAX_RENDERED_BYTES: usize = 64 * 1024 * 1024;
 
 /// Long-poll recheck ceiling. The wake gate (`notifier`) covers log appends on
 /// both the hot-list and the legacy path, so in practice a push wakes a parked
@@ -217,8 +247,9 @@ struct SegMeta {
     created_at: String,
 }
 
-/// What one probe produced: the rendered body, plus the two facts the long-poll
-/// decides on.
+/// What one probe produced: the rendered body, the two facts the long-poll
+/// decides on, and the watermarks that say whether re-reading could produce
+/// anything different.
 struct Probe {
     body: String,
     /// Record payload bytes delivered, each record counting at least 1.
@@ -228,6 +259,12 @@ struct Probe {
     /// tenant does not have, must be told now — parking would answer the
     /// question `maxWaitMs` later, identically, having taught it nothing.
     any_error: bool,
+    /// Per entry, index-aligned with the request: `highWatermark` and
+    /// `logStartOffset` as this probe saw them. Segments are immutable
+    /// (032_log_fetch's gate header), so this pair IS the state of the read:
+    /// while it holds, `body` is still the answer.
+    highs: Vec<i64>,
+    starts: Vec<i64>,
 }
 
 pub async fn handle_fetch(
@@ -312,93 +349,148 @@ pub async fn handle_fetch(
         None
     };
 
-    loop {
-        // One probe. The pooled connection is acquired, used and RELEASED
-        // inside this block (`resolve_query_timeout` drops it on success and on
-        // a statement error, and detaches + cancels on a broker-side timeout),
-        // so the park below never holds one — spec §10, the same rule the
-        // parked pop obeys.
-        let probe = {
-            // A fetch is consume-side database work and shares the pop lane's
-            // budget. It does NOT get pop's cheap `has_pending` pre-gate: that
-            // probe is (queue, group)-scoped and a fetch has no group. What
-            // stands in for it is the shape of the SQL itself — a caught-up
-            // entry (offset == highWatermark) costs ONE indexed row read and
-            // never touches queen.log_segments — plus the recheck ceiling, so a
-            // parked fetch re-probes at most ~5 times a second.
-            let mut slot = st.admission.acquire(Lane::Pop).await;
-            let client = match st.pool.get().await {
-                Ok(c) => c,
-                Err(_) => {
-                    st.metrics.record_db_error();
-                    drop(slot);
-                    return json(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "{\"error\":\"pool\"}".to_string(),
-                    );
-                }
-            };
-            let cancel_token = client.cancel_token();
-            let t0 = Instant::now();
-            let res = tokio::time::timeout(
-                st.stmt_timeout,
-                db::log_fetch_bin(
-                    &client,
-                    &queues,
-                    &partitions,
-                    &offsets,
-                    &max_bytes,
-                    MAX_TOTAL_BYTES,
-                    MAX_RECORDS_PER_ENTRY,
-                    tenant.as_str(),
-                ),
-            )
-            .await;
-            let rtt = t0.elapsed();
-            if matches!(res, Ok(Ok(_))) {
-                slot.commit_done(rtt);
-            }
-            drop(slot);
-            let (meta, blobs) = match db::resolve_query_timeout(
-                res,
-                client,
-                cancel_token,
-                "log_fetch",
-                &st.metrics,
-            ) {
-                Some(v) => v,
-                None => {
-                    return json(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "{\"error\":\"fetch failed\"}".to_string(),
-                    )
-                }
-            };
-            match render_fetch(&meta, &blobs, &queues, &partitions, &st.encryption) {
-                Some(p) => p,
-                None => {
-                    return json(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "{\"error\":\"fetch decode failed\"}".to_string(),
-                    )
-                }
-            }
-        };
+    // The one unconditional read: the caller is owed an answer, and its shape is
+    // what every decision below is made against.
+    let mut probe = match read(&st, &queues, &partitions, &offsets, &max_bytes, &tenant).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
 
-        if probe.any_error || probe.bytes >= min_bytes || Instant::now() >= deadline {
+    loop {
+        if probe.any_error || probe.bytes >= min_bytes {
+            return json(StatusCode::OK, probe.body);
+        }
+        let now = Instant::now();
+        if now >= deadline {
             return json(StatusCode::OK, probe.body);
         }
 
         let wait = deadline
-            .saturating_duration_since(Instant::now())
+            .saturating_duration_since(now)
             .min(Duration::from_millis(RECHECK_MS));
         match &qkey {
             Some(k) => st.notifier.wait_queue(k, wait).await,
             None => st.notifier.wait_any(tenant.as_str(), wait).await,
         };
-        // Woken or timed out, the answer is the same: re-probe. A wake is a
+
+        // Woken or timed out, the same question: did anything MOVE? A wake is a
         // hint that a push landed on this queue, never a promise that it landed
-        // on one of THESE partitions at an offset we asked for.
+        // on one of THESE partitions — and the answer already rendered stays
+        // correct until one of these lanes' watermarks changes, because segments
+        // are immutable (032_log_fetch, the gate's header).
+        //
+        // So the re-probe is this permit-free gate and not the read. It is the
+        // fetch path's `has_pending` (handlers/data.rs, the discovery-latency
+        // fix of 2026-07-24): an EMPTY re-probe must cost zero admission budget,
+        // or the O(#parked consumers) storm of them saturates the SHARED pop
+        // limiter and real deliveries queue behind it with a wait that grows
+        // linearly with the consumer count. It also removes the other half of
+        // the waste — a `minBytes` a quiet partition will never reach used to
+        // re-read, re-decompress and re-render the identical body up to 150
+        // times before returning the one the first read had already produced.
+        if !moved(&st, &queues, &partitions, &probe, &tenant).await {
+            continue;
+        }
+        probe = match read(&st, &queues, &partitions, &offsets, &max_bytes, &tenant).await {
+            Ok(p) => p,
+            Err(r) => return r,
+        };
+    }
+}
+
+/// One read: the admission-limited SQL call plus the render.
+///
+/// The pooled connection is acquired, used and RELEASED inside this function
+/// (`resolve_query_timeout` drops it on success and on a statement error, and
+/// detaches + cancels on a broker-side timeout), so the caller's park never
+/// holds one — spec §10, the same rule the parked pop obeys. `Err` is the
+/// response to send as-is.
+async fn read(
+    st: &AppState,
+    queues: &[String],
+    partitions: &[String],
+    offsets: &[i64],
+    max_bytes: &[i32],
+    tenant: &Tenant,
+) -> Result<Probe, Response> {
+    // A fetch is consume-side database work and shares the pop lane's budget.
+    let mut slot = st.admission.acquire(Lane::Pop).await;
+    let client = match st.pool.get().await {
+        Ok(c) => c,
+        Err(_) => {
+            st.metrics.record_db_error();
+            drop(slot);
+            return Err(json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            ));
+        }
+    };
+    let cancel_token = client.cancel_token();
+    let t0 = Instant::now();
+    let res = tokio::time::timeout(
+        st.stmt_timeout,
+        db::log_fetch_bin(
+            &client,
+            queues,
+            partitions,
+            offsets,
+            max_bytes,
+            MAX_TOTAL_BYTES,
+            MAX_RECORDS_PER_ENTRY,
+            tenant.as_str(),
+        ),
+    )
+    .await;
+    let rtt = t0.elapsed();
+    if matches!(res, Ok(Ok(_))) {
+        slot.commit_done(rtt);
+    }
+    drop(slot);
+    let (meta, blobs) =
+        match db::resolve_query_timeout(res, client, cancel_token, "log_fetch", &st.metrics) {
+            Some(v) => v,
+            None => {
+                return Err(json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "{\"error\":\"fetch failed\"}".to_string(),
+                ))
+            }
+        };
+    render_fetch(&meta, &blobs, queues, partitions, &st.encryption).ok_or_else(|| {
+        json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{\"error\":\"fetch decode failed\"}".to_string(),
+        )
+    })
+}
+
+/// Has any named lane moved off the watermarks `probe` holds?
+///
+/// Borrows a pooled connection and takes NO admission permit — the whole point,
+/// and the same bargain `has_pending` strikes on the pop path (the probe is one
+/// indexed row read per entry against `queen.log_partitions`; `pool.get` is
+/// uncontended, measured ~0µs). A probe that cannot run answers `true`, so a
+/// blip costs a wasted read and never a missed record.
+async fn moved(
+    st: &AppState,
+    queues: &[String],
+    partitions: &[String],
+    probe: &Probe,
+    tenant: &Tenant,
+) -> bool {
+    match st.pool.get().await {
+        Ok(c) => db::log_fetch_changed(
+            &c,
+            queues,
+            partitions,
+            &probe.highs,
+            &probe.starts,
+            tenant.as_str(),
+        )
+        .await
+        .unwrap_or(true),
+        Err(_) => true,
     }
 }
 
@@ -419,6 +511,19 @@ fn render_fetch(
     partitions: &[String],
     enc: &crate::encryption::Encryption,
 ) -> Option<Probe> {
+    render_capped(meta, blobs, queues, partitions, enc, MAX_RENDERED_BYTES)
+}
+
+/// [`render_fetch`] with the memory ceiling as an argument, so the truncation
+/// rule is testable without building a 64 MiB response to trip it.
+fn render_capped(
+    meta: &str,
+    blobs: &[Vec<u8>],
+    queues: &[String],
+    partitions: &[String],
+    enc: &crate::encryption::Encryption,
+    cap: usize,
+) -> Option<Probe> {
     let parsed: FetchMeta = serde_json::from_str(meta).ok()?;
     if parsed.entries.len() != queues.len() {
         return None;
@@ -427,11 +532,28 @@ fn render_fetch(
     // Capacity: the decompressed payloads dominate, and the blobs are the only
     // measure of them we have before decompressing. Undersizing costs one
     // doubling; the per-segment reserve below refines it with the real size.
-    let est = 32 + parsed.entries.len() * 128 + blobs.iter().map(|b| b.len() * 2).sum::<usize>();
+    // Clamped at the ceiling the render itself stops at, so the ESTIMATE cannot
+    // be the allocation the ceiling exists to prevent.
+    let est = (32
+        + parsed.entries.len() * 128
+        + blobs
+            .iter()
+            .map(|b| b.len().saturating_mul(2))
+            .sum::<usize>())
+    .min(cap);
     let mut out = String::with_capacity(est);
     let mut bytes: i64 = 0;
     let mut any_error = false;
     let mut blob_idx = 0usize;
+    // Records emitted by the WHOLE call, and whether the ceiling has been hit.
+    // Both are call-wide, not per entry: a per-entry allowance is what makes a
+    // whole-response bound meaningless at 1024 entries (032_log_fetch's header
+    // makes the same argument about its own budget).
+    let mut delivered = 0usize;
+    let mut full = false;
+    // The watermarks the re-probe gate compares against, in request order.
+    let mut highs = Vec::with_capacity(parsed.entries.len());
+    let mut starts = Vec::with_capacity(parsed.entries.len());
 
     out.push_str("{\"entries\":[");
     for (i, em) in parsed.entries.iter().enumerate() {
@@ -444,7 +566,14 @@ fn render_fetch(
         json_escape_into(&mut out, &partitions[i]);
         out.push_str("\",\"records\":[");
         let mut records = 0usize;
+        // Once full, the remaining entries are rendered as empty — bounds and
+        // all, so the answer stays index-aligned with the request and every
+        // caller still learns where its lanes stand. Their blobs are never
+        // decompressed, which is where the CPU half of the ceiling is saved.
         for seg in &em.segments {
+            if full {
+                break;
+            }
             // Blobs are flattened in the meta's own traversal order, so the
             // running index and the meta walk stay aligned by construction. A
             // segment the meta announces without a blob is that alignment
@@ -463,8 +592,14 @@ fn render_fetch(
             };
             let start = seg.start_idx.max(0) as usize;
             let end = (start + seg.take.max(0) as usize).min(frames.len());
-            out.reserve(raw.len() + end.saturating_sub(start) * 128);
+            out.reserve(raw.len().min(cap) + end.saturating_sub(start) * 128);
             for (j, f) in frames.iter().enumerate().take(end).skip(start) {
+                // The first record of the call is always delivered; everything
+                // after it stops at the ceiling. See MAX_RENDERED_BYTES.
+                if delivered > 0 && out.len() >= cap {
+                    full = true;
+                    break;
+                }
                 if records > 0 {
                     out.push(',');
                 }
@@ -493,6 +628,7 @@ fn render_fetch(
                 json_escape_into(&mut out, &seg.created_at);
                 out.push_str("\"}");
                 records += 1;
+                delivered += 1;
                 // An empty payload still counts, so `minBytes: 1` means "any
                 // record" — see FetchBody::min_bytes.
                 bytes += f.payload.len().max(1) as i64;
@@ -509,6 +645,8 @@ fn render_fetch(
             out.push('"');
         }
         out.push('}');
+        highs.push(em.high);
+        starts.push(em.log_start);
     }
     out.push_str("]}");
 
@@ -516,6 +654,8 @@ fn render_fetch(
         body: out,
         bytes,
         any_error,
+        highs,
+        starts,
     })
 }
 

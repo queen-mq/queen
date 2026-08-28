@@ -29,9 +29,33 @@ tokio-util = { version = "0.7", default-features = false, features = ["codec"] }
 bytes = "1"
 # Every Kafka message type, the request/response header schemas and their
 # per-(api_key, api_version) header versions. `broker` is the half of the crate
-# this side needs: decode requests, encode responses. Compression is off — it is
-# a RecordBatch concern and arrives with Produce in M2.
-kafka-protocol = { version = "0.18", default-features = false, features = ["broker"] }
+# this side needs: decode requests, encode responses.
+#
+# The four codecs are not optional and not a preference: `compression.type` is a
+# PRODUCER setting, so which one arrives is the client's choice and no
+# negotiation exists to refuse it — a batch is compressed before the facade ever
+# sees the connection. Building without one of them turns a producer's config
+# line into an undecodable batch (M2, `handlers::produce`).
+kafka-protocol = { version = "0.18", default-features = false, features = [
+    "broker",
+    "gzip",
+    "snappy",
+    "lz4",
+    "zstd",
+] }
+# The same four codec crates kafka-protocol builds those features out of, at the
+# same versions, used directly for one reason: its own decompressors write into
+# an unbounded buffer, and a Produce request that says how much heap to allocate
+# is the facade's process. `src/decompress.rs` is those decompressors with a
+# budget on the output; it decides nothing about the formats.
+flate2 = "1"
+snap = "1"
+lz4 = "1.24"
+zstd = "0.13"
+# Kafka record keys, values and header values are arbitrary bytes; Queen
+# payloads are JSON. base64 is the envelope's alphabet (`records`), same crate
+# and version as the server's and the proxy's.
+base64 = "0.22"
 # The Queen side (src/queen.rs). Same crate, version and feature set as
 # clients/client-rust, which is the repository's HTTP *client* pattern: rustls
 # with the `ring` provider (no OpenSSL on the host, no cmake in the build) and
@@ -42,6 +66,22 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
     "http2",
     "charset",
+] }
+# The optional TLS listener (M5, src/tls.rs). Same pin, same provider and the
+# same feature set as server/Cargo.toml and proxy/Cargo.toml: rustls on `ring`,
+# which is the crypto backend already in this binary (reqwest's rustls-tls
+# resolves to it) — so TLS in front costs no second backend, no cmake and no
+# system OpenSSL.
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+    "logging",
+] }
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+    "tls12",
+    "logging",
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -54,6 +94,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 # crate. Cargo unifies features per build, so `cargo test` gets broker+client
 # while `cargo build` still compiles broker alone.
 kafka-protocol = { version = "0.18", default-features = false, features = ["client"] }
+# `tokio::time::pause`/`advance`. The group coordinator is a state machine whose
+# every transition is either a command or a DEADLINE — a join window closing, a
+# session expiring, an empty group being reaped — so its tests drive a clock
+# they control rather than sleeping through real seconds (PLAN_QUEEN_KAFKA.md:
+# "deterministic unit tests … under tokio::time::pause"). Same union rule as
+# above: the binary never gets test-util.
+tokio = { version = "1", features = ["test-util"] }
 
 [profile.release]
 lto = "thin"

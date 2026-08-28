@@ -312,7 +312,7 @@ BEGIN
         'queueName', p_queue,
         'seekToEnd', p_to_end,
         'targetTimestamp', CASE WHEN p_timestamp IS NOT NULL
-            THEN to_char(p_timestamp, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END,
+            THEN to_char(p_timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END,
         'partitionsUpdated', v_updated
     );
 END;
@@ -378,7 +378,7 @@ BEGIN
         'partitionName', p_partition,
         'seekToEnd', p_to_end,
         'targetTimestamp', CASE WHEN p_timestamp IS NOT NULL
-            THEN to_char(p_timestamp, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END,
+            THEN to_char(p_timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END,
         'updated', true
     );
 END;
@@ -662,9 +662,9 @@ BEGIN
                 'segment', jsonb_build_object(
                     'seq', vd.base_offset,
                     'frameIdx', (vd.off - vd.base_offset)::int),
-                'createdAt', to_char(vd.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                'createdAt', to_char(vd.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
                 'leaseExpiresAt', CASE WHEN vd.lease_expires_at IS NOT NULL
-                    THEN to_char(vd.lease_expires_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END
+                    THEN to_char(vd.lease_expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END
             ) AS obj
         FROM (
             SELECT t.base_offset, t.created_at,
@@ -820,8 +820,8 @@ BEGIN
                        'retryCount', COALESCE(d2.retry_count, COALESCE(q2q.retry_limit, 3)),
                        'data', d2.payload,
                        'producerSub', NULL,
-                       'createdAt', to_char(d2.failed_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-                       'failedAt', to_char(d2.failed_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                       'createdAt', to_char(d2.failed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                       'failedAt', to_char(d2.failed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
                    ) AS msg
             FROM queen.log_dlq d2
             JOIN queen.log_partitions p2 ON p2.id = d2.partition_id
@@ -995,7 +995,7 @@ BEGIN
             'time_lag_seconds', lag_seconds,
             'lag_hours', ROUND(lag_seconds / 3600.0, 2),
             'oldest_unconsumed_at', CASE WHEN oldest_unconsumed_at IS NOT NULL
-                THEN to_char(oldest_unconsumed_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END,
+                THEN to_char(oldest_unconsumed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END,
             'last_consumed_at', NULL
         ) ORDER BY lag_seconds DESC
     ), '[]'::jsonb) INTO v_log

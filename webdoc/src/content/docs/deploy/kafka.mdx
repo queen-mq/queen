@@ -1,0 +1,249 @@
+---
+title: Kafka facade
+description: "Running queen-kafka beside a broker or a proxy: every environment variable it reads, the advertised-address footgun, the TLS and SASL pair, and what a client has to change to reach it."
+type: how-to
+tier: operate
+status: preview
+sidebar:
+  order: 12
+  label: Kafka facade
+sourceOfTruth:
+  - queen-kafka/src/main.rs
+  - queen-kafka/src/lib.rs
+  - queen-kafka/src/conn.rs
+  - queen-kafka/src/tls.rs
+  - queen-kafka/src/sasl.rs
+  - queen-kafka/src/queen.rs
+  - queen-kafka/src/identity.rs
+  - queen-kafka/src/coordinator/mod.rs
+  - proxy/src/routes.rs
+---
+
+`queen-kafka` is a separate binary that speaks the Kafka wire protocol on one port and plain
+HTTP to Queen on another. It is a client of Queen like any SDK is: it holds no database
+connection, embeds no broker, and stores nothing durable of its own. What a Kafka client can do
+through it, and what it deliberately cannot, is [the protocol reference](/reference/kafka).
+
+<Aside type="caution">
+The facade is a **preview**. There is no published container image and it is not part of a Queen
+release: today it is built from the repository. Nothing below has been through a release cycle.
+</Aside>
+
+## The two shapes
+
+**Beside the broker (self-hosted).** The facade runs next to a broker, points `QUEEN_URL` at it,
+and carries one `QUEEN_TOKEN` for the whole listener. Every Kafka client on that port reaches
+Queen as that one identity, so the Kafka port inherits exactly the trust boundary the broker's
+own port has: keep it on the same private network, behind the same perimeter. This is the shape
+the compatibility rig runs and the one to start with.
+
+**Beside the proxy (Cloud).** The facade points `QUEEN_URL` at a cell's proxy, turns on TLS and
+SASL/PLAIN, and each connection presents its own tenant token as the SASL password. That token
+is then the bearer on every call that connection makes, so tenancy, quota, metering and freeze
+are the proxy's, unchanged. `QUEEN_KAFKA_FORWARD_SNI_HOST` turns the TLS server name the client
+dialled into the `Host` header of those calls, which is how a proxy that routes by hostname
+finds the cluster.
+
+<Aside type="caution">
+The Cloud shape can produce but **cannot consume today**. The proxy classifies every
+broker-bound request, and `POST /api/v1/fetch`, the route the facade's Fetch and ListOffsets
+both ride, matches no rule and therefore falls into `Blocked`, which answers `404`
+`route_blocked` (`proxy/src/routes.rs`). Producing works, because `POST /api/v1/push` is the
+`Produce` class. Committed offsets need the tenant's `kv` feature granted, because
+`POST /api/v1/kv` is gated on it. Consuming through a proxy needs the fetch route classified
+first; see [the proxy route classes](/reference/multi-tenant/endpoints).
+</Aside>
+
+## Build and run
+
+There is no image and no chart. The crate is standalone, so it builds on its own manifest and
+produces one binary.
+
+```bash
+cargo build --release --manifest-path queen-kafka/Cargo.toml
+QUEEN_URL=http://localhost:6632 \
+QUEEN_KAFKA_ADVERTISED_ADDR=kafka.internal.example.com:9092 \
+  ./queen-kafka/target/release/queen-kafka
+```
+
+Every value is validated before the listener binds, and a bad one is a fatal boot with a message
+naming the variable. That is deliberate: a Kafka facade that starts on bad configuration does not
+fail, it lies. Clients bootstrap successfully and then fail on the connection they were told to
+make, one step away from the cause.
+
+Two rules hold for every variable below. A value that does not parse is a boot failure and never
+a silent fall back to the default, because the default is not there to paper over a typo. And a
+variable that is present but empty or whitespace-only counts as unset, because an empty value in
+a Compose file or a Helm template is a variable somebody meant to set.
+
+## Every variable
+
+| Variable | Default | What it is |
+| --- | --- | --- |
+| `QUEEN_URL` | `http://localhost:6632` | The broker or proxy the facade calls. Must be an `http`/`https` URL; a trailing slash is normalised away. Checked at boot, not on the first metadata refresh. |
+| `QUEEN_TOKEN` | none | Bearer token for that broker. Optional, and never logged: the boot line reports whether there is one, not what it is. With SASL on, a connection's own token replaces it. |
+| `QUEEN_KAFKA_ADDR` | `0.0.0.0:9092` | The address the Kafka listener binds. `host:port`, or `[v6]:port`. |
+| `QUEEN_KAFKA_ADVERTISED_ADDR` | **required** | The `host:port` other machines use to reach this process. No default. See below. |
+| `QUEEN_KAFKA_DEFAULT_PARTITIONS` | `1024` | Partition count for a topic the facade auto-creates, and the floor for the width it advertises. Integer in 1 to 100,000. |
+| `QUEEN_KAFKA_MAX_CONNECTIONS` | `4096` | How many connections the listener serves at once. Integer in 16 to 1,000,000. Past it a new connection is closed immediately, which is a client that reconnects rather than a facade accepting work it cannot do. |
+| `QUEEN_KAFKA_TLS_CERT` | none | PEM certificate chain. Both this and the key, or neither. |
+| `QUEEN_KAFKA_TLS_KEY` | none | PEM private key. Read and parsed at boot, so a key that does not match its certificate fails the process and not every client. |
+| `QUEEN_KAFKA_SASL` | none | The only value is `plain`, case-insensitive. Unset is a listener that authenticates nobody and reaches Queen with `QUEEN_TOKEN`. It names a mechanism rather than being a boolean so that adding SCRAM later is a value here, not a second variable that can disagree with this one. |
+| `QUEEN_KAFKA_FORWARD_SNI_HOST` | `false` | `true` or `false`. Forwards the TLS server name as the `Host` header of that connection's calls to Queen. Requires TLS: a plaintext connection carries no SNI, so `true` without a certificate is a fatal boot rather than a knob that quietly does nothing. |
+| `QUEEN_KAFKA_GROUP_JOIN_DELAY_MS` | `3000` | Kafka's `group.initial.rebalance.delay.ms`: how long the first join of an empty group waits for company. Integer in 0 to 3,600,000. Zero is legitimate for a single-consumer deployment. |
+| `QUEEN_KAFKA_GROUP_MIN_SESSION_TIMEOUT_MS` | `6000` | Kafka's `group.min.session.timeout.ms`. Integer in 1 to 3,600,000. |
+| `QUEEN_KAFKA_GROUP_MAX_SESSION_TIMEOUT_MS` | `300000` | Kafka's `group.max.session.timeout.ms`. Integer in 1 to 3,600,000, and never below the minimum: a minimum above the maximum would refuse every consumer `INVALID_SESSION_TIMEOUT` whatever it asked for, so that pair is a fatal boot. |
+| `LOG_LEVEL` | `info` | Tracing filter, `EnvFilter` syntax. |
+| `RUST_LOG` | none | Same, and it wins over `LOG_LEVEL`. |
+| `QUEEN_LOG_JSON` | `false` | `true` switches the log format to JSON. Any other value is read as false. |
+
+A consumer asking for a session timeout outside the min/max pair is refused
+`INVALID_SESSION_TIMEOUT`, which is the same contract Apache Kafka's two settings have.
+
+## The advertised address is the footgun
+
+A Kafka client connects once to a bootstrap address, asks for Metadata, and from then on talks
+only to the addresses the broker advertised. Get this wrong and every symptom appears one step
+away from its cause: bootstrap succeeds, `kcat -L` prints a broker list, and every produce and
+fetch then hangs or refuses against an address the operator never typed.
+
+There is no default that is right more often than it is wrong, so there is none, and two shapes
+are refused outright:
+
+- **unset**, with an error that names the variable, says what it is for, and points at
+  `QUEEN_KAFKA_ADDR` as the thing it is not;
+- **a wildcard host** (`0.0.0.0`, `::`), because a client handed a wildcard as the address to
+  connect to fails immediately after a successful bootstrap. The wildcard belongs in
+  `QUEEN_KAFKA_ADDR`, which is what gets bound.
+
+An address with no port, an empty host, a port that is not a TCP port number, and a bare IPv6
+address are all refused too, the last one with the bracketed form to use instead.
+
+Set it to what your clients resolve and route to. In Kubernetes that is the Service DNS name and
+the Service port, not the pod IP.
+
+## TLS and SASL
+
+TLS is both files or neither. A half-configured listener that silently served plaintext would be
+a certificate an operator believes in, which is the failure mode worth failing the boot over. No
+ALPN protocol is advertised, because Kafka's wire protocol has no registered ALPN id and no
+client offers one.
+
+SASL/PLAIN maps a Kafka credential onto a Queen one, bluntly and on purpose:
+
+- the **password is the Queen bearer token**, verbatim. The same string an SDK would put in
+  `Authorization: Bearer`. There is no directory here to look anything up in, and inventing one
+  would be inventing a second credential store beside the proxy's;
+- the **username is a label**. It is logged, which is what makes a connection identifiable
+  without the token being in the log, and it is checked against nothing, because nothing here
+  could check it.
+
+The token is verified by one authenticated call to `GET /api/v1/resources/queues` when the
+connection authenticates. A `401` or `403` from the broker is `SASL_AUTHENTICATION_FAILED` and
+the connection closes, which every client treats as fatal, correctly: no amount of retrying makes
+a wrong password right. Anything else, unreachable, a `429`, a `5xx`, closes the connection with
+no error code at all, because that is what every Kafka client has always treated as retriable,
+and answering a fatal code while Queen was restarting would make a fleet give up permanently.
+
+Authentication also asks Queen **who the credential is**, once per credential, with
+`GET /auth/me`. That answer is what the connection's consumer groups and its cached topic list
+are filed under, so that two credentials of one tenant, a key rotation or a per-service key,
+share one coordinator instead of running two groups over one set of committed offsets. Queen
+answers the question for a bearer only where its identity surface authenticates one: a broker
+with `JWT_ENABLED` unset answers a standalone identity to any caller, while a broker with auth
+on and the proxy's own session endpoint both answer `401` to a bearer. When it is not answered
+the credential is filed under itself, which is exactly what the facade did before it asked, and
+the facade logs a warning if two such credentials ever run one group id, because those two are
+either two tenants, which is fine, or one tenant's two keys, which is duplicate consumption
+nobody can see from here. A failure to ask never fails an authentication.
+
+Before a connection has authenticated it may negotiate versions and it may authenticate, and
+nothing else: any other API closes the connection with no response, which is what Apache Kafka's
+own authenticator does. Pre-authentication frames are capped well below the general frame
+ceiling.
+
+<Aside type="caution">
+`QUEEN_KAFKA_SASL=plain` on a plaintext listener puts every client's Queen token on the wire in
+the clear. It is not fatal, because a loopback rig and a sidecar-encrypted mesh are both real,
+but the facade warns at boot every time. Set the TLS pair unless the link is already encrypted
+underneath the process.
+</Aside>
+
+## Onboarding a client
+
+Everything a client changes is its bootstrap address and, in the Cloud shape, its credentials.
+No library changes, no rebuild.
+
+```properties
+bootstrap.servers=kafka.example.com:9093
+security.protocol=SASL_SSL
+sasl.mechanism=PLAIN
+sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required \
+  username="orders-service" \
+  password="<the tenant's Queen token>";
+enable.idempotence=false
+```
+
+The same two credentials in librdkafka spelling, which covers the Confluent Python, C# and
+JavaScript clients:
+
+```ini
+bootstrap.servers=kafka.example.com:9093
+security.protocol=SASL_SSL
+sasl.mechanisms=PLAIN
+sasl.username=orders-service
+sasl.password=<the tenant's Queen token>
+enable.idempotence=false
+```
+
+Against a self-hosted facade with no SASL, the whole change is `bootstrap.servers`. Drop the
+four `sasl`/`security` lines.
+
+`enable.idempotence=false` is not optional on a producer: the idempotent producer is refused, and
+several clients now turn it on by default. Anything setting `transactional.id` is refused for the
+same reason, so Kafka Streams does not run here.
+
+## What the boot log says
+
+One line, and it is the one to compare against what the clients actually use:
+
+```text
+queen-kafka starting queen_url=… authenticated=true listen=0.0.0.0:9092
+  advertised=kafka.example.com:9092 default_partitions=1024 group_join_delay_ms=3000
+  tls=true sasl=plain forward_sni_host=true
+```
+
+`authenticated` is whether there is a token, never the token. No credential reaches the log at
+any level, and the SASL username is there precisely so a connection can be identified without
+one.
+
+## Ceilings that are not configurable
+
+These are compiled in. They are here because they explain a refusal an operator will otherwise
+have to guess at.
+
+| Ceiling | Value | What hits it |
+| --- | --- | --- |
+| Request or response frame | 100 MiB | A frame above it cannot be encoded, so the answer is bounded before it is built rather than after. |
+| Pre-authentication frame | 64 KiB | An unauthenticated peer cannot make the facade allocate. |
+| Fetch response | 32 MiB | Partitions fill in request order until it is gone; the rest are answered as empty reads with their real watermarks, which is a Kafka broker's own soft-limit behaviour. |
+| Decompressed produce batch | one frame's worth | Compression buys a client no more room than it already had. A request costs the sender what it costs the facade. |
+| Advertised partitions per topic | 100,000 | A wider Queen queue stays fully readable natively; the lanes above the clamp are not addressable by a Kafka client. |
+| Partitions in one all-topics listing | 200,000 | `kcat -L` against a cell with tens of thousands of queues. Topics past the budget are omitted with a log line, because a short listing is something a client can act on and a connection reset is not. |
+| Topics auto-created per Metadata request | 100 | The 101st is `LEADER_NOT_AVAILABLE`, the client retries, and the next request creates the next hundred. |
+| Consumer groups | 10,000 | Past it a new group is `COORDINATOR_NOT_AVAILABLE`, which every client retries. |
+| Group id length | 255 characters | The same bound the broker puts on a queue name. Longer is `INVALID_GROUP_ID`. |
+| Idle connection | 10 minutes | With a 30 second ceiling on a half-received frame. |
+| One call to Queen | 10 seconds | Below every client's 30 second `request.timeout.ms`, so the client's own timer is never the first to fire. |
+
+## Restarting it
+
+A facade restart is a broker restart and needs no ceremony. Group membership is in memory and
+dies with the process; committed offsets are in Queen and outlive it. A restarted facade knows
+no members, answers `UNKNOWN_MEMBER_ID` to the first heartbeat of every survivor, and they
+rejoin and resume from where they had committed. That is the sequence a real broker failover
+produces, and every Kafka client already implements it.
+
+Two facades in front of one Queen cluster are not a Kafka cluster. Each advertises itself as the
+only broker and each coordinates its own groups, so a group whose members reach different
+facades will split. Put one facade behind one address, or give each its own set of consumers.

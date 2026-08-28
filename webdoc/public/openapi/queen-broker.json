@@ -664,6 +664,108 @@
         ]
       }
     },
+    "/api/v1/fetch": {
+      "post": {
+        "operationId": "fetch",
+        "tags": [
+          "Other"
+        ],
+        "summary": "POST /api/v1/fetch",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/fetch.rs::handle_fetch",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "entries": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "queue": {
+                          "type": "string"
+                        },
+                        "partition": {
+                          "description": "Rust type `PartitionName`."
+                        },
+                        "offset": {
+                          "type": "integer",
+                          "format": "int64"
+                        },
+                        "maxBytes": {
+                          "type": "integer",
+                          "format": "int64"
+                        }
+                      },
+                      "required": [
+                        "queue",
+                        "offset"
+                      ]
+                    }
+                  },
+                  "maxWaitMs": {
+                    "type": "integer",
+                    "format": "int64",
+                    "minimum": 0
+                  },
+                  "minBytes": {
+                    "type": "integer",
+                    "format": "int64"
+                  }
+                }
+              }
+            }
+          },
+          "x-queen-schema": "derived",
+          "x-queen-schema-source": "FetchBody"
+        }
+      }
+    },
     "/api/v1/ack": {
       "post": {
         "operationId": "ack",

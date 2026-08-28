@@ -6,7 +6,8 @@
 //!     Google's JWKS, verified-email-only linking, opt-in auto-provision
 //!   * GitHub OAuth (OAuth2 *without* OIDC): /user + /user/emails, verified
 //!     primary email only, same resolve/link/provision path
-//!   * `/auth/me`, `/auth/session-token` (short Bearer for the SPA), logout
+//!   * `/auth/me`, `/auth/session-token` (short Bearer for the SPA, and the
+//!     fleet dashboard handoff, see `session_token`), logout
 //!
 //! Sessions are proxy-minted user JWTs (`auth::Keys::mint_user_jwt`). A session
 //! token is NOT cluster-scoped (`cluster=None`): its `role` claim is a
@@ -88,6 +89,15 @@ pub fn router() -> Router<St> {
 
 #[derive(Deserialize)]
 struct StartQuery {
+    next: Option<String>,
+}
+
+/// `/auth/session-token`. Both absent on the SPA's own call; both present on a
+/// dashboard handoff. Unknown parameters are ignored rather than rejected: the
+/// minter is a different codebase, and a 400 here would be a broken console.
+#[derive(Deserialize)]
+struct SessionTokenQuery {
+    token: Option<String>,
     next: Option<String>,
 }
 
@@ -391,7 +401,38 @@ async fn me(State(st): State<St>, headers: HeaderMap) -> Response {
     )
 }
 
-async fn session_token(State(st): State<St>, headers: HeaderMap) -> Response {
+/// TWO endpoints share this path, told apart by what the host can DO.
+///
+/// **Mint-capable host**: the SPA's own call. Reads the session cookie and
+/// mints the short Bearer it uses for the data plane. Unchanged, query or no
+/// query: the auth host keeps exactly the behaviour it has always had.
+///
+/// **Verify-only host with `?token=`**: the fleet dashboard handoff. The
+/// control plane redirects a browser here with a session it minted
+/// (`queen-control`'s `cell/console.rs`), and this host, which holds the public
+/// key and no signer, VERIFIES that token and adopts it as the cookie.
+///
+/// Establishing was wired to minting, and on a verify-only host minting is the
+/// one thing that cannot work: the handoff answered 503 `not_configured` with
+/// the token sitting unread in the URL beside it, because the handler had no
+/// query extractor at all. Measured against a real cell on 2026-08-28. The two
+/// operations were never the same one: a host with no signer can still verify
+/// a signature perfectly well, and that is all an establish needs.
+///
+/// The cookie's life is the TOKEN's own remaining life, not `jwt_ttl_s`: this
+/// host cannot mint a replacement, so the console lives exactly as long as what
+/// it was handed and no longer. A cookie outliving its token would just be a
+/// session that 401s while looking present.
+async fn session_token(
+    State(st): State<St>,
+    headers: HeaderMap,
+    Query(q): Query<SessionTokenQuery>,
+) -> Response {
+    if is_handoff(st.keys.can_mint(), q.token.as_deref()) {
+        // `is_handoff` already established it is Some and non-blank.
+        let presented = q.token.as_deref().unwrap_or("").trim();
+        return establish_handoff(&st, &headers, presented, q.next.as_deref()).await;
+    }
     let Some(tok) = read_cookie(&headers, &st.cfg.cookie_name) else {
         return errors::err_401("no session");
     };
@@ -421,6 +462,126 @@ async fn session_token(State(st): State<St>, headers: HeaderMap) -> Response {
             err_500("session token could not be minted")
         }
     }
+}
+
+/// Is this request the handoff rather than the SPA's mint call?
+///
+/// A host that CAN mint is never the handoff, whatever the query says. That is
+/// what keeps the auth host's `/auth/session-token` byte-for-byte what it was:
+/// the new behaviour is unreachable on the only host that had the old one.
+fn is_handoff(can_mint: bool, token: Option<&str>) -> bool {
+    !can_mint && token.map(|t| !t.trim().is_empty()).unwrap_or(false)
+}
+
+/// What a presented handoff token earns. Pure (signature, issuer, audience and
+/// expiry, plus the redirect target), so the whole matrix is pinned by tests
+/// without a `Config`, a pool or a router. The deny-list, which needs the DB, is
+/// the caller's half.
+#[derive(Debug, PartialEq, Eq)]
+enum Handoff {
+    /// Verified. Adopt the presented token as the cookie for `max_age_s` and
+    /// send the browser on to `next`.
+    Establish { next: String, max_age_s: u64, jti: String },
+    /// Refused, carrying the reason for the LOG. Every one of them answers the
+    /// client the same 401: which of these it was is not the browser's business,
+    /// and the portal that sent it here can read its own audit trail.
+    Refuse(&'static str),
+}
+
+/// Verify a handoff token against this host's configured public key.
+///
+/// `now` is injected so the expiry edges are testable. Note what is NOT checked
+/// here: `role`. A handoff asserts identity only; the cell resolves the real
+/// per-cluster role from its own `cluster_roles`, exactly as it does for a
+/// cookie, so a token whose placeholder role says `viewer` grants nothing by
+/// saying it.
+fn decide_handoff(keys: &crate::auth::Keys, token: &str, next: Option<&str>, now: i64) -> Handoff {
+    let claims = match keys.verify_jwt_claims(token) {
+        Ok(c) => c,
+        Err(e) => {
+            // The reason is a fixed string per variant, never the token or any
+            // claim inside it.
+            return Handoff::Refuse(match e {
+                crate::auth::JwtReject::Expired => "expired",
+                crate::auth::JwtReject::BadIssuer => "issuer mismatch",
+                crate::auth::JwtReject::BadAudience => "minted for another cell",
+                crate::auth::JwtReject::BadSignature => "signature invalid",
+                crate::auth::JwtReject::NotConfigured => "no verification key configured",
+                _ => "malformed token",
+            });
+        }
+    };
+    // Verification passes a token that died within jsonwebtoken's 60s clock
+    // leeway. That leeway is there so authentication survives skew; it is not a
+    // licence to hand out a session with nothing left in it, and a cookie whose
+    // Max-Age is zero is a browser instruction to forget it immediately.
+    let left = claims.exp - now;
+    if left <= 0 {
+        return Handoff::Refuse("expired");
+    }
+    Handoff::Establish {
+        next: safe_next(next),
+        max_age_s: left as u64,
+        jti: claims.jti,
+    }
+}
+
+/// The verify-only half of `/auth/session-token`: adopt a control-plane session
+/// as this host's cookie, then get the token out of the URL.
+///
+/// The `303` is load-bearing twice over. It re-issues the navigation as a GET of
+/// `next` alone, so the address bar, the history entry and every `Referer` the
+/// next page emits carry no token: the query is stripped by going somewhere
+/// else, not by asking the browser nicely. And it is a redirect the browser
+/// performs itself, which is the only way the cookie this response sets is the
+/// cookie the next request presents.
+async fn establish_handoff(
+    st: &St,
+    headers: &HeaderMap,
+    token: &str,
+    next: Option<&str>,
+) -> Response {
+    let (next, max_age_s, jti) = match decide_handoff(&st.keys, token, next, now_secs()) {
+        Handoff::Establish { next, max_age_s, jti } => (next, max_age_s, jti),
+        Handoff::Refuse(reason) => {
+            tracing::info!(target: "oauth", reason, "console handoff refused");
+            return handoff_refused();
+        }
+    };
+    // The handoff token's jti is the control-plane session's own, so one
+    // deny-list row kills the fleet cookie and every console it opened. A
+    // logged-out session must not be able to open a new one here.
+    if st.keys.is_revoked(&st.db, &jti).await {
+        tracing::info!(target: "oauth", reason = "revoked", "console handoff refused");
+        return handoff_refused();
+    }
+    tracing::info!(target: "oauth", jti = %jti, ttl_s = max_age_s, "console handoff accepted");
+    let cookie = build_session_cookie(
+        &st.cfg.cookie_name,
+        token,
+        st.cfg.cookie_domain.as_deref(),
+        cookie_is_secure(st, headers),
+        max_age_s,
+    );
+    no_store(redirect(StatusCode::SEE_OTHER, &next, Some(&cookie)))
+}
+
+/// One answer for every rejected handoff: a 401 on the errors contract, and
+/// never a redirect. A cell that bounced the browser back toward the portal on
+/// a token it would refuse again would loop it between two hosts forever.
+fn handoff_refused() -> Response {
+    no_store(errors::err_401("this session token is not valid on this host"))
+}
+
+/// `Cache-Control: no-store` + `Referrer-Policy: no-referrer`, for the two
+/// responses whose request URL has a credential in it. The 303's own `Location`
+/// is the next page the browser loads, and without the referrer policy that
+/// page, and every subresource it pulls, is handed the token in a header.
+fn no_store(mut resp: Response) -> Response {
+    let h = resp.headers_mut();
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    resp
 }
 
 // ---------------------------------------------------------------------------
@@ -1251,29 +1412,44 @@ fn cookie_is_secure(st: &St, headers: &HeaderMap) -> bool {
         || header_str(headers, "x-forwarded-proto").map(|v| v.eq_ignore_ascii_case("https")).unwrap_or(false)
 }
 
-fn session_cookie(st: &St, headers: &HeaderMap, token: &str) -> String {
-    let mut c = format!(
-        "{}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
-        st.cfg.cookie_name, token, st.cfg.jwt_ttl_s
-    );
-    if let Some(dom) = &st.cfg.cookie_domain {
+/// The one place a session cookie's attributes are spelled out. Pure, so the
+/// handoff's shorter-lived cookie is the same cookie with a different Max-Age
+/// rather than a second format string that can drift from this one.
+fn build_session_cookie(
+    name: &str,
+    value: &str,
+    domain: Option<&str>,
+    secure: bool,
+    max_age_s: u64,
+) -> String {
+    let mut c = format!("{name}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age_s}");
+    if let Some(dom) = domain {
         c.push_str(&format!("; Domain={dom}"));
     }
-    if cookie_is_secure(st, headers) {
+    if secure {
         c.push_str("; Secure");
     }
     c
 }
 
+fn session_cookie(st: &St, headers: &HeaderMap, token: &str) -> String {
+    build_session_cookie(
+        &st.cfg.cookie_name,
+        token,
+        st.cfg.cookie_domain.as_deref(),
+        cookie_is_secure(st, headers),
+        st.cfg.jwt_ttl_s,
+    )
+}
+
 fn clear_cookie(st: &St, headers: &HeaderMap) -> String {
-    let mut c = format!("{}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0", st.cfg.cookie_name);
-    if let Some(dom) = &st.cfg.cookie_domain {
-        c.push_str(&format!("; Domain={dom}"));
-    }
-    if cookie_is_secure(st, headers) {
-        c.push_str("; Secure");
-    }
-    c
+    build_session_cookie(
+        &st.cfg.cookie_name,
+        "",
+        st.cfg.cookie_domain.as_deref(),
+        cookie_is_secure(st, headers),
+        0,
+    )
 }
 
 fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -1490,26 +1666,122 @@ fn provider_list(
     out
 }
 
-/// Minimal self-contained login page: email/password form, provider buttons
-/// when configured, sober inline CSS. `next` is carried through as a hidden
-/// field and on the provider links.
+/// What the sign-in panel can honestly offer on this host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SignIn {
+    /// This proxy issues its own sessions: the email/password form, plus any
+    /// provider button it can actually complete.
+    Here,
+    /// Verify-only host. It accepts sessions the auth host minted and issues
+    /// none, so the page explains where sign-in happens instead.
+    Elsewhere,
+}
+
+/// Which of the two surfaces this host can serve, decided from what it can DO
+/// with a session token rather than from which knob is set (the same rule
+/// `config::jwt_boot` classifies by).
+///
+/// VERIFY-ONLY IS EXACTLY `can_verify && !can_mint`: a public key and no signer,
+/// `config::JwtMode::VerifyOnly`. A verify-only host that cannot verify never
+/// reaches this page at all, because the boot gate refuses to start it.
+///
+/// Measured on a Queen Cloud cell (2026-08-28): the page rendered its form, and
+/// every submission it invited reached `establish_session`, which answers 503
+/// "no JWT signer" because minting is precisely what this host is deployed not
+/// to do. The OAuth buttons are the same dead end one redirect later, since both
+/// callbacks end in `establish_session` too, so the whole panel is withheld
+/// rather than the form alone.
+///
+/// The OTHER host that cannot mint, the one with no JWT material at all, KEEPS
+/// THE FORM. It is the API-key-only proxy `config::jwt_boot` warns about instead
+/// of refusing: nothing mints its sessions anywhere, so there is no control
+/// plane to send anyone to, and the 503 its form produces names the two
+/// variables to set (`err_no_signer`), which is the answer its operator needs.
+///
+/// A data-plane proxy holding the same public key with NO pxdb behind it
+/// (`JwtMode::NoIdentity`, which is a classification of the user table rather
+/// than of the key material) lands on the notice too, and that is right: it
+/// verifies the auth host's sessions exactly like a cell does, and a form there
+/// could not resolve a user even if a signer existed.
+fn sign_in_surface(can_mint: bool, can_verify: bool) -> SignIn {
+    if can_verify && !can_mint {
+        SignIn::Elsewhere
+    } else {
+        SignIn::Here
+    }
+}
+
+/// Minimal self-contained sign-in page, in whichever of its two forms this host
+/// can serve: the email/password form with the provider buttons it can complete
+/// (`next` carried through as a hidden field and on those links), or, on a
+/// verify-only host, the notice that says where sign-in happens instead. Sober
+/// inline CSS either way.
 fn render_login(st: &St, next: &str, error: Option<&str>) -> String {
+    login_html(
+        sign_in_surface(st.keys.can_mint(), st.keys.can_verify()),
+        &configured_providers(st),
+        st.cfg.auth_portal_url.as_deref().map(|u| (u, st.cfg.auth_portal_label.as_str())),
+        next,
+        error,
+    )
+}
+
+/// The page itself, with every input already resolved: rendered from plain
+/// values so both surfaces can be exercised without building a `Config` and a
+/// connection pool, the way `provider_list` is.
+///
+/// `portal` is the operator's sign-in URL and its link text, and only the
+/// `Elsewhere` panel has anywhere to put them.
+fn login_html(
+    sign_in: SignIn,
+    providers: &[(&str, &str)],
+    portal: Option<(&str, &str)>,
+    next: &str,
+    error: Option<&str>,
+) -> String {
     let next_e = esc(next);
     let next_q = pct(next);
     let err_html = match error {
         Some(e) => format!("<div class=\"err\">{}</div>", esc(e)),
         None => String::new(),
     };
-    let mut providers = String::new();
-    for (slug, label) in configured_providers(st) {
-        providers.push_str(&format!(
-            "<a class=\"oauth\" href=\"/auth/{slug}?next={next_q}\">Continue with {label}</a>"
-        ));
-    }
-    let divider = if providers.is_empty() {
-        String::new()
-    } else {
-        format!("{providers}<div class=\"sep\">or</div>")
+    let panel = match sign_in {
+        SignIn::Here => {
+            let mut buttons = String::new();
+            for (slug, label) in providers {
+                buttons.push_str(&format!(
+                    "<a class=\"oauth\" href=\"/auth/{slug}?next={next_q}\">Continue with {label}</a>"
+                ));
+            }
+            let divider = if buttons.is_empty() {
+                String::new()
+            } else {
+                format!("{buttons}<div class=\"sep\">or</div>")
+            };
+            format!(
+                "{divider}<form method=\"post\" action=\"/auth/login\">\
+<input type=\"hidden\" name=\"next\" value=\"{next_e}\">\
+<label for=\"email\">Email</label>\
+<input id=\"email\" name=\"email\" type=\"email\" autocomplete=\"username\" required autofocus>\
+<label for=\"password\">Password</label>\
+<input id=\"password\" name=\"password\" type=\"password\" autocomplete=\"current-password\" required>\
+<button type=\"submit\">Sign in</button></form>"
+            )
+        }
+        // No `next` on the link: it names a path on THIS host, and the portal is
+        // a different service that has no use for it.
+        SignIn::Elsewhere => {
+            let link = match portal {
+                Some((url, label)) => {
+                    format!("<a class=\"oauth\" href=\"{}\">{}</a>", esc(url), esc(label))
+                }
+                None => String::new(),
+            };
+            format!(
+                "<p class=\"note\">This host verifies sessions but does not issue them. \
+Sign in through the control plane that operates it, then return here.</p>{link}"
+            )
+        }
     };
     let favicon = favicon_data_uri();
     let badge = brand_badge_data_uri();
@@ -1568,16 +1840,11 @@ text-transform:uppercase;letter-spacing:.08em}}\
 .sep:before,.sep:after{{content:'';flex:1;height:1px;background:#262626}}\
 .err{{background:rgba(244,63,94,.12);border:1px solid rgba(244,63,94,.28);color:#fb7185;\
 padding:8px 10px;border-radius:6px;font-size:13px;margin-bottom:14px}}\
+.note{{margin:0;color:#9e9e9e;font-size:13px;line-height:1.6}}\
+.note+.oauth{{margin:16px 0 0}}\
 </style></head><body><div class=\"card\">\
 <div class=\"brand\">{mark}<span class=\"word\">Queen<b>MQ</b></span></div>\
-<div class=\"panel\"><h1>Sign in</h1>{err_html}{divider}\
-<form method=\"post\" action=\"/auth/login\">\
-<input type=\"hidden\" name=\"next\" value=\"{next_e}\">\
-<label for=\"email\">Email</label>\
-<input id=\"email\" name=\"email\" type=\"email\" autocomplete=\"username\" required autofocus>\
-<label for=\"password\">Password</label>\
-<input id=\"password\" name=\"password\" type=\"password\" autocomplete=\"current-password\" required>\
-<button type=\"submit\">Sign in</button></form></div></div></body></html>"
+<div class=\"panel\"><h1>Sign in</h1>{err_html}{panel}</div></div></body></html>"
     )
 }
 
@@ -1695,6 +1962,140 @@ mod tests {
         assert_eq!(safe_next(Some("//evil.com")), "/");
         assert_eq!(safe_next(Some("/ok")), "/ok");
         assert_eq!(safe_next(None), "/");
+    }
+
+    // --- dashboard handoff --------------------------------------------------
+
+    /// The auth host that mints and the verify-only cell that trusts it. Real
+    /// Ed25519 on both sides: the point of this path is that a host with no
+    /// signer can still check a signature, and a stub would test the branch
+    /// while leaving the claim untested.
+    fn handoff_pair() -> (crate::auth::Keys, crate::auth::Keys) {
+        crate::auth::testkit::ed_handoff_pair("queen-proxy", None)
+    }
+
+    fn establish_of(h: Handoff) -> (String, u64) {
+        match h {
+            Handoff::Establish { next, max_age_s, .. } => (next, max_age_s),
+            Handoff::Refuse(r) => panic!("expected an establish, got Refuse({r})"),
+        }
+    }
+
+    #[test]
+    fn verify_only_host_establishes_a_valid_handoff_and_sets_the_cookie() {
+        let (auth_host, cell) = handoff_pair();
+        assert!(auth_host.can_mint(), "the auth host mints");
+        assert!(!cell.can_mint(), "the cell holds a public key and no signer");
+        assert!(cell.can_verify(), "and it can still verify with it");
+
+        let now = now_secs();
+        let token =
+            crate::auth::testkit::mint_at(&auth_host, Uuid::new_v4(), now + 3600, None).unwrap();
+
+        let (next, max_age_s) =
+            establish_of(decide_handoff(&cell, &token, Some("/console"), now));
+        assert_eq!(next, "/console");
+        // The cookie lives as long as the TOKEN, not as long as this host's
+        // jwt_ttl_s: it cannot mint a replacement when the token dies.
+        assert_eq!(max_age_s, 3600);
+
+        let cookie = build_session_cookie(
+            "queen_session",
+            &token,
+            Some("queenmq.cloud"),
+            true,
+            max_age_s,
+        );
+        assert!(cookie.starts_with(&format!("queen_session={token};")), "cookie is the token");
+        for attr in ["Path=/", "HttpOnly", "SameSite=Lax", "Max-Age=3600", "Domain=queenmq.cloud", "Secure"] {
+            assert!(cookie.contains(attr), "missing {attr} in {cookie}");
+        }
+    }
+
+    #[test]
+    fn a_handoff_token_from_another_auth_host_is_refused() {
+        // Two unrelated keypairs: a token minted by a fleet this cell does not
+        // trust must not open its console, however well-formed it is.
+        let (_, cell) = handoff_pair();
+        let (stranger, _) = handoff_pair();
+        let now = now_secs();
+        let token =
+            crate::auth::testkit::mint_at(&stranger, Uuid::new_v4(), now + 3600, None).unwrap();
+        assert_eq!(
+            decide_handoff(&cell, &token, Some("/console"), now),
+            Handoff::Refuse("signature invalid")
+        );
+    }
+
+    #[test]
+    fn an_expired_handoff_token_is_refused() {
+        let (auth_host, cell) = handoff_pair();
+        let now = now_secs();
+        // Well past jsonwebtoken's 60s leeway.
+        let token =
+            crate::auth::testkit::mint_at(&auth_host, Uuid::new_v4(), now - 3600, None).unwrap();
+        assert_eq!(
+            decide_handoff(&cell, &token, Some("/console"), now),
+            Handoff::Refuse("expired")
+        );
+
+        // And the edge the leeway lets through: verification accepts a token
+        // 30s dead, but there is no session left to hand over, so it is refused
+        // here rather than set as a cookie the browser drops on arrival.
+        let just_dead =
+            crate::auth::testkit::mint_at(&auth_host, Uuid::new_v4(), now - 30, None).unwrap();
+        assert_eq!(
+            decide_handoff(&cell, &just_dead, Some("/console"), now),
+            Handoff::Refuse("expired")
+        );
+    }
+
+    #[test]
+    fn a_handoff_minted_for_another_cell_is_refused() {
+        // The `aud` binding, through the handoff path: this cell expects
+        // `cell-a`, and a token stamped for `cell-b` verifies on signature and
+        // issuer alone. auth.rs owns the rule; this pins that the handoff
+        // inherits it instead of routing around it.
+        let (auth_host, cell) = crate::auth::testkit::ed_handoff_pair("queen-proxy", Some("cell-a"));
+        let now = now_secs();
+        let ours =
+            crate::auth::testkit::mint_at(&auth_host, Uuid::new_v4(), now + 3600, Some("cell-a"))
+                .unwrap();
+        assert_eq!(establish_of(decide_handoff(&cell, &ours, Some("/"), now)).0, "/");
+
+        let theirs =
+            crate::auth::testkit::mint_at(&auth_host, Uuid::new_v4(), now + 3600, Some("cell-b"))
+                .unwrap();
+        assert_eq!(
+            decide_handoff(&cell, &theirs, Some("/console"), now),
+            Handoff::Refuse("minted for another cell")
+        );
+    }
+
+    #[test]
+    fn a_refused_handoff_carries_an_unsafe_next_nowhere() {
+        // A refusal is a 401, never a redirect, so `next` is not even consulted
+        // on that path, and an accepted one is sanitized by `safe_next`.
+        let (auth_host, cell) = handoff_pair();
+        let now = now_secs();
+        let token =
+            crate::auth::testkit::mint_at(&auth_host, Uuid::new_v4(), now + 3600, None).unwrap();
+        assert_eq!(establish_of(decide_handoff(&cell, &token, Some("//evil.com"), now)).0, "/");
+        assert_eq!(establish_of(decide_handoff(&cell, &token, None, now)).0, "/");
+    }
+
+    #[test]
+    fn a_mint_capable_host_is_never_the_handoff() {
+        // The whole guarantee that the auth host's endpoint is unchanged: on a
+        // host that can mint, `?token=` routes nowhere new.
+        assert!(!is_handoff(true, Some("a.b.c")));
+        assert!(!is_handoff(true, None));
+        // Verify-only, but no token: the SPA's own call, which still answers
+        // the 503 it always did rather than being read as an empty handoff.
+        assert!(!is_handoff(false, None));
+        assert!(!is_handoff(false, Some("")));
+        assert!(!is_handoff(false, Some("   ")));
+        assert!(is_handoff(false, Some("a.b.c")));
     }
 
     // --- resolution policy --------------------------------------------------
@@ -1914,6 +2315,117 @@ mod tests {
         // What a dev cell looks like — and it must not be mistaken for a
         // provider having gone missing.
         assert!(provider_list(false, false, false, false).is_empty());
+    }
+
+    // --- which sign-in surface the host serves -------------------------------
+
+    /// Both providers configured, so any test that renders the `Here` panel
+    /// shows the whole thing.
+    const BOTH: &[(&str, &str)] = &[("google", "Google"), ("github", "GitHub")];
+
+    #[test]
+    fn verify_only_is_the_host_that_verifies_and_cannot_mint() {
+        // The capability, not the knob: this is config::JwtMode::VerifyOnly as
+        // auth::Keys ends up building it.
+        assert_eq!(sign_in_surface(false, true), SignIn::Elsewhere);
+        // A minting host serves the form, whichever signer it built.
+        assert_eq!(sign_in_surface(true, true), SignIn::Here);
+        // NO MATERIAL AT ALL KEEPS THE FORM. It is the API-key-only proxy, and
+        // nothing mints its sessions anywhere, so there is no control plane to
+        // point it at; its form produces the 503 that names the variables to
+        // set. Losing this line would put a control-plane notice on every
+        // self-hosted proxy that never configured a signer.
+        assert_eq!(sign_in_surface(false, false), SignIn::Here);
+    }
+
+    #[test]
+    fn verify_only_replaces_the_form_with_the_notice() {
+        // The dead end this closes, measured on a Queen Cloud cell: the page
+        // offered email/password on a host that cannot mint a session, so every
+        // submission it invited came back 503.
+        let html = login_html(SignIn::Elsewhere, BOTH, None, "/", None);
+        assert!(!html.contains("<form"), "no form on a host that cannot complete one");
+        assert!(!html.contains("type=\"password\""), "and nothing to type a password into");
+        assert!(
+            html.contains("This host verifies sessions but does not issue them."),
+            "the notice says why in the page's own voice"
+        );
+        assert!(html.contains("control plane"), "and where sign-in actually happens");
+        // The provider buttons are the same dead end one redirect later: both
+        // callbacks end in `establish_session`, which cannot mint here either.
+        assert!(!html.contains("Continue with Google"), "no OAuth button that 503s on return");
+        assert!(!html.contains("class=\"sep\""), "and no divider left over one");
+    }
+
+    #[test]
+    fn the_portal_link_is_rendered_only_when_it_is_configured() {
+        let with = login_html(
+            SignIn::Elsewhere,
+            &[],
+            Some(("https://auth.example.test/login", "Continue to the control plane")),
+            "/",
+            None,
+        );
+        assert!(
+            with.contains("<a class=\"oauth\" href=\"https://auth.example.test/login\">"),
+            "the configured URL is the link"
+        );
+        assert!(with.contains(">Continue to the control plane</a>"), "labelled as configured");
+        // Absent is a supported shape, not a broken one: the same notice, with
+        // nothing to click.
+        let without = login_html(SignIn::Elsewhere, &[], None, "/", None);
+        assert!(without.contains("This host verifies sessions"), "still explains");
+        assert!(!without.contains("<a class=\"oauth\""), "with no empty link left behind");
+    }
+
+    #[test]
+    fn the_portal_link_carries_no_next_and_escapes_what_it_is_given() {
+        // `next` names a path on THIS host; the portal is a different service.
+        let html = login_html(
+            SignIn::Elsewhere,
+            &[],
+            Some(("https://auth.example.test/login", "Sign in")),
+            "/clusters/prod",
+            None,
+        );
+        assert!(!html.contains("/clusters/prod"), "the portal link is not a return path");
+        // Config refuses a non-http(s) URL long before this, but the page escapes
+        // anyway: this is the one surface served with no session at all.
+        let nasty = login_html(
+            SignIn::Elsewhere,
+            &[],
+            Some(("https://x.test/\"><script>alert(1)</script>", "L<b>")),
+            "/",
+            None,
+        );
+        assert!(!nasty.contains("<script>"), "no markup escapes the href");
+        assert!(!nasty.contains("L<b>"), "nor the label");
+    }
+
+    #[test]
+    fn a_minting_host_renders_the_form_exactly_as_before() {
+        let html = login_html(SignIn::Here, BOTH, None, "/clusters/prod", Some("Invalid email or password."));
+        assert!(html.contains("<form method=\"post\" action=\"/auth/login\">"));
+        assert!(html.contains("autocomplete=\"current-password\""));
+        assert!(html.contains("value=\"/clusters/prod\""), "next rides the form");
+        assert!(html.contains("Continue with Google") && html.contains("Continue with GitHub"));
+        assert!(html.contains("Invalid email or password."), "and a failed post still says so");
+        // A portal URL set on a minting host is inert: it has a form that works.
+        let with_portal =
+            login_html(SignIn::Here, &[], Some(("https://auth.example.test", "Portal")), "/", None);
+        assert!(with_portal.contains("<form"), "the form is what this host offers");
+        assert!(!with_portal.contains("https://auth.example.test"), "the portal is not offered");
+    }
+
+    #[test]
+    fn the_notice_is_not_dressed_as_an_error() {
+        // A verify-only cell is a deliberate deployment shape, not a fault. The
+        // error styling (the rose `.err` block) belongs to a failed login, and
+        // wearing it here would read as "something is broken" on every cloud
+        // cell's sign-in page.
+        let html = login_html(SignIn::Elsewhere, &[], None, "/", None);
+        assert!(!html.contains("class=\"err\""), "the notice is routine, not an alarm");
+        assert!(html.contains("class=\"note\""));
     }
 
     // --- sign-in page brand -------------------------------------------------

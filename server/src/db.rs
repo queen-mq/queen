@@ -1062,12 +1062,19 @@ pub async fn seg_message_detail(
 // longer exists (retention deleted). Signature kept from the seg engine: `seq`
 // now carries the segment's base_offset (the log_segments PK). For "which
 // segment covers offset X" use log_segment_covering instead.
+//
+// AT TIME ZONE 'UTC' before to_char is load-bearing, for the reason spelled out
+// at the top of 032_log_fetch.sql: `created_at` is TIMESTAMPTZ, so to_char alone
+// renders it in the SESSION's TimeZone under a format string that ends in a
+// literal "Z" — local time wearing a UTC label on any Postgres that is not UTC.
+// This string is the `createdAt` of GET /api/v1/messages/:id, verbatim.
 pub async fn seg_fetch_segment(
     client: &deadpool_postgres::Client,
     partition_id: &str,
     seq: i64,
 ) -> Result<Option<(String, String, Vec<u8>)>, tokio_postgres::Error> {
-    let stmt = "SELECT to_char(s.created_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), \
+    let stmt =
+        "SELECT to_char(s.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), \
                        lp.name, s.blob \
                 FROM queen.log_segments s \
                 JOIN queen.log_partitions lp ON lp.id = s.partition_id \
@@ -1813,6 +1820,33 @@ pub async fn log_fetch_bin(
         )
         .await?;
     Ok((row.get(0), row.get(1)))
+}
+
+// The parked fetch's re-probe gate (queen.log_fetch_changed_v1, 032_log_fetch).
+// `false` means every named lane still has the (high, logStart) pair the caller
+// already holds, and segments are immutable — so the body it already rendered is
+// still the answer and there is nothing to re-read.
+//
+// This is `has_pending`'s role on the fetch path, and for the same reason: the
+// broker runs it WITHOUT a pop admission permit and only spends one when it
+// answers `true`, so the O(#parked consumers) storm of empty re-probes can never
+// saturate the shared limiter (the discovery-latency regression of 2026-07-24).
+// One indexed row read per entry, nothing against queen.log_segments.
+pub async fn log_fetch_changed(
+    client: &deadpool_postgres::Client,
+    queues: &[String],
+    partitions: &[String],
+    highs: &[i64],
+    starts: &[i64],
+    tenant: &str,
+) -> Result<bool, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached("SELECT queen.log_fetch_changed_v1($1,$2,$3,$4,$5::text::uuid)")
+        .await?;
+    let row = client
+        .query_one(&stmt, &[&queues, &partitions, &highs, &starts, &tenant])
+        .await?;
+    Ok(row.get(0))
 }
 
 // Namespace/task discovery pop — GET /api/v1/pop (no queue in path). Wildcard-pops

@@ -91,8 +91,8 @@ BEGIN
             'deadTuples', n_dead_tup,
             'liveTuples', n_live_tup,
             'deadPercentage', ROUND(n_dead_tup::numeric / NULLIF(n_live_tup, 0) * 100, 2),
-            'lastVacuum', to_char(last_vacuum, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-            'lastAutovacuum', to_char(last_autovacuum, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+            'lastVacuum', to_char(last_vacuum AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+            'lastAutovacuum', to_char(last_autovacuum AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
         ) ORDER BY n_dead_tup DESC
     ), '[]'::jsonb) INTO v_dead_tuples
     FROM pg_stat_user_tables
@@ -140,7 +140,7 @@ BEGIN
     SELECT COALESCE(jsonb_agg(
         jsonb_build_object(
             'table', relname,
-            'lastAutovacuum', to_char(last_autovacuum, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+            'lastAutovacuum', to_char(last_autovacuum AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
             'deadTuples', n_dead_tup,
             'autovacuumCount', autovacuum_count,
             'autoanalyzeCount', autoanalyze_count
@@ -201,7 +201,7 @@ BEGIN
     END;
 
     RETURN jsonb_build_object(
-        'timestamp', to_char(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+        'timestamp', to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
         'database', current_database(),
         'databaseCache', COALESCE(v_database_cache, '{}'::jsonb),
         'tableCache', COALESCE(v_table_cache, '[]'::jsonb),

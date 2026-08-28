@@ -8,6 +8,7 @@ sidebar:
 sourceOfTruth:
   - proxy/src/main.rs
   - proxy/src/gateway.rs
+  - proxy/src/acting.rs
   - proxy/src/config.rs
   - proxy/migrations/001_init.sql
   - proxy/migrations/004_lifecycle.sql
@@ -183,6 +184,74 @@ SELECT queen_proxy.issue_api_key(:cluster_id, 'ingest-worker', :key_hash, ARRAY[
 
 A password hash of `NULL` is the OAuth-only user: they exist, they have a role, and they can
 only arrive through Google.
+
+## One hostname for several tenants
+
+Every cluster so far has its own subdomain and the wildcard record covers them all. A cell serving
+a handful of teams often wants the opposite: one URL everybody uses, with the API key deciding
+whose cluster a request lands in. `QUEEN_PROXY_SHARED_HOSTS` names the hostnames that work that way
+([proxy configuration](/deploy/proxy#shared-hosts)).
+
+Onboard the tenants exactly as above. Nothing about them is special, and each call returns its own
+plaintext key once.
+
+```sql
+SELECT queen_proxy.bootstrap_tenant('acme', 'Acme Inc', 'acme-prod', 'free',
+  (SELECT id FROM queen_proxy.cells WHERE slug = 'eu1-shared-a'),
+  'ops@acme.example', NULL, 'default');
+
+SELECT queen_proxy.bootstrap_tenant('globex', 'Globex', 'globex-prod', 'free',
+  (SELECT id FROM queen_proxy.cells WHERE slug = 'eu1-shared-a'),
+  'ops@globex.example', NULL, 'default');
+```
+
+Then name the shared hostname on the proxy and restart it, since the list is read at boot. It is a
+list, so a cell can front one shared name beside the per-cluster subdomains it already serves.
+
+```bash
+QUEEN_PROXY_SHARED_HOSTS=queen.eu1.example.com
+```
+
+`/healthz` reports how many are listed, a count rather than the names.
+
+```bash
+curl -s http://127.0.0.1:6711/healthz
+```
+
+```json
+{"enforce":false,"shared_hosts":1,"status":"ok","tenant_header":true}
+```
+
+Both tenants now use that one URL, and each key lands in its own cluster.
+
+```bash
+curl -s -X POST https://queen.eu1.example.com/api/v1/push \
+  -H "Authorization: Bearer $ACME_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"items":[{"queue":"orders","partition":"cust-42","payload":{"from":"acme"}}]}'
+```
+
+```bash
+curl -s -X POST https://queen.eu1.example.com/api/v1/push \
+  -H "Authorization: Bearer $GLOBEX_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"items":[{"queue":"orders","partition":"cust-42","payload":{"from":"globex"}}]}'
+```
+
+Neither request names a cluster, and neither can reach the other's `orders`: a key is bound to the
+cluster it was issued on, and `x-queen-act-cluster` beside a key is refused rather than honoured.
+A request carrying no credential gets `401` rather than the `421` a wrong hostname earns, because
+on a shared host there is no wrong hostname to report. People signing in to the dashboard there
+pick a cluster instead, which is what the selector is for
+([console](/reference/multi-tenant/console)).
+
+<Aside type="caution">
+Listing a shared host changes the whole listener rather than that one name. Every unauthenticated
+caller now gets `401` where an unknown host used to answer `421`, which is what keeps the wildcard
+record from being an unauthenticated directory of cluster slugs. The proxy also exits 1 at boot if
+the variable is set without a pxdb, since there would be no `api_keys` table to resolve against:
+[shared hosts](/deploy/proxy#shared-hosts).
+</Aside>
 
 ## Human logins with Google
 

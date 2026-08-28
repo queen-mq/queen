@@ -42,8 +42,29 @@
 //! partition by number. Producing through the facade always creates numeric
 //! lanes, so this only affects queues that Kafka clients share with native
 //! producers — documented at M6, not papered over here.
+//!
+//! ## Size, which is a correctness problem and not a taste one
+//!
+//! Every advertised partition is written out in full in every Metadata
+//! response — `partition_index`, leader, epoch, and three node arrays, ~26
+//! bytes on the wire and three heap allocations while it is being built — and
+//! clients refresh on their own timer. Two multipliers make that unbounded if
+//! nothing here bounds it, and Queen is a system whose recorded production
+//! scale is tens of thousands of queues and ~827k partitions:
+//!
+//!   * one topic's WIDTH, which comes from Queen and can be any number
+//!     (`advertised_partitions` clamps it — [`MAX_ADVERTISED_PARTITIONS`]);
+//!   * queues TIMES that width, which only the all-topics listing can reach
+//!     ([`MAX_LISTING_PARTITIONS`]).
+//!
+//! Neither is a preference. Past `conn::MAX_FRAME_BYTES` the response cannot be
+//! encoded at all: the connection dies AFTER the whole allocation, so a plain
+//! `kcat -L` becomes an un-answerable request that costs the broker everything
+//! and returns nothing. A truncated listing is strictly better than that, and
+//! it is the only case where anything is withheld — a client that NAMES its
+//! topics (which is every producer and every consumer) is never truncated.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use kafka_protocol::error::ResponseError;
 use kafka_protocol::messages::metadata_response::{
@@ -52,6 +73,8 @@ use kafka_protocol::messages::metadata_response::{
 use kafka_protocol::messages::{MetadataRequest, MetadataResponse, TopicName};
 use kafka_protocol::protocol::StrBytes;
 
+use crate::queen::Queue;
+use crate::throttle;
 use crate::Facade;
 
 /// The facade is the whole cluster, and it is node 0 of it.
@@ -75,6 +98,63 @@ const MAX_QUEUE_NAME_CHARS: usize = 255;
 /// Names Kafka reserves for itself: `__consumer_offsets`, `__transaction_state`,
 /// and anything else a client might mistake for one of them.
 const INTERNAL_PREFIX: &str = "__";
+
+/// Ceiling on the width advertised for ONE topic, whatever Queen reports.
+///
+/// It is also the ceiling `QUEEN_KAFKA_DEFAULT_PARTITIONS` is validated against
+/// at boot (main.rs), and the same number for the same reason: 100k lanes is a
+/// ~2.6 MB partition array in every Metadata response, which is already absurd
+/// and is the last order of magnitude before the answer stops being an answer.
+/// The configured default cannot exceed it; a queue's LIVE lane count can, and
+/// that is the case this clamp is actually for — a native Queen queue with 827k
+/// partitions (a real, recorded shape) would otherwise be a 21 MB topic entry
+/// built one `Vec`-triple at a time. Lanes above the ceiling stay reachable
+/// natively and through `POST /api/v1/fetch`; they are not addressable by a
+/// Kafka client, which is the same limitation the module header already states
+/// for lanes whose names are not decimal indices.
+pub const MAX_ADVERTISED_PARTITIONS: u32 = 100_000;
+
+/// Ceiling on the distinct topic names ONE request is answered about.
+///
+/// The named form is the only request whose cost is set by the client's own
+/// list, and that list is bounded by nothing but the frame: 100 MiB of
+/// eight-character names is ~10^7 of them, each of which would be a `String`, a
+/// hash-set entry, a plan and a response topic — before any of them reached
+/// Queen. Ten thousand is more topics than any Kafka consumer subscribes to
+/// (and more queues than a Queen tenant has), and past it the extra names are
+/// dropped from the ANSWER rather than allowed to size the work: a client that
+/// asked about a topic and is told nothing about it retries, which is the same
+/// thing it does when a topic's leader is not available yet.
+const MAX_REQUESTED_TOPICS: usize = 10_000;
+
+/// Ceiling on the topics ONE request auto-creates.
+///
+/// Each creation is a `POST /api/v1/configure` with a ten-second budget, run in
+/// sequence, on a connection that is muted until the whole response is written
+/// (conn.rs) — so without a bound, one request that names N absent topics is N
+/// upstream calls and a connection that says nothing for as long as they take.
+/// A hundred is a consumer subscribing to a hundred new topics served in one
+/// round trip; the hundred-and-first is answered LEADER_NOT_AVAILABLE, which
+/// the client retries, and the next Metadata creates the next hundred. The
+/// fleet converges either way — what it cannot do is buy an unbounded fan-out
+/// with one frame.
+pub(crate) const MAX_AUTO_CREATES_PER_REQUEST: usize = 100;
+
+/// One line per window when either ceiling binds. Both are client-driven, so
+/// both are exactly the shape that floods a log.
+static TOPIC_CAP: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
+
+/// Ceiling on the partitions materialised for ONE all-topics listing, summed
+/// across every topic in it.
+///
+/// The listing is the only request whose cost is queues × width, and it is the
+/// one no client asked to be big: `kcat -L`, an admin `listTopics`, a
+/// regex-subscription discovery. At ~26 wire bytes per partition this is a
+/// ~5 MB response, past which the answer is not one. Topics beyond the budget
+/// are omitted with a loud log line rather than the whole response being made
+/// un-encodable, because a listing that arrives short is something a client can
+/// act on and a connection reset is not.
+const MAX_LISTING_PARTITIONS: usize = 200_000;
 
 /// What one requested topic resolves to, before any call to Queen. Pure: this is
 /// the whole auto-create policy, decided from the name, the catalog and the
@@ -124,7 +204,14 @@ pub fn plan(
 /// `__consumer_offsets` that a later real implementation would collide with.
 /// The rule is by prefix, not by a list of known names, so it also covers the
 /// internal topics of Kafka versions this facade has never heard of.
-fn reserved_or_invalid(name: &str) -> Option<ResponseError> {
+///
+/// `pub(crate)` for [`crate::handlers::fetch`] and
+/// [`crate::handlers::list_offsets`], which apply the SAME rule without a
+/// catalog: a `__` name must be as invisible on the read path as it is here, or
+/// a queue Metadata hides would be readable by naming it directly. They apply it
+/// through [`not_a_topic_here`], which is the same rule in the one code those
+/// APIs may answer.
+pub(crate) fn reserved_or_invalid(name: &str) -> Option<ResponseError> {
     if name.starts_with(INTERNAL_PREFIX) {
         return Some(ResponseError::UnknownTopicOrPartition);
     }
@@ -132,6 +219,28 @@ fn reserved_or_invalid(name: &str) -> Option<ResponseError> {
         return Some(ResponseError::InvalidTopicException);
     }
     None
+}
+
+/// The same rule, for every API that is NOT Metadata: one code,
+/// UNKNOWN_TOPIC_OR_PARTITION.
+///
+/// INVALID_TOPIC_EXCEPTION is a METADATA answer. Apache Kafka raises it where a
+/// topic name is validated — the metadata path and CreateTopics — and nowhere
+/// else: a broker asked to fetch, list the offsets of, or commit against a name
+/// it does not have simply does not have it, so it answers
+/// UNKNOWN_TOPIC_OR_PARTITION whatever the name looks like. Every Kafka client
+/// is written against that shape, and the Java consumer enforces it: the fetch
+/// path walks a CLOSED set of per-partition codes and throws
+/// `IllegalStateException` out of `poll()` on anything outside it, and
+/// INVALID_TOPIC_EXCEPTION is outside it — a consumer that named an illegal
+/// topic would die rather than be told there is no such topic. The commit and
+/// offset-fetch paths are the same story with a different exception.
+///
+/// So the read and commit paths narrow the rule to the code they may answer,
+/// and Metadata — where a client asked about the NAME and can act on the answer
+/// — keeps the precise one. See `compat/ERRORS.md`.
+pub(crate) fn not_a_topic_here(name: &str) -> Option<ResponseError> {
+    reserved_or_invalid(name).map(|_| ResponseError::UnknownTopicOrPartition)
 }
 
 /// Kafka's topic-name rule, and Queen's storage bound, in one place.
@@ -147,10 +256,67 @@ pub fn is_valid_topic_name(name: &str) -> bool {
 }
 
 /// The width to advertise for a queue with `live` materialised partitions. See
-/// the module header for why it is a maximum and not either input alone.
+/// the module header for why it is a maximum and not either input alone, and
+/// [`MAX_ADVERTISED_PARTITIONS`] for why it has a ceiling at all.
 pub fn advertised_partitions(live: i64, default_partitions: u32) -> i32 {
     live.max(default_partitions as i64)
-        .clamp(0, i32::MAX as i64) as i32
+        .clamp(0, MAX_ADVERTISED_PARTITIONS as i64) as i32
+}
+
+/// The advertised width of each of `names` that Queen has a queue for.
+///
+/// The number a READ is checked against, so that a partition index this facade
+/// never advertised is answered UNKNOWN_TOPIC_OR_PARTITION instead of as an
+/// empty lane that will never fill. Produce has always applied it — through
+/// [`plan`], which it needs anyway to auto-create — and the read paths apply
+/// the same one from the same cache, because a partition that cannot be
+/// written to is not one that can be read from either.
+///
+/// A name that is absent from the answer is one this facade will not bound: the
+/// queue is not in the catalog (it may not exist at all, and Queen is the
+/// authority on that — see `handlers::fetch`), or the catalog could not be read
+/// right now. The second is the reason this returns a map rather than a result:
+/// a blip in the admin API must not fail a fetch of records Queen would have
+/// served, so an unreadable catalog costs the bound and nothing else.
+///
+/// Lanes past [`MAX_ADVERTISED_PARTITIONS`] are outside the width for the same
+/// reason they are outside a Metadata answer: a Kafka client cannot address
+/// them. They stay readable natively and through `POST /api/v1/fetch`.
+pub(crate) async fn advertised_widths<'a>(
+    facade: &Facade,
+    names: impl Iterator<Item = &'a str>,
+    token: Option<&str>,
+) -> HashMap<String, i32> {
+    let wanted: HashSet<&str> = names.collect();
+    if wanted.is_empty() {
+        // A request naming no topic at all. There is nothing to bound, so there
+        // is nothing to ask Queen either.
+        return HashMap::new();
+    }
+    let queues = match facade.catalog.list(token).await {
+        Ok(queues) => queues,
+        Err(e) => {
+            tracing::debug!(
+                target: "kafka",
+                error = %e,
+                "cannot read the queue list; this read is served without a partition-width check"
+            );
+            return HashMap::new();
+        }
+    };
+    // One pass over the catalog, and only the names the request asked about
+    // kept: a tenant's queue list and a client's topic list are both numbers
+    // neither side bounds, and their product is the quadratic this avoids.
+    queues
+        .iter()
+        .filter(|q| wanted.contains(q.name.as_str()))
+        .map(|q| {
+            (
+                q.name.clone(),
+                advertised_partitions(q.partitions, facade.default_partitions),
+            )
+        })
+        .collect()
 }
 
 // ------------------------------------------------------------------- handling
@@ -165,80 +331,37 @@ pub async fn handle(
     api_version: i16,
     token: Option<&str>,
 ) -> MetadataResponse {
+    let mut throttle = None;
     let catalog = match facade.catalog.list(token).await {
         Ok(queues) => Some(queues),
         Err(e) => {
-            tracing::error!(target: "kafka", error = %e, "metadata: cannot read the queue list");
+            // A capped or frozen tenant is not a broker fault and is answered
+            // as a WAIT rather than only as a refusal: the per-topic code stays
+            // the retriable LEADER_NOT_AVAILABLE it has always been, and
+            // `throttle_time_ms` beside it is what makes the client's retry
+            // arrive after the cap has drained rather than into it. See
+            // [`crate::throttle`].
+            throttle = throttle::for_error(&e);
+            if throttle.is_some() {
+                tracing::warn!(target: "kafka", error = %e, "metadata: the tenant is throttled");
+            } else {
+                tracing::error!(target: "kafka", error = %e, "metadata: cannot read the queue list");
+            }
             None
         }
     };
 
     let topics = match requested_names(req, api_version) {
-        // The all-topics form: whatever Queen has, minus the names that are not
-        // Kafka topics. A queue with a name Kafka cannot express is SKIPPED
-        // rather than reported as an error — a client asked for a listing, not
-        // for that queue, and an error entry for a topic it never named makes
-        // some clients discard the whole response.
-        None => catalog
-            .as_deref()
-            .map(|queues| {
-                queues
-                    .iter()
-                    .filter(|q| reserved_or_invalid(&q.name).is_none())
-                    .map(|q| {
-                        topic(
-                            &q.name,
-                            Plan::Serve(advertised_partitions(
-                                q.partitions,
-                                facade.default_partitions,
-                            )),
-                        )
-                    })
-                    .collect()
-            })
-            // Nothing cached and Queen is unreachable: an empty listing is the
-            // only shape available, and it is transient — the client refreshes.
-            .unwrap_or_default(),
+        None => listing(facade, catalog.as_deref().map(|q| &q[..])),
         Some(names) => {
-            let mut out = Vec::with_capacity(names.len());
-            for name in names {
-                let Some(name) = name else {
-                    // A null name in a request. Every version this facade
-                    // advertises addresses topics by name, so there is nothing
-                    // to look up; the entry is echoed back with its own error
-                    // rather than dropped, because a client matches the response
-                    // topics against the ones it asked for.
-                    out.push(
-                        MetadataResponseTopic::default()
-                            .with_name(None)
-                            .with_error_code(ResponseError::InvalidTopicException.code()),
-                    );
-                    continue;
-                };
-                let Some(queues) = catalog.as_deref() else {
-                    // Retriable, and the code a client already expects while a
-                    // topic's leader is being established: it backs off and asks
-                    // again, which is exactly right for "Queen blipped".
-                    out.push(topic(
-                        &name,
-                        Plan::Reject(ResponseError::LeaderNotAvailable),
-                    ));
-                    continue;
-                };
-                let live = queues.iter().find(|q| q.name == name).map(|q| q.partitions);
-                let planned = plan(
-                    &name,
-                    live,
-                    req.allow_auto_topic_creation,
-                    facade.default_partitions,
-                );
-                let planned = match planned {
-                    Plan::Create => create(facade, &name, token).await,
-                    other => other,
-                };
-                out.push(topic(&name, planned));
-            }
-            out
+            requested(
+                facade,
+                &names,
+                req.allow_auto_topic_creation,
+                catalog.as_deref().map(|q| &q[..]),
+                token,
+            )
+            .await
         }
     };
 
@@ -251,53 +374,226 @@ pub async fn handle(
         .with_cluster_id(Some(StrBytes::from_static_str(CLUSTER_ID)))
         .with_controller_id(NODE_ID.into())
         .with_topics(topics)
+        // v3+. Silently dropped by the encoder below v3, which is the only
+        // reason it can be set unconditionally.
+        .with_throttle_time_ms(throttle.unwrap_or(0))
 }
 
-/// Create the queue, and report what to answer for it.
+/// The all-topics form: whatever Queen has, minus the names that are not Kafka
+/// topics, minus whatever does not fit in [`MAX_LISTING_PARTITIONS`].
 ///
-/// The catalog is re-read first, and not from cache. `POST /api/v1/configure` is
-/// an upsert that rewrites every config column to its default
-/// (server/sql/procedures/012_configure.sql), so calling it for a queue that
-/// already exists resets that queue's leaseTime, retention and dedup window —
-/// and the snapshot the plan was made from can be up to the cache TTL old. This
-/// is once per topic that genuinely does not exist, not once per refresh.
-async fn create(facade: &Facade, name: &str, token: Option<&str>) -> Plan {
-    match facade.catalog.refresh(token).await {
-        Ok(queues) => {
-            if let Some(q) = queues.iter().find(|q| q.name == name) {
-                return Plan::Serve(advertised_partitions(
-                    q.partitions,
-                    facade.default_partitions,
-                ));
-            }
+/// A queue with a name Kafka cannot express is SKIPPED rather than reported as
+/// an error — a client asked for a listing, not for that queue, and an error
+/// entry for a topic it never named makes some clients discard the whole
+/// response. A queue past the budget is skipped for a different reason and is
+/// logged, because that one IS a shortfall.
+fn listing(facade: &Facade, catalog: Option<&[Queue]>) -> Vec<MetadataResponseTopic> {
+    // Nothing cached and Queen is unreachable: an empty listing is the only
+    // shape available, and it is transient — the client refreshes.
+    let Some(queues) = catalog else {
+        return Vec::new();
+    };
+    let mut spent = 0usize;
+    let mut omitted = 0usize;
+    let mut out = Vec::new();
+    for q in queues
+        .iter()
+        .filter(|q| reserved_or_invalid(&q.name).is_none())
+    {
+        let width = advertised_partitions(q.partitions, facade.default_partitions);
+        // The first topic always fits, or a single wide queue would empty the
+        // listing entirely and tell a client the cluster has no topics.
+        if !out.is_empty() && spent + width as usize > MAX_LISTING_PARTITIONS {
+            omitted += 1;
+            continue;
         }
+        spent += width as usize;
+        out.push(topic(&q.name, Plan::Serve(width)));
+    }
+    if omitted > 0 {
+        tracing::warn!(
+            target: "kafka",
+            listed = out.len(),
+            omitted,
+            partitions = spent,
+            budget = MAX_LISTING_PARTITIONS,
+            "the all-topics Metadata listing hit its partition budget; \
+             topics are missing from it. Clients that NAME their topics are \
+             unaffected — lower QUEEN_KAFKA_DEFAULT_PARTITIONS to fit more \
+             queues in a listing."
+        );
+    }
+    out
+}
+
+/// The named form: decide every topic from the catalog, then run the one
+/// auto-create pass the decisions ask for.
+async fn requested(
+    facade: &Facade,
+    names: &[Option<String>],
+    allow_auto_create: bool,
+    catalog: Option<&[Queue]>,
+    token: Option<&str>,
+) -> Vec<MetadataResponseTopic> {
+    // The catalog as a lookup and not a scan: both sides of it are client-set
+    // (up to [`MAX_REQUESTED_TOPICS`] names against a tenant's whole queue
+    // list), and their product is the one quadratic in this handler.
+    let live: HashMap<&str, i64> = catalog
+        .map(|queues| {
+            queues
+                .iter()
+                .map(|q| (q.name.as_str(), q.partitions))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut planned: Vec<(Option<&str>, Plan)> = names
+        .iter()
+        .map(|name| match (name.as_deref(), catalog) {
+            // A null name in a request. Every version this facade advertises
+            // addresses topics by name, so there is nothing to look up; the
+            // entry is echoed back with its own error rather than dropped,
+            // because a client matches the response topics against the ones it
+            // asked for.
+            (None, _) => (None, Plan::Reject(ResponseError::InvalidTopicException)),
+            // Retriable, and the code a client already expects while a topic's
+            // leader is being established: it backs off and asks again, which is
+            // exactly right for "Queen blipped".
+            (Some(n), None) => (Some(n), Plan::Reject(ResponseError::LeaderNotAvailable)),
+            (Some(n), Some(_)) => (
+                Some(n),
+                plan(
+                    n,
+                    live.get(n).copied(),
+                    allow_auto_create,
+                    facade.default_partitions,
+                ),
+            ),
+        })
+        .collect();
+
+    create_absent(facade, &mut planned, token).await;
+
+    planned
+        .into_iter()
+        .map(|(name, planned)| match name {
+            Some(n) => topic(n, planned),
+            None => MetadataResponseTopic::default()
+                .with_name(None)
+                .with_error_code(ResponseError::InvalidTopicException.code()),
+        })
+        .collect()
+}
+
+/// Create every topic the plan pass marked [`Plan::Create`], and rewrite its
+/// entry with what to answer.
+///
+/// ONE catalog re-read for the whole request, and not from cache.
+/// `POST /api/v1/configure` is an upsert that rewrites every config column to
+/// its default (server/sql/procedures/012_configure.sql), so calling it for a
+/// queue that already exists resets that queue's leaseTime, retention and dedup
+/// window — and the snapshot the plans were made from can be up to the cache TTL
+/// old. The re-read closes that window down to the length of this one request.
+///
+/// It is shared across the topics because it used to be per topic, and the
+/// Kafka connection is MUTED until the whole response is written (conn.rs): a
+/// consumer subscribing to 50 new topics was 1 + 2×50 serialised admin calls,
+/// each with its own 10 s budget, on a connection that could say nothing in the
+/// meantime. It is now 1 + 1 + 50 — the creates are irreducible, the reads are
+/// not. Nothing is created without a fresh read behind it either way.
+///
+/// `pub(crate)` for [`crate::handlers::produce`]: a produce to an absent topic
+/// auto-creates it, and it has to be the same policy — the same re-read, the
+/// same "it appeared meanwhile, do not re-upsert it", the same retriable error
+/// on failure — or the two paths would disagree about when a `/configure` is
+/// safe.
+pub(crate) async fn create_absent(
+    facade: &Facade,
+    planned: &mut [(Option<&str>, Plan)],
+    token: Option<&str>,
+) {
+    if !planned.iter().any(|(_, p)| matches!(p, Plan::Create)) {
+        return;
+    }
+    let fresh = match facade.catalog.refresh(token).await {
+        Ok(queues) => queues,
         Err(e) => {
             tracing::error!(
                 target: "kafka",
-                topic = name,
                 error = %e,
-                "cannot confirm the queue is absent; not creating it"
+                "cannot confirm the queues are absent; creating none of them"
             );
-            return Plan::Reject(ResponseError::LeaderNotAvailable);
+            for (_, p) in planned
+                .iter_mut()
+                .filter(|(_, p)| matches!(p, Plan::Create))
+            {
+                *p = Plan::Reject(ResponseError::LeaderNotAvailable);
+            }
+            return;
         }
+    };
+
+    // Looked up rather than scanned: the names are the client's and the queue
+    // list is the tenant's, so a scan per name is their product.
+    let live: HashMap<&str, i64> = fresh
+        .iter()
+        .map(|q| (q.name.as_str(), q.partitions))
+        .collect();
+    let mut created = 0usize;
+    let mut deferred = 0usize;
+    for (name, p) in planned.iter_mut() {
+        if !matches!(p, Plan::Create) {
+            continue;
+        }
+        let Some(name) = *name else { continue };
+        // It appeared between the plan and the re-read (a native `/configure`,
+        // or another connection's auto-create): serve it, do not re-upsert it.
+        if let Some(partitions) = live.get(name) {
+            *p = Plan::Serve(advertised_partitions(
+                *partitions,
+                facade.default_partitions,
+            ));
+            continue;
+        }
+        // The budget. Retriable on purpose: the client asks again and the next
+        // hundred are created, so a fleet subscribing to a thousand new topics
+        // converges over a few metadata refreshes instead of holding one
+        // connection open for a thousand upstream calls.
+        if created >= MAX_AUTO_CREATES_PER_REQUEST {
+            deferred += 1;
+            *p = Plan::Reject(ResponseError::LeaderNotAvailable);
+            continue;
+        }
+        created += 1;
+        *p = match facade.catalog.create(name, token).await {
+            Ok(()) => {
+                tracing::info!(
+                    target: "kafka",
+                    topic = name,
+                    partitions = facade.default_partitions,
+                    "auto-created a queue for a Kafka topic"
+                );
+                // The queue exists but has no partitions yet: Queen materialises
+                // them on the first push. The advertised width is the configured
+                // default, which is the same number the next refresh will
+                // compute through `advertised_partitions`.
+                Plan::Serve(advertised_partitions(0, facade.default_partitions))
+            }
+            Err(e) => {
+                tracing::error!(target: "kafka", topic = name, error = %e, "auto-create failed");
+                Plan::Reject(ResponseError::LeaderNotAvailable)
+            }
+        };
     }
-    match facade.catalog.create(name, token).await {
-        Ok(()) => {
-            tracing::info!(
+    if deferred > 0 {
+        if let Some(suppressed) = TOPIC_CAP.tick_now() {
+            tracing::warn!(
                 target: "kafka",
-                topic = name,
-                partitions = facade.default_partitions,
-                "auto-created a queue for a Kafka topic"
+                created,
+                deferred,
+                suppressed,
+                "one request asked for more topics than are auto-created at a time; the rest \
+                 were answered LEADER_NOT_AVAILABLE and will be created as the client retries"
             );
-            // The queue exists but has no partitions yet: Queen materialises
-            // them on the first push. The advertised width is the configured
-            // default, which is the same number the next refresh will compute
-            // through `advertised_partitions`.
-            Plan::Serve(facade.default_partitions as i32)
-        }
-        Err(e) => {
-            tracing::error!(target: "kafka", topic = name, error = %e, "auto-create failed");
-            Plan::Reject(ResponseError::LeaderNotAvailable)
         }
     }
 }
@@ -318,16 +614,35 @@ fn requested_names(req: &MetadataRequest, api_version: i16) -> Option<Vec<Option
     // Brokers answer a duplicated topic once. Keep first-seen order: clients
     // tolerate any order, but a stable one keeps the logs and the tests readable.
     let mut seen = HashSet::new();
-    Some(
-        topics
-            .iter()
-            .map(|t| t.name.as_ref().map(|n| n.0.as_str().to_string()))
-            .filter(|n| match n {
-                Some(n) => seen.insert(n.clone()),
-                None => true,
-            })
-            .collect(),
-    )
+    let mut names: Vec<Option<String>> = Vec::new();
+    let mut dropped = 0usize;
+    for (at, t) in topics.iter().enumerate() {
+        // Counted and abandoned rather than filtered: everything past the
+        // ceiling is work this request does not get to buy, including the
+        // de-duplication of it. See [`MAX_REQUESTED_TOPICS`].
+        if names.len() >= MAX_REQUESTED_TOPICS {
+            dropped = topics.len() - at;
+            break;
+        }
+        let name = t.name.as_ref().map(|n| n.0.as_str().to_string());
+        match &name {
+            Some(n) if !seen.insert(n.clone()) => continue,
+            _ => names.push(name),
+        }
+    }
+    if dropped > 0 {
+        if let Some(suppressed) = TOPIC_CAP.tick_now() {
+            tracing::warn!(
+                target: "kafka",
+                answered = names.len(),
+                dropped,
+                suppressed,
+                "a Metadata request named more topics than one answer covers; the rest are \
+                 absent from it and the client will ask again"
+            );
+        }
+    }
+    Some(names)
 }
 
 /// One topic entry, from a name and the decision made about it.
@@ -367,7 +682,6 @@ fn topic(name: &str, planned: Plan) -> MetadataResponseTopic {
 mod tests {
     use super::*;
     use crate::queen::testing::FakeQueen;
-    use crate::queen::Catalog;
     use kafka_protocol::messages::metadata_request::MetadataRequestTopic;
     use kafka_protocol::protocol::{Decodable, Encodable, Message};
     use std::sync::Arc;
@@ -412,7 +726,41 @@ mod tests {
         assert_eq!(advertised_partitions(5000, 1024), 5000);
         // Nonsense from the admin API cannot become a negative partition count.
         assert_eq!(advertised_partitions(-3, 16), 16);
-        assert_eq!(advertised_partitions(i64::MAX, 16), i32::MAX);
+    }
+
+    /// The width one topic can reach is bounded, because it is written out in
+    /// full in every Metadata response. 827k lanes is a shape this repo has
+    /// actually run; unclamped it is a ~21 MB topic entry, built one Vec-triple
+    /// at a time, on every refresh of every client.
+    #[test]
+    fn one_topic_can_never_be_wider_than_the_ceiling() {
+        assert_eq!(
+            advertised_partitions(827_000, 1024),
+            MAX_ADVERTISED_PARTITIONS as i32
+        );
+        assert_eq!(
+            advertised_partitions(i64::MAX, 16),
+            MAX_ADVERTISED_PARTITIONS as i32
+        );
+        // Just under it is untouched: the clamp is a ceiling, not a rounding.
+        assert_eq!(
+            advertised_partitions(MAX_ADVERTISED_PARTITIONS as i64 - 1, 16),
+            MAX_ADVERTISED_PARTITIONS as i32 - 1
+        );
+    }
+
+    /// `QUEEN_KAFKA_DEFAULT_PARTITIONS` is validated at boot against this same
+    /// number (main.rs), so a configured width can never be one the metadata
+    /// path would then clamp behind the operator's back.
+    #[test]
+    fn the_boot_knob_and_the_clamp_are_the_same_ceiling() {
+        const MAIN: &str = include_str!("../main.rs");
+        assert!(MAIN
+            .contains("const MAX_DEFAULT_PARTITIONS: u32 = metadata::MAX_ADVERTISED_PARTITIONS;"));
+        assert_eq!(
+            advertised_partitions(0, MAX_ADVERTISED_PARTITIONS),
+            MAX_ADVERTISED_PARTITIONS as i32
+        );
     }
 
     #[test]
@@ -460,11 +808,8 @@ mod tests {
     fn facade(queues: &[(&str, i64)], default_partitions: u32) -> (Facade, Arc<FakeQueen>) {
         let api = FakeQueen::with(queues);
         let facade = Facade {
-            advertised_host: "kafka.example.com".into(),
-            advertised_port: 9092,
             default_partitions,
-            queen_token: None,
-            catalog: Catalog::new(api.clone()),
+            ..crate::handlers::testing::over(api.clone(), Default::default())
         };
         (facade, api)
     }
@@ -542,6 +887,133 @@ mod tests {
         // The broker list is still there — that is what a client asking for no
         // topics wanted.
         assert_eq!(none.brokers.len(), 1);
+    }
+
+    /// The listing is the one request whose size is queues × width, and the one
+    /// no client asked to be big. Past `conn::MAX_FRAME_BYTES` it cannot be
+    /// encoded at all — the connection dies AFTER the allocation — so it is
+    /// bounded, and what does not fit is left out rather than making the whole
+    /// answer un-answerable.
+    #[tokio::test]
+    async fn the_all_topics_listing_is_bounded() {
+        // 40 queues that would each advertise 1/8 of the budget: five fit.
+        let width = (MAX_LISTING_PARTITIONS / 8) as u32;
+        let names: Vec<String> = (0..40).map(|i| format!("q{i}")).collect();
+        let queues: Vec<(&str, i64)> = names.iter().map(|n| (n.as_str(), 0i64)).collect();
+        let (f, _) = facade(&queues, width);
+
+        let resp = handle(&f, &request(None, false), 9, None).await;
+        assert_eq!(resp.topics.len(), 8, "the budget is spent, not exceeded");
+        let total: usize = resp.topics.iter().map(|t| t.partitions.len()).sum();
+        assert!(total <= MAX_LISTING_PARTITIONS, "{total}");
+        // Truncation is from the tail of the catalog order, so what a client
+        // does get is stable between refreshes rather than reshuffling.
+        let listed: Vec<&str> = resp
+            .topics
+            .iter()
+            .map(|t| t.name.as_ref().unwrap().0.as_str())
+            .collect();
+        assert_eq!(listed, ["q0", "q1", "q2", "q3", "q4", "q5", "q6", "q7"]);
+    }
+
+    /// The NAMED form is bounded too, and for a different reason from the
+    /// listing: its size is the client's own list, which is bounded by nothing
+    /// but the frame. Everything past the ceiling is left out of the answer
+    /// rather than turned into work.
+    #[tokio::test]
+    async fn a_request_that_names_more_topics_than_the_ceiling_is_answered_short() {
+        let (f, api) = facade(&[("orders", 3)], 4);
+        let names: Vec<String> = (0..MAX_REQUESTED_TOPICS + 500)
+            .map(|i| format!("t{i}"))
+            .collect();
+        let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+
+        // With auto-create ON, so that an unbounded list would also be an
+        // unbounded number of calls to Queen.
+        let resp = handle(&f, &request(Some(&borrowed), true), 9, None).await;
+        assert_eq!(resp.topics.len(), MAX_REQUESTED_TOPICS);
+        // First-seen order, so what the client is told about is stable between
+        // refreshes rather than a different slice each time.
+        assert_eq!(
+            resp.topics[0].name.as_ref().unwrap().0.as_str(),
+            names[0].as_str()
+        );
+        assert!(
+            api.creates.lock().unwrap().len() <= MAX_AUTO_CREATES_PER_REQUEST,
+            "one request created {} queues",
+            api.creates.lock().unwrap().len()
+        );
+    }
+
+    /// ...and the number of topics one request CREATES is bounded below that
+    /// again, because each one is a sequential call to Queen on a connection
+    /// that is muted until the whole response is written.
+    #[tokio::test]
+    async fn one_request_creates_at_most_its_budget_and_the_rest_retry() {
+        let (f, api) = facade(&[], 4);
+        let names: Vec<String> = (0..MAX_AUTO_CREATES_PER_REQUEST + 25)
+            .map(|i| format!("new-{i}"))
+            .collect();
+        let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+
+        let resp = handle(&f, &request(Some(&borrowed), true), 9, None).await;
+        assert_eq!(
+            api.creates.lock().unwrap().len(),
+            MAX_AUTO_CREATES_PER_REQUEST
+        );
+        // Every topic is still ANSWERED — the ones past the budget with the
+        // retriable code, which is what makes the client come back for them.
+        assert_eq!(resp.topics.len(), names.len());
+        let created = named(&resp, "new-0");
+        assert_eq!(created.error_code, 0);
+        let deferred = named(&resp, &names[names.len() - 1]);
+        assert_eq!(
+            deferred.error_code,
+            ResponseError::LeaderNotAvailable.code()
+        );
+
+        // The retry creates the next batch: the fleet converges instead of one
+        // request holding a connection open for a thousand upstream calls.
+        handle(&f, &request(Some(&borrowed), true), 9, None).await;
+        assert_eq!(api.creates.lock().unwrap().len(), names.len());
+        let resp = handle(&f, &request(Some(&borrowed), true), 9, None).await;
+        for name in &names {
+            assert_eq!(named(&resp, name).error_code, 0, "{name}");
+        }
+    }
+
+    /// The two ceilings compose: no single topic can be wide enough to exhaust
+    /// a listing on its own, so the "the first topic always fits" arm of
+    /// `listing` is a guard against a future re-tuning of the constants and
+    /// never something a client meets. The widest queues Queen can hold are
+    /// listed until the budget is spent, and no further.
+    #[tokio::test]
+    async fn the_widest_possible_queues_still_produce_a_usable_listing() {
+        const _: () = assert!(MAX_ADVERTISED_PARTITIONS as usize <= MAX_LISTING_PARTITIONS);
+        let (f, _) = facade(&[("a", 0), ("b", 0), ("c", 0)], MAX_ADVERTISED_PARTITIONS);
+        let resp = handle(&f, &request(None, false), 9, None).await;
+        assert_eq!(
+            resp.topics.len(),
+            MAX_LISTING_PARTITIONS / MAX_ADVERTISED_PARTITIONS as usize
+        );
+        assert_eq!(
+            resp.topics[0].partitions.len(),
+            MAX_ADVERTISED_PARTITIONS as usize
+        );
+    }
+
+    /// A client that NAMES its topics is never truncated — which is every
+    /// producer and every consumer, so the budget above costs them nothing.
+    #[tokio::test]
+    async fn naming_a_topic_is_never_subject_to_the_listing_budget() {
+        let width = (MAX_LISTING_PARTITIONS / 8) as u32;
+        let names: Vec<String> = (0..40).map(|i| format!("q{i}")).collect();
+        let queues: Vec<(&str, i64)> = names.iter().map(|n| (n.as_str(), 0i64)).collect();
+        let (f, _) = facade(&queues, width);
+
+        let resp = handle(&f, &request(Some(&["q39"]), false), 9, None).await;
+        assert_eq!(named(&resp, "q39").error_code, 0);
+        assert_eq!(named(&resp, "q39").partitions.len(), width as usize);
     }
 
     #[tokio::test]
@@ -661,6 +1133,32 @@ mod tests {
         );
         assert_eq!(named(&resp, "orders").error_code, 0);
         assert_eq!(named(&resp, "orders").partitions.len(), 40);
+    }
+
+    /// One request naming K new topics is 1 list + 1 re-read + K creates, not
+    /// 1 + 2K. The re-read is the thing that stops `/configure` resetting a
+    /// queue that already exists, and one of them covers every name in the
+    /// request; the Kafka connection is muted for the whole round trip
+    /// (conn.rs), so each avoided 10-second call is dead air on the wire.
+    #[tokio::test]
+    async fn one_request_creating_many_topics_re_reads_once() {
+        let (f, api) = facade(&[], 4);
+        let resp = handle(&f, &request(Some(&["a", "b", "c"]), true), 9, None).await;
+
+        assert_eq!(api.created(), ["a", "b", "c"]);
+        assert_eq!(api.list_count(), 2, "one plan list + one shared re-read");
+        for n in ["a", "b", "c"] {
+            assert_eq!(named(&resp, n).error_code, 0);
+            assert_eq!(named(&resp, n).partitions.len(), 4);
+        }
+    }
+
+    /// A request with nothing to create does not re-read at all.
+    #[tokio::test]
+    async fn a_request_that_creates_nothing_costs_one_call() {
+        let (f, api) = facade(&[("orders", 2)], 4);
+        handle(&f, &request(Some(&["orders"]), true), 9, None).await;
+        assert_eq!(api.list_count(), 1);
     }
 
     #[tokio::test]
@@ -784,5 +1282,39 @@ mod tests {
             let back = MetadataRequest::decode(&mut buf, version).unwrap();
             assert_eq!(requested_names(&back, version), None, "v{version}");
         }
+    }
+
+    /// A capped tenant asking for metadata is told to wait, and its topics stay
+    /// retriable rather than becoming unknown. See [`crate::throttle`].
+    #[tokio::test]
+    async fn a_throttled_metadata_carries_the_wait_beside_a_retriable_topic() {
+        let (f, api) = facade(&[("orders", 4)], 4);
+        api.fail_list(crate::queen::Error::Status {
+            code: 429,
+            body: r#"{"error":"request rate limit exceeded","code":"rate_limited"}"#.into(),
+            retry_after_ms: Some(2_000),
+        });
+        let resp = handle(&f, &request(Some(&["orders"]), false), 9, None).await;
+
+        assert_eq!(resp.throttle_time_ms, 2_000);
+        assert_eq!(
+            named(&resp, "orders").error_code,
+            ResponseError::LeaderNotAvailable.code(),
+            "a throttled tenant must not be told its topic is gone"
+        );
+    }
+
+    /// A queue list that simply failed carries no throttle: the client retries
+    /// on its own timer, which is right when nothing said when to come back.
+    #[tokio::test]
+    async fn an_unreadable_queue_list_carries_no_throttle() {
+        let (f, api) = facade(&[("orders", 4)], 4);
+        api.fail_list(crate::queen::Error::status(503, "draining"));
+        let resp = handle(&f, &request(Some(&["orders"]), false), 9, None).await;
+        assert_eq!(resp.throttle_time_ms, 0);
+        assert_eq!(
+            named(&resp, "orders").error_code,
+            ResponseError::LeaderNotAvailable.code()
+        );
     }
 }
