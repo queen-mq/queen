@@ -488,6 +488,8 @@ run_lane() {
     docker volume create \
         --label "queen.benchmark.campaign=${campaign_id}" \
         --label "queen.benchmark.run=${run_id}" \
+        --label "com.docker.compose.project=${CURRENT_PROJECT}" \
+        --label "com.docker.compose.volume=results" \
         "$CURRENT_VOLUME" >/dev/null
     docker volume create \
         --label "queen.benchmark.campaign=${campaign_id}" \

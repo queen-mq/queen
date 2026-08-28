@@ -426,6 +426,11 @@ def in_cgroup(process_path: str | None, target_path: str | None) -> bool:
 
 def classify_process(command: str, kind: str) -> str:
     normalized = command.lower()
+    # Docker's tiny init retains the complete child command in its own argv.
+    # Matching those arguments would falsely count docker-init as part of the
+    # supervisor control plane.
+    if re.match(r"^(?:/sbin/)?docker-init(?:\s|$)", normalized):
+        return kind
     if any(marker in normalized for marker in WORKER_MARKERS):
         return "worker"
     if any(marker in normalized for marker in ORCHESTRATOR_MARKERS):
