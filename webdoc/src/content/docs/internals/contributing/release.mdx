@@ -44,14 +44,22 @@ Everything else carries its own version, or none at all.
 | Broker image | `server/server.json` |
 | `queen-engine` (the broker crate) | `server/Cargo.toml`, which must say the same string as `server/server.json`: the first is what crates.io serves, the second is what the built binary reports on `/health` |
 | JavaScript client | `clients/client-js/package.json` |
-| Python client | `clients/client-py/pyproject.toml` |
+| Python client | `clients/client-py/pyproject.toml` **and** `clients/client-py/queen/__init__.py`, whose `__version__` the package exports: bumping only the first ships a package that misreports itself |
 | PHP/Laravel client | nowhere: `composer.json` has no `version` field; Packagist reads the git tag |
 | Go client | nowhere: the git tag *is* the version |
 | Rust client | `clients/client-rust/Cargo.toml` |
-| `queen-protocol` | `crates/queen-protocol/Cargo.toml`, and the version requirement on the client's dependency on it |
+| `queen-protocol` | `crates/queen-protocol/Cargo.toml`, and the version requirement on EVERY dependency on it: both `clients/client-rust/Cargo.toml` and `server/Cargo.toml` pin it by version beside the path |
 | `queenctl` | nowhere: the tag is the version, injected at build time with `-ldflags` |
 | C++ client | nowhere: header-only, taken at whatever tag you check out |
 | Dashboard (`app/`) | `app/package.json`, private, never published separately |
+
+<Aside type="caution">
+**Bump the lockfiles in the same commit.** Every crate whose version moves rewrites its own
+`Cargo.lock`, and `server/`, `proxy/`, `clients/client-rust/` and `crates/queen-protocol/`
+each keep one. The `v1.2.0` tag shipped with a lockfile a commit behind its manifest, which
+`cargo metadata --locked` catches and a plain build does not, because a plain build simply
+updates the file and moves on. Run it in each of the four directories before tagging.
+</Aside>
 
 ## The versioning rule
 
@@ -62,11 +70,12 @@ The alignment is the `MAJOR.MINOR`: a patch that rebuilds only the broker moves 
 broker.
 
 <Aside type="note">
-Today the broker carries `1.2.1` (`server/server.json`, mirrored in `server/Cargo.toml`),
-while the proxy (`proxy/Cargo.toml`), the JavaScript, Python and Rust clients and
-`queen-protocol` carry `1.2.0`, with `v1.2.0` tags covering the Go module, the CLI and
-Packagist. The step apart is deliberate: `1.2.1` is a server-only patch, so nothing outside
-`server/` was rebuilt for it. The betas behaved the same way, with the broker at
+Today the broker (`server/server.json`, mirrored in `server/Cargo.toml`), the proxy
+(`proxy/Cargo.toml`), the JavaScript, Python and Rust clients and `queen-protocol` all carry
+`1.3.0`, with `v1.3.0` tags covering the Go module, the CLI and Packagist. The release before
+it is the exception the rule allows: `1.2.1` was a server-only patch, so the broker sat at
+`1.2.1` while everything else stayed on `1.2.0` and nothing outside `server/` was rebuilt.
+The betas behaved the same way, with the broker at
 `1.0.0-beta.4` while everything else stayed on `1.0.0-beta.1`, and there as here the shared
 `MAJOR.MINOR` in front is the alignment the rule above promises. The dashboard
 (`app/package.json`) and the operator console (`proxy/console/package.json`) still say
