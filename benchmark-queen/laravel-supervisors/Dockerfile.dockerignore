@@ -1,0 +1,23 @@
+# The Dockerfile is built from the repository root. Only the Rust supervisor,
+# Laravel client and benchmark fixture are inputs to this image.
+*
+!supervisor/
+!supervisor/**
+!clients/
+!clients/client-laravel/
+!clients/client-laravel/**
+!benchmark-queen/
+!benchmark-queen/laravel-supervisors/
+!benchmark-queen/laravel-supervisors/Dockerfile
+!benchmark-queen/laravel-supervisors/Dockerfile.dockerignore
+!benchmark-queen/laravel-supervisors/app/
+!benchmark-queen/laravel-supervisors/app/**
+
+**/target
+**/vendor
+**/node_modules
+**/.phpunit.cache
+**/*.log
+benchmark-queen/laravel-supervisors/app/bootstrap/cache/*.php
+benchmark-queen/laravel-supervisors/app/storage/framework/cache/**
+benchmark-queen/laravel-supervisors/app/storage/logs/**
