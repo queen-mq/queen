@@ -17,6 +17,7 @@ SLEEP_MS=2000
 CPU_ITERATIONS=0
 JOB_TRIES=2
 QUEEN_PREFETCH=1
+QUEEN_ACK_BATCH=1
 WORKER_TIMEOUT=10
 RETRY_AFTER=12
 KILL_DELAY_MS=100
@@ -51,6 +52,7 @@ Options:
   --cpu-iterations N           SHA-256 rounds per job (default: 0)
   --job-tries N                Attempts allowed after the crash (default: 2)
   --queen-prefetch N           Queen deliveries claimed per pop (default: 1)
+  --queen-ack-batch N          Queen ACKs flushed together; <= prefetch (default: 1)
   --worker-timeout SECONDS     Laravel worker timeout (default: 10)
   --retry-after SECONDS        Queue visibility timeout (default: 12)
   --kill-delay-ms N            Delay after target's proof-of-work (default: 100)
@@ -60,8 +62,9 @@ Options:
   --dry-run                    Validate and write the planned protocol only
   -h, --help                   Show this help
 
-The test fixes BENCH_PROFILE=fixed and QUEEN_ACK_BATCH=1. Use
-`--queen-prefetch` to test the selected synchronous-ACK production profile.
+The test fixes BENCH_PROFILE=fixed. Use `--queen-prefetch` and
+`--queen-ack-batch` to test either the synchronous-ACK production profile or
+an explicitly labelled deferred-ACK candidate.
 Horizon's equivalent worker child is `artisan horizon:work`; Queen's child is
 `artisan queue:work`. The master/supervisor process is never targeted.
 EOF
@@ -97,6 +100,7 @@ while [ "$#" -gt 0 ]; do
         --cpu-iterations) CPU_ITERATIONS="${2:?--cpu-iterations requires a value}"; shift 2 ;;
         --job-tries) JOB_TRIES="${2:?--job-tries requires a value}"; shift 2 ;;
         --queen-prefetch) QUEEN_PREFETCH="${2:?--queen-prefetch requires a value}"; shift 2 ;;
+        --queen-ack-batch) QUEEN_ACK_BATCH="${2:?--queen-ack-batch requires a value}"; shift 2 ;;
         --worker-timeout) WORKER_TIMEOUT="${2:?--worker-timeout requires a value}"; shift 2 ;;
         --retry-after) RETRY_AFTER="${2:?--retry-after requires a value}"; shift 2 ;;
         --kill-delay-ms) KILL_DELAY_MS="${2:?--kill-delay-ms requires a value}"; shift 2 ;;
@@ -118,6 +122,7 @@ require_positive_int "--sleep-ms" "$SLEEP_MS"
 require_uint "--cpu-iterations" "$CPU_ITERATIONS"
 require_positive_int "--job-tries" "$JOB_TRIES"
 require_positive_int "--queen-prefetch" "$QUEEN_PREFETCH"
+require_positive_int "--queen-ack-batch" "$QUEEN_ACK_BATCH"
 require_positive_int "--worker-timeout" "$WORKER_TIMEOUT"
 require_positive_int "--retry-after" "$RETRY_AFTER"
 require_uint "--kill-delay-ms" "$KILL_DELAY_MS"
@@ -125,6 +130,7 @@ require_positive_int "--respawn-timeout" "$RESPAWN_TIMEOUT"
 require_positive_int "--completion-timeout" "$COMPLETION_TIMEOUT"
 [ "$JOB_TRIES" -ge 2 ] || die "--job-tries must be at least 2 for crash recovery"
 [ "$QUEEN_PREFETCH" -le 1000 ] || die "--queen-prefetch must be at most 1000"
+[ "$QUEEN_ACK_BATCH" -le "$QUEEN_PREFETCH" ] || die "--queen-ack-batch must not exceed --queen-prefetch"
 [ "$RETRY_AFTER" -gt "$WORKER_TIMEOUT" ] || die "--retry-after must exceed --worker-timeout"
 [ "$KILL_DELAY_MS" -lt "$SLEEP_MS" ] || die "--kill-delay-ms must be shorter than --sleep-ms"
 [ "$JOBS" -ge $(( WORKERS * 4 )) ] || die "--jobs must be at least four times --workers to preserve backlog"
@@ -158,7 +164,7 @@ campaign_id="fault-${campaign_stamp}-${git_short}-${campaign_token}"
 write_protocol_metadata() {
     python3 - "$OUTPUT_DIRECTORY" "$campaign_id" "$REPOSITORY_ROOT" "$ENGINES_CSV" \
         "$JOBS" "$WORKERS" "$SLEEP_MS" "$CPU_ITERATIONS" "$JOB_TRIES" \
-        "$QUEEN_PREFETCH" "$WORKER_TIMEOUT" "$RETRY_AFTER" "$KILL_DELAY_MS" "$RESPAWN_TIMEOUT" \
+        "$QUEEN_PREFETCH" "$QUEEN_ACK_BATCH" "$WORKER_TIMEOUT" "$RETRY_AFTER" "$KILL_DELAY_MS" "$RESPAWN_TIMEOUT" \
         "$COMPLETION_TIMEOUT" "$BUILD_IMAGES" "$DRY_RUN" <<'PY'
 import datetime as dt
 import json
@@ -169,7 +175,7 @@ from pathlib import Path
 
 (
     output, campaign_id, repository, engines, jobs, workers, sleep_ms,
-    cpu_iterations, job_tries, queen_prefetch, worker_timeout, retry_after, kill_delay_ms,
+    cpu_iterations, job_tries, queen_prefetch, queen_ack_batch, worker_timeout, retry_after, kill_delay_ms,
     respawn_timeout, completion_timeout, build_images, dry_run,
 ) = sys.argv[1:]
 
@@ -201,7 +207,7 @@ metadata = {
         "respawn_timeout_seconds": int(respawn_timeout),
         "completion_timeout_seconds": int(completion_timeout),
         "queen_prefetch": int(queen_prefetch),
-        "queen_ack_batch": 1,
+        "queen_ack_batch": int(queen_ack_batch),
         "dispatch_mode": "single",
         "build_images": build_images == "1",
         "dry_run": dry_run == "1",
@@ -555,7 +561,7 @@ write_lane_summary() {
     summary_completion_status="$7"
 
     python3 - "$summary_lane" "$summary_engine" "$summary_run_id" "$summary_app_id" \
-        "$JOBS" "$JOB_TRIES" "$QUEEN_PREFETCH" "$WORKERS" "$SLEEP_MS" "$KILL_DELAY_MS" \
+        "$JOBS" "$JOB_TRIES" "$QUEEN_PREFETCH" "$QUEEN_ACK_BATCH" "$WORKERS" "$SLEEP_MS" "$KILL_DELAY_MS" \
         "$summary_target_pid" "$summary_target_ppid" "$summary_target_args" \
         "$summary_parent_args" "$summary_replacement_pid" "$summary_kill_host_before" \
         "$summary_kill_host_after" "$summary_kill_container_before" \
@@ -567,7 +573,8 @@ import sys
 from pathlib import Path
 
 (
-    lane_raw, engine, run_id, app_id, jobs_raw, job_tries_raw, queen_prefetch_raw, workers_raw,
+    lane_raw, engine, run_id, app_id, jobs_raw, job_tries_raw, queen_prefetch_raw,
+    queen_ack_batch_raw, workers_raw,
     sleep_ms_raw, kill_delay_ms_raw, target_pid_raw, target_ppid_raw, target_args,
     parent_args, replacement_pid_raw, kill_host_before_raw,
     kill_host_after_raw, kill_container_before_raw, kill_container_after_raw,
@@ -727,7 +734,7 @@ summary = {
         "sleep_ms": int(sleep_ms_raw),
         "kill_delay_ms": int(kill_delay_ms_raw),
         "queen_prefetch": int(queen_prefetch_raw),
-        "queen_ack_batch": 1,
+        "queen_ack_batch": int(queen_ack_batch_raw),
     },
     "fault": {
         "signal": "SIGKILL",
@@ -823,7 +830,7 @@ run_lane() {
     export BENCH_RETRY_AFTER="$RETRY_AFTER"
     export BENCH_DISPATCH_MODE=single
     export QUEEN_PREFETCH="$QUEEN_PREFETCH"
-    export QUEEN_ACK_BATCH=1
+    export QUEEN_ACK_BATCH="$QUEEN_ACK_BATCH"
     export QUEEN_BULK_BATCH=100
     export QUEEN_PARTITIONS=64
     export QUEEN_POP_FUSION=0
