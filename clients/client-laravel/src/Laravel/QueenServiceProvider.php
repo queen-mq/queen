@@ -10,6 +10,7 @@ use Illuminate\Queue\Events\JobProcessed;
 use Illuminate\Queue\Events\JobProcessing;
 use Illuminate\Support\ServiceProvider;
 use Queen\Laravel\Dashboard\DashboardRepository;
+use Queen\Laravel\Dashboard\DashboardStylesheet;
 use Queen\Laravel\Dashboard\FailedJobsReadModel;
 use Queen\Laravel\Http\Middleware\AuthorizeDashboard;
 use Queen\Laravel\Http\Middleware\SecureDashboardResponse;
@@ -190,6 +191,8 @@ class QueenServiceProvider extends ServiceProvider
 
     private function registerDashboardServices(): void
     {
+        $this->app->singleton(DashboardStylesheet::class);
+
         $this->app->singleton(FailedJobsReadModel::class, function ($app): FailedJobsReadModel {
             return new FailedJobsReadModel(
                 $app['config'],

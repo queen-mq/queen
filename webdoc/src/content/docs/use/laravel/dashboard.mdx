@@ -9,10 +9,23 @@ sidebar:
 sourceOfTruth:
   - clients/client-laravel/config/queen.php
   - clients/client-laravel/routes/dashboard.php
+  - clients/client-laravel/resources/css/dashboard.css
   - clients/client-laravel/resources/views/dashboard.blade.php
+  - clients/client-laravel/resources/views/dashboard/partials/configuration.blade.php
+  - clients/client-laravel/resources/views/dashboard/partials/failed-jobs.blade.php
+  - clients/client-laravel/resources/views/dashboard/partials/header.blade.php
+  - clients/client-laravel/resources/views/dashboard/partials/notices.blade.php
+  - clients/client-laravel/resources/views/dashboard/partials/overview.blade.php
+  - clients/client-laravel/resources/views/dashboard/partials/sidebar.blade.php
+  - clients/client-laravel/resources/views/dashboard/partials/supervisor-pool-row.blade.php
+  - clients/client-laravel/resources/views/dashboard/partials/supervisor.blade.php
+  - clients/client-laravel/resources/views/dashboard/partials/workload.blade.php
   - clients/client-laravel/src/Laravel/QueenServiceProvider.php
   - clients/client-laravel/src/Laravel/Dashboard/DashboardRepository.php
+  - clients/client-laravel/src/Laravel/Dashboard/DashboardStylesheet.php
   - clients/client-laravel/src/Laravel/Dashboard/FailedJobsReadModel.php
+  - clients/client-laravel/src/Laravel/Http/Controllers/DashboardController.php
+  - clients/client-laravel/src/Laravel/Http/Controllers/DashboardStylesheetController.php
   - clients/client-laravel/src/Laravel/Http/Middleware/AuthorizeDashboard.php
   - clients/client-laravel/src/Laravel/Http/Middleware/SecureDashboardResponse.php
   - clients/client-laravel/src/Laravel/Http/Controllers/SupervisorControlController.php
@@ -167,5 +180,11 @@ administrative endpoint to the host that owns the supervisor, or use a sticky de
 endpoint. A GET on host A followed by a control POST on host B intentionally fails the instance
 fence.
 
-Responses use a nonce-based Content Security Policy, `no-store`, frame denial, MIME-sniffing
-denial and a no-referrer policy. The view loads no scripts, fonts or other assets from a CDN.
+The view loads no scripts, fonts or assets from a CDN and contains no inline style blocks or style
+attributes. The package serves its content-hashed stylesheet from the dashboard route, without a
+`vendor:publish` or frontend build step. Its link includes Subresource Integrity. Content Security
+Policy allows styles only from the same origin and explicitly rejects inline style attributes.
+Dynamic responses use `no-store`, while successful stylesheet responses use an immutable one-year
+private browser cache with intermediary transformations disabled to preserve the integrity digest.
+Error responses are never cached. Responses also carry frame denial, MIME-sniffing denial and a
+no-referrer policy.

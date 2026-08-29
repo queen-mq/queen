@@ -5,6 +5,7 @@ namespace Queen\Laravel\Http\Controllers;
 use Illuminate\Http\Request;
 use Queen\Laravel\Dashboard\DashboardConflictException;
 use Queen\Laravel\Dashboard\DashboardRepository;
+use Queen\Laravel\Dashboard\DashboardStylesheet;
 use Symfony\Component\HttpFoundation\RedirectResponse;
 use Symfony\Component\HttpFoundation\Response;
 
@@ -13,6 +14,7 @@ final class SupervisorControlController
     public function __invoke(
         Request $request,
         DashboardRepository $dashboard,
+        DashboardStylesheet $stylesheet,
         string $command,
     ): Response {
         $instanceId = $request->input('instance_id');
@@ -30,7 +32,10 @@ final class SupervisorControlController
                 'snapshot' => $dashboard->snapshot(),
                 'refreshSeconds' => $this->refreshSeconds(),
                 'refreshUrl' => route('queen.dashboard.index', [], false),
-                'cspNonce' => (string) $request->attributes->get('queen_dashboard_csp_nonce', ''),
+                'stylesheetUrl' => route('queen.dashboard.stylesheet', [
+                    'version' => $stylesheet->version(),
+                ], false),
+                'stylesheetIntegrity' => $stylesheet->integrity(),
                 'controlError' => $exception->getMessage(),
                 'controlStatus' => null,
             ], 409);

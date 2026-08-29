@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Schema;
 use Orchestra\Testbench\TestCase;
+use Queen\Laravel\Dashboard\DashboardStylesheet;
 use Queen\Laravel\QueenServiceProvider;
 use Queen\Laravel\Supervisor\SupervisorState;
 
@@ -125,6 +126,8 @@ final class LaravelDashboardTest extends TestCase
             ->assertHeader('Referrer-Policy', 'no-referrer');
         $contentSecurityPolicy = (string) $response->headers->get('Content-Security-Policy');
         $this->assertStringContainsString("default-src 'none'", $contentSecurityPolicy);
+        $this->assertStringContainsString("style-src 'self'", $contentSecurityPolicy);
+        $this->assertStringContainsString("style-src-attr 'none'", $contentSecurityPolicy);
         $this->assertStringContainsString("frame-ancestors 'none'", $contentSecurityPolicy);
         $this->assertStringContainsString("form-action 'self'", $contentSecurityPolicy);
         $this->assertStringContainsString('no-store', (string) $response->headers->get('Cache-Control'));
@@ -141,14 +144,78 @@ final class LaravelDashboardTest extends TestCase
             $this->assertSame(1, $xpath->query('//section[@id="' . $section . '"]')->length);
         }
         $this->assertSame(0, $xpath->query('//th[not(@scope="col")]')->length);
-        $this->assertSame(0, $xpath->query('//link|//script')->length);
-        $this->assertSame(1, $xpath->query('//style[@nonce]')->length);
-        $this->assertSame(1, preg_match("/style-src 'nonce-([^']+)'/", $contentSecurityPolicy, $nonce));
-        $this->assertSame($nonce[1], $xpath->query('//style')->item(0)?->getAttribute('nonce'));
+        $this->assertSame(0, $xpath->query('//style')->length);
+        $this->assertSame(0, $xpath->query('//script')->length);
+        $this->assertSame(0, $xpath->query('//*[@style]')->length);
+        $this->assertSame(1, $xpath->query('//link[@rel="stylesheet"]')->length);
 
         $this->assertDashboardButtonState($xpath, 'Pause', false);
         $this->assertDashboardButtonState($xpath, 'Continue', true);
         $this->assertDashboardButtonState($xpath, 'Terminate', false);
+    }
+
+    public function testVersionedStylesheetHasIntegrityImmutableCachingAndConditionalRequests(): void
+    {
+        $page = $this->get('/queen')->assertOk();
+        $xpath = $this->dashboardXPath($page->getContent());
+        $link = $xpath->query('//link[@rel="stylesheet"]')->item(0);
+        $this->assertInstanceOf(\DOMElement::class, $link);
+
+        $stylesheetUrl = $link->getAttribute('href');
+        $integrity = $link->getAttribute('integrity');
+        $this->assertSame(1, preg_match(
+            '#^/queen/assets/dashboard-([a-f0-9]{64})\.css$#D',
+            $stylesheetUrl,
+            $urlMatch,
+        ));
+        $this->assertMatchesRegularExpression('#^sha256-[A-Za-z0-9+/]{43}=$#D', $integrity);
+
+        $stylesheet = $this->get($stylesheetUrl)->assertOk()
+            ->assertHeader('Content-Type', 'text/css; charset=UTF-8')
+            ->assertHeader('X-Content-Type-Options', 'nosniff');
+        $css = $stylesheet->getContent();
+        $this->assertStringContainsString('.topbar', $css);
+        $this->assertSame(hash('sha256', $css), $urlMatch[1]);
+        $this->assertSame(
+            'sha256-' . base64_encode(hash('sha256', $css, true)),
+            $integrity,
+        );
+
+        $cacheControl = (string) $stylesheet->headers->get('Cache-Control');
+        $this->assertStringContainsString('private', $cacheControl);
+        $this->assertStringContainsString('max-age=31536000', $cacheControl);
+        $this->assertStringContainsString('immutable', $cacheControl);
+        $this->assertStringContainsString('no-transform', $cacheControl);
+        $this->assertStringNotContainsString('public', $cacheControl);
+        $this->assertStringNotContainsString('no-store', $cacheControl);
+        $this->assertSame(
+            "default-src 'none'; style-src 'self'; style-src-attr 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+            $stylesheet->headers->get('Content-Security-Policy'),
+        );
+
+        $etag = $stylesheet->headers->get('ETag');
+        $this->assertIsString($etag);
+        $this->assertSame('"' . $urlMatch[1] . '"', $etag);
+        $notModified = $this->withHeaders(['If-None-Match' => $etag])->get($stylesheetUrl);
+        $notModified->assertStatus(304)->assertHeader('ETag', $etag);
+        $this->assertSame('', $notModified->getContent());
+        $this->assertStringContainsString(
+            'immutable',
+            (string) $notModified->headers->get('Cache-Control'),
+        );
+        $this->assertStringContainsString(
+            'private',
+            (string) $notModified->headers->get('Cache-Control'),
+        );
+    }
+
+    public function testStylesheetRejectsAnUnknownContentHash(): void
+    {
+        $response = $this->get('/queen/assets/dashboard-' . str_repeat('0', 64) . '.css')
+            ->assertNotFound();
+        $cacheControl = (string) $response->headers->get('Cache-Control');
+        $this->assertStringContainsString('no-store', $cacheControl);
+        $this->assertStringNotContainsString('immutable', $cacheControl);
     }
 
     public function testPausedDashboardEnablesOnlyApplicableSupervisorControls(): void
@@ -395,14 +462,22 @@ final class LaravelDashboardTest extends TestCase
 
     public function testAuthorizationIsDenyByDefaultInProductionAndAnExplicitGateWins(): void
     {
+        $stylesheetUrl = '/queen/assets/dashboard-'
+            . $this->app->make(DashboardStylesheet::class)->version()
+            . '.css';
         $this->app['env'] = 'production';
         $this->get('/queen')->assertForbidden();
+        $forbiddenStylesheet = $this->get($stylesheetUrl)->assertForbidden();
+        $forbiddenCacheControl = (string) $forbiddenStylesheet->headers->get('Cache-Control');
+        $this->assertStringContainsString('no-store', $forbiddenCacheControl);
+        $this->assertStringNotContainsString('immutable', $forbiddenCacheControl);
 
         Gate::define('viewQueenDashboard', static fn (?Authenticatable $user): bool => false);
         $this->get('/queen')->assertForbidden();
 
         Gate::define('viewQueenDashboard', static fn (?Authenticatable $user): bool => true);
         $this->get('/queen')->assertOk();
+        $this->get($stylesheetUrl)->assertOk();
     }
 
     public function testLocalFallbackCanBeDisabledAndExplicitGateDenialStillWins(): void
@@ -417,9 +492,13 @@ final class LaravelDashboardTest extends TestCase
 
     public function testRuntimeKillSwitchStillWorksWhenEnabledRoutesAreAlreadyRegistered(): void
     {
+        $stylesheetUrl = '/queen/assets/dashboard-'
+            . $this->app->make(DashboardStylesheet::class)->version()
+            . '.css';
         $this->app['config']->set('queen.dashboard.enabled', false);
 
         $this->get('/queen')->assertNotFound();
+        $this->get($stylesheetUrl)->assertNotFound();
         $this->get('/queen/api/status')->assertNotFound();
         $this->post('/queen/control/pause')->assertNotFound();
     }
@@ -465,7 +544,22 @@ final class LaravelDashboardTest extends TestCase
         $instanceId = $state->instanceId();
 
         $this->post('/queen/control/pause')->assertStatus(422);
-        $this->post('/queen/control/pause', ['instance_id' => str_repeat('a', 32)])->assertStatus(409);
+        $conflict = $this->post('/queen/control/pause', ['instance_id' => str_repeat('a', 32)])
+            ->assertStatus(409);
+        $conflictCsp = (string) $conflict->headers->get('Content-Security-Policy');
+        $this->assertStringContainsString("style-src 'self'", $conflictCsp);
+        $conflictXPath = $this->dashboardXPath($conflict->getContent());
+        $conflictStylesheet = $conflictXPath->query('//link[@rel="stylesheet"]')->item(0);
+        $this->assertInstanceOf(\DOMElement::class, $conflictStylesheet);
+        $this->assertMatchesRegularExpression(
+            '#^/queen/assets/dashboard-[a-f0-9]{64}\.css$#D',
+            $conflictStylesheet->getAttribute('href'),
+        );
+        $this->assertMatchesRegularExpression(
+            '#^sha256-[A-Za-z0-9+/]{43}=$#D',
+            $conflictStylesheet->getAttribute('integrity'),
+        );
+        $this->assertSame(0, $conflictXPath->query('//style|//script|//*[@style]')->length);
 
         $state->request('pause', $instanceId, 15);
         $this->post('/queen/control/continue', ['instance_id' => $instanceId])->assertStatus(409);

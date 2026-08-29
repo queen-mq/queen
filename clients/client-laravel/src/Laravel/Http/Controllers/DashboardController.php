@@ -5,16 +5,23 @@ namespace Queen\Laravel\Http\Controllers;
 use Illuminate\Contracts\View\View;
 use Illuminate\Http\Request;
 use Queen\Laravel\Dashboard\DashboardRepository;
+use Queen\Laravel\Dashboard\DashboardStylesheet;
 
 final class DashboardController
 {
-    public function __invoke(Request $request, DashboardRepository $dashboard): View
-    {
+    public function __invoke(
+        Request $request,
+        DashboardRepository $dashboard,
+        DashboardStylesheet $stylesheet,
+    ): View {
         return view('queen::dashboard', [
             'snapshot' => $dashboard->snapshot(),
             'refreshSeconds' => $this->refreshSeconds($request),
             'refreshUrl' => route('queen.dashboard.index', [], false),
-            'cspNonce' => (string) $request->attributes->get('queen_dashboard_csp_nonce', ''),
+            'stylesheetUrl' => route('queen.dashboard.stylesheet', [
+                'version' => $stylesheet->version(),
+            ], false),
+            'stylesheetIntegrity' => $stylesheet->integrity(),
             'controlError' => $request->session()->get('queen_dashboard_control_error'),
             'controlStatus' => $request->session()->get('queen_dashboard_control_status'),
         ]);

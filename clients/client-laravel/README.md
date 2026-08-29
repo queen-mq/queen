@@ -461,9 +461,16 @@ stores are shown as unavailable instead of falling back to an unbounded
 connection; live Queen DLQ existence remains authoritative only in the broker
 dashboard.
 
-No remote scripts, fonts or CDN assets are loaded. Responses carry a strict
-nonce Content Security Policy, `no-store`, frame denial, MIME-sniffing denial
-and a no-referrer policy. Package routes participate in `artisan route:cache`.
+No remote scripts, fonts or CDN assets are loaded, and the page contains no
+inline scripts, style blocks or style attributes. The Composer package serves
+its own content-hashed stylesheet from the dashboard route, so no asset publish
+or frontend build step is required. The stylesheet link uses Subresource
+Integrity, while Content Security Policy permits styles only from the same
+origin and explicitly rejects inline style attributes. Dynamic responses use
+`no-store`; the hash-versioned stylesheet uses an immutable one-year private
+browser cache with transformations disabled to preserve its integrity digest.
+Responses also carry frame denial, MIME-sniffing denial and a no-referrer
+policy. Package routes participate in `artisan route:cache`.
 `queen.dashboard.domain`, `path`, `middleware`, refresh interval and failed-job
 row limit can all be configured in the published `config/queen.php`.
 After changing `enabled`, `path`, `domain` or middleware in a cached deployment,
