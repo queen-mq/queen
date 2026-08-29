@@ -41,7 +41,10 @@ jobs:
   suites:
     needs: broker-image
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # JS and CLI each exercise three isolated topologies. Their per-topology
+    # safety deadline is about ten minutes, so a serialized lane needs more
+    # than thirty minutes including image setup and teardown.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
