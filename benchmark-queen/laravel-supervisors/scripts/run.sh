@@ -28,6 +28,8 @@ QUEEN_POP_FUSION="${QUEEN_POP_FUSION:-0}"
 WARMUP_JOBS=50
 SAMPLE_INTERVAL="0.50"
 WAIT_TIMEOUT=300
+WORKER_TIMEOUT="${BENCH_TIMEOUT:-120}"
+RETRY_AFTER="${BENCH_RETRY_AFTER:-0}"
 BALANCE_COOLDOWN=3
 BALANCE_MAX_SHIFT=1
 SCALING_STRATEGY="size"
@@ -72,6 +74,8 @@ Options:
   --warmup-jobs N               Warm-up jobs before each sample (default: 50)
   --sample-interval SECONDS     cgroup/process sampling period (default: 0.50)
   --timeout SECONDS             Completion timeout per run (default: 300)
+  --worker-timeout SECONDS      Laravel per-job timeout (default: 120)
+  --retry-after SECONDS         Lease/visibility timeout; default max(180, prefetch*worker-timeout+1)
   --post-drain SECONDS          Observation after completion; default scales with auto
   --strategy size|time          Autoscaling pressure strategy (default: size)
   --target-jobs N               Queen size-strategy jobs per process (default: 10)
@@ -84,8 +88,9 @@ Options:
 The load generator is intentionally outside the measured cgroups. Every lane
 uses a fresh Compose project, backend and named result volume.
 Optimization defaults may also be set with BENCH_DISPATCH_MODE,
-QUEEN_PREFETCH, QUEEN_ACK_BATCH, QUEEN_BULK_BATCH, QUEEN_PARTITIONS and
-QUEEN_POP_FUSION. Explicit CLI options take precedence.
+QUEEN_PREFETCH, QUEEN_ACK_BATCH, QUEEN_BULK_BATCH, QUEEN_PARTITIONS,
+QUEEN_POP_FUSION, BENCH_TIMEOUT and BENCH_RETRY_AFTER. Explicit CLI options
+take precedence.
 EOF
 }
 
@@ -163,6 +168,8 @@ while [ "$#" -gt 0 ]; do
         --warmup-jobs) WARMUP_JOBS="${2:?--warmup-jobs requires a value}"; shift 2 ;;
         --sample-interval) SAMPLE_INTERVAL="${2:?--sample-interval requires a value}"; shift 2 ;;
         --timeout) WAIT_TIMEOUT="${2:?--timeout requires a value}"; shift 2 ;;
+        --worker-timeout) WORKER_TIMEOUT="${2:?--worker-timeout requires a value}"; shift 2 ;;
+        --retry-after) RETRY_AFTER="${2:?--retry-after requires a value}"; shift 2 ;;
         --post-drain) POST_DRAIN_SECONDS="${2:?--post-drain requires a value}"; shift 2 ;;
         --strategy) SCALING_STRATEGY="${2:?--strategy requires a value}"; shift 2 ;;
         --target-jobs) TARGET_JOBS_PER_PROCESS="${2:?--target-jobs requires a value}"; shift 2 ;;
@@ -207,6 +214,14 @@ require_positive_int "--queen-partitions" "$QUEEN_PARTITIONS"
 require_uint "--queen-pop-fusion" "$QUEEN_POP_FUSION"
 require_uint "--warmup-jobs" "$WARMUP_JOBS"
 require_positive_int "--timeout" "$WAIT_TIMEOUT"
+require_positive_int "--worker-timeout" "$WORKER_TIMEOUT"
+if [ "$RETRY_AFTER" = "0" ]; then
+    RETRY_AFTER=$(( QUEEN_PREFETCH * WORKER_TIMEOUT + 1 ))
+    if [ "$RETRY_AFTER" -lt 180 ]; then
+        RETRY_AFTER=180
+    fi
+fi
+require_positive_int "--retry-after" "$RETRY_AFTER"
 require_positive_int "--target-jobs" "$TARGET_JOBS_PER_PROCESS"
 require_decimal "--sample-interval" "$SAMPLE_INTERVAL"
 require_decimal "--target-clear" "$TARGET_CLEAR_SECONDS"
@@ -216,6 +231,9 @@ require_decimal "--target-clear" "$TARGET_CLEAR_SECONDS"
 [ "$QUEEN_BULK_BATCH" -le 1000 ] || die "--queen-bulk-batch must not exceed 1000"
 [ "$QUEEN_PARTITIONS" -le 64 ] || die "--queen-partitions must not exceed 64"
 [ "$QUEEN_POP_FUSION" -le 1 ] || die "--queen-pop-fusion must be 0 or 1"
+[ "$WORKER_TIMEOUT" -le 86400 ] || die "--worker-timeout must not exceed 86400"
+[ "$RETRY_AFTER" -le 86401 ] || die "--retry-after must not exceed 86401"
+[ "$RETRY_AFTER" -gt $(( QUEEN_PREFETCH * WORKER_TIMEOUT )) ] || die "--retry-after must exceed --queen-prefetch multiplied by --worker-timeout"
 case "$DISPATCH_MODE" in single|bulk) ;; *) die "--dispatch-mode must be single or bulk" ;; esac
 case "$SCALING_STRATEGY" in size|time) ;; *) die "--strategy must be size or time" ;; esac
 if [ "$POST_DRAIN_SECONDS" != "auto" ]; then
@@ -418,6 +436,8 @@ export BENCHMARK_SAMPLE_INTERVAL="$SAMPLE_INTERVAL"
 export BENCHMARK_POST_DRAIN="$POST_DRAIN_SECONDS"
 export BENCHMARK_WARMUP_JOBS="$WARMUP_JOBS"
 export BENCHMARK_COMPLETION_TIMEOUT="$WAIT_TIMEOUT"
+export BENCHMARK_WORKER_TIMEOUT="$WORKER_TIMEOUT"
+export BENCHMARK_RETRY_AFTER="$RETRY_AFTER"
 export BENCHMARK_INCLUDE_PSS="$INCLUDE_PSS"
 export BENCHMARK_STRATEGY="$SCALING_STRATEGY"
 export BENCHMARK_BALANCE_COOLDOWN="$BALANCE_COOLDOWN"
@@ -429,6 +449,8 @@ export QUEEN_ACK_BATCH
 export QUEEN_BULK_BATCH
 export QUEEN_PARTITIONS
 export QUEEN_POP_FUSION
+export BENCH_TIMEOUT="$WORKER_TIMEOUT"
+export BENCH_RETRY_AFTER="$RETRY_AFTER"
 
 python3 - <<'PY'
 import datetime as dt
@@ -462,6 +484,8 @@ settings = {
     "sample_interval_seconds": float(os.environ["BENCHMARK_SAMPLE_INTERVAL"]),
     "warmup_jobs": int(os.environ["BENCHMARK_WARMUP_JOBS"]),
     "completion_timeout_seconds": int(os.environ["BENCHMARK_COMPLETION_TIMEOUT"]),
+    "worker_timeout_seconds": int(os.environ["BENCHMARK_WORKER_TIMEOUT"]),
+    "retry_after_seconds": int(os.environ["BENCHMARK_RETRY_AFTER"]),
     "pss_requested": os.environ["BENCHMARK_INCLUDE_PSS"] == "1",
     "post_drain_seconds_by_profile": {
         profile: (

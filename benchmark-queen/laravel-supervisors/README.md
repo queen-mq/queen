@@ -81,6 +81,8 @@ scripts/run.sh --profile fixed --engines queen-php,queen-rust \
 | `--queen-bulk-batch` | `QUEEN_BULK_BATCH` | 1..1000 | 100 |
 | `--queen-partitions` | `QUEEN_PARTITIONS` | 1..64 | 64 |
 | `--queen-pop-fusion` | `QUEEN_POP_FUSION` | 0 or 1 | 0 |
+| `--worker-timeout` | `BENCH_TIMEOUT` | 1..86400 seconds | 120 |
+| `--retry-after` | `BENCH_RETRY_AFTER` | `> prefetch * worker-timeout` | `max(180, prefetch * worker-timeout + 1)` |
 | `--dispatch-mode` | `BENCH_DISPATCH_MODE` | single, bulk | single |
 
 Every factor is validated before image or container work begins and is written
