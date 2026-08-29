@@ -113,19 +113,84 @@ final class LaravelDashboardTest extends TestCase
         $response = $this->get('/queen');
 
         $response->assertOk()
-            ->assertSee('Laravel supervisor')
+            ->assertSee('Queen Supervisor')
+            ->assertSee('Dashboard sections')
             ->assertSee('live')
+            ->assertSee('Active')
             ->assertSee('3 / 4')
-            ->assertSee('71')
+            ->assertSee('71+')
+            ->assertSee('1 queue depth unavailable')
             ->assertHeader('X-Frame-Options', 'DENY')
             ->assertHeader('X-Content-Type-Options', 'nosniff')
             ->assertHeader('Referrer-Policy', 'no-referrer');
-        $this->assertStringContainsString("default-src 'none'", (string) $response->headers->get('Content-Security-Policy'));
-        $this->assertStringContainsString("frame-ancestors 'none'", (string) $response->headers->get('Content-Security-Policy'));
-        $this->assertStringContainsString("form-action 'self'", (string) $response->headers->get('Content-Security-Policy'));
+        $contentSecurityPolicy = (string) $response->headers->get('Content-Security-Policy');
+        $this->assertStringContainsString("default-src 'none'", $contentSecurityPolicy);
+        $this->assertStringContainsString("frame-ancestors 'none'", $contentSecurityPolicy);
+        $this->assertStringContainsString("form-action 'self'", $contentSecurityPolicy);
         $this->assertStringContainsString('no-store', (string) $response->headers->get('Cache-Control'));
-        $this->assertStringNotContainsString('http://', $response->getContent());
-        $this->assertStringNotContainsString('https://', $response->getContent());
+        $content = $response->getContent();
+        $this->assertStringNotContainsString('http://', $content);
+        $this->assertStringNotContainsString('https://', $content);
+        $this->assertStringNotContainsString('<script', $content);
+        $this->assertStringNotContainsString(' style=', $content);
+
+        $xpath = $this->dashboardXPath($content);
+        $this->assertSame(1, $xpath->query('//h1')->length);
+        $this->assertSame(1, $xpath->query('//main[@id="main-content"]')->length);
+        foreach (['overview', 'workload', 'supervisors', 'failed-jobs', 'configuration'] as $section) {
+            $this->assertSame(1, $xpath->query('//section[@id="' . $section . '"]')->length);
+        }
+        $this->assertSame(0, $xpath->query('//th[not(@scope="col")]')->length);
+        $this->assertSame(0, $xpath->query('//link|//script')->length);
+        $this->assertSame(1, $xpath->query('//style[@nonce]')->length);
+        $this->assertSame(1, preg_match("/style-src 'nonce-([^']+)'/", $contentSecurityPolicy, $nonce));
+        $this->assertSame($nonce[1], $xpath->query('//style')->item(0)?->getAttribute('nonce'));
+
+        $this->assertDashboardButtonState($xpath, 'Pause', false);
+        $this->assertDashboardButtonState($xpath, 'Continue', true);
+        $this->assertDashboardButtonState($xpath, 'Terminate', false);
+    }
+
+    public function testPausedDashboardEnablesOnlyApplicableSupervisorControls(): void
+    {
+        $this->liveSupervisor([
+            'engine' => 'rust',
+            'state' => 'paused',
+            'pool_status' => [],
+        ]);
+
+        $response = $this->get('/queen')->assertOk();
+        $response->assertSee('Paused');
+
+        $xpath = $this->dashboardXPath($response->getContent());
+        $this->assertDashboardButtonState($xpath, 'Pause', true);
+        $this->assertDashboardButtonState($xpath, 'Continue', false);
+        $this->assertDashboardButtonState($xpath, 'Terminate', false);
+    }
+
+    public function testStaleDashboardDoesNotPresentRunningStateOrEnableControls(): void
+    {
+        $state = $this->liveSupervisor([
+            'engine' => 'rust',
+            'state' => 'running',
+            'pool_status' => [],
+        ]);
+        $status = $state->status();
+        $this->assertIsArray($status);
+        $status['updated_at_epoch'] = time() - 3601;
+        $status['updated_at'] = gmdate('Y-m-d\TH:i:s\Z', $status['updated_at_epoch']);
+        file_put_contents(
+            $this->stateDirectory . '/status.json',
+            json_encode($status, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
+        );
+
+        $response = $this->get('/queen')->assertOk();
+        $response->assertSee('Stale')->assertDontSee('Active');
+
+        $xpath = $this->dashboardXPath($response->getContent());
+        $this->assertDashboardButtonState($xpath, 'Pause', true);
+        $this->assertDashboardButtonState($xpath, 'Continue', true);
+        $this->assertDashboardButtonState($xpath, 'Terminate', true);
     }
 
     public function testJsonContractUsesHeartbeatDepthsWithoutPollingAndMarksMissingDepthUnavailable(): void
@@ -596,5 +661,26 @@ final class LaravelDashboardTest extends TestCase
             }
         }
         @rmdir($directory);
+    }
+
+    private function dashboardXPath(string $content): \DOMXPath
+    {
+        $document = new \DOMDocument();
+        $previous = libxml_use_internal_errors(true);
+        try {
+            $this->assertTrue($document->loadHTML($content, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING));
+        } finally {
+            libxml_clear_errors();
+            libxml_use_internal_errors($previous);
+        }
+
+        return new \DOMXPath($document);
+    }
+
+    private function assertDashboardButtonState(\DOMXPath $xpath, string $label, bool $disabled): void
+    {
+        $button = $xpath->query('//button[normalize-space(.)="' . $label . '"]')->item(0);
+        $this->assertInstanceOf(\DOMElement::class, $button, "Expected the {$label} dashboard button.");
+        $this->assertSame($disabled, $button->hasAttribute('disabled'), "Unexpected disabled state for {$label}.");
     }
 }
