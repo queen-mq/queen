@@ -24,8 +24,28 @@ use crate::fusion::{json_escape_into, AddMsg, Fusion, ItemResult, OwnedFrame, Pu
 use crate::metrics::Metrics;
 use crate::util::uuidv7_bytes;
 
+// EMBEDDED MODE (server/src/kafka_facade.rs) reports the supervised child HERE and
+// nowhere else: /status is where an operator already looks for "what is this
+// process doing", it needs no auth token by default (JWT_SKIP_PATHS), and adding a
+// key to it is not new API surface the way a new route would be. With embedded
+// mode off — every deployment that has not opted in — the block is absent and the
+// body is byte-for-byte the string it has always been.
 pub async fn handle_status() -> Response {
-    json(StatusCode::OK, "{\"status\":\"ok\",\"engine\":\"segments-rust\"}".to_string())
+    match crate::kafka_facade::status_value() {
+        None => json(
+            StatusCode::OK,
+            "{\"status\":\"ok\",\"engine\":\"segments-rust\"}".to_string(),
+        ),
+        Some(kafka) => json(
+            StatusCode::OK,
+            serde_json::json!({
+                "status": "ok",
+                "engine": "segments-rust",
+                "kafka": kafka,
+            })
+            .to_string(),
+        ),
+    }
 }
 
 // RUSTFIX item 21: GET /metrics returns the C++ JSON shape (metrics.cpp:11-46),

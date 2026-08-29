@@ -518,6 +518,9 @@ pub struct Config {
     pub sync: SyncConfig,
     // Disk spool for DB-outage / maintenance push durability (RUSTFIX items 1, 17).
     pub file_buffer: FileBufferConfig,
+    // EMBEDDED MODE for the Kafka wire facade (server/src/kafka_facade.rs).
+    // Off by default: nothing is spawned, nothing is logged, no behaviour changes.
+    pub kafka_facade: KafkaFacadeConfig,
     // Wildcard candidate hot-list (19-wildcard-hotlist.md, server/src/hotlist.rs).
     // Broker-side candidate selection for wildcard pops. Default ON;
     // QUEEN_HOTLIST=0 (or =false) reverts to the legacy per-pop SQL candidate
@@ -937,6 +940,42 @@ impl FileBufferConfig {
     }
 }
 
+/// Embedded queen-kafka (server/src/kafka_facade.rs): the Kafka wire facade run as
+/// a supervised CHILD PROCESS of this broker, talking to it over loopback HTTP.
+///
+/// Three knobs, and only the first one decides anything: with `enabled` false the
+/// supervisor is never constructed, no child is spawned, and `/status` renders the
+/// two fields it always did. The CHILD's own configuration is not repeated here —
+/// it inherits this process's environment, so every `QUEEN_KAFKA_*` variable the
+/// facade documents (`QUEEN_KAFKA_ADVERTISED_ADDR`, `_ADDR`, `_DEFAULT_PARTITIONS`,
+/// `_SASL`, `_TLS_*`, the cluster and group timings) forwards verbatim and has
+/// exactly the meaning it has when the facade runs on its own.
+#[derive(Clone)]
+pub struct KafkaFacadeConfig {
+    pub enabled: bool,
+    /// Empty means "the `queen-kafka` file next to the broker executable", which
+    /// is resolved from `current_exe` at boot rather than written down here: a
+    /// path derived from argv is not a configuration default.
+    pub bin: String,
+    /// How long a stopping child has between SIGTERM and SIGKILL.
+    pub shutdown_grace_ms: u64,
+}
+
+impl KafkaFacadeConfig {
+    fn from_env() -> KafkaFacadeConfig {
+        KafkaFacadeConfig {
+            enabled: env_bool("QUEEN_KAFKA_EMBEDDED", false),
+            bin: env_str("QUEEN_KAFKA_BIN", ""),
+            // 5s: the facade's shutdown is closing sockets, not draining work —
+            // every offset it holds is already in Queen — so the window only has
+            // to cover a process that is mid-syscall, not one with state to
+            // flush. Floored at 100ms because a grace of zero is a SIGKILL with
+            // extra steps.
+            shutdown_grace_ms: env_int("QUEEN_KAFKA_SHUTDOWN_GRACE_MS", 5000).max(100) as u64,
+        }
+    }
+}
+
 // C++ `get_env_string` parity (config.hpp:29-33): a present-but-empty env var
 // returns "" verbatim; only a genuinely-unset var falls back to the default.
 // (RUSTFIX item 6 — the old `.filter(|v| !v.is_empty())` treated ""` as unset,
@@ -1275,6 +1314,23 @@ pub fn log_effective(cfg: &Config) {
         max_events_per_file = cfg.file_buffer.max_events_per_file,
         "config: file_buffer"
     );
+    // Embedded queen-kafka. Printed ONLY when it is on: default-off must add no
+    // line to a boot log, so that a broker running without the feature reads today
+    // exactly as it read before the feature existed. The child's own knobs are not
+    // echoed here — it prints its whole resolved configuration itself, and that
+    // line arrives in this same log stream tagged `kafka`.
+    if cfg.kafka_facade.enabled {
+        tracing::info!(
+            target: "boot",
+            bin = %if cfg.kafka_facade.bin.trim().is_empty() {
+                "<beside the broker binary>".to_string()
+            } else {
+                cfg.kafka_facade.bin.clone()
+            },
+            shutdown_grace_ms = cfg.kafka_facade.shutdown_grace_ms,
+            "config: kafka_facade"
+        );
+    }
     tracing::info!(
         target: "boot",
         encryption_key = %mask(&env_str("QUEEN_ENCRYPTION_KEY", "")),
@@ -1636,6 +1692,7 @@ pub fn load() -> Config {
         auth: AuthConfig::from_env(),
         sync: SyncConfig::from_env(),
         file_buffer: FileBufferConfig::from_env(),
+        kafka_facade: KafkaFacadeConfig::from_env(),
         // HOT-LIST default ON (operator decision 2026-07-24 after the VM A/B:
         // candidate scans gone from the profile, ingress lag flat, combo with
         // ack fusion beats the scan path on total delivered even on a slow

@@ -68,7 +68,34 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # Verify
 RUN test -f /queen && echo "Build successful"
 
-# Stage 3: Build queenctl (Go operator CLI)
+# Stage 3: Build the queen-kafka facade (Kafka wire protocol front)
+#
+# Its own stage and its own binary, because that is what the deployment is:
+# EMBEDDED MODE (server/src/kafka_facade.rs) has the broker SPAWN this file as a
+# supervised child process, so the image ships two binaries and one process tree.
+# It is inert unless QUEEN_KAFKA_EMBEDDED=true, which is why it can be added to
+# the default image without changing what the default image does.
+#
+# No frontend stage feeds this one and no path dependency reaches out of the
+# directory (queen-kafka/Cargo.toml has none), so the context is the crate alone.
+FROM rust:1-bookworm AS kafka-builder
+
+WORKDIR /usr/build/queen-kafka
+
+# Layer 1: manifests. Cargo.lock is copied so the image builds the versions the
+# repository tested, exactly as the server stage above does.
+COPY queen-kafka/Cargo.toml queen-kafka/Cargo.lock ./
+
+# Layer 2: source.
+COPY queen-kafka/src ./src
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/build/queen-kafka/target \
+    cargo build --release && cp target/release/queen-kafka /queen-kafka
+
+RUN test -f /queen-kafka && echo "Facade build successful"
+
+# Stage 4: Build queenctl (Go operator CLI)
 FROM golang:1.24-alpine AS cli-builder
 
 # Embed broker version + commit + build date into the binary so
@@ -106,7 +133,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 # Sanity check: the binary must run without any dynamic deps.
 RUN /out/queenctl version --short
 
-# Stage 4: Runtime Image
+# Stage 5: Runtime Image
 FROM ubuntu:24.04
 
 # Runtime dependencies + PostgreSQL 18 client tools (pg_dump, pg_restore for
@@ -132,6 +159,13 @@ WORKDIR /app
 # Rust broker binary (SQL schema is compiled in — no schema files to copy).
 COPY --from=server-builder /queen ./bin/queen
 
+# The Kafka facade, NEXT TO the broker binary — that adjacency is the contract:
+# with QUEEN_KAFKA_EMBEDDED=true and no QUEEN_KAFKA_BIN, the supervisor resolves
+# the child from the directory of its own executable (kafka_facade::resolve_bin),
+# so embedded mode works in this image with zero extra deployment. Run it alone
+# instead with `docker run ... queen-mq ./bin/queen-kafka`.
+COPY --from=kafka-builder /queen-kafka ./bin/queen-kafka
+
 # The same dashboard bytes the binary already embeds, on disk for inspection.
 # The binary does not read them: nothing in server/src implements a
 # static-dir override, so this is a copy for humans, not a serving path.
@@ -149,6 +183,13 @@ ENV QUEEN_SERVER=http://localhost:6632
 
 # Expose the broker port
 EXPOSE 6632
+
+# The Kafka listener of the embedded facade. Documentation only (EXPOSE publishes
+# nothing on its own) and only reachable with QUEEN_KAFKA_EMBEDDED=true; 9092
+# because that is the port every Kafka client's default bootstrap.servers names.
+# Remember QUEEN_KAFKA_ADVERTISED_ADDR: a container that advertises its internal
+# address is a bootstrap that succeeds and a produce that hangs.
+EXPOSE 9092
 
 # Run the Rust broker
 CMD ["./bin/queen"]
