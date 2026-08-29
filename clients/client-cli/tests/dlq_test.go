@@ -203,9 +203,11 @@ func TestDLQ_ManualRequeueViaPushAndDelete(t *testing.T) {
 // the command non-idempotent: the replayed message comes back with a
 // DIFFERENT transaction id. The broker mints a fresh one deliberately (the
 // original would be swallowed by the dedup window), which is exactly why two
-// runs produce two copies and why the command demands --yes. If this
-// assertion ever flips to "same id", the idempotency warnings on
-// Admin.RetryMessage and in `dlq retry --help` need revisiting.
+// runs produce two copies and why the command demands --yes. The original
+// consumer group is used below because a brand-new `all` group must still see
+// the immutable original segment before it sees the replay. If this assertion
+// ever flips to "same id", the idempotency warnings on Admin.RetryMessage and
+// in `dlq retry --help` need revisiting.
 func TestDLQ_ServerSideRetryReplaysAndClearsRow(t *testing.T) {
 	q := uniqueQueue(t, "dlq-retry")
 	runOK(t, "queue", "configure", q, "--retry-limit", "1", "--lease-time", "5")
@@ -245,7 +247,21 @@ func TestDLQ_ServerSideRetryReplaysAndClearsRow(t *testing.T) {
 		t.Fatalf("the refused retry changed the DLQ: %d rows", len(rows))
 	}
 
-	runOK(t, "dlq", "retry", pid, tx, "--yes")
+	retryOutput := runOK(t, "dlq", "retry", pid, tx, "--yes")
+	var retryResult struct {
+		ReplayedAs struct {
+			TransactionID string `json:"transaction_id"`
+		} `json:"replayedAs"`
+	}
+	if err := jsonDecode(retryOutput, &retryResult); err != nil {
+		t.Fatalf("decode dlq retry response: %v\nbody: %s", err, retryOutput)
+	}
+	if retryResult.ReplayedAs.TransactionID == "" {
+		t.Fatalf("dlq retry response omitted replayed transaction id: %s", retryOutput)
+	}
+	if retryResult.ReplayedAs.TransactionID == tx {
+		t.Fatalf("replay response reused transaction id %s: the dedup window can drop it", tx)
+	}
 
 	// The DLQ row is gone...
 	retry(t, 5*time.Second, func() error {
@@ -256,13 +272,13 @@ func TestDLQ_ServerSideRetryReplaysAndClearsRow(t *testing.T) {
 	})
 
 	// ...and the payload is back on the queue under a NEW transaction id.
-	got := popN(t, q, 1, "--cg", "ct-retry-after", "--from-mode", "all", "--timeout", "10s")
+	got := popN(t, q, 1, "--cg", "ct-retry", "--from-mode", "all", "--timeout", "10s")
 	if len(got) != 1 {
 		t.Fatalf("replayed message not poppable: got %d", len(got))
 	}
-	if got[0].TransactionID == tx {
-		t.Errorf("replay reused transaction id %s: the dedup window would drop it, "+
-			"and the non-idempotency notes assume a fresh id", tx)
+	if got[0].TransactionID != retryResult.ReplayedAs.TransactionID {
+		t.Errorf("popped replay transaction id = %s, response announced %s",
+			got[0].TransactionID, retryResult.ReplayedAs.TransactionID)
 	}
 	if got[0].Data["replay"] != "me" {
 		t.Errorf("replayed payload = %v, want {replay: me}", got[0].Data)
