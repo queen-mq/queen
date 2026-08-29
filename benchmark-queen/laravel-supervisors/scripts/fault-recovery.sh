@@ -59,7 +59,7 @@ Options:
   --kill-delay-ms N            Delay after target's proof-of-work (default: 100)
   --respawn-timeout SECONDS    Maximum wait for full pool recovery (default: 30)
   --completion-timeout SEC     Maximum wait for all unique jobs (default: 120)
-  --allow-lease-risk           Permit an intentionally unsafe prefetch/lease window
+  --allow-lease-risk           Retain an unsafe protocol; current supervisors may reject it
   --no-build                   Reuse local benchmark images
   --dry-run                    Validate and write the planned protocol only
   -h, --help                   Show this help
@@ -160,7 +160,7 @@ done
 minimum_prefetch_ms=$(( QUEEN_PREFETCH * SLEEP_MS ))
 retry_after_ms=$(( RETRY_AFTER * 1000 ))
 if [ "$contains_queen" -eq 1 ] && [ "$minimum_prefetch_ms" -ge "$retry_after_ms" ] && [ "$ALLOW_LEASE_RISK" -eq 0 ]; then
-    die "Queen prefetch needs at least ${minimum_prefetch_ms}ms for configured sleeps, but --retry-after is ${retry_after_ms}ms; reduce --queen-prefetch, increase --retry-after, or use --allow-lease-risk for an intentional negative test"
+    die "Queen prefetch needs at least ${minimum_prefetch_ms}ms for configured sleeps, but --retry-after is ${retry_after_ms}ms; reduce --queen-prefetch, increase --retry-after, or use --allow-lease-risk to retain an intentional negative protocol"
 fi
 
 mkdir -p "$OUTPUT_DIRECTORY"
@@ -245,6 +245,9 @@ metadata = {
         "This smoke test measures one crash per fresh backend; estimate probabilities with repeated runs.",
         "The lease guard covers the configured sleep floor only; CPU work and framework overhead still "
         "require additional retry_after margin.",
+        "allow_lease_risk bypasses only this harness guard. Current Queen supervisors independently "
+        "reject retry_after <= prefetch * worker timeout; end-to-end negative tests need a pre-guard "
+        "image or a separate test-only execution path.",
         "Completion is recorded at the end of handle(), before the queue ACK. Final queue counters "
         "are reconciled, but this fixture has no idempotent external side-effect ledger.",
     ],
