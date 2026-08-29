@@ -1,0 +1,199 @@
+---
+title: Migrate from Horizon
+description: "Canary Queen beside Horizon, translate worker pools, move new dispatches, drain the Redis backlog, and preserve a rollback boundary."
+type: how-to
+tier: operate
+status: preview
+sidebar:
+  order: 4
+sourceOfTruth:
+  - clients/client-laravel/config/queen.php
+  - clients/client-laravel/src/Laravel/QueenServiceProvider.php
+  - clients/client-laravel/src/Laravel/Queue/QueenQueue.php
+  - clients/client-laravel/src/Laravel/Queue/SyncedFailedJobProvider.php
+  - clients/client-laravel/src/Laravel/Supervisor/SupervisorConfiguration.php
+  - clients/client-laravel/src/Laravel/Supervisor/AutoScaler.php
+  - supervisor/src/main.rs
+verifiedBy:
+  - clients/client-laravel/tests/LaravelQueueDriverTest.php
+  - clients/client-laravel/tests/LaravelSupervisorTest.php
+  - clients/client-laravel/tests/LaravelSupervisorProductionTest.php
+  - clients/client-laravel/tests/SyncedFailedJobProviderLifecycleTest.php
+---
+
+Moving from Horizon changes two things, not one:
+
+1. Redis is replaced by Queen and PostgreSQL as the queue backend.
+2. Horizon's PHP control plane is replaced by a Queen PHP or Rust supervisor.
+
+The application job classes remain ordinary Laravel jobs. The stored backlog does not move with
+them. Redis jobs, Horizon history, metrics snapshots and tags are not imported into Queen.
+
+<Aside type="danger">
+Do not change `QUEUE_CONNECTION` and immediately stop Horizon while Redis still contains jobs.
+Queen workers cannot drain a Redis backlog, and Horizon workers cannot drain a Queen backlog. A
+safe migration gives both backends an explicit ownership window.
+</Aside>
+
+## Inventory Horizon-specific behavior
+
+Before changing a connection, record what the application uses from Horizon beyond worker
+processes:
+
+- job tags and silenced jobs;
+- wait-time notifications;
+- retained throughput and runtime snapshots;
+- Horizon dashboard access and multi-host visibility;
+- `horizon:clear`, failed-job workflows and operator runbooks;
+- per-supervisor pause and continue controls;
+- any deployment automation that calls `horizon:terminate`.
+
+Queen's current Laravel panel does not reproduce all of those surfaces. Decide where each missing
+signal or operation will live before cutover. The direct feature comparison is in
+[Queen or Horizon](/use/laravel/queen-vs-horizon).
+
+## Translate the pool configuration
+
+Queen uses the same concepts with snake_case names, but the algorithms are independent
+implementations rather than a byte-for-byte Horizon clone.
+
+| Horizon `config/horizon.php` | Queen `config/queen.php` | Note |
+| --- | --- | --- |
+| `connection` | `connection` | Change the value from `redis` to `queen` |
+| `queue` | `queues` | Queen always uses an array |
+| `balance: auto` | `balance: auto` | Dynamic total and per-queue allocation |
+| `balance: simple` | `balance: simple` | Fixed `processes`, evenly spread |
+| `balance: false` | `balance: off` | Ordered queue list on every worker |
+| `autoScalingStrategy` | `strategy` | `size` or `time` |
+| `processes` | `processes` | Primarily used by `simple` mode |
+| `minProcesses` | `min_processes` | Lower target bound |
+| `maxProcesses` | `max_processes` | Upper target bound |
+| `balanceMaxShift` | `balance_max_shift` | Maximum elastic change per cycle |
+| `balanceCooldown` | `balance_cooldown` | Seconds between elastic changes |
+| `maxJobs` | `max_jobs` | Worker recycle limit |
+| `maxTime` | `max_time` | Worker lifetime limit |
+| `timeout`, `tries`, `memory`, `sleep`, `rest`, `force` | Same names | Same worker concepts |
+| `nice` | No equivalent | Keep OS priority outside Queen |
+| Array-valued `backoff` | No direct equivalent | Queen supervisor currently accepts one integer |
+
+For strict priority such as `high,default`, use `balance=off`, `prefetch=1` and a non-blocking
+queue scan. Auto balancing deliberately allocates by measured pressure rather than queue order.
+
+## Canary Queen beside Horizon
+
+Keep the application's default connection on Redis while you prove the Queen path.
+
+<Steps>
+
+1. **Install and configure Queen without changing the default.**
+
+   ```dotenv
+   QUEUE_CONNECTION=redis
+   QUEEN_URL=https://queen.internal.example:6632
+   QUEEN_CONSUMER_GROUP=laravel
+   QUEEN_PREFETCH=1
+   QUEEN_ACK_BATCH=1
+   ```
+
+2. **Send one idempotent job explicitly to Queen.**
+
+   ```php
+   RebuildSearchIndex::dispatch($tenantId)
+       ->onConnection('queen')
+       ->onQueue('queen-canary');
+   ```
+
+3. **Run one fixed Queen worker.**
+
+   ```bash
+   php artisan queue:work queen --queue=queen-canary --timeout=60 --tries=3
+   ```
+
+4. **Verify the complete lifecycle.** Check the side effect, retry a deliberate failure through
+   Laravel, kill one worker during user code and confirm that the idempotent result remains correct
+   after redelivery.
+
+5. **Configure one Queen master.** Start with the PHP engine or a qualified Rust artifact, then
+   require `php artisan queen:supervisor status --check` to pass.
+
+</Steps>
+
+Do not use throughput alone as the canary gate. Validate job attempts, delay and backoff, timeout,
+failed-job synchronization, deployment drain and broker unavailability with the application's own
+jobs.
+
+## Move production traffic
+
+There are two safe cutover shapes.
+
+### Drain, then switch
+
+Use this when a short dispatch pause is acceptable.
+
+1. Stop or pause producers without pausing Horizon workers.
+2. Let Horizon drain every Redis queue in scope.
+3. Confirm the Redis queue sizes are zero and no reserved job remains.
+4. Gracefully terminate Horizon.
+5. Deploy `QUEUE_CONNECTION=queen` and start the Queen supervisor.
+6. Resume producers and verify Queen status, backlog and failed jobs.
+
+This shape has the simplest ownership boundary, but it introduces a dispatch pause.
+
+### Route new jobs, then drain old jobs
+
+Use this when producers can select a connection explicitly during a transition.
+
+1. Deploy code that sends new jobs to `queen` while existing Redis jobs remain owned by Horizon.
+2. Run Horizon and Queen workers at the same time, each on its own backend.
+3. Watch Redis until every old queue and reserved set is empty.
+4. Call `php artisan horizon:terminate` and remove the temporary routing flag.
+5. Keep Queen as the default connection.
+
+Do not have both systems consume the same logical work through duplicated dispatch. If a temporary
+dual write is unavoidable, the application needs its own stable idempotency key and reconciliation
+plan.
+
+## Failed jobs during the transition
+
+Laravel's failed-job repository remains the operator index. Queen also retains a DLQ snapshot when
+`sync_failed_jobs` is enabled. In a multi-process or multi-host application, configure
+`failed_jobs_lock_store` to a shared cache whose locks support ownership checks.
+
+Use Laravel commands for Laravel job mutations:
+
+```bash
+php artisan queue:failed
+php artisan queue:retry <id>
+php artisan queue:forget <id>
+php artisan queue:prune-failed
+```
+
+Do not retry a Laravel payload with the generic broker message retry operation. Laravel owns the
+failed index, attempt reset and synchronized cleanup.
+
+## Roll back without losing the new backlog
+
+Rollback changes where **new** jobs are dispatched. It does not move jobs already stored by Queen
+back into Redis.
+
+1. Stop new Queen dispatches or route them back to Redis.
+2. Keep the Queen workers running until their backlog is empty, or explicitly preserve that backlog
+   for a later recovery window.
+3. Restart Horizon before resuming Redis dispatch at full rate.
+4. Confirm both failed-job indexes and both backends before removing Queen credentials or state.
+
+Keep the Queen package, connection configuration and deployment path available until the rollback
+window closes. Removing the worker path first turns a reversible routing decision into stranded
+work.
+
+## Migration acceptance checklist
+
+- The canary covers successful, delayed, retried and failed jobs.
+- Every job with an external side effect is idempotent.
+- `retry_after > timeout`, and the lease also covers the real job runtime.
+- Prefetch remains one, or lease renewal has been tested under broker failure.
+- The Queen state directory is private, application-owned and mode `0700`.
+- Exactly one Queen supervisor master owns the application and consumer group.
+- The outer process monitor restarts the master after an unexpected exit.
+- Redis and Queen backlog ownership is explicit throughout cutover and rollback.
+- Replacements exist for every Horizon tag, metric, notification or operator action the team uses.

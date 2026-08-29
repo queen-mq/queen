@@ -1,0 +1,256 @@
+---
+title: Worker supervisors
+description: "Run Horizon-like Laravel worker pools with the reference PHP engine or the low-memory Rust engine, using one shared configuration."
+type: how-to
+tier: operate
+status: preview
+sidebar:
+  order: 2
+sourceOfTruth:
+  - clients/client-laravel/config/queen.php
+  - clients/client-laravel/bin/queen-supervisor
+  - clients/client-laravel/src/Laravel/Commands/SuperviseCommand.php
+  - clients/client-laravel/src/Laravel/Commands/SupervisorConfigCommand.php
+  - clients/client-laravel/src/Laravel/Commands/SupervisorControlCommand.php
+  - clients/client-laravel/src/Laravel/Commands/SupervisorInstallCommand.php
+  - clients/client-laravel/src/Laravel/Supervisor/SupervisorConfiguration.php
+  - clients/client-laravel/src/Laravel/Supervisor/PhpSupervisor.php
+  - clients/client-laravel/src/Laravel/Supervisor/SupervisorState.php
+  - clients/client-laravel/src/Laravel/Supervisor/AutoScaler.php
+  - clients/client-laravel/src/Laravel/Supervisor/Binary/SupervisorBinaryInstaller.php
+  - supervisor/src/main.rs
+  - .github/workflows/release-supervisor.yml
+verifiedBy:
+  - clients/client-laravel/tests/LaravelSupervisorTest.php
+  - clients/client-laravel/tests/LaravelSupervisorCommandTest.php
+  - clients/client-laravel/tests/LaravelSupervisorProductionTest.php
+  - clients/client-laravel/tests/SupervisorBinaryInstallerTest.php
+---
+
+The Queen supervisor is a **local control plane**. It starts ordinary Laravel
+`queue:work queen` children, assigns them to queues, changes their number and drains them during
+pause, scale-down and shutdown. The Queen broker never starts PHP processes.
+
+Both engines consume the same resolved configuration:
+
+| Engine | Master | Workers | Distinct behavior |
+| --- | --- | --- | --- |
+| Queen PHP | A Laravel application remains resident | `artisan queue:work queen` | Reference implementation and fallback |
+| Queen Rust | Rust remains resident after one Artisan config load | `artisan queue:work queen` | Lower master memory, process-group fencing and crash-loop circuit breaker |
+
+Switching engines does not change the pool configuration, CLI controls or dashboard protocol.
+
+## Requirements
+
+The supervisor engines currently target Unix process semantics.
+
+- PHP 8.3 or newer.
+- `symfony/process` for the PHP engine.
+- PHP `pcntl` and `posix` for process control, state ownership and the Composer launcher.
+- PHP `phar` and an available `proc_open` for native installation and smoke verification.
+- An outer process monitor such as systemd, Kubernetes or Supervisor to restart the master if it
+  exits.
+
+The queue driver can run without these additions when another process manager owns fixed workers.
+Native Windows is not supported by either Queen supervisor today.
+
+## Prepare private state
+
+Status, the local ownership lock, control requests and bounded worker telemetry share one private
+directory. Create it as the same user that will run the supervisor:
+
+```bash
+install -d -m 0700 /srv/example/queen-supervisor-state
+```
+
+```dotenv
+QUEEN_SUPERVISOR_STATE_DIRECTORY=/srv/example/queen-supervisor-state
+```
+
+<Aside type="danger">
+Do not weaken this directory to fit a typical Laravel `storage/` directory with mode `0775`.
+Queen requires an application-owned `0700` state leaf under trusted parents and fails closed on
+unsafe ownership, modes, symlinks or path replacement. Keep it outside the web root. The native
+binary installation directory is a separate path with a different policy.
+</Aside>
+
+## Configure a pool
+
+Publish `config/queen.php`, then edit `supervisor.supervisors`. This example gives one pool a total
+budget of 20 workers across two queues:
+
+```php
+'supervisor' => [
+    'poll_interval' => 3,
+    'shutdown_grace' => 75,
+    'process_limit' => 20,
+    'state_directory' => env(
+        'QUEEN_SUPERVISOR_STATE_DIRECTORY',
+        storage_path('queen-supervisor'),
+    ),
+    'supervisors' => [
+        'jobs' => [
+            'connection' => 'queen',
+            'consumer_group' => 'laravel',
+            'queues' => ['high', 'default'],
+            'balance' => 'auto',
+            'strategy' => 'time',
+            'min_processes' => 2,
+            'max_processes' => 20,
+            'target_clear_seconds' => 60,
+            'default_runtime_seconds' => 1,
+            'balance_cooldown' => 3,
+            'balance_max_shift' => 2,
+            'scale_down_delay' => 10,
+            'timeout' => 60,
+            'retry_after' => 90,
+            'tries' => 3,
+            'memory' => 128,
+        ],
+    ],
+],
+```
+
+The important inequalities are enforced at startup:
+
+- `retry_after` must be longer than `timeout`;
+- `shutdown_grace` must be longer than every pool's `timeout`;
+- `max_processes` must cover every queue in `auto` mode;
+- aggregate pool maxima must fit `process_limit`;
+- control TTL and heartbeat timeout must exceed the bounded reconciliation loop.
+
+Inspect the document that either engine will consume:
+
+```bash
+php artisan queen:supervisor-config --pretty
+```
+
+This form redacts tokens and header values. `--for-engine` contains credentials and must not be
+written to logs or ordinary build artifacts.
+
+## Balancing modes
+
+| Mode | Worker allocation | Use it for |
+| --- | --- | --- |
+| `auto` | Changes the total target and assigns workers by queue pressure | Elastic queues with no strict priority |
+| `simple` | Keeps `processes` fixed and spreads them evenly | Predictable capacity |
+| `off` | Gives every worker the ordered comma-separated queue list | Strict Laravel queue priority |
+
+`strategy=size` uses group-specific effective backlog divided by
+`target_jobs_per_process`. `strategy=time` multiplies backlog by observed worker runtime and aims
+for `target_clear_seconds`. Before telemetry exists, the time strategy uses
+`default_runtime_seconds`.
+
+`balance_max_shift` and `balance_cooldown` limit how quickly the pool changes. A lower target must
+remain stable for `scale_down_delay` before Queen drains capacity. Draining workers continue to
+count against `process_limit`, so a reallocation cannot create a temporary process spike.
+
+## Run the PHP engine
+
+The PHP engine is available directly from the Composer package:
+
+```bash
+php artisan queen:supervise
+```
+
+It uses capped exponential restart backoff. After repeated crashes it continues retrying at
+`restart_backoff_max`; it does not have the Rust engine's open/probe circuit state.
+
+Use the PHP engine first when native artifacts are not published for the host, or as a reference
+during a Rust rollout.
+
+## Run the Rust engine
+
+The Composer package includes a launcher, not a binary for every platform. Installation is an
+explicit deployment step, so Composer never downloads and executes native code by itself:
+
+```bash
+php artisan queen:supervisor-install
+vendor/bin/queen-supervisor --php php --artisan artisan
+```
+
+The installer selects the exact package-pinned version and host target, verifies the release
+manifest, archive SHA-256, executable version and local receipt, then publishes by atomic rename.
+The launcher verifies the receipt and binary hash again before every start.
+
+Prepare an application-owned installation leaf. Its immediate parent must already be a real
+directory, not a symlink, and an existing leaf must not be group- or world-writable:
+
+```bash
+install -d -m 0755 /srv/example/queen-supervisor-bin
+```
+
+```dotenv
+QUEEN_SUPERVISOR_INSTALL_PATH=/srv/example/queen-supervisor-bin
+```
+
+This avoids depending on a deployment where Laravel's `storage/` path is a symlink. The binary
+leaf is separate from the private `0700` runtime-state directory.
+
+<Aside type="caution">
+The online command is usable only when the package-pinned `supervisor/v*` tag has a published
+manifest and matching asset. Preview packages do not guarantee that those assets exist. Confirm
+the package release notes and GitHub Releases during deployment; missing assets fail closed. Until
+then, run the PHP engine or provide a verified local manifest and archive.
+</Aside>
+
+| Target | Status |
+| --- | --- |
+| Linux amd64 | Static musl pipeline prepared; native release qualification pending |
+| Linux arm64 | Static musl pipeline prepared; native release qualification pending |
+| macOS amd64 and arm64 | Native preview; signing, notarization and full E2E qualification pending |
+| Windows x64 and arm64 | Unsupported; native process and locking backends are not implemented |
+
+For an offline or controlled mirror, the installer accepts a local manifest/archive pair or an
+HTTPS base URL. High-assurance deployments can also pin the SHA-256 of a manifest already verified
+through the release's Sigstore bundle. The default installer does not independently establish
+Sigstore trust.
+
+## Inspect and control either engine
+
+The CLI uses the state directory, so the commands are identical for PHP and Rust:
+
+```bash
+php artisan queen:supervisor status
+php artisan queen:supervisor status --json
+php artisan queen:supervisor status --check
+php artisan queen:supervisor pause
+php artisan queen:supervisor continue
+php artisan queen:supervisor terminate
+```
+
+`status --check` exits non-zero unless the current generation is live and healthy, which makes it
+suitable for a local health check. Controls are fenced to the exact `instance_id`; a stale command
+cannot apply to a replacement master.
+
+Pause drains current workers and starts no replacements until continue. It does not suspend a PHP
+process while that process retains a prefetched tail. Terminate drains for `shutdown_grace`, then
+forces the remaining process group down.
+
+## Production checks
+
+Before placing a Queen supervisor in production:
+
+1. Keep `prefetch=1` and `ack_batch=1` unless the workload is short, idempotent and measured.
+2. Enable `lease_renewal` whenever `prefetch > 1` or job runtime cannot fit safely inside the
+   original lease.
+3. Use a shared cache store with distributed-lock support when synchronized failed jobs can be
+   mutated by multiple processes or hosts.
+4. Monitor `queen:supervisor status --check` and the outer process manager.
+5. Send `terminate` during deployment so the restarted master loads the new code and configuration.
+6. Keep workers idempotent. Queen provides at-least-once delivery, not exactly-once external side
+   effects.
+7. Exercise graceful and forced shutdown with the application's longest real job before rollout.
+
+<Aside type="danger">
+Run exactly one Queen supervisor master for one application and consumer group. The filesystem
+lock excludes a second owner on the same host, but Queen has no distributed fenced leader lease for
+supervisors yet. Two masters on different hosts can both observe the same backlog and scale to the
+maximum. In Kubernetes use one replica with no surge overlap, such as a `Recreate` strategy.
+</Aside>
+
+The singleton limit applies to the master, not to its worker count. Multiple Queen broker endpoints
+provide broker failover for depth reads; they do not provide active-active supervisor leadership.
+
+Next, [enable the local dashboard](/use/laravel/dashboard) or follow the
+[Horizon migration runbook](/use/laravel/migrate-from-horizon).

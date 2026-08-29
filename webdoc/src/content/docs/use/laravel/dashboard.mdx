@@ -1,0 +1,171 @@
+---
+title: Supervisor dashboard
+description: "Enable and authorize the local Laravel supervisor panel, then use its fenced controls without exposing queue payloads or credentials."
+type: how-to
+tier: operate
+status: preview
+sidebar:
+  order: 3
+sourceOfTruth:
+  - clients/client-laravel/config/queen.php
+  - clients/client-laravel/routes/dashboard.php
+  - clients/client-laravel/resources/views/dashboard.blade.php
+  - clients/client-laravel/src/Laravel/QueenServiceProvider.php
+  - clients/client-laravel/src/Laravel/Dashboard/DashboardRepository.php
+  - clients/client-laravel/src/Laravel/Dashboard/FailedJobsReadModel.php
+  - clients/client-laravel/src/Laravel/Http/Middleware/AuthorizeDashboard.php
+  - clients/client-laravel/src/Laravel/Http/Middleware/SecureDashboardResponse.php
+  - clients/client-laravel/src/Laravel/Http/Controllers/SupervisorControlController.php
+verifiedBy:
+  - clients/client-laravel/tests/LaravelDashboardDisabledTest.php
+  - clients/client-laravel/tests/LaravelDashboardTest.php
+---
+
+The Laravel panel answers one local question: **what is this application's Queen supervisor doing
+on this host?** It reads the private supervisor state already written by the PHP or Rust engine. It
+does not poll the broker again and it is not a replacement for Queen's global broker dashboard.
+
+The route is absent by default.
+
+<Screenshot
+  src="laravel-supervisor-dashboard"
+  alt="The Queen Supervisor dashboard in a live state. A compact sidebar sits beside an Overview card showing six processes, 71 queued jobs, two failed jobs, an active Rust engine, three worker pools, one draining process and a current heartbeat. The workload table begins below."
+  caption="The real light-theme dashboard rendered with representative demo state. No production data or credentials are present."
+/>
+
+## Enable it locally
+
+```dotenv
+QUEEN_DASHBOARD_ENABLED=true
+QUEEN_DASHBOARD_PATH=queen
+QUEEN_DASHBOARD_REFRESH_SECONDS=5
+QUEEN_DASHBOARD_FAILED_JOBS_LIMIT=50
+```
+
+Open `/queen`. Local and testing environments may use the built-in local allowance while
+`queen.dashboard.allow_local` is true.
+
+To test the production authorization path locally, disable that allowance:
+
+```dotenv
+QUEEN_DASHBOARD_ALLOW_LOCAL=false
+```
+
+Changing the route path, domain, enabled flag or middleware after Laravel has cached routes or
+configuration requires rebuilding both caches:
+
+```bash
+php artisan config:clear
+php artisan route:clear
+php artisan config:cache
+php artisan route:cache
+```
+
+## Authorize production access
+
+Enabling the route is not enough in production. Queen denies access until the application defines
+the `viewQueenDashboard` Gate ability. Attach application authentication before that Gate runs:
+
+```php
+// config/queen.php
+'dashboard' => [
+    'enabled' => env('QUEEN_DASHBOARD_ENABLED', false),
+    'path' => env('QUEEN_DASHBOARD_PATH', 'queen'),
+    'middleware' => ['web', 'auth'],
+],
+```
+
+```php
+use Illuminate\Support\Facades\Gate;
+
+Gate::define('viewQueenDashboard', function ($user): bool {
+    return $user !== null && $user->canOperateQueues();
+});
+```
+
+The package always retains Laravel's `web` middleware, even if it is omitted from the configured
+list. This preserves sessions and CSRF protection for state-changing controls. Put the route behind
+the same network and identity controls as any other production administration surface.
+
+<Aside type="danger">
+Do not define a production Gate that simply returns `true` unless another trusted layer has already
+authenticated and authorized the request. The same Gate protects the HTML page, JSON status and
+control actions.
+</Aside>
+
+## What the panel shows
+
+- master engine, PID, state, generation and live/stale heartbeat;
+- pools, queues, worker counts and workers currently draining;
+- last queue depth already sampled by the supervisor;
+- restart and circuit state;
+- a safe allowlist of worker settings;
+- bounded metadata from supported Laravel database or file failed-job stores.
+
+The read model never returns broker endpoints, bearer tokens, custom headers, filesystem paths,
+job payloads, exception bodies or raw backend errors. Unsupported or unavailable failed stores are
+shown as unavailable instead of falling back to an unbounded read.
+
+## What the panel controls
+
+The three controls apply to the complete local master:
+
+| Control | Effect |
+| --- | --- |
+| Pause | Drain current workers and start no replacements |
+| Continue | Resume reconciliation and start workers as needed |
+| Terminate | Drain, stop the master and let the outer process monitor restart it if configured |
+
+Each form carries the exact supervisor `instance_id`. An old page cannot pause or terminate a
+replacement generation. Queen also refuses a second pending command instead of overwriting the
+first one.
+
+| HTTP result | Meaning |
+| --- | --- |
+| `404` | Dashboard disabled at runtime or route not registered |
+| `403` | The `viewQueenDashboard` Gate denied authorization |
+| `419` | CSRF token absent or expired |
+| `409` | Supervisor replaced, stale, unavailable or already has a pending command |
+| `303` | Command accepted, followed by a redirect back to the panel |
+
+Authentication middleware runs before Queen's Gate. An unauthenticated request can therefore
+redirect or return `401`, depending on the application's guard and request format.
+
+Control TTL and heartbeat timeout are values published by the active supervisor generation. A
+newly deployed Laravel configuration cannot silently reinterpret an old master's liveness or run an
+expired command. Restart the supervisor to activate timing changes.
+
+## Failed jobs and the broker dashboard
+
+Laravel remains the command index for Laravel jobs:
+
+```bash
+php artisan queue:failed
+php artisan queue:retry <id>
+php artisan queue:forget <id>
+php artisan queue:prune-failed
+```
+
+The Queen panel displays bounded failed-job metadata but does not provide web actions for retry,
+forget, flush or prune. When failed-job synchronization is enabled, those Laravel commands also
+coordinate the matching Queen DLQ snapshot.
+
+Use the [broker dashboard](/deploy/dashboard) for global queue analytics and DLQ operations. The
+two dashboards intentionally cover different scopes:
+
+| Laravel supervisor panel | Queen broker dashboard |
+| --- | --- |
+| One local application master | Queues and consumer groups visible to the broker |
+| Worker processes and restart state | Backlog, partitions, lag, messages and system metrics |
+| Laravel failed-job metadata | Queen DLQ records |
+| Pause, continue and terminate the local master | Broker and queue administration |
+
+## Behind a load balancer
+
+The panel reads one local `state_directory`; it is not a multi-host aggregator. Route the
+administrative endpoint to the host that owns the supervisor, or use a sticky dedicated admin
+endpoint. A GET on host A followed by a control POST on host B intentionally fails the instance
+fence.
+
+Responses use a nonce-based Content Security Policy, `no-store`, frame denial, MIME-sniffing
+denial and a no-referrer policy. The view loads no scripts, fonts or other assets from a CDN.

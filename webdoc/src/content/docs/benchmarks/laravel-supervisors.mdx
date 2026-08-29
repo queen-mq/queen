@@ -1,0 +1,199 @@
+---
+title: Laravel supervisor qualification
+description: "A diagnostic comparison of Laravel Horizon, Queen PHP and Queen Rust across throughput, latency, control-plane cost and worker recovery."
+type: reference
+tier: operate
+status: preview
+sidebar:
+  order: 9
+sourceOfTruth:
+  - benchmark-queen/laravel-supervisors/QUALIFICATION_REPORT_20260829.it.md
+  - benchmark-queen/laravel-supervisors/QUALIFICATION_SUMMARY_20260829.it.md
+  - benchmark-queen/laravel-supervisors/README.md
+  - benchmark-queen/laravel-supervisors/scripts/run.sh
+  - benchmark-queen/laravel-supervisors/scripts/campaign-stats.py
+  - benchmark-queen/laravel-supervisors/scripts/feature-parity.sh
+  - benchmark-queen/laravel-supervisors/scripts/fault-recovery.sh
+  - benchmark-queen/laravel-supervisors/Dockerfile
+  - benchmark-queen/laravel-supervisors/compose.yml
+  - benchmark-queen/laravel-supervisors/app/composer.lock
+  - benchmark-queen/laravel-supervisors/app/config/benchmark.php
+  - benchmark-queen/laravel-supervisors/app/config/horizon.php
+  - benchmark-queen/laravel-supervisors/app/config/queen.php
+verifiedBy:
+  - benchmark-queen/laravel-supervisors/scripts/tests/test_campaign_stats.py
+  - benchmark-queen/laravel-supervisors/scripts/tests/test_container_isolation.py
+  - benchmark-queen/laravel-supervisors/scripts/tests/test_feature_parity_harness.py
+  - benchmark-queen/laravel-supervisors/scripts/tests/test_fault_recovery_harness.py
+  - benchmark-queen/laravel-supervisors/scripts/tests/test_run_options.py
+  - clients/client-laravel/tests/LaravelSupervisorTest.php
+  - clients/client-laravel/tests/LaravelSupervisorProductionTest.php
+  - clients/client-laravel/tests/LaravelSupervisorCommandTest.php
+  - clients/client-laravel/tests/LaravelDashboardTest.php
+  - clients/client-laravel/tests/LaravelDashboardDisabledTest.php
+  - clients/client-laravel/tests/ProcessLeaseRenewerTest.php
+  - clients/client-laravel/tests/SyncedFailedJobProviderLifecycleTest.php
+---
+
+This qualification asks whether Queen can replace the **process control plane** of Laravel
+Horizon for Queen-backed Laravel queues. Queen does not replace `queue:work`: both Queen engines
+start ordinary Laravel workers, while the Queen broker remains outside process supervision.
+
+The performance results on this page are **diagnostic**, and the feature and fault results are
+**diagnostic smoke tests**. They were produced on Docker Desktop on an Arm Mac, not on a dedicated
+Linux benchmark host. The protocol was written by the Queen team and is not an independent
+certification.
+
+## What was compared
+
+| Lane | Queue backend | Orchestrator | Worker command |
+| --- | --- | --- | --- |
+| Horizon | Redis | Horizon PHP master and supervisor | `artisan horizon:work` |
+| Queen PHP | Queen broker plus PostgreSQL | Resident Laravel/PHP master | `artisan queue:work queen` |
+| Queen Rust | Queen broker plus PostgreSQL | `queen-supervisor` Rust master | `artisan queue:work queen` |
+
+The Queen PHP engine is the reference implementation. The Rust engine resolves the same Laravel
+configuration once, then leaves Rust and the ordinary PHP workers resident. Both Queen engines
+use the same worker limits and resolved supervisor contract.
+
+The fixture pinned PHP 8.3 semantics, Laravel 12.68.0 and Horizon 5.48.3. Every lane ran the same
+Laravel application, serialized job, JSONL result sink and worker limits. Redis and Queen plus
+PostgreSQL are not equivalent in topology or durability, so whole-stack figures describe the
+declared product-shaped configurations. They are not a broker microbenchmark.
+
+## Final diagnostic cell
+
+The final confirmation measured commit `a79db4de9bc9d59cdc6facf42a475bbb7a3dd7a1` with:
+
+- macOS 26.5 on Arm, Docker Desktop Engine 29.7.2 and LinuxKit containers;
+- cgroup v2, 10 exposed CPUs and 8,214,851,584 bytes of exposed memory;
+- a fixed pool of four workers in every lane;
+- 2,000 jobs per lane, each with 10 ms of simulated work;
+- Queen prefetch 4 and ACK batch 1, with lease renewal disabled;
+- three repetitions per engine, nine runs in total.
+
+All nine runs completed the exact job set, reached queue quiescence and passed container
+isolation. Values below are medians.
+
+| Metric | Horizon | Queen PHP | Queen Rust |
+| --- | ---: | ---: | ---: |
+| Completion jobs/s | 294.30 | 300.08 | 307.67 |
+| End-to-end p95 | 6,019.54 ms | 5,478.43 ms | 5,266.49 ms |
+| Orchestrator PSS | 65.0 MiB | 35.1 MiB | 2.9 MiB |
+| Measured stack CPU | 3.750 s | 4.148 s | 3.938 s |
+| Measured stack memory | 198.1 MiB | 295.1 MiB | 265.3 MiB |
+
+Control-plane PSS excludes queue workers and backends. Measured stack memory includes the
+application container and its complete backend, Redis for Horizon and the Queen broker plus
+PostgreSQL for Queen.
+
+## Paired ratios
+
+Each entry is candidate divided by Horizon for matched repetitions. A throughput ratio above one
+favours the candidate. A latency or resource ratio below one favours the candidate. Parentheses
+contain the deterministic paired-bootstrap 95% descriptive interval where the report provides
+one.
+
+| Candidate | Throughput | End-to-end p95 | Orchestrator PSS | Stack CPU | Stack memory |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Queen PHP | 1.018 (0.937 to 1.041) | 0.924 (0.874 to 0.933) | 0.541 | 1.061 (1.018 to 1.110) | 1.488 |
+| Queen Rust | 1.046 (1.044 to 1.064) | 0.888 (0.850 to 0.898) | 0.044 | 1.031 (0.950 to 1.060) | 1.341 |
+
+Within this cell, Queen Rust completed 4.6% more jobs per second, reduced p95 by 11.2% and used
+95.6% less orchestrator PSS than Horizon. Its stack CPU result is inconclusive because the
+descriptive interval crosses one. Its measured whole-stack memory was 34.1% higher. Queen PHP
+used 45.9% less master PSS, but its throughput result is inconclusive, its measured stack CPU was
+higher and its whole-stack memory was 48.8% higher.
+
+Only three pairs contribute to each final ratio. These intervals describe variation among runs on
+this host; they do not remove host, workload or topology bias and are not population guarantees.
+The results do not support a universal claim that one supervisor is faster or cheaper for every
+Laravel workload.
+
+## Method and anti-bias controls
+
+The qualification protocol was frozen before the final campaign. The runner then applied these
+controls:
+
+- one lane at a time, with a fresh backend and result volume for every sample;
+- matched workload, worker settings, cgroup budgets and application code;
+- rotated Horizon, Queen PHP and Queen Rust execution order;
+- exact job-set and settled queue-state gates before a run became comparable;
+- no post-hoc outlier removal;
+- per-run values, medians, quartiles and deterministic paired bootstrap ratios;
+- container inventory snapshots plus a continuous Docker start-event watcher;
+- fail-closed handling for a dirty checkout, image or configuration mismatch, foreign or replaced
+  containers, unexpected restart or OOM, incomplete sampling and a non-empty final queue;
+- retention of failed-run evidence rather than silently dropping it.
+
+The fail-closed dirty-tree gate was exercised in practice. An otherwise valid campaign was
+excluded because an unrelated local file made the checkout dirty, then repeated on the same clean
+commit without an override.
+
+## Reliability smoke tests
+
+The feature-parity harness used fresh backends. Every engine completed exactly 24 of 24 jobs over
+two queues, left both queues empty and retained the expected worker identities. Queen PHP and
+Queen Rust also exercised the Queen-specific synchronized failed-job path: a terminal failure
+appeared in both Laravel's failed repository and Queen's DLQ, `queue:retry` succeeded, and both
+indexes were empty afterwards. The harness did not run that Queen-specific synchronization test
+for Horizon, which is not evidence that Horizon lacks its own failed-job lifecycle.
+
+The worker fault smoke killed one worker during user code:
+
+| Engine | Observed respawn | Unique jobs | Missing | Effects | Retry observed | Queue empty | At-least-once | Strict execution |
+| --- | ---: | ---: | ---: | ---: | --- | --- | --- | --- |
+| Horizon | 997.5 ms | 24/24 | 0 | 24 | yes | yes | pass | fail |
+| Queen PHP | 1,509.5 ms | 24/24 | 0 | 24 | yes | yes | pass | fail |
+| Queen Rust | 1,442.8 ms | 24/24 | 0 | 24 | yes | yes | pass | fail |
+
+Strict execution fails because the interrupted attempt is retried. The fixture's SQLite ledger
+keeps one idempotent effect for each job, but it is not atomic with a queue ACK or with an external
+database or service. These results support at-least-once recovery for this injected fault, not
+exactly-once delivery or a failure-probability estimate.
+
+## The prefetch and renewal caveat
+
+The final performance cell used prefetch 4 and ACK batch 1 without the lease-renewal helper. That
+combination is now classified as diagnostic only. Laravel can retain a prefetched leased tail for
+an unbounded period during maintenance mode, `queue:pause` or a `Looping` listener.
+
+A no-helper profile is supported with prefetch 1 only when the worst-case runtime of one job plus
+margin remains below `retry_after`. Every Queen supervisor profile with prefetch greater than one
+requires lease renewal. The helper has passed focused and end-to-end smoke tests, including a job
+that outlived its original lease and a renewal failure that fenced the worker before retry, but its
+cost was not present in the final table.
+
+The production performance candidate is therefore prefetch 4, ACK batch 1, renewal enabled. It
+must be measured again before the diagnostic ratios above can become a production performance
+claim. ACK batches greater than one remain separate fault-oriented experiments because they widen
+the duplicate and recovery window.
+
+## What remains before GA
+
+The current evidence supports a Unix release candidate within the tested single-master scope. A
+general-availability claim still requires:
+
+1. fixed, automatic and scaling campaigns on dedicated native Linux amd64 hosts;
+2. equivalent native Linux arm64 campaigns before publishing an arm64 performance claim;
+3. a paired performance campaign for prefetch 4, ACK batch 1 and renewal enabled;
+4. the 1, 2, 4 and 8 worker matrix, three queues, and the declared partition and pop-fusion cells;
+5. a 24-hour Laravel soak for each engine with a durable ledger and memory-slope analysis;
+6. repeated supervisor, broker, PostgreSQL, network, packet-loss, latency and full-storage faults;
+7. native installer, process-tree and provenance verification for every release target;
+8. macOS Developer ID signing and notarization before general macOS availability;
+9. a native Windows process backend and Windows end-to-end tests before any Windows asset;
+10. either web actions for the failed-job lifecycle or an explicit revision of that dashboard gate.
+
+The historical Queen broker result near one million accepted pushes per second used Go loaders,
+200 partitions and 600 consumers on dedicated infrastructure. It did not execute Laravel jobs or
+exercise either supervisor, so it is not evidence for Laravel supervisor throughput.
+
+## Software verification
+
+At the qualification snapshot, the tracked test matrix recorded 473 PHP tests with 1,992
+assertions, 53 Rust tests, 48 benchmark-harness tests and 5 release-tooling tests. The dashboard
+redesign added two focused state and semantic tests, bringing the current PHP suite to 475 tests
+with 2,036 assertions. Composer validation and audit, PHP lint, Rustfmt, Clippy, Ruff, ShellCheck
+and Actionlint also passed. This software matrix verifies contracts, parsers and harness behaviour.
+It does not replace the native performance, soak, fault and release gates above.
