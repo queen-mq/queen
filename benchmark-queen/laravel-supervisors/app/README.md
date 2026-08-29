@@ -45,6 +45,12 @@ php artisan bench:results example --expected=1000 --wait=300
 php artisan bench:queue-state --run-id=example --wait=300
 ```
 
+The count and summary commands stream immutable JSONL byte snapshots. Polling
+reads only bytes appended since the preceding snapshot, and the exact summary
+retains compact per-job scalars instead of materializing decoded event rows.
+This keeps long stress campaigns within the same PHP memory limit used by the
+producer and workers.
+
 `bench:queue-state` waits until the connection's portable `size()` and every
 available ready, reserved and delayed count remain zero for the settle window.
 The campaign stores its JSON output as `queue-state.final.json`; the analyzer
@@ -59,3 +65,9 @@ behavioural comparison: Horizon allocates its maximum across queues when work
 exists, while Queen derives the requested process count from its size or
 clearance-time target. Matching min/max/cooldown/shift bounds does not make the
 two scaling algorithms identical.
+
+Run the focused result-sink and 50,000-event memory regression with:
+
+```console
+php tests/streaming_results.php
+```

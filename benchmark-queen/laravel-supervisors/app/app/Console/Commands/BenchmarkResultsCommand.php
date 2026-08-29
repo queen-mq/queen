@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Support\BenchmarkResultAccumulator;
 use App\Support\JsonlResultSink;
 use Illuminate\Console\Command;
 use InvalidArgumentException;
@@ -28,115 +29,28 @@ final class BenchmarkResultsCommand extends Command
         $waitSeconds = $this->integerOption('wait', 0, 86_400);
         $pollMs = $this->integerOption('poll-ms', 10, 60_000);
         $deadline = hrtime(true) + ($waitSeconds * 1_000_000_000);
+        $accumulator = new BenchmarkResultAccumulator($runId);
+        $previousSnapshot = null;
 
         do {
-            $records = array_values(array_filter(
-                $sink->read($runId),
-                static fn (array $record): bool => ($record['run_id'] ?? null) === $runId,
-            ));
-            $unique = [];
-            foreach ($records as $record) {
-                $jobId = $record['job_id'] ?? null;
-                if (is_string($jobId) && $jobId !== '') {
-                    $previous = $unique[$jobId] ?? null;
-                    $completed = $record['completed_at_ns'] ?? null;
-                    $previousCompleted = is_array($previous) ? ($previous['completed_at_ns'] ?? null) : null;
-                    if (!is_array($previous)
-                        || (is_int($completed) && (!is_int($previousCompleted) || $completed < $previousCompleted))) {
-                        $unique[$jobId] = $record;
-                    }
-                }
+            $snapshot = $sink->snapshot($runId);
+            foreach ($sink->stream($snapshot, $previousSnapshot) as $record) {
+                $accumulator->add($record);
             }
+            $previousSnapshot = $snapshot;
 
-            if ($expected === 0 || count($unique) >= $expected || hrtime(true) >= $deadline) {
+            if ($expected === 0
+                || $accumulator->uniqueCompleted() >= $expected
+                || hrtime(true) >= $deadline) {
                 break;
             }
             usleep($pollMs * 1000);
         } while (true);
 
-        $summary = $this->summarize($runId, $records, array_values($unique), $expected);
+        $summary = $accumulator->summarize($expected);
         $this->line($this->json($summary));
 
-        return $expected === 0 || count($unique) >= $expected ? self::SUCCESS : self::FAILURE;
-    }
-
-    /**
-     * @param list<array<string, mixed>> $records
-     * @param list<array<string, mixed>> $unique
-     * @return array<string, mixed>
-     */
-    private function summarize(string $runId, array $records, array $unique, int $expected): array
-    {
-        $queueLatencies = [];
-        $endToEndLatencies = [];
-        $sinkWaits = [];
-        $attempts = [];
-        $enqueued = [];
-        $completed = [];
-
-        foreach ($unique as $record) {
-            $this->collectInteger($record, 'queue_latency_ns', $queueLatencies);
-            $this->collectInteger($record, 'end_to_end_ns', $endToEndLatencies);
-            $this->collectInteger($record, 'sink_lock_wait_ns', $sinkWaits);
-            $this->collectInteger($record, 'enqueued_at_ns', $enqueued);
-            $this->collectInteger($record, 'completed_at_ns', $completed);
-        }
-        foreach ($records as $record) {
-            $this->collectInteger($record, 'attempt', $attempts);
-        }
-
-        return [
-            'run_id' => $runId,
-            'expected' => $expected,
-            'complete' => $expected === 0 || count($unique) >= $expected,
-            'unique_completed' => count($unique),
-            'records' => count($records),
-            'duplicates' => max(0, count($records) - count($unique)),
-            'max_attempt' => $attempts === [] ? null : max($attempts),
-            'elapsed_ns' => $enqueued === [] || $completed === [] ? null : max($completed) - min($enqueued),
-            'completion_span_ns' => $completed === [] ? null : max($completed) - min($completed),
-            'queue_latency_ns' => $this->distribution($queueLatencies),
-            'end_to_end_ns' => $this->distribution($endToEndLatencies),
-            'sink_lock_wait_ns' => $this->distribution($sinkWaits),
-        ];
-    }
-
-    /**
-     * @param array<string, mixed> $record
-     * @param list<int> $values
-     */
-    private function collectInteger(array $record, string $key, array &$values): void
-    {
-        $value = $record[$key] ?? null;
-        if (is_int($value) && $value >= 0) {
-            $values[] = $value;
-        }
-    }
-
-    /** @param list<int> $values @return array<string, int|null> */
-    private function distribution(array $values): array
-    {
-        if ($values === []) {
-            return ['min' => null, 'p50' => null, 'p95' => null, 'p99' => null, 'max' => null];
-        }
-
-        sort($values, SORT_NUMERIC);
-
-        return [
-            'min' => $values[0],
-            'p50' => $this->nearestRank($values, 0.50),
-            'p95' => $this->nearestRank($values, 0.95),
-            'p99' => $this->nearestRank($values, 0.99),
-            'max' => $values[array_key_last($values)],
-        ];
-    }
-
-    /** @param list<int> $values */
-    private function nearestRank(array $values, float $percentile): int
-    {
-        $index = max(0, (int) ceil(count($values) * $percentile) - 1);
-
-        return $values[$index];
+        return $summary['complete'] === true ? self::SUCCESS : self::FAILURE;
     }
 
     private function integerOption(string $name, int $minimum, int $maximum): int

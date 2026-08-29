@@ -21,19 +21,19 @@ final class BenchmarkCountCommand extends Command
             throw new InvalidArgumentException('run-id has an invalid format.');
         }
 
-        $records = array_values(array_filter(
-            $sink->read($runId),
-            static fn (array $record): bool => ($record['run_id'] ?? null) === $runId,
-        ));
+        $recordsCount = 0;
         $jobIds = [];
-        foreach ($records as $record) {
+        foreach ($sink->stream($sink->snapshot($runId)) as $record) {
+            if (($record['run_id'] ?? null) !== $runId) {
+                continue;
+            }
+            ++$recordsCount;
             $jobId = $record['job_id'] ?? null;
             if (is_string($jobId) && $jobId !== '') {
                 $jobIds[$jobId] = true;
             }
         }
 
-        $recordsCount = count($records);
         $completed = count($jobIds);
         try {
             $this->line(json_encode([

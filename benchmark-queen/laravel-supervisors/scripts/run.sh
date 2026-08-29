@@ -416,6 +416,9 @@ export BENCHMARK_QUEEN_PARTITIONS="$QUEEN_PARTITIONS"
 export BENCHMARK_QUEEN_POP_FUSION="$QUEEN_POP_FUSION"
 export BENCHMARK_SAMPLE_INTERVAL="$SAMPLE_INTERVAL"
 export BENCHMARK_POST_DRAIN="$POST_DRAIN_SECONDS"
+export BENCHMARK_WARMUP_JOBS="$WARMUP_JOBS"
+export BENCHMARK_COMPLETION_TIMEOUT="$WAIT_TIMEOUT"
+export BENCHMARK_INCLUDE_PSS="$INCLUDE_PSS"
 export BENCHMARK_STRATEGY="$SCALING_STRATEGY"
 export BENCHMARK_BALANCE_COOLDOWN="$BALANCE_COOLDOWN"
 export BENCHMARK_BALANCE_MAX_SHIFT="$BALANCE_MAX_SHIFT"
@@ -457,6 +460,9 @@ settings = {
     "queen_partitions": int(os.environ["BENCHMARK_QUEEN_PARTITIONS"]),
     "queen_pop_fusion": os.environ["BENCHMARK_QUEEN_POP_FUSION"] == "1",
     "sample_interval_seconds": float(os.environ["BENCHMARK_SAMPLE_INTERVAL"]),
+    "warmup_jobs": int(os.environ["BENCHMARK_WARMUP_JOBS"]),
+    "completion_timeout_seconds": int(os.environ["BENCHMARK_COMPLETION_TIMEOUT"]),
+    "pss_requested": os.environ["BENCHMARK_INCLUDE_PSS"] == "1",
     "post_drain_seconds_by_profile": {
         profile: (
             int(os.environ["BENCHMARK_POST_DRAIN"])
@@ -652,7 +658,8 @@ run_lane() {
     set +e
     producer php artisan bench:results --no-ansi "$run_id" \
         --expected="$JOBS" --wait="$WAIT_TIMEOUT" --poll-ms=500 \
-        >"${CURRENT_HOST_RUN}/result-check.json"
+        >"${CURRENT_HOST_RUN}/result-check.json" \
+        2>"${CURRENT_HOST_RUN}/result-check.stderr.log"
     completion_status=$?
     set -e
 
@@ -719,15 +726,16 @@ run_lane() {
     set -e
     REPORT_INPUTS+=("${engine}-${profile}-${repetition_label}=${CURRENT_HOST_RUN}")
 
+    completed_host_run="$CURRENT_HOST_RUN"
     finish_lane
     if [ "$completion_status" -ne 0 ]; then
-        die "$run_id did not complete all $JOBS jobs; inspect ${CURRENT_HOST_RUN}"
+        die "$run_id did not complete all $JOBS jobs; inspect ${completed_host_run}"
     fi
     if [ "$quiescence_status" -ne 0 ]; then
-        die "$run_id did not reach queue quiescence; inspect ${CURRENT_HOST_RUN}/queue-state.final.json"
+        die "$run_id did not reach queue quiescence; inspect ${completed_host_run}/queue-state.final.json"
     fi
     if [ "$analysis_status" -ne 0 ]; then
-        die "$run_id failed analysis; inspect ${CURRENT_HOST_RUN}/summary.json"
+        die "$run_id failed analysis; inspect ${completed_host_run}/summary.json"
     fi
 }
 

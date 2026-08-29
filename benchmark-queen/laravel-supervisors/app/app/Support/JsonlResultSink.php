@@ -101,21 +101,91 @@ final class JsonlResultSink
      */
     public function read(string $runId): array
     {
+        return iterator_to_array($this->stream($this->snapshot($runId)), false);
+    }
+
+    /**
+     * Capture stable, append-only byte limits for every worker result file.
+     * Writers hold an exclusive lock across write and flush, so every captured
+     * end points immediately after a complete JSONL record.
+     */
+    public function snapshot(string $runId): JsonlResultSnapshot
+    {
         $this->assertRunId($runId);
-        $paths = glob(
-            $this->runDirectory($runId).DIRECTORY_SEPARATOR.'events'.DIRECTORY_SEPARATOR.'worker-*.jsonl',
-        );
-        if ($paths === false || $paths === []) {
-            return [];
-        }
-        sort($paths, SORT_STRING);
+        $paths = $this->eventPaths($runId);
+        $fileEnds = [];
 
-        $records = [];
         foreach ($paths as $path) {
-            array_push($records, ...$this->readFile($path));
+            $stream = @fopen($path, 'rb');
+            if ($stream === false) {
+                throw new RuntimeException("Unable to read benchmark result sink [{$path}].");
+            }
+
+            try {
+                if (!flock($stream, LOCK_SH)) {
+                    throw new RuntimeException("Unable to lock benchmark result sink [{$path}].");
+                }
+                try {
+                    $metadata = fstat($stream);
+                    $size = is_array($metadata) ? ($metadata['size'] ?? null) : null;
+                    if (!is_int($size) || $size < 0) {
+                        throw new RuntimeException("Unable to inspect benchmark result sink [{$path}].");
+                    }
+                    $fileEnds[$path] = $size;
+                } finally {
+                    flock($stream, LOCK_UN);
+                }
+            } finally {
+                fclose($stream);
+            }
         }
 
-        return $records;
+        return new JsonlResultSnapshot($runId, $fileEnds);
+    }
+
+    /**
+     * Stream records in a stable snapshot, optionally starting immediately
+     * after an earlier snapshot. Only the captured byte ranges are read, even
+     * if workers append more results while the generator is being consumed.
+     *
+     * @return iterable<array<string, mixed>>
+     */
+    public function stream(
+        JsonlResultSnapshot $snapshot,
+        ?JsonlResultSnapshot $after = null,
+    ): iterable {
+        $runId = $snapshot->runId();
+        $this->assertRunId($runId);
+        if ($after !== null && $after->runId() !== $runId) {
+            throw new RuntimeException('Benchmark result snapshots belong to different runs.');
+        }
+
+        $fileEnds = $snapshot->fileEnds();
+        $afterEnds = $after?->fileEnds() ?? [];
+        $this->assertSnapshotPaths($runId, $fileEnds);
+        $this->assertSnapshotPaths($runId, $afterEnds);
+
+        foreach ($afterEnds as $path => $_end) {
+            if (!array_key_exists($path, $fileEnds)) {
+                throw new RuntimeException(
+                    "Benchmark result sink file disappeared between snapshots [{$path}].",
+                );
+            }
+        }
+
+        foreach ($fileEnds as $path => $end) {
+            $start = $afterEnds[$path] ?? 0;
+            if ($start > $end) {
+                throw new RuntimeException(
+                    "Benchmark result sink was truncated between snapshots [{$path}].",
+                );
+            }
+            if ($start === $end) {
+                continue;
+            }
+
+            yield from $this->streamFileRange($path, $start, $end);
+        }
     }
 
     /**
@@ -189,8 +259,38 @@ final class JsonlResultSink
         return $path;
     }
 
-    /** @return list<array<string, mixed>> */
-    private function readFile(string $path): array
+    /** @return list<string> */
+    private function eventPaths(string $runId): array
+    {
+        $paths = glob(
+            $this->runDirectory($runId).DIRECTORY_SEPARATOR.'events'.DIRECTORY_SEPARATOR.'worker-*.jsonl',
+        );
+        if ($paths === false || $paths === []) {
+            return [];
+        }
+        sort($paths, SORT_STRING);
+
+        return $paths;
+    }
+
+    /**
+     * @param array<string, int> $fileEnds
+     */
+    private function assertSnapshotPaths(string $runId, array $fileEnds): void
+    {
+        $eventsDirectory = $this->runDirectory($runId).DIRECTORY_SEPARATOR.'events';
+        foreach ($fileEnds as $path => $end) {
+            if (dirname($path) !== $eventsDirectory
+                || preg_match('/^worker-[0-9]+\.jsonl$/D', basename($path)) !== 1
+                || !is_int($end)
+                || $end < 0) {
+                throw new RuntimeException('Benchmark result snapshot contains an invalid file boundary.');
+            }
+        }
+    }
+
+    /** @return iterable<array<string, mixed>> */
+    private function streamFileRange(string $path, int $start, int $end): iterable
     {
         $stream = @fopen($path, 'rb');
         if ($stream === false) {
@@ -202,10 +302,46 @@ final class JsonlResultSink
                 throw new RuntimeException("Unable to lock benchmark result sink [{$path}].");
             }
             try {
-                $records = [];
-                $lineNumber = 0;
-                while (($line = fgets($stream)) !== false) {
-                    ++$lineNumber;
+                $metadata = fstat($stream);
+                $size = is_array($metadata) ? ($metadata['size'] ?? null) : null;
+                if (!is_int($size) || $size < $end) {
+                    throw new RuntimeException(
+                        "Benchmark result sink was truncated before its snapshot [{$path}].",
+                    );
+                }
+
+                if ($start > 0) {
+                    if (fseek($stream, $start - 1, SEEK_SET) !== 0 || fread($stream, 1) !== "\n") {
+                        throw new RuntimeException(
+                            "Benchmark result snapshot starts inside a JSON line [{$path}:{$start}].",
+                        );
+                    }
+                }
+                if (fseek($stream, $start, SEEK_SET) !== 0) {
+                    throw new RuntimeException(
+                        "Unable to seek benchmark result sink [{$path}:{$start}].",
+                    );
+                }
+
+                $position = $start;
+                while ($position < $end) {
+                    $lineStart = $position;
+                    // The snapshot end is a flushed JSONL boundary, so an
+                    // unbounded fgets still stops exactly at or before it. Do
+                    // not pass the entire remaining file size as a buffer
+                    // length: that would recreate a large peak allocation.
+                    $line = fgets($stream);
+                    if ($line === false) {
+                        throw new RuntimeException(
+                            "Unable to finish reading benchmark result sink [{$path}].",
+                        );
+                    }
+                    $position = ftell($stream);
+                    if (!is_int($position) || $position <= $lineStart || $position > $end) {
+                        throw new RuntimeException(
+                            "Benchmark result snapshot ends inside a JSON line [{$path}:{$end}].",
+                        );
+                    }
                     if (trim($line) === '') {
                         continue;
                     }
@@ -214,23 +350,23 @@ final class JsonlResultSink
                         $record = json_decode($line, true, flags: JSON_THROW_ON_ERROR);
                     } catch (JsonException $exception) {
                         throw new RuntimeException(
-                            "Invalid JSON in benchmark result sink at line {$lineNumber}.",
+                            "Invalid JSON in benchmark result sink [{$path}:{$lineStart}].",
                             previous: $exception,
                         );
                     }
                     if (!is_array($record)) {
                         throw new RuntimeException(
-                            "Benchmark result sink line {$lineNumber} is not a JSON object.",
+                            "Benchmark result sink entry is not a JSON object [{$path}:{$lineStart}].",
                         );
                     }
-                    $records[] = $record;
+                    yield $record;
                 }
 
-                if (!feof($stream)) {
-                    throw new RuntimeException("Unable to finish reading benchmark result sink [{$path}].");
+                if ($position !== $end) {
+                    throw new RuntimeException(
+                        "Unable to finish reading benchmark result snapshot [{$path}:{$end}].",
+                    );
                 }
-
-                return $records;
             } finally {
                 flock($stream, LOCK_UN);
             }
