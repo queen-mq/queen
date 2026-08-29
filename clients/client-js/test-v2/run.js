@@ -55,6 +55,7 @@ console.log('TEST_CONFIG:', TEST_CONFIG);
 
 // Global test state
 export let dbPool;  
+let activeClient;
 
 // Initialize database pool
 export async function initDb() {
@@ -65,9 +66,9 @@ export async function initDb() {
 
 // Close database pool
 export async function closeDb() {
-  if (dbPool) {
-    await dbPool.end();
-  }
+  const pool = dbPool;
+  dbPool = undefined;
+  if (pool) await pool.end();
 }
 
 function log (success, ...args) {
@@ -163,6 +164,7 @@ async function main() {
         urls: TEST_CONFIG.baseUrls,
         loadBalancingStrategy: TEST_CONFIG.loadBalancingStrategy
     })
+    activeClient = client
     await initDb()
 
     // Separate human and AI tests
@@ -240,8 +242,7 @@ async function main() {
             humanTestFunctions.forEach(t => console.log(`  - ${t.name}`))
             console.log('\n🌊 queen-streams tests:')
             streamTestFunctions.forEach(t => console.log(`  - ${t.name}`))
-            await closeDb()
-            process.exit(1)
+            return 1
         }
         testsToRun = [testFunc]
         mode = 'single'
@@ -279,17 +280,29 @@ async function main() {
         console.log('\n💡 Tip: Run "node run.js" to test all tests')
     }
     
-    //await cleanupTestData()
-    await closeDb()
-    // Queen.close() destroys the per-client HTTP agent, releasing keep-alive
-    // sockets so the loop can drain; the explicit exit code is for CI.
-    await client.close()
     const failedCount = testResults.filter(x => !x.success).length
-    process.exit(failedCount > 0 ? 1 : 0)
+    return failedCount > 0 ? 1 : 0
 }
 
+let exitCode = 1
 try {
-    await main()
+    exitCode = await main()
 } catch (error) {
     log(false, 'Main error:', error.message)
+} finally {
+    // Always release both resource owners. Previously, an init/query failure
+    // skipped this teardown and the outer catch returned a successful process
+    // status, allowing a broken integration lane to appear green.
+    const cleanupResults = await Promise.allSettled([
+        closeDb(),
+        activeClient ? activeClient.close() : Promise.resolve()
+    ])
+    for (const result of cleanupResults) {
+        if (result.status === 'rejected') {
+            exitCode = 1
+            log(false, 'Cleanup error:', result.reason?.message || String(result.reason))
+        }
+    }
 }
+
+process.exit(exitCode)
