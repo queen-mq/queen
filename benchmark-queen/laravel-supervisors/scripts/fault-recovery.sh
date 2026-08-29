@@ -27,6 +27,7 @@ RESPAWN_TIMEOUT=30
 COMPLETION_TIMEOUT=120
 BUILD_IMAGES=1
 DRY_RUN=0
+ALLOW_LEASE_RISK=0
 OUTPUT_DIRECTORY=""
 
 ACTIVE_PROJECT=""
@@ -58,6 +59,7 @@ Options:
   --kill-delay-ms N            Delay after target's proof-of-work (default: 100)
   --respawn-timeout SECONDS    Maximum wait for full pool recovery (default: 30)
   --completion-timeout SEC     Maximum wait for all unique jobs (default: 120)
+  --allow-lease-risk           Permit an intentionally unsafe prefetch/lease window
   --no-build                   Reuse local benchmark images
   --dry-run                    Validate and write the planned protocol only
   -h, --help                   Show this help
@@ -106,6 +108,7 @@ while [ "$#" -gt 0 ]; do
         --kill-delay-ms) KILL_DELAY_MS="${2:?--kill-delay-ms requires a value}"; shift 2 ;;
         --respawn-timeout) RESPAWN_TIMEOUT="${2:?--respawn-timeout requires a value}"; shift 2 ;;
         --completion-timeout) COMPLETION_TIMEOUT="${2:?--completion-timeout requires a value}"; shift 2 ;;
+        --allow-lease-risk) ALLOW_LEASE_RISK=1; shift ;;
         --no-build) BUILD_IMAGES=0; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -150,6 +153,16 @@ for engine in "${ENGINES[@]}"; do
     esac
 done
 
+# Every prefetched job starts under the same checkout window, while Laravel
+# handles the local buffer serially. The configured sleep is therefore a hard
+# lower bound for the time needed to drain one prefetch. Reject a lease that is
+# already too short before CPU work and framework overhead are even counted.
+minimum_prefetch_ms=$(( QUEEN_PREFETCH * SLEEP_MS ))
+retry_after_ms=$(( RETRY_AFTER * 1000 ))
+if [ "$contains_queen" -eq 1 ] && [ "$minimum_prefetch_ms" -ge "$retry_after_ms" ] && [ "$ALLOW_LEASE_RISK" -eq 0 ]; then
+    die "Queen prefetch needs at least ${minimum_prefetch_ms}ms for configured sleeps, but --retry-after is ${retry_after_ms}ms; reduce --queen-prefetch, increase --retry-after, or use --allow-lease-risk for an intentional negative test"
+fi
+
 mkdir -p "$OUTPUT_DIRECTORY"
 OUTPUT_DIRECTORY="$(CDPATH='' cd -- "$OUTPUT_DIRECTORY" && pwd)"
 if [ -n "$(find "$OUTPUT_DIRECTORY" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
@@ -165,7 +178,7 @@ write_protocol_metadata() {
     python3 - "$OUTPUT_DIRECTORY" "$campaign_id" "$REPOSITORY_ROOT" "$ENGINES_CSV" \
         "$JOBS" "$WORKERS" "$SLEEP_MS" "$CPU_ITERATIONS" "$JOB_TRIES" \
         "$QUEEN_PREFETCH" "$QUEEN_ACK_BATCH" "$WORKER_TIMEOUT" "$RETRY_AFTER" "$KILL_DELAY_MS" "$RESPAWN_TIMEOUT" \
-        "$COMPLETION_TIMEOUT" "$BUILD_IMAGES" "$DRY_RUN" <<'PY'
+        "$COMPLETION_TIMEOUT" "$BUILD_IMAGES" "$DRY_RUN" "$ALLOW_LEASE_RISK" <<'PY'
 import datetime as dt
 import json
 import platform
@@ -176,7 +189,7 @@ from pathlib import Path
 (
     output, campaign_id, repository, engines, jobs, workers, sleep_ms,
     cpu_iterations, job_tries, queen_prefetch, queen_ack_batch, worker_timeout, retry_after, kill_delay_ms,
-    respawn_timeout, completion_timeout, build_images, dry_run,
+    respawn_timeout, completion_timeout, build_images, dry_run, allow_lease_risk,
 ) = sys.argv[1:]
 
 def command(*args: str) -> str:
@@ -208,6 +221,7 @@ metadata = {
         "completion_timeout_seconds": int(completion_timeout),
         "queen_prefetch": int(queen_prefetch),
         "queen_ack_batch": int(queen_ack_batch),
+        "allow_lease_risk": allow_lease_risk == "1",
         "dispatch_mode": "single",
         "build_images": build_images == "1",
         "dry_run": dry_run == "1",
@@ -229,6 +243,8 @@ metadata = {
         "A qualified worker plus backlog, a long sleep, and a short injection delay are strong "
         "but not nanosecond-exact proof that SIGKILL landed inside user code.",
         "This smoke test measures one crash per fresh backend; estimate probabilities with repeated runs.",
+        "The lease guard covers the configured sleep floor only; CPU work and framework overhead still "
+        "require additional retry_after margin.",
         "Completion is recorded at the end of handle(), before the queue ACK. Final queue counters "
         "are reconciled, but this fixture has no idempotent external side-effect ledger.",
     ],

@@ -68,6 +68,11 @@ prefetched jobs leased until `retry_after`. Size that lease for the worst-case
 time to process the complete batch. Keep both values at `1` for long-running
 jobs, strict per-job ACK confirmation, or comma-separated priority queues.
 Reentrant `pop()` while a prefetched job is still active is rejected.
+Queen's PHP and Rust supervisors fail configuration export unless
+`retry_after > prefetch * timeout`; keep additional margin for framework and
+transport overhead. A directly managed `queue:work` process cannot validate
+its CLI timeout against queue configuration, so its process manager must
+enforce the same invariant.
 
 Laravel's `Queue::bulk()` uses bounded, multi-partition Queen requests instead
 of looping over singleton pushes. `QUEEN_BULK_BATCH` bounds each request and

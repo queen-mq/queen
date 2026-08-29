@@ -106,6 +106,39 @@ class LaravelSupervisorProductionTest extends TestCase
         ], '/app');
     }
 
+    public function testConfigurationRejectsLeaseTooShortForThePrefetchedBatch(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            'retry_after must be longer than timeout multiplied by connection prefetch [16]',
+        );
+
+        SupervisorConfiguration::resolve([
+            'supervisor' => [
+                'supervisors' => [
+                    'jobs' => ['timeout' => 10, 'retry_after' => 160],
+                ],
+            ],
+        ], '/app', queueConnections: [
+            'queen' => ['driver' => 'queen', 'prefetch' => 16],
+        ]);
+    }
+
+    public function testConfigurationAcceptsLeaseLongerThanThePrefetchedBatch(): void
+    {
+        $config = SupervisorConfiguration::resolve([
+            'supervisor' => [
+                'supervisors' => [
+                    'jobs' => ['timeout' => 10, 'retry_after' => 161],
+                ],
+            ],
+        ], '/app', queueConnections: [
+            'queen' => ['driver' => 'queen', 'prefetch' => 16],
+        ]);
+
+        $this->assertSame(161, $config['supervisors']['jobs']['retry_after']);
+    }
+
     public function testConfigurationDerivesASafeShutdownGraceFromTheLargestTimeout(): void
     {
         $config = SupervisorConfiguration::resolve([

@@ -95,6 +95,22 @@ final class SupervisorConfiguration
             if ($retryAfter <= $timeout) {
                 throw new InvalidArgumentException("Queen supervisor [{$name}] retry_after must be longer than timeout.");
             }
+            $prefetch = self::positiveInteger(
+                $connectionConfig['prefetch'] ?? 1,
+                "supervisor [{$name}] connection prefetch",
+            );
+            if ($prefetch > 1000) {
+                throw new InvalidArgumentException("Queen supervisor [{$name}] connection prefetch may not exceed 1000.");
+            }
+            // Laravel handles a prefetched buffer serially. All jobs are
+            // leased at pop time, so the final job must still be covered after
+            // every earlier job has consumed its full timeout. Express the
+            // comparison without multiplying user-controlled integers.
+            if ($prefetch > intdiv($retryAfter - 1, $timeout)) {
+                throw new InvalidArgumentException(
+                    "Queen supervisor [{$name}] retry_after must be longer than timeout multiplied by connection prefetch [{$prefetch}].",
+                );
+            }
             $connections[$connection] = self::readConnection($connectionConfig);
 
             $restartBackoff = self::nonNegativeInteger($options['restart_backoff'] ?? 1, "supervisor [{$name}] restart_backoff");

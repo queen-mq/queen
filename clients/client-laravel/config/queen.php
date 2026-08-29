@@ -32,6 +32,7 @@ return [
     // or the fetched lease is drained. Values greater than one preserve
     // at-least-once delivery but widen the duplicate/recovery window, so size
     // retry_after for the maximum time needed to process a prefetched batch.
+    // Queen supervisors enforce retry_after > prefetch * worker timeout.
     'prefetch' => env('QUEEN_PREFETCH', 1),
     'ack_batch' => env('QUEEN_ACK_BATCH', 1),
     // Laravel Queue::bulk() is emitted as bounded multi-partition HTTP pushes.
