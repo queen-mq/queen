@@ -2557,6 +2557,13 @@ mod tests {
             op_for("/api/v1/lease/abc/extend", RouteClass::Consume),
             OpClass::Read
         );
+        // PLAN_QUEEN_KAFKA.md C2. The batched fetch is `Consume` for its
+        // authorization (routes.rs) but is NOT an `is_pop_path`, so it books
+        // reqs-only like ack and lease. Deliberate: `Delivery` would debit the
+        // delivery bucket off a count `count_pop_messages` cannot read from the
+        // fetch response shape, and a wrong debit 429s the next request.
+        assert_eq!(op_for("/api/v1/fetch", RouteClass::Consume), OpClass::Read);
+        assert!(!is_pop_path("/api/v1/fetch"));
         assert_eq!(
             op_for("/api/v1/configure", RouteClass::QueueAdmin),
             OpClass::Configure
