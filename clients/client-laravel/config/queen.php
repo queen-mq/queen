@@ -35,12 +35,36 @@ return [
     // Queen supervisors enforce retry_after > prefetch * worker timeout.
     'prefetch' => env('QUEEN_PREFETCH', 1),
     'ack_batch' => env('QUEEN_ACK_BATCH', 1),
+    // Opt-in data-plane helper for jobs whose runtime cannot be bounded by the
+    // original pop lease. One small PHP subprocess per Laravel worker renews
+    // the single lease shared by its active and prefetched jobs. If renewal can
+    // no longer finish safely it TERM/KILL-fences the worker before expiry;
+    // effects already emitted by a job can still be duplicated (at-least-once).
+    'lease_renewal' => env('QUEEN_LEASE_RENEWAL', false),
+    'lease_renewal_interval' => env('QUEEN_LEASE_RENEWAL_INTERVAL'),
+    'lease_renewal_timeout' => env('QUEEN_LEASE_RENEWAL_TIMEOUT', 5),
+    'lease_renewal_kill_grace' => env('QUEEN_LEASE_RENEWAL_KILL_GRACE', 2),
+    'lease_renewal_safety_margin' => env('QUEEN_LEASE_RENEWAL_SAFETY_MARGIN', 1),
     // Laravel Queue::bulk() is emitted as bounded multi-partition HTTP pushes.
     'bulk_batch' => env('QUEEN_BULK_BATCH', 100),
     'after_commit' => env('QUEEN_AFTER_COMMIT', false),
     // Keep Laravel failed_jobs as the command index while retaining Queen DLQ
-    // snapshots. Retry/forget/flush/prune remove the matching DLQ row.
+    // snapshots. Retry/forget/flush/prune remove the matching DLQ row. Use a
+    // cache store with distributed-lock support on multi-process/multi-host
+    // deployments; array is process-local and file is host-local.
     'sync_failed_jobs' => env('QUEEN_SYNC_FAILED_JOBS', true),
+    // Null uses Laravel's default cache store. Production deployments should
+    // name a shared store whose locks are visible to every queue worker.
+    'failed_jobs_lock_store' => env('QUEEN_FAILED_JOBS_LOCK_STORE'),
+    'failed_jobs_lock_name' => env('QUEEN_FAILED_JOBS_LOCK_NAME', 'queen:failed-jobs'),
+    // Every flush/prune row gets its own critical section, containing at most
+    // one Queen cleanup. Keep the TTL above the complete admin HTTP retry and
+    // rate-limit budget; ownership is checked before the Laravel row mutates.
+    'failed_jobs_lock_ttl' => env('QUEEN_FAILED_JOBS_LOCK_TTL', 600),
+    // Match the TTL by default. An immediately re-failing manual retry must be
+    // able to wait for the fenced cleanup/publish hand-off to release its lock
+    // instead of losing the new Laravel failed-job index row on contention.
+    'failed_jobs_lock_wait' => env('QUEEN_FAILED_JOBS_LOCK_WAIT', 600),
 
     // Local process orchestration. The PHP and Rust engines consume the same
     // resolved JSON contract exposed by `queen:supervisor-config`.
@@ -86,6 +110,20 @@ return [
                 'quiet' => true,
             ],
         ],
+    ],
+
+    // The Rust supervisor is version-pinned by this Composer package, but is
+    // installed explicitly so dependency scripts are never trusted to execute
+    // downloaded code. The Composer launcher resolves this application-local
+    // path from the Laravel root. A mirror may replace the release base URL;
+    // both its manifest and artifacts must still use HTTPS.
+    'supervisor_binary' => [
+        'install_path' => env(
+            'QUEEN_SUPERVISOR_INSTALL_PATH',
+            storage_path('queen-supervisor/bin'),
+        ),
+        'release_base_url' => env('QUEEN_SUPERVISOR_RELEASE_BASE_URL'),
+        'manifest' => env('QUEEN_SUPERVISOR_MANIFEST'),
     ],
 
     // Backoff for HTTP 429 (rate limited by the proxy), independent of the

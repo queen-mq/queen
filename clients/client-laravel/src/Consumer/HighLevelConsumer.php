@@ -260,9 +260,9 @@ class HighLevelConsumer
     /**
      * Renew lease for a message (or array of messages).
      */
-    public function renewLease(array|string $messageOrLeaseId): array
+    public function renewLease(array|string $messageOrLeaseId, ?int $seconds = null): array
     {
-        return $this->queen->renew($messageOrLeaseId);
+        return $this->queen->renew($messageOrLeaseId, $seconds);
     }
 
     /**

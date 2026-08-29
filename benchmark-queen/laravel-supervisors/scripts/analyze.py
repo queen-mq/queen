@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Wait for, summarize and compare Laravel supervisor benchmark runs.
 
-Only the Python standard library is used.  JSONL readers deliberately tolerate
-an incomplete final line so results remain useful after a killed container or a
-full disk; malformed complete lines are counted and make correctness fail.
+Only the Python standard library is used. JSONL readers retain complete records
+when a killed container or full disk leaves an incomplete final line, but both
+partial and malformed lines are counted and make primary correctness fail.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import argparse
 import json
 import math
 import os
+import sqlite3
 import sys
 import time
 from collections import defaultdict
@@ -23,8 +24,10 @@ from typing import Any, Iterable, Sequence
 SUMMARY_SCHEMA = "queen.laravel-supervisors.summary/v1"
 REPORT_SCHEMA = "queen.laravel-supervisors.report/v1"
 QUEUE_STATE_SCHEMA = "queen.laravel-supervisors.queue-state/v1"
+LEDGER_SCHEMA = "queen.laravel-supervisors.effect-ledger/v1"
 FAILURE_WORDS = {"failed", "failure", "error", "exception", "dead", "timeout"}
 ROLE_PRIORITY = {"worker": 5, "orchestrator": 4, "app": 3, "backend": 2, "stack": 1}
+MAX_DISPATCH_JOBS = 1_000_000
 
 
 @dataclass
@@ -153,12 +156,81 @@ def is_failure(record: dict[str, Any]) -> bool:
 
 
 def completion_record(record: dict[str, Any]) -> bool:
-    return not is_failure(record) and nonnegative_integer(record.get("completed_at_ns")) is not None
+    return (
+        not is_failure(record)
+        and nonnegative_integer(record.get("completed_at_ns")) is not None
+    )
+
+
+def expected_job_ids(manifest: dict[str, Any]) -> tuple[set[str], list[str]]:
+    """Resolve the exact job-id set declared by a dispatch manifest."""
+
+    errors: list[str] = []
+    expected = nonnegative_integer(manifest.get("jobs"))
+    if expected is None:
+        return set(), ["dispatch.jobs must be a non-negative integer"]
+    if expected > MAX_DISPATCH_JOBS:
+        return set(), [f"dispatch.jobs may not exceed {MAX_DISPATCH_JOBS}"]
+
+    jobs_per_queue_raw = manifest.get("jobs_per_queue")
+    queues_csv_raw = manifest.get("queues_csv")
+    multi_queue = jobs_per_queue_raw is not None or queues_csv_raw is not None
+    if not multi_queue:
+        return {f"{index:09d}" for index in range(expected)}, errors
+
+    jobs_per_queue = nonnegative_integer(jobs_per_queue_raw)
+    if jobs_per_queue in {None, 0}:
+        errors.append("dispatch.jobs_per_queue must be a positive integer")
+    elif jobs_per_queue > MAX_DISPATCH_JOBS:
+        errors.append(f"dispatch.jobs_per_queue may not exceed {MAX_DISPATCH_JOBS}")
+
+    if manifest.get("dispatch_mode") != "round-robin-single":
+        errors.append(
+            "a multi-queue dispatch manifest must use dispatch_mode round-robin-single"
+        )
+
+    queues: list[str] = []
+    if not isinstance(queues_csv_raw, str) or not queues_csv_raw:
+        errors.append("dispatch.queues_csv must be a non-empty queue CSV")
+    else:
+        queues = queues_csv_raw.split(",")
+        if len(queues) < 2:
+            errors.append("dispatch.queues_csv must contain at least two queues")
+        if len(queues) > 256:
+            errors.append("dispatch.queues_csv may not contain more than 256 queues")
+        seen: set[str] = set()
+        for queue in queues:
+            valid = (
+                0 < len(queue) <= 118
+                and queue.isascii()
+                and all(
+                    character.isalnum() or character in "._:-" for character in queue
+                )
+            )
+            if not valid:
+                errors.append(f"dispatch.queues_csv contains invalid queue {queue!r}")
+            elif queue in seen:
+                errors.append(f"dispatch.queues_csv contains duplicate queue {queue!r}")
+            seen.add(queue)
+
+    if jobs_per_queue is not None and jobs_per_queue > 0 and queues:
+        declared = jobs_per_queue * len(queues)
+        if declared != expected:
+            errors.append(
+                "dispatch.jobs does not equal jobs_per_queue multiplied by the queue count"
+            )
+
+    if errors or jobs_per_queue is None:
+        return set(), errors
+    return {
+        f"{queue}:{index:09d}" for queue in queues for index in range(jobs_per_queue)
+    }, errors
 
 
 def event_snapshot(run_directory: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     run_id = manifest.get("run_id")
     expected = nonnegative_integer(manifest.get("jobs"))
+    expected_ids, manifest_errors = expected_job_ids(manifest)
     raw = read_events(run_directory)
     completions: dict[str, list[dict[str, Any]]] = defaultdict(list)
     failures: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -183,17 +255,19 @@ def event_snapshot(run_directory: Path, manifest: dict[str, Any]) -> dict[str, A
     selected: dict[str, dict[str, Any]] = {}
     for job_id, records in completions.items():
         records.sort(
-            key=lambda item: nonnegative_integer(item.get("completed_at_ns"))
-            if nonnegative_integer(item.get("completed_at_ns")) is not None
-            else sys.maxsize
+            key=lambda item: (
+                nonnegative_integer(item.get("completed_at_ns"))
+                if nonnegative_integer(item.get("completed_at_ns")) is not None
+                else sys.maxsize
+            )
         )
         selected[job_id] = records[0]
 
     expected_completed = 0
     unexpected_job_ids: list[str] = []
-    if expected is not None:
+    if expected is not None and not manifest_errors:
         for job_id in selected:
-            if len(job_id) == 9 and job_id.isascii() and job_id.isdigit() and int(job_id) < expected:
+            if job_id in expected_ids:
                 expected_completed += 1
             else:
                 unexpected_job_ids.append(job_id)
@@ -210,11 +284,15 @@ def event_snapshot(run_directory: Path, manifest: dict[str, Any]) -> dict[str, A
         "foreign": foreign,
         "invalid": invalid,
         "expected_completed": expected_completed,
+        "expected_job_ids": expected_ids,
+        "manifest_validation_errors": manifest_errors,
         "unexpected_job_ids": sorted(unexpected_job_ids),
     }
 
 
-def nearest_rank(sorted_values: Sequence[int | float], percentile: float) -> int | float | None:
+def nearest_rank(
+    sorted_values: Sequence[int | float], percentile: float
+) -> int | float | None:
     if not sorted_values:
         return None
     index = max(0, math.ceil(len(sorted_values) * percentile) - 1)
@@ -222,7 +300,9 @@ def nearest_rank(sorted_values: Sequence[int | float], percentile: float) -> int
 
 
 def distribution(values: Iterable[int | float]) -> dict[str, int | float | None]:
-    numbers = sorted(value for value in values if not isinstance(value, bool) and value >= 0)
+    numbers = sorted(
+        value for value in values if not isinstance(value, bool) and value >= 0
+    )
     if not numbers:
         return {
             "count": 0,
@@ -314,7 +394,9 @@ def bracketed_samples(
 def process_rows(sample: dict[str, Any]) -> dict[tuple[int, Any], dict[str, Any]]:
     rows: dict[tuple[int, Any], dict[str, Any]] = {}
     for target in sample.get("targets", []):
-        if not isinstance(target, dict) or not isinstance(target.get("processes"), list):
+        if not isinstance(target, dict) or not isinstance(
+            target.get("processes"), list
+        ):
             continue
         for process in target["processes"]:
             if not isinstance(process, dict):
@@ -324,9 +406,9 @@ def process_rows(sample: dict[str, Any]) -> dict[tuple[int, Any], dict[str, Any]
                 continue
             key = (pid, process.get("start_ticks"))
             existing = rows.get(key)
-            if existing is None or ROLE_PRIORITY.get(str(process.get("role")), 0) > ROLE_PRIORITY.get(
-                str(existing.get("role")), 0
-            ):
+            if existing is None or ROLE_PRIORITY.get(
+                str(process.get("role")), 0
+            ) > ROLE_PRIORITY.get(str(existing.get("role")), 0):
                 rows[key] = process
     return rows
 
@@ -362,7 +444,14 @@ def process_resource_summary(
             requested_end_ns is None or timestamp <= requested_end_ns
         )
         per_role: dict[str, dict[str, int]] = defaultdict(
-            lambda: {"rss": 0, "pss": 0, "private": 0, "count": 0, "pss_count": 0, "private_count": 0}
+            lambda: {
+                "rss": 0,
+                "pss": 0,
+                "private": 0,
+                "count": 0,
+                "pss_count": 0,
+                "private_count": 0,
+            }
         )
         for identity, process in process_rows(sample).items():
             role = str(process.get("role", "app"))
@@ -389,10 +478,14 @@ def process_resource_summary(
                     track["max_wait"] = wait
                 tracks[identity] = track
             else:
-                if ROLE_PRIORITY.get(role, 0) > ROLE_PRIORITY.get(str(track["role"]), 0):
+                if ROLE_PRIORITY.get(role, 0) > ROLE_PRIORITY.get(
+                    str(track["role"]), 0
+                ):
                     track["role"] = role
                 if runtime is not None:
-                    track["max_runtime"] = max(runtime, int(track.get("max_runtime", runtime)))
+                    track["max_runtime"] = max(
+                        runtime, int(track.get("max_runtime", runtime))
+                    )
                 if wait is not None:
                     track["max_wait"] = max(wait, int(track.get("max_wait", wait)))
 
@@ -431,10 +524,14 @@ def process_resource_summary(
     output: dict[str, dict[str, Any]] = {}
     for role in ("orchestrator", "worker", "app", "backend", "stack"):
         runtime_ns = sum(
-            tracked_delta(track, "runtime") for track in tracks.values() if track["role"] == role
+            tracked_delta(track, "runtime")
+            for track in tracks.values()
+            if track["role"] == role
         )
         wait_ns = sum(
-            tracked_delta(track, "wait") for track in tracks.values() if track["role"] == role
+            tracked_delta(track, "wait")
+            for track in tracks.values()
+            if track["role"] == role
         )
         cpu_cores = runtime_ns / duration_ns if duration_ns > 0 else None
         process_observations = sum(memory_series[role]["count"])
@@ -442,7 +539,9 @@ def process_resource_summary(
         private_observations = sum(memory_series[role]["private_count"])
         output[role] = {
             "scope": "processes",
-            "observed_processes": sum(1 for track in tracks.values() if track["role"] == role),
+            "observed_processes": sum(
+                1 for track in tracks.values() if track["role"] == role
+            ),
             "processes_peak": max(memory_series[role]["count"], default=0),
             "cpu_seconds": runtime_ns / 1_000_000_000,
             "cpu_average_cores": cpu_cores,
@@ -486,7 +585,14 @@ def cgroup_resource_summary(
             requested_end_ns is None or timestamp <= requested_end_ns
         )
         totals: dict[str, dict[str, int]] = defaultdict(
-            lambda: {"memory": 0, "pids": 0, "reported_peak": 0, "memory_count": 0, "pids_count": 0, "peak_count": 0}
+            lambda: {
+                "memory": 0,
+                "pids": 0,
+                "reported_peak": 0,
+                "memory_count": 0,
+                "pids_count": 0,
+                "peak_count": 0,
+            }
         )
         for target in sample.get("targets", []):
             if not isinstance(target, dict):
@@ -525,14 +631,19 @@ def cgroup_resource_summary(
                     track[baseline_key] = value if at_baseline else 0
                 track[maximum_key] = max(value, int(track.get(maximum_key, value)))
 
-            events = cgroup.get("memory", {}).get("events") if isinstance(cgroup.get("memory"), dict) else None
+            events = (
+                cgroup.get("memory", {}).get("events")
+                if isinstance(cgroup.get("memory"), dict)
+                else None
+            )
             if isinstance(events, dict):
                 for event, raw in events.items():
                     value = nonnegative_integer(raw)
                     if value is None:
                         continue
                     event_track = track["events"].setdefault(
-                        str(event), {"baseline": value if at_baseline else 0, "maximum": value}
+                        str(event),
+                        {"baseline": value if at_baseline else 0, "maximum": value},
                     )
                     event_track["maximum"] = max(value, event_track["maximum"])
 
@@ -579,7 +690,9 @@ def cgroup_resource_summary(
         usage_usec = sum(tracked_delta(track, "usage_usec") for track in matching)
         user_usec = sum(tracked_delta(track, "user_usec") for track in matching)
         system_usec = sum(tracked_delta(track, "system_usec") for track in matching)
-        throttled_usec = sum(tracked_delta(track, "throttled_usec") for track in matching)
+        throttled_usec = sum(
+            tracked_delta(track, "throttled_usec") for track in matching
+        )
         nr_throttled = sum(tracked_delta(track, "nr_throttled") for track in matching)
         event_deltas: dict[str, int] = defaultdict(int)
         for track in matching:
@@ -597,7 +710,9 @@ def cgroup_resource_summary(
             "cpu_throttled_seconds": throttled_usec / 1_000_000,
             "cpu_nr_throttled": nr_throttled,
             "memory_current_bytes": distribution(series[kind]["memory"]),
-            "memory_peak_reported_bytes": max(series[kind]["reported_peak"], default=None),
+            "memory_peak_reported_bytes": max(
+                series[kind]["reported_peak"], default=None
+            ),
             "pids_current": distribution(series[kind]["pids"]),
             "memory_events": dict(sorted(event_deltas.items())),
         }
@@ -637,7 +752,11 @@ def resource_window(
 
 
 def worker_count(sample: dict[str, Any]) -> int:
-    return sum(1 for process in process_rows(sample).values() if process.get("role") == "worker")
+    return sum(
+        1
+        for process in process_rows(sample).values()
+        if process.get("role") == "worker"
+    )
 
 
 def scale_summary(
@@ -664,16 +783,29 @@ def scale_summary(
     points = [(sample_time(sample), worker_count(sample)) for sample in relevant]
     peak = max((count for _timestamp, count in points), default=0)
     first_worker = next((timestamp for timestamp, count in points if count > 0), None)
-    peak_at = next((timestamp for timestamp, count in points if count == peak), None) if peak else None
+    peak_at = (
+        next((timestamp for timestamp, count in points if count == peak), None)
+        if peak
+        else None
+    )
     scale_down = None
     if peak_at is not None:
         scale_down = next(
-            (timestamp for timestamp, count in points if timestamp > peak_at and count < peak), None
+            (
+                timestamp
+                for timestamp, count in points
+                if timestamp > peak_at and count < peak
+            ),
+            None,
         )
     drained = None
     if completed_ns is not None and peak:
         drained = next(
-            (timestamp for timestamp, count in points if timestamp >= completed_ns and count == 0),
+            (
+                timestamp
+                for timestamp, count in points
+                if timestamp >= completed_ns and count == 0
+            ),
             None,
         )
     initial_workers = points[0][1] if points else 0
@@ -702,7 +834,9 @@ def scale_summary(
         "worker_peak": peak,
         "initial_workers": initial_workers,
         "final_workers": points[-1][1] if points else 0,
-        "time_to_first_worker_ns": first_worker - origin if first_worker is not None else None,
+        "time_to_first_worker_ns": first_worker - origin
+        if first_worker is not None
+        else None,
         "time_to_peak_workers_ns": peak_at - origin if peak_at is not None else None,
         "first_scale_down_ns": scale_down - origin if scale_down is not None else None,
         "drained_after_completion_ns": drained - completed_ns
@@ -718,7 +852,11 @@ def scale_summary(
 
 def limited_ids(values: Iterable[str], maximum: int) -> dict[str, Any]:
     ordered = sorted(values)
-    return {"count": len(ordered), "ids": ordered[:maximum], "truncated": len(ordered) > maximum}
+    return {
+        "count": len(ordered),
+        "ids": ordered[:maximum],
+        "truncated": len(ordered) > maximum,
+    }
 
 
 def final_queue_state(run_directory: Path, manifest: dict[str, Any]) -> dict[str, Any]:
@@ -769,19 +907,25 @@ def final_queue_state(run_directory: Path, manifest: dict[str, Any]) -> dict[str
     normalized_supported: dict[str, bool | None] = {}
     for label in ("ready", "reserved", "delayed"):
         is_supported = supported.get(label)
-        normalized_supported[label] = is_supported if isinstance(is_supported, bool) else None
+        normalized_supported[label] = (
+            is_supported if isinstance(is_supported, bool) else None
+        )
         if not isinstance(is_supported, bool):
             errors.append(f"supported.{label} must be boolean")
         count = nonnegative_integer(state.get(label))
         normalized_state[label] = count
         if is_supported is True:
             if count is None:
-                errors.append(f"state.{label} must be a non-negative integer when supported")
+                errors.append(
+                    f"state.{label} must be a non-negative integer when supported"
+                )
             elif count != 0:
                 errors.append(f"state.{label} is not zero")
 
     probe_errors = raw.get("probe_errors")
-    if not isinstance(probe_errors, list) or any(not isinstance(value, str) for value in probe_errors):
+    if not isinstance(probe_errors, list) or any(
+        not isinstance(value, str) for value in probe_errors
+    ):
         errors.append("probe_errors must be a list of strings")
         probe_errors = []
     elif probe_errors:
@@ -835,6 +979,398 @@ def final_queue_state(run_directory: Path, manifest: dict[str, Any]) -> dict[str
     }
 
 
+def effect_ledger_summary(
+    run_directory: Path,
+    manifest: dict[str, Any],
+    completions: dict[str, list[dict[str, Any]]],
+    expected: int | None,
+    maximum_ids: int = 100,
+    allow_open_attempts: bool = False,
+) -> dict[str, Any]:
+    """Verify the durable fixture-local effect ledger.
+
+    The committed effect row is an auditable witness, not an exactly-once
+    claim: it is not atomic with Laravel's queue ACK or an external system.
+    """
+
+    mode = manifest.get("ledger_mode", "off")
+    path = run_directory / "ledger.sqlite3"
+    base: dict[str, Any] = {
+        "schema": LEDGER_SCHEMA,
+        "mode": mode,
+        "required": mode == "durable",
+        "artifact": str(path),
+        "allow_open_attempts": allow_open_attempts,
+        "semantics": (
+            "fixture-local idempotent effect keyed by run_id+job_id; not atomic with the queue ACK "
+            "or arbitrary external effects"
+        ),
+        "exactly_once_claim": False,
+    }
+    if mode == "off":
+        return base | {
+            "status": "not_requested",
+            "gate_passed": True,
+            "conservation_pass": None,
+            "idempotent_effect_pass": None,
+            "no_duplicate_side_effects_pass": None,
+            "attempt_integrity_pass": None,
+            "strict_execution_pass": None,
+            "validation_errors": [],
+        }
+    if mode != "durable":
+        return base | {
+            "status": "invalid_mode",
+            "gate_passed": False,
+            "conservation_pass": False,
+            "idempotent_effect_pass": False,
+            "no_duplicate_side_effects_pass": False,
+            "attempt_integrity_pass": False,
+            "strict_execution_pass": False,
+            "validation_errors": ["dispatch ledger_mode must be off or durable"],
+        }
+
+    errors: list[str] = []
+    attempts: list[dict[str, Any]] = []
+    effects: list[dict[str, Any]] = []
+    metadata: dict[str, str] = {}
+    quick_check: list[str] = []
+    foreign_key_violations: list[list[Any]] = []
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30.0)
+        connection.row_factory = sqlite3.Row
+        quick_check = [str(row[0]) for row in connection.execute("PRAGMA quick_check")]
+        foreign_key_violations = [
+            list(row) for row in connection.execute("PRAGMA foreign_key_check")
+        ]
+        metadata = {
+            str(row["key"]): str(row["value"])
+            for row in connection.execute("SELECT key, value FROM ledger_meta")
+        }
+        attempts = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT attempt_id, run_id, job_id, attempt_number, worker_pid,
+                       worker_host, started_at_ns, effect_outcome, observed_effect_id,
+                       effect_observed_at_ns, outcome, outcome_at_ns, error_class
+                FROM attempts ORDER BY started_at_ns, attempt_id
+                """
+            )
+        ]
+        effects = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT effect_id, run_id, job_id, created_by_attempt_id, checksum, committed_at_ns
+                FROM effects ORDER BY committed_at_ns, effect_id
+                """
+            )
+        ]
+    except (OSError, sqlite3.Error) as exception:
+        errors.append(f"cannot verify ledger database: {exception}")
+    finally:
+        if connection is not None:
+            connection.close()
+
+    run_id = manifest.get("run_id")
+    if metadata.get("schema") != LEDGER_SCHEMA:
+        errors.append(f"ledger metadata schema must be {LEDGER_SCHEMA}")
+    if not isinstance(run_id, str) or metadata.get("run_id") != run_id:
+        errors.append("ledger metadata run_id does not match dispatch manifest")
+    if quick_check != ["ok"]:
+        errors.append("SQLite quick_check did not return exactly one ok row")
+    if foreign_key_violations:
+        errors.append("SQLite foreign_key_check found violations")
+    expected_ids, expected_id_errors = expected_job_ids(manifest)
+    errors.extend(expected_id_errors)
+    if expected is None or expected < 0:
+        errors.append("dispatch manifest does not contain a valid expected job count")
+    elif len(expected_ids) != expected and not expected_id_errors:
+        errors.append("resolved ledger job IDs do not match the expected job count")
+
+    def valid_token(value: Any) -> bool:
+        return (
+            isinstance(value, str)
+            and len(value) == 32
+            and all(character in "0123456789abcdef" for character in value)
+        )
+
+    attempt_by_id: dict[str, dict[str, Any]] = {}
+    attempts_by_job: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    invalid_attempt_rows = 0
+    for attempt in attempts:
+        attempt_id = attempt.get("attempt_id")
+        effect_outcome = attempt.get("effect_outcome")
+        observed_effect_id = attempt.get("observed_effect_id")
+        effect_observed_at_ns = attempt.get("effect_observed_at_ns")
+        final_outcome = attempt.get("outcome")
+        outcome_at_ns = attempt.get("outcome_at_ns")
+        error_class = attempt.get("error_class")
+        effect_fields_valid = (
+            effect_outcome is None
+            and observed_effect_id is None
+            and effect_observed_at_ns is None
+        ) or (
+            effect_outcome in {"created", "already_present"}
+            and valid_token(observed_effect_id)
+            and nonnegative_integer(effect_observed_at_ns) is not None
+        )
+        outcome_fields_valid = (
+            (final_outcome is None and outcome_at_ns is None and error_class is None)
+            or (
+                final_outcome == "completed"
+                and nonnegative_integer(outcome_at_ns) is not None
+                and error_class is None
+            )
+            or (
+                final_outcome == "failed"
+                and nonnegative_integer(outcome_at_ns) is not None
+                and isinstance(error_class, str)
+                and bool(error_class)
+            )
+        )
+        if (
+            not valid_token(attempt_id)
+            or attempt.get("run_id") != run_id
+            or not isinstance(attempt.get("job_id"), str)
+            or nonnegative_integer(attempt.get("attempt_number")) in {None, 0}
+            or nonnegative_integer(attempt.get("worker_pid")) in {None, 0}
+            or nonnegative_integer(attempt.get("started_at_ns")) is None
+            or not effect_fields_valid
+            or not outcome_fields_valid
+        ):
+            invalid_attempt_rows += 1
+            continue
+        attempt_by_id[str(attempt_id)] = attempt
+        attempts_by_job[str(attempt["job_id"])].append(attempt)
+
+    effect_by_id: dict[str, dict[str, Any]] = {}
+    effects_by_job: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    invalid_effect_rows = 0
+    relational_errors = 0
+    for effect in effects:
+        effect_id = effect.get("effect_id")
+        creator_id = effect.get("created_by_attempt_id")
+        checksum = effect.get("checksum")
+        creator = attempt_by_id.get(str(creator_id))
+        if (
+            not valid_token(effect_id)
+            or not valid_token(creator_id)
+            or effect.get("run_id") != run_id
+            or not isinstance(effect.get("job_id"), str)
+            or not isinstance(checksum, str)
+            or len(checksum) != 64
+            or any(character not in "0123456789abcdef" for character in checksum)
+            or nonnegative_integer(effect.get("committed_at_ns")) is None
+        ):
+            invalid_effect_rows += 1
+            continue
+        if (
+            creator is None
+            or creator.get("run_id") != effect.get("run_id")
+            or creator.get("job_id") != effect.get("job_id")
+            or creator.get("effect_outcome") != "created"
+            or creator.get("observed_effect_id") != effect_id
+        ):
+            relational_errors += 1
+        effect_by_id[str(effect_id)] = effect
+        effects_by_job[str(effect["job_id"])].append(effect)
+
+    for attempt in attempt_by_id.values():
+        observed_effect_id = attempt.get("observed_effect_id")
+        if observed_effect_id is None:
+            continue
+        effect = effect_by_id.get(str(observed_effect_id))
+        if effect is None or effect.get("job_id") != attempt.get("job_id"):
+            relational_errors += 1
+
+    observed_effect_jobs = set(effects_by_job)
+    missing_effect_ids = expected_ids - observed_effect_jobs
+    unexpected_effect_ids = observed_effect_jobs - expected_ids
+    unexpected_attempt_jobs = set(attempts_by_job) - expected_ids
+    duplicate_effects = {
+        job_id: len(records) - 1
+        for job_id, records in effects_by_job.items()
+        if len(records) > 1
+    }
+    duplicate_effect_count = sum(duplicate_effects.values())
+    duplicate_executions = {
+        job_id: len(records) - 1
+        for job_id, records in attempts_by_job.items()
+        if len(records) > 1
+    }
+    duplicate_execution_count = sum(duplicate_executions.values())
+
+    completion_link_errors = 0
+    checksum_errors = 0
+    completion_effect_ids: set[str] = set()
+    expected_checksum_by_job: dict[str, str] = {}
+    for job_id, records in completions.items():
+        for record in records:
+            checksum = record.get("checksum")
+            if isinstance(checksum, str):
+                expected_checksum_by_job.setdefault(job_id, checksum)
+            attempt_id = record.get("ledger_attempt_id")
+            effect_id = record.get("ledger_effect_id")
+            effect_outcome = record.get("ledger_effect_outcome")
+            effect_created = record.get("ledger_effect_created")
+            attempt = attempt_by_id.get(str(attempt_id))
+            effect = effect_by_id.get(str(effect_id))
+            if (
+                not valid_token(attempt_id)
+                or not valid_token(effect_id)
+                or effect_outcome not in {"created", "already_present"}
+                or not isinstance(effect_created, bool)
+                or attempt is None
+                or effect is None
+                or attempt.get("job_id") != job_id
+                or effect.get("job_id") != job_id
+                or attempt.get("observed_effect_id") != effect_id
+                or attempt.get("effect_outcome") != effect_outcome
+                or effect.get("checksum") != checksum
+                or effect_created != (effect_outcome == "created")
+            ):
+                completion_link_errors += 1
+            else:
+                completion_effect_ids.add(str(effect_id))
+
+    for job_id, job_effects in effects_by_job.items():
+        expected_checksum = expected_checksum_by_job.get(job_id)
+        if expected_checksum is None or any(
+            effect.get("checksum") != expected_checksum for effect in job_effects
+        ):
+            checksum_errors += 1
+
+    open_attempt_ids = {
+        str(row["attempt_id"])
+        for row in attempt_by_id.values()
+        if row.get("outcome") is None
+    }
+    failed_attempt_ids = {
+        str(row["attempt_id"])
+        for row in attempt_by_id.values()
+        if row.get("outcome") == "failed"
+    }
+    completed_attempt_ids = {
+        str(row["attempt_id"])
+        for row in attempt_by_id.values()
+        if row.get("outcome") == "completed"
+    }
+    attempts_without_effect = {
+        str(row["attempt_id"])
+        for row in attempt_by_id.values()
+        if row.get("effect_outcome") is None
+    }
+    completed_without_effect = attempts_without_effect & completed_attempt_ids
+    created_attempt_ids = {
+        str(row["attempt_id"])
+        for row in attempt_by_id.values()
+        if row.get("effect_outcome") == "created"
+    }
+    deduplicated_attempt_ids = {
+        str(row["attempt_id"])
+        for row in attempt_by_id.values()
+        if row.get("effect_outcome") == "already_present"
+    }
+    effects_without_completion = set(effect_by_id) - completion_effect_ids
+
+    structural_integrity = (
+        not errors
+        and invalid_attempt_rows == 0
+        and invalid_effect_rows == 0
+        and relational_errors == 0
+        and completion_link_errors == 0
+    )
+    conservation_pass = (
+        structural_integrity
+        and not missing_effect_ids
+        and not unexpected_effect_ids
+        and checksum_errors == 0
+    )
+    idempotent_effect_pass = (
+        structural_integrity
+        and not missing_effect_ids
+        and not unexpected_effect_ids
+        and duplicate_effect_count == 0
+        and len(effect_by_id) == (expected or 0)
+    )
+    attempt_integrity_pass = (
+        structural_integrity
+        and not unexpected_attempt_jobs
+        and not failed_attempt_ids
+        and not completed_without_effect
+        and (allow_open_attempts or not open_attempt_ids)
+    )
+    strict_execution_pass = (
+        structural_integrity
+        and not unexpected_attempt_jobs
+        and set(attempts_by_job) == expected_ids
+        and duplicate_execution_count == 0
+        and not deduplicated_attempt_ids
+    )
+    gate_passed = (
+        conservation_pass
+        and idempotent_effect_pass
+        and attempt_integrity_pass
+        and strict_execution_pass
+    )
+
+    return base | {
+        "status": "verified" if structural_integrity else "invalid",
+        "database": {
+            "quick_check": quick_check,
+            "foreign_key_violations": foreign_key_violations,
+        },
+        "attempts": {
+            "records": len(attempts),
+            "valid_records": len(attempt_by_id),
+            "invalid_records": invalid_attempt_rows,
+            "completed": len(completed_attempt_ids),
+            "failed": limited_ids(failed_attempt_ids, maximum_ids),
+            "open_or_interrupted": limited_ids(open_attempt_ids, maximum_ids),
+            "without_effect": limited_ids(attempts_without_effect, maximum_ids),
+            "created_effect": len(created_attempt_ids),
+            "already_present": limited_ids(deduplicated_attempt_ids, maximum_ids),
+            "duplicate_executions": {
+                "count": duplicate_execution_count,
+                "jobs": dict(list(sorted(duplicate_executions.items()))[:maximum_ids]),
+                "truncated": len(duplicate_executions) > maximum_ids,
+            },
+            "unexpected_jobs": limited_ids(unexpected_attempt_jobs, maximum_ids),
+        },
+        "effects": {
+            "idempotency_key": "run_id+job_id",
+            "expected_unique_jobs": expected,
+            "records": len(effects),
+            "valid_records": len(effect_by_id),
+            "invalid_records": invalid_effect_rows,
+            "unique_jobs": len(observed_effect_jobs),
+            "missing": limited_ids(missing_effect_ids, maximum_ids),
+            "unexpected": limited_ids(unexpected_effect_ids, maximum_ids),
+            "duplicates": {
+                "count": duplicate_effect_count,
+                "jobs": dict(list(sorted(duplicate_effects.items()))[:maximum_ids]),
+                "truncated": len(duplicate_effects) > maximum_ids,
+            },
+            "without_completion_record": limited_ids(
+                effects_without_completion, maximum_ids
+            ),
+            "checksum_error_jobs": checksum_errors,
+            "relational_errors": relational_errors,
+            "completion_link_errors": completion_link_errors,
+        },
+        "conservation_pass": conservation_pass,
+        "idempotent_effect_pass": idempotent_effect_pass,
+        "no_duplicate_side_effects_pass": idempotent_effect_pass,
+        "attempt_integrity_pass": attempt_integrity_pass,
+        "strict_execution_pass": strict_execution_pass,
+        "gate_passed": gate_passed,
+        "validation_errors": errors,
+    }
+
+
 def summarize_run(run_directory: Path, maximum_ids: int = 100) -> dict[str, Any]:
     manifest = load_object(run_directory / "dispatch.json")
     events = event_snapshot(run_directory, manifest)
@@ -843,18 +1379,30 @@ def summarize_run(run_directory: Path, maximum_ids: int = 100) -> dict[str, Any]
     selected: dict[str, dict[str, Any]] = events["selected"]
     completions: dict[str, list[dict[str, Any]]] = events["completions"]
     failures: dict[str, list[dict[str, Any]]] = events["failures"]
+    effect_ledger = effect_ledger_summary(
+        run_directory,
+        manifest,
+        completions,
+        events["expected"],
+        maximum_ids,
+    )
 
     completed_ids = set(selected)
-    missing_count = max(0, expected - events["expected_completed"]) if expected is not None else 0
+    missing_count = (
+        max(0, expected - events["expected_completed"]) if expected is not None else 0
+    )
     missing_preview: list[str] = []
     if expected is not None and missing_count and maximum_ids > 0:
-        for index in range(expected):
-            job_id = f"{index:09d}"
+        for job_id in sorted(events["expected_job_ids"]):
             if job_id not in completed_ids:
                 missing_preview.append(job_id)
                 if len(missing_preview) >= maximum_ids:
                     break
-    duplicate_ids = {job_id: len(records) - 1 for job_id, records in completions.items() if len(records) > 1}
+    duplicate_ids = {
+        job_id: len(records) - 1
+        for job_id, records in completions.items()
+        if len(records) > 1
+    }
 
     queue_latencies: list[int] = []
     end_to_end_latencies: list[int] = []
@@ -884,17 +1432,23 @@ def summarize_run(run_directory: Path, maximum_ids: int = 100) -> dict[str, Any]
     first_enqueued = min(enqueued, default=None)
     dispatch_to_complete_ns = (
         last_completed - dispatch_started
-        if last_completed is not None and dispatch_started is not None and last_completed >= dispatch_started
+        if last_completed is not None
+        and dispatch_started is not None
+        and last_completed >= dispatch_started
         else None
     )
     enqueue_to_complete_ns = (
         last_completed - first_enqueued
-        if last_completed is not None and first_enqueued is not None and last_completed >= first_enqueued
+        if last_completed is not None
+        and first_enqueued is not None
+        and last_completed >= first_enqueued
         else None
     )
     completion_span_ns = (
         last_completed - first_completed
-        if last_completed is not None and first_completed is not None and last_completed >= first_completed
+        if last_completed is not None
+        and first_completed is not None
+        and last_completed >= first_completed
         else None
     )
     dispatch_duration_ns = (
@@ -913,8 +1467,13 @@ def summarize_run(run_directory: Path, maximum_ids: int = 100) -> dict[str, Any]
         first_stat = sample_time(samples[0])
         last_stat = sample_time(samples[-1])
         tolerance = 3_600 * 1_000_000_000
-        if measurement_start < first_stat - tolerance or measurement_start > last_stat + tolerance:
-            warnings.append("dispatch and sampler monotonic clocks do not appear aligned; using all stats")
+        if (
+            measurement_start < first_stat - tolerance
+            or measurement_start > last_stat + tolerance
+        ):
+            warnings.append(
+                "dispatch and sampler monotonic clocks do not appear aligned; using all stats"
+            )
             measurement_start = None
     if not samples:
         warnings.append("stats.jsonl has no usable samples")
@@ -922,19 +1481,30 @@ def summarize_run(run_directory: Path, maximum_ids: int = 100) -> dict[str, Any]
     # Headline resources exclude warm-up, and deliberately extend to the final
     # available sample so supervisor scale-down/drain cost remains visible.
     headline_end = sample_time(samples[-1]) if samples else last_completed
-    headline = resource_window(samples, measurement_start, headline_end, "measurement_with_drain")
-    active = resource_window(samples, measurement_start, last_completed, "dispatch_to_last_completion")
-    startup = resource_window(samples, None, measurement_start, "startup") if measurement_start else None
+    headline = resource_window(
+        samples, measurement_start, headline_end, "measurement_with_drain"
+    )
+    active = resource_window(
+        samples, measurement_start, last_completed, "dispatch_to_last_completion"
+    )
+    startup = (
+        resource_window(samples, None, measurement_start, "startup")
+        if measurement_start
+        else None
+    )
     all_window = resource_window(samples, None, None, "all_samples")
     scaling = scale_summary(samples, measurement_start, last_completed)
 
     event_integrity_errors = (
         events["raw"].malformed_lines
+        + events["raw"].partial_lines
         + events["raw"].unreadable_files
         + events["invalid"]
         + events["foreign"]
     )
-    metadata_records = [record for record in stats.records if record.get("type") == "metadata"]
+    metadata_records = [
+        record for record in stats.records if record.get("type") == "metadata"
+    ]
     end_records = [record for record in stats.records if record.get("type") == "end"]
     sampler_metadata = metadata_records[0] if len(metadata_records) == 1 else {}
     sampler_end = end_records[0] if len(end_records) == 1 else {}
@@ -950,7 +1520,8 @@ def summarize_run(run_directory: Path, maximum_ids: int = 100) -> dict[str, Any]
         sampling_overruns = sum(
             1
             for sample in samples
-            if (nonnegative_integer(sample.get("sampling_duration_ns")) or 0) > interval_ns
+            if (nonnegative_integer(sample.get("sampling_duration_ns")) or 0)
+            > interval_ns
         )
         cadence_gaps = sum(
             1
@@ -958,9 +1529,15 @@ def summarize_run(run_directory: Path, maximum_ids: int = 100) -> dict[str, Any]
             if sample_time(right) - sample_time(left) > interval_ns * 1.5
         )
     sampler_shape_errors = 0
-    if len(metadata_records) != 1 or sampler_metadata.get("schema") != "queen.laravel-supervisors.stats/v1":
+    if (
+        len(metadata_records) != 1
+        or sampler_metadata.get("schema") != "queen.laravel-supervisors.stats/v1"
+    ):
         sampler_shape_errors += 1
-    if len(end_records) != 1 or sampler_end.get("schema") != "queen.laravel-supervisors.stats/v1":
+    if (
+        len(end_records) != 1
+        or sampler_end.get("schema") != "queen.laravel-supervisors.stats/v1"
+    ):
         sampler_shape_errors += 1
     if interval_ns is None or interval_ns <= 0:
         sampler_shape_errors += 1
@@ -969,6 +1546,7 @@ def summarize_run(run_directory: Path, maximum_ids: int = 100) -> dict[str, Any]
 
     stats_integrity_errors = (
         stats.malformed_lines
+        + stats.partial_lines
         + stats.unreadable_files
         + invalid_stats
         + sampler_shape_errors
@@ -992,7 +1570,9 @@ def summarize_run(run_directory: Path, maximum_ids: int = 100) -> dict[str, Any]
     duplicate_count = sum(duplicate_ids.values())
     failed_records = sum(len(records) for records in failures.values())
     max_attempt = max(attempts, default=None)
-    attempts_valid = len(attempts) == len(selected) and all(attempt == 1 for attempt in attempts)
+    attempts_valid = len(attempts) == len(selected) and all(
+        attempt == 1 for attempt in attempts
+    )
     all_memory_events = value_at(all_window, "stack", "memory_events")
     oom_events = 0
     if isinstance(all_memory_events, dict):
@@ -1015,6 +1595,7 @@ def summarize_run(run_directory: Path, maximum_ids: int = 100) -> dict[str, Any]
         and duplicate_count == 0
         and failed_records == 0
         and attempts_valid
+        and not events["manifest_validation_errors"]
         and not events["unexpected_job_ids"]
         and event_integrity_errors == 0
         and stats_integrity_errors == 0
@@ -1022,6 +1603,7 @@ def summarize_run(run_directory: Path, maximum_ids: int = 100) -> dict[str, Any]
         and oom_events == 0
         and pss_complete
         and queue_state["gate_passed"]
+        and effect_ledger["gate_passed"]
     )
 
     return {
@@ -1048,7 +1630,8 @@ def summarize_run(run_directory: Path, maximum_ids: int = 100) -> dict[str, Any]
                 "jobs": dict(list(sorted(duplicate_ids.items()))[:maximum_ids]),
                 "truncated": len(duplicate_ids) > maximum_ids,
             },
-            "failed": limited_ids(failures.keys(), maximum_ids) | {"records": failed_records},
+            "failed": limited_ids(failures.keys(), maximum_ids)
+            | {"records": failed_records},
             "unexpected": limited_ids(events["unexpected_job_ids"], maximum_ids),
             "foreign_records": events["foreign"],
             "invalid_records": events["invalid"],
@@ -1058,17 +1641,27 @@ def summarize_run(run_directory: Path, maximum_ids: int = 100) -> dict[str, Any]
             "max_attempt": max_attempt,
             "attempt_records": len(attempts),
             "attempts_valid": attempts_valid,
+            "manifest_validation_errors": events["manifest_validation_errors"],
             "queue_quiescent": queue_state["gate_passed"],
+            "effect_ledger_required": effect_ledger["required"],
+            "effect_ledger_gate_passed": effect_ledger["gate_passed"],
         },
         "queue_state": queue_state,
+        "effect_ledger": effect_ledger,
         "throughput": {
-            "headline_jobs_per_second": duration_rate(len(selected), dispatch_to_complete_ns),
+            "headline_jobs_per_second": duration_rate(
+                len(selected), dispatch_to_complete_ns
+            ),
             "dispatch_to_last_completion_ns": dispatch_to_complete_ns,
             "enqueue_to_last_completion_ns": enqueue_to_complete_ns,
             "completion_span_ns": completion_span_ns,
-            "completion_span_jobs_per_second": duration_rate(max(0, len(selected) - 1), completion_span_ns),
+            "completion_span_jobs_per_second": duration_rate(
+                max(0, len(selected) - 1), completion_span_ns
+            ),
             "dispatch_duration_ns": dispatch_duration_ns,
-            "dispatch_jobs_per_second": duration_rate(expected or 0, dispatch_duration_ns),
+            "dispatch_jobs_per_second": duration_rate(
+                expected or 0, dispatch_duration_ns
+            ),
         },
         "latency": {
             "queue": latency_distribution(queue_latencies),
@@ -1078,7 +1671,11 @@ def summarize_run(run_directory: Path, maximum_ids: int = 100) -> dict[str, Any]
         },
         "resources": {
             "headline_window": headline["window"],
-            "window": {key: headline[key] for key in headline if key.endswith("_ns") or key == "samples"},
+            "window": {
+                key: headline[key]
+                for key in headline
+                if key.endswith("_ns") or key == "samples"
+            },
             "orchestrator": headline["orchestrator"],
             "workers": headline["workers"],
             "app": headline["app"],
@@ -1127,13 +1724,16 @@ def atomic_write(path: Path, content: str) -> None:
 
 
 def json_text(value: Any, pretty: bool = True) -> str:
-    return json.dumps(
-        value,
-        indent=2 if pretty else None,
-        separators=None if pretty else (",", ":"),
-        sort_keys=True,
-        ensure_ascii=True,
-    ) + "\n"
+    return (
+        json.dumps(
+            value,
+            indent=2 if pretty else None,
+            separators=None if pretty else (",", ":"),
+            sort_keys=True,
+            ensure_ascii=True,
+        )
+        + "\n"
+    )
 
 
 def wait_command(args: argparse.Namespace) -> int:
@@ -1148,7 +1748,12 @@ def wait_command(args: argparse.Namespace) -> int:
             manifest = load_object(manifest_path)
         except ValueError:
             if time.monotonic() >= deadline:
-                print(json_text({"complete": False, "reason": "dispatch manifest unavailable"}), end="")
+                print(
+                    json_text(
+                        {"complete": False, "reason": "dispatch manifest unavailable"}
+                    ),
+                    end="",
+                )
                 return 1
             time.sleep(args.poll)
             continue
@@ -1157,7 +1762,11 @@ def wait_command(args: argparse.Namespace) -> int:
             manifest["jobs"] = args.expected
         snapshot = event_snapshot(run_directory, manifest)
         expected = snapshot["expected"]
-        complete = expected is not None and snapshot["expected_completed"] >= expected
+        complete = (
+            expected is not None
+            and not snapshot["manifest_validation_errors"]
+            and snapshot["expected_completed"] >= expected
+        )
         if complete:
             if reached_at is None:
                 reached_at = time.monotonic()
@@ -1167,8 +1776,13 @@ def wait_command(args: argparse.Namespace) -> int:
                     "run_id": manifest.get("run_id"),
                     "expected": expected,
                     "unique_completed": len(snapshot["selected"]),
-                    "duplicates": sum(max(0, len(value) - 1) for value in snapshot["completions"].values()),
-                    "failed_records": sum(len(value) for value in snapshot["failures"].values()),
+                    "duplicates": sum(
+                        max(0, len(value) - 1)
+                        for value in snapshot["completions"].values()
+                    ),
+                    "failed_records": sum(
+                        len(value) for value in snapshot["failures"].values()
+                    ),
                     "malformed_lines": snapshot["raw"].malformed_lines,
                     "partial_lines_ignored": snapshot["raw"].partial_lines,
                 }
@@ -1180,7 +1794,9 @@ def wait_command(args: argparse.Namespace) -> int:
                 "run_id": manifest.get("run_id"),
                 "expected": expected,
                 "unique_completed": len(snapshot["selected"]),
-                "failed_records": sum(len(value) for value in snapshot["failures"].values()),
+                "failed_records": sum(
+                    len(value) for value in snapshot["failures"].values()
+                ),
                 "reason": "timeout",
             }
             print(json_text(payload, pretty=False), end="")
@@ -1202,6 +1818,48 @@ def summarize_command(args: argparse.Namespace) -> int:
     return 0 if summary["correctness"]["correct"] or args.allow_incomplete else 1
 
 
+def ledger_command(args: argparse.Namespace) -> int:
+    try:
+        run_directory = Path(args.run_directory)
+        manifest = load_object(run_directory / "dispatch.json")
+        manifest_jobs = nonnegative_integer(manifest.get("jobs"))
+        if manifest_jobs is None:
+            raise ValueError("dispatch.jobs must be a non-negative integer")
+        if args.expected is not None and manifest_jobs != args.expected:
+            raise ValueError(
+                f"--expected={args.expected} does not match dispatch.jobs={manifest_jobs}"
+            )
+        events = event_snapshot(run_directory, manifest)
+        summary = effect_ledger_summary(
+            run_directory,
+            manifest,
+            events["completions"],
+            events["expected"],
+            args.max_ids,
+            allow_open_attempts=args.allow_open_attempts,
+        )
+    except ValueError as exception:
+        print(f"analyze.py: {exception}", file=sys.stderr)
+        return 2
+
+    selected_gate_passed = (
+        summary["conservation_pass"] is True
+        and summary["attempt_integrity_pass"] is True
+        and summary["idempotent_effect_pass"] is True
+        and (args.allow_retried_executions or summary["strict_execution_pass"] is True)
+    )
+    summary = summary | {
+        "selected_gate_passed": selected_gate_passed,
+        "retried_executions_allowed_by_selected_gate": args.allow_retried_executions,
+    }
+    content = json_text(summary, pretty=not args.compact)
+    if args.output:
+        atomic_write(Path(args.output), content)
+    else:
+        print(content, end="")
+    return 0 if selected_gate_passed else 1
+
+
 def parse_scenario(value: str) -> tuple[str, Path]:
     if "=" in value:
         label, raw_path = value.split("=", 1)
@@ -1209,7 +1867,9 @@ def parse_scenario(value: str) -> tuple[str, Path]:
         raw_path = value
         label = Path(value).name
     if not label or not raw_path:
-        raise argparse.ArgumentTypeError("scenario must be LABEL=RUN_DIRECTORY_OR_SUMMARY")
+        raise argparse.ArgumentTypeError(
+            "scenario must be LABEL=RUN_DIRECTORY_OR_SUMMARY"
+        )
     return label, Path(raw_path)
 
 
@@ -1232,7 +1892,11 @@ def value_at(mapping: Any, *keys: str) -> Any:
 
 
 def finite_number(value: Any) -> float | None:
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    ):
         return float(value)
     return None
 
@@ -1380,7 +2044,9 @@ def report_command(args: argparse.Namespace) -> int:
     scenarios: list[dict[str, Any]] = []
     try:
         for label, path in args.scenario:
-            scenarios.append({"label": label, "summary": scenario_summary(path, args.max_ids)})
+            scenarios.append(
+                {"label": label, "summary": scenario_summary(path, args.max_ids)}
+            )
     except ValueError as exception:
         print(f"analyze.py: {exception}", file=sys.stderr)
         return 2
@@ -1396,7 +2062,9 @@ def report_command(args: argparse.Namespace) -> int:
         summary = scenario["summary"]
         scenario_memory_metric, scenario_memory = orchestrator_memory(summary)
         comparable_memory_metric = (
-            baseline_memory_metric if baseline_memory_metric == scenario_memory_metric else None
+            baseline_memory_metric
+            if baseline_memory_metric == scenario_memory_metric
+            else None
         )
         comparison_eligible = baseline_correct and summary_is_correct(summary)
         comparisons.append(
@@ -1405,28 +2073,54 @@ def report_command(args: argparse.Namespace) -> int:
                 "eligible": comparison_eligible,
                 "throughput_ratio": ratio(
                     value_at(summary, "throughput", "headline_jobs_per_second"),
-                    value_at(baseline_summary, "throughput", "headline_jobs_per_second"),
-                ) if comparison_eligible else None,
+                    value_at(
+                        baseline_summary, "throughput", "headline_jobs_per_second"
+                    ),
+                )
+                if comparison_eligible
+                else None,
                 "end_to_end_p95_ratio": ratio(
                     value_at(summary, "latency", "end_to_end", "p95_ms"),
                     value_at(baseline_summary, "latency", "end_to_end", "p95_ms"),
-                ) if comparison_eligible else None,
+                )
+                if comparison_eligible
+                else None,
                 "orchestrator_cpu_ratio": ratio(
                     value_at(summary, "resources", "orchestrator", "cpu_seconds"),
-                    value_at(baseline_summary, "resources", "orchestrator", "cpu_seconds"),
-                ) if comparison_eligible else None,
-                "orchestrator_peak_memory_ratio": ratio(scenario_memory, baseline_memory)
+                    value_at(
+                        baseline_summary, "resources", "orchestrator", "cpu_seconds"
+                    ),
+                )
+                if comparison_eligible
+                else None,
+                "orchestrator_peak_memory_ratio": ratio(
+                    scenario_memory, baseline_memory
+                )
                 if comparable_memory_metric is not None and comparison_eligible
                 else None,
-                "orchestrator_memory_metric": comparable_memory_metric if comparison_eligible else None,
+                "orchestrator_memory_metric": comparable_memory_metric
+                if comparison_eligible
+                else None,
                 "app_cpu_ratio": ratio(
                     value_at(summary, "resources", "app", "cpu_seconds"),
                     value_at(baseline_summary, "resources", "app", "cpu_seconds"),
-                ) if comparison_eligible else None,
+                )
+                if comparison_eligible
+                else None,
                 "app_peak_memory_ratio": ratio(
-                    value_at(summary, "resources", "app", "memory_current_bytes", "max"),
-                    value_at(baseline_summary, "resources", "app", "memory_current_bytes", "max"),
-                ) if comparison_eligible else None,
+                    value_at(
+                        summary, "resources", "app", "memory_current_bytes", "max"
+                    ),
+                    value_at(
+                        baseline_summary,
+                        "resources",
+                        "app",
+                        "memory_current_bytes",
+                        "max",
+                    ),
+                )
+                if comparison_eligible
+                else None,
             }
         )
     report = {
@@ -1458,7 +2152,9 @@ def argument_parser() -> argparse.ArgumentParser:
     wait.add_argument("--settle", type=nonnegative_float, default=0.2)
     wait.set_defaults(function=wait_command)
 
-    summarize = commands.add_parser("summarize", help="create a machine-readable run summary")
+    summarize = commands.add_parser(
+        "summarize", help="create a machine-readable run summary"
+    )
     summarize.add_argument("run_directory")
     summarize.add_argument("--output")
     summarize.add_argument("--max-ids", type=nonnegative_int, default=100)
@@ -1466,8 +2162,25 @@ def argument_parser() -> argparse.ArgumentParser:
     summarize.add_argument("--allow-incomplete", action="store_true")
     summarize.set_defaults(function=summarize_command)
 
-    report = commands.add_parser("report", help="compare run directories or saved summaries")
-    report.add_argument("scenario", nargs="+", type=parse_scenario, metavar="LABEL=PATH")
+    ledger = commands.add_parser(
+        "ledger",
+        help="verify attempt/effect conservation in a durable fixture ledger",
+    )
+    ledger.add_argument("run_directory")
+    ledger.add_argument("--expected", type=nonnegative_int)
+    ledger.add_argument("--max-ids", type=nonnegative_int, default=100)
+    ledger.add_argument("--allow-open-attempts", action="store_true")
+    ledger.add_argument("--allow-retried-executions", action="store_true")
+    ledger.add_argument("--output")
+    ledger.add_argument("--compact", action="store_true")
+    ledger.set_defaults(function=ledger_command)
+
+    report = commands.add_parser(
+        "report", help="compare run directories or saved summaries"
+    )
+    report.add_argument(
+        "scenario", nargs="+", type=parse_scenario, metavar="LABEL=PATH"
+    )
     report.add_argument("--output", help="Markdown output path")
     report.add_argument("--json-output", help="full machine-readable comparison path")
     report.add_argument("--max-ids", type=nonnegative_int, default=100)

@@ -39,8 +39,7 @@ $oneOf = static function (string $name, string $default, array $allowed): string
     return $value;
 };
 
-$identifier = static function (string $name, string $default, bool $forbidComma = false): string {
-    $value = env($name, $default);
+$validateIdentifier = static function (mixed $value, string $name, bool $forbidComma = false): string {
     if (!is_string($value)
         || preg_match('/^[A-Za-z0-9._:-]{1,128}$/D', $value) !== 1
         || ($forbidComma && str_contains($value, ','))) {
@@ -52,12 +51,60 @@ $identifier = static function (string $name, string $default, bool $forbidComma 
     return $value;
 };
 
+$identifier = static function (string $name, string $default, bool $forbidComma = false) use ($validateIdentifier): string {
+    return $validateIdentifier(env($name, $default), $name, $forbidComma);
+};
+
+$identifierList = static function (string $name, array $default) use ($validateIdentifier): array {
+    $raw = env($name);
+    if ($raw === null || $raw === '') {
+        return $default;
+    }
+    if (!is_string($raw)) {
+        throw new \InvalidArgumentException("{$name} must be a comma-separated queue list.");
+    }
+
+    $values = explode(',', $raw);
+    if (count($values) > 256) {
+        throw new \InvalidArgumentException("{$name} may not contain more than 256 queues.");
+    }
+
+    $resolved = [];
+    $seen = [];
+    foreach ($values as $value) {
+        if ($value === '' || $value !== trim($value)) {
+            throw new \InvalidArgumentException(
+                "{$name} must not contain empty queue names or surrounding whitespace.",
+            );
+        }
+        // Reuse the same strict queue-name grammar as BENCH_QUEUE without
+        // letting a CSV entry smuggle in another separator.
+        $queue = $validateIdentifier($value, $name, true);
+        if (isset($seen['queue:'.$queue])) {
+            throw new \InvalidArgumentException("{$name} contains duplicate queue [{$queue}].");
+        }
+        $seen['queue:'.$queue] = true;
+        $resolved[] = $queue;
+    }
+
+    return $resolved;
+};
+
 $profile = $oneOf('BENCH_PROFILE', 'fixed', ['fixed', 'auto']);
 $workers = $integer('BENCH_WORKERS', 4, 1, 256);
 $minWorkers = $profile === 'fixed' ? $workers : $integer('BENCH_MIN_WORKERS', 1, 1, 256);
 $maxWorkers = $profile === 'fixed' ? $workers : $integer('BENCH_MAX_WORKERS', $workers, 1, 256);
 if ($minWorkers > $maxWorkers) {
     throw new \InvalidArgumentException('BENCH_MIN_WORKERS must not exceed BENCH_MAX_WORKERS.');
+}
+
+$legacyQueue = $identifier('BENCH_QUEUE', 'benchmark', true);
+$queues = $identifierList('BENCH_QUEUES', [$legacyQueue]);
+$queue = $queues[0];
+if (($profile === 'fixed' ? $workers : $maxWorkers) < count($queues)) {
+    throw new \InvalidArgumentException(
+        'The fixed worker count or auto max worker count must cover every BENCH_QUEUES entry.',
+    );
 }
 
 $timeout = $integer('BENCH_TIMEOUT', 120, 1, 86_400);
@@ -72,10 +119,48 @@ if ($queenAckBatch > $queenPrefetch) {
     throw new \InvalidArgumentException('QUEEN_ACK_BATCH must not exceed QUEEN_PREFETCH.');
 }
 
+$resultsDirectory = env('BENCH_RESULTS_DIRECTORY', '/results');
+if (!is_string($resultsDirectory)
+    || !str_starts_with($resultsDirectory, DIRECTORY_SEPARATOR)
+    || rtrim($resultsDirectory, DIRECTORY_SEPARATOR) === ''
+    || preg_match('#(?:^|/)(?:\.|\.\.)(?:/|$)#', $resultsDirectory) === 1
+    || preg_match('/[\x00-\x1F\x7F]/', $resultsDirectory) === 1) {
+    throw new \InvalidArgumentException(
+        'BENCH_RESULTS_DIRECTORY must be an absolute, non-root path without dot segments.',
+    );
+}
+$resultsDirectory = rtrim($resultsDirectory, DIRECTORY_SEPARATOR);
+
+// Laravel's env() helper normalizes the literal string "null" to null. Read
+// this enum from the process environment so Compose can explicitly select the
+// framework's null failed-job driver without turning it into an invalid value.
+$failedDriver = getenv('BENCH_FAILED_DRIVER');
+$failedDriver = $failedDriver === false ? env('BENCH_FAILED_DRIVER', 'null') : $failedDriver;
+// Laravel normalizes the literal `.env` value `null` to PHP null. It still
+// names the framework's null failed-job driver for this strict enum.
+$failedDriver = $failedDriver === null ? 'null' : $failedDriver;
+if (!is_string($failedDriver) || !in_array($failedDriver, ['null', 'file'], true)) {
+    throw new \InvalidArgumentException('BENCH_FAILED_DRIVER must be one of: null, file.');
+}
+$failedPath = env('BENCH_FAILED_PATH', $resultsDirectory.'/failed-jobs.json');
+if (!is_string($failedPath)
+    || !str_starts_with($failedPath, $resultsDirectory.'/')
+    || str_ends_with($failedPath, DIRECTORY_SEPARATOR)
+    || preg_match('#(?:^|/)(?:\.|\.\.)(?:/|$)#', $failedPath) === 1
+    || preg_match('/[\x00-\x1F\x7F]/', $failedPath) === 1) {
+    throw new \InvalidArgumentException(
+        'BENCH_FAILED_PATH must be a file below BENCH_RESULTS_DIRECTORY without dot segments.',
+    );
+}
+
 return [
     'profile' => $profile,
     'connection' => $oneOf('BENCH_CONNECTION', 'redis', ['redis', 'queen']),
-    'queue' => $identifier('BENCH_QUEUE', 'benchmark', true),
+    // BENCH_QUEUE remains the one-queue compatibility input. When
+    // BENCH_QUEUES is present its first entry becomes the default dispatch
+    // queue and the complete list is shared by all three supervisors.
+    'queue' => $queue,
+    'queues' => $queues,
     'consumer_group' => $identifier('BENCH_GROUP', 'benchmark'),
     'workers' => $workers,
     'min_workers' => $minWorkers,
@@ -93,8 +178,15 @@ return [
     'timeout' => $timeout,
     'retry_after' => $retryAfter,
     'worker_memory' => $integer('BENCH_WORKER_MEMORY', 128, 16, 32_768),
-    'results_directory' => (string) env('BENCH_RESULTS_DIRECTORY', '/results'),
+    'results_directory' => $resultsDirectory,
     'dispatch_mode' => $oneOf('BENCH_DISPATCH_MODE', 'single', ['single', 'bulk']),
+    'ledger_mode' => $oneOf('BENCH_LEDGER_MODE', 'off', ['off', 'durable']),
+    // The timed campaigns keep this disabled. GA feature probes opt into a
+    // shared file repository on the results volume and exercise Laravel's
+    // normal queue:failed/retry/forget lifecycle outside performance lanes.
+    'failed_driver' => $failedDriver,
+    'failed_path' => $failedPath,
+    'failed_limit' => $integer('BENCH_FAILED_LIMIT', 1000, 1, 1_000_000),
     'queen_prefetch' => $queenPrefetch,
     'queen_ack_batch' => $queenAckBatch,
     'queen_bulk_batch' => $integer('QUEEN_BULK_BATCH', 100, 1, 1_000),

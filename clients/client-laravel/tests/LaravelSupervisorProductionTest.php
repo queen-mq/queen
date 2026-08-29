@@ -139,6 +139,78 @@ class LaravelSupervisorProductionTest extends TestCase
         $this->assertSame(161, $config['supervisors']['jobs']['retry_after']);
     }
 
+    public function testLeaseRenewalReplacesThePrefetchTimesTimeoutBound(): void
+    {
+        $config = SupervisorConfiguration::resolve([
+            'supervisor' => [
+                'supervisors' => [
+                    'jobs' => ['timeout' => 60, 'retry_after' => 90],
+                ],
+            ],
+        ], '/app', queueConnections: [
+            'queen' => [
+                'driver' => 'queen',
+                'prefetch' => 16,
+                'lease_renewal' => true,
+                'lease_renewal_interval' => 30,
+                'lease_renewal_timeout' => 5,
+            ],
+        ]);
+
+        $this->assertTrue($config['supervisors']['jobs']['lease_renewal']);
+        $this->assertSame(90, $config['supervisors']['jobs']['retry_after']);
+    }
+
+    public function testLeaseRenewalUsesTheDefaultIntervalForNullAndEmptyConfiguration(): void
+    {
+        foreach ([null, ''] as $interval) {
+            $config = SupervisorConfiguration::resolve([
+                'supervisor' => [
+                    'supervisors' => [
+                        'jobs' => ['timeout' => 60, 'retry_after' => 90],
+                    ],
+                ],
+            ], '/app', queueConnections: [
+                'queen' => [
+                    'driver' => 'queen',
+                    'prefetch' => 16,
+                    'lease_renewal' => true,
+                    'lease_renewal_interval' => $interval,
+                ],
+            ]);
+
+            $this->assertTrue($config['supervisors']['jobs']['lease_renewal']);
+            $this->assertSame(90, $config['supervisors']['jobs']['retry_after']);
+        }
+    }
+
+    public function testConfigurationRejectsUnsafeLeaseRenewalTimingAcrossAllBackends(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('lease renewal timing budget');
+
+        SupervisorConfiguration::resolve([
+            'supervisor' => [
+                'supervisors' => [
+                    'jobs' => ['timeout' => 30, 'retry_after' => 90],
+                ],
+            ],
+        ], '/app', queueConnections: [
+            'queen' => [
+                'driver' => 'queen',
+                'prefetch' => 16,
+                'urls' => [
+                    'https://queen-a.test',
+                    'https://queen-b.test',
+                    'https://queen-c.test',
+                ],
+                'lease_renewal' => true,
+                'lease_renewal_interval' => 60,
+                'lease_renewal_timeout' => 5,
+            ],
+        ]);
+    }
+
     public function testConfigurationDerivesASafeShutdownGraceFromTheLargestTimeout(): void
     {
         $config = SupervisorConfiguration::resolve([
@@ -312,6 +384,45 @@ class LaravelSupervisorProductionTest extends TestCase
         }
 
         $this->assertFalse($observer->isOwned());
+    }
+
+    public function testPendingControlCommandCannotBeOverwritten(): void
+    {
+        $directory = $this->temporaryDirectory();
+        $state = new SupervisorState($directory);
+        $state->request('pause', 'instance-a');
+
+        try {
+            $state->request('terminate', 'instance-a');
+            $this->fail('A pending command was overwritten.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('already pending', $exception->getMessage());
+        }
+
+        $pause = $state->command(null, 'instance-a');
+        $this->assertSame('pause', $pause['command']);
+        $state->request('terminate', 'instance-a');
+        $this->assertSame('terminate', $state->command($pause['nonce'], 'instance-a')['command']);
+    }
+
+    public function testControlAndStatusReadersRejectUnsafeOrOversizedFiles(): void
+    {
+        $directory = $this->temporaryDirectory();
+        $state = new SupervisorState($directory);
+        file_put_contents($directory . '/control.json', str_repeat('x', 65537));
+
+        try {
+            $state->command(null);
+            $this->fail('An oversized control document was accepted.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('bounded regular file', $exception->getMessage());
+        }
+
+        unlink($directory . '/control.json');
+        file_put_contents($directory . '/status.json', str_repeat('x', 1048577));
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('bounded regular file');
+        $state->status();
     }
 
     public function testPhpSupervisorBuildsPriorityWorkerWithScopedEnvironment(): void

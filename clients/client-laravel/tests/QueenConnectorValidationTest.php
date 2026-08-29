@@ -5,6 +5,7 @@ namespace Queen\Tests;
 use GuzzleHttp\HandlerStack;
 use InvalidArgumentException;
 use PHPUnit\Framework\TestCase;
+use Queen\Laravel\Queue\LazyLeaseRenewer;
 use Queen\Laravel\Queue\QueenConnector;
 use Queen\Tests\Support\PlanHandler;
 
@@ -60,6 +61,11 @@ class QueenConnectorValidationTest extends TestCase
             [['bulk_batch' => 0], 'Queen Laravel bulk_batch'],
             [['bulk_batch' => 1001], 'Queen Laravel bulk_batch'],
             [['after_commit' => 'false'], 'Queen Laravel after_commit'],
+            [['lease_renewal' => 'true'], 'Queen Laravel lease_renewal'],
+            [['lease_renewal_interval' => 0], 'Queen Laravel lease_renewal_interval'],
+            [['lease_renewal_timeout' => 0], 'Queen Laravel lease_renewal_timeout'],
+            [['lease_renewal_kill_grace' => -1], 'Queen Laravel lease_renewal_kill_grace'],
+            [['lease_renewal_safety_margin' => 0], 'Queen Laravel lease_renewal_safety_margin'],
             [['timeout' => true], 'timeoutMillis'],
             [['enable_failover' => 'false'], 'enableFailover'],
             [['retry_429' => 'invalid'], 'retry429'],
@@ -124,6 +130,60 @@ class QueenConnectorValidationTest extends TestCase
         $this->assertSame('8', $query['batch']);
         $this->assertSame('90', $query['leaseSeconds']);
         $this->assertSame('false', $query['wait']);
+    }
+
+    public function testLeaseRenewalRejectsAnUnsafeDeadlineBudget(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('lease_renewal timing is unsafe');
+
+        (new QueenConnector())->connect(array_replace($this->validConfig(), [
+            'lease_renewal' => true,
+            'retry_after' => 30,
+            'lease_renewal_interval' => 10,
+            'lease_renewal_timeout' => 5,
+            'lease_renewal_kill_grace' => 5,
+            'lease_renewal_safety_margin' => 4,
+        ]));
+    }
+
+    public function testLeaseRenewalRejectsTheInternalMockHandler(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('test HTTP handler');
+
+        (new QueenConnector())->connect(array_replace($this->validConfig(), [
+            'handler' => HandlerStack::create(new PlanHandler()),
+            'lease_renewal' => true,
+            'retry_after' => 120,
+        ]));
+    }
+
+    public function testSafeLeaseRenewalConfigurationBuildsWithoutStartingTheHelper(): void
+    {
+        $queue = (new QueenConnector())->connect(array_replace($this->validConfig(), [
+            'lease_renewal' => true,
+            'retry_after' => 120,
+            'lease_renewal_interval' => 30,
+            'lease_renewal_timeout' => 5,
+        ]));
+
+        $this->assertInstanceOf(\Queen\Laravel\Queue\QueenQueue::class, $queue);
+        $property = new \ReflectionProperty($queue, 'leaseRenewer');
+        $renewer = $property->getValue($queue);
+        $this->assertInstanceOf(LazyLeaseRenewer::class, $renewer);
+        $delegate = new \ReflectionProperty($renewer, 'delegate');
+        $this->assertNull($delegate->getValue($renewer));
+    }
+
+    public function testEmptyOptionalLeaseRenewalIntervalUsesTheRetryAfterDefault(): void
+    {
+        $queue = (new QueenConnector())->connect(array_replace($this->validConfig(), [
+            'lease_renewal' => false,
+            'lease_renewal_interval' => '',
+        ]));
+
+        $this->assertInstanceOf(\Queen\Laravel\Queue\QueenQueue::class, $queue);
     }
 
     private function validConfig(): array

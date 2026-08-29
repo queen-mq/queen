@@ -46,6 +46,43 @@ class SyncedFailedJobProviderTest extends TestCase
         $this->assertNull($inner->find('failed-1'));
     }
 
+    #[\PHPUnit\Framework\Attributes\DataProvider('deleteRouteMismatchResponses')]
+    public function testForgetKeepsTheLaravelRecordForADeleteRouteMismatch(array $response): void
+    {
+        $handler = new PlanHandler([['status' => 404, 'json' => $response]]);
+        $queue = (new QueenConnector())->connect([
+            'url' => 'http://queen.test:6632',
+            'handler' => HandlerStack::create($handler),
+            'retry_attempts' => 1,
+        ]);
+        $inner = new InMemoryFailedJobProvider([$this->record()]);
+        $provider = new SyncedFailedJobProvider($inner, fn (string $connection) => $queue);
+
+        try {
+            $provider->forget('failed-1');
+            $this->fail('A route mismatch must not be mistaken for an absent DLQ snapshot.');
+        } catch (HttpException $exception) {
+            $this->assertSame(404, $exception->statusCode);
+            $this->assertSame($response['code'] ?? null, $exception->errorCode);
+            $this->assertSame($response['error'], $exception->serverError);
+        }
+
+        $this->assertNotNull($inner->find('failed-1'));
+    }
+
+    public static function deleteRouteMismatchResponses(): array
+    {
+        return [
+            'explicit no_such_route' => [[
+                'error' => 'Not Found',
+                'code' => 'no_such_route',
+            ]],
+            'generic router 404' => [[
+                'error' => 'Not Found',
+            ]],
+        ];
+    }
+
     public function testForgetKeepsTheLaravelRecordWhenDlqCleanupIsUnavailable(): void
     {
         $handler = new PlanHandler([], ['status' => 503, 'json' => ['error' => 'unavailable']]);

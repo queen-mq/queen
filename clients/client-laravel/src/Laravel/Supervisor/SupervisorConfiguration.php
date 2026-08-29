@@ -102,14 +102,53 @@ final class SupervisorConfiguration
             if ($prefetch > 1000) {
                 throw new InvalidArgumentException("Queen supervisor [{$name}] connection prefetch may not exceed 1000.");
             }
+            $leaseRenewal = self::boolean(
+                $connectionConfig['lease_renewal'] ?? false,
+                "supervisor [{$name}] connection lease_renewal",
+            );
             // Laravel handles a prefetched buffer serially. All jobs are
             // leased at pop time, so the final job must still be covered after
-            // every earlier job has consumed its full timeout. Express the
-            // comparison without multiplying user-controlled integers.
-            if ($prefetch > intdiv($retryAfter - 1, $timeout)) {
+            // every earlier job has consumed its full timeout. A renewal helper
+            // tracks the shared lease instead and fences the worker before an
+            // unsafe expiry, so only non-renewing connections need this bound.
+            if (!$leaseRenewal && $prefetch > intdiv($retryAfter - 1, $timeout)) {
                 throw new InvalidArgumentException(
                     "Queen supervisor [{$name}] retry_after must be longer than timeout multiplied by connection prefetch [{$prefetch}].",
                 );
+            }
+            if ($leaseRenewal) {
+                $intervalOption = $connectionConfig['lease_renewal_interval'] ?? null;
+                $interval = self::positiveInteger(
+                    $intervalOption === null || $intervalOption === ''
+                        ? max(1, intdiv($retryAfter, 3))
+                        : $intervalOption,
+                    "supervisor [{$name}] connection lease_renewal_interval",
+                );
+                $requestTimeout = self::positiveInteger(
+                    $connectionConfig['lease_renewal_timeout'] ?? 5,
+                    "supervisor [{$name}] connection lease_renewal_timeout",
+                );
+                $killGrace = self::nonNegativeInteger(
+                    $connectionConfig['lease_renewal_kill_grace'] ?? 2,
+                    "supervisor [{$name}] connection lease_renewal_kill_grace",
+                );
+                $safetyMargin = self::positiveInteger(
+                    $connectionConfig['lease_renewal_safety_margin'] ?? 1,
+                    "supervisor [{$name}] connection lease_renewal_safety_margin",
+                );
+                $backendCount = self::connectionBackendCount($connectionConfig);
+                if ($requestTimeout > intdiv(PHP_INT_MAX, $backendCount)) {
+                    throw new InvalidArgumentException("Queen supervisor [{$name}] lease renewal request budget is too large.");
+                }
+                $requestBudget = $requestTimeout * $backendCount;
+                if (!self::sumIsBelow(
+                    [$interval, $requestBudget, $requestBudget, 1, $killGrace, $safetyMargin],
+                    $retryAfter,
+                )) {
+                    throw new InvalidArgumentException(
+                        "Queen supervisor [{$name}] lease renewal timing budget must be shorter than retry_after.",
+                    );
+                }
             }
             $connections[$connection] = self::readConnection($connectionConfig);
 
@@ -140,6 +179,7 @@ final class SupervisorConfiguration
                 'sleep' => self::nonNegativeInteger($options['sleep'] ?? 1, "supervisor [{$name}] sleep"),
                 'timeout' => $timeout,
                 'retry_after' => $retryAfter,
+                'lease_renewal' => $leaseRenewal,
                 'tries' => self::nonNegativeInteger($options['tries'] ?? 3, "supervisor [{$name}] tries"),
                 'memory' => self::positiveInteger($options['memory'] ?? 128, "supervisor [{$name}] memory"),
                 'backoff' => self::nonNegativeInteger($options['backoff'] ?? 0, "supervisor [{$name}] backoff"),
@@ -269,6 +309,30 @@ final class SupervisorConfiguration
             'bearer_token' => $bearerToken,
             'headers' => $headers,
         ];
+    }
+
+    private static function connectionBackendCount(array $connection): int
+    {
+        $urls = $connection['urls'] ?? null;
+        if (is_string($urls)) {
+            $urls = array_filter(array_map('trim', explode(',', $urls)), fn (string $url): bool => $url !== '');
+        }
+
+        return is_array($urls) && $urls !== [] ? count($urls) : 1;
+    }
+
+    /** @param list<int> $values */
+    private static function sumIsBelow(array $values, int $limit): bool
+    {
+        $sum = 0;
+        foreach ($values as $value) {
+            if ($value >= $limit - $sum) {
+                return false;
+            }
+            $sum += $value;
+        }
+
+        return true;
     }
 
     private static function identifier(string $value, string $label): void

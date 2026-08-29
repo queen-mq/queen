@@ -6,6 +6,10 @@ use RuntimeException;
 
 final class SupervisorState
 {
+    private const MAX_STATUS_BYTES = 1048576;
+
+    private const MAX_CONTROL_BYTES = 65536;
+
     private ?string $instanceId = null;
 
     public function __construct(private string $directory)
@@ -37,37 +41,62 @@ final class SupervisorState
         return $this->instanceId ?? throw new RuntimeException('Queen supervisor state lock has not been acquired.');
     }
 
-    public function request(string $command): string
+    public function request(string $command, ?string $expectedInstanceId = null): string
     {
         if (!in_array($command, ['pause', 'continue', 'terminate'], true)) {
             throw new RuntimeException("Unknown Queen supervisor command [{$command}].");
         }
+        if ($expectedInstanceId !== null && (
+            $expectedInstanceId === ''
+            || strlen($expectedInstanceId) > 128
+            || preg_match('/[\x00-\x1F\x7F]/', $expectedInstanceId) === 1
+        )) {
+            throw new RuntimeException('Queen supervisor instance ID is invalid.');
+        }
+
+        if ($expectedInstanceId === null) {
+            $current = $this->status();
+            $candidate = $current['instance_id'] ?? null;
+            $expectedInstanceId = is_string($candidate) && $candidate !== '' ? $candidate : null;
+        }
+
         $nonce = bin2hex(random_bytes(16));
-        $this->writeJson('control.json', [
-            'command' => $command,
-            'nonce' => $nonce,
-            'instance_id' => $this->status()['instance_id'] ?? null,
-            'requested_at' => gmdate(DATE_ATOM),
-        ]);
+        $this->withControlLock(function () use ($command, $nonce, $expectedInstanceId): void {
+            if (@lstat($this->path('control.json')) !== false) {
+                throw new RuntimeException(
+                    'A Queen supervisor command is already pending; wait for it to be consumed.',
+                );
+            }
+            $this->writeJson('control.json', [
+                'command' => $command,
+                'nonce' => $nonce,
+                'instance_id' => $expectedInstanceId,
+                'requested_at' => gmdate(DATE_ATOM),
+            ]);
+        });
         return $nonce;
     }
 
     public function command(?string $lastNonce, ?string $instanceId = null): ?array
     {
-        $control = $this->readJson('control.json');
-        if ($control === null) {
-            return null;
-        }
-        @unlink($this->path('control.json'));
-        if (
-            !is_string($control['nonce'] ?? null)
-            || !in_array($control['command'] ?? null, ['pause', 'continue', 'terminate'], true)
-            || ($control['nonce'] ?? null) === $lastNonce
-            || ($instanceId !== null && ($control['instance_id'] ?? null) !== $instanceId)
-        ) {
-            return null;
-        }
-        return $control;
+        return $this->withControlLock(function () use ($lastNonce, $instanceId): ?array {
+            $control = $this->readJson('control.json');
+            if ($control === null) {
+                return null;
+            }
+            if (!unlink($this->path('control.json'))) {
+                throw new RuntimeException('Unable to consume the Queen supervisor command.');
+            }
+            if (
+                !is_string($control['nonce'] ?? null)
+                || !in_array($control['command'] ?? null, ['pause', 'continue', 'terminate'], true)
+                || ($control['nonce'] ?? null) === $lastNonce
+                || ($instanceId !== null && ($control['instance_id'] ?? null) !== $instanceId)
+            ) {
+                return null;
+            }
+            return $control;
+        });
     }
 
     public function isOwned(): bool
@@ -115,11 +144,45 @@ final class SupervisorState
     private function readJson(string $file): ?array
     {
         $path = $this->path($file);
-        if (!is_file($path)) {
+        $metadata = @lstat($path);
+        if ($metadata === false) {
             return null;
         }
-        $decoded = json_decode((string) file_get_contents($path), true);
+        $maximumBytes = $file === 'control.json' ? self::MAX_CONTROL_BYTES : self::MAX_STATUS_BYTES;
+        if (($metadata['mode'] & 0170000) !== 0100000
+            || $metadata['size'] < 1
+            || $metadata['size'] > $maximumBytes) {
+            throw new RuntimeException("Queen supervisor state [{$path}] must be a bounded regular file.");
+        }
+        $contents = @file_get_contents($path, false, null, 0, $maximumBytes + 1);
+        if (!is_string($contents) || $contents === '' || strlen($contents) > $maximumBytes) {
+            throw new RuntimeException("Unable to read bounded Queen supervisor state [{$path}].");
+        }
+        $decoded = json_decode($contents, true, 32);
         return is_array($decoded) ? $decoded : null;
+    }
+
+    private function withControlLock(\Closure $operation): mixed
+    {
+        $this->ensureDirectory();
+        $path = $this->path('control.lock');
+        if (is_link($path)) {
+            throw new RuntimeException('Queen supervisor control lock must not be a symbolic link.');
+        }
+        $handle = @fopen($path, 'c+b');
+        if ($handle === false || !flock($handle, LOCK_EX)) {
+            if (is_resource($handle)) {
+                fclose($handle);
+            }
+            throw new RuntimeException('Unable to acquire the Queen supervisor control lock.');
+        }
+        @chmod($path, 0600);
+        try {
+            return $operation();
+        } finally {
+            flock($handle, LOCK_UN);
+            fclose($handle);
+        }
     }
 
     private function writeJson(string $file, array $value): void

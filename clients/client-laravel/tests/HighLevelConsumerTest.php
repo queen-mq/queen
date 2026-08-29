@@ -183,7 +183,7 @@ class HighLevelConsumerTest extends TestCase
 
         $queen->expects($this->once())
             ->method('renew')
-            ->with('lease-123')
+            ->with('lease-123', 120)
             ->willReturn(['success' => true, 'leaseId' => 'lease-123']);
 
         $consumer = new HighLevelConsumer($httpClient, $queen, [
@@ -191,7 +191,7 @@ class HighLevelConsumerTest extends TestCase
             'group' => 'g1',
         ]);
 
-        $result = $consumer->renewLease('lease-123');
+        $result = $consumer->renewLease('lease-123', 120);
         $this->assertTrue($result['success']);
     }
 

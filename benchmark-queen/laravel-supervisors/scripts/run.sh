@@ -25,6 +25,8 @@ QUEEN_ACK_BATCH="${QUEEN_ACK_BATCH:-1}"
 QUEEN_BULK_BATCH="${QUEEN_BULK_BATCH:-100}"
 QUEEN_PARTITIONS="${QUEEN_PARTITIONS:-64}"
 QUEEN_POP_FUSION="${QUEEN_POP_FUSION:-0}"
+LEDGER_MODE="${BENCH_LEDGER_MODE:-off}"
+TIMED_QUEUE="benchmark"
 WARMUP_JOBS=50
 SAMPLE_INTERVAL="0.50"
 WAIT_TIMEOUT=300
@@ -38,6 +40,8 @@ TARGET_CLEAR_SECONDS="1.0"
 POST_DRAIN_SECONDS="auto"
 BUILD_IMAGES=1
 INCLUDE_PSS=1
+ALLOW_FOREIGN_CONTAINERS=0
+QUALIFICATION_MODE="auto"
 SMOKE=0
 OUTPUT_ROOT="${BENCH_DIR}/results"
 
@@ -47,6 +51,9 @@ CURRENT_MONITOR=""
 CURRENT_VOLUME=""
 CURRENT_STATS_VOLUME=""
 CURRENT_HOST_RUN=""
+CURRENT_ISOLATION_PID=""
+CURRENT_ISOLATION_STOP=""
+CURRENT_ISOLATION_READY=""
 
 usage() {
     cat <<'EOF'
@@ -71,6 +78,7 @@ Options:
   --queen-bulk-batch N          Jobs per bulk producer call/request (default: 100)
   --queen-partitions N          Queen partitions scanned per pop (default: 64)
   --queen-pop-fusion 0|1        Broker pop-transaction fusion (default: 0)
+  --ledger                      Enable durable attempt/effect auditing; changes the workload
   --warmup-jobs N               Warm-up jobs before each sample (default: 50)
   --sample-interval SECONDS     cgroup/process sampling period (default: 0.50)
   --timeout SECONDS             Completion timeout per run (default: 300)
@@ -82,6 +90,8 @@ Options:
   --target-clear SECONDS        Queen time-strategy clearance target (default: 1.0)
   --no-pss                      Skip proportional-set-size process sampling
   --no-build                    Reuse the two local benchmark images
+  --allow-foreign-containers    Diagnostic only: retain unrelated running containers
+  --qualification MODE         auto|diagnostic|publishable (default: auto)
   --output DIRECTORY            Campaign result parent
   -h, --help                    Show this help
 
@@ -91,6 +101,11 @@ Optimization defaults may also be set with BENCH_DISPATCH_MODE,
 QUEEN_PREFETCH, QUEEN_ACK_BATCH, QUEEN_BULK_BATCH, QUEEN_PARTITIONS,
 QUEEN_POP_FUSION, BENCH_TIMEOUT and BENCH_RETRY_AFTER. Explicit CLI options
 take precedence.
+
+`--qualification publishable` fails closed unless the host is native Linux
+with Docker on cgroup v2. `--allow-foreign-containers` is incompatible with
+that mode and always makes the campaign diagnostic. Publishable campaigns
+must build their images in the same invocation; `--no-build` is rejected.
 EOF
 }
 
@@ -165,6 +180,7 @@ while [ "$#" -gt 0 ]; do
         --queen-bulk-batch) QUEEN_BULK_BATCH="${2:?--queen-bulk-batch requires a value}"; shift 2 ;;
         --queen-partitions) QUEEN_PARTITIONS="${2:?--queen-partitions requires a value}"; shift 2 ;;
         --queen-pop-fusion) QUEEN_POP_FUSION="${2:?--queen-pop-fusion requires a value}"; shift 2 ;;
+        --ledger) LEDGER_MODE="durable"; shift ;;
         --warmup-jobs) WARMUP_JOBS="${2:?--warmup-jobs requires a value}"; shift 2 ;;
         --sample-interval) SAMPLE_INTERVAL="${2:?--sample-interval requires a value}"; shift 2 ;;
         --timeout) WAIT_TIMEOUT="${2:?--timeout requires a value}"; shift 2 ;;
@@ -176,6 +192,8 @@ while [ "$#" -gt 0 ]; do
         --target-clear) TARGET_CLEAR_SECONDS="${2:?--target-clear requires a value}"; shift 2 ;;
         --no-pss) INCLUDE_PSS=0; shift ;;
         --no-build) BUILD_IMAGES=0; shift ;;
+        --allow-foreign-containers) ALLOW_FOREIGN_CONTAINERS=1; shift ;;
+        --qualification) QUALIFICATION_MODE="${2:?--qualification requires a value}"; shift 2 ;;
         --output) OUTPUT_ROOT="${2:?--output requires a value}"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) die "unknown option: $1" ;;
@@ -195,6 +213,10 @@ if [ "$SMOKE" -eq 1 ]; then
     SAMPLE_INTERVAL="0.50"
     WAIT_TIMEOUT=120
     POST_DRAIN_SECONDS=2
+fi
+
+if [ "$QUALIFICATION_MODE" = publishable ] && [ "$BUILD_IMAGES" -eq 0 ]; then
+    die "--qualification publishable cannot be combined with --no-build"
 fi
 
 require_command docker
@@ -236,6 +258,17 @@ require_decimal "--target-clear" "$TARGET_CLEAR_SECONDS"
 [ "$RETRY_AFTER" -gt $(( QUEEN_PREFETCH * WORKER_TIMEOUT )) ] || die "--retry-after must exceed --queen-prefetch multiplied by --worker-timeout"
 case "$DISPATCH_MODE" in single|bulk) ;; *) die "--dispatch-mode must be single or bulk" ;; esac
 case "$SCALING_STRATEGY" in size|time) ;; *) die "--strategy must be size or time" ;; esac
+case "$LEDGER_MODE" in off|durable) ;; *) die "BENCH_LEDGER_MODE must be off or durable" ;; esac
+case "$QUALIFICATION_MODE" in
+    auto|diagnostic|publishable) ;;
+    *) die "--qualification must be auto, diagnostic or publishable" ;;
+esac
+[ "$QUALIFICATION_MODE" != publishable ] || [ "$ALLOW_FOREIGN_CONTAINERS" -eq 0 ] \
+    || die "--qualification publishable cannot be combined with --allow-foreign-containers"
+if [ "$QUALIFICATION_MODE" = publishable ] \
+    && [ -n "$(git -C "$REPOSITORY_ROOT" status --porcelain=v1 --untracked-files=all)" ]; then
+    die "publishable qualification requires a clean Git worktree"
+fi
 if [ "$POST_DRAIN_SECONDS" != "auto" ]; then
     require_uint "--post-drain" "$POST_DRAIN_SECONDS"
 fi
@@ -263,6 +296,23 @@ done
 docker info >/dev/null 2>&1 || die "Docker daemon is unavailable"
 cgroup_version="$(docker info --format '{{.CgroupVersion}}')"
 [ "$cgroup_version" = "2" ] || die "this benchmark requires cgroup v2; Docker reported ${cgroup_version}"
+host_system="$(uname -s)"
+docker_os_type="$(docker info --format '{{.OSType}}')"
+docker_operating_system="$(docker info --format '{{.OperatingSystem}}')"
+docker_desktop=0
+case "$docker_operating_system" in
+    *Docker\ Desktop*) docker_desktop=1 ;;
+esac
+native_linux=0
+if [ "$host_system" = Linux ] \
+    && [ "$docker_os_type" = linux ] \
+    && [ "$cgroup_version" = 2 ] \
+    && [ "$docker_desktop" -eq 0 ]; then
+    native_linux=1
+fi
+if [ "$QUALIFICATION_MODE" = publishable ] && [ "$native_linux" -ne 1 ]; then
+    die "publishable qualification requires native Linux, Docker OSType=linux and cgroup v2; host=${host_system}, Docker=${docker_operating_system}"
+fi
 
 compose_current() {
     docker compose \
@@ -275,6 +325,112 @@ compose_current() {
 
 container_exists() {
     docker container inspect "$1" >/dev/null 2>&1
+}
+
+capture_container_isolation() {
+    isolation_phase="$1"
+    isolation_output="${CURRENT_HOST_RUN}/container-isolation.${isolation_phase}.json"
+    isolation_options=(
+        --phase "$isolation_phase"
+        --project "$CURRENT_PROJECT"
+        --monitor "$CURRENT_MONITOR"
+        --output "$isolation_output"
+        --allowed-service "$CURRENT_ENGINE"
+        --allowed-service producer
+    )
+    if [ "$CURRENT_ENGINE" = horizon ]; then
+        isolation_options+=(--allowed-service redis)
+    else
+        isolation_options+=(--allowed-service broker --allowed-service postgres)
+    fi
+    if [ "$ALLOW_FOREIGN_CONTAINERS" -eq 1 ]; then
+        isolation_options+=(--allow-foreign)
+    fi
+    python3 "${SCRIPT_DIR}/container-isolation.py" "${isolation_options[@]}"
+}
+
+start_continuous_isolation() {
+    local isolation_output
+    local isolation_stderr
+    local deadline
+    local container_id
+    local monitor_id
+    local -a isolation_options
+
+    [ -z "$CURRENT_ISOLATION_PID" ] || die "container isolation watch is already active"
+    isolation_output="${CURRENT_HOST_RUN}/container-isolation.measurement.json"
+    isolation_stderr="${CURRENT_HOST_RUN}/container-isolation.measurement.stderr.log"
+    CURRENT_ISOLATION_STOP="${CURRENT_HOST_RUN}/.container-isolation.stop"
+    CURRENT_ISOLATION_READY="${CURRENT_HOST_RUN}/.container-isolation.ready.json"
+    rm -f "$CURRENT_ISOLATION_STOP" "$CURRENT_ISOLATION_READY"
+    isolation_options=(
+        --phase measurement
+        --project "$CURRENT_PROJECT"
+        --monitor "$CURRENT_MONITOR"
+        --output "$isolation_output"
+        --watch-until "$CURRENT_ISOLATION_STOP"
+        --ready-file "$CURRENT_ISOLATION_READY"
+        --allowed-service "$CURRENT_ENGINE"
+        --allowed-service producer
+    )
+    if [ "$CURRENT_ENGINE" = horizon ]; then
+        isolation_options+=(--allowed-service redis)
+    else
+        isolation_options+=(--allowed-service broker --allowed-service postgres)
+    fi
+    while IFS= read -r container_id; do
+        [ -n "$container_id" ] || continue
+        isolation_options+=(--allowed-container "$container_id")
+    done < <(compose_current ps --quiet)
+    monitor_id="$(docker inspect --format '{{.Id}}' "$CURRENT_MONITOR")"
+    [ -n "$monitor_id" ] || die "unable to resolve sampler container for isolation watch"
+    isolation_options+=(--allowed-container "$monitor_id")
+    if [ "$ALLOW_FOREIGN_CONTAINERS" -eq 1 ]; then
+        isolation_options+=(--allow-foreign)
+    fi
+
+    python3 "${SCRIPT_DIR}/container-isolation.py" "${isolation_options[@]}" \
+        2>"$isolation_stderr" &
+    CURRENT_ISOLATION_PID=$!
+    deadline=$(( $(date +%s) + 15 ))
+    while [ ! -f "$CURRENT_ISOLATION_READY" ]; do
+        if ! kill -0 "$CURRENT_ISOLATION_PID" >/dev/null 2>&1; then
+            wait "$CURRENT_ISOLATION_PID" || true
+            CURRENT_ISOLATION_PID=""
+            rm -f "$CURRENT_ISOLATION_STOP" "$CURRENT_ISOLATION_READY"
+            CURRENT_ISOLATION_STOP=""
+            CURRENT_ISOLATION_READY=""
+            die "container isolation watch exited before becoming ready; inspect ${isolation_stderr}"
+        fi
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            touch "$CURRENT_ISOLATION_STOP"
+            wait "$CURRENT_ISOLATION_PID" || true
+            CURRENT_ISOLATION_PID=""
+            rm -f "$CURRENT_ISOLATION_STOP" "$CURRENT_ISOLATION_READY"
+            CURRENT_ISOLATION_STOP=""
+            CURRENT_ISOLATION_READY=""
+            die "timed out waiting for container isolation watch readiness"
+        fi
+        sleep 0.05
+    done
+    kill -0 "$CURRENT_ISOLATION_PID" >/dev/null 2>&1 \
+        || die "container isolation watch stopped after writing readiness"
+}
+
+stop_continuous_isolation() {
+    local watch_status
+    [ -n "$CURRENT_ISOLATION_PID" ] || return 0
+    touch "$CURRENT_ISOLATION_STOP"
+    if wait "$CURRENT_ISOLATION_PID"; then
+        watch_status=0
+    else
+        watch_status=$?
+    fi
+    rm -f "$CURRENT_ISOLATION_STOP" "$CURRENT_ISOLATION_READY"
+    CURRENT_ISOLATION_PID=""
+    CURRENT_ISOLATION_STOP=""
+    CURRENT_ISOLATION_READY=""
+    return "$watch_status"
 }
 
 capture_lane_diagnostics() {
@@ -292,6 +448,7 @@ capture_lane_diagnostics() {
 }
 
 cleanup_lane() {
+    stop_continuous_isolation >/dev/null 2>&1 || true
     if [ -n "$CURRENT_MONITOR" ] && container_exists "$CURRENT_MONITOR"; then
         docker stop --time 10 "$CURRENT_MONITOR" >/dev/null 2>&1 || true
         docker rm --force "$CURRENT_MONITOR" >/dev/null 2>&1 || true
@@ -379,7 +536,7 @@ wait_for_sampler() {
 }
 
 producer() {
-    compose_current run --rm --no-deps --no-TTY producer "$@"
+    compose_current exec --no-TTY producer "$@"
 }
 
 image_id() {
@@ -427,6 +584,10 @@ export BENCHMARK_RUNS="$RUNS"
 export BENCHMARK_SLEEP_MS="$SLEEP_MS"
 export BENCHMARK_CPU_ITERATIONS="$CPU_ITERATIONS"
 export BENCHMARK_DISPATCH_MODE="$DISPATCH_MODE"
+export BENCHMARK_QUEUE="$TIMED_QUEUE"
+export BENCHMARK_QUEUES=""
+export BENCHMARK_FAILED_DRIVER="null"
+export BENCHMARK_LEASE_RENEWAL="false"
 export BENCHMARK_QUEEN_PREFETCH="$QUEEN_PREFETCH"
 export BENCHMARK_QUEEN_ACK_BATCH="$QUEEN_ACK_BATCH"
 export BENCHMARK_QUEEN_BULK_BATCH="$QUEEN_BULK_BATCH"
@@ -444,6 +605,12 @@ export BENCHMARK_BALANCE_COOLDOWN="$BALANCE_COOLDOWN"
 export BENCHMARK_BALANCE_MAX_SHIFT="$BALANCE_MAX_SHIFT"
 export BENCHMARK_TARGET_JOBS="$TARGET_JOBS_PER_PROCESS"
 export BENCHMARK_TARGET_CLEAR="$TARGET_CLEAR_SECONDS"
+export BENCHMARK_LEDGER_MODE="$LEDGER_MODE"
+export BENCHMARK_ALLOW_FOREIGN_CONTAINERS="$ALLOW_FOREIGN_CONTAINERS"
+export BENCHMARK_QUALIFICATION_MODE="$QUALIFICATION_MODE"
+export BENCHMARK_NATIVE_LINUX="$native_linux"
+export BENCHMARK_DOCKER_DESKTOP="$docker_desktop"
+export BENCHMARK_HOST_SYSTEM="$host_system"
 export QUEEN_PREFETCH
 export QUEEN_ACK_BATCH
 export QUEEN_BULK_BATCH
@@ -451,6 +618,14 @@ export QUEEN_PARTITIONS
 export QUEEN_POP_FUSION
 export BENCH_TIMEOUT="$WORKER_TIMEOUT"
 export BENCH_RETRY_AFTER="$RETRY_AFTER"
+export BENCH_LEDGER_MODE="$LEDGER_MODE"
+# Timed lanes are deliberately single-queue and exclude failure persistence
+# and the lease-renewal helper. Reassert these values instead of inheriting a
+# feature-parity or reliability-probe environment from the invoking shell.
+export BENCH_QUEUE="$TIMED_QUEUE"
+export BENCH_QUEUES=''
+export BENCH_FAILED_DRIVER='null'
+export BENCH_LEASE_RENEWAL='false'
 
 python3 - <<'PY'
 import datetime as dt
@@ -476,6 +651,9 @@ settings = {
     "sleep_ms": int(os.environ["BENCHMARK_SLEEP_MS"]),
     "cpu_iterations": int(os.environ["BENCHMARK_CPU_ITERATIONS"]),
     "dispatch_mode": os.environ["BENCHMARK_DISPATCH_MODE"],
+    "queues": [os.environ["BENCHMARK_QUEUE"]],
+    "failed_driver": os.environ["BENCHMARK_FAILED_DRIVER"],
+    "lease_renewal": os.environ["BENCHMARK_LEASE_RENEWAL"] == "true",
     "queen_prefetch": int(os.environ["BENCHMARK_QUEEN_PREFETCH"]),
     "queen_ack_batch": int(os.environ["BENCHMARK_QUEEN_ACK_BATCH"]),
     "queen_bulk_batch": int(os.environ["BENCHMARK_QUEEN_BULK_BATCH"]),
@@ -506,7 +684,20 @@ settings = {
     "balance_max_shift": int(os.environ["BENCHMARK_BALANCE_MAX_SHIFT"]),
     "target_jobs_per_process": int(os.environ["BENCHMARK_TARGET_JOBS"]),
     "target_clear_seconds": float(os.environ["BENCHMARK_TARGET_CLEAR"]),
+    "ledger_mode": os.environ["BENCHMARK_LEDGER_MODE"],
+    "allow_foreign_containers": os.environ["BENCHMARK_ALLOW_FOREIGN_CONTAINERS"] == "1",
 }
+native_linux = os.environ["BENCHMARK_NATIVE_LINUX"] == "1"
+qualification_mode = os.environ["BENCHMARK_QUALIFICATION_MODE"]
+allow_foreign = settings["allow_foreign_containers"]
+if allow_foreign:
+    qualification = "diagnostic"
+elif qualification_mode == "publishable":
+    qualification = "publishable_candidate"
+elif native_linux:
+    qualification = "diagnostic_native"
+else:
+    qualification = "diagnostic"
 metadata = {
     "schema": "queen.laravel-supervisors.campaign/v1",
     "campaign_id": os.environ["CAMPAIGN_ID"],
@@ -521,6 +712,16 @@ metadata = {
         "machine": platform.machine(),
         "python": platform.python_version(),
     },
+    "host_qualification": {
+        "requested": qualification_mode,
+        "host_system": os.environ["BENCHMARK_HOST_SYSTEM"],
+        "native_linux": native_linux,
+        "cgroup_v2": docker_info.get("CgroupVersion") == "2",
+        "docker_desktop": os.environ["BENCHMARK_DOCKER_DESKTOP"] == "1",
+        "publishable_host_eligible": native_linux and not allow_foreign,
+        "foreign_container_override": allow_foreign,
+        "decision": qualification,
+    },
     "docker": {
         key: docker_info.get(key)
         for key in (
@@ -534,7 +735,7 @@ metadata = {
             if any(name.startswith("queen-") for name in settings["engines"]) else None,
     },
     "settings": settings,
-    "qualification": "diagnostic" if docker_info.get("OperatingSystem") == "Docker Desktop" else "candidate",
+    "qualification": qualification,
 }
 path = Path(os.environ["CAMPAIGN_DIRECTORY"]) / "metadata.json"
 path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -560,9 +761,14 @@ run_lane() {
     CURRENT_HOST_RUN="${campaign_dir}/${engine}/${profile}/${repetition_label}"
     mkdir -p "$CURRENT_HOST_RUN"
 
+    # No unrelated running container may share the Docker daemon with a timed
+    # lane. The explicit override preserves evidence but makes the campaign
+    # diagnostic in metadata.
+    capture_container_isolation lane-start
+
     export BENCH_RESULTS_VOLUME="$CURRENT_VOLUME"
     export BENCH_PROFILE="$profile"
-    export BENCH_QUEUE="benchmark"
+    export BENCH_QUEUE="$TIMED_QUEUE"
     export BENCH_GROUP="benchmark"
     export BENCH_WORKERS="$WORKERS"
     export BENCH_MIN_WORKERS="$MIN_WORKERS"
@@ -573,6 +779,11 @@ run_lane() {
     export BENCH_TARGET_JOBS_PER_PROCESS="$TARGET_JOBS_PER_PROCESS"
     export BENCH_TARGET_CLEAR_SECONDS="$TARGET_CLEAR_SECONDS"
     export BENCH_DISPATCH_MODE="$DISPATCH_MODE"
+    # A timed lane must not inherit feature-probe toggles, even if a caller
+    # mutates its environment between repetitions.
+    export BENCH_QUEUES=''
+    export BENCH_FAILED_DRIVER='null'
+    export BENCH_LEASE_RENEWAL='false'
     if [ "$engine" = "horizon" ]; then
         export BENCH_CONNECTION="redis"
     else
@@ -597,12 +808,12 @@ run_lane() {
         --mount "type=volume,src=${CURRENT_STATS_VOLUME},dst=/stats" \
         "$APP_IMAGE" sh -ceu 'chown 1000:1000 /stats; chmod 0700 /stats'
 
-    producer php artisan bench:config --no-ansi >"${CURRENT_HOST_RUN}/configuration.json"
     compose_current config >"${CURRENT_HOST_RUN}/compose-resolved.yml"
-    compose_current up --detach --no-build "$engine"
+    compose_current up --detach --no-build "$engine" producer
 
     app_id="$(compose_current ps --quiet "$engine")"
     [ -n "$app_id" ] || die "unable to resolve $engine container"
+    producer php artisan bench:config --no-ansi >"${CURRENT_HOST_RUN}/configuration.json"
     app_pid="$(docker inspect --format '{{.State.Pid}}' "$app_id")"
     [ "$app_pid" -gt 0 ] || die "$engine has no host PID"
 
@@ -672,6 +883,11 @@ run_lane() {
         fi
     fi
 
+    # Snapshot again immediately before the measured dispatch. Compose lane
+    # containers and the named sampler are the only permitted workloads.
+    capture_container_isolation pre-dispatch
+    start_continuous_isolation
+
     producer php artisan bench:dispatch --no-ansi \
         --run-id="$run_id" \
         --jobs="$JOBS" \
@@ -705,6 +921,11 @@ run_lane() {
     # turn the observer itself into a backend CPU result.
     docker stop --time 10 "$CURRENT_MONITOR" >/dev/null
     CURRENT_MONITOR=""
+    if stop_continuous_isolation; then
+        isolation_watch_status=0
+    else
+        isolation_watch_status=$?
+    fi
 
     # A completion record is written before Laravel deletes/acknowledges the
     # job. Require the backend to remain empty for one second so a lane cannot
@@ -732,6 +953,11 @@ run_lane() {
     quiescence_status=$?
     set -e
 
+    if [ "$LEDGER_MODE" = durable ]; then
+        producer php artisan bench:ledger-checkpoint --no-ansi "$run_id" \
+            >"${CURRENT_HOST_RUN}/ledger-checkpoint.json"
+    fi
+
     docker run --rm --user 0:0 \
         --mount "type=volume,src=${CURRENT_STATS_VOLUME},dst=/from,readonly" \
         --mount "type=bind,src=${CURRENT_HOST_RUN},dst=/to" \
@@ -742,6 +968,10 @@ run_lane() {
         --mount "type=volume,src=${CURRENT_VOLUME},dst=/from,readonly" \
         --mount "type=bind,src=${CURRENT_HOST_RUN},dst=/to" \
         "$APP_IMAGE" sh -ceu 'cp -a "/from/$1/." /to/' sh "$run_id"
+
+    # Detect a workload that appeared while the lane was running. This is
+    # outside resource sampling, but still a validity gate for the sample.
+    capture_container_isolation post-measurement
 
     set +e
     python3 "${SCRIPT_DIR}/analyze.py" summarize "$CURRENT_HOST_RUN" \
@@ -760,6 +990,9 @@ run_lane() {
     fi
     if [ "$analysis_status" -ne 0 ]; then
         die "$run_id failed analysis; inspect ${completed_host_run}/summary.json"
+    fi
+    if [ "$isolation_watch_status" -ne 0 ]; then
+        die "$run_id overlapped foreign container activity or lost its Docker event watch; inspect ${completed_host_run}/container-isolation.measurement.json"
     fi
 }
 

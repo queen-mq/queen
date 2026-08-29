@@ -8,8 +8,11 @@ use Queen\Queen;
 
 class QueenConnector implements ConnectorInterface
 {
-    public function __construct(private array $defaults = [])
-    {
+    /** @param (\Closure(string, \Closure(): mixed): mixed)|null $failedJobRetryHandler */
+    public function __construct(
+        private array $defaults = [],
+        private ?\Closure $failedJobRetryHandler = null,
+    ) {
     }
 
     public function connect(array $config): QueenQueue
@@ -54,6 +57,34 @@ class QueenConnector implements ConnectorInterface
         $ackBatch = self::boundedInteger($config['ack_batch'] ?? 1, 'ack_batch', 1, $prefetch);
         $bulkBatch = self::boundedInteger($config['bulk_batch'] ?? 100, 'bulk_batch', 1, 1000);
         $dispatchAfterCommit = self::boolean($config['after_commit'] ?? false, 'after_commit');
+        $leaseRenewal = self::boolean($config['lease_renewal'] ?? false, 'lease_renewal');
+        $leaseRenewalIntervalOption = $config['lease_renewal_interval'] ?? null;
+        $leaseRenewalInterval = self::boundedInteger(
+            $leaseRenewalIntervalOption === null || $leaseRenewalIntervalOption === ''
+                ? max(1, intdiv($retryAfter, 3))
+                : $leaseRenewalIntervalOption,
+            'lease_renewal_interval',
+            1,
+            PHP_INT_MAX,
+        );
+        $leaseRenewalTimeout = self::boundedInteger(
+            $config['lease_renewal_timeout'] ?? 5,
+            'lease_renewal_timeout',
+            1,
+            PHP_INT_MAX,
+        );
+        $leaseRenewalKillGrace = self::boundedInteger(
+            $config['lease_renewal_kill_grace'] ?? 2,
+            'lease_renewal_kill_grace',
+            0,
+            PHP_INT_MAX,
+        );
+        $leaseRenewalSafetyMargin = self::boundedInteger(
+            $config['lease_renewal_safety_margin'] ?? 1,
+            'lease_renewal_safety_margin',
+            1,
+            PHP_INT_MAX,
+        );
 
         $urls = $config['urls'] ?? null;
         if (is_string($urls)) {
@@ -89,6 +120,50 @@ class QueenConnector implements ConnectorInterface
             $clientConfig['handler'] = $config['handler'];
         }
 
+        $leaseRenewer = null;
+        if ($leaseRenewal) {
+            if (array_key_exists('handler', $clientConfig)) {
+                throw new InvalidArgumentException(
+                    'Queen Laravel lease_renewal cannot use the internal test HTTP handler override.',
+                );
+            }
+
+            $backendCount = is_array($urls) && $urls !== [] ? count($urls) : 1;
+            if ($leaseRenewalTimeout > intdiv(PHP_INT_MAX, $backendCount)) {
+                throw new InvalidArgumentException('Queen Laravel lease renewal request budget is too large.');
+            }
+            $requestBudget = $leaseRenewalTimeout * $backendCount;
+            // One scheduled attempt plus one bounded retry must fit before a
+            // TERM/KILL fence and the previous lease's safety margin.
+            if (!self::sumIsBelow(
+                [
+                    $leaseRenewalInterval,
+                    $requestBudget,
+                    $requestBudget,
+                    1,
+                    $leaseRenewalKillGrace,
+                    $leaseRenewalSafetyMargin,
+                ],
+                $retryAfter,
+            )) {
+                throw new InvalidArgumentException(
+                    'Queen Laravel lease_renewal timing is unsafe: interval + two request budgets + retry + kill grace + safety margin must be shorter than retry_after.',
+                );
+            }
+
+            $leaseRenewer = new LazyLeaseRenewer(
+                static fn (): LeaseRenewer => new ProcessLeaseRenewer(
+                    $clientConfig,
+                    $retryAfter,
+                    $leaseRenewalInterval,
+                    $leaseRenewalTimeout,
+                    $requestBudget,
+                    $leaseRenewalKillGrace,
+                    $leaseRenewalSafetyMargin,
+                ),
+            );
+        }
+
         return new QueenQueue(
             new Queen($clientConfig),
             defaultQueue: $defaultQueue,
@@ -102,6 +177,8 @@ class QueenConnector implements ConnectorInterface
             prefetch: $prefetch,
             ackBatch: $ackBatch,
             bulkBatch: $bulkBatch,
+            leaseRenewer: $leaseRenewer,
+            failedJobRetryHandler: $this->failedJobRetryHandler,
         );
     }
 
@@ -154,5 +231,19 @@ class QueenConnector implements ConnectorInterface
         }
 
         return $value;
+    }
+
+    /** @param list<int> $values */
+    private static function sumIsBelow(array $values, int $limit): bool
+    {
+        $sum = 0;
+        foreach ($values as $value) {
+            if ($value >= $limit - $sum) {
+                return false;
+            }
+            $sum += $value;
+        }
+
+        return true;
     }
 }

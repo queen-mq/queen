@@ -21,6 +21,8 @@
         "ext-json": "*",
         "ext-mbstring": "*",
         "ext-pcntl": "*",
+        "ext-pdo": "*",
+        "ext-pdo_sqlite": "*",
         "ext-posix": "*",
         "ext-redis": "*",
         "laravel/framework": "12.68.0",

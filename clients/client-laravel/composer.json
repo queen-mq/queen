@@ -33,7 +33,9 @@
         "illuminate/support": "Required for Laravel service-provider and facade integration",
         "illuminate/console": "Required by the Laravel Artisan commands",
         "symfony/process": "Required by the PHP worker supervisor",
-        "ext-pcntl": "Required by the PHP worker supervisor on Unix"
+        "ext-pcntl": "Required by both supervisors and the native Composer launcher on Unix",
+        "ext-phar": "Required by queen:supervisor-install to inspect the native release archive",
+        "ext-posix": "Required by Laravel lease-renewal worker fencing on Unix"
     },
     "autoload": {
         "psr-4": {
@@ -45,6 +47,9 @@
             "Queen\\Tests\\": "tests/"
         }
     },
+    "bin": [
+        "bin/queen-supervisor"
+    ],
     "extra": {
         "laravel": {
             "providers": [

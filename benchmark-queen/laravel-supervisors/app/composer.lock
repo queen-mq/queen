@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "0ede88fdb702674c1de4dea706b2d4c8",
+    "content-hash": "57bd79b74a044273f12a77b8a14eed10",
     "packages": [
         {
             "name": "brick/math",
@@ -3239,7 +3239,7 @@
             "dist": {
                 "type": "path",
                 "url": "../../../clients/client-laravel",
-                "reference": "78a6bc63592e317e6febfcf6e42c374137d308d1"
+                "reference": "2b2317cd31a50daa56cfc8c1cfc06d2ca776545c"
             },
             "require": {
                 "guzzlehttp/guzzle": "^7.0",
@@ -3252,6 +3252,7 @@
             },
             "suggest": {
                 "ext-pcntl": "Required by the PHP worker supervisor on Unix",
+                "ext-posix": "Required by Laravel lease-renewal worker fencing on Unix",
                 "illuminate/console": "Required by the Laravel Artisan commands",
                 "illuminate/queue": "Required to use Queen as a Laravel queue connection",
                 "illuminate/support": "Required for Laravel service-provider and facade integration",
@@ -6039,6 +6040,8 @@
         "ext-json": "*",
         "ext-mbstring": "*",
         "ext-pcntl": "*",
+        "ext-pdo": "*",
+        "ext-pdo_sqlite": "*",
         "ext-posix": "*",
         "ext-redis": "*"
     },

@@ -91,6 +91,24 @@ jobs:
         run: composer audit --locked --no-interaction
       - name: PHPUnit unit suite
         run: vendor/bin/phpunit --testsuite Unit
+      - name: Supervisor release/installer contract
+        if: matrix.php-version == '8.3'
+        working-directory: ${{ github.workspace }}
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("supervisor/Cargo.toml", "rb"))["package"]["version"])')
+          python3 supervisor/scripts/verify_release_version.py --tag "supervisor/v$version"
+          release_test=$(mktemp -d)
+          for platform in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
+            touch "$release_test/queen-supervisor-$version-$platform.tar.gz"
+          done
+          python3 supervisor/scripts/build_release_manifest.py \
+            --version "$version" \
+            --repository queen-mq/queen \
+            --dist "$release_test" \
+            --output "$release_test/queen-supervisor-manifest.json"
+          php supervisor/scripts/verify_client_manifest.php \
+            "$release_test/queen-supervisor-manifest.json"
+          python3 -m unittest discover -s supervisor/scripts/tests -v
 
   # Broker tests that do not require the live PostgreSQL stack. Native for fast
   # caching; live integration cases remain in the Docker-backed matrix above.

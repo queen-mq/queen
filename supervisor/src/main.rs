@@ -105,6 +105,12 @@ struct SupervisorConfig {
     balance_max_shift: usize,
     #[serde(default = "default_retry_after")]
     retry_after: u64,
+    // Laravel validates the renewal timing budget before exporting this
+    // contract. The Rust supervisor does not renew leases itself, but it must
+    // accept and preserve compatibility with the resolved v2 supervisor
+    // document consumed by both engines.
+    #[serde(default, rename = "lease_renewal")]
+    _lease_renewal: bool,
     #[serde(default = "default_scale_down_delay")]
     scale_down_delay: u64,
     #[serde(default = "default_restart_backoff")]
@@ -2010,6 +2016,7 @@ mod tests {
             balance_cooldown: 3,
             balance_max_shift: 1,
             retry_after: 90,
+            _lease_renewal: false,
             scale_down_delay: 10,
             restart_backoff: 1,
             restart_backoff_max: 8,
@@ -2482,6 +2489,7 @@ mod tests {
                     "default_runtime_seconds": 1.0,
                     "balance_cooldown": 3,
                     "balance_max_shift": 1,
+                    "lease_renewal": true,
                     "sleep": 1,
                     "timeout": 60,
                     "tries": 3,
@@ -2498,6 +2506,7 @@ mod tests {
         let config: Config = serde_json::from_value(document).unwrap();
         let supervisor = &config.supervisors["default"];
         assert_eq!(supervisor.retry_after, 90);
+        assert!(supervisor._lease_renewal);
         assert_eq!(supervisor.scale_down_delay, 10);
         assert_eq!(supervisor.restart_backoff, 1);
         assert_eq!(supervisor.restart_backoff_max, 30);

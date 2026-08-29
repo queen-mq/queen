@@ -166,6 +166,11 @@ For the PHP engine, replace `ExecStart` with
 Both engines currently target Unix. Laravel workers require PHP `pcntl` for
 pause, continue and graceful signal handling. The Rust engine also creates a
 process group per worker so a forced shutdown cannot leave descendants behind.
+If `queen-supervisor` is the container entrypoint, use a real init process
+(Docker `--init`, Compose `init: true`, tini or an equivalent reaper). This is
+required when lease renewal is enabled because its helper deliberately leaves
+the worker group during graceful drain and may be orphaned briefly after a
+forced kill.
 
 ## Secrets and state
 
@@ -202,7 +207,36 @@ cd /srv/app
 /path/to/queen/supervisor/target/release/queen-supervisor --php php --artisan artisan
 ```
 
-Tags named `supervisor/vX.Y.Z` publish static Linux `amd64` and `arm64`
-tarballs plus SHA-256 files. The release workflow refuses a tag whose version
-does not match `supervisor/Cargo.toml` and smoke-tests `--version` and `--help`
-before publishing.
+The native crate intentionally lives at repository root under `supervisor/`:
+it has a Rust toolchain, lockfile and release lifecycle independent from
+Composer, and is not PHP-autoloadable source. Distribution is nevertheless
+coordinated with the Laravel package. Composer installs the launcher and
+`queen:supervisor-install`; that installer selects a native binary from the
+manifest for the exact `SupervisorBinary::VERSION`. CI refuses a release unless
+that version, the tag, `Cargo.toml` and `Cargo.lock` all agree.
+
+Tags named `supervisor/vX.Y.Z` publish these precompiled archives:
+
+| Operating system | amd64 / x86-64 | arm64 / Apple Silicon |
+| --- | --- | --- |
+| Linux | `x86_64-unknown-linux-musl` | `aarch64-unknown-linux-musl` |
+| macOS | `x86_64-apple-darwin` | `aarch64-apple-darwin` |
+| Windows | Not supported | Not supported |
+
+Windows is deliberately absent rather than redirected to an incompatible
+archive: the current implementation depends on Unix signals, advisory locks,
+file ownership/modes and process groups. It needs native Windows process and
+locking backends before a Windows asset can be published safely.
+
+Each release includes `queen-supervisor-manifest.json`, a canonical JSON v1
+document containing the version, target, HTTPS URL and SHA-256 digest of every
+archive. It has no generated timestamp, so identical inputs produce identical
+bytes suitable for detached signatures. The workflow signs it keylessly with
+Sigstore (`queen-supervisor-manifest.sigstore.json`), publishes a SHA-256
+sidecar, and records GitHub build-provenance attestations for both the manifest
+and every archive. Archives normalize entry order, permissions, ownership,
+timestamps and gzip headers and are packaged twice with a byte comparison
+before publication. Every native binary is also built twice from a clean target
+directory and compared byte for byte. The Rust toolchain, Linux build image and
+Alpine build dependency are pinned; the macOS deployment target and linker
+reproducibility flags are fixed; all Cargo dependencies remain locked.

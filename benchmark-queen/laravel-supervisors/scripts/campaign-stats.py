@@ -34,6 +34,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 REPORT_SCHEMA = "queen.laravel-supervisors.campaign-stats/v1"
 CAMPAIGN_SCHEMA = "queen.laravel-supervisors.campaign/v1"
 SUMMARY_SCHEMA = "queen.laravel-supervisors.summary/v1"
+CONTAINER_ISOLATION_SCHEMA = "queen.laravel-supervisors.container-isolation/v1"
 DEFAULT_BASELINE = "horizon"
 DEFAULT_SEED = 20260829
 DEFAULT_RESAMPLES = 10_000
@@ -183,6 +184,7 @@ METRIC_BY_NAME = {metric.name: metric for metric in METRICS}
 BENCHMARK_KEY_FIELDS: tuple[str, ...] = (
     "profile",
     "queue",
+    "queues",
     "consumer_group",
     "workers",
     "min_workers",
@@ -201,6 +203,8 @@ BENCHMARK_KEY_FIELDS: tuple[str, ...] = (
     "retry_after",
     "worker_memory",
     "dispatch_mode",
+    "ledger_mode",
+    "failed_driver",
     "queen_prefetch",
     "queen_ack_batch",
     "queen_bulk_batch",
@@ -219,6 +223,7 @@ QUEEN_CONNECTION_KEY_FIELDS: tuple[str, ...] = (
     "retry_429",
     "partition_prefix",
     "after_commit",
+    "lease_renewal",
 )
 
 METADATA_SETTING_FIELDS: tuple[str, ...] = (
@@ -232,6 +237,10 @@ METADATA_SETTING_FIELDS: tuple[str, ...] = (
     "sleep_ms",
     "cpu_iterations",
     "dispatch_mode",
+    "ledger_mode",
+    "queues",
+    "failed_driver",
+    "lease_renewal",
     "queen_prefetch",
     "queen_ack_batch",
     "queen_bulk_batch",
@@ -553,6 +562,67 @@ def validate_summary(summary: Mapping[str, Any] | None) -> tuple[bool, list[str]
     return not errors, errors, warnings
 
 
+def validate_container_isolation(
+    artifact: Mapping[str, Any] | None,
+) -> tuple[bool, list[str]]:
+    errors: list[str] = []
+    if artifact is None:
+        return False, ["continuous container-isolation artifact is unavailable"]
+    if artifact.get("schema") != CONTAINER_ISOLATION_SCHEMA:
+        errors.append(
+            f"container isolation schema must be {CONTAINER_ISOLATION_SCHEMA}"
+        )
+    if artifact.get("mode") != "continuous_start_event_watch":
+        errors.append("container isolation mode is not continuous_start_event_watch")
+    if artifact.get("active") is not False:
+        errors.append("container isolation watch did not record a final state")
+    if artifact.get("ownership_mode") != "exact_container_ids":
+        errors.append("container isolation watch did not freeze exact container IDs")
+    allowed_ids = artifact.get("allowed_container_ids")
+    if (
+        not isinstance(allowed_ids, list)
+        or not allowed_ids
+        or any(not isinstance(item, str) or not item for item in allowed_ids)
+    ):
+        errors.append("container isolation allowed_container_ids is not a non-empty list")
+    watch_errors = artifact.get("errors")
+    if not isinstance(watch_errors, list) or any(
+        not isinstance(item, str) for item in watch_errors
+    ):
+        errors.append("container isolation errors is not a string list")
+    elif watch_errors:
+        errors.append("container isolation watch reported errors")
+    start_events = artifact.get("start_events")
+    if not isinstance(start_events, Mapping):
+        errors.append("container isolation start_events is missing")
+    else:
+        if nonnegative_integer(start_events.get("invalid_count")) != 0:
+            errors.append("container isolation start_events contains invalid records")
+        for field in ("record_count", "foreign_count"):
+            if nonnegative_integer(start_events.get(field)) is None:
+                errors.append(f"container isolation start_events.{field} is invalid")
+    for phase in ("initial_inventory", "final_inventory"):
+        inventory = artifact.get(phase)
+        if not isinstance(inventory, Mapping) or inventory.get("gate_passed") is not True:
+            errors.append(f"container isolation {phase} gate did not pass")
+    foreign_detected = artifact.get("foreign_detected")
+    restart_detected = artifact.get("restart_detected")
+    override_requested = artifact.get("override_requested")
+    if not isinstance(foreign_detected, bool):
+        errors.append("container isolation foreign_detected is not boolean")
+    if not isinstance(override_requested, bool):
+        errors.append("container isolation override_requested is not boolean")
+    if restart_detected is not False:
+        errors.append("container isolation restart_detected is not false")
+    if artifact.get("event_integrity_valid") is not True:
+        errors.append("container isolation event_integrity_valid is not true")
+    if foreign_detected is True and override_requested is not True:
+        errors.append("foreign container activity was not covered by a diagnostic override")
+    if artifact.get("gate_passed") is not True:
+        errors.append("container isolation gate_passed is not true")
+    return not errors, errors
+
+
 def expected_cells(metadata: Mapping[str, Any] | None) -> set[tuple[str, str, str]]:
     settings = value_at(metadata, "settings")
     if not isinstance(settings, Mapping):
@@ -673,6 +743,7 @@ def build_comparison_keys(
             "cpu_iterations",
             "dispatch_mode",
             "dispatch_batch_size",
+            "ledger_mode",
         ),
         "summary.manifest",
         errors,
@@ -726,6 +797,31 @@ def build_comparison_keys(
             "dispatch_mode",
             value_at(manifest, "dispatch_mode"),
             value_at(metadata, "settings", "dispatch_mode"),
+        ),
+        (
+            "manifest ledger_mode",
+            value_at(manifest, "ledger_mode"),
+            value_at(metadata, "settings", "ledger_mode"),
+        ),
+        (
+            "benchmark ledger_mode",
+            value_at(benchmark, "ledger_mode"),
+            value_at(metadata, "settings", "ledger_mode"),
+        ),
+        (
+            "queues",
+            value_at(benchmark, "queues"),
+            value_at(metadata, "settings", "queues"),
+        ),
+        (
+            "failed_driver",
+            value_at(benchmark, "failed_driver"),
+            value_at(metadata, "settings", "failed_driver"),
+        ),
+        (
+            "lease_renewal",
+            value_at(configuration, "queen_connection", "lease_renewal"),
+            value_at(metadata, "settings", "lease_renewal"),
         ),
         ("workers", value_at(benchmark, "workers"), value_at(metadata, "settings", "workers")),
         (
@@ -816,9 +912,18 @@ def collect_run(
     run_directory = campaign / engine / profile / repetition
     summary, summary_error = read_json_object(run_directory / "summary.json")
     configuration, configuration_error = read_json_object(run_directory / "configuration.json")
+    isolation, isolation_error = read_json_object(
+        run_directory / "container-isolation.measurement.json"
+    )
     valid, validation_errors, validation_warnings = validate_summary(summary)
     if summary_error is not None:
         validation_errors.insert(0, summary_error)
+        valid = False
+    isolation_valid, isolation_errors = validate_container_isolation(isolation)
+    if isolation_error is not None:
+        isolation_errors.insert(0, isolation_error)
+    if not isolation_valid or isolation_error is not None:
+        validation_errors.extend(isolation_errors)
         valid = False
     repetition_match = REPETITION_PATTERN.fullmatch(repetition)
     if repetition_match is None:
@@ -872,6 +977,7 @@ def collect_run(
             "warnings": validation_warnings,
             "correctness_correct": value_at(correctness, "correct") is True,
             "queue_quiescent": value_at(queue_state, "gate_passed") is True,
+            "container_isolation_gate": value_at(isolation, "gate_passed") is True,
         },
         "metrics": extract_metrics(summary),
         "comparison": {

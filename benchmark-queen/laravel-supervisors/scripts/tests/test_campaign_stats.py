@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import importlib.util
 import json
 import sys
@@ -43,6 +42,10 @@ class CampaignStatsTest(unittest.TestCase):
                 "sleep_ms": 10,
                 "cpu_iterations": 0,
                 "dispatch_mode": "single",
+                "ledger_mode": "off",
+                "queues": ["benchmark"],
+                "failed_driver": "null",
+                "lease_renewal": False,
                 "queen_prefetch": 1,
                 "queen_ack_batch": 1,
                 "queen_bulk_batch": 100,
@@ -72,6 +75,7 @@ class CampaignStatsTest(unittest.TestCase):
                 "profile": "fixed",
                 "connection": connection,
                 "queue": "benchmark",
+                "queues": ["benchmark"],
                 "consumer_group": "benchmark",
                 "workers": 2,
                 "min_workers": 2,
@@ -90,6 +94,8 @@ class CampaignStatsTest(unittest.TestCase):
                 "retry_after": 180,
                 "worker_memory": 128,
                 "dispatch_mode": "single",
+                "ledger_mode": "off",
+                "failed_driver": "null",
                 "queen_prefetch": 1,
                 "queen_ack_batch": 1,
                 "queen_bulk_batch": 100,
@@ -107,6 +113,7 @@ class CampaignStatsTest(unittest.TestCase):
                 "retry_429": [],
                 "partition_prefix": "benchmark",
                 "after_commit": False,
+                "lease_renewal": False,
             },
         }
 
@@ -124,6 +131,7 @@ class CampaignStatsTest(unittest.TestCase):
                 "cpu_iterations": 0,
                 "dispatch_mode": "single",
                 "dispatch_batch_size": 1,
+                "ledger_mode": "off",
             },
             "correctness": {
                 "correct": True,
@@ -220,6 +228,35 @@ services:
     name: fixture
 """
 
+    def container_isolation(self) -> dict:
+        allowed_id = "c" * 64
+        inventory = {
+            "gate_passed": True,
+            "foreign_count": 0,
+            "allowed_container_ids": [allowed_id],
+        }
+        return {
+            "schema": "queen.laravel-supervisors.container-isolation/v1",
+            "mode": "continuous_start_event_watch",
+            "active": False,
+            "ownership_mode": "exact_container_ids",
+            "allowed_container_ids": [allowed_id],
+            "initial_inventory": inventory,
+            "final_inventory": inventory,
+            "start_events": {
+                "record_count": 0,
+                "invalid_count": 0,
+                "foreign_count": 0,
+            },
+            "errors": [],
+            "foreign_detected": False,
+            "restart_detected": False,
+            "event_integrity_valid": True,
+            "override_requested": False,
+            "gate_passed": True,
+            "qualification": "isolated",
+        }
+
     def make_campaign(
         self,
         root: Path,
@@ -245,6 +282,9 @@ services:
                 )
                 (run / "compose-resolved.yml").write_text(
                     self.compose(engine), encoding="utf-8"
+                )
+                (run / "container-isolation.measurement.json").write_text(
+                    json.dumps(self.container_isolation()) + "\n", encoding="utf-8"
                 )
         return campaign
 
@@ -280,6 +320,12 @@ services:
             200.0,
             queen_group["metrics"]["completion_span_jobs_per_second"]["median"],
         )
+        queen_run = next(run for run in first["runs"] if run["engine"] == "queen-rust")
+        pair_key = queen_run["comparison"]["pair_key"]
+        self.assertEqual("off", pair_key["workload"]["ledger_mode"])
+        self.assertEqual(["benchmark"], pair_key["benchmark"]["queues"])
+        self.assertEqual("null", pair_key["benchmark"]["failed_driver"])
+        self.assertFalse(pair_key["queen_transport"]["lease_renewal"])
 
     def test_non_quiescent_run_is_reported_and_pair_is_suppressed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -308,6 +354,33 @@ services:
         )
         self.assertFalse(invalid["validation"]["valid"])
 
+    def test_missing_continuous_isolation_artifact_suppresses_ratio(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            campaign = self.make_campaign(Path(temporary), [100.0], [200.0])
+            artifact = (
+                campaign
+                / "queen-rust"
+                / "fixed"
+                / "r01"
+                / "container-isolation.measurement.json"
+            )
+            artifact.unlink()
+            report = campaign_stats.build_report(campaign, seed=1, resamples=100)
+
+        comparison = self.comparison(report)
+        self.assertEqual(0, comparison["pairs_eligible"])
+        candidate = next(
+            run for run in report["runs"] if run["engine"] == "queen-rust"
+        )
+        self.assertFalse(candidate["validation"]["valid"])
+        self.assertFalse(candidate["validation"]["container_isolation_gate"])
+        self.assertTrue(
+            any(
+                "container-isolation.measurement.json" in reason
+                for reason in candidate["validation"]["errors"]
+            )
+        )
+
     def test_configuration_mismatch_enumerates_path_and_suppresses_ratio(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             campaign = self.make_campaign(Path(temporary), [100.0], [200.0])
@@ -327,6 +400,39 @@ services:
                 for value in comparison["paired_runs"][0]["ratios"].values()
             )
         )
+
+    def test_timed_lane_isolation_settings_fail_closed_on_drift(self) -> None:
+        cases = (
+            (("benchmark", "queues"), ["critical"], "run queues disagrees"),
+            (("benchmark", "failed_driver"), "file", "run failed_driver disagrees"),
+            (
+                ("queen_connection", "lease_renewal"),
+                True,
+                "run lease_renewal disagrees",
+            ),
+            (
+                ("benchmark", "ledger_mode"),
+                "durable",
+                "run benchmark ledger_mode disagrees",
+            ),
+        )
+        for (section, field), value, expected_reason in cases:
+            with self.subTest(field=field):
+                with tempfile.TemporaryDirectory() as temporary:
+                    campaign = self.make_campaign(Path(temporary), [100.0], [200.0])
+                    path = campaign / "queen-rust" / "fixed" / "r01" / "configuration.json"
+                    configuration = json.loads(path.read_text(encoding="utf-8"))
+                    configuration[section][field] = value
+                    path.write_text(json.dumps(configuration) + "\n", encoding="utf-8")
+                    report = campaign_stats.build_report(campaign, seed=1, resamples=100)
+
+                comparison = self.comparison(report)
+                self.assertEqual(0, comparison["pairs_eligible"])
+                reasons = comparison["paired_runs"][0]["suppression_reasons"]
+                self.assertTrue(
+                    any(expected_reason in reason for reason in reasons),
+                    reasons,
+                )
 
     def test_extra_repetition_is_preserved_but_invalid_and_suppressed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

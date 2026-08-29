@@ -1,0 +1,43 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use Queen\Laravel\Supervisor\Binary\SupervisorBinary;
+
+$autoload = $GLOBALS['_composer_autoload_path'] ?? dirname(__DIR__) . '/vendor/autoload.php';
+if (!is_string($autoload) || !is_file($autoload)) {
+    fwrite(STDERR, "queen-supervisor: cannot locate the Composer autoloader.\n");
+    exit(70);
+}
+require_once $autoload;
+
+try {
+    $platform = SupervisorBinary::platform();
+    $installBase = getenv('QUEEN_SUPERVISOR_INSTALL_PATH');
+    if (!is_string($installBase) || trim($installBase) === '') {
+        $storage = getenv('LARAVEL_STORAGE_PATH');
+        if (!is_string($storage) || trim($storage) === '') {
+            $cwd = getcwd();
+            if (!is_string($cwd) || $cwd === '') {
+                throw new RuntimeException('cannot determine the Laravel application directory');
+            }
+            $storage = $cwd . DIRECTORY_SEPARATOR . 'storage';
+        }
+        $installBase = rtrim($storage, DIRECTORY_SEPARATOR)
+            . DIRECTORY_SEPARATOR . 'queen-supervisor'
+            . DIRECTORY_SEPARATOR . 'bin';
+    }
+    $binary = SupervisorBinary::assertInstalled($installBase, $platform);
+    if (!function_exists('pcntl_exec')) {
+        throw new RuntimeException('ext-pcntl is required so the Composer launcher can replace itself');
+    }
+    pcntl_exec($binary, array_slice($argv, 1));
+    $error = error_get_last();
+    throw new RuntimeException(
+        'cannot execute the installed binary' . (isset($error['message']) ? ': ' . $error['message'] : ''),
+    );
+} catch (Throwable $exception) {
+    fwrite(STDERR, 'queen-supervisor: ' . $exception->getMessage() . "\n");
+    exit(70);
+}

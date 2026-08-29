@@ -10,85 +10,256 @@ on:
         description: 'Existing supervisor/vX.Y.Z tag to release'
         required: true
 
-permissions:
-  contents: write
-  id-token: write
-  attestations: write
+permissions: {}
 
 jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      source-date-epoch: ${{ steps.release.outputs.source-date-epoch }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - name: Verify coordinated release version
+        id: release
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          TRIGGER_REF: ${{ github.ref }}
+        run: |
+          test "$TRIGGER_REF" = "refs/tags/$RELEASE_TAG" || {
+            echo "run the release workflow from the exact $RELEASE_TAG tag ref" >&2
+            exit 1
+          }
+          version=$(python3 supervisor/scripts/verify_release_version.py --tag "$RELEASE_TAG")
+          source_date_epoch=$(git show -s --format=%ct HEAD)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "source-date-epoch=$source_date_epoch" >> "$GITHUB_OUTPUT"
+      - name: Test release tooling
+        run: python3 -m unittest discover -s supervisor/scripts/tests -v
+
   build:
-    runs-on: ubuntu-latest
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, arm64]
+        include:
+          - os: linux
+            arch: amd64
+            target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            docker-platform: linux/amd64
+          - os: linux
+            arch: arm64
+            target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04
+            docker-platform: linux/arm64
+          - os: darwin
+            arch: amd64
+            target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - os: darwin
+            arch: arm64
+            target: aarch64-apple-darwin
+            runner: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           ref: ${{ github.event.inputs.tag || github.ref }}
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - name: Verify release version
-        id: version
-        env:
-          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
-        run: |
-          case "$RELEASE_TAG" in
-            supervisor/v*) ;;
-            *) echo "tag must match supervisor/vX.Y.Z" >&2; exit 1 ;;
-          esac
-          tag_version="${RELEASE_TAG#supervisor/v}"
-          crate_version=$(awk -F'"' '/^version[[:space:]]*=/{print $2; exit}' supervisor/Cargo.toml)
-          test "$tag_version" = "$crate_version"
-          echo "version=$tag_version" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        if: matrix.os == 'linux'
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        if: matrix.os == 'linux'
       - name: Build static Linux binary
-        uses: docker/build-push-action@v6
+        if: matrix.os == 'linux'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: supervisor/Dockerfile.release
           target: artifact
-          platforms: linux/${{ matrix.arch }}
-          outputs: type=local,dest=dist
-          cache-from: type=gha,scope=supervisor-${{ matrix.arch }}
-          cache-to: type=gha,scope=supervisor-${{ matrix.arch }},mode=max
-      - name: Smoke test and package
+          platforms: ${{ matrix.docker-platform }}
+          outputs: type=local,dest=build-output
+          build-args: |
+            SOURCE_DATE_EPOCH=${{ needs.prepare.outputs.source-date-epoch }}
+          cache-from: type=gha,scope=supervisor-${{ matrix.os }}-${{ matrix.arch }}
+          cache-to: type=gha,scope=supervisor-${{ matrix.os }}-${{ matrix.arch }},mode=max
+
+      - name: Install pinned Rust toolchain
+        if: matrix.os == 'darwin'
+        run: rustup toolchain install 1.88.0 --profile minimal --target "${{ matrix.target }}"
+      - name: Build native macOS binary
+        if: matrix.os == 'darwin'
         env:
-          VERSION: ${{ steps.version.outputs.version }}
-          ARCH: ${{ matrix.arch }}
+          CARGO_INCREMENTAL: '0'
+          MACOSX_DEPLOYMENT_TARGET: '12.0'
+          RUSTFLAGS: '-C link-arg=-Wl,-no_uuid'
+          SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source-date-epoch }}
+          ZERO_AR_DATE: '1'
         run: |
-          chmod 0755 dist/queen-supervisor
-          install -m 0644 supervisor/dist/queen-supervisor.service.example dist/
-          install -m 0644 LICENSE.md dist/
-          if [ "$ARCH" = amd64 ]; then
-            dist/queen-supervisor --version
-            dist/queen-supervisor --help >/dev/null
-          fi
-          archive="queen-supervisor-${VERSION}-linux-${ARCH}.tar.gz"
-          tar -C dist -czf "$archive" queen-supervisor queen-supervisor.service.example LICENSE.md
-          sha256sum "$archive" > "$archive.sha256"
+          cargo +1.88.0 build \
+            --manifest-path supervisor/Cargo.toml \
+            --locked \
+            --release \
+            --target "${{ matrix.target }}"
+          cp "supervisor/target/${{ matrix.target }}/release/queen-supervisor" queen-supervisor.first
+          cargo +1.88.0 clean --manifest-path supervisor/Cargo.toml
+          cargo +1.88.0 build \
+            --manifest-path supervisor/Cargo.toml \
+            --locked \
+            --release \
+            --target "${{ matrix.target }}"
+          cmp queen-supervisor.first \
+            "supervisor/target/${{ matrix.target }}/release/queen-supervisor"
+          mkdir -p build-output
+          cp queen-supervisor.first build-output/queen-supervisor
+
+      - name: Smoke test native binary
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          chmod 0755 build-output/queen-supervisor
+          test "$(build-output/queen-supervisor --version)" = "queen-supervisor $VERSION"
+          build-output/queen-supervisor --help >/dev/null
+
+      - name: Create reproducible archive
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SOURCE_DATE_EPOCH: ${{ needs.prepare.outputs.source-date-epoch }}
+          RELEASE_OS: ${{ matrix.os }}
+          RELEASE_ARCH: ${{ matrix.arch }}
+        run: |
+          staging=$(mktemp -d)
+          comparison=$(mktemp -d)
+          install -m 0755 build-output/queen-supervisor "$staging/queen-supervisor"
+          install -m 0644 supervisor/dist/queen-supervisor.service.example "$staging/"
+          install -m 0644 LICENSE.md "$staging/"
+          python3 supervisor/scripts/package_release.py \
+            --staging "$staging" \
+            --output release-output \
+            --version "$VERSION" \
+            --os "$RELEASE_OS" \
+            --arch "$RELEASE_ARCH" \
+            --source-date-epoch "$SOURCE_DATE_EPOCH"
+          python3 supervisor/scripts/package_release.py \
+            --staging "$staging" \
+            --output "$comparison" \
+            --version "$VERSION" \
+            --os "$RELEASE_OS" \
+            --arch "$RELEASE_ARCH" \
+            --source-date-epoch "$SOURCE_DATE_EPOCH"
+          cmp \
+            "release-output/queen-supervisor-$VERSION-$RELEASE_OS-$RELEASE_ARCH.tar.gz" \
+            "$comparison/queen-supervisor-$VERSION-$RELEASE_OS-$RELEASE_ARCH.tar.gz"
+
       - name: Attest release archive
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
-          subject-path: queen-supervisor-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
-      - uses: actions/upload-artifact@v4
+          subject-path: release-output/queen-supervisor-${{ needs.prepare.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: queen-supervisor-linux-${{ matrix.arch }}
+          name: queen-supervisor-${{ matrix.os }}-${{ matrix.arch }}
           path: |
-            queen-supervisor-*.tar.gz
-            queen-supervisor-*.tar.gz.sha256
+            release-output/queen-supervisor-*.tar.gz
+            release-output/queen-supervisor-*.tar.gz.sha256
           if-no-files-found: error
 
   release:
-    needs: build
-    runs-on: ubuntu-latest
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          pattern: queen-supervisor-linux-*
+          persist-credentials: false
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: queen-supervisor-*
           path: dist
           merge-multiple: true
-      - name: Publish GitHub release
+      - name: Verify archives and build canonical manifest
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          for checksum in dist/*.tar.gz.sha256; do
+            (cd dist && sha256sum -c "$(basename "$checksum")")
+          done
+          python3 supervisor/scripts/build_release_manifest.py \
+            --version "$VERSION" \
+            --repository "$RELEASE_REPOSITORY" \
+            --dist dist \
+            --output dist/queen-supervisor-manifest.json
+          (cd dist && sha256sum queen-supervisor-manifest.json > queen-supervisor-manifest.json.sha256)
+
+      # The Laravel package is the distribution surface: this gate exercises
+      # its real manifest parser against the exact document being published.
+      - name: Set up PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, pcntl, posix, dom, xml, xmlwriter
+          coverage: none
+          tools: composer:v2
+      - name: Install Laravel client test dependencies
+        working-directory: clients/client-laravel
+        run: composer install --no-interaction --no-progress --prefer-dist
+      - name: Verify Laravel installer consumes release manifest
+        run: php supervisor/scripts/verify_client_manifest.php dist/queen-supervisor-manifest.json
+      - name: Install the actual Linux amd64 release archive through Laravel
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          install_directory=$(mktemp -d)
+          php supervisor/scripts/verify_client_archive.php \
+            dist/queen-supervisor-manifest.json \
+            "dist/queen-supervisor-$VERSION-linux-amd64.tar.gz" \
+            "$install_directory"
+      - name: Test Laravel installer integrity and platform gates
+        working-directory: clients/client-laravel
+        run: vendor/bin/phpunit tests/SupervisorBinaryInstallerTest.php
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.0.6'
+      - name: Sign manifest with GitHub OIDC
+        run: |
+          cosign sign-blob \
+            --yes \
+            --bundle dist/queen-supervisor-manifest.sigstore.json \
+            dist/queen-supervisor-manifest.json
+          cosign verify-blob \
+            --bundle dist/queen-supervisor-manifest.sigstore.json \
+            --certificate-identity "https://github.com/${GITHUB_WORKFLOW_REF}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            dist/queen-supervisor-manifest.json
+      - name: Attest release manifest
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: dist/queen-supervisor-manifest.json
+      - name: Publish GitHub release without overwriting assets
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
-        run: gh release create "$RELEASE_TAG" dist/* --verify-tag --generate-notes --title "Queen Supervisor ${RELEASE_TAG#supervisor/v}"
+        run: |
+          gh release create "$RELEASE_TAG" dist/* \
+            --verify-tag \
+            --generate-notes \
+            --latest=false \
+            --title "Queen Supervisor ${RELEASE_TAG#supervisor/v}"

@@ -10,9 +10,11 @@ use PHPUnit\Framework\TestCase;
 use Queen\Exceptions\ConflationPolicyMismatchException;
 use Queen\Exceptions\HttpException;
 use Queen\Laravel\Contracts\QueenPartitionable;
+use Queen\Laravel\Queue\LeaseRenewer;
 use Queen\Laravel\Queue\QueenConnector;
 use Queen\Laravel\Queue\QueenJob;
 use Queen\Laravel\Queue\QueenQueue;
+use Queen\Queen;
 use Queen\Tests\Support\PlanHandler;
 
 class LaravelQueueDriverTest extends TestCase
@@ -294,6 +296,53 @@ class LaravelQueueDriverTest extends TestCase
         $this->assertSame('/api/v1/messages/partition%2Fid/transaction%20id', $handler->requests[1]->getUri()->getPath());
     }
 
+    #[\PHPUnit\Framework\Attributes\DataProvider('failedCleanupRouteMismatches')]
+    public function testManualRetryDoesNotHideADeleteRouteMismatch(array $response): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 201, 'json' => [['status' => 'queued']]],
+            ['status' => 404, 'json' => $response],
+        ]);
+        [$queue] = $this->queueFor($handler);
+        $payload = $this->payload('job-123');
+        $payload['_queen'] = [
+            'attempts' => 4,
+            'manual_retry' => 'retry-transaction-123',
+            'failed_source' => [
+                'partition_id' => 'partition-1',
+                'transaction_id' => 'transaction-1',
+            ],
+        ];
+
+        try {
+            $queue->pushRaw(json_encode($payload, JSON_THROW_ON_ERROR), 'emails');
+            $this->fail('A failed DLQ delete route must abort the Laravel retry hand-off.');
+        } catch (HttpException $exception) {
+            $this->assertSame(404, $exception->statusCode);
+            $this->assertSame($response['code'] ?? null, $exception->errorCode);
+            $this->assertSame($response['error'], $exception->serverError);
+        }
+
+        $this->assertCount(2, $handler->requests);
+    }
+
+    public static function failedCleanupRouteMismatches(): array
+    {
+        return [
+            'explicit no_such_route' => [[
+                'error' => 'Not Found',
+                'code' => 'no_such_route',
+            ]],
+            'generic router 404 without a code' => [[
+                'error' => 'Not Found',
+            ]],
+            'route code wins over misleading error prose' => [[
+                'error' => 'Message not found',
+                'code' => 'no_such_route',
+            ]],
+        ];
+    }
+
     public function testFailedJobRawBodyMarksThePayloadForManualRetry(): void
     {
         $payload = $this->payload('job-123');
@@ -409,6 +458,155 @@ class LaravelQueueDriverTest extends TestCase
         $this->assertSame('/api/v1/ack/batch', $handler->requests[1]->getUri()->getPath());
         $this->assertSame(['transaction-1', 'transaction-2', 'transaction-3'],
             array_column($ack['acknowledgments'], 'transactionId'));
+    }
+
+    public function testLeaseRenewerTracksTheWholePrefetchedLeaseUntilEveryAckSucceeds(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popBatchResponse([
+                $this->payload('job-1'),
+                $this->payload('job-2'),
+                $this->payload('job-3'),
+            ])],
+            ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => false]]],
+            ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => false]]],
+            ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => true]]],
+        ]);
+        $renewer = new RecordingLeaseRenewer();
+        $queue = $this->queueWithLeaseRenewer($handler, $renewer, prefetch: 3);
+
+        $queue->pop('emails')->delete();
+        $this->assertSame(['lease-1'], $renewer->tracked);
+        $this->assertSame([], $renewer->forgotten);
+
+        $queue->pop('emails')->delete();
+        $this->assertSame([], $renewer->forgotten);
+
+        $queue->pop('emails')->delete();
+        $this->assertSame(['lease-1'], $renewer->forgotten);
+        $this->assertSame(['lease-1', 'lease-1', 'lease-1'], $renewer->healthChecks);
+    }
+
+    public function testUnsafeRenewalDiscardsTheWholeLeaseBeforeAnotherPrefetchedJobRuns(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popBatchResponse([
+                $this->payload('job-1'),
+                $this->payload('job-2'),
+                $this->payload('job-3'),
+            ])],
+            ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => false]]],
+            ['status' => 200, 'json' => ['success' => true, 'messages' => []]],
+        ]);
+        $renewer = new RecordingLeaseRenewer();
+        $queue = $this->queueWithLeaseRenewer($handler, $renewer, prefetch: 3);
+
+        $queue->pop('emails')->delete();
+        $renewer->failure = 'deadline exhausted';
+        try {
+            $queue->pop('emails');
+            $this->fail('A job under an unsafe lease was returned to Laravel.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('deadline exhausted', $exception->getMessage());
+        }
+
+        $renewer->failure = null;
+        $this->assertNull($queue->pop('emails'), 'the remaining same-lease tail was discarded');
+        $this->assertSame(['lease-1'], $renewer->forgotten);
+        $this->assertCount(3, $handler->requests, 'a fresh broker pop follows the discarded local lease');
+    }
+
+    public function testLeaseDeadlineStartsBeforeASlowPopRequest(): void
+    {
+        $inner = new PlanHandler([
+            ['status' => 200, 'json' => $this->popResponse($this->payload('job-1'))],
+            ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => true]]],
+        ]);
+        $handler = new DelayedPlanHandler($inner, 250_000);
+        $renewer = new RecordingLeaseRenewer();
+        $queue = $this->queueWithLeaseRenewer($handler, $renewer);
+
+        $before = intdiv(hrtime(true), 1_000_000);
+        $job = $queue->pop('emails');
+        $after = intdiv(hrtime(true), 1_000_000);
+        $deadline = $renewer->deadlines['lease-1'];
+
+        $this->assertGreaterThanOrEqual(200, $after - $before);
+        $this->assertGreaterThanOrEqual($before + 119_900, $deadline);
+        $this->assertLessThanOrEqual($before + 120_100, $deadline);
+        $this->assertLessThan($after + 119_900, $deadline,
+            'the HTTP response time was incorrectly added to the lease deadline');
+        $job->delete();
+    }
+
+    public function testJobIsNotDeliveredWhenLeaseTrackingIsNotConfirmed(): void
+    {
+        $handler = new PlanHandler([[
+            'status' => 200,
+            'json' => $this->popResponse($this->payload('job-1')),
+        ]]);
+        $renewer = new RecordingLeaseRenewer();
+        $renewer->trackFailure = 'child died before tracked ACK';
+        $queue = $this->queueWithLeaseRenewer($handler, $renewer);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('before tracked ACK');
+        $queue->pop('emails');
+    }
+
+    public function testAmbiguousAckStopsRenewingAndDiscardsEveryPartitionInTheLease(): void
+    {
+        $response = $this->popBatchResponse([
+            $this->payload('job-a'),
+            $this->payload('job-b'),
+        ]);
+        $response['messages'][1]['partitionId'] = '0298f2c1-4d3a-7c10-9f2b-6a1e5d0c7b83';
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $response],
+            ['status' => 200, 'json' => [['success' => false, 'error' => 'lease moved']]],
+            ['status' => 200, 'json' => ['success' => true, 'messages' => []]],
+        ]);
+        $renewer = new RecordingLeaseRenewer();
+        $queue = $this->queueWithLeaseRenewer($handler, $renewer, prefetch: 2);
+
+        try {
+            $queue->pop('emails')->delete();
+            $this->fail('An ambiguous ACK was silently accepted.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('lease moved', $exception->getMessage());
+        }
+
+        $this->assertSame(['lease-1'], $renewer->forgotten);
+        $this->assertNull($queue->pop('emails'));
+        $this->assertCount(3, $handler->requests);
+    }
+
+    public function testBatchAckTransportFailureStopsRenewingAndIsNotRetriedLocally(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popBatchResponse([
+                $this->payload('job-1'),
+                $this->payload('job-2'),
+            ])],
+            ['status' => 503, 'json' => ['error' => 'database unavailable']],
+            ['status' => 503, 'json' => ['error' => 'database unavailable']],
+            ['status' => 503, 'json' => ['error' => 'database unavailable']],
+        ]);
+        $renewer = new RecordingLeaseRenewer();
+        $queue = $this->queueWithLeaseRenewer($handler, $renewer, prefetch: 2, ackBatch: 2);
+
+        $queue->pop('emails')->delete();
+        try {
+            $queue->pop('emails')->delete();
+            $this->fail('An ambiguous batch ACK transport failure was silently accepted.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('database unavailable', $exception->getMessage());
+        }
+
+        $this->assertSame(['lease-1'], $renewer->forgotten);
+        $requestCount = count($handler->requests);
+        $queue->flushAcknowledgements();
+        $this->assertCount($requestCount, $handler->requests, 'an ambiguous renewed lease must not be retried locally');
     }
 
     public function testPrefetchRejectsReentrantPopUntilCurrentDeliveryIsHandled(): void
@@ -1072,6 +1270,33 @@ class LaravelQueueDriverTest extends TestCase
         return [$queue, $handler];
     }
 
+    private function queueWithLeaseRenewer(
+        callable $handler,
+        LeaseRenewer $renewer,
+        int $prefetch = 1,
+        int $ackBatch = 1,
+    ): QueenQueue {
+        $queen = new Queen([
+            'url' => 'http://queen.test:6632',
+            'handler' => HandlerStack::create($handler),
+        ]);
+        $queue = new QueenQueue(
+            $queen,
+            defaultQueue: 'default',
+            consumerGroup: 'workers',
+            partitionCount: 8,
+            partitionPrefix: 'job',
+            retryAfter: 120,
+            prefetch: $prefetch,
+            ackBatch: $ackBatch,
+            leaseRenewer: $renewer,
+        );
+        $queue->setContainer(new Container());
+        $queue->setConnectionName('queen');
+
+        return $queue;
+    }
+
     private function payload(string $uuid): array
     {
         return [
@@ -1140,6 +1365,64 @@ class PartitionedTestJob implements QueenPartitionable
     public function queenPartition(): string
     {
         return $this->partition;
+    }
+}
+
+class RecordingLeaseRenewer implements LeaseRenewer
+{
+    /** @var list<string> */
+    public array $tracked = [];
+
+    /** @var list<string> */
+    public array $forgotten = [];
+
+    /** @var list<string> */
+    public array $healthChecks = [];
+
+    /** @var array<string, int> */
+    public array $deadlines = [];
+
+    public ?string $failure = null;
+
+    public ?string $trackFailure = null;
+
+    public function track(string $leaseId, int $deadlineMonotonicMillis): void
+    {
+        $this->tracked[] = $leaseId;
+        $this->deadlines[$leaseId] = $deadlineMonotonicMillis;
+        if ($this->trackFailure !== null) {
+            throw new \RuntimeException($this->trackFailure);
+        }
+    }
+
+    public function forget(string $leaseId): void
+    {
+        $this->forgotten[] = $leaseId;
+    }
+
+    public function assertHealthy(string $leaseId): void
+    {
+        $this->healthChecks[] = $leaseId;
+        if ($this->failure !== null) {
+            throw new \RuntimeException($this->failure);
+        }
+    }
+
+    public function close(): void
+    {
+    }
+}
+
+class DelayedPlanHandler
+{
+    public function __construct(private PlanHandler $inner, private int $delayMicros)
+    {
+    }
+
+    public function __invoke($request, array $options): mixed
+    {
+        usleep($this->delayMicros);
+        return ($this->inner)($request, $options);
     }
 }
 

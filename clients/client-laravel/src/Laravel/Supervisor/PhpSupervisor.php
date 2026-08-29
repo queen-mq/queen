@@ -543,7 +543,10 @@ final class PhpSupervisor
             || !defined('SIGUSR2')
             || !defined('SIGCONT')
         ) {
-            throw new \RuntimeException('The Queen PHP supervisor requires a Unix-like OS, ext-pcntl and symfony/process. Use the Rust engine on unsupported hosts.');
+            throw new \RuntimeException(
+                'The Queen PHP supervisor requires a Unix-like OS, ext-pcntl and symfony/process. '
+                . 'The Rust engine is the optimized alternative on supported Unix platforms.',
+            );
         }
     }
 

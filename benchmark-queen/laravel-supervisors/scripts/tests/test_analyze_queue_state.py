@@ -135,6 +135,28 @@ class QueueStateGateTest(unittest.TestCase):
         self.assertFalse(summary["queue_state"]["artifact_valid"])
         self.assertFalse(summary["correctness"]["correct"])
 
+    def test_partial_event_line_fails_primary_correctness(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run = self.make_run(Path(temporary))
+            with (run / "events" / "worker-1.jsonl").open("ab") as stream:
+                stream.write(b'{"run_id":"fixture-run"')
+            summary = analyze.summarize_run(run)
+
+        self.assertEqual(1, summary["correctness"]["partial_lines_ignored"])
+        self.assertFalse(summary["correctness"]["correct"])
+
+    def test_partial_sampler_line_fails_primary_correctness(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run = self.make_run(Path(temporary))
+            with (run / "stats.jsonl").open("ab") as stream:
+                stream.write(b'{"schema":"queen.laravel-supervisors.stats/v1"')
+            summary = analyze.summarize_run(run)
+
+        integrity = summary["resources"]["stats_integrity"]
+        self.assertEqual(1, integrity["partial_lines_ignored"])
+        self.assertGreater(integrity["integrity_errors"], 0)
+        self.assertFalse(summary["correctness"]["correct"])
+
     def test_report_suppresses_ratios_when_queue_gate_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -2,6 +2,7 @@
 
 namespace Queen\Laravel;
 
+use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Queue\QueueManager;
 use Illuminate\Queue\Events\JobExceptionOccurred;
 use Illuminate\Queue\Events\JobFailed;
@@ -12,6 +13,7 @@ use Queen\Laravel\Queue\QueenConnector;
 use Queen\Laravel\Queue\SyncedFailedJobProvider;
 use Queen\Laravel\Supervisor\WorkerTelemetry;
 use Queen\Queen;
+use RuntimeException;
 
 class QueenServiceProvider extends ServiceProvider
 {
@@ -23,17 +25,85 @@ class QueenServiceProvider extends ServiceProvider
 
         if ((bool) $this->app['config']->get('queen.sync_failed_jobs', true)) {
             $this->app->extend('queue.failer', function ($provider, $app) {
+                $lockStore = $this->optionalString(
+                    $app['config']->get('queen.failed_jobs_lock_store'),
+                    'queen.failed_jobs_lock_store',
+                );
+                $lockName = $this->requiredString(
+                    $app['config']->get('queen.failed_jobs_lock_name', 'queen:failed-jobs'),
+                    'queen.failed_jobs_lock_name',
+                );
+                $lockTtl = $this->configurationInteger(
+                    $app['config']->get('queen.failed_jobs_lock_ttl', 600),
+                    'queen.failed_jobs_lock_ttl',
+                    1,
+                );
+                $lockWait = $this->configurationInteger(
+                    $app['config']->get('queen.failed_jobs_lock_wait', 600),
+                    'queen.failed_jobs_lock_wait',
+                    0,
+                );
+
                 return new SyncedFailedJobProvider(
                     $provider,
                     fn (string $connection) => $app['queue']->connection($connection),
+                    function (\Closure $operation) use ($app, $lockStore, $lockName, $lockTtl, $lockWait): mixed {
+                        $cache = $lockStore === null ? $app['cache'] : $app['cache']->store($lockStore);
+                        $lock = $cache->lock($lockName, $lockTtl);
+                        if (!method_exists($lock, 'isOwnedByCurrentProcess')) {
+                            throw new RuntimeException(
+                                'The configured Queen failed-job cache lock cannot verify ownership.',
+                            );
+                        }
+
+                        try {
+                            return $lock->block($lockWait, function () use ($lock, $operation): mixed {
+                                $assertOwned = static function () use ($lock): void {
+                                    if (!$lock->isOwnedByCurrentProcess()) {
+                                        throw new RuntimeException(
+                                            'The Queen failed-job cache lock expired during a mutation.',
+                                        );
+                                    }
+                                };
+
+                                $assertOwned();
+                                $result = $operation($assertOwned);
+                                $assertOwned();
+
+                                return $result;
+                            });
+                        } catch (LockTimeoutException $exception) {
+                            throw new RuntimeException(
+                                'Timed out acquiring the Queen failed-job cache lock; no index mutation was attempted.',
+                                previous: $exception,
+                            );
+                        }
+                    },
                 );
             });
         }
 
         $this->callAfterResolving(QueueManager::class, function (QueueManager $manager): void {
-            $manager->addConnector('queen', fn () => new QueenConnector(
-                $this->app['config']->get('queen', [])
-            ));
+            $manager->addConnector('queen', function (): QueenConnector {
+                $retryHandler = null;
+                if ((bool) $this->app['config']->get('queen.sync_failed_jobs', true)) {
+                    $retryHandler = function (string $fence, \Closure $republish): mixed {
+                        $provider = $this->app['queue.failer'];
+                        if (!$provider instanceof SyncedFailedJobProvider) {
+                            throw new RuntimeException(
+                                'Queen failed-job synchronization is enabled, but its synchronized provider is unavailable.',
+                            );
+                        }
+
+                        return $provider->retryWithFence($fence, $republish);
+                    };
+                }
+
+                return new QueenConnector(
+                    $this->app['config']->get('queen', []),
+                    $retryHandler,
+                );
+            });
         });
 
         $this->app->singleton(Queen::class, function ($app) {
@@ -95,6 +165,11 @@ class QueenServiceProvider extends ServiceProvider
             'block_for' => $queen['block_for'] ?? 0,
             'prefetch' => $queen['prefetch'] ?? 1,
             'ack_batch' => $queen['ack_batch'] ?? 1,
+            'lease_renewal' => $queen['lease_renewal'] ?? false,
+            'lease_renewal_interval' => $queen['lease_renewal_interval'] ?? null,
+            'lease_renewal_timeout' => $queen['lease_renewal_timeout'] ?? 5,
+            'lease_renewal_kill_grace' => $queen['lease_renewal_kill_grace'] ?? 2,
+            'lease_renewal_safety_margin' => $queen['lease_renewal_safety_margin'] ?? 1,
             'bulk_batch' => $queen['bulk_batch'] ?? 100,
             'after_commit' => $queen['after_commit'] ?? false,
         ];
@@ -104,6 +179,37 @@ class QueenServiceProvider extends ServiceProvider
             $defaults,
             is_array($existing) ? $existing : [],
         ));
+    }
+
+    private function configurationInteger(mixed $value, string $name, int $minimum): int
+    {
+        $integer = false;
+        if (is_int($value)) {
+            $integer = $value;
+        } elseif (is_string($value) && preg_match('/^[0-9]+$/D', $value) === 1) {
+            $digits = ltrim($value, '0');
+            $integer = filter_var($digits === '' ? '0' : $digits, FILTER_VALIDATE_INT);
+        }
+
+        if ($integer === false || $integer < $minimum) {
+            throw new \InvalidArgumentException("{$name} must be an integer of at least {$minimum}.");
+        }
+
+        return $integer;
+    }
+
+    private function requiredString(mixed $value, string $name): string
+    {
+        if (!is_string($value) || trim($value) === '' || preg_match('/[\x00-\x1F\x7F]/', $value) === 1) {
+            throw new \InvalidArgumentException("{$name} must be a non-empty string without control characters.");
+        }
+
+        return $value;
+    }
+
+    private function optionalString(mixed $value, string $name): ?string
+    {
+        return $value === null ? null : $this->requiredString($value, $name);
     }
 
     public function boot(): void
@@ -120,6 +226,7 @@ class QueenServiceProvider extends ServiceProvider
                 Commands\SuperviseCommand::class,
                 Commands\SupervisorConfigCommand::class,
                 Commands\SupervisorControlCommand::class,
+                Commands\SupervisorInstallCommand::class,
             ]);
         }
     }

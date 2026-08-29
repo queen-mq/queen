@@ -37,12 +37,62 @@ scripts/run.sh --smoke
 scripts/run.sh --profile both --jobs 2000 --workers 4 --runs 3 --sleep-ms 10
 ```
 
-Pass `--no-build` only after the images have been built from the same checkout.
+Pass `--no-build` only to diagnostic campaigns after the images have been built
+from the same checkout. Publishable campaigns always rebuild and reject that
+option so their image identity cannot be stale.
 Run `scripts/run.sh --help` for workload, sampling, engine and output options.
 Generated campaigns are placed under `results/<timestamp>-<git-sha>/` and are
 ignored by Git. The top-level report lists every raw run without cross-profile
 ratios; `reports/<profile>-rNN.{md,json}` contains the paired comparisons for
 each profile and repetition.
+
+Every performance lane snapshots the complete Docker container inventory at
+lane start, immediately before dispatch and after measurement. From the
+pre-dispatch boundary until the resource sampler stops, it also subscribes to
+Docker's container-start event stream and brackets it with stable inventory
+snapshots. The allowed set is frozen to exact container IDs, so a transient
+foreign container, a same-project one-off tool or a replacement container
+cannot hide between snapshots. A start event for an already allowed ID is a
+lane-container restart and fails even with the diagnostic foreign-container
+override. The evidence is retained as
+`container-isolation.measurement.json`; a lost event stream, invalid inventory
+or foreign start fails closed. The benchmark producer is started once before
+this boundary and reused with `docker compose exec`, keeping its exact ID
+stable and outside measured cgroups. The explicit
+`--allow-foreign-containers` override preserves the same evidence but forces
+campaign qualification to `diagnostic`; it cannot be used for a publishable
+result.
+
+Host qualification is also fail-closed. Automatic runs are
+`diagnostic` on Docker Desktop/virtualized hosts and `diagnostic_native` on
+native Linux. Only `--qualification publishable` may produce
+`publishable_candidate`, and it is rejected unless the host is native Linux,
+Docker reports Linux with cgroup v2, and no foreign-container override is set.
+This host gate is necessary but does not replace the remaining publication
+protocol controls below.
+
+### Durable reliability ledger
+
+Performance campaigns leave the ledger off so its SQLite commits cannot
+silently change the workload. Add `--ledger` to run a separately labelled
+reliability cell. Before enqueue, the fixture creates a durable SQLite ledger;
+each execution records its attempt, then atomically creates or observes one
+idempotent effect keyed by `(run_id, job_id)`, and finally records its outcome.
+
+The analyzer reports four distinct gates:
+
+- effect conservation: every expected key exists and no unexpected key does;
+- idempotent effect: exactly one committed effect row exists per key;
+- attempt integrity: no attempt belongs to an unexpected job, completed attempts
+  observed an effect and outcomes are valid;
+- strict execution: one attempt per job, with no `already_present` dedup hit.
+
+A retry after an uncertain ACK can therefore conserve one idempotent effect
+while failing strict execution. `ledger.sqlite3`, result-to-attempt links and
+the full gate output are retained. This proves only the fixture-local SQLite
+effect: it is not atomic with the queue ACK or an arbitrary external service,
+and it is not an exactly-once guarantee. Never mix ledger-on and ledger-off
+samples in one performance aggregate.
 
 Aggregate a repeated campaign only after all lanes have finished:
 
@@ -57,8 +107,9 @@ The campaign report retains every run, reports median, quartiles, IQR and
 range, and computes deterministic paired-bootstrap 95% confidence intervals
 for candidate/baseline ratios. Pairing is by repetition and is fail-closed:
 missing artifacts, failed correctness or quiescence, sampler errors, OOM, PSS
-gaps, or mismatched workload/environment/resource budgets suppress the ratio
-and are listed explicitly. Bootstrap intervals describe run-to-run variation
+gaps, a missing/invalid continuous container-isolation watch, or mismatched
+workload/environment/resource budgets suppress the ratio and are listed
+explicitly. Bootstrap intervals describe run-to-run variation
 on this host; they are not population guarantees, and fewer than three valid
 pairs are labelled unstable.
 
@@ -211,6 +262,10 @@ completed job set, container restart/OOM state, and a queue that remains empty
 for the final settle window. Every lane uses a fresh backend and retains its
 timeline, process identities, raw events, queue state, logs and container
 evidence even when the harness fails closed.
+The harness explicitly fixes `BENCH_QUEUES` to the single legacy queue,
+`BENCH_FAILED_DRIVER=null` and lease renewal off, and retains the resolved
+application configuration so inherited feature-test variables cannot change
+the protocol silently.
 
 ```console
 scripts/fault-recovery.sh \
@@ -219,10 +274,49 @@ scripts/fault-recovery.sh \
 ```
 
 This is deliberately labelled `diagnostic_smoke`. A single injected crash
-does not estimate a failure probability, completion is recorded before ACK,
-and the fixture has no idempotent external side-effect ledger. Repeat the
-scenario with fixed seeds and report every run; do not describe a clean run as
-proof of exactly-once effects or backend crash durability.
+does not estimate a failure probability. The harness now requires conservation
+of the fixture-local idempotent ledger and reports `created` versus
+`already_present` observations for every attempt. Repeat the scenario with
+fixed seeds and report every run; the ledger is not atomic with ACK or external
+systems, so a clean run is still not proof of exactly-once effects or backend
+crash durability.
+
+### Feature-parity diagnostic
+
+`feature-parity.sh` is the reusable, non-performance gate for the behaviours
+that a throughput campaign cannot prove. It creates a fresh Compose project,
+backend and result volume for every engine. All three lanes receive an equal,
+deterministic round-robin dispatch across every configured queue; the gate
+requires the exact job set and a settled empty state on each individual queue.
+Queue names are limited to 118 ASCII bytes because the fixture appends a colon
+and nine-digit sequence while preserving its 128-byte job-ID ceiling.
+Queen PHP and Queen Rust also run the full Laravel failed-job lifecycle: one
+file-store row and its matching Queen DLQ snapshot must appear, `queue:retry`
+must complete the fail-once probe, and both stores must then be empty.
+
+```console
+scripts/feature-parity.sh \
+  --output results/features-$(date -u +%Y%m%dT%H%M%SZ) \
+  --engines horizon,queen-php,queen-rust \
+  --queues critical,default --jobs-per-queue 12 --workers 2 --no-build
+```
+
+The runner fails closed on timeouts, incomplete or duplicate results, residual
+ready/reserved/delayed work, failed-store/DLQ disagreement, container restart
+or OOM. In this fixed-pool scenario it also records every worker's PID and
+Linux process start tick after the health gate and after the workload; a lost
+or respawned worker changes that identity and fails the lane. The interval
+before the baseline and after the final snapshot is outside this worker gate.
+It retains both worker snapshots, per-lane JSON, raw fixture events and
+isolated container logs. Failed payloads and exception bodies are redacted,
+and neither resolved Compose configuration nor process environment is
+captured. `metadata.json` marks the campaign `diagnostic_feature_smoke` and
+`performance_comparable: false`; do not mix this result with performance
+samples.
+Every lane also records `configuration.json` after explicitly setting
+`BENCH_QUEUES`, selecting `BENCH_FAILED_DRIVER=file` only for Queen lifecycle
+lanes, and disabling lease renewal. This prevents caller environment leakage
+and makes those three feature toggles auditable.
 
 ## Requirements
 
@@ -377,13 +471,16 @@ python3 scripts/analyze.py summarize "results/$RUN_ID" \
 The wrapper fails the sample on a health timeout, missing jobs, duplicates,
 non-one attempts, a non-quiescent final queue, sampler errors, OOM events or
 cleanup failure. It never silently reuses an artifact directory or backend.
+Malformed or partial final lines in either completion or sampler JSONL remain
+available for diagnosis but invalidate the primary correctness summary.
 
 A complete retained run has this shape:
 
 ```text
 artifacts/<run-id>/
 ├── app-config.json
-├── compose.resolved.yml
+├── compose-resolved.yml
+├── container-isolation.measurement.json
 ├── dispatch.json
 ├── events/worker-<pid>.jsonl
 ├── queue-state.final.json

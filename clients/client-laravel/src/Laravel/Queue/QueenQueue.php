@@ -33,8 +33,12 @@ class QueenQueue extends BaseQueue implements QueueContract
     /** @var list<array{message: array, group: string, affinity_key: ?string}> */
     private array $pendingAcknowledgements = [];
 
+    /** @var array<string, int> Locally unsettled deliveries per broker lease. */
+    private array $leaseOutstanding = [];
+
     private int $nextBatchId = 0;
 
+    /** @param (\Closure(string, \Closure(): mixed): mixed)|null $failedJobRetryHandler */
     public function __construct(
         private Queen $queen,
         private string $defaultQueue = 'default',
@@ -47,18 +51,18 @@ class QueenQueue extends BaseQueue implements QueueContract
         private int $prefetch = 1,
         private int $ackBatch = 1,
         private int $bulkBatch = 100,
+        private ?LeaseRenewer $leaseRenewer = null,
+        private ?\Closure $failedJobRetryHandler = null,
     ) {
         $this->dispatchAfterCommit = $dispatchAfterCommit;
     }
 
     public function __destruct()
     {
-        if ($this->pendingAcknowledgements === []) {
-            return;
-        }
-
         try {
-            $this->flushAcknowledgements();
+            if ($this->pendingAcknowledgements !== []) {
+                $this->flushAcknowledgements();
+            }
         } catch (\Throwable $exception) {
             // Destructors cannot safely surface an exception to Laravel's
             // worker. The unacknowledged leases remain durable and will be
@@ -66,6 +70,8 @@ class QueenQueue extends BaseQueue implements QueueContract
             // shutdowns. SIGKILL has the same at-least-once outcome naturally.
             error_log('Queen Laravel worker could not flush batched acknowledgements during shutdown: '
                 . $exception->getMessage());
+        } finally {
+            $this->leaseRenewer?->close();
         }
     }
 
@@ -224,30 +230,73 @@ class QueenQueue extends BaseQueue implements QueueContract
         $jobId = (string) ($decoded['uuid'] ?? Uuid::v7());
         $manualRetryId = $decoded['_queen']['manual_retry'] ?? null;
         $failedSource = $decoded['_queen']['failed_source'] ?? null;
+        $retryFence = $decoded['_queen']['retry_fence'] ?? null;
         $manualRetry = (is_string($manualRetryId) && $manualRetryId !== '') || $manualRetryId === true;
         if ($manualRetry) {
             // Laravel's queue:retry republishes the failed payload verbatim.
             // A fresh Queen transaction ID bypasses the original dispatch's
             // dedup record, while attempts must restart from one.
             $decoded['_queen']['attempts'] = 0;
-            unset($decoded['_queen']['manual_retry'], $decoded['_queen']['failed_source']);
+            unset(
+                $decoded['_queen']['manual_retry'],
+                $decoded['_queen']['failed_source'],
+                $decoded['_queen']['retry_fence'],
+            );
         }
 
-        $result = $this->queen->queue($queue)
-            ->partition($partition)
-            ->push([['data' => $decoded, 'transactionId' => $manualRetry
-                ? (is_string($manualRetryId) ? $manualRetryId : Uuid::v7())
-                : $jobId]])
-            ->execute();
+        $publish = function () use (
+            $queue,
+            $partition,
+            $decoded,
+            $manualRetry,
+            $manualRetryId,
+            $jobId,
+        ): void {
+            $result = $this->queen->queue($queue)
+                ->partition($partition)
+                ->push([['data' => $decoded, 'transactionId' => $manualRetry
+                    ? (is_string($manualRetryId) ? $manualRetryId : Uuid::v7())
+                    : $jobId]])
+                ->execute();
 
-        $this->assertPushAccepted($result);
+            $this->assertPushAccepted($result);
+        };
 
-        // queue:retry only removes Laravel's failed-job row after pushRaw()
-        // returns. Delete Queen's corresponding DLQ snapshot after a confirmed
-        // push; a transient cleanup error keeps the failed row so the same
-        // stable transaction ID can safely retry this hand-off.
-        if ($manualRetry && is_array($failedSource)) {
-            $this->deleteFailedSource($failedSource);
+        $cleanupFailedSource = function () use ($manualRetry, $failedSource): void {
+            if ($manualRetry && is_array($failedSource)) {
+                $this->deleteFailedSource($failedSource);
+            }
+        };
+
+        if ($manualRetry && $this->failedJobRetryHandler !== null) {
+            if ($retryFence === null) {
+                throw new RuntimeException(
+                    'The Queen failed-job retry fence is missing; select the job through Laravel queue:retry.',
+                );
+            }
+            if (!is_string($retryFence) || preg_match('/^[0-9a-f]{64}$/D', $retryFence) !== 1) {
+                throw new RuntimeException('The Queen failed-job retry fence is malformed.');
+            }
+            ($this->failedJobRetryHandler)(
+                $retryFence,
+                function () use ($cleanupFailedSource, $publish): void {
+                    // Retire the old DLQ snapshot before making the retried
+                    // job visible. If publication then fails or is ambiguous,
+                    // the durable Laravel row and stable retry transaction ID
+                    // make the hand-off repeatable. Once publish succeeds, the
+                    // provider has no further network call before deleting the
+                    // old row and releasing the lock, so an immediately failing
+                    // new generation is not held behind broker I/O.
+                    $cleanupFailedSource();
+                    $publish();
+                },
+            );
+        } else {
+            // Standalone client use has no synchronized failed-store row. Keep
+            // the legacy order and only remove a supplied snapshot after Queen
+            // has accepted the retry.
+            $publish();
+            $cleanupFailedSource();
         }
 
         return $jobId;
@@ -373,9 +422,23 @@ class QueenQueue extends BaseQueue implements QueueContract
             ->wait($this->blockFor > 0)
             ->timeoutMillis($pollTimeoutMillis);
 
+        // The lease is created inside this request. Starting the local deadline
+        // before the request can only fence early (especially with long-poll),
+        // never let a helper renew past an already-expired broker lease.
+        $popStartedMillis = self::monotonicMillis();
         $messages = array_values($builder->pop());
         if ($messages === []) {
             return null;
+        }
+
+        if ($this->leaseRenewer !== null) {
+            if ($this->retryAfter > intdiv(PHP_INT_MAX - $popStartedMillis, 1000)) {
+                throw new RuntimeException('Queen Laravel retry_after is too large for a monotonic lease deadline.');
+            }
+            $this->registerLeaseRenewal(
+                $messages,
+                $popStartedMillis + $this->retryAfter * 1000,
+            );
         }
 
         // Batch accounting exists only to know when deferred ACKs must flush.
@@ -394,6 +457,16 @@ class QueenQueue extends BaseQueue implements QueueContract
 
     private function makeJob(array $message, string $queue): QueenJob
     {
+        if ($this->leaseRenewer !== null) {
+            $leaseId = $this->leaseId($message);
+            try {
+                $this->leaseRenewer->assertHealthy($leaseId);
+            } catch (\Throwable $renewalFailure) {
+                $this->abandonLease($message);
+                throw $renewalFailure;
+            }
+        }
+
         if ($this->prefetch > 1) {
             $key = $this->deliveryKey($message);
             $this->activeDeliveries[$queue] = $key;
@@ -454,11 +527,16 @@ class QueenQueue extends BaseQueue implements QueueContract
 
             $this->assertSuccessful($result, $failed ? 'dead-letter job' : 'acknowledge job');
         } catch (\Throwable $acknowledgementFailure) {
-            $this->discardPrefetchedSiblings($message);
-            $this->markDeliveryHandled($message);
+            if ($this->leaseRenewer !== null) {
+                $this->abandonLease($message);
+            } else {
+                $this->discardPrefetchedSiblings($message);
+                $this->markDeliveryHandled($message);
+            }
             throw $acknowledgementFailure;
         }
         $this->markDeliveryHandled($message);
+        $this->settleLeaseMessage($message);
     }
 
     /** Flush successful ACKs deferred by ack_batch. */
@@ -477,19 +555,32 @@ class QueenQueue extends BaseQueue implements QueueContract
                 $count++;
             }
 
-            $result = $this->queen->ack($messages, 'completed', array_filter([
-                'group' => $group,
-                'affinityKey' => $affinityKey,
-            ], fn ($value) => $value !== null));
             try {
+                $result = $this->queen->ack($messages, 'completed', array_filter([
+                    'group' => $group,
+                    'affinityKey' => $affinityKey,
+                ], fn ($value) => $value !== null));
                 $this->assertBatchAcknowledged($result, $count);
             } catch (\Throwable $acknowledgementFailure) {
+                $abandonedLeases = [];
                 foreach ($messages as $message) {
-                    $this->discardPrefetchedSiblings($message);
+                    if ($this->leaseRenewer !== null) {
+                        $leaseId = $this->leaseId($message);
+                        if (isset($abandonedLeases[$leaseId])) {
+                            continue;
+                        }
+                        $abandonedLeases[$leaseId] = true;
+                        $this->abandonLease($message);
+                    } else {
+                        $this->discardPrefetchedSiblings($message);
+                    }
                 }
                 throw $acknowledgementFailure;
             }
             array_splice($this->pendingAcknowledgements, 0, $count);
+            foreach ($messages as $message) {
+                $this->settleLeaseMessage($message);
+            }
         }
     }
 
@@ -533,14 +624,19 @@ class QueenQueue extends BaseQueue implements QueueContract
         } catch (\Throwable $releaseFailure) {
             // The transaction outcome is ambiguous. Never execute a locally
             // buffered sibling whose partition lease may already have moved.
-            $this->discardPrefetchedSiblings($message);
-            $this->markDeliveryHandled($message);
+            if ($this->leaseRenewer !== null) {
+                $this->abandonLease($message);
+            } else {
+                $this->discardPrefetchedSiblings($message);
+                $this->markDeliveryHandled($message);
+            }
             throw $releaseFailure;
         }
 
         // A successful completed ACK advances only through this message and
         // keeps the remaining same-partition lease valid.
         $this->markDeliveryHandled($message);
+        $this->settleLeaseMessage($message);
     }
 
     public function getQueen(): Queen
@@ -881,6 +977,7 @@ class QueenQueue extends BaseQueue implements QueueContract
                 $candidateLeaseId = (string) ($candidate['leaseId'] ?? $candidate['lease_id'] ?? '');
                 if ($candidatePartitionId === $partitionId && $candidateLeaseId === $leaseId) {
                     $this->markDeliveryHandled($candidate);
+                    $this->settleLeaseMessage($candidate);
                     continue;
                 }
                 $kept[] = $candidate;
@@ -892,6 +989,133 @@ class QueenQueue extends BaseQueue implements QueueContract
                 $this->prefetched[$queue] = ['messages' => $kept, 'next' => 0];
             }
         }
+    }
+
+    /** @param list<array> $messages */
+    private function registerLeaseRenewal(array $messages, int $deadlineMonotonicMillis): void
+    {
+        $counts = [];
+        foreach ($messages as $message) {
+            $leaseId = $this->leaseId($message);
+            $counts[$leaseId] = ($counts[$leaseId] ?? 0) + 1;
+        }
+
+        $started = [];
+        $previous = [];
+        try {
+            foreach ($counts as $leaseId => $count) {
+                $previous[$leaseId] = $this->leaseOutstanding[$leaseId] ?? null;
+                if (!isset($this->leaseOutstanding[$leaseId])) {
+                    $this->leaseRenewer?->track($leaseId, $deadlineMonotonicMillis);
+                    $started[] = $leaseId;
+                }
+                $this->leaseOutstanding[$leaseId] = ($this->leaseOutstanding[$leaseId] ?? 0) + $count;
+            }
+        } catch (\Throwable $exception) {
+            foreach ($started as $leaseId) {
+                $this->leaseRenewer?->forget($leaseId);
+            }
+            // A failed track has an ambiguous child-side outcome. Close the
+            // helper so no unconfirmed lease can be renewed as an orphan.
+            $this->leaseRenewer?->close();
+            foreach ($previous as $leaseId => $count) {
+                if ($count === null) {
+                    unset($this->leaseOutstanding[$leaseId]);
+                } else {
+                    $this->leaseOutstanding[$leaseId] = $count;
+                }
+            }
+            throw $exception;
+        }
+    }
+
+    private function settleLeaseMessage(array $message): void
+    {
+        if ($this->leaseRenewer === null) {
+            return;
+        }
+
+        $leaseId = $this->leaseId($message);
+        if (!isset($this->leaseOutstanding[$leaseId])) {
+            return;
+        }
+        $remaining = $this->leaseOutstanding[$leaseId] - 1;
+        if ($remaining > 0) {
+            $this->leaseOutstanding[$leaseId] = $remaining;
+            return;
+        }
+
+        unset($this->leaseOutstanding[$leaseId]);
+        $this->leaseRenewer->forget($leaseId);
+    }
+
+    /**
+     * Stop extending an ambiguous lease and discard every local tail sharing
+     * it. The broker can then redeliver any unacknowledged position after the
+     * original lease expires; already-observed job effects may therefore be
+     * duplicated, which is the required at-least-once failure mode.
+     */
+    private function abandonLease(array $message): void
+    {
+        if ($this->leaseRenewer === null) {
+            return;
+        }
+
+        $leaseId = $this->leaseId($message);
+        unset($this->leaseOutstanding[$leaseId]);
+        $this->leaseRenewer->forget($leaseId);
+
+        foreach ($this->prefetched as $queue => $state) {
+            $kept = [];
+            $count = count($state['messages']);
+            for ($index = $state['next']; $index < $count; ++$index) {
+                $candidate = $state['messages'][$index];
+                if ($this->leaseIdOrNull($candidate) === $leaseId) {
+                    $this->markDeliveryHandled($candidate);
+                    continue;
+                }
+                $kept[] = $candidate;
+            }
+            if ($kept === []) {
+                unset($this->prefetched[$queue]);
+            } else {
+                $this->prefetched[$queue] = ['messages' => $kept, 'next' => 0];
+            }
+        }
+
+        // Do not retry a deferred ACK for a lease whose outcome is ambiguous.
+        // Any successful subset is idempotent; the unacknowledged subset must
+        // become visible again after expiry.
+        $this->pendingAcknowledgements = array_values(array_filter(
+            $this->pendingAcknowledgements,
+            fn (array $entry): bool => $this->leaseIdOrNull($entry['message']) !== $leaseId,
+        ));
+        $this->markDeliveryHandled($message);
+    }
+
+    private function leaseId(array $message): string
+    {
+        $leaseId = $this->leaseIdOrNull($message);
+        if ($leaseId === null) {
+            throw new RuntimeException('Queen returned a message without a lease ID while lease renewal is enabled.');
+        }
+
+        return $leaseId;
+    }
+
+    private function leaseIdOrNull(array $message): ?string
+    {
+        $leaseId = $message['leaseId'] ?? $message['lease_id'] ?? null;
+        return is_string($leaseId) && $leaseId !== '' ? $leaseId : null;
+    }
+
+    private static function monotonicMillis(): int
+    {
+        if (PHP_INT_SIZE < 8) {
+            throw new RuntimeException('Queen Laravel lease renewal requires 64-bit PHP monotonic timestamps.');
+        }
+
+        return intdiv(hrtime(true), 1_000_000);
     }
 
     private function deliveryKey(array $message): string
@@ -914,7 +1138,14 @@ class QueenQueue extends BaseQueue implements QueueContract
         try {
             $this->queen->admin()->deleteMessage($partitionId, $transactionId);
         } catch (HttpException $exception) {
-            if ($exception->statusCode !== 404) {
+            // DELETE has one idempotent 404 shape: the broker-native
+            // {error: "Message not found"} response for an absent DLQ row.
+            // A proxy/broker route mismatch is also a 404, but means cleanup
+            // never ran and must leave Laravel's failed row intact.
+            $snapshotIsAbsent = $exception->statusCode === 404
+                && $exception->errorCode === null
+                && $exception->serverError === 'Message not found';
+            if (!$snapshotIsAbsent) {
                 throw $exception;
             }
         }

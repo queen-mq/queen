@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Jobs\BenchmarkJob;
+use App\Support\BenchmarkEffectLedger;
 use App\Support\JsonlResultSink;
 use Illuminate\Console\Command;
 use Illuminate\Contracts\Queue\Factory as QueueFactory;
@@ -24,7 +25,11 @@ final class BenchmarkDispatchCommand extends Command
 
     protected $description = 'Dispatch one deterministic benchmark burst and print its JSON manifest';
 
-    public function handle(JsonlResultSink $sink, QueueFactory $queues): int
+    public function handle(
+        JsonlResultSink $sink,
+        BenchmarkEffectLedger $ledger,
+        QueueFactory $queues,
+    ): int
     {
         $runId = $this->option('run-id');
         $runId = is_string($runId) && $runId !== '' ? $runId : (string) Str::uuid();
@@ -43,6 +48,7 @@ final class BenchmarkDispatchCommand extends Command
         }
 
         $sink->reserveRun($runId);
+        $ledger->reserveRun($runId);
         $startedAt = hrtime(true);
         if ($dispatchMode === 'single') {
             for ($index = 0; $index < $jobs; ++$index) {
@@ -88,6 +94,10 @@ final class BenchmarkDispatchCommand extends Command
                 : 1,
             'sleep_ms' => $sleepMs,
             'cpu_iterations' => $cpuIterations,
+            'ledger_mode' => $ledger->mode(),
+            'ledger_semantics' => $ledger->enabled()
+                ? 'fixture-local idempotent effect keyed by run_id+job_id; not queue-ACK atomic'
+                : 'disabled',
             'dispatch_started_ns' => $startedAt,
             'dispatch_finished_ns' => $completedAt,
             'dispatch_duration_ns' => $completedAt - $startedAt,

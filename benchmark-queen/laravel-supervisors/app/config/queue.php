@@ -43,9 +43,11 @@ return [
         'database' => 'sqlite',
         'table' => 'job_batches',
     ],
-    // Failed jobs are counted by the harness; no fourth persistence backend is
-    // introduced into the hot path of any lane.
+    // Timed lanes default to null so they do not gain a fourth persistence
+    // backend. GA failure probes explicitly select the shared file driver.
     'failed' => [
-        'driver' => 'null',
+        'driver' => $benchmark['failed_driver'],
+        'path' => $benchmark['failed_path'],
+        'limit' => $benchmark['failed_limit'],
     ],
 ];

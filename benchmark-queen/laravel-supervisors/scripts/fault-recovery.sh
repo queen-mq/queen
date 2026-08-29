@@ -221,6 +221,11 @@ metadata = {
         "completion_timeout_seconds": int(completion_timeout),
         "queen_prefetch": int(queen_prefetch),
         "queen_ack_batch": int(queen_ack_batch),
+        "ledger_mode": "durable",
+        "queues": ["benchmark"],
+        "bench_queues_csv": "",
+        "failed_driver": "null",
+        "lease_renewal": False,
         "allow_lease_risk": allow_lease_risk == "1",
         "dispatch_mode": "single",
         "build_images": build_images == "1",
@@ -236,6 +241,16 @@ metadata = {
         "queen_worker_command": "artisan queue:work",
         "delivery_semantics": "at-least-once",
         "strict_duplicate_observation": "reported separately from at-least-once recovery",
+        "effect_witness": (
+            "fixture-local idempotent SQLite effects, durable before completion and queue ACK; "
+            "conservation and duplicate-side-effect gates are reported separately"
+        ),
+        "sterilized_environment": {
+            "BENCH_QUEUES": "",
+            "BENCH_FAILED_DRIVER": "null",
+            "BENCH_LEASE_RENEWAL": "false",
+            "BENCH_LEASE_RENEWAL_INTERVAL": "",
+        },
     },
     "known_limits": [
         "The fixture disables durable failed-job storage; failure signals are therefore log-derived.",
@@ -248,8 +263,8 @@ metadata = {
         "allow_lease_risk bypasses only this harness guard. Current Queen supervisors independently "
         "reject retry_after <= prefetch * worker timeout; end-to-end negative tests need a pre-guard "
         "image or a separate test-only execution path.",
-        "Completion is recorded at the end of handle(), before the queue ACK. Final queue counters "
-        "are reconciled, but this fixture has no idempotent external side-effect ledger.",
+        "The effect ledger is a fixture-local idempotent transactional witness. It is not atomic with the "
+        "queue ACK or an arbitrary external side effect and cannot establish exactly-once delivery.",
     ],
 }
 Path(output, "metadata.json").write_text(
@@ -461,7 +476,9 @@ $tries = (int) $argv[5];
 $connection = $argv[6];
 $queue = $argv[7];
 $sink = $app->make(App\Support\JsonlResultSink::class);
+$ledger = $app->make(App\Support\BenchmarkEffectLedger::class);
 $sink->reserveRun($runId);
+$ledger->reserveRun($runId);
 $queueConnection = $app->make(Illuminate\Contracts\Queue\Factory::class)->connection($connection);
 $startedAt = hrtime(true);
 for ($index = 0; $index < $jobs; ++$index) {
@@ -487,6 +504,8 @@ $manifest = [
     "job_tries" => $tries,
     "sleep_ms" => $sleepMs,
     "cpu_iterations" => $cpuIterations,
+    "ledger_mode" => $ledger->mode(),
+    "ledger_semantics" => "fixture-local idempotent effect keyed by run_id+job_id; not queue-ACK atomic",
     "dispatch_started_ns" => $startedAt,
     "dispatch_finished_ns" => $completedAt,
     "dispatch_duration_ns" => $completedAt - $startedAt,
@@ -578,6 +597,7 @@ write_lane_summary() {
     summary_kill_wall="$5"
     summary_respawn_host="$6"
     summary_completion_status="$7"
+    summary_ledger_status="$8"
 
     python3 - "$summary_lane" "$summary_engine" "$summary_run_id" "$summary_app_id" \
         "$JOBS" "$JOB_TRIES" "$QUEEN_PREFETCH" "$QUEEN_ACK_BATCH" "$WORKERS" "$SLEEP_MS" "$KILL_DELAY_MS" \
@@ -585,7 +605,7 @@ write_lane_summary() {
         "$summary_parent_args" "$summary_replacement_pid" "$summary_kill_host_before" \
         "$summary_kill_host_after" "$summary_kill_container_before" \
         "$summary_kill_container_after" "$summary_kill_wall" "$summary_respawn_host" \
-        "$summary_completion_status" <<'PY'
+        "$summary_completion_status" "$summary_ledger_status" <<'PY'
 import json
 import re
 import sys
@@ -597,7 +617,7 @@ from pathlib import Path
     sleep_ms_raw, kill_delay_ms_raw, target_pid_raw, target_ppid_raw, target_args,
     parent_args, replacement_pid_raw, kill_host_before_raw,
     kill_host_after_raw, kill_container_before_raw, kill_container_after_raw,
-    kill_wall, respawn_host_raw, completion_status_raw,
+    kill_wall, respawn_host_raw, completion_status_raw, ledger_status_raw,
 ) = sys.argv[1:]
 lane = Path(lane_raw)
 jobs = int(jobs_raw)
@@ -619,6 +639,7 @@ def keyed_containers(path: Path):
 
 result = read_json(lane / "result-check.json", {})
 queue_state = read_json(lane / "queue-final.json", {})
+effect_ledger = read_json(lane / "ledger-check.json", {})
 before = keyed_containers(lane / "containers-before.json")
 after = keyed_containers(lane / "containers-final.json")
 
@@ -740,8 +761,19 @@ at_least_once_pass = (
     and int(completion_status_raw) == 0
     and queue_reconciled
     and container_integrity
+    and int(ledger_status_raw) == 0
+    and effect_ledger.get("selected_gate_passed") is True
+    and effect_ledger.get("conservation_pass") is True
+    and effect_ledger.get("idempotent_effect_pass") is True
+    and effect_ledger.get("attempt_integrity_pass") is True
 )
-strict_observation_pass = at_least_once_pass and duplicates == 0 and not failure_lines
+strict_observation_pass = (
+    at_least_once_pass
+    and duplicates == 0
+    and not failure_lines
+    and effect_ledger.get("no_duplicate_side_effects_pass") is True
+    and effect_ledger.get("strict_execution_pass") is True
+)
 
 summary = {
     "schema": "queen.laravel-supervisors.fault-result/v1",
@@ -794,6 +826,7 @@ summary = {
         "durable_failure_count_reason": "fixture queue.failed.driver is null",
         "failure_signal_count": len(failure_lines),
         "final_queue_state": queue_state,
+        "effect_ledger": effect_ledger,
     },
     "containers": container_checks,
     "checks": {
@@ -808,13 +841,21 @@ summary = {
         "no_failure_signal_observed": not failure_lines,
         "queue_reconciled_to_zero": queue_reconciled,
         "no_container_restart_or_oom": container_integrity,
+        "effect_conservation_pass": effect_ledger.get("conservation_pass") is True,
+        "attempt_ledger_integrity_pass": effect_ledger.get("attempt_integrity_pass") is True,
+        "idempotent_effect_pass": effect_ledger.get("idempotent_effect_pass") is True,
+        "strict_execution_pass": effect_ledger.get("strict_execution_pass") is True,
+        "no_duplicate_side_effect_observed": (
+            effect_ledger.get("no_duplicate_side_effects_pass") is True
+        ),
         "at_least_once_pass": at_least_once_pass,
         "strict_observation_pass": strict_observation_pass,
     },
     "interpretation": (
-        "Duplicates are reported but do not invalidate at-least-once recovery. "
-        "strict_observation_pass additionally requires no duplicate and no "
-        "engine-specific failure signal matched in the application log."
+        "Completion duplicates and idempotency dedup hits are reported but do not invalidate "
+        "at-least-once conservation. strict_observation_pass additionally requires a single "
+        "execution attempt per job and no engine-specific failure signal matched in the application log. "
+        "The ledger is not an exactly-once claim for external effects."
     ),
 }
 (lane / "fault-result.json").write_text(
@@ -848,6 +889,14 @@ run_lane() {
     export BENCH_TIMEOUT="$WORKER_TIMEOUT"
     export BENCH_RETRY_AFTER="$RETRY_AFTER"
     export BENCH_DISPATCH_MODE=single
+    export BENCH_LEDGER_MODE=durable
+    # The fault protocol is deliberately single-queue, uses no failed-job
+    # persistence and does not start the lease-renewal helper. Never inherit
+    # these feature-probe toggles from the invoking shell.
+    export BENCH_QUEUES=''
+    export BENCH_FAILED_DRIVER='null'
+    export BENCH_LEASE_RENEWAL='false'
+    export BENCH_LEASE_RENEWAL_INTERVAL=''
     export QUEEN_PREFETCH="$QUEEN_PREFETCH"
     export QUEEN_ACK_BATCH="$QUEEN_ACK_BATCH"
     export QUEEN_BULK_BATCH=100
@@ -897,6 +946,8 @@ PY
     app_id="$(compose_active ps --quiet "$lane_engine")"
     [ -n "$app_id" ] || die "unable to resolve $lane_engine container"
     wait_for_health "$app_id" 180 "$lane_engine"
+    producer php artisan bench:config --no-ansi \
+        >"${ACTIVE_LANE_DIRECTORY}/configuration.json"
     append_timeline "$timeline" supervisor_healthy "$app_id"
 
     initial_workers="${ACTIVE_LANE_DIRECTORY}/workers-before.tsv"
@@ -1022,6 +1073,10 @@ PY
     set -e
     append_timeline "$timeline" queue_state_captured "status=${queue_state_status}"
 
+    producer php artisan bench:ledger-checkpoint --no-ansi "$run_id" \
+        >"${ACTIVE_LANE_DIRECTORY}/ledger-checkpoint.json"
+    append_timeline "$timeline" effect_ledger_checkpoint "$run_id"
+
     docker exec "$app_id" ps -eo pid=,ppid=,etimes=,lstart=,stat=,comm=,args= --forest \
         >"${ACTIVE_LANE_DIRECTORY}/process-tree-final.txt" 2>/dev/null || true
     docker logs --timestamps "$app_id" >"${ACTIVE_LANE_DIRECTORY}/app.log" 2>&1 || true
@@ -1031,10 +1086,20 @@ PY
         --mount "type=bind,src=${ACTIVE_LANE_DIRECTORY},dst=/to" \
         "$APP_IMAGE" sh -ceu 'mkdir -p /to/results; cp -a "/from/$1/." /to/results/' sh "$run_id"
 
+    set +e
+    python3 "${SCRIPT_DIR}/analyze.py" ledger "${ACTIVE_LANE_DIRECTORY}/results" \
+        --expected="$JOBS" \
+        --allow-open-attempts \
+        --allow-retried-executions \
+        --output="${ACTIVE_LANE_DIRECTORY}/ledger-check.json"
+    ledger_status=$?
+    set -e
+    append_timeline "$timeline" effect_ledger_check "status=${ledger_status}"
+
     write_lane_summary "$ACTIVE_LANE_DIRECTORY" "$lane_engine" "$run_id" "$app_id" \
         "$target_pid" "$target_ppid" "$target_args" "$parent_args" "$replacement_pid" \
         "$kill_host_before" "$kill_host_after" "$kill_container_before" \
-        "$kill_container_after" "$kill_wall" "$respawn_host" "$completion_status"
+        "$kill_container_after" "$kill_wall" "$respawn_host" "$completion_status" "$ledger_status"
     append_timeline "$timeline" lane_complete "$lane_engine"
 
     lane_pass="$(python3 -c '
@@ -1075,6 +1140,12 @@ aggregate = {
     "all_strict_observation_pass": bool(results) and all(
         item["checks"]["strict_observation_pass"] for item in results
     ),
+    "all_effect_conservation_pass": bool(results) and all(
+        item["checks"]["effect_conservation_pass"] for item in results
+    ),
+    "all_duplicate_side_effect_free": bool(results) and all(
+        item["checks"]["no_duplicate_side_effect_observed"] for item in results
+    ),
 }
 (root / "report.json").write_text(
     json.dumps(aggregate, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -1083,17 +1154,21 @@ aggregate = {
 lines = [
     "# Fault/recovery smoke report",
     "",
-    "| Engine | Respawn ms | Unique | Missing | Duplicates | Retry observed | Queue zero | Restarts/OOM | At-least-once | Strict observation |",
-    "| --- | ---: | ---: | ---: | ---: | --- | --- | --- | --- | --- |",
+    "| Engine | Respawn ms | Unique | Missing | Completion duplicates | Idempotency dedup hits | Effects | Conservation | Retry observed | Queue zero | Restarts/OOM | At-least-once | Strict execution |",
+    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- | --- | --- | --- |",
 ]
 for item in results:
     recovery = item["supervisor_recovery"]["kill_to_full_pool_ms"]
     recovery_text = "n/a" if recovery is None else f"{recovery:.1f}"
     job = item["job_recovery"]
+    ledger = job["effect_ledger"]
     checks = item["checks"]
     lines.append(
         f"| {item['engine']} | {recovery_text} | {job['unique_completed']}/{job['expected']} "
         f"| {job['missing']} | {job['duplicates']} "
+        f"| {ledger['attempts']['already_present']['count']} "
+        f"| {ledger['effects']['records']} "
+        f"| {'pass' if checks['effect_conservation_pass'] else 'FAIL'} "
         f"| {'yes' if job['inflight_recovery_observed'] else 'NO'} "
         f"| {'yes' if checks['queue_reconciled_to_zero'] else 'NO'} "
         f"| {'pass' if checks['no_container_restart_or_oom'] else 'FAIL'} "
@@ -1102,11 +1177,12 @@ for item in results:
     )
 lines.extend([
     "",
-    "The at-least-once gate requires worker respawn, every unique job, and no container restart/OOM. ",
-    "The stricter observational gate additionally requires zero observed duplicates and no failure signal in logs. ",
-    "A duplicate is legal under at-least-once delivery if SIGKILL lands after the job side effect but before ACK.",
+    "The at-least-once gate requires worker respawn, every unique job, fixture-effect conservation, and no container restart/OOM. ",
+    "The stricter execution gate additionally requires one attempt per job, zero completion duplicates and no failure signal in logs. ",
+    "A retry is legal under at-least-once delivery; the `(run_id, job_id)` key converts a repeated fixture effect into an observable dedup hit.",
+    "The SQLite ledger witnesses only fixture-local idempotent effects; it does not prove exactly-once effects in external systems.",
     "",
-    "See `metadata.json`, each lane's `fault-result.json`, raw JSONL results, process trees, resolved Compose file, container inspections and logs.",
+    "See `metadata.json`, each lane's `fault-result.json`, `ledger-check.json`, raw SQLite/JSONL results, process trees, resolved Compose file, container inspections and logs.",
 ])
 (root / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY

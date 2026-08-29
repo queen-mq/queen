@@ -15,9 +15,10 @@ return [
         Str::slug((string) env('APP_NAME', 'queen-supervisor-benchmark'), '_').'_horizon:',
     ),
     'middleware' => [],
-    'waits' => [
-        'redis:'.$benchmark['queue'] => 60,
-    ],
+    'waits' => array_fill_keys(
+        array_map(fn (string $queue): string => 'redis:'.$queue, $benchmark['queues']),
+        60,
+    ),
     'trim' => [
         'recent' => 60,
         'pending' => 60,
@@ -39,7 +40,7 @@ return [
     'defaults' => [
         'bench' => [
             'connection' => $benchmark['connection'],
-            'queue' => [$benchmark['queue']],
+            'queue' => $benchmark['queues'],
             'balance' => $fixed ? 'simple' : 'auto',
             'autoScalingStrategy' => $benchmark['strategy'],
             'processes' => $fixed ? $benchmark['workers'] : $benchmark['max_workers'],

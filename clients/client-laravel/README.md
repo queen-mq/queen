@@ -40,6 +40,9 @@ QUEEN_BLOCK_FOR=5
 # QUEEN_PREFETCH=16
 # QUEEN_ACK_BATCH=16
 # QUEEN_BULK_BATCH=100
+# For jobs that can outlive the original prefetched lease:
+# QUEEN_LEASE_RENEWAL=true
+# QUEEN_LEASE_RENEWAL_INTERVAL=30
 ```
 
 Run the ordinary Laravel worker:
@@ -68,11 +71,46 @@ prefetched jobs leased until `retry_after`. Size that lease for the worst-case
 time to process the complete batch. Keep both values at `1` for long-running
 jobs, strict per-job ACK confirmation, or comma-separated priority queues.
 Reentrant `pop()` while a prefetched job is still active is rejected.
-Queen's PHP and Rust supervisors fail configuration export unless
-`retry_after > prefetch * timeout`; keep additional margin for framework and
-transport overhead. A directly managed `queue:work` process cannot validate
-its CLI timeout against queue configuration, so its process manager must
-enforce the same invariant.
+Without lease renewal, Queen's PHP and Rust supervisors fail configuration
+export unless `retry_after > prefetch * timeout`; keep additional margin for
+framework and transport overhead. A directly managed `queue:work` process
+cannot validate its CLI timeout against queue configuration, so its process
+manager must enforce the same invariant.
+
+Set `QUEEN_LEASE_RENEWAL=true` when the complete prefetched batch cannot be
+bounded by the original lease. Queen lazily starts one persistent PHP CLI
+helper when a worker claims its first lease; resolving the same connection in
+PHP-FPM for dispatch remains supported. The helper is part of the delivery
+data path, not the Queen supervisor/control plane: it renews the one pop lease
+shared by the active job, the local prefetch tail and any ACK awaiting
+confirmation. It is created in a
+clean subprocess, receives credentials over a private pipe, and exits when the
+worker closes that pipe. This mode requires Unix CLI PHP with `proc_open`,
+`proc_terminate`, `posix_getppid`, `posix_kill` and `posix_setpgid`; the first
+consume fails closed before delivering a job when the platform cannot provide
+them. The helper leaves the worker process group before confirming readiness,
+so a graceful Rust scale-down cannot stop renewal underneath the active job.
+When the Rust supervisor is PID 1, run it behind a real container init (for
+example Docker `--init`/Compose `init: true` or tini) so forcibly orphaned
+helper processes are reaped. Laravel's synchronous driver holds exactly one
+pop lease at a time; a second
+concurrent lease is rejected before its job can be handed to the application.
+
+Renewal does not change Queen's at-least-once contract. If the helper cannot
+complete a renewal inside its monotonic deadline, it sends `TERM` and then
+`KILL` to fence the worker before the lease expires. An effect already emitted
+by the interrupted job can be duplicated after redelivery, so handlers still
+need idempotency keys. `retry_after` must remain longer than the worker timeout,
+and the connector additionally requires this conservative budget to fit:
+`interval + 2 × (HTTP timeout × backend count) + 1s retry + kill grace + safety
+margin < retry_after`. Defaults are one-third of `retry_after`, 5s HTTP timeout,
+2s kill grace and 1s safety margin. Each Laravel worker gains one PHP helper
+process; include its RSS/CPU in capacity planning and do not attribute it to
+the PHP or Rust supervisor's control-plane footprint. The initial deadline is
+derived from the host's 64-bit monotonic clock before the pop request starts;
+a slow/long poll can therefore fence early but can never overestimate how long
+the broker lease remains valid. The helper acknowledges lease registration
+over the pipe before the job is handed to Laravel.
 
 Laravel's `Queue::bulk()` uses bounded, multi-partition Queen requests instead
 of looping over singleton pushes. `QUEEN_BULK_BATCH` bounds each request and
@@ -148,7 +186,73 @@ master. It invokes Artisan once to resolve the same configuration, then leaves
 only Rust and the ordinary PHP workers resident:
 
 ```bash
-queen-supervisor --php php --artisan artisan
+# Explicit deploy step; Composer dependency scripts never download or run it.
+php artisan queen:supervisor-install
+
+# Composer exposes the launcher in vendor/bin.
+vendor/bin/queen-supervisor --php php --artisan artisan
+```
+
+The Composer package pins the supervisor version and owns its installer and
+launcher, so the PHP integration and compatible Rust executable are released
+together. The executable is intentionally not embedded in the Composer
+archive: the explicit install command selects the current host artifact and
+places it under `storage/queen-supervisor/bin/<version>/<os>-<arch>`. The
+launcher checks its installation receipt and binary SHA-256 on every start,
+then uses `pcntl_exec` to replace PHP; it does not keep a PHP launcher process
+resident and never downloads automatically.
+
+Prebuilt releases are selected without cross-platform fallback for Linux and
+macOS on `amd64`/`x86_64` and `arm64`/`aarch64`. Windows is rejected explicitly
+until worker fencing is safe without Unix signals and process groups. The PHP
+supervisor has the same Unix process-control requirement, so Queen currently
+does not provide a supported Laravel supervisor engine on Windows. A custom
+install path must also be present in the launcher's environment:
+
+```dotenv
+QUEEN_SUPERVISOR_INSTALL_PATH=/srv/app/var/queen-supervisor
+```
+
+The default online install downloads the exact versioned manifest over HTTPS,
+then accepts only the matching target archive and its mandatory manifest
+SHA-256. A private HTTPS mirror can host both files:
+
+```bash
+php artisan queen:supervisor-install \
+  --base-url=https://artifacts.example.com/queen/supervisor/v0.1.0
+```
+
+For an air-gapped deployment, transfer the release manifest and archive
+together. Local inputs must be regular non-symlink files; the same pinned
+version, target, filename, SHA-256 and executable `--version` checks remain in
+force:
+
+```bash
+php artisan queen:supervisor-install \
+  --manifest=/media/releases/queen-supervisor-manifest.json \
+  --archive=/media/releases/queen-supervisor-0.1.0-linux-amd64.tar.gz
+```
+
+Installation is serialized by a local file lock and publishes verified files
+with same-filesystem atomic renames. Failed downloads, oversized inputs, hash
+mismatches, malformed archives and version mismatches leave no runnable new
+installation. Re-run with `--force` to replace and revalidate the pinned
+version.
+
+Trust boundary: SHA-256 proves that an archive is the artifact named by the
+manifest; it is not by itself a signature. For the default source, manifest
+authenticity rests on HTTPS and GitHub release access controls. In higher
+assurance environments, mirror only a manifest verified against Queen's
+release provenance/attestation, then install from that controlled HTTPS or
+offline source. The published Sigstore bundle can be checked before mirroring:
+
+```bash
+cosign verify-blob \
+  --bundle queen-supervisor-manifest.sigstore.json \
+  --certificate-identity \
+    https://github.com/queen-mq/queen/.github/workflows/release-supervisor.yml@refs/tags/supervisor/v0.1.0 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  queen-supervisor-manifest.json
 ```
 
 Both read `queen.supervisor.supervisors`, start standard `queue:work` children
@@ -546,7 +650,7 @@ $consumer->close();
 | `consumeBatch(int $timeoutMs, int $max)` | Get up to `$max` messages |
 | `ack(array $message)` | Acknowledge message(s) |
 | `nack(array $message)` | Negative-acknowledge (mark failed) |
-| `renewLease(array\|string $msg)` | Extend message lease |
+| `renewLease(array\|string $msg, ?int $seconds = null)` | Extend message lease |
 | `isClosed()` | Check if consumer was stopped |
 | `close()` | Stop the consumer |
 
@@ -759,7 +863,7 @@ $queen->ack($message, true, ['group' => 'processors']);
 $queen->renew($message);
 
 // Renew by lease ID
-$queen->renew('lease-id-string');
+$queen->renew('lease-id-string', 120); // extend with the same 120s horizon
 
 // Renew multiple
 $queen->renew($messages);
@@ -949,9 +1053,18 @@ return [
     'block_for' => env('QUEEN_BLOCK_FOR', 0),
     'prefetch' => env('QUEEN_PREFETCH', 1),
     'ack_batch' => env('QUEEN_ACK_BATCH', 1),
+    'lease_renewal' => env('QUEEN_LEASE_RENEWAL', false),
+    'lease_renewal_interval' => env('QUEEN_LEASE_RENEWAL_INTERVAL'),
+    'lease_renewal_timeout' => env('QUEEN_LEASE_RENEWAL_TIMEOUT', 5),
+    'lease_renewal_kill_grace' => env('QUEEN_LEASE_RENEWAL_KILL_GRACE', 2),
+    'lease_renewal_safety_margin' => env('QUEEN_LEASE_RENEWAL_SAFETY_MARGIN', 1),
     'bulk_batch' => env('QUEEN_BULK_BATCH', 100),
     'after_commit' => env('QUEEN_AFTER_COMMIT', false),
     'sync_failed_jobs' => env('QUEEN_SYNC_FAILED_JOBS', true),
+    'failed_jobs_lock_store' => env('QUEEN_FAILED_JOBS_LOCK_STORE'),
+    'failed_jobs_lock_name' => env('QUEEN_FAILED_JOBS_LOCK_NAME', 'queen:failed-jobs'),
+    'failed_jobs_lock_ttl' => env('QUEEN_FAILED_JOBS_LOCK_TTL', 600),
+    'failed_jobs_lock_wait' => env('QUEEN_FAILED_JOBS_LOCK_WAIT', 600),
     'retry_429' => [
         'maxAttempts' => env('QUEEN_RETRY_429_MAX_ATTEMPTS'),
         'baseMs' => env('QUEEN_RETRY_429_BASE_MS'),
@@ -962,7 +1075,37 @@ return [
 
 Keep `sync_failed_jobs=true` whenever final failures are retained in both
 Laravel and Queen. Disabling it leaves `queue:forget`, flush and prune unable to
-remove broker DLQ snapshots.
+remove broker DLQ snapshots. The decorator serializes failed-store mutations
+with a Laravel cache lock. Set `failed_jobs_lock_store` to a shared cache store
+with distributed-lock support (for example Redis) on every worker and host;
+`null` uses Laravel's default cache store. The `array` store is process-local;
+the `file` store can coordinate local processes sharing that filesystem, but
+neither is a multi-host lock.
+
+`failed_jobs_lock_ttl` must exceed one complete Queen admin cleanup or fenced
+manual-retry hand-off, including HTTP retries, failover and rate-limit backoff;
+the conservative default is 600 seconds. `failed_jobs_lock_wait` is only the
+acquisition wait and defaults to the same 600-second upper bound. This matters
+when a manually retried job fails immediately: its worker must be able to wait
+until `queue:retry` retires the old generation, or a `database-uuids` store
+cannot insert the replacement UUID. Keep the wait at least as large as the TTL
+unless a shorter, explicitly accepted failed-index logging budget is required.
+A timeout or lost lock fails closed: the mutating operation does not delete a
+different generation. Flush and prune first snapshot exact IDs under a short
+lock, then acquire one lock per ID, so a large failed store never holds one TTL
+across all network calls and failures logged after the snapshot are not
+deleted. A partially completed bulk cleanup is safe to retry because an
+already-absent Queen snapshot is idempotent. An unqualified flush
+conservatively leaves rows stamped in its current one-second boundary;
+rerunning the command removes them after the boundary has passed and prevents
+a same-UUID re-failure from being mistaken for its prior generation.
+
+Prefer Laravel's database or DynamoDB failed-job provider for durable
+deployments. The bounded file provider is supported and Queen cleans its oldest
+DLQ snapshot before Laravel evicts the matching row, but it remains a
+local/diagnostic store. The cleanup suppresses only Queen's explicit
+`Message not found` response; a 404 `no_such_route` or generic route mismatch is an
+operational error and keeps the Laravel row.
 
 `queue:clear` is intentionally not advertised: Queen does not yet have an
 atomic primitive that clears ready jobs, active leases and Laravel-owned timers

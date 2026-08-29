@@ -222,9 +222,15 @@ class Queen
 
     /**
      * @param string|array $messageOrLeaseId Lease ID string, message array, or array of messages
+     * @param int|null $seconds New lease horizon. Null retains the broker's
+     *                          backwards-compatible 60 second default.
      */
-    public function renew(string|array $messageOrLeaseId): array
+    public function renew(string|array $messageOrLeaseId, ?int $seconds = null): array
     {
+        if ($seconds !== null && ($seconds < 1 || $seconds > 2_147_483_647)) {
+            throw new \InvalidArgumentException('Lease renewal seconds must be in the range 1..2147483647');
+        }
+
         $leaseIds = [];
 
         if (is_string($messageOrLeaseId)) {
@@ -254,11 +260,38 @@ class Queen
         $results = [];
         foreach ($leaseIds as $leaseId) {
             try {
-                $result = $this->httpClient->post("/api/v1/lease/{$leaseId}/extend", []);
+                $result = $this->httpClient->post(
+                    '/api/v1/lease/' . rawurlencode((string) $leaseId) . '/extend',
+                    $seconds === null ? [] : ['seconds' => $seconds],
+                );
+                $renewed = is_array($result) ? ($result['renewed'] ?? null) : null;
+                $expires = is_array($result)
+                    ? ($result['newExpiresAt'] ?? $result['expiresAt'] ?? $result['lease_expires_at'] ?? null)
+                    : null;
+                // Only the affected-row count proves that the broker still
+                // owned and extended this lease. An expiry string is useful
+                // scheduling metadata, but must never turn renewed:0 (or a
+                // legacy/ambiguous response without renewed) into success.
+                $hasRenewalEvidence = is_int($renewed) && $renewed > 0;
+                $hasValidExpiry = $expires === null
+                    || is_string($expires) && self::isRfc3339Timestamp($expires);
+                if (!is_array($result)
+                    || ($result['success'] ?? null) !== true
+                    || !$hasRenewalEvidence
+                    || !$hasValidExpiry) {
+                    $results[] = [
+                        'leaseId' => $leaseId,
+                        'success' => false,
+                        'error' => is_array($result) && is_string($result['error'] ?? null)
+                            ? $result['error']
+                            : 'Queen rejected or could not verify the lease renewal',
+                    ];
+                    continue;
+                }
                 $results[] = [
                     'leaseId' => $leaseId,
                     'success' => true,
-                    'newExpiresAt' => $result['newExpiresAt'] ?? $result['lease_expires_at'] ?? null,
+                    'newExpiresAt' => $expires,
                 ];
             } catch (\Throwable $error) {
                 $results[] = ['leaseId' => $leaseId, 'success' => false, 'error' => $error->getMessage()];
@@ -269,6 +302,26 @@ class Queen
         return is_string($messageOrLeaseId) || !isset($messageOrLeaseId[0])
             ? $results[0]
             : $results;
+    }
+
+    private static function isRfc3339Timestamp(string $value): bool
+    {
+        if (preg_match(
+            '/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/D',
+            $value,
+        ) !== 1) {
+            return false;
+        }
+
+        try {
+            new \DateTimeImmutable($value);
+        } catch (\Exception) {
+            return false;
+        }
+
+        $errors = \DateTimeImmutable::getLastErrors();
+        return $errors === false
+            || $errors['warning_count'] === 0 && $errors['error_count'] === 0;
     }
 
     // ===========================
