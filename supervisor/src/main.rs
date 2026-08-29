@@ -1217,7 +1217,10 @@ fn trusted_directory_component(
         .into());
     }
     let mode = metadata.mode();
-    let sticky = mode & libc::S_ISVTX as u32 != 0;
+    // `MetadataExt::mode()` is always `u32`, while libc exposes `S_ISVTX`
+    // as different integer types across Unix targets (for example, `u16` on
+    // macOS and `u32` on Linux). The POSIX sticky-mode bit itself is 0o1000.
+    let sticky = mode & 0o1000 != 0;
     if !state_leaf && mode & 0o022 != 0 && !sticky {
         return Err(format!(
             "state_directory ancestor {} must not be group/world-writable unless it is a trusted sticky directory",
