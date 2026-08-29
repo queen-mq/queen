@@ -62,8 +62,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 use super::{
-    Command, GroupConfig, JoinAnswer, JoinRequest, MemberId, Protocol, Snapshot, SyncAnswer,
-    SyncRequest,
+    Command, GroupConfig, GroupDescription, JoinAnswer, JoinRequest, MemberDescription, MemberId,
+    Protocol, Snapshot, SyncAnswer, SyncRequest,
 };
 use crate::obs::Sampler;
 
@@ -134,6 +134,13 @@ pub enum State {
 /// identity, its timings, and two opaque byte strings.
 struct Member {
     id: MemberId,
+    /// The two identity strings DescribeGroups answers and nothing else reads:
+    /// the `client.id` from the request header and the peer address
+    /// `conn::serve` accepted. Kept per member rather than derived, because a
+    /// group's members arrive on different connections and only the member
+    /// knows which one was its own.
+    client_id: String,
+    client_host: String,
     /// Every protocol it says it speaks, in ITS order of preference.
     protocols: Vec<Protocol>,
     session_timeout: Duration,
@@ -397,6 +404,26 @@ impl Group {
             Command::Describe(reply) => {
                 let _ = reply.send(self.snapshot());
             }
+            Command::DescribeGroup(reply) => {
+                let _ = reply.send(self.description());
+            }
+            Command::Discard(reply) => {
+                let empty = self.members.is_empty();
+                // Reaped NOW rather than in `empty_reap`, and through the
+                // reaper's own path rather than a second one: a deleted group
+                // has to read back `Dead` on the very next DescribeGroups, and
+                // an actor left standing would answer `Empty` — which is what
+                // an operator would read as "the delete did not happen".
+                //
+                // The run loop takes it from here: `overdue()` is true the
+                // instant this returns, `on_timer` finds an Empty group whose
+                // reap deadline has passed, and the actor exits and
+                // deregisters itself.
+                if empty && self.state == State::Empty {
+                    self.reap_deadline = Some(Instant::now());
+                }
+                let _ = reply.send(empty);
+            }
         }
     }
 
@@ -409,6 +436,36 @@ impl Group {
             protocol_name: self.protocol_name.clone(),
             members: self.members.iter().map(|m| m.id.clone()).collect(),
             pending: self.pending.len(),
+        }
+    }
+
+    /// The same instant, in DescribeGroups' shape. See [`GroupDescription`] for
+    /// why it is a second read of the same fields and not a widened
+    /// [`Snapshot`].
+    ///
+    /// The two byte strings are the whole value of the API and neither is
+    /// touched: the metadata is what this member sent for the ELECTED protocol
+    /// (a member that does not speak it has none, which is the empty string
+    /// Kafka answers too), and the assignment is exactly the bytes the leader
+    /// posted at SyncGroup.
+    fn description(&self) -> GroupDescription {
+        let elected = self.protocol_name.clone().unwrap_or_default();
+        GroupDescription {
+            state: self.state,
+            generation: self.generation,
+            protocol_type: self.protocol_type.clone(),
+            protocol_name: self.protocol_name.clone(),
+            members: self
+                .members
+                .iter()
+                .map(|m| MemberDescription {
+                    id: m.id.clone(),
+                    client_id: m.client_id.clone(),
+                    client_host: m.client_host.clone(),
+                    metadata: m.metadata_for(&elected),
+                    assignment: m.assignment.clone(),
+                })
+                .collect(),
         }
     }
 
@@ -530,6 +587,8 @@ impl Group {
         if !known {
             self.members.push(Member {
                 id: member_id.clone(),
+                client_id: req.client_id.clone(),
+                client_host: req.client_host.clone(),
                 protocols: req.protocols.clone(),
                 session_timeout: session,
                 rebalance_timeout: rebalance,
@@ -557,6 +616,12 @@ impl Group {
             return;
         };
         member.protocols = req.protocols;
+        // Refreshed on every rejoin, not only at the first join: a member that
+        // rejoins does so on whatever connection it holds NOW, and a host an
+        // operator reads has to be the one the member is attached to rather
+        // than the one it first arrived on.
+        member.client_id = req.client_id;
+        member.client_host = req.client_host;
         member.session_timeout = session;
         member.rebalance_timeout = rebalance;
         member.deadline = session_deadline;
@@ -1060,6 +1125,7 @@ mod tests {
     fn join_request(label: &str, protocols: &[&str]) -> JoinRequest {
         JoinRequest {
             member_id: String::new(),
+            client_host: "/127.0.0.1".to_string(),
             client_id: "consumer".to_string(),
             protocol_type: "consumer".to_string(),
             protocols: protocols
@@ -2315,6 +2381,182 @@ mod tests {
             root.live_groups(),
             0,
             "an actor exited without removing its own registry entry"
+        );
+    }
+
+    // ------------------------------------------------------ the two readings
+
+    /// [`Snapshot`] and [`GroupDescription`] are two reads of the SAME instant
+    /// in the same actor, kept apart so that a wire shape carrying opaque
+    /// member bytes does not churn the FSM assertions in this file. The one
+    /// thing they must never do is disagree, and this is the test the doc
+    /// comment on `GroupDescription` promises.
+    ///
+    /// Asserted at every state a live actor can be observed in and not at one,
+    /// because a divergence would come from a TRANSITION rather than from a
+    /// resting state, and because the two paths are two independent actor
+    /// `Command`s: `ListGroups` renders a group from `describe`, `DescribeGroups`
+    /// from `describe_group`, and nothing but this test stops the two from
+    /// drifting into answering an operator's two tools differently about the
+    /// same group in the same second.
+    ///
+    /// The walk is one group through its whole life: PreparingRebalance while
+    /// forming (members known, nothing elected), CompletingRebalance (the
+    /// generation has moved, the leader owes an assignment), Stable (every
+    /// field populated and the opaque bytes carried), PreparingRebalance again
+    /// after a member leaves (which is NOT the same shape as the first one),
+    /// Empty (the FSM clears the protocol type and the member list at once),
+    /// and the absence left by the reaper.
+    ///
+    /// `Dead` itself is deliberately absent from that list: it is not
+    /// observable. The actor sets it and returns from its loop on the same turn
+    /// ([`Group::on_timer`]), so no `Command` is ever served in that state and
+    /// neither reading can be taken there. What replaces it is a group with no
+    /// actor, which both readings answer `None` for, and that is what the last
+    /// step pins.
+    #[tokio::test(start_paused = true)]
+    async fn the_two_readings_of_a_group_never_disagree() {
+        let c = coordinator();
+
+        async fn agree(c: &Coordinator, group: &str, at: &str) -> Snapshot {
+            use crate::handlers::list_groups::state_name;
+
+            let snapshot = c.describe(group).await.expect("no actor");
+            let described = c.describe_group(group).await.expect("no actor");
+            assert_eq!(described.state, snapshot.state, "state at {at}");
+            // The same states again in the WIRE vocabulary, because the string
+            // is what a client compares: `states_filter` on ListGroups is
+            // matched literally, and DescribeGroups puts the answer in
+            // `group_state`. Both render through the one `state_name`, so the
+            // only way the two APIs can disagree about a group is the two
+            // Commands' `state` fields disagreeing here.
+            assert_eq!(
+                state_name(described.state),
+                state_name(snapshot.state),
+                "state string at {at}"
+            );
+            assert_eq!(
+                described.generation, snapshot.generation,
+                "generation at {at}"
+            );
+            assert_eq!(
+                described
+                    .members
+                    .iter()
+                    .map(|m| m.id.clone())
+                    .collect::<Vec<_>>(),
+                snapshot.members,
+                "member ids (and their order) at {at}"
+            );
+            // Not named by the design, but read off the same fields and just as
+            // cheap to pin: a handler branches on the protocol type being None.
+            assert_eq!(
+                described.protocol_type, snapshot.protocol_type,
+                "protocol type at {at}"
+            );
+            assert_eq!(
+                described.protocol_name, snapshot.protocol_name,
+                "protocol name at {at}"
+            );
+            snapshot
+        }
+
+        // PreparingRebalance while FORMING: both joins are parked inside the
+        // window, so the members are known and the generation they will all be
+        // told does not exist yet. Driven by hand rather than through
+        // `two_member_group`, which closes the window on its way out and would
+        // step over this point.
+        let first = spawn_join(&c, "orders", "leader");
+        wait_for_members(&c, "orders", 1).await;
+        let second = spawn_join(&c, "orders", "follower");
+        wait_for_members(&c, "orders", 2).await;
+        let forming = agree(&c, "orders", "PreparingRebalance (forming)").await;
+        assert_eq!(forming.state, State::PreparingRebalance);
+        assert_eq!(forming.generation, 0, "the fixture is wrong");
+        assert_eq!(
+            forming.protocol_name, None,
+            "nothing is elected until the window closes"
+        );
+        assert_eq!(
+            forming.protocol_type.as_deref(),
+            Some("consumer"),
+            "the type is known from the first join, the assignor is not"
+        );
+
+        // Mid-rebalance: the window closed, nobody has synced.
+        close_join_window().await;
+        let (leader, follower) = (first.await.unwrap(), second.await.unwrap());
+        assert_eq!(leader.error, None);
+        assert_eq!(follower.error, None);
+        let joining = agree(&c, "orders", "CompletingRebalance").await;
+        assert_eq!(joining.state, State::CompletingRebalance);
+        assert_eq!(joining.members.len(), 2, "the fixture is wrong");
+
+        // Stable, where every field is populated and the members carry the
+        // leader's own bytes.
+        stabilise(&c, "orders", &leader, &follower).await;
+        let stable = agree(&c, "orders", "Stable").await;
+        assert_eq!(stable.state, State::Stable);
+        let described = c.describe_group("orders").await.unwrap();
+        assert_eq!(
+            described
+                .members
+                .iter()
+                .map(|m| (m.metadata.clone(), m.assignment.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    Bytes::from_static(b"leader/range"),
+                    Bytes::from_static(b"leader-slice"),
+                ),
+                (
+                    Bytes::from_static(b"follower/range"),
+                    Bytes::from_static(b"follower-slice"),
+                ),
+            ],
+            "the description carried bytes the snapshot's member ids did not agree with"
+        );
+
+        // PreparingRebalance again, and NOT the shape the first one had: one
+        // member is left, the generation has already moved and the elected
+        // protocol is still set. A reading that took "rebalancing" to mean
+        // "nothing is elected" would agree while forming and disagree here.
+        assert_eq!(c.leave("orders", &follower.member_id).await, None);
+        wait_for_state(&c, "orders", State::PreparingRebalance).await;
+        let reforming = agree(&c, "orders", "PreparingRebalance (re-forming)").await;
+        assert_eq!(reforming.members, vec![leader.member_id.clone()]);
+        assert_eq!(reforming.protocol_name.as_deref(), Some("range"));
+
+        // Empty: the last member leaves, and the two readings must clear
+        // together.
+        assert_eq!(c.leave("orders", &leader.member_id).await, None);
+        wait_for_state(&c, "orders", State::Empty).await;
+        let empty = agree(&c, "orders", "Empty").await;
+        assert!(empty.members.is_empty());
+        assert_eq!(empty.protocol_type, None);
+
+        // ...and then the reaper, which is as close to `Dead` as either reading
+        // gets. Both must answer `None`, because each handler renders that
+        // absence its own way and both renderings are only correct if the
+        // absence is common: DescribeGroups asks the durable index whether the
+        // group is `Empty` or `Dead`, ListGroups drops it from the live half
+        // and lets the index answer for it.
+        tokio::time::advance(GroupConfig::default().empty_reap + Duration::from_secs(1)).await;
+        for _ in 0..1_000 {
+            if c.live_groups() == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(c.live_groups(), 0, "the empty group was never reaped");
+        assert!(
+            c.describe("orders").await.is_none(),
+            "a reaped group still has a snapshot"
+        );
+        assert!(
+            c.describe_group("orders").await.is_none(),
+            "a reaped group still has a description, so DescribeGroups would \
+             answer a live group where ListGroups shows none"
         );
     }
 

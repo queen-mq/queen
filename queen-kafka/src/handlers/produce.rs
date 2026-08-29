@@ -15,6 +15,17 @@
 //! the envelope is built ([`crate::wire`]): this is the last place it exists,
 //! because what is not written into the payload here never reaches Queen.
 //!
+//! ## Any node serves any partition, whatever Metadata said the leader was
+//!
+//! In cluster mode ([`crate::cluster`]) this handler has NO leadership gate,
+//! and the absence is a decision: `003_log_push.sql:131-213` allocates a
+//! message's offset by locking the `queen.log_partitions` row INSIDE the
+//! database transaction, so two facades appending to one partition through two
+//! brokers cannot issue the same offset. Apache Kafka answers
+//! NOT_LEADER_OR_FOLLOWER at a non-leader because a non-leader does not have
+//! the data; here every node has all of it, and refusing would turn each
+//! membership change into a synchronised metadata storm for nothing.
+//!
 //! ## One push, and the offsets that come back from it
 //!
 //! The batching is not an optimisation detail, it is what makes the answer
@@ -87,10 +98,11 @@ use kafka_protocol::messages::produce_request::PartitionProduceData;
 use kafka_protocol::messages::produce_response::{PartitionProduceResponse, TopicProduceResponse};
 use kafka_protocol::messages::{ProduceRequest, ProduceResponse, TopicName};
 use kafka_protocol::protocol::StrBytes;
-use kafka_protocol::records::{BatchDecodeInfo, RecordBatchDecoder, NO_PRODUCER_ID};
+use kafka_protocol::records::{BatchDecodeInfo, RecordBatchDecoder};
 
 use crate::decompress::{self, Refusal};
 use crate::handlers::metadata::{self, Plan};
+use crate::idempotent;
 use crate::queen::{self, PushItem, Pushed};
 use crate::records as envelope;
 use crate::throttle;
@@ -142,11 +154,36 @@ const MAX_RECORDS_PER_REQUEST: usize = 1_000_000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Slot {
     /// Items `start..start+len` of the push are this partition's records.
-    Push { start: usize, len: usize },
+    ///
+    /// `seq` is present only for an idempotent producer, and is what the
+    /// sequence window is advanced with once the push has answered — never
+    /// before ([`crate::idempotent`]).
+    Push {
+        start: usize,
+        len: usize,
+        seq: Option<idempotent::Pending>,
+    },
     /// Nothing to write: the entry carried no records at all.
     Empty,
+    /// An idempotent producer resent a batch this facade has already appended.
+    /// Answered `error_code = 0` with the offsets the original got, and NOTHING
+    /// is written — Kafka's own duplicate semantics, and the reason a retry
+    /// after a lost response is invisible.
+    Duplicate(i64),
     /// Answer this error, and write nothing.
     Reject(ResponseError, String),
+}
+
+/// What one partition entry needs to consult the idempotent-producer window:
+/// the process-wide state, and the scope to file it under.
+///
+/// The tenant is resolved once per request rather than once per partition —
+/// it is a lock and a hash of the connection's credential
+/// ([`crate::identity::Identities::known`]), and a request carries as many
+/// partitions as a client likes.
+struct Idem<'a> {
+    producers: &'a idempotent::Producers,
+    tenant: &'a crate::identity::TenantKey,
 }
 
 /// Handle one Produce request. `None` means "write no response frame", which is
@@ -192,7 +229,29 @@ async fn build(facade: &Facade, req: &ProduceRequest, token: Option<&str>) -> Pr
     // them with today; the per-queue `relaxed` durability class is what will
     // make acks=1 cheaper than acks=-1, and until it exists answering both from
     // the durable path is the safe direction to be wrong in.
-    if let Some(id) = &req.transactional_id {
+    // An EMPTY transactional id is not a transactional id, and is read here as
+    // exactly the absent one it was meant to be. Erlang's `kafka_protocol`
+    // hand-rolls the Produce encoder instead of deriving it from its own schema,
+    // and types this field `string` where the schema says `nullable_string`
+    // (`kpro_req_lib.erl:308`, with `kpro_lib.erl:140` encoding null as `""`),
+    // so a plainly NON-transactional send from brod — and with it
+    // `broadway_kafka` and `kaffe`, which is most of the Elixir in production —
+    // puts a zero-length string on the wire where the protocol says null.
+    // Apache Kafka takes those same bytes without complaint, because a real
+    // broker does not gate on this field at all: a produce is transactional to
+    // it when the RECORD BATCH carries the `isTransactional` attribute bit. That
+    // bit is still refused, in `stage` below, which is where the refusal always
+    // belonged. Measured, not reasoned: the identical brod build produces
+    // cleanly against apache/kafka:3.9.1 and could not produce one message here
+    // (compat/brod/README.md). A non-empty id keeps every byte of the refusal.
+    // The empty-string filter lives in ONE place now
+    // ([`crate::idempotent::transactional_id`]), because
+    // `handlers::init_producer_id` has to read this field exactly the same way:
+    // a producer that met one answer here and another there would meet two
+    // different stories about transactions.
+    if let Some(id) =
+        idempotent::transactional_id(req.transactional_id.as_ref().map(|id| id.0.as_str()))
+    {
         // TRANSACTIONAL_ID_AUTHORIZATION_FAILED rather than a generic refusal:
         // it is a code every client already handles as fatal-and-final for the
         // producer (it aborts rather than retrying), it names the transactional
@@ -202,7 +261,7 @@ async fn build(facade: &Facade, req: &ProduceRequest, token: Option<&str>) -> Pr
         // message instead of appearing to work.
         tracing::warn!(
             target: "kafka",
-            transactional_id = %id.0.as_str(),
+            transactional_id = %id,
             "produce with a transactional id: transactions are out of scope"
         );
         return uniform(
@@ -212,12 +271,18 @@ async fn build(facade: &Facade, req: &ProduceRequest, token: Option<&str>) -> Pr
                 "queen-kafka does not implement transactions, so it will not accept the \
                  transactional id `{}` — remove transactional.id (and exactly-once processing) \
                  from this producer",
-                id.0.as_str()
+                id
             ),
         );
     }
 
     let plans = topic_plans(facade, req, token).await;
+
+    let tenant = facade.catalog.tenant_key(token);
+    let idem = Idem {
+        producers: &facade.producers,
+        tenant: &tenant,
+    };
 
     let mut items: Vec<PushItem> = Vec::new();
     let mut slots: Vec<Vec<Slot>> = Vec::with_capacity(req.topic_data.len());
@@ -237,7 +302,7 @@ async fn build(facade: &Facade, req: &ProduceRequest, token: Option<&str>) -> Pr
                 topic
                     .partition_data
                     .iter()
-                    .map(|p| stage(&mut items, name, plan, p, &budget))
+                    .map(|p| stage(&mut items, name, plan, p, &budget, &idem))
                     .collect(),
             );
         }
@@ -251,7 +316,7 @@ async fn build(facade: &Facade, req: &ProduceRequest, token: Option<&str>) -> Pr
         Some(facade.queen.push(&items, token).await)
     };
 
-    render(req, &slots, pushed.as_ref())
+    render(req, &slots, pushed.as_ref(), &idem)
 }
 
 // --------------------------------------------------------------------- topics
@@ -341,6 +406,7 @@ fn stage(
     plan: Plan,
     p: &PartitionProduceData,
     budget: &decompress::Budget,
+    idem: &Idem<'_>,
 ) -> Slot {
     let width = match plan {
         Plan::Serve(width) => width,
@@ -425,6 +491,39 @@ fn stage(
         tracing::warn!(target: "kafka", topic, partition = p.index, %why, "refusing a record batch");
         return Slot::Reject(error, why);
     }
+    // The idempotent producer's sequence window, checked HERE — on the headers,
+    // before the batch is decompressed and before the record count is charged
+    // against the request's budget — because a duplicate is answered without
+    // decoding a byte of it and a gap is refused without decoding a byte of it.
+    // This is the place `refuse` used to answer UNSUPPORTED_FOR_MESSAGE_FORMAT
+    // from ([`crate::idempotent`]).
+    let seq = match idem.producers.check(idem.tenant, topic, p.index, &infos) {
+        idempotent::Verdict::NotIdempotent => None,
+        idempotent::Verdict::Accept(pending) => Some(pending),
+        idempotent::Verdict::Duplicate(base) => {
+            // Kafka answers a duplicate as the SUCCESS it was. Debug and not
+            // warn: on a producer whose response was lost this is the system
+            // working, and it is exactly the moment a fleet retries in unison.
+            tracing::debug!(
+                target: "kafka",
+                topic,
+                partition = p.index,
+                base_offset = base,
+                "an idempotent producer resent a batch this facade already appended"
+            );
+            return Slot::Duplicate(base);
+        }
+        idempotent::Verdict::Reject(error, why) => {
+            tracing::warn!(
+                target: "kafka",
+                topic,
+                partition = p.index,
+                %why,
+                "refusing a batch on its producer sequence"
+            );
+            return Slot::Reject(error, why);
+        }
+    };
     // Charged off the HEADERS, before the decoder can reserve for them.
     let declared = infos.iter().fold(0usize, |sum, i| {
         sum.saturating_add(i.record_count.max(0) as usize)
@@ -520,7 +619,7 @@ fn stage(
     }
     match items.len() - start {
         0 => Slot::Empty,
-        len => Slot::Push { start, len },
+        len => Slot::Push { start, len, seq },
     }
 }
 
@@ -535,15 +634,14 @@ fn stage(
 ///     abort marker) is written by a coordinator, never by a producer, so a
 ///     produce carrying one is a genuinely invalid record rather than an
 ///     unsupported feature — and this facade is no one's coordinator.
-///   * **producer id set** → UNSUPPORTED_FOR_MESSAGE_FORMAT. This is the
-///     idempotent producer, and the honest statement is not "your record is
-///     invalid" (it is perfectly valid) but "this broker does not support what
-///     that record is asking for". Accepting it would be the worst outcome
-///     available: the sequence numbers would be stored and never checked, so
-///     the producer's every retry would duplicate silently while the client
-///     believed it had exactly-once-into-the-log. UNSUPPORTED_FOR_MESSAGE_FORMAT
-///     is not retriable, which is the point — the producer stops instead of
-///     looping.
+///
+/// A **producer id** is no longer among them. Until M7 F3 it was refused
+/// UNSUPPORTED_FOR_MESSAGE_FORMAT with a message ending "Set
+/// enable.idempotence=false", on the reasoning that accepting sequence numbers
+/// this facade did not check would be the worst outcome available. That
+/// reasoning still holds and is why the replacement is a CHECK and not an
+/// acceptance: the sequence window in [`crate::idempotent`] runs immediately
+/// after this function, on the same headers, before anything is decompressed.
 ///
 /// Checked on the batch headers, so a batch is refused before it is
 /// decompressed. An EMPTY batch carrying a flag writes nothing either way and
@@ -566,17 +664,6 @@ fn refuse(infos: &[BatchDecodeInfo]) -> Option<(ResponseError, String)> {
                 .to_string(),
             ));
         }
-        if info.producer_id != NO_PRODUCER_ID {
-            return Some((
-                ResponseError::UnsupportedForMessageFormat,
-                format!(
-                    "queen-kafka does not implement the idempotent producer, so it will not accept \
-                     producer id {} — it would have to store sequence numbers it does not enforce, \
-                     and every retry would duplicate silently. Set enable.idempotence=false",
-                    info.producer_id
-                ),
-            ));
-        }
     }
     None
 }
@@ -588,6 +675,7 @@ fn render(
     req: &ProduceRequest,
     slots: &[Vec<Slot>],
     pushed: Option<&queen::Result<Vec<Pushed>>>,
+    idem: &Idem<'_>,
 ) -> ProduceResponse {
     let mut responses = Vec::with_capacity(req.topic_data.len());
     for (topic, row) in req.topic_data.iter().zip(slots) {
@@ -601,7 +689,10 @@ fn render(
                 // Nothing was appended, so there is no base offset to report and
                 // nothing failed either: the entry asked for no work.
                 Slot::Empty => appended(p.index, NO_OFFSET),
-                Slot::Push { start, len } => match pushed {
+                // Already in the log, at these offsets. Nothing was pushed and
+                // nothing is committed: the window already remembers this batch.
+                Slot::Duplicate(base) => appended(p.index, *base),
+                Slot::Push { start, len, seq } => match pushed {
                     // `get` and not an index: a handler must not panic on
                     // anything a broker answered, however wrong it is.
                     Some(Ok(results)) => match results
@@ -615,7 +706,18 @@ fn render(
                         })
                         .and_then(base_offset)
                     {
-                        Ok(base) => appended(p.index, base),
+                        Ok(base) => {
+                            // The window advances HERE and nowhere else: only a
+                            // run that came back with contiguous offsets is a
+                            // run whose sequences this facade may claim to have
+                            // appended. A partially failed push leaves the entry
+                            // untouched, so the client's retry is new work
+                            // rather than a skipped duplicate.
+                            if let Some(pending) = seq {
+                                idem.producers.commit(pending, base, *len);
+                            }
+                            appended(p.index, base)
+                        }
                         // The records are in the spool and will be numbered when
                         // maintenance ends: retriable, never a delivery failure.
                         // See the module header.
@@ -850,6 +952,11 @@ fn kafka_error(e: &queen::Error) -> ResponseError {
         // A 2xx we could not read, or a push response that does not line up
         // with the items we sent.
         queen::Error::Body(_) => ResponseError::UnknownServerError,
+        // Unreachable on this path, and the arm is not a shrug: only the
+        // fenced offset commit sends a conditional write ([`crate::cluster::fence`]),
+        // and a produce is a push and not a key/value write. If one ever appeared here it
+        // would be this facade's bug, so it is answered as one.
+        queen::Error::Precondition { .. } => ResponseError::UnknownServerError,
     }
 }
 
@@ -890,6 +997,31 @@ mod tests {
     };
     use std::sync::Arc;
 
+    /// The idempotent-producer context a `stage` or `render` test needs, owned
+    /// so the borrow outlives the call. A fresh tracker per test: the window is
+    /// process-wide in production and must not be shared between tests here,
+    /// where two of them producing sequence 0 would look like a duplicate.
+    struct Window {
+        producers: idempotent::Producers,
+        tenant: crate::identity::TenantKey,
+    }
+
+    impl Window {
+        fn new() -> Window {
+            Window {
+                producers: idempotent::Producers::new(),
+                tenant: crate::identity::TenantKey::Tenant("test".into()),
+            }
+        }
+
+        fn idem(&self) -> Idem<'_> {
+            Idem {
+                producers: &self.producers,
+                tenant: &self.tenant,
+            }
+        }
+    }
+
     // ------------------------------------------------------------- fixtures
 
     fn facade(queues: &[(&str, i64)], default_partitions: u32) -> (Facade, Arc<FakeQueen>) {
@@ -908,7 +1040,7 @@ mod tests {
             control: false,
             delete_horizon: false,
             partition_leader_epoch: -1,
-            producer_id: NO_PRODUCER_ID,
+            producer_id: idempotent::NO_PRODUCER_ID,
             producer_epoch: -1,
             timestamp_type: TimestampType::Creation,
             offset: 0,
@@ -936,6 +1068,17 @@ mod tests {
         )
         .expect("the client side encodes it");
         out.freeze()
+    }
+
+    /// A record from an IDEMPOTENT producer. The batch encoder reads the
+    /// producer id, epoch and sequence off the first record of the batch, so
+    /// these three fields become the batch HEADER the window is checked on.
+    fn idempotent_record(producer_id: i64, epoch: i16, sequence: i32) -> Record {
+        let mut r = record(None, b"v");
+        r.producer_id = producer_id;
+        r.producer_epoch = epoch;
+        r.sequence = sequence;
+        r
     }
 
     /// `[(topic, [(partition, batch bytes)])]` → a Produce request.
@@ -1267,6 +1410,57 @@ mod tests {
         assert_eq!(api.list_count(), 0, "a refused produce read the catalog");
     }
 
+    /// The shape every Erlang producer sends. `kafka_protocol` encodes a NULL
+    /// transactional id as a zero-length string (compat/brod/README.md), so the
+    /// field arrives PRESENT and EMPTY on a produce that has nothing
+    /// transactional about it. It is a plain produce, and the record is written.
+    #[tokio::test]
+    async fn an_empty_transactional_id_is_a_plain_produce() {
+        let (f, api) = facade(&[("orders", 1)], 4);
+        let req = simple("orders", 0, &[record(None, b"v")])
+            .with_transactional_id(Some(StrBytes::from_static_str("").into()));
+        let resp = handle(&f, &req, None).await.unwrap();
+
+        let p = answer(&resp, "orders", 0);
+        assert_eq!(
+            p.error_code, 0,
+            "an empty transactional id was read as a transaction: {:?}",
+            p.error_message
+        );
+        assert_eq!(
+            api.pushed().len(),
+            1,
+            "an empty transactional id cost the record"
+        );
+    }
+
+    /// The three shapes of the field side by side, so neither half of the line
+    /// above can be widened or narrowed on its own: absent and empty are the
+    /// same statement, and anything else is still refused with 53.
+    #[tokio::test]
+    async fn only_a_non_empty_transactional_id_is_refused() {
+        let refused = ResponseError::TransactionalIdAuthorizationFailed.code();
+        for (id, expected) in [(None, 0), (Some(""), 0), (Some("tx-1"), refused)] {
+            let (f, api) = facade(&[("orders", 1)], 4);
+            let mut req = simple("orders", 0, &[record(None, b"v")]);
+            if let Some(id) = id {
+                req = req.with_transactional_id(Some(StrBytes::from_string(id.to_string()).into()));
+            }
+            let resp = handle(&f, &req, None).await.unwrap();
+
+            assert_eq!(
+                answer(&resp, "orders", 0).error_code,
+                expected,
+                "transactional_id={id:?}"
+            );
+            assert_eq!(
+                api.pushed().len(),
+                usize::from(expected == 0),
+                "transactional_id={id:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn a_transactional_batch_is_refused() {
         let (f, api) = facade(&[("orders", 1)], 4);
@@ -1295,45 +1489,177 @@ mod tests {
         assert!(api.pushed().is_empty());
     }
 
-    /// The idempotent producer: accepting it would store sequence numbers this
-    /// facade never checks, and duplicate silently on every retry.
+    /// One idempotent record, the way a stock Java producer sends it. Until
+    /// M7 F3 this was UNSUPPORTED_FOR_MESSAGE_FORMAT and a message ending "Set
+    /// enable.idempotence=false"; it is now the ordinary write path with the
+    /// sequence window in front of it ([`crate::idempotent`]).
     #[tokio::test]
-    async fn an_idempotent_producer_is_refused_and_told_why() {
+    async fn an_idempotent_producer_is_written_and_its_sequence_remembered() {
         let (f, api) = facade(&[("orders", 1)], 4);
-        let mut r = record(None, b"v");
-        r.producer_id = 7;
-        r.producer_epoch = 0;
-        r.sequence = 0;
-        let resp = handle(&f, &simple("orders", 0, &[r]), None).await.unwrap();
+        let resp = handle(
+            &f,
+            &simple("orders", 0, &[idempotent_record(7, 0, 0)]),
+            None,
+        )
+        .await
+        .unwrap();
 
         let p = answer(&resp, "orders", 0);
+        assert_eq!(p.error_code, 0, "{:?}", p.error_message);
+        assert_eq!(p.base_offset, 0);
+        assert_eq!(api.pushed().len(), 1);
+        assert_eq!(f.producers.tracked(), 1);
+    }
+
+    /// THE property: a resend of an appended batch is answered as the success it
+    /// was, carrying the offsets the original got, and nothing is written twice.
+    #[tokio::test]
+    async fn an_idempotent_resend_is_answered_with_the_original_offsets() {
+        let (f, api) = facade(&[("orders", 1)], 4);
+        // Two records first, so the base offset the duplicate has to repeat is
+        // not the zero every empty log would answer by accident.
+        let first = simple("orders", 0, &[record(None, b"a"), record(None, b"b")]);
+        handle(&f, &first, None).await.unwrap();
+
+        let req = simple("orders", 0, &[idempotent_record(7, 0, 0)]);
+        let one = handle(&f, &req, None).await.unwrap();
+        let base = answer(&one, "orders", 0).base_offset;
+        assert_eq!(base, 2);
+        assert_eq!(api.pushed().len(), 3);
+
+        let two = handle(&f, &req, None).await.unwrap();
+        let p = answer(&two, "orders", 0);
+        assert_eq!(p.error_code, 0, "a duplicate must be a success");
+        assert_eq!(p.base_offset, base, "a duplicate must repeat the offsets");
         assert_eq!(
-            p.error_code,
-            ResponseError::UnsupportedForMessageFormat.code()
+            api.pushed().len(),
+            3,
+            "a duplicate batch was written to the log a second time"
         );
-        assert!(p
-            .error_message
-            .as_ref()
-            .unwrap()
-            .as_str()
-            .contains("enable.idempotence=false"));
+    }
+
+    /// The other half, and just as load-bearing: a batch that would leave a hole
+    /// is refused and NOTHING is written, which is what makes the Java client
+    /// re-drain and resend in order.
+    #[tokio::test]
+    async fn an_idempotent_gap_is_refused_and_nothing_is_written() {
+        let (f, api) = facade(&[("orders", 1)], 4);
+        handle(
+            &f,
+            &simple("orders", 0, &[idempotent_record(7, 0, 0)]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(api.pushed().len(), 1);
+
+        let resp = handle(
+            &f,
+            &simple("orders", 0, &[idempotent_record(7, 0, 5)]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            answer(&resp, "orders", 0).error_code,
+            ResponseError::OutOfOrderSequenceNumber.code()
+        );
+        assert_eq!(api.pushed().len(), 1, "a gapped batch was written");
+        // ...and the batch that WAS next still is.
+        let next = handle(
+            &f,
+            &simple("orders", 0, &[idempotent_record(7, 0, 1)]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer(&next, "orders", 0).error_code, 0);
+    }
+
+    /// A window this facade never had — a restart, an eviction, a facade switch.
+    /// OUT_OF_ORDER and not UNKNOWN_PRODUCER_ID, because OUT_OF_ORDER is the
+    /// code whose recovery (KIP-360's epoch bump) every client implements.
+    #[tokio::test]
+    async fn a_producer_this_facade_never_saw_is_out_of_order_not_unknown() {
+        let (f, api) = facade(&[("orders", 1)], 4);
+        let resp = handle(
+            &f,
+            &simple("orders", 0, &[idempotent_record(7, 0, 42)]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            answer(&resp, "orders", 0).error_code,
+            ResponseError::OutOfOrderSequenceNumber.code()
+        );
         assert!(api.pushed().is_empty());
     }
 
-    /// Producer id 0 is a REAL producer id — the first one a coordinator hands
-    /// out — and only -1 means "none". An off-by-one here would let the very
-    /// first idempotent producer through.
+    /// A producer that bumped its epoch (KIP-360) resets its own sequences, and
+    /// the facade accepts the reset rather than reading it as a duplicate.
+    #[tokio::test]
+    async fn a_bumped_epoch_resets_the_sequence_and_is_accepted() {
+        let (f, api) = facade(&[("orders", 1)], 4);
+        handle(
+            &f,
+            &simple("orders", 0, &[idempotent_record(7, 0, 0)]),
+            None,
+        )
+        .await
+        .unwrap();
+        let resp = handle(
+            &f,
+            &simple("orders", 0, &[idempotent_record(7, 1, 0)]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer(&resp, "orders", 0).error_code, 0);
+        assert_eq!(api.pushed().len(), 2);
+        // ...and the OLD epoch is fenced from then on.
+        let stale = handle(
+            &f,
+            &simple("orders", 0, &[idempotent_record(7, 0, 1)]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            answer(&stale, "orders", 0).error_code,
+            ResponseError::InvalidProducerEpoch.code()
+        );
+    }
+
+    /// Producer id 0 is a REAL producer id and only -1 means "none". The
+    /// off-by-one that would let the very first idempotent producer through is
+    /// visible here as the difference between a checked sequence and an
+    /// unchecked one.
     #[tokio::test]
     async fn producer_id_zero_is_a_producer_id() {
         let (f, _) = facade(&[("orders", 1)], 4);
-        let mut r = record(None, b"v");
-        r.producer_id = 0;
-        r.sequence = 0;
-        let resp = handle(&f, &simple("orders", 0, &[r]), None).await.unwrap();
+        // Producer 0 at sequence 5, with no window: checked, and refused.
+        let resp = handle(
+            &f,
+            &simple("orders", 0, &[idempotent_record(0, 0, 5)]),
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             answer(&resp, "orders", 0).error_code,
-            ResponseError::UnsupportedForMessageFormat.code()
+            ResponseError::OutOfOrderSequenceNumber.code()
         );
+
+        // ...while -1 with the same sequence is not an idempotent produce at
+        // all, and is written without a word.
+        let mut plain = record(None, b"v");
+        plain.sequence = 5;
+        let ok = handle(&f, &simple("orders", 0, &[plain]), None)
+            .await
+            .unwrap();
+        assert_eq!(answer(&ok, "orders", 0).error_code, 0);
+        assert_eq!(f.producers.tracked(), 0);
     }
 
     #[tokio::test]
@@ -1450,8 +1776,9 @@ mod tests {
     #[tokio::test]
     async fn one_bad_partition_does_not_poison_the_request() {
         let (f, api) = facade(&[("orders", 2), ("clicks", 2)], 4);
-        let mut idempotent = record(None, b"nope");
-        idempotent.producer_id = 12;
+        // An idempotent batch this facade holds no window for: refused
+        // OUT_OF_ORDER_SEQUENCE_NUMBER, and its neighbours are still written.
+        let stranded = idempotent_record(12, 0, 9);
         let mut corrupt = BytesMut::from(&batch(&[record(None, b"bad")], Compression::None)[..]);
         let last = corrupt.len() - 1;
         corrupt[last] ^= 0xff;
@@ -1461,7 +1788,7 @@ mod tests {
                 "orders",
                 &[
                     (0, batch(&[record(None, b"good-0")], Compression::None)),
-                    (1, batch(&[idempotent], Compression::None)),
+                    (1, batch(&[stranded], Compression::None)),
                     (2, corrupt.freeze()),
                     (
                         9,
@@ -1485,7 +1812,7 @@ mod tests {
         assert_eq!(answer(&resp, "orders", 0).base_offset, 0);
         assert_eq!(
             answer(&resp, "orders", 1).error_code,
-            ResponseError::UnsupportedForMessageFormat.code()
+            ResponseError::OutOfOrderSequenceNumber.code()
         );
         assert_eq!(
             answer(&resp, "orders", 2).error_code,
@@ -1556,7 +1883,14 @@ mod tests {
         let p = PartitionProduceData::default()
             .with_index(0)
             .with_records(Some(raw));
-        match stage(&mut items, "orders", Plan::Serve(4), &p, &budget) {
+        match stage(
+            &mut items,
+            "orders",
+            Plan::Serve(4),
+            &p,
+            &budget,
+            &Window::new().idem(),
+        ) {
             Slot::Reject(e, why) => {
                 assert_eq!(e, ResponseError::MessageTooLarge);
                 assert!(why.contains("decompress"), "{why}");
@@ -1581,7 +1915,14 @@ mod tests {
         let p = PartitionProduceData::default()
             .with_index(0)
             .with_records(Some(raw));
-        match stage(&mut items, "orders", Plan::Serve(4), &p, &budget) {
+        match stage(
+            &mut items,
+            "orders",
+            Plan::Serve(4),
+            &p,
+            &budget,
+            &Window::new().idem(),
+        ) {
             Slot::Reject(e, why) => {
                 assert_eq!(e, ResponseError::MessageTooLarge);
                 assert!(why.contains("declare"), "{why}");
@@ -1604,13 +1945,28 @@ mod tests {
                 )))
         };
         let mut items = Vec::new();
+        let w = Window::new();
         let budget = decompress::Budget::new(1024 * 1024, 3);
         assert!(matches!(
-            stage(&mut items, "orders", Plan::Serve(4), &entry(0), &budget),
+            stage(
+                &mut items,
+                "orders",
+                Plan::Serve(4),
+                &entry(0),
+                &budget,
+                &w.idem()
+            ),
             Slot::Push { .. }
         ));
         assert!(matches!(
-            stage(&mut items, "orders", Plan::Serve(4), &entry(1), &budget),
+            stage(
+                &mut items,
+                "orders",
+                Plan::Serve(4),
+                &entry(1),
+                &budget,
+                &w.idem()
+            ),
             Slot::Reject(ResponseError::MessageTooLarge, _)
         ));
         assert_eq!(items.len(), 2, "only the first entry may have been staged");
@@ -1629,13 +1985,28 @@ mod tests {
         };
 
         let mut items = Vec::new();
+        let w = Window::new();
         let budget = decompress::Budget::new(48 * 1024, MAX_RECORDS_PER_REQUEST);
         assert!(matches!(
-            stage(&mut items, "orders", Plan::Serve(4), &entry(0), &budget),
+            stage(
+                &mut items,
+                "orders",
+                Plan::Serve(4),
+                &entry(0),
+                &budget,
+                &w.idem()
+            ),
             Slot::Push { .. }
         ));
         assert!(matches!(
-            stage(&mut items, "orders", Plan::Serve(4), &entry(1), &budget),
+            stage(
+                &mut items,
+                "orders",
+                Plan::Serve(4),
+                &entry(1),
+                &budget,
+                &w.idem()
+            ),
             Slot::Reject(ResponseError::MessageTooLarge, _)
         ));
         assert_eq!(items.len(), 1, "only the first entry may have been staged");

@@ -301,8 +301,105 @@ var deliberate = []classification{
 		"documented: __-prefixed topics are hidden and refused everywhere"},
 	{regexp.MustCompile(`^metadata/alltopics\.has_consumer_offsets$`),
 		"documented: __-prefixed topics are hidden; the facade has no __consumer_offsets to hide either"},
-	{regexp.MustCompile(`^extras/initproducerid\.`),
-		"non-goal in PLAN_QUEEN_KAFKA.md: no transactions, no EOS, so InitProducerId is not implemented"},
+
+	// ------------------------------------------ M7 F3: the idempotent producer
+	{regexp.MustCompile(`^initproducerid/initproducerid\.bump\.(keeps_the_id|epoch)$`),
+		"deliberate, and the ONE place F3 does not copy Apache Kafka. Kafka's non-transactional path answers a " +
+			"KIP-360 bump by blindly ALLOCATING a fresh producer id at epoch 0 " +
+			"(TransactionCoordinator.handleInitProducerId: 'if the transactional id is null, always blindly " +
+			"accept'); the facade answers the SAME id one epoch higher. The epoch is what discriminates one " +
+			"producer session from the next inside idempotent.rs's key, so bumping it invalidates everything " +
+			"remembered under the old epoch while keeping the producer's identity stable across a recovery, and " +
+			"it costs no entropy per recovery. Either answer satisfies every client: the Java client takes " +
+			"whatever the response says (TransactionManager.setProducerIdAndEpoch) and resets its own sequences " +
+			"because it asked for a bump. Measured on both sides above: bump.error_code is NONE on both"},
+	{regexp.MustCompile(`^initproducerid/initproducerid\.transactional\.error_code$`),
+		"both brokers refuse a transactional id and neither grants one (transactional.granted_an_id is false on " +
+			"both, which is the part a client acts on). The CODES differ because the refusals are different " +
+			"facts: Kafka 3.9.1 answers NOT_COORDINATOR because this broker is not the coordinator for that " +
+			"transactional id, which is retriable and tells the client to go and find the right node. The facade " +
+			"answers TRANSACTIONAL_ID_AUTHORIZATION_FAILED (53) — fatal and final — because there is no right " +
+			"node: transactions are excluded by plan and a retriable code would send the client round a loop " +
+			"that cannot end. Same code and same sentence handlers::produce gives a transactional id, so a user " +
+			"meets one message about transactions and not two"},
+	{regexp.MustCompile(`^initproducerid/initproducerid\.empty_transactional\.`),
+		"MEASURED, and the divergence is the fix: Apache Kafka refuses a ZERO-LENGTH transactional id " +
+			"INVALID_REQUEST, because \"\" is not null and fails its own validation. The facade reads it as the " +
+			"absent id it was meant to be (idempotent::transactional_id). Erlang's kafka_protocol 4.3.6 — brod, " +
+			"and with it broadway_kafka and kaffe, which is most of the Elixir in production — hand-rolls its " +
+			"encoders and writes a null nullable_string as \"\" (kpro_lib.erl:140). Copying Kafka here would " +
+			"refuse every Elixir producer a producer id. Kafka never meets the bug because brod does not send " +
+			"InitProducerId to it either; the facade does, and this is the same filter produce.rs already " +
+			"applies to the same field (compat/brod/README.md)"},
+	{regexp.MustCompile(`^idempotent/idempotent\.unknown_producer\.error_code$`),
+		"MEASURED and DELIBERATE, and it is the one row worth arguing with. Apache Kafka 3.9.1 ACCEPTS a batch " +
+			"at sequence 42 from a producer id it holds no state for (error NONE): it persists producer state in " +
+			"the log, so an absent entry means the state was aged out, which is rare and benign. This facade " +
+			"holds no durable producer state by design, so an absent entry is COMMON — every restart produces " +
+			"one — and accepting would mean the sequence window is silently unenforced for exactly as long as a " +
+			"producer keeps running after a restart. It answers OUT_OF_ORDER_SEQUENCE_NUMBER (45) instead, and " +
+			"the cost of that choice was measured rather than assumed: " +
+			"compat/go/idempotent_test.go TestAnIdempotentProducerSurvivesAFacadeRestart SIGKILLs the facade " +
+			"under a live default-idempotence producer and the producer keeps running, every record accounted " +
+			"for. UNKNOWN_PRODUCER_ID (59) is not used for the reason Kafka retired it: some clients answer it " +
+			"by reasoning about log_start_offset, which this facade answers as -1"},
+
+	// ------------------------------------------------ M7 F1: topics admin
+	{regexp.MustCompile(`^createtopics/create\.\w+\.num_partitions$`),
+		"documented deviation: Queen declares no width per queue (configure_queue_v1 creates the queue row and " +
+			"nothing else; a log_partitions row materialises on the first push), so the facade cannot honour a " +
+			"per-topic partition count. It accepts the number, does nothing with it, and reports the width the " +
+			"topic will actually have — max(live lanes, QUEEN_KAFKA_DEFAULT_PARTITIONS). The property that matters " +
+			"is kept and is asserted beside this one: create.new.metadata_agrees is true on both brokers, so the " +
+			"number the create reports is the number the client's next Metadata hashes modulo"},
+	{regexp.MustCompile(`^createtopics/create\.internal_name\.`),
+		"documented: __-prefixed topics are hidden and refused everywhere (metadata::reserved_or_invalid). Apache " +
+			"Kafka treats them as ordinary names; creating one here would make a queue the facade then refuses to " +
+			"show, so CreateTopics — the surface where a NAME is validated — answers INVALID_TOPIC_EXCEPTION"},
+	{regexp.MustCompile(`^createtopics/create\.compact\.`),
+		"deliberate, and the loudest refusal in the stage: log compaction is a stated non-goal, so " +
+			"cleanup.policy=compact is answered INVALID_CONFIG instead of being accepted and not performed. This " +
+			"is what makes Kafka Connect fail at STARTUP rather than lose its connector configuration on a later " +
+			"restart, and it is why CreateTopics does not unlock Connect"},
+	{regexp.MustCompile(`^createtopics/create\.kafka_only_config\.`),
+		"deliberate: a topic config Kafka has and Queen has no mechanism for is refused INVALID_CONFIG rather " +
+			"than dropped. min.insync.replicas=1 happens to be the value the facade would report anyway, but " +
+			"accepting the KEY would mean accepting min.insync.replicas=2 too — telling a client it got a " +
+			"durability setting it did not get. The mapping is topic_config.rs and it is deliberately short",
+	},
+	{regexp.MustCompile(`^describeconfigs/topic\.retention_ms$`),
+		"documented gap, recorded rather than papered over: Queen exposes NO HTTP read of a queue's configuration " +
+			"(get_queue_v2 answers no config at all; get_queue_detail_v2's config object has leaseTime, retryLimit, " +
+			"retryDelay, ttl, maxQueueSize and deadLetterQueue and NOT retentionEnabled/retentionSeconds). So " +
+			"retention is writable and not readable here: CreateTopics sets it, and the create's own v5+ echo is " +
+			"where a client reads it back — createtopics/create.retention.echo matches Kafka exactly. Reporting a " +
+			"plausible default instead of omitting the key would be a guess"},
+	{regexp.MustCompile(`^describeconfigs/topic\.\w+_read_only$`),
+		"deliberate: every config this facade reports is read_only=true because AlterConfigs is NOT advertised, so " +
+			"nothing here can be changed through it. Kafka reports its topic configs writable because it has " +
+			"AlterConfigs. A UI that greys out its edit button on this flag is being told the truth by both"},
+	{regexp.MustCompile(`^describeconfigs/broker_logger\.`),
+		"deliberate: BROKER_LOGGER (resource type 8) describes a log4j hierarchy. The facade runs none, so it " +
+			"answers INVALID_REQUEST rather than an empty config set, which would read as 'this resource exists " +
+			"and is empty'"},
+
+	// ------------------------------------------------ M7 F2: groups admin
+	{regexp.MustCompile(`^groups-admin/.*\.authorized_operations$`),
+		"deliberate: Kafka 3.9.1 with no authorizer computes READ|DELETE|DESCRIBE (328). The facade answers " +
+			"i32::MIN, which is Kafka's OWN AUTHORIZED_OPERATIONS_OMITTED — the Java client turns it into null " +
+			"and tools render 'unknown'. It has no ACL model: what a credential may do is Queen's to say, per " +
+			"call, and it says so by answering 401 or 403 to that call. A bitfield computed here would be a " +
+			"permission set this process invented, and a UI that greyed out a button on it would be acting on a " +
+			"guess (handlers::describe_groups)"},
+	{regexp.MustCompile(`^groups-admin/badname\.`),
+		"deliberate, and it is the facade's own bound rather than a protocol one: a group id is refused " +
+			"INVALID_GROUP_ID when it is empty or longer than 255 characters (coordinator::invalid_group_id), " +
+			"because every copy of a group id — the registry key, the composed KV key, every log line about it — " +
+			"is this facade's, and the protocol gives the field no bound at all (a client may send ~32 KB of one " +
+			"at the non-flexible versions). Kafka has no such bound and answers `Dead` / GROUP_ID_NOT_FOUND for " +
+			"these names. The rule is applied by all six group-addressed APIs through ONE function, so a name " +
+			"JoinGroup refuses and DescribeGroups describes cannot exist, and 24 is on the closed set every " +
+			"client accepts on both APIs"},
 }
 
 type classification struct {
@@ -323,6 +420,12 @@ var accepted = []classification{
 	{regexp.MustCompile(`^(listoffsets/v5\.latest|metadata/known_v9\.p0)\.leader_epoch$`),
 		"the facade has no leader epochs to report; -1 is Kafka's own 'unknown epoch' sentinel and clients skip " +
 			"epoch validation on it rather than misbehaving"},
+	{regexp.MustCompile(`^extras/initproducerid\.error_code$`),
+		"a startup transient on the ORACLE's side, not a facade difference: `extras` is the first scenario to " +
+			"run and Kafka's __transaction_state log may still be loading, which it answers " +
+			"COORDINATOR_LOAD_IN_PROGRESS. The same question asked later, by the initproducerid scenario, is " +
+			"answered NONE by both (initproducerid.fresh.error_code). Since M7 F3 the facade grants the id here " +
+			"rather than refusing the key"},
 	{regexp.MustCompile(`^extras/produce_v2\.`),
 		"Produce v2 is below the advertised floor (versions.rs offers 3-9) and the facade closes the connection, " +
 			"which is what Kafka itself does with a version it does not know — metadata_v99 closes identically on " +
@@ -331,8 +434,25 @@ var accepted = []classification{
 		"the produce answer carries no log start offset (-1, the field's own default in Kafka's schema and the " +
 			"Java client's) because a push reports offsets and statuses and no lower bound: filling it in would " +
 			"cost a bounds probe per produce, on the write path, for a field only the idempotent producer reads " +
-			"— and that producer is refused outright (handlers::produce::refuse). The fetch path reports the real " +
-			"log start on both sides, which is where a client looks for it"},
+			"— and that producer, implemented since M7 F3, does not need it: the facade never answers " +
+			"UNKNOWN_PRODUCER_ID (59), which is the one code whose client-side recovery consults this field. It " +
+			"answers OUT_OF_ORDER_SEQUENCE_NUMBER for a lost window instead, whose recovery is KIP-360's epoch " +
+			"bump and reads nothing here (crate::idempotent). The fetch path reports the real log start on both " +
+			"sides, which is where a client looks for it"},
+
+	// ------------------------------------------------ M7 F1: topics admin
+	{regexp.MustCompile(`^createtopics/create\.duplicate\.error_codes$`),
+		"the facade answers ONE result per request entry, so a name sent twice comes back twice; Kafka collapses " +
+			"the pair into one result. Both answer INVALID_REQUEST and both create nothing " +
+			"(create.duplicate.exists_after is false on both), which is the part a client acts on. No client " +
+			"indexes this API positionally — the Java AdminClient and franz-go's kadm both key their futures by " +
+			"topic name — and one-result-per-entry is what the facade does for DeleteTopics and DescribeConfigs " +
+			"too, so matching Kafka here would make CreateTopics the odd one out"},
+	{regexp.MustCompile(`^deletetopics/delete\.results_line_up$`),
+		"the facade answers in REQUEST order, name for name; Kafka's controller answers in its own order (see the " +
+			"delete.result_names info line beside this). The facade is the stricter of the two and every per-name " +
+			"error code matches, so nothing a client reads differs — it is only the order it would have to sort " +
+			"itself if it indexed positionally, which no client does"},
 }
 
 func classify(scenarioName, key string) (string, string) {

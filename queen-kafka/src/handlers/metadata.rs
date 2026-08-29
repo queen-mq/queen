@@ -15,6 +15,24 @@
 //! Replication is Postgres's business and is not modelled here — claiming
 //! replicas the facade does not arbitrate would be a lie a client could act on.
 //!
+//! ...unless `QUEEN_KAFKA_NODE_ID` is set, in which case the answer is the
+//! whole live set from the node registry, the controller is the lowest live id,
+//! and each partition's leader is the rendezvous winner over that set
+//! ([`crate::cluster`]). Two things do NOT change with it, and both are
+//! deliberate:
+//!
+//!   * `replica_nodes` and `isr_nodes` stay `[leader]` and not the whole set.
+//!     Claiming N replicas would be the same lie in a larger font; the one
+//!     client behaviour that reads the ISR list is rack-aware follower fetch,
+//!     which arrives at Fetch v11 and is out of reach behind the deliberate v6
+//!     cap in [`crate::versions`].
+//!   * `leader_epoch` stays −1, for the reason already written beside it: a
+//!     synthetic epoch that changed on every membership change would invite
+//!     clients to run truncation detection against a value nothing maintains.
+//!
+//! And the leader is an ADVERTISEMENT: every node serves every partition, so a
+//! client using a stale map is not wrong, only unbalanced ([`crate::cluster`]).
+//!
 //! ## Topics and partitions
 //!
 //! Topic name = Queen queue name; Kafka partition n = Queen partition n. The
@@ -73,17 +91,26 @@ use kafka_protocol::messages::metadata_response::{
 use kafka_protocol::messages::{MetadataRequest, MetadataResponse, TopicName};
 use kafka_protocol::protocol::StrBytes;
 
+use crate::cluster::Placement;
 use crate::queen::Queue;
 use crate::throttle;
 use crate::Facade;
 
 /// The facade is the whole cluster, and it is node 0 of it.
-pub const NODE_ID: i32 = 0;
+///
+/// **Reserved**: a clustered node id is `1..=64`
+/// ([`crate::cluster::MIN_NODE_ID`]), so node 0 means "this facade is on its
+/// own" and can mean nothing else. That is what makes a client's cached broker
+/// list from single mode wholly replaced on its next refresh rather than
+/// half-overlapping with a cluster's. Apache Kafka is 0-based; the deviation is
+/// deliberate, and the boot error for `QUEEN_KAFKA_NODE_ID=0` says so.
+pub const SINGLE_NODE_ID: i32 = 0;
 
 /// Reported from Metadata v2 up. Clients use it for logging and for refusing to
 /// talk to two different clusters through one connection pool, so it has to be
 /// stable across restarts — hence a constant and not something derived from the
-/// process or the broker list.
+/// process or the broker list. In cluster mode it is `QUEEN_KAFKA_CLUSTER`,
+/// which DEFAULTS to this same value ([`crate::cluster::Cluster::cluster_id`]).
 pub const CLUSTER_ID: &str = "queen";
 
 /// Kafka's own limit on a topic name (org.apache.kafka.common.internals.Topic).
@@ -351,11 +378,19 @@ pub async fn handle(
         }
     };
 
+    // ONE snapshot for the whole response: every broker entry and every
+    // partition's leader is derived from the same live set, so an answer can
+    // never name a leader that is missing from its own broker list.
+    let placement = facade
+        .cluster
+        .placement(&facade.advertised_host, facade.advertised_port);
+
     let topics = match requested_names(req, api_version) {
-        None => listing(facade, catalog.as_deref().map(|q| &q[..])),
+        None => listing(facade, &placement, catalog.as_deref().map(|q| &q[..])),
         Some(names) => {
             requested(
                 facade,
+                &placement,
                 &names,
                 req.allow_auto_topic_creation,
                 catalog.as_deref().map(|q| &q[..]),
@@ -366,13 +401,25 @@ pub async fn handle(
     };
 
     MetadataResponse::default()
-        .with_brokers(vec![MetadataResponseBroker::default()
-            .with_node_id(NODE_ID.into())
-            .with_host(StrBytes::from_string(facade.advertised_host.clone()))
-            .with_port(facade.advertised_port as i32)
-            .with_rack(None)])
-        .with_cluster_id(Some(StrBytes::from_static_str(CLUSTER_ID)))
-        .with_controller_id(NODE_ID.into())
+        .with_brokers(
+            placement
+                .brokers()
+                .iter()
+                .map(|node| {
+                    MetadataResponseBroker::default()
+                        .with_node_id(node.id.into())
+                        .with_host(StrBytes::from_string(node.host.clone()))
+                        .with_port(node.port as i32)
+                        // No rack. A rack is what rack-aware follower fetch
+                        // reads, and that arrives at Fetch v11.
+                        .with_rack(None)
+                })
+                .collect(),
+        )
+        .with_cluster_id(Some(StrBytes::from_string(
+            facade.cluster.cluster_id().to_string(),
+        )))
+        .with_controller_id(placement.controller().into())
         .with_topics(topics)
         // v3+. Silently dropped by the encoder below v3, which is the only
         // reason it can be set unconditionally.
@@ -387,7 +434,11 @@ pub async fn handle(
 /// entry for a topic it never named makes some clients discard the whole
 /// response. A queue past the budget is skipped for a different reason and is
 /// logged, because that one IS a shortfall.
-fn listing(facade: &Facade, catalog: Option<&[Queue]>) -> Vec<MetadataResponseTopic> {
+fn listing(
+    facade: &Facade,
+    placement: &Placement,
+    catalog: Option<&[Queue]>,
+) -> Vec<MetadataResponseTopic> {
     // Nothing cached and Queen is unreachable: an empty listing is the only
     // shape available, and it is transient — the client refreshes.
     let Some(queues) = catalog else {
@@ -408,7 +459,7 @@ fn listing(facade: &Facade, catalog: Option<&[Queue]>) -> Vec<MetadataResponseTo
             continue;
         }
         spent += width as usize;
-        out.push(topic(&q.name, Plan::Serve(width)));
+        out.push(topic(placement, &q.name, Plan::Serve(width)));
     }
     if omitted > 0 {
         tracing::warn!(
@@ -430,6 +481,7 @@ fn listing(facade: &Facade, catalog: Option<&[Queue]>) -> Vec<MetadataResponseTo
 /// auto-create pass the decisions ask for.
 async fn requested(
     facade: &Facade,
+    placement: &Placement,
     names: &[Option<String>],
     allow_auto_create: bool,
     catalog: Option<&[Queue]>,
@@ -476,7 +528,7 @@ async fn requested(
     planned
         .into_iter()
         .map(|(name, planned)| match name {
-            Some(n) => topic(n, planned),
+            Some(n) => topic(placement, n, planned),
             None => MetadataResponseTopic::default()
                 .with_name(None)
                 .with_error_code(ResponseError::InvalidTopicException.code()),
@@ -646,7 +698,11 @@ fn requested_names(req: &MetadataRequest, api_version: i16) -> Option<Vec<Option
 }
 
 /// One topic entry, from a name and the decision made about it.
-fn topic(name: &str, planned: Plan) -> MetadataResponseTopic {
+///
+/// The leader comes from `placement` and not from a constant: in single mode
+/// that is node 0 without so much as a hash, and in cluster mode it is the
+/// rendezvous winner over the live set.
+fn topic(placement: &Placement, name: &str, planned: Plan) -> MetadataResponseTopic {
     let base = MetadataResponseTopic::default()
         .with_name(Some(TopicName(StrBytes::from_string(name.to_string()))))
         // Never true: the facade owns no internal topics, and the names Kafka
@@ -656,16 +712,19 @@ fn topic(name: &str, planned: Plan) -> MetadataResponseTopic {
         Plan::Serve(partitions) => base.with_partitions(
             (0..partitions)
                 .map(|index| {
+                    let leader = placement.leader_of(name, index);
                     MetadataResponsePartition::default()
                         .with_partition_index(index)
-                        .with_leader_id(NODE_ID.into())
+                        .with_leader_id(leader.into())
                         // -1 is "unknown epoch", and it is the truth: the facade
                         // has no leader elections to number. Advertising a real
                         // epoch would invite clients to run truncation detection
                         // against a value nothing here maintains.
                         .with_leader_epoch(-1)
-                        .with_replica_nodes(vec![NODE_ID.into()])
-                        .with_isr_nodes(vec![NODE_ID.into()])
+                        // The leader alone, and not the live set: see the
+                        // module header. Replication is Postgres's business.
+                        .with_replica_nodes(vec![leader.into()])
+                        .with_isr_nodes(vec![leader.into()])
                         .with_offline_replicas(vec![])
                 })
                 .collect(),
@@ -1316,5 +1375,282 @@ mod tests {
             named(&resp, "orders").error_code,
             ResponseError::LeaderNotAvailable.code()
         );
+    }
+}
+
+#[cfg(test)]
+mod clustered {
+    //! Metadata in cluster mode: the whole live set, one deterministic leader
+    //! map, and the two fields that deliberately do NOT grow with it.
+    use super::*;
+    use crate::handlers::testing::clustered;
+    use kafka_protocol::messages::metadata_request::MetadataRequestTopic;
+    use kafka_protocol::messages::MetadataRequest;
+
+    const THREE: [(i32, &str, u16); 3] = [
+        (1, "kafka-1.example.com", 9092),
+        (2, "kafka-2.example.com", 9093),
+        (3, "kafka-3.example.com", 9094),
+    ];
+
+    fn named(topic: &str) -> MetadataRequest {
+        MetadataRequest::default()
+            .with_topics(Some(vec![MetadataRequestTopic::default().with_name(Some(
+                TopicName(StrBytes::from_string(topic.to_string())),
+            ))]))
+            .with_allow_auto_topic_creation(false)
+    }
+
+    /// THE fix for "both facades are the only broker": every node answers all
+    /// three, at their own addresses, with the lowest live id as controller.
+    #[tokio::test]
+    async fn the_answer_is_the_whole_live_set() {
+        for me in [1, 2, 3] {
+            let (f, _) = clustered(&[("orders", 2)], &THREE, me);
+            let resp = handle(&f, &named("orders"), 9, None).await;
+
+            let brokers: Vec<(i32, String, i32)> = resp
+                .brokers
+                .iter()
+                .map(|b| (b.node_id.0, b.host.as_str().to_string(), b.port))
+                .collect();
+            assert_eq!(
+                brokers,
+                vec![
+                    (1, "kafka-1.example.com".to_string(), 9092),
+                    (2, "kafka-2.example.com".to_string(), 9093),
+                    (3, "kafka-3.example.com".to_string(), 9094),
+                ],
+                "node {me}"
+            );
+            assert_eq!(
+                resp.controller_id.0, 1,
+                "the controller is not the lowest id"
+            );
+            assert_eq!(resp.cluster_id.as_ref().unwrap().as_str(), "rig");
+        }
+    }
+
+    /// The leader map is a pure function of the live set, so three nodes
+    /// answering the same request agree partition by partition — and every
+    /// leader is a node that exists.
+    #[tokio::test]
+    async fn the_leader_map_is_identical_from_every_node() {
+        let mut maps = Vec::new();
+        for me in [1, 2, 3] {
+            let (f, _) = clustered(&[("orders", 2)], &THREE, me);
+            let resp = handle(&f, &named("orders"), 9, None).await;
+            let topic = &resp.topics[0];
+            maps.push(
+                topic
+                    .partitions
+                    .iter()
+                    .map(|p| p.leader_id.0)
+                    .collect::<Vec<i32>>(),
+            );
+        }
+        assert!(maps.windows(2).all(|w| w[0] == w[1]), "{maps:?}");
+        assert!(maps[0].iter().all(|id| (1..=3).contains(id)));
+        // The facade's fixture width is 4 lanes, and they are not all on one
+        // node — a "deterministic" map that put everything on one node would
+        // pass every equality above.
+        assert!(
+            maps[0]
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                > 1,
+            "every partition landed on one node: {:?}",
+            maps[0]
+        );
+    }
+
+    /// What does NOT change with a cluster: the replica list is the leader
+    /// alone (replication is Postgres's business) and the epoch is still -1.
+    #[tokio::test]
+    async fn replicas_isr_and_epoch_are_unchanged() {
+        let (f, _) = clustered(&[("orders", 2)], &THREE, 2);
+        let resp = handle(&f, &named("orders"), 9, None).await;
+        for p in &resp.topics[0].partitions {
+            assert_eq!(p.replica_nodes, vec![p.leader_id]);
+            assert_eq!(p.isr_nodes, vec![p.leader_id]);
+            assert!(p.offline_replicas.is_empty());
+            assert_eq!(p.leader_epoch, -1);
+        }
+    }
+
+    /// A stale view still advertises the cluster it last saw: a Metadata that
+    /// suddenly reported one broker would tell every client the cluster shrank,
+    /// and they would all reconnect to one node.
+    #[tokio::test(start_paused = true)]
+    async fn a_stale_view_still_advertises_the_last_known_cluster() {
+        let (f, _) = clustered(&[("orders", 2)], &THREE, 2);
+        let ttl = f.cluster.state().unwrap().ttl;
+        tokio::time::advance(ttl + std::time::Duration::from_secs(60)).await;
+        let resp = handle(&f, &named("orders"), 9, None).await;
+        assert_eq!(resp.brokers.len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod golden {
+    //! THE regression gate for cluster mode: with `QUEEN_KAFKA_NODE_ID` unset,
+    //! the two responses a client bootstraps on must be what they were before
+    //! cluster mode existed — not equivalent, IDENTICAL, byte for byte, at
+    //! every advertised version.
+    //!
+    //! The buffers below were captured from the pre-cluster code
+    //! (`git show HEAD:queen-kafka/src/handlers/metadata.rs`, node 0 everywhere
+    //! and a hard-coded broker list) and are asserted against the code as it is
+    //! now. A change that moves a byte of the single-node answer fails here,
+    //! which is the only way an operator who set nothing could ever notice.
+    use super::*;
+    use crate::handlers::testing::facade;
+    use bytes::BytesMut;
+    use kafka_protocol::messages::metadata_request::MetadataRequestTopic;
+    use kafka_protocol::messages::{FindCoordinatorRequest, MetadataRequest};
+    use kafka_protocol::protocol::Encodable;
+
+    /// One captured response per advertised Metadata version, v0..=v9.
+    const METADATA: [&str; 10] = [
+        // v0
+        concat!(
+            "000000010000000000116b61666b612e6578616d706c652e636f6d000023840000000100",
+            "0000066f7264657273000000040000000000000000000000000001000000000000000100",
+            "000000000000000001000000000000000100000000000000010000000000000000000200",
+            "000000000000010000000000000001000000000000000000030000000000000001000000",
+            "000000000100000000",
+        ),
+        // v1
+        concat!(
+            "000000010000000000116b61666b612e6578616d706c652e636f6d00002384ffff000000",
+            "0000000001000000066f7264657273000000000400000000000000000000000000010000",
+            "000000000001000000000000000000010000000000000001000000000000000100000000",
+            "000000000002000000000000000100000000000000010000000000000000000300000000",
+            "00000001000000000000000100000000",
+        ),
+        // v2
+        concat!(
+            "000000010000000000116b61666b612e6578616d706c652e636f6d00002384ffff000571",
+            "7565656e0000000000000001000000066f72646572730000000004000000000000000000",
+            "000000000100000000000000010000000000000000000100000000000000010000000000",
+            "000001000000000000000000020000000000000001000000000000000100000000000000",
+            "0000030000000000000001000000000000000100000000",
+        ),
+        // v3
+        concat!(
+            "00000000000000010000000000116b61666b612e6578616d706c652e636f6d00002384ff",
+            "ff0005717565656e0000000000000001000000066f726465727300000000040000000000",
+            "000000000000000001000000000000000100000000000000000001000000000000000100",
+            "000000000000010000000000000000000200000000000000010000000000000001000000",
+            "000000000000030000000000000001000000000000000100000000",
+        ),
+        // v4
+        concat!(
+            "00000000000000010000000000116b61666b612e6578616d706c652e636f6d00002384ff",
+            "ff0005717565656e0000000000000001000000066f726465727300000000040000000000",
+            "000000000000000001000000000000000100000000000000000001000000000000000100",
+            "000000000000010000000000000000000200000000000000010000000000000001000000",
+            "000000000000030000000000000001000000000000000100000000",
+        ),
+        // v5
+        concat!(
+            "00000000000000010000000000116b61666b612e6578616d706c652e636f6d00002384ff",
+            "ff0005717565656e0000000000000001000000066f726465727300000000040000000000",
+            "000000000000000001000000000000000100000000000000000000000000010000000000",
+            "000001000000000000000100000000000000000000000000020000000000000001000000",
+            "000000000100000000000000000000000000030000000000000001000000000000000100",
+            "00000000000000",
+        ),
+        // v6
+        concat!(
+            "00000000000000010000000000116b61666b612e6578616d706c652e636f6d00002384ff",
+            "ff0005717565656e0000000000000001000000066f726465727300000000040000000000",
+            "000000000000000001000000000000000100000000000000000000000000010000000000",
+            "000001000000000000000100000000000000000000000000020000000000000001000000",
+            "000000000100000000000000000000000000030000000000000001000000000000000100",
+            "00000000000000",
+        ),
+        // v7
+        concat!(
+            "00000000000000010000000000116b61666b612e6578616d706c652e636f6d00002384ff",
+            "ff0005717565656e0000000000000001000000066f726465727300000000040000000000",
+            "0000000000ffffffff000000010000000000000001000000000000000000000000000100",
+            "000000ffffffff0000000100000000000000010000000000000000000000000002000000",
+            "00ffffffff000000010000000000000001000000000000000000000000000300000000ff",
+            "ffffff0000000100000000000000010000000000000000",
+        ),
+        // v8
+        concat!(
+            "00000000000000010000000000116b61666b612e6578616d706c652e636f6d00002384ff",
+            "ff0005717565656e0000000000000001000000066f726465727300000000040000000000",
+            "0000000000ffffffff000000010000000000000001000000000000000000000000000100",
+            "000000ffffffff0000000100000000000000010000000000000000000000000002000000",
+            "00ffffffff000000010000000000000001000000000000000000000000000300000000ff",
+            "ffffff00000001000000000000000100000000000000008000000080000000",
+        ),
+        // v9
+        concat!(
+            "000000000200000000126b61666b612e6578616d706c652e636f6d000023840000067175",
+            "65656e00000000020000076f7264657273000500000000000000000000ffffffff020000",
+            "00000200000000010000000000000100000000ffffffff02000000000200000000010000",
+            "000000000200000000ffffffff02000000000200000000010000000000000300000000ff",
+            "ffffff02000000000200000000010080000000008000000000",
+        ),
+    ];
+
+    /// The same for FindCoordinator, v0..=v3.
+    const FIND_COORDINATOR: [&str; 4] = [
+        // v0
+        "00000000000000116b61666b612e6578616d706c652e636f6d00002384",
+        // v1
+        "00000000000000000000000000116b61666b612e6578616d706c652e636f6d00002384",
+        // v2
+        "00000000000000000000000000116b61666b612e6578616d706c652e636f6d00002384",
+        // v3
+        "0000000000000100000000126b61666b612e6578616d706c652e636f6d0000238400",
+    ];
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// A facade over a queue that exists, so the answer is `Serve` and nothing
+    /// is auto-created: the bytes must not depend on a call to Queen.
+    #[tokio::test]
+    async fn a_single_node_metadata_answer_is_unchanged_at_every_version() {
+        let f = facade(&[("orders", 2)]);
+        for (version, want) in METADATA.iter().enumerate() {
+            let version = version as i16;
+            let req = MetadataRequest::default()
+                .with_topics(Some(vec![MetadataRequestTopic::default()
+                    .with_name(Some(TopicName(StrBytes::from_static_str("orders"))))]))
+                .with_allow_auto_topic_creation(false);
+            let resp = handle(&f, &req, version, None).await;
+            let mut buf = BytesMut::new();
+            resp.encode(&mut buf, version)
+                .unwrap_or_else(|e| panic!("encode v{version}: {e}"));
+            assert_eq!(hex(&buf), *want, "Metadata v{version} changed on the wire");
+        }
+    }
+
+    #[test]
+    fn a_single_node_find_coordinator_answer_is_unchanged_at_every_version() {
+        let f = facade(&[]);
+        for (version, want) in FIND_COORDINATOR.iter().enumerate() {
+            let version = version as i16;
+            let req = FindCoordinatorRequest::default()
+                .with_key(StrBytes::from_static_str("orders-consumer"))
+                .with_key_type(0);
+            let resp = crate::handlers::find_coordinator::handle(&f, &req);
+            let mut buf = BytesMut::new();
+            resp.encode(&mut buf, version)
+                .unwrap_or_else(|e| panic!("encode v{version}: {e}"));
+            assert_eq!(
+                hex(&buf),
+                *want,
+                "FindCoordinator v{version} changed on the wire"
+            );
+        }
     }
 }

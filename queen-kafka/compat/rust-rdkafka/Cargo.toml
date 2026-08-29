@@ -1,0 +1,40 @@
+# The rdkafka (Rust) row of the queen-kafka client matrix.
+#
+# Standalone on purpose: there is no cargo workspace in this repository (server/
+# and queen-kafka/ each build on their own manifest), and this suite must never
+# be pulled into either. The empty [workspace] table below makes that explicit
+# rather than relying on cargo's ancestor walk.
+[package]
+name = "queen-kafka-compat-rdkafka"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "compat"
+path = "src/main.rs"
+
+[dependencies]
+# rdkafka 0.39 wraps rdkafka-sys 4.10.0+2.12.1 = librdkafka 2.12.1.
+#
+# cmake-build: vendor and compile librdkafka from the crate's own submodule
+# rather than linking whatever the host happens to have. That is the point of
+# this row — it proves the facade against the C library itself, which is the
+# engine under confluent-kafka-python, confluent-kafka-go, .NET and
+# node-rdkafka too.
+#
+# libz  -> gzip, ssl -> the SASL_SSL lane, zstd -> the zstd codec, all of which
+# the test bar asks for. lz4 and snappy are unconditional in librdkafka.
+# NOT enabled: gssapi (needs cyrus-sasl; SASL/PLAIN is built in and does not),
+# dynamic-linking (would defeat the vendoring), ssl-vendored (builds OpenSSL
+# from source; the host has openssl@3 and cmake finds it).
+rdkafka = { version = "0.39", default-features = false, features = [
+    "cmake-build",
+    "libz",
+    "ssl",
+    "zstd",
+    "tokio",
+] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }

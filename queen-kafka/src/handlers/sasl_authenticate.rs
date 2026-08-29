@@ -216,6 +216,35 @@ mod tests {
         );
     }
 
+    /// The exact bytes kafka-python and aiokafka put on the wire: one config
+    /// key filling the authzid AND the authcid (`kafka/sasl/plain.py`,
+    /// `aiokafka.conn.SaslPlainAuthenticator`). RFC 4616 permits it and Apache
+    /// Kafka's `PlainSaslServer` accepts it, so the whole pure-Python ecosystem
+    /// reaches Queen with its token — and reaches it under the SAME label as a
+    /// client that leaves the authzid empty, which is what makes the log line
+    /// mean one thing.
+    #[tokio::test]
+    async fn the_python_framing_admits_the_connection_too() {
+        let (f, api) = facade();
+        let mut state = SaslState::AwaitingAuthenticate;
+        let bytes = Bytes::from_static(b"acme\0acme\0tenant-token");
+        let (resp, outcome) = handle(&f, &request(bytes), &mut state).await;
+
+        assert_eq!(resp.error_code, 0, "{:?}", resp.error_message);
+        assert!(matches!(outcome, Outcome::Admitted), "{outcome:?}");
+        assert_eq!(
+            state,
+            SaslState::Authenticated {
+                token: "tenant-token".into(),
+                user: "acme".into()
+            }
+        );
+        assert_eq!(
+            api.tokens.lock().unwrap().as_slice(),
+            [Some("tenant-token".to_string())]
+        );
+    }
+
     #[tokio::test]
     async fn a_refused_credential_is_fatal_and_says_so_on_the_wire() {
         let (f, api) = facade();

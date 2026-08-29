@@ -705,3 +705,113 @@ async fn an_unreadable_retry_after_is_not_guessed_at() {
         );
     }
 }
+
+// ------------------------------------------------------ M7 F1: topics admin
+
+/// The delete route's own answer, corrected by the handler so `deleted`
+/// mirrors `existed` (server/src/handlers/queues.rs).
+const DELETE_BODY: &str = r#"{"deleted":true,"existed":true,"queue":"orders",
+  "messagesDeleted":41,"partitionsDeleted":8}"#;
+
+/// The same route for a queue that was never there. Still HTTP 200 — DELETE is
+/// idempotent here and the SDKs use delete-before-create as a cleanup idiom —
+/// with `deleted` rewritten to false, which is the ONLY thing that tells the
+/// facade there was nothing to delete.
+const DELETE_MISSING_BODY: &str = r#"{"deleted":false,"existed":false,
+  "message":"Queue not found, nothing was deleted"}"#;
+
+/// The CreateTopics body: the options bag is MERGED into `{"queue": …}`
+/// because the route reads the options off the top level of the body, and
+/// `queue` is the one key that is not one of them.
+#[tokio::test]
+async fn a_configure_with_options_merges_them_beside_the_queue_name() {
+    let (base, seen) = stub(vec![Canned::new(200, CONFIGURE_BODY)]).await;
+    let api = HttpQueen::new(&base).unwrap();
+
+    api.create_queue_with(
+        "sessions",
+        &serde_json::json!({"retentionEnabled": true, "retentionSeconds": 604800}),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen[0].line, "POST /api/v1/configure HTTP/1.1");
+    let sent: serde_json::Value = serde_json::from_str(&seen[0].body).unwrap();
+    assert_eq!(
+        sent,
+        serde_json::json!({
+            "queue": "sessions",
+            "retentionEnabled": true,
+            "retentionSeconds": 604800
+        })
+    );
+}
+
+/// An EMPTY bag is byte-for-byte what the auto-create path already sends, so
+/// a CreateTopics with no configs cannot write a default the client did not ask
+/// for.
+#[tokio::test]
+async fn a_configure_with_no_options_sends_exactly_the_auto_create_body() {
+    let (base, seen) = stub(vec![Canned::new(200, CONFIGURE_BODY)]).await;
+    let api = HttpQueen::new(&base).unwrap();
+
+    api.create_queue_with("events", &serde_json::json!({}), None)
+        .await
+        .unwrap();
+
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen[0].body, r#"{"queue":"events"}"#);
+}
+
+#[tokio::test]
+async fn a_delete_hits_the_documented_route_and_reads_the_outcome_back() {
+    let (base, seen) = stub(vec![Canned::new(200, DELETE_BODY)]).await;
+    let api = HttpQueen::new(&base).unwrap();
+
+    let answer = api
+        .delete_queue("orders", Some("tenant-token"))
+        .await
+        .unwrap();
+
+    assert!(answer.existed);
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(
+        seen[0].line,
+        "DELETE /api/v1/resources/queues/orders HTTP/1.1"
+    );
+    assert_eq!(
+        seen[0].authorization.as_deref(),
+        Some("Bearer tenant-token")
+    );
+}
+
+/// THE distinction DeleteTopics rests on: a queue that is not there is a 200
+/// with `deleted:false`, not an HTTP error.
+#[tokio::test]
+async fn a_delete_of_a_queue_that_is_not_there_is_not_an_error() {
+    let (base, _) = stub(vec![Canned::new(200, DELETE_MISSING_BODY)]).await;
+    let api = HttpQueen::new(&base).unwrap();
+
+    let answer = api.delete_queue("never-existed", None).await.unwrap();
+    assert!(!answer.existed);
+}
+
+/// The name is a path SEGMENT and it came off a Kafka wire. Metadata's name
+/// rule has already refused everything outside `[A-Za-z0-9._-]` by the time a
+/// delete gets here, so this encodes nothing today — it is here so a future
+/// relaxation of that rule cannot become a path traversal.
+#[tokio::test]
+async fn a_hostile_queue_name_cannot_leave_its_path_segment() {
+    let (base, seen) = stub(vec![Canned::new(200, DELETE_MISSING_BODY)]).await;
+    let api = HttpQueen::new(&base).unwrap();
+
+    api.delete_queue("../../admin?x=1", None).await.unwrap();
+
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(
+        seen[0].line,
+        "DELETE /api/v1/resources/queues/..%2F..%2Fadmin%3Fx%3D1 HTTP/1.1"
+    );
+}

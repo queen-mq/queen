@@ -7,6 +7,18 @@ rig has to fake, and only under `--m5` (see below). `js/`, `librdkafka/` and
 `java/` are M6's other client rows and run against the same stack — see
 [The rest of the M6 client matrix](#the-rest-of-the-m6-client-matrix).
 
+Two suites stand up their own stack instead, because the shape they measure is
+not one broker and one facade:
+
+| Suite | Shape | Ports and containers |
+| --- | --- | --- |
+| [`cluster/`](cluster) | **cluster mode**: one Postgres, two mesh-wired Queen brokers on it, three clustered facades, one facade with the cluster config absent, and two unclustered facades. Nine scenarios, run by `cluster/rig-cluster.sh` | 32400-32419, container `qkx-c2-pg` |
+| [`embedded/`](embedded) | **embedded mode** (`QUEEN_KAFKA_EMBEDDED=true` on the BROKER, which then supervises the facade as a child process), run by `embedded/rig-embedded.sh` | see its own README |
+
+`embedded/` is on disk with its own README and rig and is **not claimed by any
+report of the 2026-08-29 campaign**, so nothing in this file vouches for its
+results. Read it as unratified until somebody re-runs it and says so here.
+
 ```sh
 queen-kafka/compat/rig.sh                    # stand up, run everything, tear down
 queen-kafka/compat/rig.sh -run TestLongPoll -v
@@ -66,6 +78,18 @@ module outside itself.
 | `TestSaslListenerRefusesAnUnauthenticatedClient` (`--m5`) | a client with no credentials reads nothing from a SASL listener |
 | `TestSaslRefusesAWrongPassword` (`--m5`) | a wrong password gets SASL_AUTHENTICATION_FAILED — the fatal code, not a retriable disconnect — and the listener still serves the right one |
 | `TestPlaintextClientAgainstTheTLSListener` (`--m5`) | a plaintext frame on the TLS port gets a TLS alert and a close, the facade survives it, and a TLS client works immediately after |
+
+### M7, added 2026-08-29
+
+Three files, 43 further top-level tests, on the same stack and in the same run.
+They are grouped here rather than listed one by one; each file's header says
+what every test pins.
+
+| File | Tests | What it pins |
+| --- | --- | --- |
+| `go/admin_topics_test.go` | 21 | CreateTopics, DeleteTopics and DescribeConfigs at every advertised version: a created queue a second client can see, the refusals (an existing topic, `cleanup.policy=compact`, an unknown config, a reserved name, a manual replica assignment, a name repeated inside one request), `validate_only` writing nothing, `retention.ms` applied and echoed, the broker resource, and answers lining up index-for-index with the request |
+| `go/admin_groups_test.go` | 11 | ListGroups showing a STOPPED group beside a live one and honouring the state filter, DescribeGroups with host and assignment and telling a stopped group from an unknown one, DeleteGroups refusing a group with members and removing a stopped group's offsets, the advertised windows, and a listing that survives a facade restart |
+| `go/idempotent_test.go` | 11 | InitProducerId at every advertised version, an epoch bump, a transactional id refused immediately and an EMPTY one treated as absent, a default franz-go producer round-tripping, a duplicate batch answered with the ORIGINAL offsets, a sequence gap refused with nothing written, an unknown producer, a stale epoch fenced, and a default idempotent producer surviving a facade SIGKILL |
 
 ## The M5 surface: TLS, SASL and the throttle
 
@@ -130,9 +154,11 @@ for each code beside it is `src/throttle.rs`.
 
 ## Two client facts worth knowing before reading a failure
 
-- **`kgo.DisableIdempotentWrite()` is mandatory.** franz-go is an idempotent
-  producer by default, and `InitProducerId` is deliberately unimplemented (no
-  transactions, no EOS). Without the option the first produce never happens.
+- **`kgo.DisableIdempotentWrite()` is no longer needed** (2026-08-29, M7 F3).
+  franz-go is an idempotent producer by default and `InitProducerId` is now
+  advertised, so a stock `kgo.NewClient` produces. Transactions are still
+  refused: it is idempotence that landed, not EOS. Tests written before F3 that
+  still pass the option are unaffected, since disabling it is legal.
 - **acks=0 offsets are invented by the client.** There is no response to read
   them from, so franz-go fills them from its own per-partition counter. Nothing
   about them is an assertion on the facade.
@@ -180,7 +206,23 @@ read out of that client's own debug stream rather than assumed.
 | librdkafka 2.15 (kcat 1.7) | `librdkafka/kcat.sh` | `-L` metadata and auto-create, `-P`/`-C` round-trip with keys and headers, gzip/snappy/lz4/zstd, an explicit start offset, `-Q`, and `-G` group consume + commit + resume |
 | librdkafka 2.15 (confluent-kafka 2.15) | `librdkafka/confluent_group.py` | delivery-report offsets, a group that commits synchronously, the commit read back over OffsetFetch, watermarks, a second consumer resuming, a fresh group applying `auto.offset.reset`, and two cooperative-sticky members |
 | Java kafka-clients 3.9 | `java/QueenKafkaCompat.java` | acks=all and gzip producers, a group consumer over every partition, headers in order with empty and null kept apart, `commitSync` + `committed`, `beginningOffsets`/`endOffsets`, and commit-and-resume |
-| Java, the unsupported shapes | `java/QueenKafkaEdges.java` | the DEFAULT (idempotent) producer and `group.protocol=consumer`: both must fail fast and legibly, and both do |
+| Java, the unsupported shapes | `java/QueenKafkaEdges.java` | the DEFAULT (idempotent) producer and `group.protocol=consumer`. It narrates rather than asserts, and **half of it is out of date since M7 F3**: the default producer now sends, and its success line still calls that a fallback |
+| **2026-08-29** Java kafka-clients 4.3.1 + 3.6.2 | `java-matrix/run.sh` | the KIP-896 question settled: 4.x negotiates every advertised API to the top of its window and no raised client floor lands above a facade cap; both versions plaintext and over SASL_SSL; `initTransactions()` hanging for `max.block.ms`, which M7 F3 did NOT fix and which is the transaction coordinator's retriable answer rather than InitProducerId. The 5 stale FAILs are inverted and the suite is green: 4.3.1 matrix 81 checks, 3.6.2 matrix 80, `edges` rc=0 on both. Its SASL lane runs on 4.3.1 only, because kafka-clients below 3.9 cannot do SASL on JDK 24 (JEP 486) |
+| **2026-08-29** Spring Boot 3.5.16 + spring-kafka 3.3.16 | `spring-kafka/run.sh` | the stock Boot bean set, `@KafkaListener` at `concurrency=4` splitting 8 partitions, cooperative-sticky as its own protocol, commit and resume across listener ids, and how much of `KafkaAdmin` works (`describeTopics` and `clusterId` always did; since M7 F1 `NewTopic` beans do too, unless one asks for `cleanup.policy=compact`) |
+| **2026-08-29** sarama 1.60.2 (+ 1.45.2) | `sarama/run.sh` | sarama's one-knob `Config.Version` against the advertised windows, a sweep from 0.10.2.0 to 4.3.1, and the version cliff below sarama v1.46.0 where the producer works while the consumer loops on EOF |
+| **2026-08-29** segmentio/kafka-go 0.4.51 | `kafka-go/run.sh` | its two protocol stacks at once: the negotiating `Transport` and the `Conn` path that writes OffsetCommit v2 and OffsetFetch v1 with no negotiation, on the facade's exact floors; plus auto-create decided by the Metadata wire flag rather than by naming the topic |
+| **2026-08-29** kafka-python 2.0.2 / 2.3.2 / 3.0.11 (+ ng) | `kafka-python/run.sh` | the default `api_version` probe proven safe on four releases, the hint above `(0,11,0)` proven to be the footgun, and SASL/PLAIN with the wire bytes: the authzid refusal this suite found was fixed on 2026-08-29 and the lane now passes stock |
+| **2026-08-29** aiokafka 0.14.0 (+ 0.12.0) | `aiokafka/run.sh` | the asyncio client end to end, and the hard floor at 0.13.0: below it `JoinGroupRequest_v5` is closed and the client hangs for ever with produce still working |
+| **2026-08-29** Confluent.Kafka 2.15.0 (.NET) | `confluent-dotnet/run.sh` | the easiest row in the matrix (idempotence is already off), negotiated exactly to the `versions.rs` ceilings, plus `ListConsumerGroupsAsync`, which used to abort the PROCESS with a glibc double free before writing a byte and which M7 F2 fixed by advertising key 16 at all |
+| **2026-08-29** node-rdkafka 3.6.1 + @confluentinc/kafka-javascript 1.10.0 | `node-librdkafka/run.sh` | both Node librdkafka bindings, and a 2x2 cross-binding header probe showing that node-rdkafka loses binary header bytes on its WRITE path while the facade returns whatever it was given |
+| **2026-08-29** @platformatic/kafka 2.11.0 | `platformatic-kafka/run.sh` | the new pure-TypeScript client, which walks DOWN from each advertised maximum and therefore sends exactly the facade's ceiling on every API; the same suite passes against apache/kafka 3.9.1, where it sends Fetch v17 |
+| **2026-08-29** rdkafka 0.39.0 (Rust) | `rust-rdkafka/run.sh` | delivery reports carrying the assigned partition and offset (a direct check on `PushResult::offset`), a full commit-and-resume across two consumers, and the librdkafka consumer default `allow.auto.create.topics=false` |
+| **2026-08-29** rdkafka 0.29.0 (Ruby) + php-rdkafka 6.0.5 | `rdkafka-ruby-php/run.sh` | two containerised bindings on either side of a librdkafka boundary: 2.14.2 compresses gzip, snappy and lz4, 2.6.1 silently sends all four codecs uncompressed against the advertised Produce floor of v3 |
+| **2026-08-29** brod 4.6.3 (Erlang/Elixir) | `brod/run.sh` | was the only FAIL in the matrix, settled against an `apache/kafka:3.9.1` oracle in the same container: kafka_protocol encodes a null `transactional_id` as `""` and the facade refused any present one. Fixed the same day in `src/handlers/produce.rs`, and stock brod now passes 58 of 58. Also the only client that exercises the BOTTOM of the advertised windows (Metadata v2, ListOffsets v2, FindCoordinator v0, OffsetFetch v2) |
+
+The full matrix, including the mandatory config and the caveat for each client,
+the evidence behind every non-PASS row, and the usage-ranked landscape of what
+was deliberately not tested and why, is [CLIENT_MATRIX.md](CLIENT_MATRIX.md).
 
 Three client behaviours to know before reading a failure in these:
 
@@ -192,8 +234,31 @@ Three client behaviours to know before reading a failure in these:
   offset 0 whatever the group has committed — against any broker. The resume
   test therefore asks for the reset policy (`-X topic.auto.offset.reset`) and
   leaves `-o` alone.
-- **The Java producer must be told `enable.idempotence=false`**, exactly like
-  franz-go's `DisableIdempotentWrite()`. Left at its 3.x default it dies on the
-  first send with `UnsupportedVersionException: The node does not support
-  INIT_PRODUCER_ID`. librdkafka and kafkajs need nothing: librdkafka defaults
-  the flag off and disables the feature by itself when the broker lacks it.
+- **The Java producer no longer needs `enable.idempotence=false`** (2026-08-29,
+  M7 F3). Left at its 3.x default it used to die on the first send with
+  `UnsupportedVersionException: The node does not support INIT_PRODUCER_ID`; it
+  now negotiates InitProducerId to v4 and sends. librdkafka and kafkajs never
+  needed anything: librdkafka defaults the flag off and disables the feature by
+  itself when the broker lacks it.
+- **The stale assertions are inverted (2026-08-29).** `java-matrix` (5 FAILs)
+  and `sarama`'s `edges` scenario (3 FAILs, 4 in a full run) used to assert that
+  CreateTopics, DeleteTopics, DescribeConfigs, ListGroups, DescribeGroups and
+  `ClusterAdmin.ListTopics` are REFUSED. All six work since M7 F1 and F2, so the
+  assertions were what was wrong. All 34 of them across seven suites were
+  inverted into positive checks of the 21-key surface rather than deleted, and
+  every one of those suites was re-run to green. Two things the inversion
+  taught, both worth keeping in mind before writing the next one:
+  **CreateTopics does not honour `num_partitions`** (`create_topics.rs` takes
+  the wider of the live lane count and `QUEEN_KAFKA_DEFAULT_PARTITIONS`), so the
+  obvious inversion "created with the 4 partitions asked for" is itself wrong
+  and the suites now assert the true width and name the deviation on the line;
+  and the ruby/php **zstd detector was blind rather than merely fail-open**,
+  because librdkafka's "Broker does not support compression type" notice rides
+  the `msg` debug facility while both suites set `debug=protocol`. It is now
+  `debug=protocol,msg` and fails closed.
+- **`java/QueenKafkaEdges.java` is still out of date, and not by an assertion.**
+  It narrates rather than asserts, so it does not FAIL, but its success line
+  still reads "the client fell back to a non-idempotent producer", which is no
+  longer what happens. `aiokafka` and `node-librdkafka` likewise still carry
+  stale text (a "14 keys" reference and a fail-open idempotence section). None
+  of the three was touched by the sweep.

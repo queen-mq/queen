@@ -2,7 +2,9 @@
 //! Spec: PLAN_QUEEN_KAFKA.md (repo root); the protocol lives in the library.
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use queen_kafka::cluster::{self, registry, Cluster, ClusterState};
 use queen_kafka::coordinator::{Coordinator, GroupConfig};
 use queen_kafka::handlers::metadata;
 use queen_kafka::{conn, queen, tls, Facade, Policy};
@@ -32,6 +34,16 @@ struct Config {
     /// Queen and a fine lane count is what makes the mapping "Kafka partition n
     /// = Queen partition n" worth having.
     default_partitions: u32,
+    /// `QUEEN_KAFKA_NODE_ID` — the ONE switch of cluster mode
+    /// ([`queen_kafka::cluster`]). `None` is the default and is this facade's
+    /// behaviour bit for bit: nothing below is read, spawned or written.
+    node_id: Option<i32>,
+    /// `QUEEN_KAFKA_CLUSTER` — the registry prefix and the advertised
+    /// `cluster_id`. Only read when `node_id` is set, and refused without it.
+    cluster: String,
+    /// `QUEEN_KAFKA_CLUSTER_HEARTBEAT_MS` / `QUEEN_KAFKA_CLUSTER_TTL_MS`.
+    cluster_heartbeat: Duration,
+    cluster_ttl: Duration,
     /// The consumer-group timings (M4): the join window and the session-timeout
     /// bounds. Resolved by [`GroupConfig::resolve`], which owns their names,
     /// defaults and validation — they belong next to the state machine that
@@ -68,6 +80,10 @@ impl std::fmt::Debug for Config {
             .field("advertised_host", &self.advertised_host)
             .field("advertised_port", &self.advertised_port)
             .field("default_partitions", &self.default_partitions)
+            .field("node_id", &self.node_id)
+            .field("cluster", &self.cluster)
+            .field("cluster_heartbeat", &self.cluster_heartbeat)
+            .field("cluster_ttl", &self.cluster_ttl)
             .field("groups", &self.groups)
             .field("tls", &self.tls)
             .field("policy", &self.policy)
@@ -244,6 +260,94 @@ impl Config {
             },
         };
 
+        // ------------------------------------------------------------ cluster
+        //
+        // One switch, and it is `QUEEN_KAFKA_NODE_ID`. Everything else here is
+        // refused when it is absent rather than quietly ignored: a knob that
+        // does nothing is worse than one that is missing (the same rule
+        // QUEEN_KAFKA_FORWARD_SNI_HOST follows above).
+        let node_id = match env("QUEEN_KAFKA_NODE_ID") {
+            None => None,
+            Some(v) => match v.parse::<i32>() {
+                Ok(n) if (cluster::MIN_NODE_ID..=cluster::MAX_NODE_ID).contains(&n) => Some(n),
+                _ => {
+                    return Err(format!(
+                        "QUEEN_KAFKA_NODE_ID={v} is not a node id — give it an integer in \
+                         {min}..={max}, or unset it for a facade that is on its own.\n\
+                         0 is RESERVED for the single-node identity this facade advertises when \
+                         it is not clustered, so that `am I clustered` is never ambiguous and a \
+                         client's cached broker list is replaced wholesale rather than \
+                         half-overlapping. Apache Kafka is 0-based; this deviates deliberately.",
+                        min = cluster::MIN_NODE_ID,
+                        max = cluster::MAX_NODE_ID,
+                    ))
+                }
+            },
+        };
+
+        let cluster =
+            match env("QUEEN_KAFKA_CLUSTER") {
+                None => queen_kafka::handlers::metadata::CLUSTER_ID.to_string(),
+                Some(_) if node_id.is_none() => return Err(
+                    "QUEEN_KAFKA_CLUSTER is set without QUEEN_KAFKA_NODE_ID. A cluster name alone \
+                     would change the cluster_id this facade advertises without clustering \
+                     anything — a second, silent axis. Set QUEEN_KAFKA_NODE_ID (1..=64) as well, \
+                     or unset this."
+                        .to_string(),
+                ),
+                Some(name) => {
+                    // The charset is what makes the registry prefix unambiguous
+                    // WITHOUT escaping: `:` is outside it, so one cluster's key
+                    // prefix can never be a prefix of another's
+                    // (queen_kafka::cluster::registry).
+                    if name.len() > 64
+                        || !name
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+                    {
+                        return Err(format!(
+                        "QUEEN_KAFKA_CLUSTER={name} is not a cluster name — 1 to 64 characters of \
+                         [A-Za-z0-9._-]. The name goes in the key prefix of the node registry, \
+                         and a `:` in it would make one cluster's rows readable as another's."
+                    ));
+                    }
+                    name
+                }
+            };
+
+        // The registry is written with THIS PROCESS's credential, so there has
+        // to be one. Named at boot rather than discovered as an empty view.
+        if node_id.is_some() && queen_token.is_none() {
+            return Err(format!(
+                "QUEEN_KAFKA_NODE_ID={} needs QUEEN_TOKEN. The node registry lives in Queen KV \
+                 and is written with THIS PROCESS's credential, not a client's, because the \
+                 broker list every client is handed has to be the same list. Give this facade a \
+                 Queen token, or unset QUEEN_KAFKA_NODE_ID for single-node mode.\n\
+                 All facades of one cluster must present credentials of ONE Queen tenant: \
+                 queen.kv is keyed by tenant, so two tenants are two registries and each facade \
+                 would see only itself.",
+                node_id.unwrap_or_default()
+            ));
+        }
+
+        let cluster_heartbeat =
+            millis("QUEEN_KAFKA_CLUSTER_HEARTBEAT_MS", &env, 2_000, 500, 30_000)?;
+        let cluster_ttl = millis("QUEEN_KAFKA_CLUSTER_TTL_MS", &env, 10_000, 3_000, 120_000)?;
+        // 5x by default, and never below 3x. Under 3x a single slow KV write
+        // evicts a live node and moves group ownership for nothing — a
+        // rebalance storm caused by the liveness system itself.
+        if cluster_ttl < cluster_heartbeat * 3 {
+            return Err(format!(
+                "QUEEN_KAFKA_CLUSTER_TTL_MS={ttl} is less than three times \
+                 QUEEN_KAFKA_CLUSTER_HEARTBEAT_MS={hb}. The TTL is how long a node stays live \
+                 after its last successful write, so a margin under 3x makes one slow KV call \
+                 evict a healthy node and move every group it coordinates. Raise the TTL or \
+                 lower the heartbeat.",
+                ttl = cluster_ttl.as_millis(),
+                hb = cluster_heartbeat.as_millis(),
+            ));
+        }
+
         Ok(Config {
             queen_url,
             queen_token,
@@ -251,6 +355,10 @@ impl Config {
             advertised_host,
             advertised_port,
             default_partitions,
+            node_id,
+            cluster,
+            cluster_heartbeat,
+            cluster_ttl,
             groups: GroupConfig::resolve(&|k| get(k))?,
             tls,
             policy: Policy {
@@ -259,6 +367,28 @@ impl Config {
                 max_connections,
             },
         })
+    }
+}
+
+/// A duration knob in milliseconds, bounded at both ends and LOUD on a bad
+/// value — the rule every other knob in this file follows: the default is not
+/// there to paper over a typo.
+fn millis(
+    key: &str,
+    env: &impl Fn(&str) -> Option<String>,
+    default_ms: u64,
+    min_ms: u64,
+    max_ms: u64,
+) -> Result<Duration, String> {
+    match env(key) {
+        None => Ok(Duration::from_millis(default_ms)),
+        Some(v) => match v.parse::<u64>() {
+            Ok(ms) if (min_ms..=max_ms).contains(&ms) => Ok(Duration::from_millis(ms)),
+            _ => Err(format!(
+                "{key}={v} is not a duration this facade will run on — give it a whole number of \
+                 milliseconds in {min_ms}..={max_ms}, or unset it for {default_ms}"
+            )),
+        },
     }
 }
 
@@ -296,6 +426,59 @@ fn split_host_port(key: &str, raw: &str) -> Result<(String, u16), String> {
         )),
         Ok(p) => Ok((host.to_string(), p)),
     }
+}
+
+/// How long the stop path may spend handing this node's registry row back
+/// before it gives up and lets the TTL do it.
+///
+/// It is a budget and not a hope: in EMBEDDED mode the broker's supervisor
+/// SIGTERMs this process and SIGKILLs it after `QUEEN_KAFKA_SHUTDOWN_GRACE_MS`
+/// (default 5000, server/src/config.rs), so one KV round trip has to finish
+/// well inside that window or not at all. A stop that misses it is not a
+/// failure, only a slower one: the row expires on its own TTL, which is the
+/// behaviour every kill has always had.
+const DEREGISTER_BUDGET: Duration = Duration::from_secs(2);
+
+/// Resolves when this process is asked to stop, with the name of what asked.
+///
+/// SIGTERM is the one that matters and the one nothing here used to handle:
+/// it is what `kubectl delete pod` and every rolling deploy send, what
+/// `systemctl stop` sends, and what the broker's own supervisor sends to this
+/// process in embedded mode (server/src/kafka_facade.rs). Without a handler the
+/// default action ends the process where it stands, which in cluster mode means
+/// a registry row left behind for a whole TTL — and in a container, where this
+/// is pid 1, it means the signal is not even delivered.
+///
+/// Ctrl-C is here for the same reason in the shape a person uses: a facade run
+/// from a terminal and stopped from that terminal must hand its id back too.
+#[cfg(unix)]
+async fn stop_signal() -> &'static str {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = match signal(SignalKind::terminate()) {
+        Ok(s) => s,
+        Err(e) => {
+            // Refusing to start over this would be worse than the loss: the
+            // facade still serves, it just cannot be stopped politely.
+            tracing::warn!(
+                target: "boot",
+                error = %e,
+                "SIGTERM cannot be handled in this process; a stop will not hand this node's \
+                 registry row back and its peers will advertise it until the row's TTL expires"
+            );
+            let _ = tokio::signal::ctrl_c().await;
+            return "ctrl-c";
+        }
+    };
+    tokio::select! {
+        _ = term.recv() => "SIGTERM",
+        _ = tokio::signal::ctrl_c() => "ctrl-c",
+    }
+}
+
+#[cfg(not(unix))]
+async fn stop_signal() -> &'static str {
+    let _ = tokio::signal::ctrl_c().await;
+    "ctrl-c"
 }
 
 /// Slim tracing init, aligned with the broker's and the proxy's obs.rs:
@@ -371,6 +554,10 @@ async fn main() {
         tls = tls.is_some(),
         sasl = if cfg.policy.sasl_plain { "plain" } else { "none" },
         forward_sni_host = cfg.policy.forward_sni_host,
+        // 0 is the single-node identity and can be nothing else, so one field
+        // says both whether this facade is clustered and which node it is.
+        node_id = cfg.node_id.unwrap_or(metadata::SINGLE_NODE_ID),
+        cluster = %cfg.cluster,
         "queen-kafka starting"
     );
 
@@ -381,9 +568,78 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    // Cluster mode, before the listener binds: claim this node's id, read the
+    // live set in the same call, and start the heartbeat that keeps both true.
+    // The registration is kept for the stop path, which is the other half of a
+    // rolling deploy: a node that goes away without giving its id back is a
+    // TTL of peers advertising a closed port, and a replacement pod meeting its
+    // own predecessor's row.
+    let mut registration: Option<registry::Registration> = None;
+    let cluster = match cfg.node_id {
+        None => Cluster::Single,
+        Some(id) => {
+            let state = ClusterState::new(
+                cluster::Node {
+                    id,
+                    host: cfg.advertised_host.clone(),
+                    port: cfg.advertised_port,
+                    incarnation: cluster::new_incarnation(),
+                },
+                cfg.cluster.clone(),
+                cfg.cluster_heartbeat,
+                cfg.cluster_ttl,
+            );
+            let version =
+                match registry::claim(api.as_ref(), &state, cfg.queen_token.as_deref()).await {
+                    Ok(version) => Some(version),
+                    // The single most likely operator error, caught for one KV
+                    // operation. Fatal, because two facades on one node id
+                    // advertise one address for two processes.
+                    Err(registry::Refused::Taken(message)) => {
+                        tracing::error!(target: "boot", "FATAL: {message}");
+                        std::process::exit(1);
+                    }
+                    // NOT fatal: a facade that crash-loops through a Queen
+                    // restart takes its clients' produce with it, and the
+                    // freshness gate already refuses to coordinate anything
+                    // until the registry has been read. The heartbeat re-tries
+                    // the claim, and a duplicate id discovered there stops
+                    // coordination rather than the process.
+                    Err(registry::Refused::Unreachable(e)) => {
+                        tracing::error!(
+                            target: "boot",
+                            error = %e,
+                            "the node registry could not be read at boot; this facade will serve \
+                             produce and fetch and will NOT coordinate any consumer group until \
+                             a heartbeat succeeds"
+                        );
+                        None
+                    }
+                };
+            registration = Some(registry::spawn(
+                Arc::clone(&api) as Arc<dyn queen::QueenApi>,
+                Arc::clone(&state),
+                cfg.queen_token.clone(),
+                version,
+            ));
+            tracing::info!(
+                target: "boot",
+                node_id = id,
+                cluster = %cfg.cluster,
+                heartbeat_ms = cfg.cluster_heartbeat.as_millis() as u64,
+                ttl_ms = cfg.cluster_ttl.as_millis() as u64,
+                peers = state.view().map_or(0, |v| v.nodes.len()),
+                "cluster mode is on"
+            );
+            Cluster::Enabled(state)
+        }
+    };
+
     let facade = Arc::new(Facade::new(
         cfg.advertised_host.clone(),
         cfg.advertised_port,
+        cluster,
         cfg.default_partitions,
         cfg.queen_token.clone(),
         // One client object for both paths: it owns the connection pool, and
@@ -405,7 +661,54 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    conn::serve(listener, facade, tls).await;
+    // The accept loop runs until this process is asked to stop. Dropping it
+    // closes the listening socket, so no NEW connection is accepted from that
+    // moment; the connections already being served are tasks of their own and
+    // keep going for as long as the stop path below takes, which is the small
+    // drain a rolling deploy wants and costs nothing to have.
+    let stopped_by = tokio::select! {
+        _ = conn::serve(listener, facade, tls) => "the accept loop ended",
+        signal = stop_signal() => signal,
+    };
+    tracing::info!(target: "shutdown", signal = stopped_by, "queen-kafka is stopping");
+
+    // Hand the node id back. Everything durable this facade had is in Queen and
+    // was never here (the group membership it forgets is the one thing a
+    // restart is allowed to lose), so the ONLY thing a stop owes the cluster is
+    // its registry row: deleted, its peers drop this node within one heartbeat
+    // instead of one TTL, and a replacement with the same id claims it at once
+    // rather than waiting the corpse out.
+    if let Some(registration) = registration {
+        match registration.deregister(DEREGISTER_BUDGET).await {
+            registry::Departure::Released => tracing::info!(
+                target: "shutdown",
+                node_id = cfg.node_id.unwrap_or(metadata::SINGLE_NODE_ID),
+                cluster = %cfg.cluster,
+                "this node's registry row is deleted; its peers stop advertising it on their next \
+                 registry read"
+            ),
+            registry::Departure::NothingHeld => tracing::info!(
+                target: "shutdown",
+                "this facade held no registry row to hand back"
+            ),
+            // Neither of these is worth failing the exit over, and neither is
+            // silent: the row is somebody else's, or it expires on its TTL the
+            // way a killed node's does.
+            registry::Departure::NotOurs(reason) => tracing::warn!(
+                target: "shutdown",
+                reason = %reason,
+                "the registry row under this node id is not the one this process wrote, so it was \
+                 left alone; whoever holds it now keeps it"
+            ),
+            registry::Departure::Failed(why) => tracing::warn!(
+                target: "shutdown",
+                error = %why,
+                ttl_ms = cfg.cluster_ttl.as_millis() as u64,
+                "this node's registry row could not be deleted; peers will keep advertising this \
+                 address until the row's TTL expires"
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -707,5 +1010,214 @@ mod tests {
         ])
         .unwrap_err();
         assert!(err.contains("QUEEN_KAFKA_FORWARD_SNI_HOST"), "{err}");
+    }
+
+    // ------------------------------------------------------------- cluster
+
+    /// The default is not "a one-node cluster", it is the configuration this
+    /// facade has always had — asserted as a STRUCT so a new field cannot slip
+    /// into the default without this failing.
+    #[test]
+    fn absent_cluster_configuration_is_exactly_todays_configuration() {
+        let cfg = resolve(&[("QUEEN_KAFKA_ADVERTISED_ADDR", "kafka.example.com:9092")]).unwrap();
+        assert_eq!(cfg.node_id, None);
+        assert_eq!(
+            cfg.cluster, "queen",
+            "the cluster_id every client already sees"
+        );
+        assert_eq!(cfg.cluster_heartbeat, Duration::from_millis(2_000));
+        assert_eq!(cfg.cluster_ttl, Duration::from_millis(10_000));
+
+        // ...and the whole struct is the one the pre-cluster resolve produced.
+        let expected = Config {
+            queen_url: "http://localhost:6632".to_string(),
+            queen_token: None,
+            listen_addr: "0.0.0.0:9092".to_string(),
+            advertised_host: "kafka.example.com".to_string(),
+            advertised_port: 9092,
+            default_partitions: 1024,
+            node_id: None,
+            cluster: "queen".to_string(),
+            cluster_heartbeat: Duration::from_millis(2_000),
+            cluster_ttl: Duration::from_millis(10_000),
+            groups: cfg.groups,
+            tls: None,
+            policy: Policy::default(),
+        };
+        assert_eq!(cfg, expected);
+    }
+
+    /// Node 0 is reserved for the single-node identity, and the error says so
+    /// rather than leaving an operator to discover that Kafka is 0-based and
+    /// this is not.
+    #[test]
+    fn a_node_id_outside_the_cluster_range_is_refused_and_names_the_reservation() {
+        for bad in ["0", "-1", "65", "two", "1.0", "1000"] {
+            let err = resolve(&[
+                ("QUEEN_KAFKA_ADVERTISED_ADDR", "host:9092"),
+                ("QUEEN_TOKEN", "t"),
+                ("QUEEN_KAFKA_NODE_ID", bad),
+            ])
+            .unwrap_err();
+            assert!(err.contains("QUEEN_KAFKA_NODE_ID"), "{bad}: {err}");
+            assert!(err.contains("1..=64"), "{bad}: {err}");
+        }
+        assert!(resolve(&[
+            ("QUEEN_KAFKA_ADVERTISED_ADDR", "host:9092"),
+            ("QUEEN_TOKEN", "t"),
+            ("QUEEN_KAFKA_NODE_ID", "0"),
+        ])
+        .unwrap_err()
+        .contains("RESERVED"));
+
+        let cfg = resolve(&[
+            ("QUEEN_KAFKA_ADVERTISED_ADDR", "host:9092"),
+            ("QUEEN_TOKEN", "t"),
+            ("QUEEN_KAFKA_NODE_ID", "64"),
+        ])
+        .unwrap();
+        assert_eq!(cfg.node_id, Some(64));
+    }
+
+    /// One axis, one switch: a cluster NAME without a node id would change the
+    /// advertised cluster_id of a facade that is not clustered.
+    #[test]
+    fn a_cluster_name_without_a_node_id_is_refused() {
+        let err = resolve(&[
+            ("QUEEN_KAFKA_ADVERTISED_ADDR", "host:9092"),
+            ("QUEEN_KAFKA_CLUSTER", "prod"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("QUEEN_KAFKA_CLUSTER"), "{err}");
+        assert!(err.contains("QUEEN_KAFKA_NODE_ID"), "{err}");
+    }
+
+    /// The charset is what makes the registry prefix unambiguous without
+    /// escaping, so it is enforced where it is set and not where it is read.
+    #[test]
+    fn a_cluster_name_is_checked_against_the_prefix_charset() {
+        let cfg = resolve(&[
+            ("QUEEN_KAFKA_ADVERTISED_ADDR", "host:9092"),
+            ("QUEEN_TOKEN", "t"),
+            ("QUEEN_KAFKA_NODE_ID", "2"),
+            ("QUEEN_KAFKA_CLUSTER", "prod.eu-west_1"),
+        ])
+        .unwrap();
+        assert_eq!(cfg.cluster, "prod.eu-west_1");
+
+        for bad in ["prod:eu", "prod eu", "così", &"c".repeat(65), "prod/eu"] {
+            let err = resolve(&[
+                ("QUEEN_KAFKA_ADVERTISED_ADDR", "host:9092"),
+                ("QUEEN_TOKEN", "t"),
+                ("QUEEN_KAFKA_NODE_ID", "2"),
+                ("QUEEN_KAFKA_CLUSTER", bad),
+            ])
+            .unwrap_err();
+            assert!(err.contains("QUEEN_KAFKA_CLUSTER"), "{bad}: {err}");
+        }
+    }
+
+    /// The registry is written with THIS process's credential, so cluster mode
+    /// needs one — and the error says why rather than just naming a variable.
+    #[test]
+    fn cluster_mode_requires_a_token_of_its_own() {
+        let err = resolve(&[
+            ("QUEEN_KAFKA_ADVERTISED_ADDR", "host:9092"),
+            ("QUEEN_KAFKA_NODE_ID", "2"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("QUEEN_TOKEN"), "{err}");
+        assert!(err.contains("registry"), "{err}");
+        // ...and a single-node facade still needs none.
+        assert!(resolve(&[("QUEEN_KAFKA_ADVERTISED_ADDR", "host:9092")]).is_ok());
+    }
+
+    /// SIGTERM is what stops this process, and it is handled rather than
+    /// defaulted: `kubectl delete pod`, `systemctl stop` and the broker's own
+    /// supervisor in embedded mode all send exactly this, and the default
+    /// action would end the process before it could hand its node id back.
+    ///
+    /// The signal is raised at THIS process, so the assertion is the real
+    /// thing and not a stand-in. The test installs its own listener first: from
+    /// that moment tokio owns the disposition of SIGTERM process-wide, so a
+    /// missed delivery can only make this test slow, never kill the run.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_sigterm_is_what_stops_this_process() {
+        use tokio::signal::unix::{signal, SignalKind};
+        let ours = signal(SignalKind::terminate()).expect("cannot handle SIGTERM here");
+        let mut stopping = tokio::spawn(stop_signal());
+        let me = std::process::id().to_string();
+        // Raised until it is seen: the spawned task registers its own stream
+        // asynchronously, and a signal delivered before it does is one nothing
+        // is listening for. Re-raising is free — the disposition is already
+        // tokio's, and `ours` above guarantees that from the first line.
+        for _ in 0..50 {
+            let raised = std::process::Command::new("kill")
+                .args(["-TERM", &me])
+                .status()
+                .expect("cannot raise SIGTERM");
+            assert!(raised.success(), "kill -TERM refused");
+            if let Ok(stopped) =
+                tokio::time::timeout(std::time::Duration::from_millis(100), &mut stopping).await
+            {
+                assert_eq!(stopped.expect("the stop task panicked"), "SIGTERM");
+                // `ours` is held to here on purpose: it is what guarantees the
+                // disposition was tokio's before the first `kill`.
+                drop(ours);
+                return;
+            }
+        }
+        panic!("SIGTERM did not stop the process's serve loop");
+    }
+
+    /// The liveness margin. Below 3x, one slow KV call evicts a healthy node
+    /// and moves every group it coordinates — a rebalance storm the liveness
+    /// system caused by itself.
+    #[test]
+    fn the_ttl_must_be_at_least_three_heartbeats() {
+        let err = resolve(&[
+            ("QUEEN_KAFKA_ADVERTISED_ADDR", "host:9092"),
+            ("QUEEN_TOKEN", "t"),
+            ("QUEEN_KAFKA_NODE_ID", "2"),
+            ("QUEEN_KAFKA_CLUSTER_HEARTBEAT_MS", "2000"),
+            ("QUEEN_KAFKA_CLUSTER_TTL_MS", "5000"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("QUEEN_KAFKA_CLUSTER_TTL_MS=5000"), "{err}");
+        assert!(
+            err.contains("QUEEN_KAFKA_CLUSTER_HEARTBEAT_MS=2000"),
+            "{err}"
+        );
+
+        let cfg = resolve(&[
+            ("QUEEN_KAFKA_ADVERTISED_ADDR", "host:9092"),
+            ("QUEEN_TOKEN", "t"),
+            ("QUEEN_KAFKA_NODE_ID", "2"),
+            ("QUEEN_KAFKA_CLUSTER_HEARTBEAT_MS", "1000"),
+            ("QUEEN_KAFKA_CLUSTER_TTL_MS", "3000"),
+        ])
+        .unwrap();
+        assert_eq!(cfg.cluster_heartbeat, Duration::from_millis(1_000));
+        assert_eq!(cfg.cluster_ttl, Duration::from_millis(3_000));
+
+        // Loud on a value that is not a duration, and on one outside the
+        // bounds — never a silent fall back to the default.
+        for (key, bad) in [
+            ("QUEEN_KAFKA_CLUSTER_HEARTBEAT_MS", "0"),
+            ("QUEEN_KAFKA_CLUSTER_HEARTBEAT_MS", "100"),
+            ("QUEEN_KAFKA_CLUSTER_HEARTBEAT_MS", "two seconds"),
+            ("QUEEN_KAFKA_CLUSTER_TTL_MS", "1000000"),
+            ("QUEEN_KAFKA_CLUSTER_TTL_MS", "-1"),
+        ] {
+            let err = resolve(&[
+                ("QUEEN_KAFKA_ADVERTISED_ADDR", "host:9092"),
+                ("QUEEN_TOKEN", "t"),
+                ("QUEEN_KAFKA_NODE_ID", "2"),
+                (key, bad),
+            ])
+            .unwrap_err();
+            assert!(err.contains(key), "{key}={bad}: {err}");
+        }
     }
 }

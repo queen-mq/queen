@@ -134,6 +134,88 @@ pub struct Api {
 /// would be advertising a refusal. v5 is the last version whose whole surface is
 /// the two watermark sentinels, which is exactly the surface Queen answers
 /// exactly.
+///
+/// THE TOPICS-ADMIN APIS (M7 F1) are the three an AdminClient object needs
+/// before any of it works, and their ceilings are all the same boundary the
+/// Metadata row already stops at: a TOPIC ID. This facade mints none and has no
+/// registry to resolve one, so every window below ends one version below where
+/// a UUID becomes the way to name a topic.
+///
+///   * `2..=6` for CreateTopics, where the schema goes to 7 and its own floor
+///     is 2 (KIP-896 dropped v0 and v1). v4 is KIP-464, where `num_partitions`
+///     and `replication_factor` may be -1 — the shape Spring's `TopicBuilder`
+///     and every modern AdminClient send, and the one that lets a client say "I
+///     do not care" to two numbers this facade does not declare
+///     (`handlers::create_topics`). v5 carries the created topic's real configs
+///     back, which is the ONE place `retention.ms` can be answered at all
+///     ([`crate::topic_config`]). v6 is KIP-599: the version at which a client
+///     understands THROTTLING_QUOTA_EXCEEDED, which is how a Cloud rate cap has
+///     to reach an AdminClient. Ceiling: v7 answers a `topic_id` UUID.
+///   * `1..=5` for DeleteTopics, where the schema goes to 6 and its own floor
+///     is 1. v5 adds `error_message`, which is where "there is no such queue"
+///     gets to say so in words as well as in a code. Ceiling: v6 replaces the
+///     name list with `topics[]` carrying a name OR a topic id, and an id is a
+///     name this facade cannot resolve.
+///   * `1..=4` for DescribeConfigs — the whole schema, and the only row here
+///     with no ceiling argument to make, because nothing in the window asks for
+///     something the facade cannot answer. v1 is the schema's own floor, v3's
+///     `config_type` and `documentation` are answered truthfully for the
+///     handful of keys reported, and v4 is the flexible encoding. The short
+///     answer is a property of the HANDLER, not of the version: a key is
+///     reported only where the facade can name what enforces it
+///     ([`crate::topic_config`]).
+///
+/// THE GROUPS-ADMIN APIS (M7 F2) are what an operator's tools ask about a
+/// consumer group, and they answer from the two halves the facade has always
+/// been split into: EXISTENCE and offsets are Queen's (the durable index in
+/// [`crate::offsets`]), LIVENESS is this process's ([`crate::coordinator`]).
+/// Their ceilings are three different boundaries and none of them is the topic
+/// id this time:
+///
+///   * `0..=4` for ListGroups. v4 is KIP-518 — `states_filter` and
+///     `group_state` — which is what `kafka-consumer-groups.sh --list --state`
+///     and every UI's group filter send, and it is HONOURED rather than
+///     ignored. Ceiling: v5 adds `group_type`, the KIP-848 discriminator
+///     between a classic group and a consumer-protocol one, and KIP-848 is
+///     excluded by plan — a facade that answered a group TYPE question would be
+///     claiming a taxonomy it does not implement.
+///   * `0..=3` for DescribeGroups, where the schema goes to 6. Ceiling: v4
+///     carries `group_instance_id`, which is the SAME static-membership rule
+///     that caps JoinGroup at 4 and Sync/Heartbeat/Leave at 2 — a member this
+///     facade cannot hold an identity for must not be describable as if it
+///     had one. v3 adds `include_authorized_operations`, answered with Kafka's
+///     own "omitted" sentinel because the facade has no ACL model
+///     (`handlers::describe_groups`).
+///   * `0..=2` for DeleteGroups — the whole schema, and the only row here with
+///     no ceiling to argue. v2 is the flexible encoding and adds no field;
+///     there is no version of this API that asks for something the facade
+///     cannot answer.
+///
+/// THE IDEMPOTENT PRODUCER (M7 F3) is one row, and it is the row that removes
+/// the largest onboarding papercut this facade had: `enable.idempotence` has
+/// defaulted to true in the Java client since 3.0 and Spring Boot inherits it,
+/// so before this row a producer with NO configuration at all could not send a
+/// single record ([`crate::handlers::init_producer_id`], and the enforcement in
+/// [`crate::idempotent`]).
+///
+/// `0..=4` for InitProducerId, where the REQUEST schema goes to 5 and the enum's
+/// `valid_versions()` answers `0..=6` because it takes the wider of request and
+/// response. Read the request's own `VERSIONS` and not the enum's: a `max` of 6
+/// would pass the guard below and then fail to decode.
+///
+///   * **v3 is load-bearing and not optional.** It is KIP-360's epoch bump,
+///     where the request carries the producer's current `(producer_id, epoch)`
+///     so a producer can ask for a new epoch and reset its own sequences. Every
+///     way this facade can lose a sequence window — a restart, an eviction, a
+///     connection landing on another facade — reaches the client as
+///     OUT_OF_ORDER_SEQUENCE_NUMBER, and OUT_OF_ORDER is FATAL in the Java
+///     producer unless it can bump. Without v3 in this window, a lost window is
+///     a dead producer; with it, it is a bump and a reset.
+///   * v4 adds PRODUCER_FENCED to the error taxonomy the client will accept on
+///     this API, which costs nothing and is true.
+///   * Ceiling: v5 exists for KIP-890's transaction protocol 2, and transactions
+///     are refused here — advertising the version that exists only for them
+///     would be advertising a refusal.
 pub const ADVERTISED: &[Api] = &[
     Api {
         key: ApiKey::Produce,
@@ -204,6 +286,41 @@ pub const ADVERTISED: &[Api] = &[
         key: ApiKey::SaslAuthenticate,
         min: 0,
         max: 1,
+    },
+    Api {
+        key: ApiKey::CreateTopics,
+        min: 2,
+        max: 6,
+    },
+    Api {
+        key: ApiKey::DeleteTopics,
+        min: 1,
+        max: 5,
+    },
+    Api {
+        key: ApiKey::DescribeConfigs,
+        min: 1,
+        max: 4,
+    },
+    Api {
+        key: ApiKey::ListGroups,
+        min: 0,
+        max: 4,
+    },
+    Api {
+        key: ApiKey::DescribeGroups,
+        min: 0,
+        max: 3,
+    },
+    Api {
+        key: ApiKey::DeleteGroups,
+        min: 0,
+        max: 2,
+    },
+    Api {
+        key: ApiKey::InitProducerId,
+        min: 0,
+        max: 4,
     },
 ];
 
@@ -426,6 +543,168 @@ mod tests {
         );
     }
 
+    /// The topics-admin trio, and the property their ceilings share: the
+    /// version at which a topic can be named by a UUID is outside every one of
+    /// them, for the same reason Metadata stops at v9 — this facade has no
+    /// registry to resolve a topic id, so a client that could ask by id would
+    /// be answered "unknown" for a topic sitting right there.
+    #[test]
+    fn classify_the_topic_admin_apis() {
+        for (key, min, max, topic_ids) in [
+            (ApiKey::CreateTopics, 2, 6, 7),
+            (ApiKey::DeleteTopics, 1, 5, 6),
+        ] {
+            let k = key as i16;
+            assert_eq!(classify(k, min), Support::Advertised(key), "{key:?} v{min}");
+            assert_eq!(classify(k, max), Support::Advertised(key), "{key:?} v{max}");
+            assert_eq!(
+                classify(k, topic_ids),
+                Support::UnsupportedVersion(key),
+                "{key:?} v{topic_ids} names a topic by UUID"
+            );
+            assert_eq!(
+                classify(k, min - 1),
+                Support::UnsupportedVersion(key),
+                "{key:?} v{} is below the schema's own floor",
+                min - 1
+            );
+        }
+
+        // DescribeConfigs is the whole schema: there is no version of it that
+        // asks for something this facade cannot answer, so the only boundary
+        // is the schema's own.
+        let k = ApiKey::DescribeConfigs as i16;
+        assert_eq!(classify(k, 1), Support::Advertised(ApiKey::DescribeConfigs));
+        assert_eq!(classify(k, 4), Support::Advertised(ApiKey::DescribeConfigs));
+        assert_eq!(
+            classify(k, 0),
+            Support::UnsupportedVersion(ApiKey::DescribeConfigs)
+        );
+        assert_eq!(
+            classify(k, 5),
+            Support::UnsupportedVersion(ApiKey::DescribeConfigs)
+        );
+
+        // The write half of the config surface stays absent: DescribeConfigs
+        // reports `read_only = true` for everything precisely because nothing
+        // here can be altered through the facade, and advertising AlterConfigs
+        // would make that flag a lie.
+        assert_eq!(
+            classify(ApiKey::AlterConfigs as i16, 0),
+            Support::UnknownApi
+        );
+        assert_eq!(
+            classify(ApiKey::IncrementalAlterConfigs as i16, 0),
+            Support::UnknownApi
+        );
+    }
+
+    /// The groups-admin trio. Their three ceilings are three different
+    /// boundaries, so unlike the topics trio there is no shared rule to assert
+    /// — what IS shared is that each one stops where the version starts asking
+    /// about something this facade does not model.
+    #[test]
+    fn classify_the_group_admin_apis() {
+        // ListGroups: v4 is KIP-518's state filter, which is honoured. v5 adds
+        // `group_type`, the KIP-848 discriminator, and KIP-848 is excluded by
+        // plan.
+        let k = ApiKey::ListGroups as i16;
+        assert_eq!(classify(k, 0), Support::Advertised(ApiKey::ListGroups));
+        assert_eq!(classify(k, 4), Support::Advertised(ApiKey::ListGroups));
+        assert_eq!(
+            classify(k, 5),
+            Support::UnsupportedVersion(ApiKey::ListGroups),
+            "v5 asks a group TYPE question this facade has no taxonomy for"
+        );
+
+        // DescribeGroups stops one below `group_instance_id`, which is the same
+        // static-membership rule the five M4 group APIs share — asserted here
+        // as a NUMBER so that raising this row past it fails rather than
+        // silently describing a static member as a dynamic one.
+        let k = ApiKey::DescribeGroups as i16;
+        assert_eq!(classify(k, 0), Support::Advertised(ApiKey::DescribeGroups));
+        assert_eq!(classify(k, 3), Support::Advertised(ApiKey::DescribeGroups));
+        assert_eq!(
+            classify(k, 4),
+            Support::UnsupportedVersion(ApiKey::DescribeGroups),
+            "v4 carries group_instance_id"
+        );
+
+        // DeleteGroups is the whole schema.
+        let k = ApiKey::DeleteGroups as i16;
+        assert_eq!(classify(k, 0), Support::Advertised(ApiKey::DeleteGroups));
+        assert_eq!(classify(k, 2), Support::Advertised(ApiKey::DeleteGroups));
+        assert_eq!(
+            classify(k, 3),
+            Support::UnsupportedVersion(ApiKey::DeleteGroups)
+        );
+
+        // The one group-shaped API that stays absent, and the reason it does:
+        // OffsetDelete removes ONE group's offsets for named partitions, which
+        // is a partial reset with no membership guard in front of it.
+        // DeleteGroups has Kafka's NON_EMPTY_GROUP rule and is the whole tool.
+        assert_eq!(
+            classify(ApiKey::OffsetDelete as i16, 0),
+            Support::UnknownApi
+        );
+    }
+
+    /// The idempotent producer's one row, and the trap the whole table has:
+    /// `ApiKey::valid_versions()` takes the WIDER of request and response, so
+    /// InitProducerId answers `0..=6` there while its request decoder stops at
+    /// 5. The guard above compares against the enum, so it would pass a `max` of
+    /// 6 that no client could ever get a body decoded at.
+    #[test]
+    fn classify_the_idempotent_producer_api() {
+        use kafka_protocol::messages::InitProducerIdRequest;
+        use kafka_protocol::protocol::Message;
+
+        let k = ApiKey::InitProducerId as i16;
+        assert_eq!(classify(k, 0), Support::Advertised(ApiKey::InitProducerId));
+        // v3 is KIP-360's epoch bump, and the reason the window reaches this
+        // far: without it, a sequence window this facade lost is a FATAL
+        // OutOfOrderSequenceException instead of a bump and a reset.
+        assert_eq!(classify(k, 3), Support::Advertised(ApiKey::InitProducerId));
+        assert_eq!(classify(k, 4), Support::Advertised(ApiKey::InitProducerId));
+        // v5 exists for KIP-890's transaction protocol 2, and transactions are
+        // refused. Advertising it would be advertising a refusal.
+        assert_eq!(
+            classify(k, 5),
+            Support::UnsupportedVersion(ApiKey::InitProducerId)
+        );
+
+        // The trap itself, pinned so that raising the row on the strength of the
+        // enum alone fails here rather than on a client's wire.
+        let request_max = <InitProducerIdRequest as Message>::VERSIONS.max;
+        assert_eq!(request_max, 5);
+        assert!(
+            ApiKey::InitProducerId.valid_versions().max > request_max,
+            "the enum no longer answers wider than the request; the comment above needs revisiting"
+        );
+        let advertised = lookup(k).expect("InitProducerId is advertised");
+        assert!(
+            advertised.max <= request_max,
+            "InitProducerId is advertised at v{} and the request decoder stops at v{request_max}",
+            advertised.max
+        );
+
+        // Transactions stay absent, and this is where that is asserted now that
+        // key 22 itself is advertised: the produce-side transaction APIs have no
+        // row at all.
+        for absent in [
+            ApiKey::AddPartitionsToTxn,
+            ApiKey::AddOffsetsToTxn,
+            ApiKey::EndTxn,
+            ApiKey::TxnOffsetCommit,
+        ] {
+            assert_eq!(
+                classify(absent as i16, 0),
+                Support::UnknownApi,
+                "{absent:?} is a transaction API and must not be advertised"
+            );
+        }
+    }
+
     #[test]
     fn classify_rejects_everything_else() {
         // A real Kafka API this build does not offer: the KIP-848 group
@@ -434,11 +713,11 @@ mod tests {
             classify(ApiKey::ConsumerGroupHeartbeat as i16, 0),
             Support::UnknownApi
         );
-        // Transactions, excluded by the same paragraph.
-        assert_eq!(
-            classify(ApiKey::InitProducerId as i16, 0),
-            Support::UnknownApi
-        );
+        // Transactions, excluded by the same paragraph. InitProducerId used to
+        // be asserted here beside it and is not any more: M7 F3 advertises the
+        // key for the IDEMPOTENT producer, which is not a transaction — the
+        // transactional half of it is refused inside the handler
+        // (`handlers::init_producer_id`) rather than by not existing.
         assert_eq!(
             classify(ApiKey::TxnOffsetCommit as i16, 0),
             Support::UnknownApi

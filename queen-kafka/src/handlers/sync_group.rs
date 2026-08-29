@@ -27,6 +27,12 @@ pub async fn handle(facade: &Facade, req: &SyncGroupRequest) -> SyncGroupRespons
     if let Some(e) = crate::coordinator::invalid_group_id(group) {
         return render(SyncAnswer::refused(e));
     }
+    // Cluster mode's ownership guard — see [`crate::handlers::join_group`]. A
+    // member whose join happened on another node must not have its assignment
+    // arbitrated here.
+    if let Some(e) = facade.cluster.group_guard(group) {
+        return render(SyncAnswer::refused(e));
+    }
     let answer = facade
         .coordinator
         .sync(
@@ -81,12 +87,13 @@ mod tests {
             .with_protocols(vec![JoinGroupRequestProtocol::default()
                 .with_name(StrBytes::from_static_str("range"))
                 .with_metadata(Bytes::from_static(b"subscription"))]);
-        let minted = crate::handlers::join_group::handle(f, &req, 4, "c").await;
+        let minted = crate::handlers::join_group::handle(f, &req, 4, "c", "/127.0.0.1").await;
         let joined = crate::handlers::join_group::handle(
             f,
             &req.clone().with_member_id(minted.member_id),
             4,
             "c",
+            "/127.0.0.1",
         )
         .await;
         assert_eq!(joined.error_code, 0);

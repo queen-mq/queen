@@ -1,0 +1,13 @@
+{
+  "name": "queen-kafka-compat-platformatic",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "@platformatic/kafka against the queen-kafka compat rig",
+  "scripts": {
+    "test": "node run.mjs"
+  },
+  "dependencies": {
+    "@platformatic/kafka": "^2.11.0"
+  }
+}

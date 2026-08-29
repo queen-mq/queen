@@ -114,6 +114,12 @@ enum Command {
     /// [`crate::offsets`]'s, and it happens only if this says yes.
     CheckCommit(MemberId, i32, oneshot::Sender<Option<ResponseError>>),
     Describe(oneshot::Sender<Snapshot>),
+    /// DescribeGroups' read. A SECOND observation of the same fields rather
+    /// than a widened [`Snapshot`]: see [`GroupDescription`].
+    DescribeGroup(oneshot::Sender<GroupDescription>),
+    /// DeleteGroups' last step. Answers whether the group was empty, and reaps
+    /// it when it was — see [`Coordinator::discard_if_empty`].
+    Discard(oneshot::Sender<bool>),
 }
 
 /// One assignment protocol a member supports: a name the group votes on, and
@@ -134,10 +140,20 @@ pub struct Protocol {
 pub struct JoinRequest {
     /// Empty on a client's very first join. See [`JoinRequest::member_id_required`].
     pub member_id: MemberId,
-    /// The connection's `client.id`, only ever used to make a minted member id
-    /// readable in a log — Kafka's own coordinator names members
-    /// `<client.id>-<uuid>` for the same reason.
+    /// The connection's `client.id`. It makes a minted member id readable in a
+    /// log — Kafka's own coordinator names members `<client.id>-<uuid>` for the
+    /// same reason — and from M7 F2 it is also a column of
+    /// `kafka-consumer-groups.sh --describe` ([`MemberDescription`]).
     pub client_id: String,
+    /// Where this member connected from, in Apache Kafka's own spelling
+    /// (`/127.0.0.1`). Carried because it is the first column an operator reads
+    /// when a partition is stuck on a member, and it exists nowhere else in the
+    /// facade: the peer address is known only to `conn::serve`, which is why
+    /// [`crate::conn::Conn`] carries it from the accept loop to this field.
+    ///
+    /// Empty is a legal value and means "nobody told us" — never a
+    /// plausible-looking placeholder, which is what an operator would act on.
+    pub client_host: String,
     /// `consumer` for a consumer group, `connect` for Kafka Connect, and
     /// whatever else a client invents. Compared across members, never
     /// interpreted.
@@ -238,6 +254,57 @@ pub struct Snapshot {
     /// Observable because it is the one part of a group's state a client can
     /// grow without becoming a member, so its bound is worth a test.
     pub pending: usize,
+}
+
+/// A group as DescribeGroups needs it: the same instant [`Snapshot`] observes,
+/// in the shape the protocol asks for.
+///
+/// A SECOND read of the same fields rather than a widened `Snapshot`, and the
+/// reason is that the two have different owners. `Snapshot` is the FSM's own
+/// observation point — the paused-clock tests in [`group`] and the tenancy
+/// tests in `crate::lib` read `members: Vec<MemberId>` and assert on it — while
+/// this one is a wire shape that carries two opaque byte strings per member.
+/// Widening the first into the second would churn every one of those assertions
+/// for a handler that does not need them. What the two must never do is
+/// disagree — ListGroups renders a group from [`Coordinator::describe`] and
+/// DescribeGroups from [`Coordinator::describe_group`], so a drift between them
+/// answers an operator's two tools differently about the same group in the same
+/// second. `group`'s `the_two_readings_of_a_group_never_disagree` pins that at
+/// every state a live actor can be observed in, and pins the ABSENCE both
+/// answer once the actor is reaped; `Dead` is not among them because the actor
+/// sets it and exits on the same turn, so no command is ever served in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupDescription {
+    pub state: group::State,
+    pub generation: i32,
+    /// `consumer`, `connect`, whatever the members agreed on. `None` for a
+    /// group with no members: the FSM clears it so the next group under this id
+    /// is free to be a different kind ([`group`]'s `become_empty`), and the
+    /// durable index is what remembers it across that
+    /// ([`crate::offsets::index_key`]).
+    pub protocol_type: Option<String>,
+    /// The elected assignment protocol — `range`, `cooperative-sticky`. `None`
+    /// outside a completed generation.
+    pub protocol_name: Option<String>,
+    /// In join order, which is also leader-election order.
+    pub members: Vec<MemberDescription>,
+}
+
+/// One member, as `kafka-consumer-groups.sh --describe` prints it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberDescription {
+    pub id: MemberId,
+    pub client_id: String,
+    /// See [`JoinRequest::client_host`].
+    pub client_host: String,
+    /// The subscription bytes this member sent at JoinGroup for the ELECTED
+    /// protocol, verbatim. Never parsed here — the same rule the whole
+    /// coordinator is built on — and passing them through byte for byte is the
+    /// whole value of the API: it is what lets a client render the members ×
+    /// partitions table.
+    pub metadata: Bytes,
+    /// The slice the leader posted for this member at SyncGroup, verbatim.
+    pub assignment: Bytes,
 }
 
 /// The timings of the membership protocol. Every one of them is a duration a
@@ -742,6 +809,53 @@ impl Coordinator {
         let tx = self.existing(group)?;
         let (reply, answer) = oneshot::channel();
         tx.send(Command::Describe(reply)).await.ok()?;
+        answer.await.ok()
+    }
+
+    /// The same group, in the shape DescribeGroups answers. `None` when no
+    /// actor holds one, which the handler turns into Kafka's own answer for a
+    /// group it has never heard of: `Dead`, with no error (measured against
+    /// `apache/kafka:3.9.1`, not assumed — see `handlers::describe_groups`).
+    ///
+    /// Never creates a group, for the same reason
+    /// [`Coordinator::ask_existing`] exists: an admin tool that describes ten
+    /// thousand group ids must not leave ten thousand actors behind.
+    pub async fn describe_group(&self, group: &str) -> Option<GroupDescription> {
+        let tx = self.existing(group)?;
+        let (reply, answer) = oneshot::channel();
+        tx.send(Command::DescribeGroup(reply)).await.ok()?;
+        answer.await.ok()
+    }
+
+    /// The group ids THIS tenant has a live actor for.
+    ///
+    /// It FILTERS by the scope rather than enumerating the registry, and that
+    /// is the whole of ListGroups' tenant safety: the map is process-wide, so
+    /// an enumeration would hand one tenant's admin tool another tenant's group
+    /// ids. See [`GroupKey`].
+    pub fn live(&self) -> Vec<String> {
+        self.groups
+            .lock()
+            .expect("the group registry lock is never held across a panic")
+            .keys()
+            .filter(|(scope, _)| scope == &self.scope)
+            .map(|(_, id)| id.clone())
+            .collect()
+    }
+
+    /// DeleteGroups' membership rule and its last step in one round trip: is
+    /// this group empty, and if it is, reap it now.
+    ///
+    /// `Some(false)` is Kafka's NON_EMPTY_GROUP — a group with members is not
+    /// deletable, which is what stops a delete from silently resetting a
+    /// running fleet to `auto.offset.reset`. `Some(true)` is "it was empty and
+    /// it is gone", so the DescribeGroups after a delete says `Dead` rather
+    /// than `Empty`. `None` is "there is no actor", which is not a failure:
+    /// the group's offsets may still be in Queen and are deleted anyway.
+    pub async fn discard_if_empty(&self, group: &str) -> Option<bool> {
+        let tx = self.existing(group)?;
+        let (reply, answer) = oneshot::channel();
+        tx.send(Command::Discard(reply)).await.ok()?;
         answer.await.ok()
     }
 

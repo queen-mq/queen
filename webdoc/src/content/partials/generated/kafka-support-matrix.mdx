@@ -9,16 +9,23 @@ description: "Every Kafka API the queen-kafka facade advertises, its version win
       - queen-kafka/src/versions.rs (ADVERTISED)
 */}
 
-The facade advertises **14 Kafka APIs**. Every row is read out of `queen-kafka/src/versions.rs` at build time, which is the same table the ApiVersions response is built from and the same table every incoming request is checked against.
+The facade advertises **21 Kafka APIs**. Every row is read out of `queen-kafka/src/versions.rs` at build time, which is the same table the ApiVersions response is built from and the same table every incoming request is checked against.
 
 | API | Versions | Where the window ends, and why |
 | --- | --- | --- |
 | `ApiVersions` | v0–v3 | Ceiling: one below the schema, on purpose. v3 is what every client in the compatibility matrix negotiates against a 3.x broker, and it keeps the v0 fallback on a path a real client reaches. |
+| `CreateTopics` | v2–v6 | Ceiling: v7 answers a `topic_id` UUID this facade has no registry to mint, the same boundary Metadata stops at. v4 (KIP-464) is where -1 means 'you choose' for the partition count and replication factor, v5 carries the created topic's real configs back, and v6 is where a client understands THROTTLING_QUOTA_EXCEEDED. Floor: the schema's own. |
+| `DeleteGroups` | v0–v2 | The whole schema. v2 is the flexible encoding and adds no field, and there is no version of this API that asks for something the facade cannot answer. |
+| `DeleteTopics` | v1–v5 | Ceiling: v6 replaces the name list with entries carrying a name or a topic id, and an id is a name this facade cannot resolve. v5 adds `error_message`, which is where 'there is no such queue' gets to say so. Floor: the schema's own. |
+| `DescribeConfigs` | v1–v4 | The whole schema, and the only row here with no ceiling to argue: nothing in the window asks for something the facade cannot answer. v3's `config_type` and `documentation` are answered truthfully for the keys reported, and the answer is short because a key is reported only where the facade can name what enforces it. |
+| `DescribeGroups` | v0–v3 | Ceiling: v4 carries `group_instance_id` (static membership, out of scope), the same rule that caps JoinGroup at 4. v3's `include_authorized_operations` is answered with Kafka's own omitted sentinel, because the facade has no ACL model and a computed bitfield would be an invented permission set. |
 | `Fetch` | v4–v6 | Ceiling: v7 introduces fetch sessions (KIP-227), which are per-connection broker state. The facade keeps none by design, so the cap deletes `session_id`, `session_epoch` and `forgotten_topics_data` rather than half-answering them. v4 is the schema's own floor. |
 | `FindCoordinator` | v0–v3 | Ceiling: v4 is the batched form, which exists for clusters where groups live on different brokers. Here the answer is this process, for every key, always. |
 | `Heartbeat` | v0–v2 | Ceiling: v3 carries `group_instance_id` (static membership, out of scope). |
+| `InitProducerId` | v0–v4 | Ceiling: v5 exists for KIP-890's transaction protocol 2, and transactions are refused here — advertising the version that exists only for them would be advertising a refusal. v3 is load-bearing rather than a nicety: it is KIP-360's epoch bump, and it is what turns a sequence window this facade has lost (a restart, an evicted entry) into a reset the producer recovers from instead of a fatal error. Read the REQUEST schema for the cap, not the key's `valid_versions()`, which answers wider because it takes the maximum of request and response. |
 | `JoinGroup` | v0–v4 | Ceiling: v5 carries `group_instance_id` (static membership, out of scope). v4 is also where MEMBER_ID_REQUIRED lands, and that is implemented. |
 | `LeaveGroup` | v0–v2 | Ceiling: v3 carries `group_instance_id`, and is also where one request may remove several members at once. Below it a request is exactly one member, which is the shape the coordinator has. |
+| `ListGroups` | v0–v4 | Ceiling: v5 adds `group_type`, the KIP-848 discriminator between a classic group and a consumer-protocol one, and KIP-848 is excluded by plan — answering a group TYPE question would claim a taxonomy the facade does not implement. v4 is KIP-518's `states_filter` and `group_state`, and both are honoured rather than ignored. |
 | `ListOffsets` | v1–v5 | Ceiling: v7 adds the MAX_TIMESTAMP sentinel, a time-index question Queen cannot answer. v5 is the last version whose whole surface is the two watermark sentinels. v1 is the schema's own floor. |
 | `Metadata` | v0–v9 | Ceiling: v10 adds topic ids, and a client may then address a topic by a UUID this facade has no registry to resolve. v9 is already the flexible encoding and carries every field a client needs. |
 | `OffsetCommit` | v2–v6 | Ceiling: v7 carries `group_instance_id` (static membership, out of scope). Floor: v0 and v1 are the ZooKeeper-era offset store. |
@@ -34,16 +41,10 @@ A client that sends one of these gets no response frame at all: the connection c
 
 | API | What a client wants it for | Why it is not here |
 | --- | --- | --- |
-| `InitProducerId` | Opens a transactional or idempotent producer session. | Transactions and exactly-once are excluded by plan. |
-| `AddPartitionsToTxn` | Enrols a partition in an open transaction. | Same exclusion. |
+| `AddPartitionsToTxn` | Enrols a partition in an open transaction. | Transactions and exactly-once are excluded by plan. InitProducerId IS advertised, for the idempotent producer alone: a non-transactional grant is answered, a `transactional.id` is refused. |
 | `EndTxn` | Commits or aborts a transaction. | Same exclusion. |
 | `TxnOffsetCommit` | Commits consumer offsets inside a transaction. | Same exclusion, and the reason Kafka Streams cannot run against the facade. |
 | `ConsumerGroupHeartbeat` | The KIP-848 broker-side rebalance protocol. | Excluded by plan; groups use the classic Join/Sync protocol. |
-| `CreateTopics` | Creates a topic explicitly, with a partition count. | Topics are auto-created on first Metadata instead. |
-| `DeleteTopics` | Deletes a topic. | Deleting a queue is a Queen operation. |
-| `DeleteGroups` | Deletes a consumer group and its committed offsets. | Nothing removes committed offsets through the facade yet. |
-| `DescribeConfigs` | Reads a topic's or broker's configuration. | Queue options are a Queen surface. |
-| `AlterConfigs` | Writes a topic's or broker's configuration. | Same. |
-| `DescribeGroups` | Lists a group's members and their assignments. | Membership is in-memory and not exposed. |
-| `ListGroups` | Lists the groups a broker coordinates. | Same. |
+| `AlterConfigs` | Writes a topic's or broker's configuration. | Queue options are a Queen surface. DescribeConfigs reads them, and reports every key `read_only` precisely because nothing here can write one back. |
+| `OffsetDelete` | Removes a group's committed offsets for named partitions. | A partial reset with no membership guard in front of it. DeleteGroups is the whole tool, and it keeps Kafka's rule that only an empty group is deletable. |
 | `DeleteRecords` | Truncates a partition below an offset. | Retention is a Queen queue option. |

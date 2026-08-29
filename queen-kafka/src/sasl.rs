@@ -14,7 +14,9 @@
 //!   NOT checked against anything, because there is nothing here that could
 //!   check it — the token names the tenant at the Queen end, and a username
 //!   that disagreed with it would be either ignored or a second, weaker
-//!   authorisation decision made in the wrong process.
+//!   authorisation decision made in the wrong process. The one string it is
+//!   ever compared with is the authzid beside it in the same response, and only
+//!   to refuse a request to act as someone ELSE ([`parse_plain`]).
 //!
 //! Both of those are stated in the operator docs rather than implied: a tenant
 //! sets `sasl.username=<anything memorable>` and `sasl.password=<their token>`.
@@ -141,8 +143,10 @@ impl SaslState {
 /// interpolated into one by accident.
 pub struct Plain {
     /// The authorization identity. RFC 4616 allows a client to ask to act as
-    /// somebody else; nothing here can grant that, so a non-empty one is
-    /// refused rather than ignored (see [`parse_plain`]).
+    /// somebody else; nothing here can grant that, so one that DIFFERS from
+    /// `username` is refused rather than ignored. One that repeats the username
+    /// asks for nothing and is accepted, which is what Apache Kafka does and
+    /// what the pure-Python clients need (see [`parse_plain`]).
     pub authzid: String,
     pub username: String,
     pub password: String,
@@ -166,7 +170,8 @@ pub enum PlainError {
     NoUsername,
     /// No password, i.e. no token. The one field this facade cannot invent.
     NoPassword,
-    /// An authorization identity was asked for. See [`Plain::authzid`].
+    /// An authorization identity DIFFERENT from the username was asked for.
+    /// One that repeats the username is accepted. See [`Plain::authzid`].
     Impersonation,
 }
 
@@ -191,8 +196,10 @@ impl std::fmt::Display for PlainError {
             ),
             PlainError::Impersonation => write!(
                 f,
-                "an authorization identity was requested. This facade authorizes the token in \
-                 the password field and nothing else, so it cannot honour one"
+                "an authorization identity was requested that differs from the username. This \
+                 facade authorizes the token in the password field and nothing else, so it \
+                 cannot honour one. Leave the authzid empty, or repeat the username in it the \
+                 way the Python clients do"
             ),
         }
     }
@@ -215,7 +222,24 @@ pub fn parse_plain(bytes: &[u8]) -> Result<Plain, PlainError> {
     let authzid = parts.next().unwrap_or("");
     let username = parts.next().unwrap_or("");
     let password = parts.next().unwrap_or("");
-    if !authzid.is_empty() {
+    // RFC 4616 lets the authzid be present, and Apache Kafka's own
+    // `PlainSaslServer.authenticate` refuses only one that DIFFERS from the
+    // authenticated username — "Authentication failed: Client requested an
+    // authorization id that is different from username". `user\0user\0pass` is
+    // therefore a response every real broker accepts, and it is what BOTH pure
+    // Python clients send: `kafka/sasl/plain.py` in kafka-python and
+    // `SaslPlainAuthenticator` in aiokafka/conn.py both build the initial
+    // response by joining the username to itself. Refusing any non-empty
+    // authzid locked the whole pip-installable Python ecosystem out of every
+    // SASL listener with no client-side workaround, because in those clients
+    // one config key fills both fields: emptying the authzid empties the
+    // username too, and the response is then refused for the other reason.
+    //
+    // An authzid EQUAL to the username asks for nothing: it is the same
+    // identity, and here that identity is a label anyway (see the module
+    // header). A DIFFERING one is a request to act as somebody else, which
+    // this facade still cannot grant and still refuses rather than ignores.
+    if !authzid.is_empty() && authzid != username {
         return Err(PlainError::Impersonation);
     }
     if username.is_empty() {
@@ -297,6 +321,51 @@ mod tests {
             refusal(&plain("someone-else", "acme", "token")),
             PlainError::Impersonation
         );
+    }
+
+    /// The shape every client that leaves the field alone puts on the wire:
+    /// librdkafka, franz-go, the Java client, kafkajs. The baseline.
+    #[test]
+    fn an_empty_authzid_is_accepted() {
+        let got = parse_plain(&plain("", "acme", "token")).unwrap();
+        assert_eq!(got.username, "acme");
+        assert_eq!(got.password, "token");
+        assert!(got.authzid.is_empty());
+    }
+
+    /// The shape kafka-python (`kafka/sasl/plain.py`) and aiokafka
+    /// (`SaslPlainAuthenticator`) put on the wire: one config key filling both
+    /// fields. RFC 4616 permits it and Apache Kafka's `PlainSaslServer` accepts
+    /// it, so this facade accepts it — an authzid that repeats the username
+    /// asks for nothing.
+    #[test]
+    fn an_authzid_that_repeats_the_username_is_accepted() {
+        let got = parse_plain(&plain("acme", "acme", "tenant-token")).unwrap();
+        assert_eq!(got.username, "acme");
+        assert_eq!(got.password, "tenant-token");
+        // Kept as sent rather than normalised away: what the client said is
+        // what the struct holds.
+        assert_eq!(got.authzid, "acme");
+    }
+
+    /// The distinction is the whole of the check, so it is worth pinning at the
+    /// boundary rather than only on an obviously different string.
+    #[test]
+    fn an_authzid_differing_from_the_username_is_still_refused() {
+        for (authzid, username) in [
+            ("someone-else", "acme"),
+            // Case and whitespace are differences: this is a byte comparison,
+            // like Apache Kafka's `String.equals`, not a fuzzy identity match.
+            ("ACME", "acme"),
+            ("acme ", "acme"),
+            ("acme-2", "acme"),
+        ] {
+            assert_eq!(
+                refusal(&plain(authzid, username, "token")),
+                PlainError::Impersonation,
+                "{authzid:?} beside {username:?} was not refused"
+            );
+        }
     }
 
     #[test]

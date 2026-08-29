@@ -39,7 +39,10 @@ KAFKA_TLS_PORT="${KAFKA_TLS_PORT:-19093}"
 # literal, so an address here would test TLS and nothing about routing.
 KAFKA_TLS_HOST="${KAFKA_TLS_HOST:-localhost}"
 PARTITIONS="${PARTITIONS:-8}"
-CONTAINER="queen-kafka-compat-pg"
+# Overridable so a stage of a campaign can run this rig inside its own assigned
+# container namespace while another one is up. PG_HOST_PORT / BROKER_PORT /
+# KAFKA_PORT / KAFKA_TLS_PORT / GATE_PORT already are.
+CONTAINER="${CONTAINER:-queen-kafka-compat-pg}"
 
 KEEP=0
 M5=0

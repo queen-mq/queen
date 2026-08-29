@@ -45,7 +45,7 @@ and every other API applies the same name rule through
 | Code | Retriable | When | Notes |
 |---|---|---|---|
 | `UNKNOWN_TOPIC_OR_PARTITION` (3) | yes (+metadata) | the queue does not exist and the client asked us not to create it; or the name begins with `__` | `__` is answered UNKNOWN and not INVALID on purpose: to Kafka those are valid names that happen to be a broker's own bookkeeping topics, and INVALID would surface as a crash in tooling that lists them. |
-| `INVALID_TOPIC_EXCEPTION` (17) | no | the name is not a legal Kafka topic name, or a null name in the request | **The only API that emits this**, and the API a client can act on it from. |
+| `INVALID_TOPIC_EXCEPTION` (17) | no | the name is not a legal Kafka topic name, or a null name in the request | One of **the only two APIs that emit this** — the other is CreateTopics (M7), the other surface where a client names a topic and can act on the answer. Everywhere else the same rule is narrowed to UNKNOWN by `not_a_topic_here`. |
 | `LEADER_NOT_AVAILABLE` (5) | yes (+metadata) | the queue list could not be read; auto-create failed or was still in flight | Also the code beside `throttle_time_ms` when the tenant is capped — retriable, so the client backs off and comes back. |
 
 ## Produce (v3–v9) — per partition
@@ -55,7 +55,11 @@ and every other API applies the same name rule through
 | `INVALID_REQUIRED_ACKS` (21) | no | `acks` is not 0, 1 or -1 | |
 | `TRANSACTIONAL_ID_AUTHORIZATION_FAILED` (53) | no | a `transactional_id` on the request, or the transactional flag on a batch | Fatal and final for the producer, and unmistakably about transactions. Kafka Streams stops here with a sentence instead of appearing to work. |
 | `INVALID_RECORD` (87) | no | a CONTROL batch | A control batch is written by a transaction coordinator; this facade is nobody's. |
-| `UNSUPPORTED_FOR_MESSAGE_FORMAT` (43) | no | a producer id is set (the idempotent producer), or the records are a pre-v2 message set | Not retriable, which is the point: accepting an idempotent producer would store sequence numbers nothing enforces and every retry would duplicate silently. |
+| `UNSUPPORTED_FOR_MESSAGE_FORMAT` (43) | no | the records are a pre-v2 message set | Until M7 F3 this was also the answer to any batch carrying a producer id. It is not any more: the idempotent producer is implemented and the four codes below are what a producer id can now be answered with. |
+| `OUT_OF_ORDER_SEQUENCE_NUMBER` (45) | no (KIP-360) | an idempotent batch would leave a GAP, or this facade holds no sequence window for that producer | Refusing the gap is what makes "idempotent" a claim about ORDER and not only about duplicates: **nothing is written**. An absent window is the same code because the recovery is the same — the producer bumps its epoch through InitProducerId v3 and resets. Apache Kafka 3.9.1 *accepts* the absent-window case (measured); the facade does not, because it has no durable producer state and an absent window is common rather than rare here. |
+| `DUPLICATE_SEQUENCE_NUMBER` (46) | no | an idempotent batch is at or below the last appended sequence but is not a batch this facade appended | The re-batched retry. An EXACT resend is not this — it is answered `error_code = 0` with the offsets the original got, and nothing is written, which is Kafka's own duplicate semantics and the whole point of the window. |
+| `INVALID_PRODUCER_EPOCH` (47) | no | an idempotent batch carries an epoch below the highest this facade has seen for that producer | A producer retrying a batch it had queued at an epoch it has since left. Not the transactional fencing, which this facade refuses outright. |
+| `INVALID_RECORD` (87) | no | one partition entry mixes idempotent and non-idempotent batches, or batches from two producer sessions | No client does this. It is refused rather than half-answered because the response carries ONE error code and ONE base offset per partition, and a run that is half remembered and half new is describable by neither. |
 | `CORRUPT_MESSAGE` (2) | **yes** | the batch headers or the records did not decode | Retriable in Kafka (a CRC failure can be the wire), and this is the code a real broker gives for the same thing. A producer therefore retries the same undecodable batch until `delivery.timeout.ms` and then fails — matching Apache Kafka, deliberately. |
 | `MESSAGE_TOO_LARGE` (10) | no | the request decompresses past the frame ceiling, declares more records than one request may decode, or Queen answered 413 | The producer's own answer is to split the batch or raise `max.request.size`. |
 | `UNKNOWN_TOPIC_OR_PARTITION` (3) | yes (+metadata) | a `__` or unnameable topic; a partition outside the advertised width; Queen answered 404 | Past-the-width is UNKNOWN and not an invalid-request code because it is usually a stale metadata view, and UNKNOWN is what makes the client refresh. |
@@ -66,7 +70,10 @@ and every other API applies the same name rule through
 | `UNKNOWN_SERVER_ERROR` (-1) | no | Queen answered something else (a 400 is our bug), an unreadable 2xx, or a push whose offsets do not line up | Loud in the log by construction. |
 
 `acks=0` writes no response frame at all, so none of these reaches that
-producer; they are logged instead (`log_silent_failures`).
+producer; they are logged instead (`log_silent_failures`). The sequence window
+is still updated on that path — a duplicate or an out-of-order simply cannot be
+reported. Java and librdkafka both refuse `acks != all` under idempotence, so
+the only way to reach it is a hand-rolled client.
 
 ## Fetch (v4–v6) — per partition
 
@@ -194,6 +201,175 @@ which has no top-level field):
 A partition with no committed offset is `-1` with error 0, and that is the whole
 contract: `-1` is what makes a client apply `auto.offset.reset`, which is the
 only correct behaviour for a group that has never committed.
+
+## CreateTopics (v2–v6) — per topic
+
+| Code | Retriable | When | Notes |
+|---|---|---|---|
+| `INVALID_TOPIC_EXCEPTION` (17) | no | the name is not a legal Kafka topic name, or begins with `__` | The second API that emits it, and for the reason the audit's rule names: this is a surface where a NAME is validated, so the client can act on it. `__` is INVALID here and UNKNOWN in Metadata on purpose — creating one would make a queue the facade then refuses to show anywhere. |
+| `TOPIC_ALREADY_EXISTS` (36) | no | the catalog already has a queue of that name | And `POST /api/v1/configure` is **not** called for it. The stored procedure is an upsert that rewrites every config column to its defaults, so a create over a live queue would silently reset its leaseTime, retention, retry policy and dedup window. |
+| `INVALID_REPLICA_ASSIGNMENT` (39) | no | a non-empty `assignments` | A manual assignment names broker ids to place partitions on; this facade places nothing anywhere. Accepting it would be silently discarding an explicit operator instruction. |
+| `INVALID_CONFIG` (40) | no | `cleanup.policy=compact` (or `compact,delete`); `retention.ms` under 1000 ms or below -1; any config name outside the mapping | The mapping is `src/topic_config.rs`. Compaction is refused because it is a stated non-goal and nothing compacts — which is what makes Kafka Connect fail at startup instead of losing its connector configuration on a later restart. A sub-second retention is refused rather than rounded to zero, which would mean "delete everything". |
+| `INVALID_REQUEST` (42) | no | the same topic name appears more than once in one request | Apache Kafka's own answer, and none of the entries is created. It is also what stops the second configure for one name being an upsert over the queue the first one just made. |
+| `TOPIC_AUTHORIZATION_FAILED` (29) | no | Queen answered 401 or 403 | The connection's credential may not create queues. |
+| `THROTTLING_QUOTA_EXCEEDED` (89) | yes | **v6 only**: Queen answered 429, or the request asked for more than 100 topics | KIP-599, and the whole reason v6 is in the advertised window: it is the version at which a client understands the code. The wait rides `throttle_time_ms` beside it. |
+| `REQUEST_TIMED_OUT` (7) | yes | below v6, everything the row above covers; at any version, Queen unreachable, a 408, or a 5xx; and the queue list being unreadable | A `RetriableException` in the Java AdminClient, so the call is retried inside the request timeout rather than surfaced. An unreadable catalog creates NOTHING: "absent" cannot be assumed from a read that failed, or the create becomes the upsert described under code 36. |
+| `UNKNOWN_SERVER_ERROR` (-1) | no | Queen answered 2xx with a body this facade could not read, or a `configure` that did not confirm | Loud by construction: it is our bug or the broker's, and dressing it up as a timeout would leave a client retrying for ever. |
+
+`validate_only` runs every check above and writes nothing; the answer is what
+*would* have happened, including the width.
+
+## DeleteTopics (v1–v5) — per topic
+
+| Code | Retriable | When | Notes |
+|---|---|---|---|
+| `UNKNOWN_TOPIC_OR_PARTITION` (3) | yes (+metadata) | the route answered `{"deleted": false}`; or the name begins with `__` or is not a legal topic name | Kafka's own answer for deleting a topic that is not there. The name rule goes through `not_a_topic_here` and **not** through the INVALID code: this is not a name-validation surface, it is a "do you have this" surface. |
+| `TOPIC_AUTHORIZATION_FAILED` (29) | no | Queen answered 401 or 403 | |
+| `REQUEST_TIMED_OUT` (7) | yes | Queen unreachable, a 408, a 429 or a 5xx; or the request asked to delete more than 100 topics | DeleteTopics has no `THROTTLING_QUOTA_EXCEEDED` version inside the advertised window — v6 would, and v6 is out because it names topics by id — so the retriable code available here carries the throttle. |
+| `UNKNOWN_SERVER_ERROR` (-1) | no | a body this facade could not read, or a 404 | The route answers 200 for a queue that is not there, so a 404 means the route itself is absent: a facade pointed at something that is not a Queen broker. |
+
+**Two things this API leaves behind, stated rather than half-fixed.** A queue
+that native Queen producers share with Kafka clients can be deleted by the Kafka
+half — no new privilege (the same bearer can issue the same HTTP DELETE) but a
+new blast radius. And committed offsets under `qk:group:*:<topic>:*` are not
+removed with the topic and become orphans; Kafka has the same shape, and
+DeleteGroups (below) is the tool for them.
+
+## DescribeConfigs (v1–v4) — per resource
+
+| Code | Retriable | When | Notes |
+|---|---|---|---|
+| `UNKNOWN_TOPIC_OR_PARTITION` (3) | yes (+metadata) | a TOPIC resource the catalog does not have, or a `__`/illegal name | Same `not_a_topic_here` rule as the read paths. |
+| `INVALID_REQUEST` (42) | no | a BROKER resource named anything but `` or this node's id; any resource type other than topic (2) and broker (4) | BROKER_LOGGER (8) describes a log4j hierarchy this facade does not run. Answering an empty config set instead would read as "this resource exists and is empty", which is a different and wrong thing. |
+| `TOPIC_AUTHORIZATION_FAILED` (29) | no | the queue list could not be read because Queen answered 401 or 403 | |
+| `REQUEST_TIMED_OUT` (7) | yes | the queue list could not be read for any other reason, including a 429 | A read, so it answers what the read paths answer, with the wait on `throttle_time_ms`. A BROKER resource is unaffected: it is answered out of this process and makes no call at all. |
+
+**What it does NOT report, and why that is the honest answer.** A key is
+reported only where the facade can name the thing that enforces its value. For a
+TOPIC that is two keys — `cleanup.policy=delete` and `min.insync.replicas=1` —
+because Queen exposes **no HTTP read of a queue's configuration**:
+`GET /api/v1/resources/queues/:queue` answers no config at all, and
+`GET /api/v1/status/queues/:queue` answers leaseTime, retryLimit, retryDelay,
+ttl, maxQueueSize and deadLetterQueue and not `retentionEnabled`/
+`retentionSeconds`. So `retention.ms` is **writable and not readable** here:
+CreateTopics sets it, and the create's own v5+ config echo is where a client
+reads it back. Omitting a key is protocol-legal; reporting a plausible default
+for a knob nothing honours is not.
+
+Every key is `read_only = true` and `is_sensitive = false`, and the synonym list
+is empty. None of that is laziness: AlterConfigs is not advertised, so nothing
+here can be changed through this facade, and nothing here inherits its value
+from anything else.
+
+## ListGroups (v0–v4) — top level
+
+| Code | Retriable | When | Notes |
+|---|---|---|---|
+| `GROUP_AUTHORIZATION_FAILED` (30) | no | the durable group index could not be read because Queen answered 401 or 403 | The one KV failure that is reported rather than absorbed. It is not a moment in time, and a client handed a partial list with error 0 would take it for the whole one. GROUP and not TOPIC authorization, the same noun choice `offsets.rs` already argues for: the credential that failed is the one reading a group's data. |
+
+**Every other failure answers error 0 with a SHORTER list**, and that is a
+decision rather than an oversight. The answer has two halves — the groups this
+process holds members for, and the groups the durable index in Queen knows about
+([`src/offsets.rs`](../src/offsets.rs)) — and a tool rendering a page is better
+served by the live half plus a log line than by an error. A failed index read is
+logged at warn, once per window, naming what is missing: the groups whose
+consumers are stopped.
+
+The other bound has no code at all: past 10 000 groups the list is truncated,
+because this API has no truncation flag on the wire. That is why the bound is the
+same number as the group cap — past it this facade refuses to coordinate a new
+group anyway — and why reaching it is a log line.
+
+`states_filter` (v4, KIP-518) is applied, not ignored. A state string nothing is
+in answers an empty list and no error, which is what Apache Kafka 3.9.1 does with
+an unknown state too (measured).
+
+## DescribeGroups (v0–v3) — per group
+
+| Code | Retriable | When | Notes |
+|---|---|---|---|
+| `INVALID_GROUP_ID` (24) | no | the group id is empty or longer than 255 characters | The facade's own bound, through the one `coordinator::invalid_group_id` all six group-addressed APIs share, so a name JoinGroup refuses and this one describes cannot exist. Apache Kafka has no such bound and answers `Dead` for these names; the protocol gives the field none either, so a client may send ~32 KB of one at the non-flexible versions and every copy of it would be this facade's. |
+| `NOT_COORDINATOR` (16) | yes | **cluster mode only**: this node is not the rendezvous owner of the group | The redirect: every client answers it by re-running FindCoordinator. This node cannot see the members of a group another facade coordinates, and `Empty` would be a plausible wrong answer. |
+| `COORDINATOR_NOT_AVAILABLE` (15) | yes | **cluster mode only**: the live-node view is too old to say who owns the group; or the request asked about more than 1000 groups | |
+| `COORDINATOR_NOT_AVAILABLE` (15) / `UNKNOWN_SERVER_ERROR` (-1) | yes / no | the durable group index could not be read | Answered rather than guessed: without the index this facade cannot tell a group that never existed from one whose consumers are stopped, and `Dead` for the second reads as "somebody deleted my group". The mapping is `offsets::kafka_error`. |
+
+**A group nobody has ever heard of is error 0 with state `Dead`**, not an error.
+Measured against `apache/kafka:3.9.1` at v0, v3 and v5 before the handler was
+written, because it is counter-intuitive enough that writing it from the name of
+the code would have got it wrong — and `kafka-consumer-groups.sh` turns exactly
+that answer into `Consumer group 'g' does not exist.`
+
+The three answers, and the two halves they come from:
+
+| The group is | `group_state` | `protocol_type` | members |
+|---|---|---|---|
+| live on this facade | the FSM's | the members' | every member |
+| only in the durable index | `Empty` | the index's | none |
+| in neither | `Dead` | `""` | none |
+
+`authorized_operations` (v3) is **always** `i32::MIN` — Kafka's own
+`AUTHORIZED_OPERATIONS_OMITTED`, which the Java client turns into `null` and
+tools render as "unknown" — whether or not `include_authorized_operations` was
+set. Kafka 3.9.1 with no authorizer answers 328 (READ|DELETE|DESCRIBE) instead.
+The facade has no ACL model: what a credential may do is Queen's to say, per
+call, and it says so by answering 401 or 403 to that call. A bitfield computed
+here would be a permission set this process invented.
+
+`group_instance_id` is always null and the window stops one version below where
+it is encoded: static membership is out of scope, the same rule that caps
+JoinGroup at v4.
+
+## DeleteGroups (v0–v2) — per group
+
+| Code | Retriable | When | Notes |
+|---|---|---|---|
+| `NON_EMPTY_GROUP` (68) | no | the group has members | Kafka's own rule, kept exactly, and **nothing is touched**. It is the whole guard: without it one `--delete` typed against a running fleet would silently reset every consumer in it to `auto.offset.reset`. |
+| `GROUP_ID_NOT_FOUND` (69) | no | there is no actor for the group and the store held nothing under its prefix | Kafka's own answer, measured. It is also what a second delete of the same group answers, which is what makes a partially failed delete safe to re-run. |
+| `INVALID_GROUP_ID` (24) | no | the group id is empty or longer than 255 characters | Same rule and same reason as DescribeGroups above. |
+| `NOT_COORDINATOR` (16) | yes | **cluster mode only**: this node is not the rendezvous owner | Applied before anything is read or written: a node that cannot see whether the group has members cannot apply the emptiness rule, and deleting the offsets of a group another node is running is exactly what that rule exists to stop. |
+| `COORDINATOR_NOT_AVAILABLE` (15) | yes | **cluster mode only**: the view is too old to say; or the request asked to delete more than 100 groups | |
+| `GROUP_AUTHORIZATION_FAILED` (30) | no | Queen answered 401 or 403 | |
+| `COORDINATOR_NOT_AVAILABLE` (15) | yes | Queen unreachable, a 408, a 429 or a 5xx | |
+| `UNKNOWN_SERVER_ERROR` (-1) | no | a body this facade could not read | |
+
+**A failure part-way through leaves a partially deleted group, and that is said
+rather than papered over.** The delete is offsets first (a paged prefix walk,
+deleted a page at a time) and the index row last, so a failure between them
+leaves a group that lists as `Empty` with nothing committed — a state Kafka has
+too. There is no transaction across a KV batch boundary; every step is
+idempotent, the answer is the retriable code the failure maps to, and re-running
+the delete finishes the job.
+
+**What this API is, and is not.** It is the only thing in the facade that removes
+a committed offset, and it is a TOOL rather than a policy: offsets still never
+expire on their own, and nothing here adds `offsets.retention.minutes`. What it
+deletes is `qk:group:<group>:*` and `qk:groups:<group>` under the connection's
+own credential. A group's fence key (`qk:fence:<group>`, cluster mode only) is
+left alone — it belongs to `src/cluster/fence.rs`, and a stale fence on a
+recreated group is resolved by that module's own discovery.
+
+## InitProducerId (v0–v4) — top level
+
+| Code | Retriable | When | Notes |
+|---|---|---|---|
+| `TRANSACTIONAL_ID_AUTHORIZATION_FAILED` (53) | no | a non-empty `transactional_id` | The same code and the same sentence `Produce` gives a transactional id, so a user meets ONE message about transactions and not two. Fatal in the Java client, out of `InitProducerIdHandler`. An EMPTY id is **not** a transactional id and is granted normally: brod's hand-rolled encoder writes a null one as `""` (`idempotent::transactional_id`). |
+
+That is the only error this API can answer. The handler makes **no call to
+Queen at all** — the connection is already authenticated, so there is no
+catalog to read, no push to make and nothing to be unavailable — which is
+exactly the property the biggest onboarding papercut wanted: the answer is a
+number and a zero, on the same turn of the connection loop.
+
+**A transactional client does not reach this handler, and the refusal it does
+meet is not fast.** Measured 2026-08-29 with kafka-clients 4.3.1: a producer
+with `transactional.id` set asks `FindCoordinator` for a TRANSACTION coordinator
+first, the facade answers that `COORDINATOR_NOT_AVAILABLE` (15) — which is
+**retriable** — and the client loops there for the whole of `max.block.ms`
+(~190 requests over 20 s) without ever sending an InitProducerId.
+`initTransactions()` therefore still costs 20 s, exactly as it did before key 22
+was advertised. Advertising the key did not change that and was never going to;
+the fix is a fatal code on the FindCoordinator transaction path, which is
+outside M7 F3's scope. Sent straight at node 0, this handler refuses in ~10 ms.
 
 ## SaslHandshake (v0–v1) / SaslAuthenticate (v0–v1)
 

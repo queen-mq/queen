@@ -31,8 +31,10 @@ KAFKA_PORT="${KAFKA_PORT:-29092}"
 PARTITIONS="${PARTITIONS:-8}"
 KAFKA_IMAGE="${KAFKA_IMAGE:-apache/kafka:3.9.1}"
 
-PG_CONTAINER=qk-diff-pg
-KAFKA_CONTAINER=qk-diff-kafka
+# Overridable so a stage of a campaign can run this rig inside its own assigned
+# container namespace while another one is up. Every port above already is.
+PG_CONTAINER="${PG_CONTAINER:-qk-diff-pg}"
+KAFKA_CONTAINER="${KAFKA_CONTAINER:-qk-diff-kafka}"
 STATE_DIR="${STATE_DIR:-/tmp/qk-diff}"
 BROKER_LOG="$STATE_DIR/broker.log"
 FACADE_LOG="$STATE_DIR/facade.log"

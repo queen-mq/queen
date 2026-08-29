@@ -21,7 +21,14 @@ use crate::Facade;
 /// Handle one LeaveGroup.
 pub async fn handle(facade: &Facade, req: &LeaveGroupRequest) -> LeaveGroupResponse {
     let group = req.group_id.0.as_str();
+    // The same ownership guard as the other four group APIs
+    // ([`crate::cluster`]). A leave at a non-owner is answered NOT_COORDINATOR
+    // rather than silently accepted: accepting it would tell a departing
+    // consumer its seat was freed while the owner still holds it, and the group
+    // would wait out the session timeout after all.
     let error = if let Some(e) = crate::coordinator::invalid_group_id(group) {
+        Some(e)
+    } else if let Some(e) = facade.cluster.group_guard(group) {
         Some(e)
     } else {
         facade
@@ -59,12 +66,13 @@ mod tests {
             .with_protocols(vec![JoinGroupRequestProtocol::default()
                 .with_name(StrBytes::from_static_str("range"))
                 .with_metadata(Bytes::new())]);
-        let minted = crate::handlers::join_group::handle(f, &req, 4, "c").await;
+        let minted = crate::handlers::join_group::handle(f, &req, 4, "c", "/127.0.0.1").await;
         crate::handlers::join_group::handle(
             f,
             &req.clone().with_member_id(minted.member_id),
             4,
             "c",
+            "/127.0.0.1",
         )
         .await
         .member_id

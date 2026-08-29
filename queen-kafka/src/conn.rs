@@ -31,8 +31,10 @@ use std::time::Duration;
 
 use bytes::{Buf, Bytes, BytesMut};
 use kafka_protocol::messages::{
-    ApiKey, ApiVersionsRequest, FetchRequest, FindCoordinatorRequest, HeartbeatRequest,
-    JoinGroupRequest, LeaveGroupRequest, ListOffsetsRequest, MetadataRequest, OffsetCommitRequest,
+    ApiKey, ApiVersionsRequest, CreateTopicsRequest, DeleteGroupsRequest, DeleteTopicsRequest,
+    DescribeConfigsRequest, DescribeGroupsRequest, FetchRequest, FindCoordinatorRequest,
+    HeartbeatRequest, InitProducerIdRequest, JoinGroupRequest, LeaveGroupRequest,
+    ListGroupsRequest, ListOffsetsRequest, MetadataRequest, OffsetCommitRequest,
     OffsetFetchRequest, ProduceRequest, RequestHeader, ResponseHeader, SaslAuthenticateRequest,
     SaslHandshakeRequest, SyncGroupRequest,
 };
@@ -42,8 +44,10 @@ use tokio::net::TcpListener;
 use tokio_util::codec::{Encoder, LengthDelimitedCodec};
 
 use crate::handlers::{
-    api_versions, fetch, find_coordinator, heartbeat, join_group, leave_group, list_offsets,
-    metadata, offset_commit, offset_fetch, produce, sasl_authenticate, sasl_handshake, sync_group,
+    api_versions, create_topics, delete_groups, delete_topics, describe_configs, describe_groups,
+    fetch, find_coordinator, heartbeat, init_producer_id, join_group, leave_group, list_groups,
+    list_offsets, metadata, offset_commit, offset_fetch, produce, sasl_authenticate,
+    sasl_handshake, sync_group,
 };
 use crate::obs::Sampler;
 use crate::sasl::SaslState;
@@ -113,7 +117,10 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// It bounds the wait for the FIRST byte of a request and nothing else. A
 /// long-poll Fetch parked for thirty seconds is not idle by this measure: its
 /// request has arrived, and the silence is ours.
-const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+/// `pub(crate)` for [`crate::handlers::describe_configs`], which reports it as
+/// `connections.max.idle.ms`: the number a broker resource answers there has to
+/// be the one this loop actually enforces, not a second copy of it.
+pub(crate) const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// How long a connection may go quiet in the MIDDLE of a frame.
 ///
@@ -212,7 +219,9 @@ pub async fn serve(
                     // at the end of this task however it ends.
                     let _slot = slot;
                     let outcome = match acceptor {
-                        None => connection(stream, Conn::new(&facade, None)).await,
+                        None => {
+                            connection(stream, Conn::new(&facade, None, kafka_host(&peer))).await
+                        }
                         Some(acceptor) => {
                             let handshake = tokio::time::timeout(
                                 TLS_HANDSHAKE_TIMEOUT,
@@ -222,7 +231,8 @@ pub async fn serve(
                             match handshake {
                                 Ok(Ok(stream)) => {
                                     let sni = crate::tls::server_name(&stream);
-                                    connection(stream, Conn::new(&facade, sni)).await
+                                    connection(stream, Conn::new(&facade, sni, kafka_host(&peer)))
+                                        .await
                                 }
                                 // Neither is the facade's fault and both are
                                 // client-driven, so both are sampled: a
@@ -294,19 +304,41 @@ pub struct Conn {
     /// `QUEEN_KAFKA_FORWARD_SNI_HOST` is off: "which name did this consumer
     /// dial" is the first question of every routing problem.
     pub sni: Option<String>,
+    /// Where this connection came from, already in Apache Kafka's own spelling
+    /// (`/127.0.0.1`) so nothing downstream has to know the format.
+    ///
+    /// It exists because the accept loop is the ONLY place that knows it, and
+    /// because DescribeGroups answers it as a member's HOST column (M7 F2). It
+    /// is carried and never interpreted: no routing, no authorization and no
+    /// rate limiting reads it, so a proxy that rewrites the peer address costs
+    /// an operator a column and nothing else.
+    pub peer: String,
 }
 
 impl Conn {
     /// A fresh connection against the process-wide facade.
-    pub fn new(root: &Facade, sni: Option<String>) -> Conn {
+    pub fn new(root: &Facade, sni: Option<String>, peer: String) -> Conn {
         let facade = root.for_connection(sni.as_deref());
         let sasl = if facade.policy.sasl_plain {
             SaslState::Unauthenticated
         } else {
             SaslState::Disabled
         };
-        Conn { facade, sasl, sni }
+        Conn {
+            facade,
+            sasl,
+            sni,
+            peer,
+        }
     }
+}
+
+/// A peer address the way Apache Kafka writes one into a group description:
+/// `InetAddress.toString()` with an empty hostname, i.e. `/127.0.0.1`, and
+/// without the ephemeral port — which is what `kafka-consumer-groups.sh` prints
+/// under HOST and what every UI renders.
+fn kafka_host(peer: &std::net::SocketAddr) -> String {
+    format!("/{}", peer.ip())
 }
 
 /// One connection, serial: decode a frame, handle it, write the response, and
@@ -637,7 +669,8 @@ pub async fn dispatch(conn: &mut Conn, frame: Bytes) -> Reply {
             // `client_id` comes from the request HEADER — the only place it
             // exists — and is used to name the member id the coordinator mints.
             let client_id = header.client_id.as_ref().map(|s| s.as_str()).unwrap_or("");
-            let body = join_group::handle(&conn.facade, &req, api_version, client_id).await;
+            let body =
+                join_group::handle(&conn.facade, &req, api_version, client_id, &conn.peer).await;
             respond(key, header.correlation_id, &body, api_version)
         }
         ApiKey::SyncGroup => {
@@ -679,6 +712,79 @@ pub async fn dispatch(conn: &mut Conn, frame: Bytes) -> Reply {
                 Err(e) => return Reply::Close(format!("OffsetFetch v{api_version} body: {e}")),
             };
             let body = offset_fetch::handle(&conn.facade, &req, conn.facade.token()).await;
+            respond(key, header.correlation_id, &body, api_version)
+        }
+        // ------------------------------------------------------ M7 F1: topics admin
+        ApiKey::CreateTopics => {
+            let req = match CreateTopicsRequest::decode(&mut buf, api_version) {
+                Ok(r) => r,
+                Err(e) => return Reply::Close(format!("CreateTopics v{api_version} body: {e}")),
+            };
+            // The VERSION is passed through, and it is load-bearing rather than
+            // decorative: KIP-599's THROTTLING_QUOTA_EXCEEDED is a code only a
+            // v6 client knows, so a rate cap has to be answered differently
+            // either side of that line (`handlers::create_topics`).
+            let body =
+                create_topics::handle(&conn.facade, &req, api_version, conn.facade.token()).await;
+            respond(key, header.correlation_id, &body, api_version)
+        }
+        ApiKey::DeleteTopics => {
+            let req = match DeleteTopicsRequest::decode(&mut buf, api_version) {
+                Ok(r) => r,
+                Err(e) => return Reply::Close(format!("DeleteTopics v{api_version} body: {e}")),
+            };
+            let body = delete_topics::handle(&conn.facade, &req, conn.facade.token()).await;
+            respond(key, header.correlation_id, &body, api_version)
+        }
+        ApiKey::DescribeConfigs => {
+            let req = match DescribeConfigsRequest::decode(&mut buf, api_version) {
+                Ok(r) => r,
+                Err(e) => return Reply::Close(format!("DescribeConfigs v{api_version} body: {e}")),
+            };
+            let body = describe_configs::handle(&conn.facade, &req, conn.facade.token()).await;
+            respond(key, header.correlation_id, &body, api_version)
+        }
+        // ------------------------------------------------------ M7 F2: groups admin
+        ApiKey::ListGroups => {
+            let req = match ListGroupsRequest::decode(&mut buf, api_version) {
+                Ok(r) => r,
+                Err(e) => return Reply::Close(format!("ListGroups v{api_version} body: {e}")),
+            };
+            // The VERSION is passed through because KIP-518's `states_filter`
+            // is a v4 field and is HONOURED: below v4 a client cannot send one
+            // and cannot read the state it would have filtered on
+            // (`handlers::list_groups`).
+            let body =
+                list_groups::handle(&conn.facade, &req, api_version, conn.facade.token()).await;
+            respond(key, header.correlation_id, &body, api_version)
+        }
+        ApiKey::DescribeGroups => {
+            let req = match DescribeGroupsRequest::decode(&mut buf, api_version) {
+                Ok(r) => r,
+                Err(e) => return Reply::Close(format!("DescribeGroups v{api_version} body: {e}")),
+            };
+            let body = describe_groups::handle(&conn.facade, &req, conn.facade.token()).await;
+            respond(key, header.correlation_id, &body, api_version)
+        }
+        ApiKey::DeleteGroups => {
+            let req = match DeleteGroupsRequest::decode(&mut buf, api_version) {
+                Ok(r) => r,
+                Err(e) => return Reply::Close(format!("DeleteGroups v{api_version} body: {e}")),
+            };
+            let body = delete_groups::handle(&conn.facade, &req, conn.facade.token()).await;
+            respond(key, header.correlation_id, &body, api_version)
+        }
+        // ------------------------------------------------ M7 F3: idempotent producer
+        ApiKey::InitProducerId => {
+            let req = match InitProducerIdRequest::decode(&mut buf, api_version) {
+                Ok(r) => r,
+                Err(e) => return Reply::Close(format!("InitProducerId v{api_version} body: {e}")),
+            };
+            // The ONE handler on this listener that awaits nothing: a producer
+            // id is minted from process state, so the grant cannot fail for
+            // infrastructure reasons and cannot be slow. That is the property
+            // the papercut fix wants (`handlers::init_producer_id`).
+            let body = init_producer_id::handle(&conn.facade, &req);
             respond(key, header.correlation_id, &body, api_version)
         }
         // Unreachable while the table and this match agree, which is the point:
@@ -1066,6 +1172,10 @@ mod tests {
 
     // ------------------------------------------------------------- dispatched
 
+    /// The peer address the accept loop would have handed a connection, in the
+    /// shape [`kafka_host`] makes.
+    const TEST_PEER: &str = "/127.0.0.1";
+
     /// A facade wired to a fake Queen with one queue. The ApiVersions tests
     /// never reach it; the Metadata, Produce and group ones do.
     fn facade() -> Arc<Facade> {
@@ -1076,7 +1186,7 @@ mod tests {
     /// not ABOUT the listener's policy sees the shape a plain OSS deployment
     /// has.
     fn conn() -> Conn {
-        Conn::new(&facade(), None)
+        Conn::new(&facade(), None, TEST_PEER.to_string())
     }
 
     fn sent(reply: Reply) -> Bytes {
@@ -1239,6 +1349,30 @@ mod tests {
                     // is exercised below.
                     ApiKey::SaslHandshake => sasl_handshake_request(version, 1, "PLAIN"),
                     ApiKey::SaslAuthenticate => sasl_authenticate_request(version, 1, b""),
+                    // A topic per version, because the second create of one
+                    // name is answered TOPIC_ALREADY_EXISTS — still a response,
+                    // but this test is about the dispatch table and a name that
+                    // means the same thing at every version keeps it that way.
+                    ApiKey::CreateTopics => {
+                        create_topics_request(version, 1, &format!("walk-{version}"))
+                    }
+                    ApiKey::DeleteTopics => delete_topics_request(version, 1),
+                    ApiKey::DescribeConfigs => describe_configs_request(version, 1),
+                    ApiKey::ListGroups => list_groups_request(version, 1),
+                    ApiKey::DescribeGroups => describe_groups_request(version, 1),
+                    // A group per version, and one nobody has ever heard of:
+                    // the answer is GROUP_ID_NOT_FOUND, which is a RESPONSE,
+                    // which is what this test is about. Deleting the group the
+                    // JoinGroup rows above just made would empty the fixture
+                    // under every later version of the walk.
+                    ApiKey::DeleteGroups => {
+                        delete_groups_request(version, 1, &format!("walk-{version}"))
+                    }
+                    // A fresh grant at every version: below v3 the request has
+                    // no producer id field at all, and at v3+ this sends the
+                    // "mint me one" sentinel, which is the arm every client
+                    // opens with.
+                    ApiKey::InitProducerId => init_producer_id_request(version, 1),
                     other => panic!("{other:?} is advertised but this test cannot build one"),
                 };
                 match dispatch(&mut f, frame).await {
@@ -2370,7 +2504,7 @@ mod tests {
             body.member_id.as_str().to_string()
         };
         let connection = |token: &str| {
-            let mut c = Conn::new(&facade, None);
+            let mut c = Conn::new(&facade, None, TEST_PEER.to_string());
             c.facade = c.facade.authenticated_as(token);
             c
         };
@@ -2516,7 +2650,7 @@ mod tests {
         let facade = crate::handlers::testing::over(api, sasl_policy());
 
         // 1. A credential that is refused.
-        let mut wrong = Conn::new(&facade, None);
+        let mut wrong = Conn::new(&facade, None, TEST_PEER.to_string());
         dispatch(&mut wrong, sasl_handshake_request(1, 1, "PLAIN")).await;
         dispatch(
             &mut wrong,
@@ -2526,7 +2660,7 @@ mod tests {
 
         // 2. Malformed responses, which is where a naive parser would echo the
         //    input it could not read.
-        let mut malformed = Conn::new(&facade, None);
+        let mut malformed = Conn::new(&facade, None, TEST_PEER.to_string());
         dispatch(&mut malformed, sasl_handshake_request(1, 3, "PLAIN")).await;
         for bytes in [
             format!("no-nuls-{SECRET}").into_bytes(),
@@ -2538,7 +2672,7 @@ mod tests {
 
         // 3. The happy path, which logs an admission — and then real work with
         //    the credential on it, which logs whatever a handler logs.
-        let mut good = Conn::new(&facade, None);
+        let mut good = Conn::new(&facade, None, TEST_PEER.to_string());
         dispatch(&mut good, sasl_handshake_request(1, 5, "PLAIN")).await;
         dispatch(
             &mut good,
@@ -2549,12 +2683,12 @@ mod tests {
         dispatch(&mut good, produce_request(9, 8, -1)).await;
 
         // 4. The v0 flow, whose token is a bare frame.
-        let mut legacy = Conn::new(&facade, None);
+        let mut legacy = Conn::new(&facade, None, TEST_PEER.to_string());
         dispatch(&mut legacy, sasl_handshake_request(0, 9, "PLAIN")).await;
         dispatch(&mut legacy, Bytes::from(plain_bytes("acme", SECRET))).await;
 
         // 5. An unauthenticated request, which logs a close.
-        let mut ungated = Conn::new(&facade, None);
+        let mut ungated = Conn::new(&facade, None, TEST_PEER.to_string());
         dispatch(&mut ungated, metadata_request(9, 10, Some(&["orders"]))).await;
 
         let logged = capture.text();
@@ -2584,5 +2718,382 @@ mod tests {
             logged.contains("acme"),
             "the username label never reached the log, so a line names nobody:\n{logged}"
         );
+    }
+    // ------------------------------------------------ M7 F1: topics admin
+
+    /// A CreateTopics request the way an AdminClient writes it: one topic,
+    /// KIP-464's "I do not care" for the width and the replication factor.
+    fn create_topics_request(api_version: i16, correlation_id: i32, topic: &str) -> Bytes {
+        use kafka_protocol::messages::create_topics_request::CreatableTopic;
+        use kafka_protocol::messages::TopicName;
+
+        let mut out = BytesMut::new();
+        RequestHeader::default()
+            .with_request_api_key(ApiKey::CreateTopics as i16)
+            .with_request_api_version(api_version)
+            .with_correlation_id(correlation_id)
+            .with_client_id(Some(StrBytes::from_static_str("queen-kafka-test")))
+            .encode(
+                &mut out,
+                ApiKey::CreateTopics.request_header_version(api_version),
+            )
+            .unwrap();
+        CreateTopicsRequest::default()
+            .with_timeout_ms(30_000)
+            .with_topics(vec![CreatableTopic::default()
+                .with_name(TopicName(StrBytes::from_string(topic.to_string())))
+                .with_num_partitions(-1)
+                .with_replication_factor(-1)])
+            .encode(&mut out, api_version)
+            .unwrap();
+        out.freeze()
+    }
+
+    /// A DeleteTopics request naming one topic that is not there — the answer
+    /// is UNKNOWN_TOPIC_OR_PARTITION, which is a RESPONSE, which is what the
+    /// walk test is about. Deleting `orders` would empty the fixture under
+    /// every later version of the walk.
+    fn delete_topics_request(api_version: i16, correlation_id: i32) -> Bytes {
+        use kafka_protocol::messages::TopicName;
+
+        let mut out = BytesMut::new();
+        RequestHeader::default()
+            .with_request_api_key(ApiKey::DeleteTopics as i16)
+            .with_request_api_version(api_version)
+            .with_correlation_id(correlation_id)
+            .with_client_id(Some(StrBytes::from_static_str("queen-kafka-test")))
+            .encode(
+                &mut out,
+                ApiKey::DeleteTopics.request_header_version(api_version),
+            )
+            .unwrap();
+        DeleteTopicsRequest::default()
+            .with_timeout_ms(30_000)
+            .with_topic_names(vec![TopicName(StrBytes::from_static_str("never-existed"))])
+            .encode(&mut out, api_version)
+            .unwrap();
+        out.freeze()
+    }
+
+    /// A DescribeConfigs request for both resource types at once, which is what
+    /// `kafka-configs.sh` and every UI reach for.
+    fn describe_configs_request(api_version: i16, correlation_id: i32) -> Bytes {
+        use kafka_protocol::messages::describe_configs_request::DescribeConfigsResource;
+
+        let mut out = BytesMut::new();
+        RequestHeader::default()
+            .with_request_api_key(ApiKey::DescribeConfigs as i16)
+            .with_request_api_version(api_version)
+            .with_correlation_id(correlation_id)
+            .with_client_id(Some(StrBytes::from_static_str("queen-kafka-test")))
+            .encode(
+                &mut out,
+                ApiKey::DescribeConfigs.request_header_version(api_version),
+            )
+            .unwrap();
+        DescribeConfigsRequest::default()
+            .with_resources(vec![
+                DescribeConfigsResource::default()
+                    .with_resource_type(2)
+                    .with_resource_name(StrBytes::from_static_str("orders")),
+                DescribeConfigsResource::default()
+                    .with_resource_type(4)
+                    .with_resource_name(StrBytes::from_static_str("0")),
+            ])
+            .encode(&mut out, api_version)
+            .unwrap();
+        out.freeze()
+    }
+
+    /// End to end through the dispatcher for all three, at every advertised
+    /// version: a real client decodes what comes back, and the fields it acts
+    /// on are the ones asserted.
+    #[tokio::test]
+    async fn the_topics_admin_apis_round_trip_through_dispatch() {
+        use kafka_protocol::messages::{
+            CreateTopicsResponse, DeleteTopicsResponse, DescribeConfigsResponse,
+        };
+
+        for version in 2i16..=6 {
+            let wire = sent(
+                dispatch(
+                    &mut conn(),
+                    create_topics_request(version, 41, &format!("made-{version}")),
+                )
+                .await,
+            );
+            let mut buf = wire;
+            let header = ResponseHeader::decode(
+                &mut buf,
+                ApiKey::CreateTopics.response_header_version(version),
+            )
+            .unwrap();
+            let body = CreateTopicsResponse::decode(&mut buf, version).unwrap();
+            assert!(buf.is_empty(), "v{version}: {} trailing bytes", buf.len());
+            assert_eq!(header.correlation_id, 41);
+            assert_eq!(body.topics[0].error_code, 0, "v{version}");
+            // v5 is where the created topic's real width comes back; below it
+            // the field is not on the wire at all.
+            if version >= 5 {
+                assert_eq!(body.topics[0].num_partitions, 4, "v{version}");
+                assert_eq!(body.topics[0].replication_factor, 1, "v{version}");
+                assert!(!body.topics[0].configs.as_ref().unwrap().is_empty());
+            }
+        }
+
+        for version in 1i16..=5 {
+            let wire = sent(dispatch(&mut conn(), delete_topics_request(version, 42)).await);
+            let mut buf = wire;
+            let header = ResponseHeader::decode(
+                &mut buf,
+                ApiKey::DeleteTopics.response_header_version(version),
+            )
+            .unwrap();
+            let body = DeleteTopicsResponse::decode(&mut buf, version).unwrap();
+            assert!(buf.is_empty(), "v{version}: {} trailing bytes", buf.len());
+            assert_eq!(header.correlation_id, 42);
+            assert_eq!(body.responses[0].error_code, 3, "v{version}");
+            // v5 is where "there is no such queue" gets to say so in words.
+            if version >= 5 {
+                assert!(body.responses[0].error_message.is_some(), "v{version}");
+            }
+        }
+
+        for version in 1i16..=4 {
+            let wire = sent(dispatch(&mut conn(), describe_configs_request(version, 43)).await);
+            let mut buf = wire;
+            let header = ResponseHeader::decode(
+                &mut buf,
+                ApiKey::DescribeConfigs.response_header_version(version),
+            )
+            .unwrap();
+            let body = DescribeConfigsResponse::decode(&mut buf, version).unwrap();
+            assert!(buf.is_empty(), "v{version}: {} trailing bytes", buf.len());
+            assert_eq!(header.correlation_id, 43);
+            assert_eq!(body.results[0].error_code, 0, "v{version} topic");
+            assert_eq!(body.results[1].error_code, 0, "v{version} broker");
+            assert!(!body.results[1].configs.is_empty(), "v{version}");
+            // v3 is where the type of a config becomes a field; below it a
+            // client renders every value as a string.
+            if version >= 3 {
+                assert!(
+                    body.results[1].configs.iter().all(|c| c.config_type != 0),
+                    "v{version}: a config was answered with an UNKNOWN type"
+                );
+            }
+        }
+    }
+    // ------------------------------------------------ M7 F2: groups admin
+
+    /// A ListGroups request the way `kafka-consumer-groups.sh --list` writes
+    /// one: no state filter, which means "every group".
+    fn list_groups_request(api_version: i16, correlation_id: i32) -> Bytes {
+        let mut out = BytesMut::new();
+        RequestHeader::default()
+            .with_request_api_key(ApiKey::ListGroups as i16)
+            .with_request_api_version(api_version)
+            .with_correlation_id(correlation_id)
+            .with_client_id(Some(StrBytes::from_static_str("queen-kafka-test")))
+            .encode(
+                &mut out,
+                ApiKey::ListGroups.request_header_version(api_version),
+            )
+            .unwrap();
+        ListGroupsRequest::default()
+            .encode(&mut out, api_version)
+            .unwrap();
+        out.freeze()
+    }
+
+    /// A DescribeGroups request for a group nobody has heard of — error 0 and
+    /// state `Dead`, which is Apache Kafka's own answer and still a response.
+    fn describe_groups_request(api_version: i16, correlation_id: i32) -> Bytes {
+        use kafka_protocol::messages::GroupId;
+
+        let mut out = BytesMut::new();
+        RequestHeader::default()
+            .with_request_api_key(ApiKey::DescribeGroups as i16)
+            .with_request_api_version(api_version)
+            .with_correlation_id(correlation_id)
+            .with_client_id(Some(StrBytes::from_static_str("queen-kafka-test")))
+            .encode(
+                &mut out,
+                ApiKey::DescribeGroups.request_header_version(api_version),
+            )
+            .unwrap();
+        DescribeGroupsRequest::default()
+            .with_groups(vec![GroupId(StrBytes::from_static_str("walk-describe"))])
+            // v3's field, and the encoder refuses a field set on a version that
+            // does not carry it — which is exactly the check that keeps this
+            // walk honest about what each version is.
+            .with_include_authorized_operations(api_version >= 3)
+            .encode(&mut out, api_version)
+            .unwrap();
+        out.freeze()
+    }
+
+    fn delete_groups_request(api_version: i16, correlation_id: i32, group: &str) -> Bytes {
+        use kafka_protocol::messages::GroupId;
+
+        let mut out = BytesMut::new();
+        RequestHeader::default()
+            .with_request_api_key(ApiKey::DeleteGroups as i16)
+            .with_request_api_version(api_version)
+            .with_correlation_id(correlation_id)
+            .with_client_id(Some(StrBytes::from_static_str("queen-kafka-test")))
+            .encode(
+                &mut out,
+                ApiKey::DeleteGroups.request_header_version(api_version),
+            )
+            .unwrap();
+        DeleteGroupsRequest::default()
+            .with_groups_names(vec![GroupId(StrBytes::from_string(group.to_string()))])
+            .encode(&mut out, api_version)
+            .unwrap();
+        out.freeze()
+    }
+
+    /// End to end through the dispatcher for all three, at every advertised
+    /// version: a real client decodes what comes back, and the fields it acts
+    /// on are the ones asserted.
+    #[tokio::test]
+    async fn the_groups_admin_apis_round_trip_through_dispatch() {
+        use kafka_protocol::messages::{
+            DeleteGroupsResponse, DescribeGroupsResponse, ListGroupsResponse,
+        };
+
+        // One connection for all of it, so the JoinGroup below and the reads
+        // after it see the same coordinator.
+        let mut f = conn();
+        dispatch(&mut f, join_group_request(4, 7, "dispatch-group")).await;
+
+        for version in 0i16..=4 {
+            let wire = sent(dispatch(&mut f, list_groups_request(version, 51)).await);
+            let mut buf = wire;
+            let header = ResponseHeader::decode(
+                &mut buf,
+                ApiKey::ListGroups.response_header_version(version),
+            )
+            .unwrap();
+            let body = ListGroupsResponse::decode(&mut buf, version).unwrap();
+            assert!(buf.is_empty(), "v{version}: {} trailing bytes", buf.len());
+            assert_eq!(header.correlation_id, 51);
+            assert_eq!(body.error_code, 0, "v{version}");
+            assert_eq!(body.groups.len(), 1, "v{version}");
+            assert_eq!(
+                body.groups[0].group_id.0.as_str(),
+                "dispatch-group",
+                "v{version}"
+            );
+            // The state is a v4 field, and below it the wire carries none.
+            if version >= 4 {
+                assert!(!body.groups[0].group_state.is_empty(), "v{version}");
+            }
+        }
+
+        for version in 0i16..=3 {
+            let wire = sent(dispatch(&mut f, describe_groups_request(version, 52)).await);
+            let mut buf = wire;
+            let header = ResponseHeader::decode(
+                &mut buf,
+                ApiKey::DescribeGroups.response_header_version(version),
+            )
+            .unwrap();
+            let body = DescribeGroupsResponse::decode(&mut buf, version).unwrap();
+            assert!(buf.is_empty(), "v{version}: {} trailing bytes", buf.len());
+            assert_eq!(header.correlation_id, 52);
+            // Kafka's own answer for a group it has never heard of, measured
+            // against apache/kafka:3.9.1: no error, state Dead.
+            assert_eq!(body.groups[0].error_code, 0, "v{version}");
+            assert_eq!(body.groups[0].group_state.as_str(), "Dead", "v{version}");
+            assert_eq!(
+                body.groups[0].authorized_operations,
+                i32::MIN,
+                "v{version}: a permission set was invented"
+            );
+        }
+
+        for version in 0i16..=2 {
+            let wire = sent(
+                dispatch(
+                    &mut f,
+                    delete_groups_request(version, 53, &format!("walk-{version}")),
+                )
+                .await,
+            );
+            let mut buf = wire;
+            let header = ResponseHeader::decode(
+                &mut buf,
+                ApiKey::DeleteGroups.response_header_version(version),
+            )
+            .unwrap();
+            let body = DeleteGroupsResponse::decode(&mut buf, version).unwrap();
+            assert!(buf.is_empty(), "v{version}: {} trailing bytes", buf.len());
+            assert_eq!(header.correlation_id, 53);
+            assert_eq!(body.results[0].error_code, 69, "v{version}");
+        }
+    }
+
+    // ------------------------------------------- M7 F3: the idempotent producer
+
+    /// An InitProducerId request the way a stock producer opens with one:
+    /// non-transactional, and asking to be given an id.
+    fn init_producer_id_request(api_version: i16, correlation_id: i32) -> Bytes {
+        use kafka_protocol::messages::ProducerId;
+
+        let mut out = BytesMut::new();
+        RequestHeader::default()
+            .with_request_api_key(ApiKey::InitProducerId as i16)
+            .with_request_api_version(api_version)
+            .with_correlation_id(correlation_id)
+            .with_client_id(Some(StrBytes::from_static_str("queen-kafka-test")))
+            .encode(
+                &mut out,
+                ApiKey::InitProducerId.request_header_version(api_version),
+            )
+            .unwrap();
+        InitProducerIdRequest::default()
+            // null, not "": the field is nullable and this producer is not
+            // transactional. brod writes "" here and both are read the same way
+            // (`idempotent::transactional_id`).
+            .with_transactional_id(None)
+            .with_transaction_timeout_ms(60_000)
+            .with_producer_id(ProducerId(-1))
+            .with_producer_epoch(-1)
+            .encode(&mut out, api_version)
+            .unwrap();
+        out.freeze()
+    }
+
+    /// End to end through the dispatcher at every advertised version: a real
+    /// client decodes what comes back, and the two fields it acts on — the id
+    /// and the epoch — are the ones asserted.
+    #[tokio::test]
+    async fn init_producer_id_round_trips_through_dispatch() {
+        use kafka_protocol::messages::InitProducerIdResponse;
+
+        let mut f = conn();
+        let mut granted = Vec::new();
+        for version in 0i16..=4 {
+            let wire = sent(dispatch(&mut f, init_producer_id_request(version, 91)).await);
+            let mut buf = wire;
+            let header = ResponseHeader::decode(
+                &mut buf,
+                ApiKey::InitProducerId.response_header_version(version),
+            )
+            .unwrap();
+            let body = InitProducerIdResponse::decode(&mut buf, version).unwrap();
+            assert!(buf.is_empty(), "v{version}: {} trailing bytes", buf.len());
+            assert_eq!(header.correlation_id, 91);
+            assert_eq!(body.error_code, 0, "v{version}");
+            assert_eq!(body.producer_epoch, 0, "v{version}");
+            assert!(body.producer_id.0 > 0, "v{version}: {:?}", body.producer_id);
+            assert_eq!(body.throttle_time_ms, 0, "v{version}");
+            granted.push(body.producer_id.0);
+        }
+        granted.sort_unstable();
+        let minted = granted.len();
+        granted.dedup();
+        assert_eq!(granted.len(), minted, "two producers were given one id");
     }
 }

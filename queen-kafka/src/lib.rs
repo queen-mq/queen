@@ -21,10 +21,12 @@
 //! as the `throttle_time_ms` every Kafka client already backs off on —
 //! [`throttle`]).
 
+pub mod cluster;
 pub mod conn;
 pub mod coordinator;
 pub mod decompress;
 pub mod handlers;
+pub mod idempotent;
 pub mod identity;
 pub mod obs;
 pub mod offsets;
@@ -34,6 +36,7 @@ pub mod sasl;
 pub mod secret;
 pub mod throttle;
 pub mod tls;
+pub mod topic_config;
 pub mod versions;
 pub mod wire;
 
@@ -60,11 +63,21 @@ use std::sync::{Arc, Mutex};
 /// ("no durable state in the facade"), so a restart is a broker restart and
 /// clients recover the way they already know how to.
 pub struct Facade {
-    /// The host and port handed to clients as the address of node 0. Validated
-    /// at boot (main.rs): the classic Kafka footgun is advertising something
-    /// clients cannot reach, which fails only *after* a successful bootstrap.
+    /// The host and port handed to clients as the address of THIS node — node 0
+    /// on its own, `QUEEN_KAFKA_NODE_ID` in a cluster. Validated at boot
+    /// (main.rs): the classic Kafka footgun is advertising something clients
+    /// cannot reach, which fails only *after* a successful bootstrap.
     pub advertised_host: String,
     pub advertised_port: u16,
+    /// Whether this facade is one of several, and if so which one and who the
+    /// others are ([`cluster`]).
+    ///
+    /// [`cluster::Cluster::Single`] — the default, and every deployment that
+    /// sets no `QUEEN_KAFKA_NODE_ID` — is not a one-node cluster: it is the
+    /// code path this facade has always had, and the Metadata and
+    /// FindCoordinator bytes are identical to what they were before this field
+    /// existed.
+    pub cluster: cluster::Cluster,
     /// `QUEEN_KAFKA_DEFAULT_PARTITIONS` — the width a topic is advertised at
     /// unless Queen already has more lanes than that. See
     /// [`handlers::metadata`].
@@ -86,6 +99,11 @@ pub struct Facade {
     /// The consumer groups this facade is the coordinator of (M4), as THIS
     /// connection's credential sees them ([`coordinator::Coordinator::scoped`]).
     ///
+    /// In cluster mode it is [`cluster::Cluster::owner_of_group`] that makes
+    /// this registry globally unique rather than merely process-wide: a group
+    /// this node does not own is refused NOT_COORDINATOR before the coordinator
+    /// is touched, so no second actor for it is ever spawned here.
+    ///
     /// The ONE piece of state that is neither configuration nor derived from
     /// Queen, and it is deliberately the one thing a restart is allowed to
     /// lose: membership is an agreement between clients that a broker
@@ -93,6 +111,20 @@ pub struct Facade {
     /// the arbiter changes its mind. What must NOT be lost — the committed
     /// offsets — is not here; it is in Queen, through [`offsets`].
     pub coordinator: coordinator::Coordinator,
+    /// The idempotent producers this facade is enforcing sequence numbers for
+    /// (M7 F3), shared by every connection because a producer id is granted on
+    /// one connection and used on that one connection while the state has to
+    /// outlive the `Facade` clones [`Facade::for_connection`] and
+    /// [`Facade::authenticated_as`] make.
+    ///
+    /// The SECOND piece of state that is neither configuration nor derived from
+    /// Queen, and — like the coordinator's registry above — deliberately one a
+    /// restart is allowed to lose. The difference, and it is the one worth
+    /// saying out loud: a real Kafka broker does NOT lose producer state on a
+    /// restart, so losing it here has a cost, and that cost is at-least-once for
+    /// at most [`idempotent::WINDOW`] batches of a producer that was mid-stream
+    /// ([`idempotent`]).
+    pub producers: Arc<idempotent::Producers>,
     /// Queen as each SNI name sees it. Shared by every connection.
     lanes: Arc<Lanes>,
     /// Listener policy, read by [`conn`] and by nothing downstream of it.
@@ -169,11 +201,16 @@ impl Facade {
         Facade {
             advertised_host: self.advertised_host.clone(),
             advertised_port: self.advertised_port,
+            cluster: self.cluster.clone(),
             default_partitions: self.default_partitions,
             queen_token: self.queen_token.clone(),
             queen: lane.queen,
             catalog: lane.catalog,
             coordinator: self.coordinator.clone(),
+            // The Arc and not a fresh one: a producer's sequence window has to
+            // be the same object on every connection of the process, or the
+            // window would be lost at the one moment it is needed.
+            producers: Arc::clone(&self.producers),
             lanes: Arc::clone(&self.lanes),
             policy: self.policy,
         }
@@ -195,6 +232,7 @@ impl Facade {
         Facade {
             advertised_host: self.advertised_host.clone(),
             advertised_port: self.advertised_port,
+            cluster: self.cluster.clone(),
             default_partitions: self.default_partitions,
             queen_token: Some(token.to_string()),
             queen: Arc::clone(&self.queen),
@@ -202,6 +240,11 @@ impl Facade {
             coordinator: self
                 .coordinator
                 .scoped(self.catalog.tenant_key(Some(token))),
+            // NOT re-scoped, unlike the coordinator: the tenant is inside the
+            // producer window's own key ([`idempotent`]) rather than around the
+            // container, because the map is process-wide and its LRU has to be
+            // one budget for the whole process.
+            producers: Arc::clone(&self.producers),
             lanes: Arc::clone(&self.lanes),
             policy: self.policy,
         }
@@ -378,9 +421,15 @@ impl Facade {
     /// other: the root lane's client is the same object as `queen`, and its
     /// catalog is the same object as `catalog`. A caller that built them apart
     /// would give a connection with no SNI a different cache from the process's.
+    // Eight positional arguments, and they are eight because a `Facade` is
+    // eight independent things a boot decides — a parameter struct would move
+    // the same list one file away and stop the compiler from telling a caller
+    // which one it forgot.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         advertised_host: String,
         advertised_port: u16,
+        cluster: cluster::Cluster,
         default_partitions: u32,
         queen_token: Option<String>,
         queen: Arc<dyn queen::QueenApi>,
@@ -391,12 +440,17 @@ impl Facade {
         Facade {
             advertised_host,
             advertised_port,
+            cluster,
             default_partitions,
             queen_token,
             lanes: Arc::new(Lanes::new(Arc::clone(&queen), Arc::clone(&catalog))),
             queen,
             catalog,
             coordinator,
+            // Built here rather than passed in, because there is exactly one
+            // right answer (an empty tracker) and a caller that could choose
+            // would be a caller that could give two connections two windows.
+            producers: Arc::new(idempotent::Producers::new()),
             policy,
         }
     }
@@ -605,6 +659,7 @@ mod tests {
         let mut req = coordinator::JoinRequest {
             member_id: String::new(),
             client_id: client.to_string(),
+            client_host: "/127.0.0.1".to_string(),
             protocol_type: "consumer".to_string(),
             protocols: vec![coordinator::Protocol {
                 name: "range".to_string(),
@@ -630,6 +685,7 @@ mod tests {
         Facade::new(
             "kafka.example.com".into(),
             9092,
+            cluster::Cluster::Single,
             4,
             None,
             api,

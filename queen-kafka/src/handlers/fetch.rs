@@ -11,6 +11,18 @@
 //! partition, and the handler's work is the two translations either side of it:
 //! Kafka's ceilings onto C2's, and stored payloads back into a RecordBatch.
 //!
+//! ## Any node serves any partition, and no gate says otherwise
+//!
+//! In cluster mode ([`crate::cluster`]) there is NO leadership gate here, on
+//! purpose: `032_log_fetch.sql:11-19` says of the call behind this handler that
+//! it *"is not a pop. No lease is taken, no `queen.log_consumers` row is read,
+//! created or advanced, no watermark is written, nothing is claimed and no SKIP
+//! LOCKED dance runs."* Two facades fetching the same offsets through two
+//! brokers therefore get the same records, and there is no per-partition state
+//! for a refusal to protect. A push made through another broker is seen within
+//! `RECHECK_MS` even with the mesh down (server/src/handlers/fetch.rs:126-131),
+//! which is what makes that true across brokers and not merely within one.
+//!
 //! ## v4..=v6, and why the ceiling is not a shrug
 //!
 //! v7 introduces FETCH SESSIONS (KIP-227): the client registers an incremental
@@ -978,6 +990,11 @@ fn kafka_error(e: &queen::Error) -> ResponseError {
         // A 2xx we could not read, or an answer that does not line up with the
         // entries we sent.
         queen::Error::Body(_) => ResponseError::UnknownServerError,
+        // Unreachable on this path, and the arm is not a shrug: only the
+        // fenced offset commit sends a conditional write ([`crate::cluster::fence`]),
+        // and a fetch writes nothing at all. If one ever appeared here it
+        // would be this facade's bug, so it is answered as one.
+        queen::Error::Precondition { .. } => ResponseError::UnknownServerError,
     }
 }
 

@@ -18,7 +18,13 @@ use crate::Facade;
 /// Handle one Heartbeat.
 pub async fn handle(facade: &Facade, req: &HeartbeatRequest) -> HeartbeatResponse {
     let group = req.group_id.0.as_str();
+    // The ownership guard comes before the coordinator, and it is the one error
+    // code this API can carry that means "ask FindCoordinator again": a client
+    // heartbeating at the wrong node has to be told to move, not told its
+    // generation is fine ([`crate::cluster`]).
     let error = if let Some(e) = crate::coordinator::invalid_group_id(group) {
+        Some(e)
+    } else if let Some(e) = facade.cluster.group_guard(group) {
         Some(e)
     } else {
         facade
@@ -56,12 +62,13 @@ mod tests {
             .with_protocols(vec![JoinGroupRequestProtocol::default()
                 .with_name(StrBytes::from_static_str("range"))
                 .with_metadata(Bytes::new())]);
-        let minted = crate::handlers::join_group::handle(f, &req, 4, "c").await;
+        let minted = crate::handlers::join_group::handle(f, &req, 4, "c", "/127.0.0.1").await;
         let joined = crate::handlers::join_group::handle(
             f,
             &req.clone().with_member_id(minted.member_id),
             4,
             "c",
+            "/127.0.0.1",
         )
         .await;
         (joined.member_id.to_string(), joined.generation_id)

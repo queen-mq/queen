@@ -32,16 +32,31 @@ use crate::Facade;
 /// and the minted id comes back with the successful response.
 const MEMBER_ID_REQUIRED_FROM: i16 = 4;
 
-/// Handle one JoinGroup. `client_id` is the connection's, from the request
-/// header — the coordinator uses it to make a minted member id readable.
+/// Handle one JoinGroup.
+///
+/// `client_id` is the connection's, from the request header — the coordinator
+/// uses it to make a minted member id readable. `client_host` is the peer
+/// address `conn::serve` accepted, which exists nowhere else in the facade and
+/// which DescribeGroups answers as the member's HOST column: the first thing an
+/// operator looks at when a partition is stuck on a member.
 pub async fn handle(
     facade: &Facade,
     req: &JoinGroupRequest,
     api_version: i16,
     client_id: &str,
+    client_host: &str,
 ) -> JoinGroupResponse {
     let group = req.group_id.0.as_str();
     if let Some(e) = crate::coordinator::invalid_group_id(group) {
+        return refused(e, req.member_id.as_str());
+    }
+    // Cluster mode: a node that does not own this group answers NOT_COORDINATOR
+    // rather than forming a second generation of it, and it does so BEFORE the
+    // coordinator is touched — so no group actor is spawned here for a group
+    // that lives on another node ([`crate::cluster`]). `None` in single mode,
+    // without reading anything.
+    if let Some(e) = facade.cluster.group_guard(group) {
+        tracing::debug!(target: "kafka", group, error = ?e, "join refused: not this node's group");
         return refused(e, req.member_id.as_str());
     }
     let answer = facade
@@ -51,6 +66,7 @@ pub async fn handle(
             JoinRequest {
                 member_id: req.member_id.to_string(),
                 client_id: client_id.to_string(),
+                client_host: client_host.to_string(),
                 protocol_type: req.protocol_type.to_string(),
                 protocols: req
                     .protocols
@@ -116,6 +132,10 @@ mod tests {
     use kafka_protocol::messages::GroupId;
     use kafka_protocol::protocol::{Decodable, Encodable, Message};
 
+    /// The peer address the accept loop would have handed in, in Apache
+    /// Kafka's own spelling.
+    const HOST: &str = "/127.0.0.1";
+
     fn request(group: &str, member: &str) -> JoinGroupRequest {
         JoinGroupRequest::default()
             .with_group_id(GroupId(StrBytes::from_string(group.to_string())))
@@ -133,7 +153,7 @@ mod tests {
     #[tokio::test]
     async fn the_member_id_round_trip_happens_at_v4() {
         let f = facade(&[]);
-        let minted = handle(&f, &request("orders-consumer", ""), 4, "kcat").await;
+        let minted = handle(&f, &request("orders-consumer", ""), 4, "kcat", HOST).await;
         assert_eq!(minted.error_code, ResponseError::MemberIdRequired.code());
         assert!(minted.member_id.as_str().starts_with("kcat-"));
         assert_eq!(minted.generation_id, -1);
@@ -143,6 +163,7 @@ mod tests {
             &request("orders-consumer", minted.member_id.as_str()),
             4,
             "kcat",
+            HOST,
         )
         .await;
         assert_eq!(joined.error_code, 0);
@@ -160,7 +181,7 @@ mod tests {
     #[tokio::test]
     async fn an_empty_member_id_below_v4_joins_outright() {
         let f = facade(&[]);
-        let joined = handle(&f, &request("orders-consumer", ""), 3, "kcat").await;
+        let joined = handle(&f, &request("orders-consumer", ""), 3, "kcat", HOST).await;
         assert_eq!(joined.error_code, 0);
         assert!(!joined.member_id.is_empty());
         assert_eq!(joined.generation_id, 1);
@@ -169,7 +190,7 @@ mod tests {
     #[tokio::test]
     async fn an_empty_group_id_is_refused_without_a_coordinator() {
         let f = facade(&[]);
-        let resp = handle(&f, &request("", ""), 4, "kcat").await;
+        let resp = handle(&f, &request("", ""), 4, "kcat", HOST).await;
         assert_eq!(resp.error_code, ResponseError::InvalidGroupId.code());
         assert_eq!(f.coordinator.live_groups(), 0, "a group was created");
     }
@@ -183,14 +204,14 @@ mod tests {
     async fn a_group_id_that_is_not_a_name_is_refused_without_a_coordinator() {
         let f = facade(&[]);
         let huge = "g".repeat(crate::coordinator::MAX_GROUP_ID_CHARS + 1);
-        let resp = handle(&f, &request(&huge, ""), 4, "kcat").await;
+        let resp = handle(&f, &request(&huge, ""), 4, "kcat", HOST).await;
         assert_eq!(resp.error_code, ResponseError::InvalidGroupId.code());
         assert_eq!(f.coordinator.live_groups(), 0, "a group was created");
 
         // The longest name that IS one still works, so the bound refuses only
         // what it means to.
         let longest = "g".repeat(crate::coordinator::MAX_GROUP_ID_CHARS);
-        let resp = handle(&f, &request(&longest, ""), 4, "kcat").await;
+        let resp = handle(&f, &request(&longest, ""), 4, "kcat", HOST).await;
         assert_eq!(resp.error_code, ResponseError::MemberIdRequired.code());
     }
 
@@ -200,7 +221,14 @@ mod tests {
     #[tokio::test]
     async fn a_huge_client_id_does_not_become_a_huge_member_id() {
         let f = facade(&[]);
-        let minted = handle(&f, &request("orders-consumer", ""), 4, &"c".repeat(40_000)).await;
+        let minted = handle(
+            &f,
+            &request("orders-consumer", ""),
+            4,
+            &"c".repeat(40_000),
+            HOST,
+        )
+        .await;
         assert_eq!(minted.error_code, ResponseError::MemberIdRequired.code());
         assert!(minted.member_id.len() < 200, "{}", minted.member_id.len());
     }
@@ -218,7 +246,7 @@ mod tests {
         );
 
         for version in row.min..=row.max {
-            let resp = handle(&f, &request("g", "invented"), version, "kcat").await;
+            let resp = handle(&f, &request("g", "invented"), version, "kcat", HOST).await;
             assert_eq!(
                 resp.error_code,
                 ResponseError::UnknownMemberId.code(),
@@ -247,7 +275,7 @@ mod tests {
             // At v4 and up the id has to be minted first; below it the empty id
             // joins straight away.
             let member = if version >= MEMBER_ID_REQUIRED_FROM {
-                handle(&f, &request("g", ""), version, "c")
+                handle(&f, &request("g", ""), version, "c", HOST)
                     .await
                     .member_id
                     .to_string()
@@ -264,7 +292,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("decode request v{version}: {e}"));
             assert!(buf.is_empty(), "v{version}: trailing request bytes");
 
-            let resp = handle(&f, &decoded, version, "c").await;
+            let resp = handle(&f, &decoded, version, "c", HOST).await;
             let mut wire = BytesMut::new();
             resp.encode(&mut wire, version)
                 .unwrap_or_else(|e| panic!("encode response v{version}: {e}"));

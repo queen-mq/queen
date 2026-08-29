@@ -8,6 +8,14 @@
 //! consumer runs after an OFFSET_OUT_OF_RANGE. A facade that gets Fetch right
 //! and this wrong has a consumer that cannot begin.
 //!
+//! ## Any node answers, in cluster mode as in single
+//!
+//! No leadership gate ([`crate::cluster`]): both numbers are bounds read out of
+//! `queen.log_partitions` through the same `STABLE` fetch call
+//! (`032_log_fetch.sql:11-19`), so every facade of a cluster answers the same
+//! thing. Gating it would only break the consumer recovering from an
+//! OFFSET_OUT_OF_RANGE, which is the one client that most needs an answer.
+//!
 //! ## Both numbers come out of a fetch
 //!
 //! There is no bounds endpoint on Queen and there does not need to be: C2 was
@@ -425,6 +433,11 @@ fn kafka_error(e: &queen::Error) -> ResponseError {
             _ => ResponseError::UnknownServerError,
         },
         queen::Error::Body(_) => ResponseError::UnknownServerError,
+        // Unreachable on this path, and the arm is not a shrug: only the
+        // fenced offset commit sends a conditional write ([`crate::cluster::fence`]),
+        // and ListOffsets is a pure read of a partition's bounds. If one ever appeared here it
+        // would be this facade's bug, so it is answered as one.
+        queen::Error::Precondition { .. } => ResponseError::UnknownServerError,
     }
 }
 

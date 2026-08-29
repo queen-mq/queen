@@ -91,6 +91,31 @@ pub enum Error {
     },
     /// Queen answered 2xx with a body this client cannot read.
     Body(String),
+    /// A conditional write lost its precondition, and the operation carried
+    /// `"required": true` — so the stored procedure raised `check_violation`
+    /// and the WHOLE transaction rolled back: not one operation of that call
+    /// landed (024_kv.sql:546-560, 1498-1502).
+    ///
+    /// It reaches this client as HTTP **200** with
+    /// `{"ok":false,"reason":"kv_precondition",…}` and not as a status code, on
+    /// purpose (server/src/handlers/kv.rs:317-353: "this is the EXPECTED
+    /// outcome of every legitimate redelivery … it must pollute neither the
+    /// error metrics nor the retry policies"). It is an `Error` here for one
+    /// reason only — it is the answer to a call that wrote nothing, so no
+    /// caller may treat it as a write — and the fields are the loser's whole
+    /// verdict, which is what makes a second round trip unnecessary.
+    Precondition {
+        /// The operation that lost, by input ordinal.
+        failed_index: usize,
+        /// `version`, `absent` or `exists`, as the stored procedure named it.
+        reason: String,
+        /// The winner's version, or 0 when the key is not there. **Advisory**
+        /// (024_kv.sql:1467-1471): a value to re-`expect` with once, never a
+        /// fencing token to reuse blindly.
+        version: i64,
+        /// The winner's value, so the loser already knows what the winner did.
+        value: serde_json::Value,
+    },
 }
 
 impl Error {
@@ -125,6 +150,16 @@ impl std::fmt::Display for Error {
                 None => write!(f, "HTTP {code}: {}", Snippet(body)),
             },
             Error::Body(e) => write!(f, "body: {e}"),
+            Error::Precondition {
+                failed_index,
+                reason,
+                version,
+                ..
+            } => write!(
+                f,
+                "kv precondition lost on operation {failed_index} ({reason}); \
+                 the current version is {version} and nothing was written"
+            ),
         }
     }
 }
@@ -380,25 +415,54 @@ pub const MAX_KV_READ_BYTES: usize = 4 * 1024 * 1024;
 
 /// One key/value operation, in the exact shape `kv_apply_v1` takes.
 ///
-/// Only the three the offset path needs are modelled. `ns` is a separate field
-/// from `key` and is validated against `^[a-z0-9][a-z0-9._-]{0,63}$` by the
-/// stored procedure, so it is never a place to put anything a client chose.
+/// `ns` is a separate field from `key` and is validated against
+/// `^[a-z0-9][a-z0-9._-]{0,63}$` by the stored procedure, so it is never a
+/// place to put anything a client chose.
+///
+/// ## The conditional half, and why it is here
+///
+/// Until cluster mode ([`crate::cluster`]) this modelled three of the surface's
+/// seven operations and none of its preconditions, because an offset commit is
+/// an unconditional upsert. A second facade makes that upsert the defect —
+/// last writer wins, silently — so the fence in [`crate::cluster::fence`] needs
+/// `expect`, `required` and a TTL, all of which the broker has had all along
+/// (024_kv.sql). Nothing on the SERVER changes for any of this.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "op")]
 pub enum KvOp {
-    /// Unconditional upsert. `forever` is not a default and not an option: the
-    /// stored procedure demands EXACTLY ONE of `ttlSeconds` and `forever` on
-    /// every write, deliberately, so that nothing lands in the store without
-    /// someone having decided when it leaves. A committed offset's answer is
-    /// "never" — a consumer group that finds its offsets expired resumes from
-    /// `auto.offset.reset`, which is either a replay of the whole topic or a
-    /// silent skip to its end. Use [`KvOp::put`] rather than writing the field.
+    /// An upsert, optionally conditional. Built through the constructors below
+    /// rather than by writing the fields, because two of them are mutually
+    /// exclusive and one of them is a fence.
+    ///
+    /// `forever` is not a default and not an option: the stored procedure
+    /// demands EXACTLY ONE of `ttlSeconds` and `forever` on every write
+    /// (024_kv.sql:565-575), deliberately, so that nothing lands in the store
+    /// without someone having decided when it leaves. A committed offset's
+    /// answer is "never" — a consumer group that finds its offsets expired
+    /// resumes from `auto.offset.reset`, which is either a replay of the whole
+    /// topic or a silent skip to its end. A NODE REGISTRY row's answer is ten
+    /// seconds, because that row IS the liveness claim ([`crate::cluster`]).
     #[serde(rename = "put")]
     Put {
         ns: String,
         key: String,
         value: serde_json::Value,
+        /// Serialized only when true: `"forever": false` is zero expiry
+        /// declarations to the stored procedure, not one, so a TTL write must
+        /// not carry it at all.
+        #[serde(skip_serializing_if = "not_set")]
         forever: bool,
+        #[serde(rename = "ttlSeconds", skip_serializing_if = "Option::is_none")]
+        ttl_seconds: Option<u64>,
+        /// `expect: 0` is "must not exist" — what `putIfAbsent` desugars to
+        /// (024_kv.sql:960-966). `expect: N > 0` is a PURE UPDATE that creates
+        /// nothing when the key is absent (`:1053-1090`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expect: Option<i64>,
+        /// Turn a lost precondition from a verdict into an abort of the whole
+        /// transaction (024_kv.sql:1498-1502). See [`Error::Precondition`].
+        #[serde(skip_serializing_if = "not_set")]
+        required: bool,
     },
     /// Read a known key list. Answers `rows` for the ones that are there and
     /// `missing` for the ones that are not — absence is a datum, not a hole the
@@ -416,16 +480,103 @@ pub enum KvOp {
         #[serde(skip_serializing_if = "Option::is_none")]
         after: Option<String>,
     },
+    /// Remove a key. `expect: 0` is "it must not exist" (idempotent success
+    /// when it does not); `expect: N` is a fenced delete (024_kv.sql:1092-1120).
+    #[serde(rename = "delete")]
+    Delete {
+        ns: String,
+        key: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expect: Option<i64>,
+    },
+}
+
+/// `skip_serializing_if` for a `bool` that is only ever written when set. Both
+/// of [`KvOp::Put`]'s flags mean something by their PRESENCE.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn not_set(b: &bool) -> bool {
+    !*b
 }
 
 impl KvOp {
-    /// A write that never expires. See [`KvOp::Put`].
+    /// An unconditional write that never expires — the offset commit's own
+    /// shape, unchanged. See [`KvOp::Put`].
     pub fn put(ns: &str, key: &str, value: serde_json::Value) -> KvOp {
         KvOp::Put {
             ns: ns.to_string(),
             key: key.to_string(),
             value,
             forever: true,
+            ttl_seconds: None,
+            expect: None,
+            required: false,
+        }
+    }
+
+    /// A write that expires in `ttl_seconds`, conditional on `expect` when one
+    /// is given. The node registry's heartbeat: the row IS the liveness claim,
+    /// so a node that stops writing stops being live without anyone having to
+    /// notice ([`crate::cluster::registry`]).
+    pub fn put_ttl(
+        ns: &str,
+        key: &str,
+        value: serde_json::Value,
+        ttl_seconds: u64,
+        expect: Option<i64>,
+    ) -> KvOp {
+        KvOp::Put {
+            ns: ns.to_string(),
+            key: key.to_string(),
+            value,
+            forever: false,
+            ttl_seconds: Some(ttl_seconds),
+            expect,
+            required: false,
+        }
+    }
+
+    /// `putIfAbsent`, in the form the stored procedure desugars it to
+    /// (024_kv.sql:960-966: *"putIfAbsent DESUGARS to put with expect:0 at the
+    /// entry of this loop: one code path"*). The name is kept here because it
+    /// is the name of the thing; the wire carries the one form.
+    ///
+    /// It wins against an expired-but-unpruned row (`:1010-1015`), which is
+    /// what makes a node that restarts inside the sweeper's lag reclaim its own
+    /// id rather than lose to its own corpse.
+    pub fn put_if_absent_ttl(
+        ns: &str,
+        key: &str,
+        value: serde_json::Value,
+        ttl_seconds: u64,
+    ) -> KvOp {
+        KvOp::put_ttl(ns, key, value, ttl_seconds, Some(0))
+    }
+
+    /// A FENCED write that never expires: conditional on `expect`, and
+    /// `required` so that losing it aborts the whole transaction rather than
+    /// answering `applied:false` beside a batch of writes that landed anyway.
+    /// See [`crate::cluster::fence`].
+    pub fn fence(ns: &str, key: &str, value: serde_json::Value, expect: i64) -> KvOp {
+        KvOp::Put {
+            ns: ns.to_string(),
+            key: key.to_string(),
+            value,
+            forever: true,
+            ttl_seconds: None,
+            expect: Some(expect),
+            required: true,
+        }
+    }
+
+    /// Remove a key, optionally under a precondition. Not on any path today —
+    /// it is here because the offsets and the fences of a group are exactly
+    /// what a DeleteGroups would sweep, and the layout was designed for it
+    /// ([`crate::offsets`]).
+    pub fn delete(ns: &str, key: &str, expect: Option<i64>) -> KvOp {
+        KvOp::Delete {
+            ns: ns.to_string(),
+            key: key.to_string(),
+            expect,
         }
     }
 
@@ -433,7 +584,7 @@ impl KvOp {
     /// way the broker counts it (server/src/handlers/kv.rs).
     pub fn keys(&self) -> usize {
         match self {
-            KvOp::Put { .. } => 1,
+            KvOp::Put { .. } | KvOp::Delete { .. } => 1,
             KvOp::GetMany { keys, .. } => keys.len(),
             KvOp::GetPrefix { limit, .. } => (*limit).clamp(1, MAX_KV_PREFIX_LIMIT) as usize,
         }
@@ -449,6 +600,12 @@ pub struct KvRow {
     /// (`keysOnly`, which this facade never asks for).
     #[serde(default)]
     pub value: serde_json::Value,
+    /// Opaque, unique, from a sequence — never `version + 1`, so there is no
+    /// ABA (024_kv.sql:133-140). Compared for EQUALITY only, never ordered and
+    /// never arithmetic. 0 is "not there", which is also how an expired row
+    /// reads.
+    #[serde(default)]
+    pub version: i64,
 }
 
 /// What one operation answered. A faithful subset: the fields the offset path
@@ -465,6 +622,20 @@ pub struct KvAnswer {
     /// Writes only. A `put` with no precondition is always `Some(true)`.
     #[serde(default)]
     pub applied: Option<bool>,
+    /// Writes only. The version the key holds AFTER the operation when it
+    /// applied, and the WINNER's when it did not — the loser must not need a
+    /// second round trip (024_kv.sql:1467-1471). See [`KvRow::version`].
+    #[serde(default)]
+    pub version: i64,
+    /// Writes only, and only when `applied` is false: `version`, `absent` or
+    /// `exists`. Which one it is decides whether a fence is retried or handed
+    /// over — see [`crate::cluster::fence`].
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Writes only: the value under the key. The WINNER's when the operation
+    /// did not apply, which is what tells a loser who it lost to.
+    #[serde(default)]
+    pub value: serde_json::Value,
     #[serde(default)]
     pub rows: Vec<KvRow>,
     /// `getMany` only: the keys that are not there.
@@ -479,6 +650,32 @@ pub struct KvAnswer {
     /// `getPrefix` only: the cursor to continue from, set when `truncated`.
     #[serde(rename = "nextAfter", default)]
     pub next_after: Option<String>,
+}
+
+/// What one `DELETE /api/v1/resources/queues/:queue` did.
+///
+/// One field, because the route reports one thing this facade can act on. The
+/// SP always answers `deleted:true` and hides the real outcome in `existed`,
+/// which the route then corrects — it rewrites `deleted` to mirror `existed`
+/// precisely so a client that trusts `deleted` is not told a queue it never had
+/// was removed (server/src/handlers/queues.rs). This reads the corrected field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Deleted {
+    /// Whether there was a queue of that name to delete.
+    pub existed: bool,
+}
+
+/// The delete body, as the route writes it. Only the one field is named; the SP
+/// also reports counts the dashboard uses and none of that may become a parse
+/// failure here.
+#[derive(Debug, Deserialize)]
+struct DeleteQueueBody {
+    #[serde(default)]
+    deleted: bool,
+    /// Present when the SP answered rather than the route — read only to make
+    /// a stored-procedure refusal loud instead of silently "not deleted".
+    #[serde(default)]
+    error: Option<serde_json::Value>,
 }
 
 /// The calls the facade makes to Queen. A trait, and not just the concrete
@@ -548,6 +745,41 @@ pub trait QueenApi: Send + Sync + 'static {
         let _ = token;
         Box::pin(async { Ok(None) })
     }
+
+    /// `POST /api/v1/configure` with an options bag — the M7 CreateTopics path
+    /// (`crate::handlers::create_topics`).
+    ///
+    /// [`QueenApi::create_queue`] keeps its own body and is NOT expressed in
+    /// terms of this one. The two send the same request with different bodies,
+    /// and that duplication is deliberate: `create_queue` is the auto-create
+    /// path, whose contract is "an EMPTY options bag, only ever for a name the
+    /// catalog does not have", and routing it through a method that takes a bag
+    /// would put one edit away from the auto-create path a default that resets
+    /// a live queue's config columns.
+    ///
+    /// The same upsert rule applies here and is stricter, not looser: the SP
+    /// rewrites every config column it was not given to ITS defaults, so this
+    /// may only be called for a name the catalog does not have. CreateTopics
+    /// answers TOPIC_ALREADY_EXISTS instead of calling it.
+    fn create_queue_with<'a>(
+        &'a self,
+        name: &'a str,
+        options: &'a serde_json::Value,
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<()>>;
+
+    /// `DELETE /api/v1/resources/queues/:queue` — the M7 DeleteTopics path.
+    ///
+    /// The route is idempotent by design and answers 200 either way, rewriting
+    /// the body so `deleted` mirrors `existed`
+    /// (server/src/handlers/queues.rs). So a missing queue is not an HTTP
+    /// error to be mapped: it is [`Deleted::existed`] being false, which is
+    /// what becomes UNKNOWN_TOPIC_OR_PARTITION.
+    fn delete_queue<'a>(
+        &'a self,
+        name: &'a str,
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Deleted>>;
 
     /// The same Queen, reached with `host` as the HTTP `Host` header of every
     /// call — the M5 shared-host fit (`QUEEN_KAFKA_FORWARD_SNI_HOST`).
@@ -671,6 +903,25 @@ fn retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<i64> {
     seconds.checked_mul(1_000).filter(|ms| *ms >= 0)
 }
 
+/// One path SEGMENT, percent-encoded.
+///
+/// The unreserved set of RFC 3986 plus nothing: every other byte is escaped, so
+/// a `/`, a `?`, a `#` or a space in a name cannot change which resource the
+/// request addresses. Hand-rolled rather than pulled from a crate because it is
+/// six lines and the only URL this facade builds from a client-supplied string.
+fn encode_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 /// The list body. Only the fields this facade reads are named; the broker adds
 /// to this response for the dashboard (retainedBytes, messages, the top-level
 /// kv/timer byte counters) and none of that may turn into a parse failure here.
@@ -726,6 +977,70 @@ impl QueenApi for HttpQueen {
                 )));
             }
             Ok(())
+        })
+    }
+
+    fn create_queue_with<'a>(
+        &'a self,
+        name: &'a str,
+        options: &'a serde_json::Value,
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            // The bag is MERGED into `{"queue": name}` rather than nested: the
+            // route reads the options from the top level of the body
+            // (server/src/handlers/queues.rs → `configure_queue_v1(name,
+            // options)`), and `queue` is the one key that is not one of them.
+            let mut payload = serde_json::Map::new();
+            if let Some(bag) = options.as_object() {
+                payload.extend(bag.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+            payload.insert("queue".into(), serde_json::json!(name));
+            let body = Self::send(
+                self.request(reqwest::Method::POST, "/api/v1/configure", token)
+                    .body(serde_json::Value::Object(payload).to_string()),
+            )
+            .await?;
+            // The same two checks `create_queue` makes, and for the same
+            // reason: `handle_configure` surfaces a stored-procedure failure as
+            // a non-2xx, but the SP can also echo `{"error":…}` inside a 200.
+            let parsed: serde_json::Value =
+                serde_json::from_str(&body).map_err(|e| Error::Body(e.to_string()))?;
+            if let Some(e) = parsed.get("error").filter(|e| !e.is_null()) {
+                return Err(Error::Body(format!("configure answered {e}")));
+            }
+            if parsed.get("configured").and_then(|c| c.as_bool()) != Some(true) {
+                return Err(Error::Body(format!(
+                    "configure did not confirm: {}",
+                    Snippet(&body)
+                )));
+            }
+            Ok(())
+        })
+    }
+
+    fn delete_queue<'a>(
+        &'a self,
+        name: &'a str,
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Deleted>> {
+        Box::pin(async move {
+            // Percent-encoded, because the name is a path SEGMENT and it came
+            // off a Kafka wire. `handlers::metadata::is_valid_topic_name` has
+            // already refused everything outside `[A-Za-z0-9._-]` by the time a
+            // delete gets here, so this encodes nothing today — it is here so
+            // that a future relaxation of the name rule cannot become a path
+            // traversal.
+            let path = format!("/api/v1/resources/queues/{}", encode_segment(name));
+            let body = Self::send(self.request(reqwest::Method::DELETE, &path, token)).await?;
+            let parsed: DeleteQueueBody =
+                serde_json::from_str(&body).map_err(|e| Error::Body(e.to_string()))?;
+            if let Some(e) = parsed.error.filter(|e| !e.is_null()) {
+                return Err(Error::Body(format!("delete answered {e}")));
+            }
+            Ok(Deleted {
+                existed: parsed.deleted,
+            })
         })
     }
 
@@ -837,6 +1152,27 @@ struct KvBody<'a> {
 struct KvResponseBody {
     #[serde(default)]
     results: Vec<KvAnswer>,
+    /// Present, and false, on the one 200 that is not an answer: a `required`
+    /// precondition that lost. See [`Error::Precondition`].
+    #[serde(default = "yes")]
+    ok: bool,
+    #[serde(default)]
+    reason: String,
+    #[serde(rename = "failedIndex", default)]
+    failed_index: usize,
+    #[serde(rename = "kvReason", default)]
+    kv_reason: Option<String>,
+    #[serde(default)]
+    version: i64,
+    #[serde(default)]
+    value: serde_json::Value,
+}
+
+/// A body with no `ok` at all is a successful one — `ok` is written only by
+/// `precondition_200` (server/src/handlers/kv.rs:337-354) and by the error
+/// shapes, and the success body has never carried it.
+fn yes() -> bool {
+    true
 }
 
 /// Match a KV response back to the operations that produced it.
@@ -850,6 +1186,24 @@ struct KvResponseBody {
 fn align_kv_results(body: &str, ops: usize) -> Result<Vec<KvAnswer>> {
     let parsed: KvResponseBody =
         serde_json::from_str(body).map_err(|e| Error::Body(e.to_string()))?;
+    // The one 200 that carries no results at all. Read BEFORE the alignment,
+    // because the alignment would otherwise report it as "kv answered nothing
+    // for operation 0" — a body error, which is neither retriable nor true:
+    // the call was refused by a precondition and every operation in it rolled
+    // back. See [`Error::Precondition`].
+    if !parsed.ok {
+        return Err(match parsed.reason.as_str() {
+            "kv_precondition" => Error::Precondition {
+                failed_index: parsed.failed_index,
+                reason: parsed.kv_reason.unwrap_or_default(),
+                version: parsed.version,
+                value: parsed.value,
+            },
+            // `ok:false` with any other reason is a shape this client has not
+            // been taught. Named rather than guessed at.
+            other => Error::Body(format!("kv answered ok=false, reason={other}")),
+        });
+    }
     let mut out: Vec<Option<KvAnswer>> = (0..ops).map(|_| None).collect();
     for r in parsed.results {
         let slot = out
@@ -1384,6 +1738,36 @@ impl Catalog {
         self.entries.lock().await.remove(&key);
         Ok(())
     }
+
+    /// The same, with an options bag — the CreateTopics path.
+    ///
+    /// The cache is dropped exactly as [`Catalog::create`] drops it, and that
+    /// is what makes `kafka-topics.sh --create` followed immediately by
+    /// `--list` show the topic instead of a list up to one TTL old.
+    pub async fn create_with(
+        &self,
+        name: &str,
+        options: &serde_json::Value,
+        token: Option<&str>,
+    ) -> Result<()> {
+        self.api.create_queue_with(name, options, token).await?;
+        let key = self.identities.known(token);
+        self.entries.lock().await.remove(&key);
+        Ok(())
+    }
+
+    /// Delete a queue and drop the cached list — the DeleteTopics path.
+    ///
+    /// The cache is dropped on a FAILURE too, and deliberately: a delete whose
+    /// answer did not arrive may still have landed, and serving a list that
+    /// says the queue is there would be a guess. Re-reading costs one admin
+    /// call; guessing costs a client a topic that is not where it was told.
+    pub async fn delete(&self, name: &str, token: Option<&str>) -> Result<Deleted> {
+        let answer = self.api.delete_queue(name, token).await;
+        let key = self.identities.known(token);
+        self.entries.lock().await.remove(&key);
+        answer
+    }
 }
 
 /// The failure `cred`'s own last call left on `entry`, if that is whose it was.
@@ -1432,6 +1816,19 @@ pub mod testing {
         pub queues: Mutex<Vec<Queue>>,
         pub lists: AtomicUsize,
         pub creates: Mutex<Vec<String>>,
+        /// Every `create_queue_with`, as `(name, options bag)`. Separate from
+        /// `creates` on purpose: the auto-create path and the CreateTopics path
+        /// send DIFFERENT bodies to the same route, and a test that could not
+        /// tell them apart could not catch one being routed through the other.
+        pub configures: Mutex<Vec<(String, serde_json::Value)>>,
+        /// Every `delete_queue`, in call order.
+        pub deletes: Mutex<Vec<String>>,
+        /// When set, the next `create_queue_with` fails with exactly this
+        /// error — the CreateTopics status mapping needs failures `fail`
+        /// cannot express.
+        pub create_error: Mutex<Option<Error>>,
+        /// When set, the next `delete_queue` fails with exactly this error.
+        pub delete_error: Mutex<Option<Error>>,
         pub tokens: Mutex<Vec<Option<String>>>,
         /// When set, every call fails with it.
         pub fail: Mutex<Option<String>>,
@@ -1478,7 +1875,12 @@ pub mod testing {
         /// procedure's key column is `COLLATE "C"`, so a prefix read comes back
         /// in BYTE order and pages with a cursor in that order. A `HashMap` here
         /// would let a paging bug pass.
-        kv: Mutex<std::collections::BTreeMap<(String, String), serde_json::Value>>,
+        kv: Mutex<std::collections::BTreeMap<(String, String), Stored>>,
+        /// `queen.kv_version_seq`. A SEQUENCE and not `version + 1`, which is
+        /// what makes a version unique across the whole store and rules out an
+        /// ABA (024_kv.sql:133-140). It starts well above zero so that a test
+        /// asserting on one cannot pass by accident against a counter.
+        kv_version: std::sync::atomic::AtomicI64,
         /// Ceiling on the rows ONE read answers before it truncates, standing in
         /// for the stored procedure's 4 MiB byte budget ([`MAX_KV_READ_BYTES`]),
         /// which no test can reach with realistic values. `None` is "never
@@ -1491,6 +1893,36 @@ pub mod testing {
         identities: Mutex<HashMap<Option<String>, Result<Option<String>>>>,
         /// The credential every identity call was made with, in call order.
         identity_calls: Mutex<Vec<Option<String>>>,
+    }
+
+    /// One row of the fake key/value store.
+    ///
+    /// The version and the expiry are not decoration: cluster mode fences an
+    /// offset commit on a version and claims a node id with a TTL, so a double
+    /// that answered `applied: true` to everything would let both defects
+    /// through ([`crate::cluster`]).
+    #[derive(Clone)]
+    struct Stored {
+        value: serde_json::Value,
+        version: i64,
+        /// `None` is `forever`. Measured on [`tokio::time::Instant`] so a test
+        /// under `tokio::time::pause` can advance past it — which is the only
+        /// way to reach the resurrection rule (024_kv.sql:1010-1015).
+        expires_at: Option<tokio::time::Instant>,
+    }
+
+    impl Stored {
+        /// `queen.kv_live_v1`: an expired row is NEVER returned and NEVER
+        /// counts as existing, before the sweeper prunes it (024_kv.sql:576-580).
+        fn live(&self, now: tokio::time::Instant) -> bool {
+            self.expires_at.is_none_or(|at| at > now)
+        }
+    }
+
+    /// `queen.kv_ver_v1`: the version of a row as a READER sees it — 0 for an
+    /// absent row and for an expired one alike.
+    fn effective_version(row: Option<&Stored>, now: tokio::time::Instant) -> i64 {
+        row.filter(|r| r.live(now)).map_or(0, |r| r.version)
     }
 
     /// One partition of the fake log.
@@ -1521,6 +1953,10 @@ pub mod testing {
                 ),
                 lists: AtomicUsize::new(0),
                 creates: Mutex::new(Vec::new()),
+                configures: Mutex::new(Vec::new()),
+                deletes: Mutex::new(Vec::new()),
+                create_error: Mutex::new(None),
+                delete_error: Mutex::new(None),
                 tokens: Mutex::new(Vec::new()),
                 fail: Mutex::new(None),
                 list_error: Mutex::new(None),
@@ -1536,6 +1972,7 @@ pub mod testing {
                 kv_calls: Mutex::new(Vec::new()),
                 kv_error: Mutex::new(None),
                 kv: Mutex::new(std::collections::BTreeMap::new()),
+                kv_version: std::sync::atomic::AtomicI64::new(1_000),
                 kv_read_rows: Mutex::new(None),
                 identities: Mutex::new(HashMap::new()),
                 identity_calls: Mutex::new(Vec::new()),
@@ -1612,6 +2049,26 @@ pub mod testing {
             self.creates.lock().unwrap().clone()
         }
 
+        /// Every `(name, options)` a CreateTopics configured, in call order.
+        pub fn configured(&self) -> Vec<(String, serde_json::Value)> {
+            self.configures.lock().unwrap().clone()
+        }
+
+        /// Every name a DeleteTopics deleted, in call order.
+        pub fn deleted(&self) -> Vec<String> {
+            self.deletes.lock().unwrap().clone()
+        }
+
+        /// The next `create_queue_with` fails with `e` and writes nothing.
+        pub fn fail_create(&self, e: Error) {
+            *self.create_error.lock().unwrap() = Some(e);
+        }
+
+        /// The next `delete_queue` fails with `e` and removes nothing.
+        pub fn fail_delete(&self, e: Error) {
+            *self.delete_error.lock().unwrap() = Some(e);
+        }
+
         pub fn fail_with(&self, why: &str) {
             *self.fail.lock().unwrap() = Some(why.to_string());
         }
@@ -1639,19 +2096,58 @@ pub mod testing {
 
         /// Put a key into the store, as if something else had written it.
         pub fn kv_seed(&self, ns: &str, key: &str, value: serde_json::Value) {
-            self.kv
-                .lock()
-                .unwrap()
-                .insert((ns.to_string(), key.to_string()), value);
+            self.kv_seed_ttl(ns, key, value, None);
         }
 
-        /// What the store holds for one key.
+        /// The same, with an expiry — `Some(seconds)` or `None` for forever.
+        /// The clock is [`tokio::time::Instant`]'s, so a paused test advances
+        /// past it.
+        pub fn kv_seed_ttl(
+            &self,
+            ns: &str,
+            key: &str,
+            value: serde_json::Value,
+            ttl_seconds: Option<u64>,
+        ) {
+            let version = self.next_version();
+            self.kv.lock().unwrap().insert(
+                (ns.to_string(), key.to_string()),
+                Stored {
+                    value,
+                    version,
+                    expires_at: ttl_seconds
+                        .map(|s| tokio::time::Instant::now() + Duration::from_secs(s)),
+                },
+            );
+        }
+
+        fn next_version(&self) -> i64 {
+            self.kv_version
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        }
+
+        /// What the store holds for one key, or `None` when the key is absent
+        /// OR expired — the same rule a reader gets (024_kv.sql:576-580).
         pub fn kv_get(&self, ns: &str, key: &str) -> Option<serde_json::Value> {
+            let now = tokio::time::Instant::now();
             self.kv
                 .lock()
                 .unwrap()
                 .get(&(ns.to_string(), key.to_string()))
-                .cloned()
+                .filter(|row| row.live(now))
+                .map(|row| row.value.clone())
+        }
+
+        /// The version one key holds, 0 when it is absent or expired.
+        pub fn kv_version_of(&self, ns: &str, key: &str) -> i64 {
+            let now = tokio::time::Instant::now();
+            effective_version(
+                self.kv
+                    .lock()
+                    .unwrap()
+                    .get(&(ns.to_string(), key.to_string())),
+                now,
+            )
         }
 
         /// The store, in byte order.
@@ -1747,6 +2243,25 @@ pub mod testing {
         ) -> BoxFuture<'a, Result<()>> {
             self.note();
             self.inner.create_queue(name, token)
+        }
+
+        fn create_queue_with<'a>(
+            &'a self,
+            name: &'a str,
+            options: &'a serde_json::Value,
+            token: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<()>> {
+            self.note();
+            self.inner.create_queue_with(name, options, token)
+        }
+
+        fn delete_queue<'a>(
+            &'a self,
+            name: &'a str,
+            token: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<Deleted>> {
+            self.note();
+            self.inner.delete_queue(name, token)
         }
 
         fn push<'a>(
@@ -1852,6 +2367,65 @@ pub mod testing {
                     partitions: 0,
                 });
                 Ok(())
+            })
+        }
+
+        fn create_queue_with<'a>(
+            &'a self,
+            name: &'a str,
+            options: &'a serde_json::Value,
+            token: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<()>> {
+            Box::pin(async move {
+                self.tokens.lock().unwrap().push(token.map(str::to_string));
+                // Recorded BEFORE the failure check, so a test can assert that
+                // a create was attempted and still refused.
+                self.configures
+                    .lock()
+                    .unwrap()
+                    .push((name.to_string(), options.clone()));
+                if let Some(e) = self.create_error.lock().unwrap().take() {
+                    return Err(e);
+                }
+                if let Some(e) = self.fail.lock().unwrap().clone() {
+                    return Err(Error::Transport(e));
+                }
+                self.queues.lock().unwrap().push(Queue {
+                    name: name.to_string(),
+                    partitions: 0,
+                });
+                Ok(())
+            })
+        }
+
+        /// The route's own shape: 200 either way, `deleted` mirroring
+        /// `existed`. A queue that is not there is NOT an error here, which is
+        /// the whole distinction DeleteTopics rests on.
+        fn delete_queue<'a>(
+            &'a self,
+            name: &'a str,
+            token: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<Deleted>> {
+            Box::pin(async move {
+                self.tokens.lock().unwrap().push(token.map(str::to_string));
+                self.deletes.lock().unwrap().push(name.to_string());
+                if let Some(e) = self.delete_error.lock().unwrap().take() {
+                    return Err(e);
+                }
+                if let Some(e) = self.fail.lock().unwrap().clone() {
+                    return Err(Error::Transport(e));
+                }
+                let mut queues = self.queues.lock().unwrap();
+                let before = queues.len();
+                queues.retain(|q| q.name != name);
+                let existed = queues.len() != before;
+                drop(queues);
+                if existed {
+                    // The log goes with the queue, as it does in Queen: the
+                    // delete cascades through log_partitions.
+                    self.logs.lock().unwrap().retain(|(q, _), _| q != name);
+                }
+                Ok(Deleted { existed })
             })
         }
 
@@ -1998,16 +2572,109 @@ pub mod testing {
                     return Err(Error::status(400, format!("{keys} keys in one call")));
                 }
                 let cut = *self.kv_read_rows.lock().unwrap();
+                let now = tokio::time::Instant::now();
                 let mut kv = self.kv.lock().unwrap();
-                Ok(ops
-                    .iter()
-                    .enumerate()
-                    .map(|(index, op)| match op {
-                        KvOp::Put { ns, key, value, .. } => {
-                            kv.insert((ns.clone(), key.clone()), value.clone());
+                // VALIDATE-THEN-APPLY, and all-or-nothing on an escalation
+                // (024_kv.sql §6.1 point 1 and point 5): a `required`
+                // precondition that loses raises `check_violation`, which
+                // aborts the TRANSACTION — so the writes that already applied
+                // in the same call must not survive either. The working copy is
+                // what makes that true here rather than merely intended; it is
+                // affordable because a test's store is tens of keys.
+                let mut working = kv.clone();
+                let mut answers = Vec::with_capacity(ops.len());
+                for (index, op) in ops.iter().enumerate() {
+                    let answer = match op {
+                        KvOp::Put {
+                            ns,
+                            key,
+                            value,
+                            ttl_seconds,
+                            expect,
+                            required,
+                            ..
+                        } => {
+                            let at = (ns.clone(), key.clone());
+                            let current = working.get(&at);
+                            let effective = effective_version(current, now);
+                            let (applied, reason) = match expect {
+                                None => (true, None),
+                                // "Must not exist", and it WINS against an
+                                // expired-but-unpruned row.
+                                Some(0) => (effective == 0, Some("exists")),
+                                // A PURE UPDATE: an `expect: N > 0` on an
+                                // absent key creates NOTHING.
+                                Some(n) => match effective {
+                                    0 => (false, Some("absent")),
+                                    v => (v == *n, Some("version")),
+                                },
+                            };
+                            if applied {
+                                let version = self.next_version();
+                                working.insert(
+                                    at,
+                                    Stored {
+                                        value: value.clone(),
+                                        version,
+                                        expires_at: ttl_seconds
+                                            .map(|s| now + Duration::from_secs(s)),
+                                    },
+                                );
+                                KvAnswer {
+                                    applied: Some(true),
+                                    version,
+                                    value: value.clone(),
+                                    ..empty_answer(index, "put")
+                                }
+                            } else {
+                                if *required {
+                                    // The whole call, including `working`, is
+                                    // discarded: nothing was written.
+                                    return Err(Error::Precondition {
+                                        failed_index: index,
+                                        reason: reason.unwrap_or_default().to_string(),
+                                        version: effective,
+                                        value: current
+                                            .filter(|r| r.live(now))
+                                            .map(|r| r.value.clone())
+                                            .unwrap_or(serde_json::Value::Null),
+                                    });
+                                }
+                                KvAnswer {
+                                    applied: Some(false),
+                                    version: effective,
+                                    reason: reason.map(str::to_string),
+                                    // An expired row is not a value: the loser
+                                    // sees the same nothing a reader would.
+                                    value: current
+                                        .filter(|r| r.live(now))
+                                        .map(|r| r.value.clone())
+                                        .unwrap_or(serde_json::Value::Null),
+                                    ..empty_answer(index, "put")
+                                }
+                            }
+                        }
+                        KvOp::Delete { ns, key, expect } => {
+                            let at = (ns.clone(), key.clone());
+                            let effective = effective_version(working.get(&at), now);
+                            let (applied, reason) = match expect {
+                                None => (effective != 0, Some("absent")),
+                                Some(0) => (effective == 0, Some("exists")),
+                                Some(n) => match effective {
+                                    0 => (false, Some("absent")),
+                                    v => (v == *n, Some("version")),
+                                },
+                            };
+                            if applied {
+                                working.remove(&at);
+                            }
                             KvAnswer {
-                                applied: Some(true),
-                                ..empty_answer(index, "put")
+                                applied: Some(applied),
+                                // The version that WAS there either way: what was
+                                // removed, or what stopped the removal.
+                                version: effective,
+                                reason: (!applied).then(|| reason.unwrap_or_default().to_string()),
+                                ..empty_answer(index, "delete")
                             }
                         }
                         KvOp::GetMany { ns, keys } => {
@@ -2021,15 +2688,23 @@ pub mod testing {
                             let mut sorted: Vec<&String> = keys.iter().collect();
                             sorted.sort();
                             for key in sorted {
-                                match kv.get(&(ns.clone(), key.clone())) {
-                                    Some(value) => {
+                                // The WORKING copy, because the stored
+                                // procedure applies every write before the
+                                // first read (§6.1 point 2), so a get after a
+                                // put in one call sees the put.
+                                match working
+                                    .get(&(ns.clone(), key.clone()))
+                                    .filter(|row| row.live(now))
+                                {
+                                    Some(row) => {
                                         if cut.is_some_and(|c| rows.len() >= c) {
                                             truncated = true;
                                             continue;
                                         }
                                         rows.push(KvRow {
                                             key: key.clone(),
-                                            value: value.clone(),
+                                            value: row.value.clone(),
+                                            version: row.version,
                                         });
                                     }
                                     None => missing.push(key.clone()),
@@ -2052,8 +2727,8 @@ pub mod testing {
                             let limit = cut.map_or(limit, |c| limit.min(c));
                             let mut rows = Vec::new();
                             let mut truncated = false;
-                            for ((row_ns, key), value) in kv.iter() {
-                                if row_ns != ns || !key.starts_with(prefix) {
+                            for ((row_ns, key), row) in working.iter() {
+                                if row_ns != ns || !key.starts_with(prefix) || !row.live(now) {
                                     continue;
                                 }
                                 // Exclusive, and in byte order: the same cursor
@@ -2067,7 +2742,8 @@ pub mod testing {
                                 }
                                 rows.push(KvRow {
                                     key: key.clone(),
-                                    value: value.clone(),
+                                    value: row.value.clone(),
+                                    version: row.version,
                                 });
                             }
                             let next_after = truncated
@@ -2080,8 +2756,11 @@ pub mod testing {
                                 ..empty_answer(index, "getPrefix")
                             }
                         }
-                    })
-                    .collect())
+                    };
+                    answers.push(answer);
+                }
+                *kv = working;
+                Ok(answers)
             })
         }
     }
@@ -2092,6 +2771,9 @@ pub mod testing {
             index,
             op: op.to_string(),
             applied: None,
+            version: 0,
+            reason: None,
+            value: serde_json::Value::Null,
             rows: Vec::new(),
             missing: Vec::new(),
             truncated: false,
@@ -2739,6 +3421,23 @@ mod tests {
         }
 
         fn create_queue<'a>(&'a self, _: &'a str, _: Option<&'a str>) -> BoxFuture<'a, Result<()>> {
+            unreachable!("the stall test only lists")
+        }
+
+        fn create_queue_with<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a serde_json::Value,
+            _: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<()>> {
+            unreachable!("the stall test only lists")
+        }
+
+        fn delete_queue<'a>(
+            &'a self,
+            _: &'a str,
+            _: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<Deleted>> {
             unreachable!("the stall test only lists")
         }
 

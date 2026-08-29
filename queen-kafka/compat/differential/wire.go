@@ -579,6 +579,13 @@ var errNames = map[int16]string{
 	76: "UNSUPPORTED_COMPRESSION_TYPE", 78: "OFFSET_NOT_AVAILABLE",
 	79: "MEMBER_ID_REQUIRED", 81: "GROUP_MAX_SIZE_REACHED",
 	82: "FENCED_INSTANCE_ID", 87: "UNKNOWN_TOPIC_ID",
+	// M7 F2's two: the pair DeleteGroups answers with, and the reason both
+	// brokers agree on them is that they are Kafka's own rule (a group with
+	// members is not deletable) and Kafka's own answer for a name it has never
+	// seen.
+	39: "INVALID_REPLICA_ASSIGNMENT", 40: "INVALID_CONFIG",
+	68: "NON_EMPTY_GROUP", 69: "GROUP_ID_NOT_FOUND",
+	89: "THROTTLING_QUOTA_EXCEEDED",
 }
 
 func errName(code int16) string {

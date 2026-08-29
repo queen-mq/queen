@@ -42,6 +42,24 @@
 //! this facade invented would end a consumer that a real broker would have
 //! started. The refusals this handler does have are all group-level, where the
 //! client's own retry loop is waiting for them. See `compat/ERRORS.md`.
+//!
+//! ## There is deliberately NO cluster-mode ownership guard here
+//!
+//! The other five group-addressed APIs — Join, Sync, Heartbeat, Leave and
+//! OffsetCommit — answer NOT_COORDINATOR at a node that does not own the group
+//! ([`crate::cluster`]). This one does not, and the omission is a decision, not
+//! an oversight, so nobody adds one for symmetry:
+//!
+//!   * it is a READ of shared state. The offsets are rows in `queen.kv`
+//!     (024_kv.sql), so every node answers the same thing; there is no second
+//!     copy for a redirect to protect.
+//!   * refusing it would break the `assign()`-based simple consumer, which
+//!     never runs FindCoordinator and may hold a connection to any node. It
+//!     would be told to go somewhere it has no way of finding.
+//!
+//! The commit path is where the ownership matters, because a commit can rewind
+//! what another node wrote, and that is exactly where the guard and the fence
+//! both are.
 
 use kafka_protocol::error::ResponseError;
 use kafka_protocol::messages::offset_fetch_response::{

@@ -16,6 +16,38 @@
 //! is written into every partition of the response rather than reported once,
 //! which is also what Apache Kafka does with the same situation.
 //!
+//! ## In cluster mode there are two more fences, and they are different things
+//!
+//! The membership check above is about a member of a group. Cluster mode adds
+//! two checks about the NODE ([`crate::cluster`]):
+//!
+//!   * an ownership GUARD, before the coordinator is touched: a node that is
+//!     not the rendezvous owner of this group answers NOT_COORDINATOR, which is
+//!     a redirect every client answers by re-running FindCoordinator. It
+//!     applies to the SIMPLE CONSUMER too, deliberately: two simple consumers
+//!     on two nodes are exactly the measured last-writer-wins, and exempting
+//!     them would leave the hole open in the one case nothing else catches.
+//!   * a compare-and-set FENCE, inside the write: the commit batch carries a
+//!     conditional write of the group's fence key with `"required": true`, so a
+//!     node that is stale about the live set — and therefore still believes the
+//!     guard above passed — writes nothing at all rather than rewinding the
+//!     real owner's offsets ([`crate::cluster::fence`]).
+//!
+//! ## It also writes the one thing that makes a group EXIST
+//!
+//! M7 F2's durable group index ([`crate::offsets::index_key`]). A commit is the
+//! only request every consumer sends — a simple `assign()`-based consumer never
+//! joins a group at all, and it is exactly the group `kafka-consumer-groups.sh
+//! --list` has to show — so it is where a group's existence is recorded.
+//!
+//! It costs one extra call to Queen the FIRST time a (tenant, group) commits in
+//! this process's lifetime and nothing after that: [`INDEXED`] is the memory,
+//! and it is bounded and evicting, because a group id is a string a client
+//! chooses. A failed index write does not fail the commit and does not mark the
+//! group as seen — the next commit tries again — because a group whose offsets
+//! are stored and whose index row is not is a group that works and does not
+//! list, which is a smaller wrong than a commit refused for a listing.
+//!
 //! ## What is refused before Queen is asked
 //!
 //! A topic name Metadata would not show (`__`-prefixed, or not a legal Kafka
@@ -39,12 +71,94 @@ use kafka_protocol::messages::offset_commit_response::{
 use kafka_protocol::messages::{OffsetCommitRequest, OffsetCommitResponse, TopicName};
 use kafka_protocol::protocol::StrBytes;
 
+use crate::cluster::fence;
 use crate::handlers::metadata;
+use crate::identity::TenantKey;
 use crate::offsets::{self, Committed};
 use crate::Facade;
 
 /// Kafka's "no offset": the only negative a client may commit.
 const NO_OFFSET: i64 = -1;
+
+/// The (tenant, group) pairs this process has already written an index row for.
+///
+/// Bounded and EVICTING for the same reason `crate::Lanes` is: a group id is a
+/// string a client chooses, and a map that grows with every id anyone commits
+/// under is a map an anonymous peer sizes. Evicting costs the evicted group one
+/// redundant `put` on its next commit — an upsert of the row it already has —
+/// and nothing else, which is why the cheapest possible policy (drop the least
+/// recently written) is the right one here.
+///
+/// Keyed by the TENANT as well as the group, and that is not decoration: the KV
+/// store is scoped per tenant on the broker side, so one tenant's row is not
+/// another's. A set keyed by the group id alone would let the first tenant to
+/// commit under `orders-consumer` suppress the index write of every other
+/// tenant that ever used the name — their groups would work and never list.
+static INDEXED: Seen = Seen::new();
+
+/// How many (tenant, group) pairs [`INDEXED`] remembers. The same number as
+/// `coordinator::MAX_GROUPS`, and for the same reason: past it this facade is
+/// not coordinating the group anyway.
+const MAX_INDEXED: usize = 10_000;
+
+/// The remembering half of [`INDEXED`]. A `std::sync::Mutex` around a map and a
+/// counter; nothing is awaited while it is held.
+struct Seen {
+    seen: std::sync::Mutex<Option<std::collections::HashMap<(TenantKey, String), u64>>>,
+    clock: std::sync::atomic::AtomicU64,
+}
+
+impl Seen {
+    const fn new() -> Seen {
+        Seen {
+            seen: std::sync::Mutex::new(None),
+            clock: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Has this pair been indexed? Marking is a separate call
+    /// ([`Seen::mark`]), deliberately: a group is only remembered once the
+    /// write it stands for has actually landed.
+    fn contains(&self, tenant: &TenantKey, group: &str) -> bool {
+        let mut held = self
+            .seen
+            .lock()
+            .expect("the indexed-group lock is never held across a panic");
+        let seen = held.get_or_insert_with(Default::default);
+        let key = (tenant.clone(), group.to_string());
+        match seen.get_mut(&key) {
+            Some(used) => {
+                *used = self
+                    .clock
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn mark(&self, tenant: &TenantKey, group: &str) {
+        let now = self
+            .clock
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut held = self
+            .seen
+            .lock()
+            .expect("the indexed-group lock is never held across a panic");
+        let seen = held.get_or_insert_with(Default::default);
+        while seen.len() >= MAX_INDEXED {
+            let Some(coldest) = seen
+                .iter()
+                .min_by_key(|(_, used)| **used)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            seen.remove(&coldest);
+        }
+        seen.insert((tenant.clone(), group.to_string()), now);
+    }
+}
 
 /// What one requested partition resolved to.
 enum Slot {
@@ -64,7 +178,20 @@ pub async fn handle(
     if let Some(e) = crate::coordinator::invalid_group_id(group) {
         return refuse_all(req, e);
     }
-    // The fence, before anything is written. `generation_id_or_member_epoch` is
+    // Cluster mode's ownership guard, before the coordinator is touched — so a
+    // node that does not own this group never spawns an actor for it. In single
+    // mode this is `None` without reading anything.
+    if let Some(e) = facade.cluster.group_guard(group) {
+        tracing::debug!(
+            target: "kafka",
+            group,
+            error = ?e,
+            "offset commit refused: this node does not coordinate the group"
+        );
+        return refuse_all(req, e);
+    }
+    // The membership fence, before anything is written.
+    // `generation_id_or_member_epoch` is
     // the generation at every version this facade advertises — the "member
     // epoch" half of that name belongs to the KIP-848 protocol, which is out of
     // scope and unreachable here.
@@ -119,8 +246,72 @@ pub async fn handle(
         );
     }
 
-    let stored = offsets::store(facade.queen.as_ref(), &writes, token).await;
-    render(req, &slots, &stored)
+    // The fenced write. In single mode this is exactly the call it always was;
+    // in cluster mode the batch carries the group's fence at index 0 and a lost
+    // one writes nothing.
+    match fence::commit(
+        facade.queen.as_ref(),
+        &facade.cluster,
+        // The tenant this connection's credential resolves to — the same key
+        // the coordinator files the group's actor under, read from the catalog
+        // rather than resolved here (it is a synchronous cache read; see
+        // [`Facade::authenticated_as`]). The fence CELL is per (tenant, group)
+        // so that two tenants' groups of one name do not fight over one
+        // remembered version; the fence KEY needs no tenant, because
+        // `queen.kv` is keyed by one.
+        &facade.catalog.tenant_key(token),
+        group,
+        req.generation_id_or_member_epoch,
+        &writes,
+        token,
+    )
+    .await
+    {
+        fence::Verdict::Stored(stored) => {
+            if stored.iter().any(|r| r.is_ok()) {
+                remember(facade, group, token).await;
+            }
+            render(req, &slots, &stored)
+        }
+        // Both of these wrote NOTHING, and both are per-partition codes a
+        // client retries — the first after re-running FindCoordinator, the
+        // second after a backoff.
+        fence::Verdict::NotCoordinator => refuse_all(req, ResponseError::NotCoordinator),
+        fence::Verdict::Unavailable => refuse_all(req, ResponseError::CoordinatorNotAvailable),
+    }
+}
+
+/// Record that this group exists, once per (tenant, group) per process.
+///
+/// Called only after at least one offset of the commit actually landed, so a
+/// commit that wrote nothing does not put a group in the listing. The protocol
+/// type is the live actor's when there is one — `consumer` for a consumer
+/// group, `connect` for Kafka Connect — and the empty string when there is not,
+/// which is what Kafka reports for a simple `assign()`-based group and what
+/// `KafkaAdminClient.listConsumerGroups` accepts beside `consumer`.
+async fn remember(facade: &Facade, group: &str, token: Option<&str>) {
+    let tenant = facade.catalog.tenant_key(token);
+    if INDEXED.contains(&tenant, group) {
+        return;
+    }
+    let protocol_type = facade
+        .coordinator
+        .describe(group)
+        .await
+        .and_then(|s| s.protocol_type)
+        .unwrap_or_default();
+    match offsets::index(facade.queen.as_ref(), group, &protocol_type, token).await {
+        Ok(()) => INDEXED.mark(&tenant, group),
+        // Not marked, so the next commit tries again. The commit itself has
+        // already succeeded and is not affected: see the module header.
+        Err(e) => tracing::warn!(
+            target: "kafka",
+            group,
+            error = %e,
+            "the group's offsets were committed but its index row was not written; \
+             it will not appear in ListGroups until a later commit writes one"
+        ),
+    }
 }
 
 /// Resolve one requested partition into a write or a refusal.
@@ -317,12 +508,13 @@ mod tests {
             .with_protocols(vec![JoinGroupRequestProtocol::default()
                 .with_name(StrBytes::from_static_str("range"))
                 .with_metadata(Bytes::new())]);
-        let minted = crate::handlers::join_group::handle(f, &req, 4, "c").await;
+        let minted = crate::handlers::join_group::handle(f, &req, 4, "c", "/127.0.0.1").await;
         let joined = crate::handlers::join_group::handle(
             f,
             &req.clone().with_member_id(minted.member_id),
             4,
             "c",
+            "/127.0.0.1",
         )
         .await;
         (joined.member_id.to_string(), joined.generation_id)
