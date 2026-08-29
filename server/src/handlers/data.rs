@@ -806,6 +806,15 @@ struct PopPart {
     partition: String,
     #[serde(rename = "partitionId")]
     partition_id: String,
+    // Group-scoped redelivery count written by the SQL claim path. Defaulting
+    // to one keeps rolling upgrades safe when a broker briefly sees metadata
+    // produced by the previous procedure version.
+    #[serde(
+        rename = "deliveryAttempt",
+        alias = "attempt",
+        default
+    )]
+    delivery_attempt: Option<i32>,
     #[serde(default)]
     segments: Vec<PopSeg>,
 }
@@ -847,16 +856,22 @@ struct ListState {
 }
 
 // Single-partition pop result (db::pop_specific assembles the queen.log_pop_v1
-// rows into this shape): segments + partitionId, no partition name (the caller
-// knows it from the path). `seq` in the segment JSON carries base_offset and
-// `startOff` the start frame index — opaque tokens (§11); the renderer only
-// reads startOff/take/createdAt/blob.
+// rows into this shape): segments + partitionId + the group-scoped delivery
+// attempt, with no partition name (the caller knows it from the path). `seq` in
+// the segment JSON carries base_offset and `startOff` the start frame index —
+// opaque tokens (§11); the renderer only reads startOff/take/createdAt/blob.
 #[derive(Deserialize)]
 struct PopSpecificResult {
     #[serde(default)]
     segments: Vec<PopSeg>,
     #[serde(rename = "partitionId", default)]
     partition_id: String,
+    #[serde(
+        rename = "deliveryAttempt",
+        alias = "attempt",
+        default
+    )]
+    delivery_attempt: Option<i32>,
     #[serde(default)]
     error: Option<String>,
 }
@@ -1259,6 +1274,7 @@ async fn try_targeted_serve(
             parts.push(PopPart {
                 partition: hint.clone(),
                 partition_id: parsed.partition_id,
+                delivery_attempt: parsed.delivery_attempt,
                 segments: parsed.segments,
             });
             remaining -= seg_count;
@@ -2826,7 +2842,8 @@ fn pop_error_body(e: &str) -> (String, usize, PopMeta) {
     (out, 0, PopMeta::default())
 }
 
-// Wildcard pop response: SP result is {"partitions":[{partition,partitionId,segments}]}.
+// Wildcard pop response: SP result is
+// {"partitions":[{partition,partitionId,deliveryAttempt,segments}]}.
 // `bin_blobs`: Some on the bin_v1 path — native bytea[] blobs aligned with the
 // meta's segment traversal order (base64 `blob` fields absent from the JSON).
 #[allow(clippy::too_many_arguments)]
@@ -2912,6 +2929,7 @@ fn build_pop_specific_response(
     let part = PopPart {
         partition: partition.to_string(),
         partition_id: parsed.partition_id,
+        delivery_attempt: parsed.delivery_attempt,
         segments: parsed.segments,
     };
     render_pop_parts(std::slice::from_ref(&part), None, queue, group, lease_id, enc, cfl)
@@ -2976,6 +2994,7 @@ fn render_pop_parts(
     // lease and skip this entirely.
     let collect_leases = !lease_id.is_empty();
     for part in parts {
+        let delivery_attempt = part.delivery_attempt.unwrap_or(1).max(1).to_string();
         if !part.partition_id.is_empty() {
             meta.partition_ids.push(part.partition_id.clone());
         }
@@ -3113,7 +3132,9 @@ fn render_pop_parts(
                 json_escape_into(&mut out, lease_id);
                 out.push_str("\",\"consumerGroup\":\"");
                 json_escape_into(&mut out, group);
-                out.push_str("\"}");
+                out.push_str("\",\"deliveryAttempt\":");
+                out.push_str(&delivery_attempt);
+                out.push('}');
                 count += 1;
                 // ACK REGISTRY: fingerprint the delivered txn (~50ns) while it is
                 // in hand — same xxh3_128 the ack path recomputes from the wire
@@ -6385,6 +6406,179 @@ mod protocol_conformance {
         assert!(!parsed.has_conflation_conflict());
     }
 
+    /// `deliveryAttempt` is group/partition claim metadata, so every frame in
+    /// one claimed partition gets the same value while another partition in
+    /// the same response may have a different redelivery history.
+    #[test]
+    fn delivery_attempt_is_rendered_per_partition_and_defaults_to_one() {
+        let frames_a = [
+            FrameIn {
+                message_id: [1; 16],
+                txn: "a-1",
+                trace_id: None,
+                producer_sub: None,
+                payload: br#"{"n":1}"#,
+                encrypted: false,
+            },
+            FrameIn {
+                message_id: [2; 16],
+                txn: "a-2",
+                trace_id: None,
+                producer_sub: None,
+                payload: br#"{"n":2}"#,
+                encrypted: false,
+            },
+        ];
+        let frames_b = [FrameIn {
+            message_id: [3; 16],
+            txn: "b-1",
+            trace_id: None,
+            producer_sub: None,
+            payload: br#"{"n":3}"#,
+            encrypted: false,
+        }];
+        let blob_a = base64::engine::general_purpose::STANDARD
+            .encode(zstd_compress(&pack_frames(&frames_a), 1));
+        let blob_b = base64::engine::general_purpose::STANDARD
+            .encode(zstd_compress(&pack_frames(&frames_b), 1));
+        let meta = serde_json::json!({
+            "partitions": [
+                {
+                    "partition": "a",
+                    "partitionId": "pa",
+                    "deliveryAttempt": 2,
+                    "segments": [{
+                        "seq": 0,
+                        "startOff": 0,
+                        "take": 2,
+                        "createdAt": "2026-08-28T10:00:00.000000Z",
+                        "blob": blob_a
+                    }]
+                },
+                {
+                    "partition": "b",
+                    "partitionId": "pb",
+                    "deliveryAttempt": 5,
+                    "segments": [{
+                        "seq": 0,
+                        "startOff": 0,
+                        "take": 1,
+                        "createdAt": "2026-08-28T10:00:00.000000Z",
+                        "blob": blob_b
+                    }]
+                }
+            ]
+        });
+
+        let (body, count, _) = build_pop_response(
+            &meta.to_string(),
+            None,
+            "orders",
+            "workers",
+            "lease-1",
+            &crate::encryption::Encryption::from_env(),
+            Conflation::OFF,
+        );
+        assert_eq!(count, 3, "{body}");
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let attempts: Vec<i64> = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["deliveryAttempt"].as_i64().unwrap())
+            .collect();
+        assert_eq!(attempts, [2, 2, 5]);
+
+        // Rolling upgrade safety: metadata from the previous procedure has no
+        // attempt key. It must remain a first delivery, never zero/null or a
+        // parse failure that strands the lease.
+        let fallback = serde_json::json!({
+            "partitions": [{
+                "partition": "a",
+                "partitionId": "pa",
+                "segments": [{
+                    "seq": 0,
+                    "startOff": 0,
+                    "take": 1,
+                    "createdAt": "2026-08-28T10:00:00.000000Z",
+                    "blob": meta["partitions"][0]["segments"][0]["blob"].clone()
+                }]
+            }]
+        });
+        let (body, count, _) = build_pop_response(
+            &fallback.to_string(),
+            None,
+            "orders",
+            "workers",
+            "lease-2",
+            &crate::encryption::Encryption::from_env(),
+            Conflation::OFF,
+        );
+        assert_eq!(count, 1, "{body}");
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(body["messages"][0]["deliveryAttempt"], 1);
+
+        // The pinned and targeted routes deserialize a different SQL envelope;
+        // pin that adapter too so the count cannot disappear only there.
+        let specific = serde_json::json!({
+            "partitionId": "pa",
+            "deliveryAttempt": 7,
+            "segments": [meta["partitions"][0]["segments"][0].clone()]
+        });
+        let (body, count, _) = build_pop_specific_response(
+            &specific.to_string(),
+            "orders",
+            "a",
+            "workers",
+            "lease-3",
+            &crate::encryption::Encryption::from_env(),
+            Conflation::OFF,
+        );
+        assert_eq!(count, 2, "{body}");
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|message| message["deliveryAttempt"] == 7),
+            "{body}"
+        );
+    }
+
+    /// All five SQL assembly paths must carry the group-scoped count into the
+    /// metadata consumed above. This source pin complements the live Postgres
+    /// test: it runs in every ordinary `cargo test`, even without a database.
+    #[test]
+    fn every_sql_pop_assembly_path_carries_delivery_attempt() {
+        let sql = include_str!("../../sql/procedures/004_log_pop.sql");
+        let procedures = [
+            "queen.log_pop_specific_v1",
+            "queen.log_pop_wildcard_wire_v1",
+            "queen.log_pop_wildcard_bin_v1",
+            "queen.log_pop_discover_wire_v1",
+            "queen.log_pop_list_v1",
+        ];
+        for (index, procedure) in procedures.iter().enumerate() {
+            let start = sql
+                .find(&format!("CREATE FUNCTION {procedure}"))
+                .unwrap_or_else(|| panic!("missing {procedure}"));
+            let end = procedures
+                .get(index + 1)
+                .and_then(|next| sql[start..].find(&format!("CREATE FUNCTION {next}")))
+                .map(|offset| start + offset)
+                .unwrap_or(sql.len());
+            assert!(
+                sql[start..end].contains("'deliveryAttempt'"),
+                "{procedure} dropped deliveryAttempt"
+            );
+        }
+        assert!(
+            sql.contains("RETURNING u.ei, p.last_offset, c.attempt_count"),
+            "the hot-list fast path must return the count written atomically by its lease update"
+        );
+    }
+
     /// POP AUTOPILOT — the opt-in is a query parameter the broker must read under
     /// exactly the name the SDKs send, and (the whole compatibility argument)
     /// ABSENCE must be distinguishable from `false`: absent means "the client
@@ -6392,14 +6586,18 @@ mod protocol_conformance {
     #[test]
     fn the_autopilot_opt_in_is_read_from_the_query() {
         let uri: axum::http::Uri =
-            "http://x/api/v1/pop/queue/q?consumerGroup=w&autopilot=true".parse().unwrap();
+            "http://x/api/v1/pop/queue/q?consumerGroup=w&autopilot=true"
+                .parse()
+                .unwrap();
         let axum::extract::Query(p) =
             axum::extract::Query::<PopParams>::try_from_uri(&uri).unwrap();
         assert_eq!(p.autopilot, Some(true));
         // Per-dimension: the opt-in rides alongside an explicit knob, and the
         // explicit knob still arrives intact for the handler to honour.
         let uri: axum::http::Uri =
-            "http://x/api/v1/pop/queue/q?autopilot=true&partitions=1".parse().unwrap();
+            "http://x/api/v1/pop/queue/q?autopilot=true&partitions=1"
+                .parse()
+                .unwrap();
         let axum::extract::Query(p) =
             axum::extract::Query::<PopParams>::try_from_uri(&uri).unwrap();
         assert_eq!(p.autopilot, Some(true));

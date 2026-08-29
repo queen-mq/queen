@@ -164,7 +164,7 @@ done
 # --- run one job ------------------------------------------------------------
 run_job() {
   suite="$1"; topo="$2"
-  base="$LOGDIR/${suite}-${topo}"; log="$base.log"
+  base="$LOGDIR/${suite}-${topo}"; log="$base.log"; diag="$base.diag.log"
   start=$(date +%s)
   if [ "$topo" = "unit" ]; then
     docker run --rm "queen-test-runner-$suite" >"$log" 2>&1
@@ -187,6 +187,13 @@ run_job() {
       docker compose -p "$proj" -f "$compose" up \
         --abort-on-container-exit --exit-code-from runner >"$log" 2>&1
     code=$?
+    if [ "$code" != 0 ]; then
+      # Capture the runner before teardown appends container shutdown noise to
+      # the combined log. This keeps the actual assertion or timeout visible.
+      QUEEN_RUNNER_IMAGE="queen-test-runner-$suite" QUEEN_TEST_TENANCY="$tflag" \
+        docker compose -p "$proj" -f "$compose" logs \
+          --no-color --tail=200 runner >"$diag" 2>&1 || true
+    fi
     if [ "$KEEP" = 0 ]; then
       QUEEN_RUNNER_IMAGE="queen-test-runner-$suite" QUEEN_TEST_TENANCY="$tflag" \
         docker compose -p "$proj" -f "$compose" down -v --remove-orphans >>"$log" 2>&1 || true
@@ -194,12 +201,21 @@ run_job() {
   fi
   echo "$code" >"$base.code"
   echo "$(( $(date +%s) - start ))" >"$base.dur"
-  if [ "$code" = 0 ]; then echo ">> PASS ${suite}/${topo} ($(cat "$base.dur")s)"
-  else echo ">> FAIL ${suite}/${topo} rc=$code ($(cat "$base.dur")s)"; fi
+  if [ "$code" = 0 ]; then
+    echo ">> PASS ${suite}/${topo} ($(cat "$base.dur")s)"
+  else
+    echo ">> FAIL ${suite}/${topo} rc=$code ($(cat "$base.dur")s)"
+    # Surface diagnostics immediately. A later topology or the outer CI
+    # deadline must not hide the only useful failure output in a temp file.
+    diagnostic_log="$log"
+    [ -s "$diag" ] && diagnostic_log="$diag"
+    echo "----- immediate diagnostics ${suite}/${topo}: $diagnostic_log -----"
+    tail -n 200 "$diagnostic_log" 2>/dev/null
+  fi
 }
 
 # --- rolling-window parallelism (portable to bash 3.2: no `wait -n`) --------
-echo ">> running $(echo $JOBS | wc -w | tr -d ' ') jobs, up to $MAXP in parallel"
+echo ">> running $(echo "$JOBS" | wc -w | tr -d ' ') jobs, up to $MAXP in parallel"
 for job in $JOBS; do
   suite="${job%%|*}"; topo="${job##*|}"
   while [ "$(jobs -rp | wc -l | tr -d ' ')" -ge "$MAXP" ]; do sleep 0.3; done
@@ -297,9 +313,11 @@ for job in $JOBS; do
   suite="${job%%|*}"; topo="${job##*|}"
   c="$(cat "$LOGDIR/$suite-$topo.code" 2>/dev/null || echo 1)"
   if [ "$c" != 0 ]; then
+    diagnostic_log="$LOGDIR/$suite-$topo.log"
+    [ -s "$LOGDIR/$suite-$topo.diag.log" ] && diagnostic_log="$LOGDIR/$suite-$topo.diag.log"
     echo
-    echo "----- tail $suite/$topo (rc=$c) : $LOGDIR/$suite-$topo.log -----"
-    tail -n 30 "$LOGDIR/$suite-$topo.log" 2>/dev/null
+    echo "----- diagnostics $suite/$topo (rc=$c) : $diagnostic_log -----"
+    tail -n 200 "$diagnostic_log" 2>/dev/null
   fi
 done
 

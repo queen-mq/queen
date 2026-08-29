@@ -23,9 +23,36 @@ sourceOfTruth:
   - clients/client-laravel/src/Exceptions/ErrorCode.php
   - clients/client-laravel/src/Laravel/QueenServiceProvider.php
   - clients/client-laravel/src/Laravel/QueenFacade.php
+  - clients/client-laravel/src/Laravel/Queue/QueenConnector.php
+  - clients/client-laravel/src/Laravel/Queue/QueenQueue.php
+  - clients/client-laravel/src/Laravel/Queue/QueenJob.php
+  - clients/client-laravel/src/Laravel/Queue/ProcessLeaseRenewer.php
+  - clients/client-laravel/src/Laravel/Queue/SyncedFailedJobProvider.php
+  - clients/client-laravel/src/Laravel/Contracts/QueenPartitionable.php
   - clients/client-laravel/src/Laravel/Commands/ConsumeCommand.php
+  - clients/client-laravel/src/Laravel/Commands/SuperviseCommand.php
+  - clients/client-laravel/src/Laravel/Commands/SupervisorConfigCommand.php
+  - clients/client-laravel/src/Laravel/Commands/SupervisorControlCommand.php
+  - clients/client-laravel/src/Laravel/Commands/SupervisorInstallCommand.php
+  - clients/client-laravel/src/Laravel/Supervisor/Binary/SupervisorBinary.php
+  - clients/client-laravel/src/Laravel/Supervisor/Binary/SupervisorBinaryInstaller.php
+  - clients/client-laravel/src/Laravel/Supervisor/SupervisorConfiguration.php
+  - clients/client-laravel/src/Laravel/Supervisor/AutoScaler.php
+  - clients/client-laravel/src/Laravel/Supervisor/PhpSupervisor.php
+  - clients/client-laravel/src/Laravel/Supervisor/SupervisorState.php
+  - clients/client-laravel/src/Laravel/Supervisor/WorkerTelemetry.php
+  - clients/client-laravel/src/Laravel/Dashboard/DashboardRepository.php
+  - clients/client-laravel/src/Laravel/Dashboard/FailedJobsReadModel.php
+  - clients/client-laravel/src/Laravel/Http/Middleware/AuthorizeDashboard.php
+  - clients/client-laravel/src/Laravel/Http/Middleware/SecureDashboardResponse.php
+  - clients/client-laravel/routes/dashboard.php
   - clients/client-laravel/config/queen.php
+  - supervisor/src/main.rs
   - server/src/main.rs
+verifiedBy:
+  - clients/client-laravel/tests/ProcessLeaseRenewerTest.php
+  - clients/client-laravel/tests/SyncedFailedJobProviderLifecycleTest.php
+  - clients/client-laravel/tests/LaravelDashboardTest.php
 ---
 
 The Composer package is `smartpricing/queen-mq`, PSR-4 namespace `Queen\`. It requires PHP 8.3 or
@@ -188,6 +215,7 @@ $queen->queue('orders')
 | `autopilot(bool $enabled = true)` | `true` | `true` | Broker-side pop sizing for the knobs above that you did not set. On by default; `false` restores the pre-1.2 client defaults (batch 1, partitions 1) and sends no `autopilot` parameter. `QUEEN_SDK_POP_AUTOPILOT=off` does the same for a whole process, read once when the client is built. Setting both knobs leaves nothing to decide, so no parameter is sent then either. See [pop autopilot](/reference/http/pop#autopilot). Requires broker >= 1.2; an older one applies its own defaults (batch 200, partitions 1) to the omitted knobs, which is a sizing difference and nothing more. |
 | `wait(bool $enabled)` | `false` | `true` | Long-poll. |
 | `timeoutMillis(int $millis)` | `30000` | `30000` | Server-side deadline; the HTTP call adds 5 s of slack. |
+| `leaseSeconds(int $seconds)` | queue default | queue default | Per-pop lease override, clamped to at least one second. Keep framework worker timeouts shorter than this value. |
 | `autoAck(bool $enabled)` | `false` | `true` | The two meanings differ. See the warning. |
 | `subscriptionMode(string $mode)` | `null` | `null` | `all` \| `new`. |
 | `subscriptionFrom(string $from)` | `null` | `null` | `'now'` or an ISO timestamp. |
@@ -322,6 +350,15 @@ turn it into a query string.
 | `getTasks()` | `GET /api/v1/resources/tasks` |
 | `listQueues(array $params = [])` | `GET /api/v1/resources/queues` |
 | `getQueue(string $name)` | `GET /api/v1/resources/queues/:name` |
+| `getQueueDepth(string $name, ?string $group = null, ?int $timeoutMillis = null)` | `GET /api/v1/resources/queues/:name/depth` |
+| `getQueueDepthAsync(string $name, ?string $group = null, ?int $timeoutMillis = null)` | Same route through the failover-aware async client. |
+
+Depth is the lightweight scaling read: total `pending`, live-lease
+`processing`, claimable `ready`, their partition counts, and
+`effectivePending` / `effectiveReady` adjusted for conflation. Per-partition
+rows carry `pending`, `processing` and `ready`. It has no message timestamps or
+segment scan; older brokers may omit the lease-aware fields during a rolling
+upgrade.
 
 ### Messages and traces
 
@@ -402,6 +439,46 @@ Publish the config with the `queen-config` tag; it lands at `config/queen.php`. 
 | `affinity_hash_ring` | `QUEEN_AFFINITY_HASH_RING` | `150` |
 | `health_retry_after` | `QUEEN_HEALTH_RETRY_AFTER` | `30000` |
 | `headers` | none | `[]` |
+| `queue` | `QUEEN_QUEUE` | `default` |
+| `consumer_group` | `QUEEN_CONSUMER_GROUP` | `laravel` |
+| `partitions` | `QUEEN_PARTITIONS` | `64` (clamped to the broker maximum) |
+| `partition_prefix` | `QUEEN_PARTITION_PREFIX` | `laravel` |
+| `retry_after` | `QUEEN_RETRY_AFTER` | `90` seconds |
+| `block_for` | `QUEEN_BLOCK_FOR` | `0` seconds |
+| `prefetch` | `QUEEN_PREFETCH` | `1` job |
+| `ack_batch` | `QUEEN_ACK_BATCH` | `1` job (cannot exceed `prefetch`) |
+| `lease_renewal` | `QUEEN_LEASE_RENEWAL` | `false` |
+| `lease_renewal_interval` | `QUEEN_LEASE_RENEWAL_INTERVAL` | derived from lease timing |
+| `lease_renewal_timeout` | `QUEEN_LEASE_RENEWAL_TIMEOUT` | `5` seconds |
+| `lease_renewal_kill_grace` | `QUEEN_LEASE_RENEWAL_KILL_GRACE` | `2` seconds |
+| `lease_renewal_safety_margin` | `QUEEN_LEASE_RENEWAL_SAFETY_MARGIN` | `1` second |
+| `bulk_batch` | `QUEEN_BULK_BATCH` | `100` jobs |
+| `after_commit` | `QUEEN_AFTER_COMMIT` | `false` |
+| `sync_failed_jobs` | `QUEEN_SYNC_FAILED_JOBS` | `true` |
+| `failed_jobs_lock_store` | `QUEEN_FAILED_JOBS_LOCK_STORE` | Laravel default cache store |
+| `failed_jobs_lock_name` | `QUEEN_FAILED_JOBS_LOCK_NAME` | `queen:failed-jobs` |
+| `failed_jobs_lock_ttl` | `QUEEN_FAILED_JOBS_LOCK_TTL` | `600` seconds |
+| `failed_jobs_lock_wait` | `QUEEN_FAILED_JOBS_LOCK_WAIT` | `600` seconds |
+| `supervisor.poll_interval` | `QUEEN_SUPERVISOR_POLL_INTERVAL` | `3` seconds |
+| `supervisor.http_timeout` | `QUEEN_SUPERVISOR_HTTP_TIMEOUT` | `5` seconds |
+| `supervisor.control_ttl` | `QUEEN_SUPERVISOR_CONTROL_TTL` | `3600` seconds |
+| `supervisor.heartbeat_timeout` | `QUEEN_SUPERVISOR_HEARTBEAT_TIMEOUT` | derived above the bounded loop budget |
+| `supervisor.read_bearer_token` | `QUEEN_SUPERVISOR_READ_BEARER_TOKEN` | unset; falls back to `bearer_token` |
+| `supervisor.shutdown_grace` | `QUEEN_SUPERVISOR_SHUTDOWN_GRACE` | `75` seconds |
+| `supervisor.process_limit` | `QUEEN_SUPERVISOR_PROCESS_LIMIT` | `256` |
+| `supervisor.state_directory` | `QUEEN_SUPERVISOR_STATE_DIRECTORY` | `storage/queen-supervisor` |
+| `supervisor.telemetry_ttl` | `QUEEN_SUPERVISOR_TELEMETRY_TTL` | `300` seconds |
+| `dashboard.enabled` | `QUEEN_DASHBOARD_ENABLED` | `false` |
+| `dashboard.path` | `QUEEN_DASHBOARD_PATH` | `queen` |
+| `dashboard.domain` | `QUEEN_DASHBOARD_DOMAIN` | unset |
+| `dashboard.middleware` | none | `['web']` |
+| `dashboard.refresh_seconds` | `QUEEN_DASHBOARD_REFRESH_SECONDS` | `5` seconds |
+| `dashboard.allow_local` | `QUEEN_DASHBOARD_ALLOW_LOCAL` | `true` |
+| `dashboard.failed_jobs_limit` | `QUEEN_DASHBOARD_FAILED_JOBS_LIMIT` | `50` rows |
+| `supervisor_binary.install_path` | `QUEEN_SUPERVISOR_INSTALL_PATH` | `storage/queen-supervisor-bin` |
+| `supervisor_binary.release_base_url` | `QUEEN_SUPERVISOR_RELEASE_BASE_URL` | unset |
+| `supervisor_binary.manifest` | `QUEEN_SUPERVISOR_MANIFEST` | unset |
+| `supervisor_binary.manifest_sha256` | `QUEEN_SUPERVISOR_MANIFEST_SHA256` | unset |
 | `retry_429.maxAttempts` | `QUEEN_RETRY_429_MAX_ATTEMPTS` | unset |
 | `retry_429.baseMs` | `QUEEN_RETRY_429_BASE_MS` | unset |
 | `retry_429.capMs` | `QUEEN_RETRY_429_CAP_MS` | unset |
@@ -423,6 +500,186 @@ Queen::queue('orders')->push([['data' => ['id' => 1]]])->execute();
 
 The facade proxies `queue()`, `transaction()`, `admin()`, `ack()`, `renew()`,
 `flushAllBuffers()`, `getBufferStats()` and `close()`.
+
+### Laravel Queue driver
+
+The provider also registers a `queen` Laravel queue connection. Existing jobs
+can use `dispatch()`, middleware, backoff and failed-job events unchanged:
+
+```bash
+QUEUE_CONNECTION=queen php artisan queue:work queen --queue=default --timeout=60 --tries=3
+```
+
+`retry_after` becomes the Queen lease duration and must exceed the worker/job
+timeout. `block_for` is the long-poll duration; leave it at `0` for a worker
+that scans a comma-separated priority queue list. Zero disables broker waiting
+but retains the normal 30-second request budget; positive values become the
+broker timeout and the HTTP client adds five seconds of transport slack.
+
+The default `prefetch=1` and `ack_batch=1` keep the per-job synchronous ACK
+boundary. Short, idempotent workloads can opt into a larger prefetch and set
+`ack_batch` to the same value: one pop then feeds the standard sequential
+Laravel worker, and the final delete commits the complete lease through
+`/ack/batch`. This is still at-least-once delivery, but it deliberately widens
+the crash duplicate window and unprocessed prefetched jobs can remain leased
+until `retry_after`. The lease must cover the worst-case runtime of the entire
+prefetched batch. Leave both at `1` for long jobs, strict per-job confirmation,
+or comma-separated priority queues. A reentrant `pop()` before the active
+prefetched job is deleted or released fails explicitly.
+
+Laravel `Queue::bulk()` is overridden with bounded multi-partition Queen push
+requests. `bulk_batch` limits each request; ordinary `dispatch()` remains a
+single-job operation.
+
+Ordinary jobs are assigned deterministically to a bounded set of partition
+stripes. A job implementing
+`Queen\Laravel\Contracts\QueenPartitionable::queenPartition()` supplies its own
+ordering key instead. Delayed dispatch and positive backoff use Queen timers;
+an immediate release uses an atomic ack-and-push transaction. A positive
+backoff uses an atomic ack-and-timer transaction, and a final Laravel failure is
+acked to Queen's DLQ. Laravel's failed-job provider is decorated by default so
+retry, forget, flush and prune also remove the matching Queen snapshot. Failed
+payloads carry a stable retry transaction ID; `queue:retry` resets their attempt
+count and can safely bypass the original dispatch's deduplication record. Use
+Laravel's command for Laravel jobs, not generic Admin `retryMessage()`, because
+only Laravel owns the `failed_jobs` index.
+
+Laravel `Queue::size()` obtains delayed work with the broker's indexed
+`count(queue, 'laravel:')` timer operation, so it does not download keyset pages.
+The client falls back to legacy paging when the broker explicitly returns
+`no_such_route`/`unsupported`, or when the immediately preceding broker ignores
+`mode=count` and returns the exact, well-formed list-page contract. That page is
+reused as page one. Timeouts, 5xx responses, malformed pages, missing cursors
+and cyclic cursors remain visible errors instead of producing a plausible but
+partial size.
+
+The driver can still run under any ordinary process manager. For Horizon-like
+local pools, the package also provides the PHP and Rust supervisors below; the
+Queen broker itself never spawns PHP workers.
+
+The broker emits a group-scoped `deliveryAttempt` for every popped message. It
+increments after nack, worker crash or lease expiry; the driver combines it
+with explicit releases for Laravel `attempts()` and `--tries`. During a rolling
+upgrade an older broker's missing field falls back to `1`, so upgrade brokers
+before depending on crash-attempt enforcement.
+
+Laravel monitoring reads the worker consumer group's cheap depth endpoint.
+`size()` is total `pending` (including live leases) plus Laravel-owned timers,
+`pendingSize()` is claimable `ready`, and `reservedSize()` is live-lease
+`processing`. Missing lease-aware fields retain the previous counters during a
+rolling broker upgrade.
+
+For oldest-job age, `ready: 0` returns `null` without the segment-backed queue
+detail call. With ready work the depth response has no timestamps, so the
+driver filters queue detail to ready partitions and returns a conservative
+approximation. Queue detail uses the queue-wide worst cursor; its
+`oldestMessage` can therefore predate this group's first unleased job. Older
+brokers use the same approximate fallback.
+
+<Aside type="caution">
+Queen does not yet expose an atomic clear covering ready jobs, live leases and
+Laravel timers, so this driver does not implement Laravel `ClearableQueue` and
+`Admin::clearQueue()` fails locally. Timer-delivery failures that exhaust the
+timer engine occur before a Laravel worker sees the job; monitor the
+`__timer__` DLQ group because those cannot create a Laravel `JobFailed` event.
+</Aside>
+
+### Worker supervisors
+
+The guided configuration, platform matrix and production checks are in
+[Worker supervisors](/use/laravel/supervisors). The PHP engine keeps one Laravel master resident:
+
+```bash
+php artisan queen:supervise
+```
+
+The separate Rust binary starts the same `queue:work` children after one
+temporary Artisan invocation resolves the versioned configuration. Install the package-pinned
+native asset explicitly, then use the Composer launcher:
+
+```bash
+php artisan queen:supervisor-install
+vendor/bin/queen-supervisor --php php --artisan artisan
+php artisan queen:supervisor-config --pretty
+```
+
+The online install succeeds only when a manifest and asset exist for the package-pinned
+`supervisor/v*` release. Preview packages do not guarantee published assets, so use the PHP engine
+or a verified local manifest/archive pair until the matching release is available. The immediate
+parent of `supervisor_binary.install_path` must be an existing real directory; the install leaf
+must be application-owned and must not be group- or world-writable. See
+[Run the Rust engine](/use/laravel/supervisors#run-the-rust-engine) for the secure path example and
+platform status.
+
+The normal exporter redacts bearer tokens and header values. Pass
+`--for-engine` only when producing input for a supervisor engine; that form
+contains the credentials.
+
+Each entry in `supervisor.supervisors` carries `connection`, `consumer_group`,
+an ordered `queues` list, Laravel worker options and its scaling policy.
+
+| Setting | Meaning |
+| --- | --- |
+| `balance=auto` | Dynamic target, distributed across queues by pressure. |
+| `balance=simple` | Fixed `processes`, spread evenly. |
+| `balance=off` | Every worker receives the ordered comma-separated queue list. |
+| `strategy=size` | `ceil(sum(effectivePending) / target_jobs_per_process)`. |
+| `strategy=time` | `ceil(sum(effectivePending × runtime) / target_clear_seconds)`. |
+| `min_processes` / `max_processes` | Lower and upper target bounds. |
+| `balance_cooldown` / `balance_max_shift` | Reconciliation cadence and per-cycle change bound. |
+| `scale_down_delay` | How long a lower target must persist before downscaling. |
+| `restart_backoff` / `restart_backoff_max` | Bounds repeated worker restart attempts. |
+| `stable_after` | Runtime after which the crash backoff resets. |
+| `default_runtime_seconds` | Time-strategy fallback before worker telemetry exists. |
+
+Both engines use capped exponential restart backoff. Only the Rust engine opens
+a circuit after five consecutive crashes and permits one probe after the
+cooldown; the PHP engine has no open/probe phase and continues at
+`restart_backoff_max`.
+
+The local control command is shared by both engines:
+
+```bash
+php artisan queen:supervisor status [--json]
+php artisan queen:supervisor status --check # non-zero unless live
+php artisan queen:supervisor pause
+php artisan queen:supervisor continue
+php artisan queen:supervisor terminate
+```
+
+Status, commands, the exclusive PID lock and duration telemetry live below
+`state_directory`. Pause/continue map to `SIGUSR2`/`SIGCONT`; termination sends
+`SIGTERM` and enforces `shutdown_grace`. This surface targets Unix and requires
+PHP `pcntl`.
+
+`QUEEN_URLS` supplies failover broker endpoints for depth reads. Both v2 engines
+read the selected pool's resolved Queen `connections` entry directly and build
+an isolated client from its endpoints, bearer token and validated headers;
+neither reuses a worker's live Laravel client.
+`QUEEN_SUPERVISOR_READ_BEARER_TOKEN` may replace the worker token with a
+read-only one while retaining the other custom headers. Both engines poll in
+waves of at most 16 concurrent depth requests and fail over network/5xx errors.
+The exported JSON contains the read token and headers only with `--for-engine`:
+do not log that form, prefer piping it directly to the Rust process, and protect
+any credential-bearing `--config` file with mode `0600`.
+
+<Aside type="danger">
+Exactly one supervisor master may serve an application/consumer group. The
+filesystem lock prevents duplicate local ownership only. Queen has no
+distributed fenced leader lease for supervisors yet, so two hosts can both see
+the same backlog and independently scale to the maximum. Worker count is not
+restricted; only the master is singleton. Use one Kubernetes replica with no
+surge overlap, such as `Recreate`.
+</Aside>
+
+### Supervisor dashboard
+
+The package also provides a disabled-by-default local panel. It reads bounded state from the one
+local master and protects HTML, JSON and controls with the same `viewQueenDashboard` Gate. In
+production, enabling the route without defining an allowing Gate still returns `403`.
+
+The complete authorization example, route-cache procedure and local-versus-global scope are in
+[Supervisor dashboard](/use/laravel/dashboard).
 
 ### Artisan command
 

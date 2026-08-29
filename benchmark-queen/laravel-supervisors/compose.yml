@@ -1,0 +1,254 @@
+name: queen-laravel-supervisors
+
+x-app-environment: &app-environment
+  APP_ENV: benchmark
+  APP_DEBUG: "false"
+  APP_KEY: base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+  LOG_CHANNEL: stderr
+  CACHE_STORE: array
+  SESSION_DRIVER: array
+  BENCH_PROFILE: ${BENCH_PROFILE:-fixed}
+  BENCH_QUEUE: ${BENCH_QUEUE:-benchmark}
+  BENCH_GROUP: ${BENCH_GROUP:-benchmark}
+  BENCH_WORKERS: ${BENCH_WORKERS:-8}
+  BENCH_MIN_WORKERS: ${BENCH_MIN_WORKERS:-1}
+  BENCH_MAX_WORKERS: ${BENCH_MAX_WORKERS:-8}
+  BENCH_STRATEGY: ${BENCH_STRATEGY:-size}
+  BENCH_BALANCE_COOLDOWN: ${BENCH_BALANCE_COOLDOWN:-3}
+  BENCH_BALANCE_MAX_SHIFT: ${BENCH_BALANCE_MAX_SHIFT:-1}
+  BENCH_SCALE_DOWN_DELAY: ${BENCH_SCALE_DOWN_DELAY:-0}
+  BENCH_TARGET_JOBS_PER_PROCESS: ${BENCH_TARGET_JOBS_PER_PROCESS:-10}
+  BENCH_TARGET_CLEAR_SECONDS: ${BENCH_TARGET_CLEAR_SECONDS:-1.0}
+  BENCH_DEFAULT_RUNTIME_SECONDS: ${BENCH_DEFAULT_RUNTIME_SECONDS:-0.01}
+  BENCH_TIMEOUT: ${BENCH_TIMEOUT:-120}
+  BENCH_RETRY_AFTER: ${BENCH_RETRY_AFTER:-180}
+  BENCH_POLL_INTERVAL: ${BENCH_POLL_INTERVAL:-1}
+  BENCH_DISPATCH_MODE: ${BENCH_DISPATCH_MODE:-single}
+  BENCH_LEDGER_MODE: ${BENCH_LEDGER_MODE:-off}
+  BENCH_QUEUES: ${BENCH_QUEUES:-}
+  BENCH_FAILED_DRIVER: "${BENCH_FAILED_DRIVER:-null}"
+  BENCH_FAILED_PATH: /results/failed-jobs.json
+  BENCH_FAILED_LIMIT: ${BENCH_FAILED_LIMIT:-1000}
+  BENCH_RESULTS_DIRECTORY: /results
+  QUEEN_URL: http://broker:6632
+  QUEEN_URLS: http://broker:6632
+  QUEEN_QUEUE: ${BENCH_QUEUE:-benchmark}
+  QUEEN_CONSUMER_GROUP: ${BENCH_GROUP:-benchmark}
+  QUEEN_PREFETCH: ${QUEEN_PREFETCH:-1}
+  QUEEN_ACK_BATCH: ${QUEEN_ACK_BATCH:-1}
+  QUEEN_BULK_BATCH: ${QUEEN_BULK_BATCH:-100}
+  QUEEN_PARTITIONS: ${QUEEN_PARTITIONS:-64}
+  QUEEN_POP_FUSION: ${QUEEN_POP_FUSION:-0}
+  # Reliability probes opt in explicitly. Timed benchmark lanes keep the
+  # renewal helper disabled so its per-worker process is never hidden inside
+  # a supervisor resource comparison.
+  QUEEN_LEASE_RENEWAL: "${BENCH_LEASE_RENEWAL:-false}"
+  QUEEN_LEASE_RENEWAL_INTERVAL: ${BENCH_LEASE_RENEWAL_INTERVAL:-}
+  QUEEN_LEASE_RENEWAL_TIMEOUT: ${BENCH_LEASE_RENEWAL_TIMEOUT:-5}
+  QUEEN_LEASE_RENEWAL_KILL_GRACE: ${BENCH_LEASE_RENEWAL_KILL_GRACE:-2}
+  QUEEN_LEASE_RENEWAL_SAFETY_MARGIN: ${BENCH_LEASE_RENEWAL_SAFETY_MARGIN:-1}
+  QUEEN_SUPERVISOR_STATE_DIRECTORY: /run/queen-supervisor
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_HORIZON_DB: "1"
+  REDIS_QUEUE_DB: "0"
+
+x-app: &app
+  image: queen-laravel-supervisor-bench:local
+  build:
+    context: ../..
+    dockerfile: benchmark-queen/laravel-supervisors/Dockerfile
+  user: "1000:1000"
+  working_dir: /workspace/benchmark-queen/laravel-supervisors/app
+  init: true
+  restart: "no"
+  cpus: ${BENCH_APP_CPUS:-4.0}
+  mem_limit: ${BENCH_APP_MEMORY:-1024m}
+  pids_limit: ${BENCH_APP_PIDS:-512}
+  # The fixture's default worker timeout is 120s and the Queen engines allow
+  # another 15s to drain. Docker must not pre-empt that graceful deadline.
+  stop_grace_period: 150s
+  volumes:
+    - results:/results
+  environment: *app-environment
+
+services:
+  # Redis and PostgreSQL+broker each receive an aggregate 2 CPUs / 2 GiB by
+  # default. This keeps backend resources comparable while staying well below
+  # an 8.2 GiB Docker Desktop budget with one benchmark lane active.
+  redis:
+    image: redis:7.4.2-alpine
+    profiles: [horizon]
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - 1664mb
+      - --maxmemory-policy
+      - noeviction
+    restart: "no"
+    cpus: ${BENCH_REDIS_CPUS:-2.0}
+    mem_limit: ${BENCH_REDIS_MEMORY:-2048m}
+    pids_limit: 128
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      # Probe quickly during bootstrap, then get out of the measured hot path.
+      start_interval: 1s
+      start_period: 30s
+      interval: 1h
+      timeout: 2s
+      retries: 10
+
+  postgres:
+    image: postgres:16.10-bookworm
+    profiles: [queen-php, queen-rust]
+    environment:
+      POSTGRES_DB: queen
+      POSTGRES_USER: queen
+      POSTGRES_PASSWORD: queen-benchmark-only
+    command:
+      - postgres
+      - -c
+      - max_connections=128
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - synchronous_commit=on
+    restart: "no"
+    cpus: ${BENCH_POSTGRES_CPUS:-1.0}
+    mem_limit: ${BENCH_POSTGRES_MEMORY:-1024m}
+    pids_limit: 256
+    tmpfs:
+      - /var/lib/postgresql/data:rw,nosuid,nodev,size=768m
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U queen -d queen]
+      start_interval: 1s
+      start_period: 60s
+      interval: 1h
+      timeout: 3s
+      retries: 20
+
+  broker:
+    image: queen-laravel-supervisor-broker:local
+    profiles: [queen-php, queen-rust]
+    build:
+      context: ../..
+      dockerfile: server/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      PG_USER: queen
+      PG_PASSWORD: queen-benchmark-only
+      PG_DATABASE: queen
+      QUEEN_APPLY_SCHEMA: "1"
+      PORT: "6632"
+      DB_POOL_SIZE: "32"
+      QUEEN_POP_FUSION: ${QUEEN_POP_FUSION:-0}
+      LOG_LEVEL: warn
+      FILE_BUFFER_DIR: /var/lib/queen/buffers
+    restart: "no"
+    cpus: ${BENCH_BROKER_CPUS:-1.0}
+    mem_limit: ${BENCH_BROKER_MEMORY:-1024m}
+    pids_limit: 256
+    tmpfs:
+      - /var/lib/queen/buffers:rw,nosuid,nodev,size=256m
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          grep -Eq '(^|[[:space:]])[[:xdigit:]]+:19E8[[:space:]]+[[:xdigit:]]+:0000[[:space:]]+0A([[:space:]]|$)'
+          /proc/net/tcp /proc/net/tcp6
+      start_interval: 1s
+      start_period: 90s
+      interval: 1h
+      timeout: 3s
+      retries: 30
+
+  horizon:
+    <<: *app
+    profiles: [horizon]
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      <<: *app-environment
+      BENCH_LANE: horizon
+      BENCH_CONNECTION: redis
+      QUEUE_CONNECTION: redis
+    command: [sh, -ceu, "sleep 2; exec php artisan horizon"]
+    healthcheck:
+      test: [CMD-SHELL, php artisan horizon:status --no-ansi >/dev/null 2>&1]
+      start_interval: 1s
+      start_period: 30s
+      interval: 1h
+      timeout: 3s
+      retries: 10
+
+  queen-php:
+    <<: *app
+    profiles: [queen-php]
+    depends_on:
+      broker:
+        condition: service_healthy
+    environment:
+      <<: *app-environment
+      BENCH_LANE: queen-php
+      BENCH_CONNECTION: queen
+      QUEUE_CONNECTION: queen
+    command: [sh, -ceu, "sleep 2; exec php artisan queen:supervise"]
+    tmpfs:
+      - /run/queen-supervisor:rw,nosuid,nodev,noexec,size=16m,mode=0700,uid=1000,gid=1000
+    healthcheck:
+      test: [CMD-SHELL, php artisan queen:supervisor status --check --no-ansi >/dev/null 2>&1]
+      start_interval: 1s
+      start_period: 30s
+      interval: 1h
+      timeout: 3s
+      retries: 10
+
+  queen-rust:
+    <<: *app
+    profiles: [queen-rust]
+    depends_on:
+      broker:
+        condition: service_healthy
+    environment:
+      <<: *app-environment
+      BENCH_LANE: queen-rust
+      BENCH_CONNECTION: queen
+      QUEUE_CONNECTION: queen
+    command:
+      - sh
+      - -ceu
+      - sleep 2; exec queen-supervisor --php /usr/local/bin/php --artisan artisan
+    tmpfs:
+      - /run/queen-supervisor:rw,nosuid,nodev,noexec,size=16m,mode=0700,uid=1000,gid=1000
+    healthcheck:
+      test: [CMD-SHELL, php artisan queen:supervisor status --check --no-ansi >/dev/null 2>&1]
+      start_interval: 1s
+      start_period: 30s
+      interval: 1h
+      timeout: 3s
+      retries: 10
+
+  # Explicitly targeted by the runner; its tools-only profile prevents it from
+  # consuming resources while a supervisor lane is being measured.
+  producer:
+    <<: *app
+    profiles: [tools]
+    environment:
+      <<: *app-environment
+      BENCH_LANE: ${BENCH_LANE:-producer}
+      BENCH_CONNECTION: ${BENCH_CONNECTION:-queen}
+      QUEUE_CONNECTION: ${BENCH_CONNECTION:-queen}
+    command: [sleep, infinity]
+
+volumes:
+  results:
+    name: ${BENCH_RESULTS_VOLUME:-queen-laravel-supervisor-results}

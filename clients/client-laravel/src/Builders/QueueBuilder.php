@@ -37,6 +37,7 @@ class QueueBuilder
     private bool $consumeAutoAck;
     private bool $consumeWait;
     private int $consumeTimeoutMillis;
+    private ?int $consumeLeaseSeconds = null;
     private bool $consumeRenewLease;
     private ?int $consumeRenewLeaseIntervalMillis;
     private ?string $consumeSubscriptionMode;
@@ -137,7 +138,7 @@ class QueueBuilder
         return new OperationBuilder(
             $this->httpClient,
             'DELETE',
-            '/api/v1/resources/queues/' . urlencode($this->queueName),
+            '/api/v1/resources/queues/' . rawurlencode($this->queueName),
             null
         );
     }
@@ -176,7 +177,7 @@ class QueueBuilder
 
             $result = [
                 'queue' => $this->queueName,
-                'partition' => $this->partition,
+                'partition' => $item['partition'] ?? $this->partition,
                 'payload' => $payloadValue,
                 'transactionId' => $item['transactionId'] ?? Uuid::v7(),
             ];
@@ -306,6 +307,19 @@ class QueueBuilder
     public function timeoutMillis(int $millis): static
     {
         $this->consumeTimeoutMillis = $millis;
+        return $this;
+    }
+
+    /**
+     * Override the queue's visibility timeout for this consumer/pop.
+     *
+     * This is especially useful for framework queue workers: their process
+     * timeout must remain shorter than the broker lease, otherwise a slow job
+     * may be delivered to a second worker while the first one is still alive.
+     */
+    public function leaseSeconds(int $seconds): static
+    {
+        $this->consumeLeaseSeconds = max(1, $seconds);
         return $this;
     }
 
@@ -445,6 +459,10 @@ class QueueBuilder
         $params['wait'] = $this->consumeWait ? 'true' : 'false';
         $params['timeout'] = (string) $this->consumeTimeoutMillis;
 
+        if ($this->consumeLeaseSeconds !== null) {
+            $params['leaseSeconds'] = (string) $this->consumeLeaseSeconds;
+        }
+
         if ($this->group !== null) {
             $params['consumerGroup'] = $this->group;
         }
@@ -555,6 +573,7 @@ class QueueBuilder
             'autoAck' => $this->consumeAutoAck,
             'wait' => $this->consumeWait,
             'timeoutMillis' => $this->consumeTimeoutMillis,
+            'leaseSeconds' => $this->consumeLeaseSeconds,
             'renewLease' => $this->consumeRenewLease,
             'renewLeaseIntervalMillis' => $this->consumeRenewLeaseIntervalMillis,
             'subscriptionMode' => $this->consumeSubscriptionMode,
@@ -574,9 +593,10 @@ class QueueBuilder
     {
         if ($this->queueName !== null) {
             if ($this->partition !== 'Default') {
-                return "/api/v1/pop/queue/{$this->queueName}/partition/{$this->partition}";
+                return '/api/v1/pop/queue/' . rawurlencode($this->queueName)
+                    . '/partition/' . rawurlencode($this->partition);
             }
-            return "/api/v1/pop/queue/{$this->queueName}";
+            return '/api/v1/pop/queue/' . rawurlencode($this->queueName);
         }
 
         if ($this->namespace !== null || $this->task !== null) {

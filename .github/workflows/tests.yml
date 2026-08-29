@@ -41,7 +41,10 @@ jobs:
   suites:
     needs: broker-image
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # JS and CLI each exercise three isolated topologies. Their per-topology
+    # safety deadline is about ten minutes, so a serialized lane needs more
+    # than thirty minutes including image setup and teardown.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -49,7 +52,7 @@ jobs:
         # §10.2). It is a cell of its own rather than a step of another because
         # it is the executable specification the six SDK cells are read against:
         # when it and an SDK cell disagree, the SDK is wrong.
-        suite: [js, go, py, cli, cpp, rust-client, mesh, http]
+        suite: [js, go, py, cli, cpp, laravel, rust-client, mesh, http]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -60,8 +63,59 @@ jobs:
       - name: ${{ matrix.suite }}
         run: test/run.sh --suite ${{ matrix.suite }} --no-build-broker -j 1
 
-  # 50 in-process broker unit tests — no stack needed. Native for fast caching;
-  # this is the Rust CI the repo previously lacked.
+  # Pure PHP/Laravel client contract tests. Keep this independent from the
+  # broker image so syntax, dependency and fake-handler regressions fail fast
+  # even when Docker or the live Laravel matrix is unavailable.
+  php-client-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version: ["8.3", "8.4"]
+    defaults:
+      run:
+        working-directory: clients/client-laravel
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up PHP ${{ matrix.php-version }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          extensions: mbstring, pcntl, posix, dom, xml, xmlwriter
+          coverage: none
+          tools: composer:v2
+      - name: Validate Composer metadata
+        run: composer validate --strict
+      - name: Resolve and install dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+      - name: Audit resolved dependencies
+        if: matrix.php-version == '8.4'
+        run: composer audit --locked --no-interaction
+      - name: PHPUnit unit suite
+        run: vendor/bin/phpunit --testsuite Unit
+      - name: Supervisor release/installer contract
+        if: matrix.php-version == '8.3'
+        working-directory: ${{ github.workspace }}
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("supervisor/Cargo.toml", "rb"))["package"]["version"])')
+          python3 supervisor/scripts/verify_release_version.py --tag "supervisor/v$version"
+          release_test=$(mktemp -d)
+          for platform in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
+            touch "$release_test/queen-supervisor-$version-$platform.tar.gz"
+          done
+          python3 supervisor/scripts/build_release_manifest.py \
+            --version "$version" \
+            --repository queen-mq/queen \
+            --source-commit "$(git rev-parse HEAD)" \
+            --dist "$release_test" \
+            --output "$release_test/queen-supervisor-manifest.json"
+          php supervisor/scripts/verify_client_manifest.php \
+            "$release_test/queen-supervisor-manifest.json"
+          python3 -m unittest discover -s supervisor/scripts/tests -v
+
+  # Broker tests that do not require the live PostgreSQL stack. Native for fast
+  # caching; live integration cases remain in the Docker-backed matrix above.
   rust-unit:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -79,14 +133,15 @@ jobs:
       - name: cargo test
         run: cargo test --manifest-path server/Cargo.toml --locked
 
-  # The Rust SDK and the wire-contract crate. There is no cargo workspace at the
+  # The Rust SDK, Laravel supervisor and wire-contract crate. There is no cargo workspace at the
   # repo root, and a path dependency's `#[cfg(test)]` modules are never compiled
   # — so the broker's `cargo test` above reaches neither of these. Each manifest
   # has to be named explicitly or its tests do not run anywhere.
   #
   # No broker here: this cell is the unit tests, the fake-broker wire tests and
   # the skip branch of the integration harness. The live-broker run is the
-  # `rust-client` cell of the matrix above.
+  # `rust-client` cell of the matrix above. The supervisor uses mocked/local
+  # inputs only, so its complete suite belongs here.
   rust-client-unit:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -103,6 +158,8 @@ jobs:
         run: cargo test --manifest-path crates/queen-protocol/Cargo.toml --locked
       - name: client tests
         run: cargo test --manifest-path clients/client-rust/Cargo.toml --locked
+      - name: Laravel supervisor tests
+        run: cargo test --manifest-path supervisor/Cargo.toml --locked
       # `signals` is off by default, so nothing else in the repo ever compiles
       # `shutdown_on_signal`.
       - name: client tests (all features)
@@ -115,6 +172,7 @@ jobs:
           rc=0
           cargo fmt --manifest-path crates/queen-protocol/Cargo.toml --check || rc=1
           cargo fmt --manifest-path clients/client-rust/Cargo.toml --check || rc=1
+          cargo fmt --manifest-path supervisor/Cargo.toml --check || rc=1
           exit $rc
       - name: clippy
         run: |
@@ -123,6 +181,8 @@ jobs:
             --all-targets -- -D warnings || rc=1
           cargo clippy --manifest-path clients/client-rust/Cargo.toml --locked \
             --all-targets --all-features -- -D warnings || rc=1
+          cargo clippy --manifest-path supervisor/Cargo.toml --locked \
+            --all-targets -- -D warnings || rc=1
           exit $rc
 
   # The Kafka wire-protocol facade (PLAN_QUEEN_KAFKA.md). Its own workspace root,
@@ -175,6 +235,19 @@ jobs:
           cargo check --manifest-path crates/queen-protocol/Cargo.toml --locked --all-targets
           cargo check --manifest-path clients/client-rust/Cargo.toml --locked \
             --all-targets --all-features
+
+  # The supervisor's HTTP/TLS dependency tree requires Rust 1.88 (ICU 2.3).
+  # Keep this separate from the SDK's lower 1.86 promise.
+  supervisor-msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.88"
+      - name: cargo check on the declared MSRV
+        run: cargo check --manifest-path supervisor/Cargo.toml --locked --all-targets
 
   # Same promise for the broker crate (queen-engine), which declares its own,
   # HIGHER floor: 1.88, forced by jsonwebtoken -> simple_asn1 -> time. The two

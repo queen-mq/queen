@@ -3,9 +3,10 @@
 namespace Queen\Exceptions;
 
 /**
- * Machine-readable error codes from the proxy error contract, carried in the
- * JSON body's "code" field and surfaced as HttpException::$errorCode so
- * callers can branch without string-matching the message.
+ * Machine-readable error codes from broker/proxy error contracts. Proxy codes
+ * travel in the JSON body's `code` field as HttpException::$errorCode; native
+ * broker errors may travel as `error` and are retained separately as
+ * HttpException::$serverError. Callers branch on those fields, never prose.
  *
  * 429 -> RATE_LIMITED | QUOTA_EXCEEDED (retryable, paced by Retry429Policy)
  * 403 -> CLUSTER_SUSPENDED | STORAGE_QUOTA_EXCEEDED | FEATURE_GATED |
@@ -23,6 +24,10 @@ class ErrorCode
     public const STORAGE_QUOTA_EXCEEDED = 'storage_quota_exceeded';
     public const FEATURE_GATED = 'feature_gated';
     public const FORBIDDEN = 'forbidden';
+    /** The requested route does not exist on this broker version. */
+    public const NO_SUCH_ROUTE = 'no_such_route';
+    /** The route exists, but this operation/mode is not implemented. */
+    public const UNSUPPORTED = 'unsupported';
 
     /**
      * Not a server code: the SDK's own verdict for a 404 on the

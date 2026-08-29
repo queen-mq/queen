@@ -33,7 +33,8 @@ node --test test-v2/http-unit/retry429.test.js \
              test-v2/kv-unit/kvWire.test.js \
              test-v2/kv-unit/timerWire.test.js \
              test-v2/kv-unit/txnWire.test.js \
-             test-v2/conflation-unit/conflationWire.test.js
+             test-v2/conflation-unit/conflationWire.test.js \
+             test-v2/runner-unit/fatalExit.test.js
 
 # No argument = human + stream in one process; run.js calls process.exit(fail?1:0).
 exec node test-v2/run.js

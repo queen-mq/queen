@@ -54,11 +54,11 @@ const (
 )
 
 var (
-	binPath    string
-	serverURL  string
-	queuePfx   string
-	pg         *pgxpool.Pool
-	createdQs  sync.Map // queueName -> struct{}{}
+	binPath   string
+	serverURL string
+	queuePfx  string
+	pg        *pgxpool.Pool
+	createdQs sync.Map // queueName -> struct{}{}
 )
 
 func TestMain(m *testing.M) {
@@ -72,7 +72,12 @@ func TestMain(m *testing.M) {
 		os.Exit(2)
 	}
 	code := m.Run()
-	teardown()
+	if err := teardown(); err != nil {
+		fmt.Fprintln(os.Stderr, "queenctl e2e teardown failed:", err)
+		if code == 0 {
+			code = 1
+		}
+	}
 	os.Exit(code)
 }
 
@@ -107,7 +112,7 @@ func setup() error {
 	return nil
 }
 
-func teardown() {
+func teardown() error {
 	// Best-effort delete every queue we created. Test cases also call
 	// cleanupQueue at end-of-test, but a panic mid-test could leave
 	// stragglers behind.
@@ -117,8 +122,15 @@ func teardown() {
 		return true
 	})
 	if pg != nil {
+		if acquired := pg.Stat().AcquiredConns(); acquired != 0 {
+			// pgxpool.Close waits for acquired connections without a deadline.
+			// Fail immediately with a useful diagnostic instead of consuming the
+			// outer ten-minute `go test` timeout.
+			return fmt.Errorf("%d PostgreSQL connection(s) still acquired", acquired)
+		}
 		pg.Close()
 	}
+	return nil
 }
 
 func getenv(k, fallback string) string {
@@ -399,15 +411,12 @@ func pgRow(t *testing.T, sql string, args ...any) []any {
 	requirePG(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	row := pg.QueryRow(ctx, sql, args...)
 	cols := []any{}
-	// Drive: caller passes (sql, args...) and expects []any result. We use
-	// pgx Row.Scan via reflection-free pattern: query for one row and let
-	// the caller use len() against expected layout.
-	// Instead: return Values() helper via QueryRow → pgx doesn't expose
-	// that directly; use Query so we can call Values().
+	// Use Query rather than QueryRow because pgx Row does not expose Values().
+	// Every acquired connection is released when rows is closed; creating an
+	// unused QueryRow here would keep its connection checked out and make
+	// pgxpool.Close block at the end of the suite.
 	rows, err := pg.Query(ctx, sql, args...)
-	_ = row
 	if err != nil {
 		t.Fatalf("pg query: %v", err)
 	}

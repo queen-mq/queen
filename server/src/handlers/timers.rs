@@ -38,6 +38,7 @@ use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use base64::Engine;
+use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use super::{json, AppState};
@@ -94,6 +95,12 @@ fn max_horizon_ms() -> i64 {
     static V: OnceLock<i64> = OnceLock::new();
     *V.get_or_init(|| env_usize("QUEEN_TIMERS_MAX_HORIZON_S", 7_776_000) as i64 * 1000)
 }
+
+/// Exact timer counts are prefix-scoped so they remain index-driven. Bound the
+/// caller-controlled value in BYTES, matching PostgreSQL's `octet_length` and
+/// the actual size that travels through the URL, driver and btree comparator.
+/// `laravel:` is the first consumer; the endpoint remains namespace-generic.
+const TIMER_COUNT_PREFIX_MAX_BYTES: usize = 128;
 
 // ---------------------------------------------------------------------------
 // Response shapes. Same envelope discipline as the KV surface: `error` is a code
@@ -790,7 +797,7 @@ pub async fn handle_timer_peek(
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/v1/timers/:queue — list, keyset.
+// GET /api/v1/timers/:queue — list, keyset, or an explicit prefix count.
 //
 // THE QUEUE IS MANDATORY (§4.1), which is why it is a path segment and not a
 // filter: a tenant-wide list would be a scan that an end user of the customer
@@ -798,25 +805,101 @@ pub async fn handle_timer_peek(
 // decided by somebody else's web traffic.
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, PartialEq, Eq)]
+enum TimerReadQuery {
+    List {
+        after: Option<String>,
+        limit: i32,
+    },
+    Count {
+        prefix: String,
+    },
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct TimerReadParams {
+    mode: Option<String>,
+    after: Option<String>,
+    limit: Option<String>,
+    prefix: Option<String>,
+}
+
+/// Parse the two contracts sharing the queue-scoped GET route.
+///
+/// No `mode` (or `mode=list`) is byte-for-byte the old list behaviour. Count is
+/// deliberately opt-in because, although it is an index-driven namespace walk,
+/// an exact aggregate cannot have the list's LIMIT. Requiring a non-empty
+/// prefix keeps callers from accidentally turning it into a whole-queue scan.
+fn timer_read_query(q: &TimerReadParams) -> Result<TimerReadQuery, (&'static str, String)> {
+    match q.mode.as_deref().unwrap_or("list") {
+        "" | "list" => {
+            let after = q.after.as_ref().filter(|s| !s.is_empty()).cloned();
+            let limit = q
+                .limit
+                .as_ref()
+                .and_then(|v| v.parse::<i32>().ok())
+                .unwrap_or(100);
+            Ok(TimerReadQuery::List { after, limit })
+        }
+        "count" => {
+            if q.after.is_some() || q.limit.is_some() {
+                return Err((
+                    "timers_count_page_parameters",
+                    "mode=count does not accept after or limit".to_string(),
+                ));
+            }
+            let prefix = q.prefix.as_ref().ok_or_else(|| {
+                (
+                    "timers_count_prefix_required",
+                    "mode=count requires a non-empty prefix".to_string(),
+                )
+            })?;
+            if prefix.is_empty() {
+                return Err((
+                    "timers_count_prefix_required",
+                    "mode=count requires a non-empty prefix".to_string(),
+                ));
+            }
+            if prefix.as_bytes().contains(&0) {
+                return Err((
+                    "timers_count_prefix_invalid",
+                    "timer count prefix cannot contain NUL".to_string(),
+                ));
+            }
+            if prefix.len() > TIMER_COUNT_PREFIX_MAX_BYTES {
+                return Err((
+                    "timers_count_prefix_too_long",
+                    format!(
+                        "timer count prefix is {} bytes; the ceiling is {}",
+                        prefix.len(),
+                        TIMER_COUNT_PREFIX_MAX_BYTES
+                    ),
+                ));
+            }
+            Ok(TimerReadQuery::Count {
+                prefix: prefix.clone(),
+            })
+        }
+        mode => Err((
+            "timers_read_mode_unknown",
+            format!("unknown timer read mode `{mode}`; expected list or count"),
+        )),
+    }
+}
+
 pub async fn handle_timers_list(
     State(st): State<Arc<AppState>>,
     Extension(tenant): Extension<Tenant>,
     Path(queue): Path<String>,
-    Query(q): Query<HashMap<String, String>>,
+    Query(q): Query<TimerReadParams>,
 ) -> Response {
     if let Some(resp) = gated(&st, tenant.as_str(), crate::switches::Surface::TimerRead, 0) {
         return resp;
     }
-    // `after` is an EXCLUSIVE keyset cursor, not an offset, and it is stable
-    // because timer_key carries COLLATE "C". `limit` is CLAMPED by the SP and
-    // never rejected, with `truncated` telling the truth: a 400 on a too-large
-    // limit is an error the user cannot fix without reading the server's
-    // configuration.
-    let after = q.get("after").filter(|s| !s.is_empty()).cloned();
-    let limit = q
-        .get("limit")
-        .and_then(|v| v.parse::<i32>().ok())
-        .unwrap_or(100);
+    let query = match timer_read_query(&q) {
+        Ok(q) => q,
+        Err((reason, detail)) => return bad_request(reason, &detail),
+    };
 
     let client = match st.pool.get().await {
         Ok(c) => c,
@@ -826,15 +909,34 @@ pub async fn handle_timers_list(
         }
     };
     let cancel = client.cancel_token();
-    let res = tokio::time::timeout(
-        st.stmt_timeout,
-        db::timers_list(&client, tenant.as_str(), &queue, after.as_deref(), limit),
-    )
-    .await;
-    match super::kv::resolve_db(res, client, cancel, "timers_list", &st.metrics) {
-        Ok(txt) => json(StatusCode::OK, txt),
-        Err(Some(e)) => db_error_response(&st, &e),
-        Err(None) => unavailable("timers_timeout"),
+    match query {
+        TimerReadQuery::List { after, limit } => {
+            // `after` is an EXCLUSIVE keyset cursor, not an offset, and it is
+            // stable because timer_key carries COLLATE "C". `limit` is CLAMPED
+            // by the SP and never rejected, with `truncated` telling the truth.
+            let res = tokio::time::timeout(
+                st.stmt_timeout,
+                db::timers_list(&client, tenant.as_str(), &queue, after.as_deref(), limit),
+            )
+            .await;
+            match super::kv::resolve_db(res, client, cancel, "timers_list", &st.metrics) {
+                Ok(txt) => json(StatusCode::OK, txt),
+                Err(Some(e)) => db_error_response(&st, &e),
+                Err(None) => unavailable("timers_timeout"),
+            }
+        }
+        TimerReadQuery::Count { prefix } => {
+            let res = tokio::time::timeout(
+                st.stmt_timeout,
+                db::timers_count(&client, tenant.as_str(), &queue, &prefix),
+            )
+            .await;
+            match super::kv::resolve_db(res, client, cancel, "timers_count", &st.metrics) {
+                Ok(txt) => json(StatusCode::OK, txt),
+                Err(Some(e)) => db_error_response(&st, &e),
+                Err(None) => unavailable("timers_timeout"),
+            }
+        }
     }
 }
 
@@ -866,6 +968,61 @@ mod tests {
     #[test]
     fn the_default_horizon_is_ninety_days() {
         assert_eq!(max_horizon_ms(), 7_776_000_000);
+    }
+
+    #[test]
+    fn timer_count_mode_is_explicit_bounded_and_literal() {
+        let list = timer_read_query(&TimerReadParams::default()).expect("legacy list mode");
+        assert_eq!(
+            list,
+            TimerReadQuery::List {
+                after: None,
+                limit: 100
+            }
+        );
+
+        let count = timer_read_query(&TimerReadParams {
+            mode: Some("count".to_string()),
+            prefix: Some("laravel:%_".to_string()),
+            ..TimerReadParams::default()
+        })
+        .expect("metacharacters are literal prefix bytes");
+        assert_eq!(
+            count,
+            TimerReadQuery::Count {
+                prefix: "laravel:%_".to_string()
+            }
+        );
+
+        for prefix in ["".to_string(), "x".repeat(129), "nul\0byte".to_string()] {
+            let q = TimerReadParams {
+                mode: Some("count".to_string()),
+                prefix: Some(prefix),
+                ..TimerReadParams::default()
+            };
+            assert!(timer_read_query(&q).is_err());
+        }
+
+        // The ceiling is bytes, not Unicode scalar count: 64 two-byte code
+        // points fit exactly, 65 do not.
+        let exact = TimerReadParams {
+            mode: Some("count".to_string()),
+            prefix: Some("é".repeat(64)),
+            ..TimerReadParams::default()
+        };
+        assert!(timer_read_query(&exact).is_ok());
+        let over = TimerReadParams {
+            mode: Some("count".to_string()),
+            prefix: Some("é".repeat(65)),
+            ..TimerReadParams::default()
+        };
+        assert!(timer_read_query(&over).is_err());
+
+        let unknown = TimerReadParams {
+            mode: Some("sum".to_string()),
+            ..TimerReadParams::default()
+        };
+        assert!(timer_read_query(&unknown).is_err());
     }
 
     /// The four routes of §8.1, built exactly as main.rs must build them (see

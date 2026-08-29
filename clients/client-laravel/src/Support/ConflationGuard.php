@@ -3,6 +3,7 @@
 namespace Queen\Support;
 
 use Queen\Exceptions\ConflationUnsupportedException;
+use Queen\Exceptions\ConflationPolicyMismatchException;
 
 /**
  * The SDK half of the conflation contract (PLAN_CONFLATION §3.3, §4). Every pop
@@ -21,8 +22,8 @@ use Queen\Exceptions\ConflationUnsupportedException;
  *   asked | conflation | conflict | outcome
  *   ------+------------+----------+-------------------------------------------
  *    no   |     -      |    no    | nothing to say
- *    no   |     -      |   yes    | warn once: this consumer is being served a
- *         |            |          | policy it never declared
+ *    no   |    yes     |    -     | RAISE before returning messages: this
+ *         |            |          | consumer requires full delivery
  *    yes  |    yes     |    -     | working as declared (warn once on conflict)
  *    yes  |     no     |   yes    | the broker UNDERSTOOD the flag and declined
  *         |            |          | it — warn once, keep consuming (§3.3: a
@@ -73,19 +74,27 @@ final class ConflationGuard
         $conflict = ($body['conflationConflict'] ?? false) === true;
         $applied = ($body['conflation'] ?? false) === true;
 
-        // Reported whether or not this consumer asked: the disagreement is
-        // just as worth knowing when the group conflates and this consumer
-        // does not expect it to.
-        if ($conflict) {
-            self::warnOnce($queue, $group, $namespace, $task, $applied);
-        }
-
         // Pop maintenance is not version skew: the broker refused the pop before
         // it reached the claim path, so there is no policy to echo and nothing
         // to conclude from the absence of one. Without this, an operator pausing
         // pops would stop every conflating consumer in the fleet with a "broker
         // too old" exception.
         $paused = ($body['paused'] ?? false) === true;
+
+        // Ordinary queue consumers require every message, so silently joining
+        // a group whose persisted policy is conflation=true would discard
+        // intermediate jobs. The broker echoes the effective policy even when
+        // this client omitted the opt-in flag; fail before returning messages.
+        if (!$requested && $applied) {
+            throw new ConflationPolicyMismatchException(
+                "consumer group '{$group}' on '" . ($queue ?? (($namespace ?? '*') . '/' . ($task ?? '*')))
+                . "' has conflation enabled, but this consumer requires conflation=false"
+            );
+        }
+
+        if ($conflict) {
+            self::warnOnce($queue, $group, $namespace, $task, $applied);
+        }
 
         if (!$requested || $applied || $conflict || $paused) {
             return;

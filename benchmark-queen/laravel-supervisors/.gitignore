@@ -1,0 +1,12 @@
+/.env
+/.env.*
+!/.env.example
+/artifacts/
+/reports/
+/results/
+/*.csv
+/*.jsonl
+/*.log
+/*.pid
+/scripts/__pycache__/
+*.py[cod]

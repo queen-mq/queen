@@ -1,0 +1,6 @@
+/.env
+/bootstrap/cache/*.php
+/storage/framework/cache/*
+/storage/logs/*
+/storage/queen-supervisor/*
+/vendor/

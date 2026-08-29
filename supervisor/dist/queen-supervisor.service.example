@@ -1,0 +1,28 @@
+[Unit]
+Description=Queen Laravel worker supervisor
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=queen
+Group=queen
+WorkingDirectory=/srv/queen-app/current
+UMask=0077
+EnvironmentFile=-/etc/queen-supervisor/queen.env
+ExecStartPre=/usr/bin/test -x /srv/queen-app/current/vendor/bin/queen-supervisor
+ExecStartPre=/usr/bin/test -f /srv/queen-app/current/artisan
+ExecStart=/srv/queen-app/current/vendor/bin/queen-supervisor --php /usr/bin/php --artisan /srv/queen-app/current/artisan
+# `queen:supervisor terminate` exits cleanly so a process manager can reload
+# Laravel configuration under a fresh master.
+Restart=always
+RestartSec=2
+# SIGTERM reaches the master; systemd applies the final SIGKILL to the cgroup.
+KillMode=mixed
+SendSIGKILL=yes
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target

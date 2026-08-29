@@ -33,8 +33,8 @@
 #           is the half the SDK warning is derived FROM.
 #    MODES  §1.5 composition, e2e shape of §7.1(9): all+conflation delivers 1
 #           over a backlog; new+conflation delivers 0 until the next push.
-#    DEPTH  §2.5/§5.3: partitionsPending / conflation / effectivePending on
-#           GET /api/v1/resources/queues/:queue/depth.
+#    DEPTH  §2.5/§5.3: pending / processing / ready and their conflation-
+#           effective forms on GET /api/v1/resources/queues/:queue/depth.
 #    COUNTER §6.3: queen_queue_conflated_per_minute surfaces on
 #           /metrics/prometheus (fed by ack's `conflated` through syscollect's
 #           METRICS_FLUSH_MS lane, default 60 s — hence this section's deadline).
@@ -400,7 +400,7 @@ fi
 scenario_end
 
 # =============================================================================
-scenario_begin "DEPTH partitionsPending / conflation / effectivePending (§2.5, §5.3)"
+scenario_begin "DEPTH pending / processing / ready / conflation-effective (§2.5, §5.3)"
 # =============================================================================
 configure_queue "$Q_DEPTH" '{"leaseTime":120}'
 push_range "$Q_DEPTH" p0 0 5
@@ -421,13 +421,19 @@ while [ "$DW_TOTAL" -lt 3 ] && [ "$(date +%s)" -lt "$DDL" ]; do
 done
 eq "conflating pop serves ONE message per partition (3 partitions -> 3)" "3" "$DW_TOTAL"
 
-# Leased but NOT acked: the log depth must be untouched, and the three new
-# fields must be present with the conflating reading.
+# Leased but NOT acked: the log depth stays untouched while lease/ready fields
+# expose the conflation-adjusted schedulable work.
 depth "$Q_DEPTH" "$GW"
 eq "pending is LOG depth (positions to retire)" "15" "$(jv '.pending')"
 eq "partitionsPending counts partitions with pending > 0" "3" "$(jv '.partitionsPending')"
 eq "conflation echoes the group's stored policy" "true" "$(jv '.conflation')"
 eq "effectivePending is WORK depth for a conflating group" "3" "$(jv '.effectivePending')"
+eq "live conflating leases cover all pending positions" "15" "$(jv '.processing')"
+eq "fully leased conflating backlog has no ready positions" "0" "$(jv '.ready')"
+eq "fully leased conflating backlog has no ready partitions" "0" "$(jv '.partitionsReady')"
+eq "conflating effectiveReady is ready-partition count" "0" "$(jv '.effectiveReady')"
+eq "per-partition processing sums to the aggregate" "15" "$(jv '[.partitions[].processing] | add')"
+eq "per-partition ready sums to the aggregate" "0" "$(jv '[.partitions[].ready] | add')"
 
 ack_msgs "$GW" completed "$TMPD/dw.msgs"
 eq "batch ack of the three tails succeeds" "true" "$ACKB_ALL"
@@ -436,6 +442,10 @@ eq "after the acks pending is 0" "0" "$(jv '.pending')"
 eq "and partitionsPending is 0" "0" "$(jv '.partitionsPending')"
 eq "and effectivePending is 0" "0" "$(jv '.effectivePending')"
 eq "and conflation still reads true" "true" "$(jv '.conflation')"
+eq "and processing is 0" "0" "$(jv '.processing')"
+eq "and ready is 0" "0" "$(jv '.ready')"
+eq "and partitionsReady is 0" "0" "$(jv '.partitionsReady')"
+eq "and effectiveReady is 0" "0" "$(jv '.effectiveReady')"
 
 # A NON-conflating group on the same queue: effectivePending == pending.
 pop "$Q_DEPTH" "consumerGroup=$GAU&subscriptionMode=all&batch=1"   # register; lease not acked
@@ -444,12 +454,19 @@ eq "non-conflating group: pending unchanged by an unacked lease" "15" "$(jv '.pe
 eq "non-conflating group: conflation false" "false" "$(jv '.conflation')"
 eq "non-conflating group: effectivePending == pending" "15" "$(jv '.effectivePending')"
 eq "non-conflating group: partitionsPending" "3" "$(jv '.partitionsPending')"
+eq "non-conflating group: one live leased position" "1" "$(jv '.processing')"
+eq "non-conflating group: ready excludes that lease" "14" "$(jv '.ready')"
+eq "non-conflating group: every partition still has ready work" "3" "$(jv '.partitionsReady')"
+eq "non-conflating group: effectiveReady == ready" "14" "$(jv '.effectiveReady')"
 
 # Queue-level (no group): worst named cursor wins; no group => conflation false.
 depth "$Q_DEPTH"
 eq "queue-level pending is the worst named cursor's" "15" "$(jv '.pending')"
 eq "queue-level conflation is false" "false" "$(jv '.conflation')"
 eq "queue-level effectivePending == pending" "15" "$(jv '.effectivePending')"
+eq "queue-level processing sums live leases" "1" "$(jv '.processing')"
+eq "queue-level ready excludes the live lease" "14" "$(jv '.ready')"
+eq "queue-level effectiveReady == ready" "14" "$(jv '.effectiveReady')"
 scenario_end
 
 # =============================================================================

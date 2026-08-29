@@ -132,6 +132,12 @@ class TimersIntegrationTest extends IntegrationTestCase
         $rest = $timers->list(self::TIMER_QUEUE, ['after' => $page['nextAfter']]);
         $this->assertSame(['listed-b'], array_column($rest['rows'], 'timerKey'));
         $this->assertFalse($rest['truncated']);
+
+        $this->assertSame(
+            2,
+            $timers->count(self::TIMER_QUEUE, 'listed-'),
+            'the exact prefix count must agree without fetching either list page'
+        );
     }
 
     /**

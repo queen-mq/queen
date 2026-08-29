@@ -36,6 +36,7 @@ class QueueBuilderTest extends TestCase
             ->autoAck(false)
             ->wait(true)
             ->timeoutMillis(60000)
+            ->leaseSeconds(90)
             ->renewLease(true, 30000)
             ->subscriptionMode('all')
             ->subscriptionFrom('2024-01-01T00:00:00Z');

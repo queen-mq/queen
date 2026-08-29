@@ -6,6 +6,7 @@ use GuzzleHttp\HandlerStack;
 use PHPUnit\Framework\TestCase;
 use Psr\Http\Message\RequestInterface;
 use Queen\Exceptions\ConflationUnsupportedException;
+use Queen\Exceptions\ConflationPolicyMismatchException;
 use Queen\Laravel\Commands\ConsumeCommand;
 use Queen\Queen;
 use Queen\Support\ConflationGuard;
@@ -283,7 +284,7 @@ class ConflationTest extends TestCase
     }
 
     // ===========================
-    // 3. Declaration conflict (§3.3) — warn ONCE, never error
+    // 3. Declaration conflict (§3.3)
     // ===========================
 
     public function testConflictWarnsExactlyOncePerQueueAndGroup(): void
@@ -340,23 +341,21 @@ class ConflationTest extends TestCase
     }
 
     /**
-     * The other half of §3.3: the group's stored policy is conflation=ON and
-     * THIS consumer did not ask for it. The broker applies conflation anyway
-     * and flags the disagreement — the consumer is being served last-value
-     * delivery it never declared, which is exactly what it needs told.
+     * A consumer that requires every message must never silently join a group
+     * whose stored policy is conflation=ON: that would discard intermediate
+     * jobs before user code sees them.
      */
-    public function testConflictIsReportedEvenWhenThisConsumerDidNotAskForConflation(): void
+    public function testPersistedConflationIsRejectedWhenThisConsumerDidNotAskForIt(): void
     {
         $handler = new PlanHandler([], self::ok(self::popBody(conflation: true, conflict: true)));
         $queen = $this->queen($handler);
 
-        $messages = [];
-        $warnings = $this->captureWarnings(function () use ($queen, &$messages): void {
-            $messages = $queen->queue('orders')->group('workers')->pop();
-        });
+        $this->expectException(ConflationPolicyMismatchException::class);
+        $this->expectExceptionMessage('requires conflation=false');
 
-        $this->assertCount(1, $messages);
-        $this->assertCount(1, $warnings);
+        $this->captureWarnings(function () use ($queen): void {
+            $queen->queue('orders')->group('workers')->pop();
+        });
     }
 
     /**
@@ -387,11 +386,10 @@ class ConflationTest extends TestCase
     // ===========================
 
     /**
-     * `pending` is LOG depth, `effectivePending` is WORK depth: a conflating
-     * queue at pending 4,000,000 / effectivePending 12 is healthy, while the
-     * same numbers on a non-conflating group are an incident. The PHP admin
-     * surface returns the decoded body as-is, so what is pinned here is that
-     * the new fields survive the round trip untouched.
+     * `pending` is LOG depth, `processing` is the live leased span and `ready`
+     * is immediately claimable. Conflating effective depths are partition
+     * counts. The PHP admin surface returns the decoded body as-is, so this
+     * pins every aggregate and per-partition field through the round trip.
      */
     public function testQueueDepthCarriesTheConflationFields(): void
     {
@@ -399,20 +397,37 @@ class ConflationTest extends TestCase
             'queue' => 'orders',
             'group' => 'workers',
             'pending' => 4000000,
+            'processing' => 1000000,
+            'ready' => 3000000,
             'partitionsPending' => 12,
+            'partitionsReady' => 10,
             'conflation' => true,
             'effectivePending' => 12,
-            'partitions' => [['partition' => 'k-1', 'pending' => 900]],
+            'effectiveReady' => 10,
+            'partitions' => [[
+                'partition' => 'k-1',
+                'pending' => 900,
+                'processing' => 100,
+                'ready' => 800,
+            ]],
         ]));
         $queen = $this->queen($handler);
 
-        $depth = $queen->admin()->getQueueDepth('orders', 'workers');
+        $depth = $queen->admin()->getQueueDepth('orders', 'workers', 1_234);
 
         $this->assertSame(12, $depth['partitionsPending']);
         $this->assertTrue($depth['conflation']);
         $this->assertSame(12, $depth['effectivePending']);
         $this->assertSame(4000000, $depth['pending']);
+        $this->assertSame(1000000, $depth['processing']);
+        $this->assertSame(3000000, $depth['ready']);
+        $this->assertSame(10, $depth['partitionsReady']);
+        $this->assertSame(10, $depth['effectiveReady']);
+        $this->assertSame(100, $depth['partitions'][0]['processing']);
+        $this->assertSame(800, $depth['partitions'][0]['ready']);
         $this->assertSame('workers', self::query($handler->requests[0])['group'] ?? null);
+        $this->assertSame(1.234, $handler->options[0]['timeout']);
+        $this->assertFalse($handler->options[0]['allow_redirects']);
     }
 
     // ===========================

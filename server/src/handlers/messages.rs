@@ -324,12 +324,18 @@ pub async fn handle_retry_message(
         None => payload_txt,
     };
 
+    // Make the freshness contract explicit instead of relying on handle_push's
+    // missing-transactionId fallback. Besides documenting the security-sensitive
+    // dedup boundary at the call site, this lets us reject an impossible UUID
+    // collision before a replay can be mistaken for the quarantined frame.
+    let replay_transaction_id = fresh_replay_transaction_id(&transaction_id);
     let push_body = serde_json::json!({
         "items": [{
             "queue": queue,
             "partition": partition,
             "payload": serde_json::from_str::<serde_json::Value>(&payload_txt)
                 .unwrap_or(serde_json::Value::Null),
+            "transactionId": replay_transaction_id,
         }]
     })
     .to_string();
@@ -358,21 +364,21 @@ pub async fn handle_retry_message(
             .to_string(),
         );
     }
-    let pushed: serde_json::Value =
-        serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
-    let first = pushed.get(0).cloned().unwrap_or(serde_json::Value::Null);
-    let push_status = first.get("status").and_then(|s| s.as_str()).unwrap_or("");
-    if push_status == "error" || push_status.is_empty() {
-        return json(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({
-                "success": false,
-                "error": "Replay push was rejected — the message is still in the dead-letter queue",
-                "pushResult": pushed,
-            })
-            .to_string(),
-        );
-    }
+    let first = match accepted_replay_push_result(&body, &transaction_id) {
+        Some(result) => result,
+        None => {
+            let pushed = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({
+                    "success": false,
+                    "error": "Replay push was rejected — the message is still in the dead-letter queue",
+                    "pushResult": pushed,
+                })
+                .to_string(),
+            );
+        }
+    };
 
     // Push accepted: drop the DLQ row. A failure here is reported (the message
     // now exists twice: replayed AND still dead-lettered) rather than swallowed.
@@ -399,6 +405,43 @@ pub async fn handle_retry_message(
             .to_string(),
         ),
     }
+}
+
+// A retry submits exactly one snapshot. Deleting its DLQ row is therefore safe
+// only when the push response contains exactly one result and that result is a
+// durable acceptance. Be deliberately fail-closed: `duplicate` is not enough
+// here because the retry uses a fresh transaction id, while every failure,
+// unknown status, extra result or malformed body must leave the snapshot in the
+// DLQ for another operator attempt.
+fn fresh_replay_transaction_id(original_transaction_id: &str) -> String {
+    loop {
+        let candidate = uuid_bytes_to_string(&uuidv7_bytes());
+        if candidate != original_transaction_id {
+            return candidate;
+        }
+    }
+}
+
+fn accepted_replay_push_result(
+    body: &[u8],
+    original_transaction_id: &str,
+) -> Option<serde_json::Value> {
+    let mut results: Vec<serde_json::Value> = serde_json::from_slice(body).ok()?;
+    if results.len() != 1 {
+        return None;
+    }
+    let result = results.pop()?;
+    let parsed: queen_protocol::PushResult = serde_json::from_value(result.clone()).ok()?;
+    (parsed.index == 0
+        && !parsed.message_id.is_empty()
+        && !parsed.transaction_id.is_empty()
+        && parsed.transaction_id != original_transaction_id
+        && !parsed.queue_name.is_empty()
+        && matches!(
+            parsed.status,
+            queen_protocol::PushStatus::Queued | queen_protocol::PushStatus::Buffered
+        ))
+    .then_some(result)
 }
 
 // Enrich a list_messages_v1 result: log-queue entries come back with
@@ -607,3 +650,57 @@ fn decrypt_dlq_payloads(enc: &crate::encryption::Encryption, v: &mut serde_json:
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{accepted_replay_push_result, fresh_replay_transaction_id};
+
+    #[test]
+    fn dlq_replay_mints_a_transaction_id_different_from_the_original() {
+        let original = "01a04f39-7c33-7000-985d-707a8e01e44f";
+        let replay = fresh_replay_transaction_id(original);
+
+        assert_ne!(replay, original);
+        assert_eq!(replay.len(), 36, "replay id must retain UUID wire shape");
+    }
+
+    #[test]
+    fn dlq_replay_accepts_exactly_one_durable_push_result() {
+        for status in ["queued", "buffered"] {
+            let body = format!(
+                r#"[{{"index":0,"message_id":"m1","transaction_id":"t1","queueName":"q","status":"{status}"}}]"#
+            );
+            let accepted = accepted_replay_push_result(body.as_bytes(), "original-txn")
+                .expect("queued and buffered are durable replay outcomes");
+            assert_eq!(accepted["status"], status);
+        }
+    }
+
+    #[test]
+    fn dlq_replay_rejects_non_accepted_and_malformed_push_results() {
+        for body in [
+            r#"[{"index":0,"message_id":"m1","transaction_id":"t1","queueName":"q","status":"failed"}]"#,
+            r#"[{"index":0,"message_id":"m1","transaction_id":"t1","queueName":"q","status":"duplicate"}]"#,
+            r#"[{"index":0,"message_id":"m1","transaction_id":"t1","queueName":"q","status":"error"}]"#,
+            r#"[{"index":0,"message_id":"m1","transaction_id":"t1","queueName":"q","status":"unknown"}]"#,
+            r#"[{"index":0,"message_id":"m1","transaction_id":"t1","queueName":"q","status":"QUEUED"}]"#,
+            r#"[{"index":0,"message_id":"m1","transaction_id":"t1","queueName":"q","status":null}]"#,
+            r#"[{"index":0,"message_id":"m1","transaction_id":"original-txn","queueName":"q","status":"queued"}]"#,
+            r#"[{"index":1,"message_id":"m1","transaction_id":"t1","queueName":"q","status":"queued"}]"#,
+            r#"[{"index":0,"message_id":"","transaction_id":"t1","queueName":"q","status":"queued"}]"#,
+            r#"[{"index":0,"message_id":"m1","transaction_id":"","queueName":"q","status":"queued"}]"#,
+            r#"[{"index":0,"message_id":"m1","transaction_id":"t1","queueName":"","status":"queued"}]"#,
+            r#"[{"status":"queued"}]"#,
+            r#"[{}]"#,
+            r#"[]"#,
+            r#"[{"index":0,"message_id":"m1","transaction_id":"t1","queueName":"q","status":"queued"},{"index":1,"message_id":"m2","transaction_id":"t2","queueName":"q","status":"buffered"}]"#,
+            r#"{"status":"queued"}"#,
+            r#"["queued"]"#,
+            r#"not-json"#,
+        ] {
+            assert!(
+                accepted_replay_push_result(body.as_bytes(), "original-txn").is_none(),
+                "replay result must be rejected: {body}"
+            );
+        }
+    }
+}

@@ -145,10 +145,23 @@ fn short_and_malformed_codes_do_not_panic() {
     // "\u{e9}a" is the one that actually bites: it is three BYTES, so `&code[..2]` splits a
     // char and panics. The class prefix must be taken over bytes (`code.as_bytes()`) or with
     // `char_indices`, never with a naive byte range.
-    for code in ["", "4", "0", "?", "4\u{0}", "\u{e9}", "\u{e9}a", "\u{1f600}"] {
+    for code in [
+        "",
+        "4",
+        "0",
+        "?",
+        "4\u{0}",
+        "\u{e9}",
+        "\u{e9}a",
+        "\u{1f600}",
+    ] {
         let _ = c(code);
     }
-    assert_eq!(c(""), SqlClass::Permanent, "an empty code is not a reason to retry forever");
+    assert_eq!(
+        c(""),
+        SqlClass::Permanent,
+        "an empty code is not a reason to retry forever"
+    );
 }
 
 #[test]
@@ -171,6 +184,10 @@ fn the_classifier_is_pure() {
     // it once per segment per retry and must get the same verdict every time, or a batch could
     // oscillate between isolated and batched replay.
     for code in TRANSIENT.iter().chain(CONFIG).chain(PERMANENT) {
-        assert_eq!(c(code), c(code), "{code} classified differently on two calls");
+        assert_eq!(
+            c(code),
+            c(code),
+            "{code} classified differently on two calls"
+        );
     }
 }

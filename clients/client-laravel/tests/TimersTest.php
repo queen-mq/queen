@@ -259,6 +259,125 @@ class TimersTest extends TestCase
         $this->assertSame('after=order-1&limit=50', $request->getUri()->getQuery());
     }
 
+    public function testCountUsesTheExplicitPrefixModeAndValidatesTheWire(): void
+    {
+        $handler = new PlanHandler([], ['status' => 200, 'json' => ['count' => 17]]);
+
+        $count = $this->timersFor($handler)->count('payments/retry', 'laravel:');
+
+        $request = $handler->requests[0];
+        $this->assertSame(17, $count);
+        $this->assertSame('GET', $request->getMethod());
+        $this->assertSame('/api/v1/timers/payments%2Fretry', $request->getUri()->getPath());
+        $this->assertSame('mode=count&prefix=laravel%3A', $request->getUri()->getQuery());
+    }
+
+    public function testCountRejectsEveryMalformedSuccessfulResponse(): void
+    {
+        foreach ([
+            [],
+            ['count' => '2'],
+            ['count' => -1],
+            ['count' => 1.5],
+            ['count' => 2, 'rows' => []],
+            ['rows' => [], 'truncated' => false],
+            ['rows' => [], 'truncated' => 0, 'nextAfter' => null],
+            ['rows' => ['named' => ['timerKey' => 'laravel:a']], 'truncated' => false, 'nextAfter' => null],
+            ['rows' => [], 'truncated' => false, 'nextAfter' => null, 'extra' => true],
+            ['rows' => [], 'truncated' => true, 'nextAfter' => null],
+        ] as $body) {
+            $handler = new PlanHandler([], ['status' => 200, 'json' => $body]);
+
+            try {
+                $this->timersFor($handler)->count('q', 'laravel:');
+                $this->fail('A malformed timer count response must be rejected.');
+            } catch (\UnexpectedValueException $exception) {
+                $this->assertNotSame('', $exception->getMessage());
+            }
+        }
+    }
+
+    public function testCountReusesAnExactLegacyFirstPageAndContinuesByKeyset(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => [
+                'rows' => [
+                    ['timerKey' => 'application:reminder:1'],
+                    ['timerKey' => 'laravel:delay:job-1'],
+                ],
+                'truncated' => true,
+                'nextAfter' => 'laravel:delay:job-1',
+            ]],
+            ['status' => 200, 'json' => [
+                'rows' => [
+                    ['timerKey' => 'laravel:release:job-2'],
+                    ['timerKey' => 'z:last'],
+                ],
+                'truncated' => false,
+                'nextAfter' => null,
+            ]],
+        ]);
+
+        $this->assertSame(2, $this->timersFor($handler)->count('q', 'laravel:'));
+        $this->assertCount(2, $handler->requests, 'the list returned by mode=count is the first page');
+        $this->assertSame('mode=count&prefix=laravel%3A', $handler->requests[0]->getUri()->getQuery());
+        $this->assertSame(
+            'after=laravel%3Adelay%3Ajob-1&limit=1000',
+            $handler->requests[1]->getUri()->getQuery()
+        );
+    }
+
+    public function testLegacyCountFailsClosedOnMalformedOrCyclicLaterPages(): void
+    {
+        foreach ([
+            ['rows' => [], 'truncated' => false],
+            [
+                'rows' => [['timerKey' => 'laravel:a']],
+                'truncated' => true,
+                'nextAfter' => 'laravel:a',
+            ],
+            [
+                'rows' => [['timerKey' => 'laravel:b']],
+                'truncated' => false,
+                'nextAfter' => 'laravel:b',
+            ],
+        ] as $badSecondPage) {
+            $handler = new PlanHandler([
+                ['status' => 200, 'json' => [
+                    'rows' => [['timerKey' => 'laravel:a']],
+                    'truncated' => true,
+                    'nextAfter' => 'laravel:a',
+                ]],
+                ['status' => 200, 'json' => $badSecondPage],
+            ]);
+
+            try {
+                $this->timersFor($handler)->count('q', 'laravel:');
+                $this->fail('A bad later page must not return a partial timer count.');
+            } catch (\UnexpectedValueException) {
+                $this->assertCount(2, $handler->requests);
+            }
+        }
+    }
+
+    public function testCountValidatesPrefixBeforeSendingARequest(): void
+    {
+        $boundary = new PlanHandler([], ['status' => 200, 'json' => ['count' => 0]]);
+        $this->assertSame(0, $this->timersFor($boundary)->count('q', str_repeat('é', 64)));
+        $this->assertSame(1, $boundary->count(), '128 UTF-8 bytes are accepted exactly');
+
+        foreach (['', "bad\0prefix", "bad\xFFutf8", str_repeat('x', 129), str_repeat('é', 65)] as $prefix) {
+            $handler = new PlanHandler();
+
+            try {
+                $this->timersFor($handler)->count('q', $prefix);
+                $this->fail('An invalid timer count prefix must be rejected.');
+            } catch (\InvalidArgumentException) {
+                $this->assertSame(0, $handler->count());
+            }
+        }
+    }
+
     public function testBatchSendsOperationsVerbatimAndInOrder(): void
     {
         $handler = new PlanHandler([], ['status' => 200, 'json' => ['results' => [[], []]]]);

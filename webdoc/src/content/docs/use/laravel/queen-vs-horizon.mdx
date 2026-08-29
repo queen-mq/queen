@@ -1,0 +1,207 @@
+---
+title: Queen or Horizon
+description: "A direct Laravel decision guide: architecture, worker balancing, dashboards, memory, operational maturity, and the cases where Horizon is still the better fit."
+type: concept
+tier: use
+status: preview
+sidebar:
+  order: 5
+  label: Queen vs Horizon
+sourceOfTruth:
+  - clients/client-laravel/config/queen.php
+  - clients/client-laravel/src/Laravel/QueenServiceProvider.php
+  - clients/client-laravel/src/Laravel/Queue/QueenQueue.php
+  - clients/client-laravel/src/Laravel/Supervisor/SupervisorConfiguration.php
+  - clients/client-laravel/src/Laravel/Supervisor/PhpSupervisor.php
+  - clients/client-laravel/src/Laravel/Supervisor/SupervisorState.php
+  - clients/client-laravel/src/Laravel/Dashboard/DashboardRepository.php
+  - supervisor/src/main.rs
+  - benchmark-queen/laravel-supervisors/QUALIFICATION_SUMMARY_20260829.md
+  - benchmark-queen/laravel-supervisors/QUALIFICATION_REPORT_20260829.md
+verifiedBy:
+  - clients/client-laravel/tests/LaravelQueueDriverTest.php
+  - clients/client-laravel/tests/LaravelSupervisorTest.php
+  - clients/client-laravel/tests/LaravelSupervisorProductionTest.php
+  - clients/client-laravel/tests/LaravelDashboardTest.php
+---
+
+Queen is not a drop-in reimplementation of Horizon. Both can supervise Laravel workers, but they
+sit on different queue backends and make different operational trade-offs.
+
+| Stack | Queue backend | Control plane | Worker process |
+| --- | --- | --- | --- |
+| Horizon | Redis | Horizon PHP master and supervisors | `artisan horizon:work` |
+| Queen PHP | Queen broker plus PostgreSQL | Laravel/PHP master | `artisan queue:work queen` |
+| Queen Rust | Queen broker plus PostgreSQL | Rust master after one temporary Artisan config load | `artisan queue:work queen` |
+
+The fair comparison is therefore **Horizon plus Redis** against **Queen's Laravel driver,
+supervisor, broker and PostgreSQL**. Comparing Horizon with the Queen broker alone would compare a
+worker control plane with a message store.
+
+<Aside type="note">
+Choose Horizon when its established Redis workflow, multi-master visibility, job tags, retained
+metrics and wait notifications are requirements today. Evaluate Queen when you want Queen's queue
+model and a much smaller Rust master, and can accept the current Unix, single-master preview
+boundary.
+</Aside>
+
+## Capability comparison
+
+Horizon facts in this table follow the current
+[official Laravel Horizon documentation](https://laravel.com/docs/horizon). Queen facts follow the
+implementation and tests named in this page's frontmatter.
+
+| Area | Horizon | Queen Laravel |
+| --- | --- | --- |
+| Laravel jobs | Standard dispatch, middleware, retry, backoff and failures | Same Laravel application surface |
+| Queue backend | Redis only; the official docs state Redis Cluster is not supported | Queen broker with PostgreSQL as durable source of truth |
+| Dynamic balancing | `auto`, with `size` or `time` strategy | `auto`, with independent `size` or `time` implementation |
+| Fixed allocation | `simple` | `simple` |
+| Ordered queue priority | `balance=false` | `balance=off` |
+| Master runtime | PHP with Laravel/Horizon loaded | PHP reference engine or optimized Rust engine |
+| Crash-loop control | Process restart behavior managed by Horizon and the outer monitor | Capped restart backoff in both engines; Rust adds an open/probe circuit breaker |
+| Multiple master hosts | Master records and supervisor state are shared through Horizon's Redis repository | Not safe yet; one master per application and consumer group |
+| Dashboard | Mature Horizon dashboard over its Redis state | Local supervisor panel plus a separate global Queen broker dashboard |
+| Retained job and queue metrics | Snapshot command and retained graphs | Live bounded supervisor state; broker analytics are separate |
+| Job tags and silencing | Automatic/manual tags and silenced jobs | Not implemented in the Laravel supervisor panel |
+| Long-wait notifications | Mail, Slack and SMS routes with per-queue thresholds | No package-native wait alert routing yet |
+| Per-supervisor controls | Pause, continue and status for individual supervisors | Controls currently apply to the complete local master |
+| Failed jobs | Horizon commands and dashboard integration | Laravel commands remain authoritative; Queen synchronizes a DLQ snapshot and shows bounded metadata |
+| Clear a queue | `horizon:clear` | No atomic clear across ready jobs, live leases and Laravel timers |
+| Native binary | Not needed | Rust engine requires an explicit version-pinned installation |
+
+Matching names do not imply identical algorithms. Capacity limits can be configured to the same
+values, but queue depth, runtime estimation, cooldown and process lifecycle come from different
+implementations.
+
+## Where Queen has an advantage
+
+### A smaller control plane
+
+The Rust master does not keep a Laravel application resident after configuration. In the final
+diagnostic campaign its median proportional set size was **2.9 MiB**, against **65.0 MiB** for the
+Horizon orchestrator. The Queen PHP reference master measured 35.1 MiB.
+
+That is a control-plane result, not a whole-stack memory claim. Queen still needs its broker and
+PostgreSQL.
+
+### One contract, two engines
+
+PHP and Rust consume the same resolved configuration and publish the same versioned status and
+control protocol. A deployment can validate behavior with the readable PHP reference engine, then
+move to Rust without changing pool definitions or dashboard commands.
+
+### Queen queue semantics
+
+Choosing Queen also chooses capabilities below the supervisor:
+
+- one FIFO partition per ordering key, created by the first push;
+- consumer groups and replay over one stored copy;
+- delayed jobs backed by Queen timers;
+- a broker DLQ snapshot synchronized with Laravel's failed-job index;
+- atomic acknowledgement plus push or timer operations;
+- multiple broker endpoints and a separate read token for supervisor depth calls.
+
+These are advantages only when the application needs them. A team that already operates Redis and
+does not need Queen's model may value Horizon's smaller topology more.
+
+### Bounded and fenced local control
+
+Supervisor configuration, status and telemetry have explicit file, queue, pool and aggregate
+limits. Controls carry an exact generation identifier. Unsafe state ownership or a replaced state
+path fails closed instead of silently creating a second control namespace.
+
+## Where Horizon has an advantage
+
+### Product maturity and familiarity
+
+Horizon has an established Laravel installation path, a large operating history and one familiar
+Redis-backed surface. Queen's Laravel supervisor is still a preview with additional broker,
+PostgreSQL and state-directory decisions.
+
+### A richer Laravel-specific dashboard
+
+Horizon includes retained throughput and runtime snapshots, job tags, silencing, long-wait
+notifications and per-supervisor controls. Queen's current Laravel panel focuses on local process
+health and safe master controls. Global backlog analytics and DLQ operations live in the separate
+broker dashboard, and failed-job web mutations are not implemented.
+
+### Multi-host supervisors
+
+Horizon stores live master and supervisor records in its
+[Redis repository](https://github.com/laravel/horizon/blob/5.x/src/Repositories/RedisMasterSupervisorRepository.php).
+Queen's filesystem lock prevents a second local owner only; it does not elect one leader across
+hosts. A Queen deployment must run one master replica for an application and consumer group, with
+no rolling-surge overlap.
+
+### Fewer release artifacts
+
+Horizon installs as a Composer package and still relies on an outer process monitor. Queen PHP does
+the same. Queen Rust adds a native artifact, platform matrix, installer and coordinated
+Composer/native release. The installer is explicit and heavily checked, but it remains another
+deployment step.
+
+## What the diagnostic benchmark found
+
+The final matched campaign used Docker Desktop on an arm64 Mac, four fixed workers, 2,000 jobs per
+lane with 10 ms of simulated work, prefetch 4, ACK batch 1 and three runs per engine. All nine runs
+were correct, quiescent and isolated.
+
+| Median | Horizon | Queen PHP | Queen Rust |
+| --- | ---: | ---: | ---: |
+| Completion jobs/s | 294.30 | 300.08 | 307.67 |
+| End-to-end p95 | 6,019.54 ms | 5,478.43 ms | 5,266.49 ms |
+| Orchestrator PSS | 65.0 MiB | 35.1 MiB | 2.9 MiB |
+| Measured stack CPU | 3.750 s | 4.148 s | 3.938 s |
+| Measured stack memory | 198.1 MiB | 295.1 MiB | 265.3 MiB |
+
+Paired against Horizon, Queen Rust measured **1.046x completion throughput**, **0.888x p95** and
+**0.044x orchestrator PSS**. Its stack CPU result was inconclusive with only three pairs. The
+complete Queen Rust topology used **1.341x stack memory** because it included the Queen broker and
+PostgreSQL while the Horizon fixture used Redis.
+
+<Aside type="caution">
+These figures are diagnostic, not a universal performance claim. The fast profile was measured
+without the lease-renewal helper that production now requires for `prefetch > 1`. It must be
+repeated with renewal on dedicated Linux amd64 and arm64 hosts before publication as a GA result.
+The full method, paired intervals and gates are in
+[Laravel supervisor benchmark](/benchmarks/laravel-supervisors).
+</Aside>
+
+The separate historical result near one million messages per second is a broker-native push test
+with Go loaders, 200 partitions and 600 consumers. It is not a Laravel job-throughput result and
+does not belong in this comparison.
+
+## Reliability boundary
+
+The qualification exercised two queues, synchronized failed jobs and a worker killed during user
+code. Horizon, Queen PHP and Queen Rust all preserved the 24 expected idempotent effects and drained
+their queue after redelivery. That verifies the tested at-least-once path.
+
+It does not verify exactly-once external effects. A process can perform an external side effect and
+die before its acknowledgement becomes durable in any of the three systems. Jobs still need an
+idempotency strategy.
+
+Queen's remaining pre-GA gates include a 24-hour Laravel soak, persistent broker/network/PostgreSQL
+and storage faults, broader scaling and partition matrices, native release verification and the
+same fast profile with renewal enabled.
+
+## Choose Horizon when
+
+- Redis is the intended queue backend and the team already operates it well.
+- Job tags, silencing, retained Horizon graphs or built-in long-wait notifications are required.
+- Multiple application hosts must run independent supervisor masters today.
+- A native release artifact or Unix-only supervisor boundary is unacceptable.
+- The application does not need Queen's partition, replay, timer or transaction model.
+
+## Evaluate Queen when
+
+- Queen is already the desired queue backend.
+- The resident memory of the PHP orchestration master matters.
+- Per-entity FIFO lanes, consumer groups, replay or atomic ack-and-push are useful to the workload.
+- One supervisor master can own a large local worker pool.
+- The team can qualify its own jobs under at-least-once delivery and the current preview gates.
+
+If Queen fits, follow the [Horizon migration runbook](/use/laravel/migrate-from-horizon). If any
+Horizon-only feature above is a hard requirement, stay on Horizon until Queen has an explicit,
+tested replacement rather than recreating it in application code by accident.

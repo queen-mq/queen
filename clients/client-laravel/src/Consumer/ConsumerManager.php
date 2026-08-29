@@ -42,6 +42,7 @@ class ConsumerManager
         $autoAck = $options['autoAck'] ?? true;
         $wait = $options['wait'] ?? true;
         $timeoutMillis = $options['timeoutMillis'] ?? 30000;
+        $leaseSeconds = $options['leaseSeconds'] ?? null;
         $renewLease = $options['renewLease'] ?? false;
         $renewLeaseIntervalMillis = $options['renewLeaseIntervalMillis'] ?? null;
         $each = $options['each'] ?? false;
@@ -56,7 +57,20 @@ class ConsumerManager
         $conflation = $options['conflation'] ?? false;
 
         $path = $this->buildPath($queue, $partition, $namespace, $task);
-        $baseParams = $this->buildParams($batch, $wait, $timeoutMillis, $group, $subscriptionMode, $subscriptionFrom, $namespace, $task, $maxPartitions, $conflation, $autopilot);
+        $baseParams = $this->buildParams(
+            $batch,
+            $wait,
+            $timeoutMillis,
+            $group,
+            $subscriptionMode,
+            $subscriptionFrom,
+            $namespace,
+            $task,
+            $maxPartitions,
+            $conflation,
+            $leaseSeconds,
+            $autopilot,
+        );
         $affinityKey = $this->getAffinityKey($queue, $partition, $namespace, $task, $group);
         // The identity the conflation checks report against: what was asked for,
         // and which (queue, group) pair a declaration conflict belongs to.
@@ -257,7 +271,7 @@ class ConsumerManager
                             break;
                         }
                         $this->renewLeaseIfNeeded($messages, $leaseRenewalTime, $renewLeaseIntervalMillis);
-                        $this->processMessage($message, $handler, $autoAck, $group);
+                        $this->processMessage($message, $handler, $autoAck, $group, $affinityKey);
                         $workerProcessed[$w]++;
                         if ($perWorkerLimit !== null && $workerProcessed[$w] >= $perWorkerLimit) {
                             break;
@@ -265,7 +279,7 @@ class ConsumerManager
                     }
                 } else {
                     $this->renewLeaseIfNeeded($messages, $leaseRenewalTime, $renewLeaseIntervalMillis);
-                    $this->processBatch($messages, $handler, $autoAck, $group);
+                    $this->processBatch($messages, $handler, $autoAck, $group, $affinityKey);
                     $workerProcessed[$w] += count($messages);
                 }
             }
@@ -380,7 +394,7 @@ class ConsumerManager
                         }
 
                         $this->renewLeaseIfNeeded($messages, $leaseRenewalTime, $renewLeaseIntervalMillis);
-                        $this->processMessage($message, $handler, $autoAck, $group);
+                        $this->processMessage($message, $handler, $autoAck, $group, $affinityKey);
                         $processedCount++;
 
                         if ($limit !== null && $processedCount >= $limit) {
@@ -389,7 +403,7 @@ class ConsumerManager
                     }
                 } else {
                     $this->renewLeaseIfNeeded($messages, $leaseRenewalTime, $renewLeaseIntervalMillis);
-                    $this->processBatch($messages, $handler, $autoAck, $group);
+                    $this->processBatch($messages, $handler, $autoAck, $group, $affinityKey);
                     $processedCount += count($messages);
                 }
             } catch (\Throwable $error) {
@@ -430,18 +444,30 @@ class ConsumerManager
         }
     }
 
-    private function processMessage(array $message, \Closure $handler, bool $autoAck, ?string $group): void
+    private function processMessage(
+        array $message,
+        \Closure $handler,
+        bool $autoAck,
+        ?string $group,
+        ?string $affinityKey,
+    ): void
     {
         try {
             $handler($message);
 
             if ($autoAck) {
                 $context = $group !== null ? ['group' => $group] : [];
+                if ($affinityKey !== null) {
+                    $context['affinityKey'] = $affinityKey;
+                }
                 $this->queen->ack($message, true, $context);
             }
         } catch (\Throwable $error) {
             if ($autoAck) {
                 $context = $group !== null ? ['group' => $group] : [];
+                if ($affinityKey !== null) {
+                    $context['affinityKey'] = $affinityKey;
+                }
                 $this->queen->ack($message, false, $context);
                 return;
             }
@@ -449,18 +475,30 @@ class ConsumerManager
         }
     }
 
-    private function processBatch(array $messages, \Closure $handler, bool $autoAck, ?string $group): void
+    private function processBatch(
+        array $messages,
+        \Closure $handler,
+        bool $autoAck,
+        ?string $group,
+        ?string $affinityKey,
+    ): void
     {
         try {
             $handler($messages);
 
             if ($autoAck) {
                 $context = $group !== null ? ['group' => $group] : [];
+                if ($affinityKey !== null) {
+                    $context['affinityKey'] = $affinityKey;
+                }
                 $this->queen->ack($messages, true, $context);
             }
         } catch (\Throwable $error) {
             if ($autoAck) {
                 $context = $group !== null ? ['group' => $group] : [];
+                if ($affinityKey !== null) {
+                    $context['affinityKey'] = $affinityKey;
+                }
                 $this->queen->ack($messages, false, $context);
                 return;
             }
@@ -548,9 +586,10 @@ class ConsumerManager
     {
         if ($queue !== null) {
             if ($partition !== null) {
-                return "/api/v1/pop/queue/{$queue}/partition/{$partition}";
+                return '/api/v1/pop/queue/' . rawurlencode($queue)
+                    . '/partition/' . rawurlencode($partition);
             }
-            return "/api/v1/pop/queue/{$queue}";
+            return '/api/v1/pop/queue/' . rawurlencode($queue);
         }
 
         if ($namespace !== null || $task !== null) {
@@ -571,6 +610,7 @@ class ConsumerManager
         ?string $task,
         ?int $maxPartitions = null,
         bool $conflation = false,
+        ?int $leaseSeconds = null,
         bool $autopilot = true,
     ): string {
         // Batch, partitions and with them the autopilot flag. null/0 means the
@@ -594,6 +634,9 @@ class ConsumerManager
 
         if ($group !== null) {
             $params['consumerGroup'] = $group;
+        }
+        if ($leaseSeconds !== null) {
+            $params['leaseSeconds'] = (string) $leaseSeconds;
         }
         if ($subscriptionMode !== null) {
             $params['subscriptionMode'] = $subscriptionMode;
