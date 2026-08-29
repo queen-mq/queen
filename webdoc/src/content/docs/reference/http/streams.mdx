@@ -17,11 +17,12 @@ verifiedBy:
   - clients/client-go/tests/streams_integration/gate_test.go
 digest: >-
   `/streams/v1` is three JSON POSTs and a public versioned contract, not an SDK internal.
-  `POST /streams/v1/queries` registers a query by `name` and returns its `query_id`, answering 409
-  when `config_hash` differs from the stored one and `reset` is absent. `POST /streams/v1/state/get`
-  reads state rows for one `query_id` and `partition_id`, filtered by `keys`, `key_prefix` or
-  `ripe_at_or_before`, at read-only access level. `POST /streams/v1/cycle` commits `state_ops`,
-  `push_items` and the source ack in one PostgreSQL transaction, at read-write.
+  `POST /streams/v1/queries` registers a query by `name` and returns its `query_id`: 409 on a
+  `config_hash` mismatch without `reset`, 403 without an enabled `queen_streams.quota` grant.
+  `POST /streams/v1/state/get` reads state rows for one `query_id` and `partition_id`, filtered
+  by `keys`, `key_prefix` or `ripe_at_or_before`. `POST /streams/v1/cycle` commits `state_ops`,
+  `push_items` and the ack in one transaction. All three are tenant-scoped: a foreign partition
+  or query reads as missing.
 ---
 
 The whole streaming engine is three JSON POSTs. `/streams/v1` sits inside the versioned contract
@@ -35,9 +36,12 @@ streaming worker by registering a query, reading its state, and committing cycle
 | `POST /streams/v1/state/get` | read-only | Reads the state rows for one query and one partition |
 | `POST /streams/v1/cycle` | read-write | Commits state writes, sink pushes and the source ack in one transaction |
 
-None of the three is tenant-scoped. A query `name` is global to the database, and the cycle
-resolves its sink queues on the default tenant. See [the model](/use/streams) for what a worker
-does between these calls.
+All three are tenant-scoped. A query `name` is unique per tenant, not global, so the same name
+under two tenants is two independent queries; state reads and cycles reject a partition or query
+that is not the caller's, and the cycle resolves and auto-creates its sink queues under the
+request tenant. On a broker with tenancy off everything lands on the default tenant and none of
+this is observable. See [the model](/use/streams) for what a worker does between these calls, and
+[Isolation](/reference/multi-tenant/isolation/#streams-are-tenant-scoped) for the guarantees.
 
 ## POST /streams/v1/queries
 
@@ -45,21 +49,30 @@ Registration is idempotent on `name`, and it is where a changed operator chain i
 
 | Field | Type | Required | Meaning |
 | --- | --- | --- | --- |
-| `name` | string | yes | The query's global identity. This is the SDK's `queryId` |
+| `name` | string | yes | The query's identity within the tenant. This is the SDK's `queryId` |
 | `source_queue` | string | yes | The queue the worker pops from |
 | `sink_queue` | string | no | The queue closed windows are pushed to. An empty string is stored as null |
 | `config_hash` | string | yes | A hash the client computes over the operator chain. The handler rejects a missing or empty value with **400** before the procedure runs |
 | `reset` | boolean | no, default `false` | Delete every state row for this query before rewriting the registration |
 
-Three outcomes:
+Four outcomes:
 
 - **The name is new.** The row is inserted and the response carries `fresh: true`.
+- **The name is new but the tenant may not register it.** With tenancy on, a non-default tenant
+  needs an enabled `queen_streams.quota` row on the cell database, and `max_queries` (when set) is
+  an exact cap. No grant, a disabled one, or a full cap is **HTTP 403** with `success: false`,
+  `denied: true` and an error naming which. Nothing is inserted. This is distinct from the 409
+  below on purpose: retrying a 409 with `reset: true` is the documented fix, and retrying a 403
+  that way fixes nothing. The gate applies to **new names only**: re-registering an existing query,
+  hash match or `reset` alike, always passes, so revoking a grant stops new queries without
+  stranding a Runner that is still draining. The default tenant never reads the grant table.
 - **The name exists and `config_hash` matches.** `source_queue` and `sink_queue` are updated to the
   supplied values and the accumulators are kept. `fresh` is `false`.
 - **The name exists and `config_hash` differs.** With `reset` absent or `false` this is **HTTP
   409**, with `success: false` and an error naming the query. With `reset: true` the broker deletes
   every `queen_streams.state` row for the query, stores the new hash, and answers 200 with
-  `reset: true`.
+  `reset: true`. Names are per-tenant, so the query this resolves, and the `query_id` the 409
+  reveals, can only ever be the caller's own.
 
 A 200 body carries the identity every later call uses. `query_id` is that value; the name never
 appears on the wire again.
@@ -110,6 +123,11 @@ row whose `value` has no numeric `windowEnd` can never match that filter.
 Missing `query_id` or `partition_id` produces **400**, because the procedure reports `success:
 false` for it and the handler maps that to 400. An `error` field in the result is **500**.
 
+With tenancy on, a `partition_id` that is not the caller's answers **404** `{"error":"not found"}`
+before the procedure runs, the same answer a genuinely missing partition gets, and a `query_id`
+belonging to another tenant reads as empty `rows` exactly like an unknown one. Neither address can
+be probed for another tenant's existence.
+
 <Aside type="note">
 No SDK exposes the full filter set. `getState` is an internal module in JavaScript and Rust, and
 Go's `runtime.GetState` takes explicit keys only. Prefix and ripeness reads are available over HTTP
@@ -155,7 +173,8 @@ which is the intended outcome: a typo must not commit a partial fold.
 In a `push_items` element, `partition` defaults to `Default` and `payload` may also be sent as
 `data`. An item with an empty `queue` is skipped rather than rejected. You may supply `messageId`
 and `transactionId`, and the broker stamps a UUIDv7 message id and reuses it as the transaction id
-when you do not.
+when you do not. Sink queues resolve within the request tenant, and one that does not exist yet is
+auto-created under it, exactly like push auto-create.
 
 `leaseId` is the worker id the pop returned, and it is the exactly-once guard: the procedure locks
 the cursor row and raises if the lease is absent, held by another worker, or expired, which rolls
@@ -193,7 +212,12 @@ retrying it is safe because the whole call is one transaction.
 ```
 
 On failure the same envelope comes back with `"success": false` and an `error` string carrying the
-PostgreSQL message, and nothing committed for that element.
+PostgreSQL message, and nothing committed for that element. Two of those errors are ownership
+verdicts: `partition not found` when the source partition is not the caller's (or does not exist,
+deliberately the same message), and `query not found` for a foreign or unknown `query_id`. With
+tenancy on, a foreign partition usually never reaches the procedure at all: the handler's
+ownership gate answers **404** `{"error":"not found"}` first, the same pre-gate the state read
+has.
 
 <Aside type="caution">
 `"success": false` arrives with a 200. A client that checks only the status code will treat a
@@ -210,7 +234,8 @@ protocol by hand inherits all of them:
   broker-side, then pushed through `queen.log_push_one_v1`, the same allocator
   [`POST /api/v1/push`](/reference/http/push) uses. Stream output is not a second class of message.
 - **Encryption.** Sink payloads for a queue with `encryptionEnabled` are enveloped before packing,
-  and a cipher failure warns and stores plaintext rather than failing the cycle. See
+  and a cipher failure warns and stores plaintext rather than failing the cycle. The flag is read
+  from the request tenant's queue, never from another tenant's same-named one. See
   [payload encryption](/reference/security/encryption/).
 - **Discoverability and metrics.** Because the procedure commits internally, neither the push nor
   the ack fast path runs afterwards, so the handler does their bookkeeping: it marks the sink

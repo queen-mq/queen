@@ -26,6 +26,7 @@ digest: >-
   slug. Both brokers sit behind one `queen` network alias, which is standby and not load
   spreading: the proxy pins to whichever it resolves and moves to the other when that one goes
   away. One PostgreSQL means this survives losing a broker, not losing the database.
+# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
 ---
 
 Every other page in this section deploys one part. This one is the whole thing in a single file,
@@ -167,9 +168,9 @@ curl -s http://localhost:6632/health && curl -s http://localhost:6642/health && 
 ```
 
 ```json
-{"status":"healthy","database":"connected","engine":"segments-rust","version":"1.0.2"}
-{"status":"healthy","database":"connected","engine":"segments-rust","version":"1.0.2"}
-{"enforce":false,"status":"ok","tenant_header":true}
+{"status":"healthy","database":"connected","engine":"segments-rust","version":"1.2.1"}
+{"status":"healthy","database":"connected","engine":"segments-rust","version":"1.2.1"}
+{"enforce":false,"shared_hosts":0,"status":"ok","tenant_header":true}
 ```
 
 ## Bootstrap the control plane
@@ -243,8 +244,9 @@ curl -s "http://localhost:6711/api/v1/pop/queue/orders?batch=1&wait=true&consume
 ```
 
 The popped message carries `"producerSub": "queen-proxy"`, which is how you know it went through
-the front door and not around it. Drop either header and the answer is `401`, from the proxy
-without the key and from the broker without a token.
+the front door and not around it. Drop the key and the proxy answers `401`; send a `Host` whose
+first label names no cluster and it answers `421`; reach a broker directly without a token and the
+broker answers `401`.
 
 ## What this stack does and does not survive
 

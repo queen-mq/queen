@@ -262,7 +262,7 @@ where
         // Never take a broker-side auto-ack here: consume settles messages
         // itself, and a server-side ack at delivery would lose the batch on a
         // handler crash.
-        let popped = match builder.pop().await {
+        let popped = match builder.pop_result().await {
             Ok(m) => m,
             Err(e) => {
                 if e.is_terminal_refusal() {
@@ -284,11 +284,20 @@ where
 
         if popped.is_empty() {
             if !builder.wait {
-                // Without long-polling an empty queue would spin the CPU.
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                // Without long-polling an empty queue would spin the CPU. The
+                // delay is the broker's advised pacing when this pop engaged
+                // autopilot and the broker had an opinion — it knows the arrival
+                // rate on this queue and this client does not — otherwise the
+                // historical 100ms.
+                tokio::time::sleep(crate::autopilot::empty_poll_delay(
+                    popped.autopilot.as_ref(),
+                ))
+                .await;
             }
             continue;
         }
+
+        let popped = popped.messages;
 
         last_message = Instant::now();
 

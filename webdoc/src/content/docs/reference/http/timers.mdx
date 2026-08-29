@@ -54,10 +54,10 @@ rung may stop it, only an operator can. That tenant would keep producing message
 up to the horizon or until somebody intervenes, and the block would produce the exact opposite of
 its purpose.
 
-So: the `DELETE` route passes only the boot flag. Not a paused schedule, not a missing grant, not a
-full quota may refuse it. A mixed batch sent to `POST` when the cluster is blocked is refused
-**whole**, explicitly, rather than having half of it silently dropped, and the refusal carries an
-`x-queen-timers-hint` header naming the route that always works.
+So: the `DELETE` route passes the gate ladder unconditionally. Not a paused schedule, not a missing
+grant, not a full quota may refuse it. A mixed batch sent to `POST` when the cluster is blocked is
+refused **whole**, explicitly, rather than having half of it silently dropped, and the refusal
+carries an `x-queen-timers-hint` header naming the route that always works.
 
 An SDK that cancels should use the `DELETE` route. One that cancels inside a batch has chosen the
 schedule route's authorization.

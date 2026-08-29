@@ -392,6 +392,14 @@ pub fn spawn_reporter(h: ReporterHandles) {
             let adm = h.admission.snapshot();
             let (lap_visits, lap_cands, age_p50, age_p95) = h.hotlist.lap.snapshot();
             let (ring_oldest, ring_depth) = h.hotlist.ready_probe();
+            // BURST-RESOLVED TELEMETRY (soak cell 2026-08-24). `ring_oldest`/
+            // `ring_depth` above are a SAMPLE taken at this instant, once per
+            // window; the pair below is the window's MAXIMUM, accumulated on the
+            // paths that already held the value. Both are read here and nowhere
+            // else, because reading them RESETS the window (hotlist::BurstStats,
+            // admission::pop_wait_max).
+            let burst = h.hotlist.burst.take_window();
+            let pop_wait_max = h.admission.take_pop_wait_max();
             let d_visits = lap_visits.saturating_sub(prev_visits);
             let d_cands = lap_cands.saturating_sub(prev_cands);
             prev_visits = lap_visits;
@@ -484,6 +492,35 @@ pub fn spawn_reporter(h: ReporterHandles) {
                 // The number an operator wants at 3am is "how many times has this
                 // cell moved a partition since boot", which is the total.
                 eph_wipes = h.metrics.eph_wipes.load(Ordering::Relaxed),
+                // BURST-RESOLVED TELEMETRY (soak cell 2026-08-24). Appended as
+                // permanent columns of this line, like the kv/conflation/eph ones
+                // above it and for the same reason: no third periodic block.
+                //
+                // The gap they exist to close: e2e p99 330-470 ms against a client
+                // push RTT p99 of 46-88 ms, i.e. the time is spent READY-BUT-
+                // UNCLAIMED — and every existing field samples once per 10 s, so a
+                // burst that forms and drains in 400 ms leaves ready=0 in the
+                // per-lane lines while the global sample happens to catch 393. These
+                // four are WINDOWED MAXIMA and reset with this line.
+                //
+                // `max_lane_ready` is the discriminator. High (100+) means ONE lane
+                // held the backlog ⇒ the claim WIDTH binds (pop_autopilot's burst
+                // bypass, QUEEN_POP_AUTOPILOT_BURST_CAP). Low (~2) with
+                // `ring_depth_max` in the hundreds means the depth was SPREAD over
+                // ~229 lanes ⇒ the ~9-slot pop admission lane binds, and
+                // `pop_wait_max` is that regime's direct witness.
+                ring_depth_max = burst.depth_max,
+                ring_oldest_max_ms = burst.oldest_max_ms,
+                max_lane_ready = burst.lane_ready_max,
+                pop_wait_max = pop_wait_max,
+                // …and where the depth CAME FROM, as plain windowed counts: a
+                // producer's mark, a wheel deadline coming due, or the reseed floor
+                // rediscovering the broker's own backlog. Every entry into a ready
+                // list lands in exactly one of the three, so they sum to the arrivals
+                // the `ring_depth_max` beside them is a peak of.
+                ready_from_mark = burst.from_mark,
+                ready_from_wheel = burst.from_wheel,
+                ready_from_reseed = burst.from_reseed,
                 "broker rates"
             );
             prev_kv_ops = kv_ops;

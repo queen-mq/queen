@@ -7,6 +7,8 @@ use Queen\Http\HttpClient;
 use Queen\Http\Retry429Policy;
 use Queen\Queen;
 use Queen\Support\ConflationGuard;
+use Queen\Support\Defaults;
+use Queen\Support\PopAutopilot;
 
 /**
  * High-level consumer inspired by php-rdkafka's KafkaConsumer.
@@ -33,7 +35,15 @@ class HighLevelConsumer
     private bool $closed = false;
 
     private string $popPath;
-    private string $baseParams;
+    /**
+     * Everything subscribe() resolved that a per-call pop still needs. Held as
+     * VALUES rather than as a rendered query string because both consume
+     * surfaces override the sizing per call, and pop autopilot has to see the
+     * final numbers: patching `batch` into an already-rendered string would send
+     * `autopilot=true` next to two pinned knobs, which is a request that asks
+     * the broker to decide nothing.
+     */
+    private array $popArgs = [];
     private ?string $affinityKey = null;
     /** [requested, queue, group, namespace, task] — see ConflationGuard. */
     private array $conflationScope = [false, null, null, null, null];
@@ -56,17 +66,30 @@ class HighLevelConsumer
         $namespace = $this->options['namespace'] ?? null;
         $task = $this->options['task'] ?? null;
         $group = $this->options['group'] ?? null;
-        $batch = $this->options['batch'] ?? 1;
+        // null means the user said nothing about this dimension, which is what
+        // pop autopilot acts on (see ConsumerManager for the full note).
+        $batch = $this->options['batch'] ?? null;
         $wait = $this->options['wait'] ?? true;
         $timeoutMillis = $this->options['timeoutMillis'] ?? 30000;
         $leaseSeconds = $this->options['leaseSeconds'] ?? null;
         $subscriptionMode = $this->options['subscriptionMode'] ?? null;
         $subscriptionFrom = $this->options['subscriptionFrom'] ?? null;
-        $maxPartitions = $this->options['maxPartitions'] ?? 1;
+        $maxPartitions = $this->options['maxPartitions'] ?? null;
+        $autopilot = $this->options['autopilot'] ?? !$this->queen->autopilotOff();
         $conflation = $this->options['conflation'] ?? false;
 
         $this->popPath = $this->buildPath($queue, $partition, $namespace, $task);
-        $this->baseParams = $this->buildParams($batch, $wait, $timeoutMillis, $group, $subscriptionMode, $subscriptionFrom, $namespace, $task, $maxPartitions, $conflation, $leaseSeconds);
+        $this->popArgs = [
+            'group' => $group,
+            'subscriptionMode' => $subscriptionMode,
+            'subscriptionFrom' => $subscriptionFrom,
+            'namespace' => $namespace,
+            'task' => $task,
+            'maxPartitions' => $maxPartitions,
+            'conflation' => $conflation,
+            'leaseSeconds' => $leaseSeconds,
+            'autopilot' => $autopilot,
+        ];
         $this->affinityKey = $this->getAffinityKey($queue, $partition, $namespace, $task, $group);
         $this->conflationScope = [$conflation, $queue, $group, $namespace, $task];
         $this->subscribed = true;
@@ -105,15 +128,10 @@ class HighLevelConsumer
             return null;
         }
 
-        // Override batch=1 and use the provided timeout
-        $params = $this->baseParams;
-        // Replace batch and timeout in params
-        $parsedParams = [];
-        parse_str($params, $parsedParams);
-        $parsedParams['batch'] = '1';
-        $parsedParams['timeout'] = (string) $timeoutMs;
-        $parsedParams['wait'] = 'true';
-        $queryString = http_build_query($parsedParams);
+        // This surface hands back exactly one message, so batch=1 is a decision
+        // of the SDK's and travels as one -- pop autopilot then has only the
+        // sweep width left to choose, unless the caller pinned that too.
+        $queryString = $this->popQuery(1, $timeoutMs);
 
         try {
             $clientTimeout = $timeoutMs + 5000;
@@ -188,12 +206,8 @@ class HighLevelConsumer
             return [];
         }
 
-        $parsedParams = [];
-        parse_str($this->baseParams, $parsedParams);
-        $parsedParams['batch'] = (string) $maxMessages;
-        $parsedParams['timeout'] = (string) $timeoutMs;
-        $parsedParams['wait'] = 'true';
-        $queryString = http_build_query($parsedParams);
+        // $maxMessages IS the batch this call wants, so it travels as a pin.
+        $queryString = $this->popQuery($maxMessages, $timeoutMs);
 
         try {
             $clientTimeout = $timeoutMs + 5000;
@@ -358,8 +372,33 @@ class HighLevelConsumer
         throw new \RuntimeException('Must specify queue, namespace, or task');
     }
 
+    /**
+     * One pop's query string: what subscribe() resolved, with the batch and
+     * timeout this call is asking for. Always a long poll -- both consume
+     * surfaces block for the timeout they were given.
+     */
+    private function popQuery(int $batch, int $timeoutMs): string
+    {
+        $a = $this->popArgs;
+
+        return $this->buildParams(
+            $batch,
+            true,
+            $timeoutMs,
+            $a['group'] ?? null,
+            $a['subscriptionMode'] ?? null,
+            $a['subscriptionFrom'] ?? null,
+            $a['namespace'] ?? null,
+            $a['task'] ?? null,
+            $a['maxPartitions'] ?? null,
+            $a['conflation'] ?? false,
+            $a['leaseSeconds'] ?? null,
+            $a['autopilot'] ?? true,
+        );
+    }
+
     private function buildParams(
-        int $batch,
+        ?int $batch,
         bool $wait,
         int $timeoutMillis,
         ?string $group,
@@ -367,15 +406,29 @@ class HighLevelConsumer
         ?string $subscriptionFrom,
         ?string $namespace,
         ?string $task,
-        int $maxPartitions = 1,
+        ?int $maxPartitions = null,
         bool $conflation = false,
         ?int $leaseSeconds = null,
+        bool $autopilot = true,
     ): string {
-        $params = [
-            'batch' => (string) $batch,
-            'wait' => $wait ? 'true' : 'false',
-            'timeout' => (string) $timeoutMillis,
-        ];
+        // Batch, partitions and with them the autopilot flag. null/0 means the
+        // user set nothing (QueueBuilder leaves it that way on purpose), which is
+        // the dimension the broker gets to choose. THE RULE lives in one place
+        // (Support\PopAutopilot) precisely because this SDK has THREE pop param
+        // builders -- PLAN_CONFLATION §4 opens on that hazard by name; only the
+        // placement of the keys is here, and it is the pre-autopilot placement so
+        // an autopilot-off request is byte-identical.
+        $sizing = PopAutopilot::sizing($batch, $maxPartitions, Defaults::CONSUME_DEFAULTS['batch'], $autopilot);
+
+        $params = [];
+        if ($sizing['autopilot']) {
+            $params['autopilot'] = 'true';
+        }
+        if ($sizing['batch'] !== null) {
+            $params['batch'] = $sizing['batch'];
+        }
+        $params['wait'] = $wait ? 'true' : 'false';
+        $params['timeout'] = (string) $timeoutMillis;
 
         if ($group !== null) {
             $params['consumerGroup'] = $group;
@@ -395,9 +448,11 @@ class HighLevelConsumer
         if ($task !== null) {
             $params['task'] = $task;
         }
-        // v4 multi-partition pop: drain up to N sparse partitions per call.
-        if ($maxPartitions > 1) {
-            $params['partitions'] = (string) $maxPartitions;
+        // v4 multi-partition pop: drain up to N sparse partitions per call. Under
+        // autopilot a pinned width travels even when it is 1, because 1 is then a
+        // decision and not the absence of one.
+        if ($sizing['partitions'] !== null) {
+            $params['partitions'] = $sizing['partitions'];
         }
         // Last-value delivery, sent only when true: the broker treats presence
         // as opt-in, and conflation=false would read as a DISAGREEMENT with a

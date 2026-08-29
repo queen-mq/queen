@@ -1,0 +1,82 @@
+goload -mode cloud [r5000-noisy] -> http://10.114.0.2:6711
+  target=proxy tenants=50 sharedQueue=true queue="orders" group="workers" partitions=1 brokerTenantHeader=false
+  offered=2500.0 msg/s total (50.00/tenant) push-batch=10 -> 5.00 req/s per tenant across 1 producer(s) | max-inflight=4096
+  consumers=1/tenant popBatch=100 popWait=true autoAck=false | payload=256B | duration=180s drain=25s | idleConns=86/client verify=true
+[configure] 50 queue(s) configured in 0.03s
+[08:16:22 load ] offered=    2500/s push=    2499/s pop=    1007/s ack=    1007/s shed=      0/s inflight=    3 | e2e p50=5931.01 p99=18481.15 ms | pushRTT p50=  9.15 p99= 937.98 ms | lag=44750 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=766
+[08:16:52 load ] offered=    2500/s push=    2500/s pop=     637/s ack=     633/s shed=      0/s inflight=    3 | e2e p50=29229.06 p99=39583.74 ms | pushRTT p50=  8.26 p99=  47.36 ms | lag=100660 | err push=0 pop=15 ack=0 (429=0 403=0 5xx=0 to=15 conn=0) empty=34 cross=0 gor=736
+[08:17:22 load ] offered=    2500/s push=    2500/s pop=     610/s ack=     613/s shed=      0/s inflight=    2 | e2e p50=47972.35 p99=70778.88 ms | pushRTT p50=  8.51 p99=  29.57 ms | lag=157370 | err push=0 pop=28 ack=0 (429=0 403=0 5xx=0 to=28 conn=0) empty=57 cross=0 gor=709
+[08:17:52 load ] offered=    2500/s push=    2500/s pop=     627/s ack=     627/s shed=      0/s inflight=    1 | e2e p50=69730.30 p99=98041.86 ms | pushRTT p50=  8.64 p99=  27.26 ms | lag=213570 | err push=0 pop=41 ack=0 (429=0 403=0 5xx=0 to=41 conn=0) empty=88 cross=0 gor=304
+[08:18:22 load ] offered=    2500/s push=    2500/s pop=     580/s ack=     580/s shed=      0/s inflight=    3 | e2e p50=94896.13 p99=130547.71 ms | pushRTT p50=  8.77 p99=  30.59 ms | lag=271160 | err push=0 pop=44 ack=0 (429=0 403=0 5xx=0 to=44 conn=0) empty=131 cross=0 gor=306
+[08:18:52 load ] offered=    2500/s push=    2500/s pop=     667/s ack=     667/s shed=      0/s inflight=    2 | e2e p50=115867.65 p99=133693.44 ms | pushRTT p50=  9.41 p99=  31.36 ms | lag=326170 | err push=0 pop=59 ack=0 (429=0 403=0 5xx=0 to=59 conn=0) empty=175 cross=0 gor=305
+[drain] producers stopped after 180.0s; draining 25s before the correctness verdict
+
+========== r5000-noisy ==========
+offered       2500.0 msg/s (450000 msgs, 0 shed)
+achieved  push   2500.0 msg/s (450000 msgs)   pop    687.8 msg/s during load (  1846.1 msg/s over load+drain, 378460 msgs)   ack 378360 msgs
+e2eFromSchedule  n=378460    p50=85458.94 p95=133693.44 p99=133693.44 p999=133693.44 max=169792.49 ms
+e2eFromSend      n=378460    p50=85458.94 p95=133693.44 p99=133693.44 p999=133693.44 max=169792.27 ms
+pushRtt          n=45000     p50=    8.77 p95=   20.10 p99=   70.14 p999=  995.33 max=  1283.75 ms
+ackRtt           n=3933      p50=    8.10 p95=   34.05 p99=  536.58 p999=  995.33 max=  1150.05 ms
+errors pop        total=59 kinds=map[canceled:49 timeout:59] codes=map[]
+    first timeout: pop request failed: Get "http://10.114.0.2:6711/api/v1/pop/queue/orders?autoAck=false&batch=100&consumerGroup=workers&timeout=5000&wait=true": context deadline exceeded
+bytes     nominal 292 B/msg -> pushed 125.31 MiB, delivered 105.39 MiB
+
+---- delivery correctness (after the drain) ----
+idx  tenant         queue           sentOk  received  missing      dup   extra   cross verdict
+0    noisy-0000     orders            9000      8810      190        0       0       0 FAIL  firstMissing=[8811 8812 8813 8814 8815 8816 8817 8818]
+1    noisy-0001     orders            9000      5220     3780        0       0       0 FAIL  firstMissing=[5221 5222 5223 5224 5225 5226 5227 5228]
+2    noisy-0002     orders            9000      7410     1590        0       0       0 FAIL  firstMissing=[7411 7412 7413 7414 7415 7416 7417 7418]
+3    noisy-0003     orders            9000      9000        0        0       0       0 OK
+4    noisy-0004     orders            9000      6520     2480        0       0       0 FAIL  firstMissing=[6521 6522 6523 6524 6525 6526 6527 6528]
+5    noisy-0005     orders            9000      7410     1590        0       0       0 FAIL  firstMissing=[7411 7412 7413 7414 7415 7416 7417 7418]
+6    noisy-0006     orders            9000      8420      580        0       0       0 FAIL  firstMissing=[8421 8422 8423 8424 8425 8426 8427 8428]
+7    noisy-0007     orders            9000      6720     2280        0       0       0 FAIL  firstMissing=[6721 6722 6723 6724 6725 6726 6727 6728]
+8    noisy-0008     orders            9000      8720      280        0       0       0 FAIL  firstMissing=[8721 8722 8723 8724 8725 8726 8727 8728]
+9    noisy-0009     orders            9000      9000        0        0       0       0 OK
+10   noisy-0010     orders            9000      7520     1480        0       0       0 FAIL  firstMissing=[7521 7522 7523 7524 7525 7526 7527 7528]
+11   noisy-0011     orders            9000      7820     1180        0       0       0 FAIL  firstMissing=[7821 7822 7823 7824 7825 7826 7827 7828]
+12   noisy-0012     orders            9000      6620     2380        0       0       0 FAIL  firstMissing=[6621 6622 6623 6624 6625 6626 6627 6628]
+13   noisy-0013     orders            9000      8120      880        0       0       0 FAIL  firstMissing=[8121 8122 8123 8124 8125 8126 8127 8128]
+14   noisy-0014     orders            9000      8120      880        0       0       0 FAIL  firstMissing=[8121 8122 8123 8124 8125 8126 8127 8128]
+15   noisy-0015     orders            9000      8130      870        0       0       0 FAIL  firstMissing=[8131 8132 8133 8134 8135 8136 8137 8138]
+16   noisy-0016     orders            9000      6910     2090        0       0       0 FAIL  firstMissing=[6911 6912 6913 6914 6915 6916 6917 6918]
+17   noisy-0017     orders            9000      5310     3690        0       0       0 FAIL  firstMissing=[5311 5312 5313 5314 5315 5316 5317 5318]
+18   noisy-0018     orders            9000      6710     2290        0       0       0 FAIL  firstMissing=[6711 6712 6713 6714 6715 6716 6717 6718]
+19   noisy-0019     orders            9000      5730     3270        0       0       0 FAIL  firstMissing=[5731 5732 5733 5734 5735 5736 5737 5738]
+20   noisy-0020     orders            9000      8720      280        0       0       0 FAIL  firstMissing=[8721 8722 8723 8724 8725 8726 8727 8728]
+21   noisy-0021     orders            9000      6720     2280        0       0       0 FAIL  firstMissing=[6721 6722 6723 6724 6725 6726 6727 6728]
+22   noisy-0022     orders            9000      9000        0        0       0       0 OK
+23   noisy-0023     orders            9000      7120     1880        0       0       0 FAIL  firstMissing=[7121 7122 7123 7124 7125 7126 7127 7128]
+24   noisy-0024     orders            9000      7430     1570        0       0       0 FAIL  firstMissing=[7431 7432 7433 7434 7435 7436 7437 7438]
+25   noisy-0025     orders            9000      6320     2680        0       0       0 FAIL  firstMissing=[6321 6322 6323 6324 6325 6326 6327 6328]
+26   noisy-0026     orders            9000      5710     3290        0       0       0 FAIL  firstMissing=[5711 5712 5713 5714 5715 5716 5717 5718]
+27   noisy-0027     orders            9000      7520     1480        0       0       0 FAIL  firstMissing=[7521 7522 7523 7524 7525 7526 7527 7528]
+28   noisy-0028     orders            9000      7930     1070        0       0       0 FAIL  firstMissing=[7931 7932 7933 7934 7935 7936 7937 7938]
+29   noisy-0029     orders            9000      5620     3380        0       0       0 FAIL  firstMissing=[5621 5622 5623 5624 5625 5626 5627 5628]
+30   noisy-0030     orders            9000      8520      480        0       0       0 FAIL  firstMissing=[8521 8522 8523 8524 8525 8526 8527 8528]
+31   noisy-0031     orders            9000      6810     2190        0       0       0 FAIL  firstMissing=[6811 6812 6813 6814 6815 6816 6817 6818]
+32   noisy-0032     orders            9000      8410      590        0       0       0 FAIL  firstMissing=[8411 8412 8413 8414 8415 8416 8417 8418]
+33   noisy-0033     orders            9000      8220      780        0       0       0 FAIL  firstMissing=[8221 8222 8223 8224 8225 8226 8227 8228]
+34   noisy-0034     orders            9000      9000        0        0       0       0 OK
+35   noisy-0035     orders            9000      6910     2090        0       0       0 FAIL  firstMissing=[6911 6912 6913 6914 6915 6916 6917 6918]
+36   noisy-0036     orders            9000      8420      580        0       0       0 FAIL  firstMissing=[8421 8422 8423 8424 8425 8426 8427 8428]
+37   noisy-0037     orders            9000      7720     1280        0       0       0 FAIL  firstMissing=[7721 7722 7723 7724 7725 7726 7727 7728]
+38   noisy-0038     orders            9000      8620      380        0       0       0 FAIL  firstMissing=[8621 8622 8623 8624 8625 8626 8627 8628]
+39   noisy-0039     orders            9000      9000        0        0       0       0 OK
+40   noisy-0040     orders            9000      8710      290        0       0       0 FAIL  firstMissing=[8711 8712 8713 8714 8715 8716 8717 8718]
+41   noisy-0041     orders            9000      6210     2790        0       0       0 FAIL  firstMissing=[6211 6212 6213 6214 6215 6216 6217 6218]
+42   noisy-0042     orders            9000      8020      980        0       0       0 FAIL  firstMissing=[8021 8022 8023 8024 8025 8026 8027 8028]
+43   noisy-0043     orders            9000      7820     1180        0       0       0 FAIL  firstMissing=[7821 7822 7823 7824 7825 7826 7827 7828]
+44   noisy-0044     orders            9000      9000        0        0       0       0 OK
+45   noisy-0045     orders            9000      9000        0        0       0       0 OK
+46   noisy-0046     orders            9000      6720     2280        0       0       0 FAIL  firstMissing=[6721 6722 6723 6724 6725 6726 6727 6728]
+47   noisy-0047     orders            9000      6910     2090        0       0       0 FAIL  firstMissing=[6911 6912 6913 6914 6915 6916 6917 6918]
+48   noisy-0048     orders            9000      6920     2080        0       0       0 FAIL  firstMissing=[6921 6922 6923 6924 6925 6926 6927 6928]
+49   noisy-0049     orders            9000      7210     1790        0       0       0 FAIL  firstMissing=[7211 7212 7213 7214 7215 7216 7217 7218]
+     TOTAL                          450000    378460    71540        0       0       0
+VERDICT: FAIL
+CAUTION: 71540 missing may be BACKLOG, not loss — 22170 messages were still arriving in the last 2s of the drain and the consumer side hit 59 error(s) (map[]). Re-run with a longer -drain, or size -drain to the rate the plan actually permits.
+
+[artifacts] /root/ladder2/r5000-noisy.json
+            /root/ladder2/r5000-noisy-interval.csv

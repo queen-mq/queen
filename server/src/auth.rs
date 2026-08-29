@@ -577,3 +577,181 @@ pub async fn auth_middleware(
     req.extensions_mut().insert(AuthedSub(sub));
     next.run(req).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::SUPPORTED_JWT_ALGORITHMS;
+
+    /// Every `alg` a token header can carry, i.e. every input `check_alg_allowed`
+    /// can be asked about. Kept honest by `every_alg_is_exhaustive` below.
+    const EVERY_ALG: &[Algorithm] = &[
+        Algorithm::HS256,
+        Algorithm::HS384,
+        Algorithm::HS512,
+        Algorithm::ES256,
+        Algorithm::ES384,
+        Algorithm::RS256,
+        Algorithm::RS384,
+        Algorithm::RS512,
+        Algorithm::PS256,
+        Algorithm::PS384,
+        Algorithm::PS512,
+        Algorithm::EdDSA,
+    ];
+
+    /// Compile-time guard, not a runtime one: `jsonwebtoken::Algorithm` is not
+    /// `#[non_exhaustive]`, so adding a variant upstream breaks THIS match, which
+    /// is the reminder to add it to `EVERY_ALG` (a stale `EVERY_ALG` would make the
+    /// parity test below silently stop covering the new algorithm).
+    #[allow(dead_code)]
+    fn every_alg_is_exhaustive(a: Algorithm) {
+        match a {
+            Algorithm::HS256
+            | Algorithm::HS384
+            | Algorithm::HS512
+            | Algorithm::ES256
+            | Algorithm::ES384
+            | Algorithm::RS256
+            | Algorithm::RS384
+            | Algorithm::RS512
+            | Algorithm::PS256
+            | Algorithm::PS384
+            | Algorithm::PS512
+            | Algorithm::EdDSA => {}
+        }
+    }
+
+    /// An enabled auth config carrying EVERY kind of key material, so
+    /// `validate()` answers only the question these tests ask — "is this
+    /// algorithm NAME supported?" — and never the independent question of
+    /// whether the key material suits it.
+    fn cfg_with_alg(algorithm: &str) -> AuthConfig {
+        AuthConfig {
+            enabled: true,
+            algorithm: algorithm.to_string(),
+            secret: "secret".into(),
+            public_key: "pem".into(),
+            jwks_url: "https://example.invalid/jwks".into(),
+            jwks_refresh_interval_seconds: 3600,
+            jwks_request_timeout_ms: 5000,
+            issuer: String::new(),
+            audience: String::new(),
+            clock_skew_seconds: 30,
+            skip_paths: Vec::new(),
+            roles_claim: "role".into(),
+            roles_array_claim: "roles".into(),
+            role_admin: "admin".into(),
+            role_read_write: "read-write".into(),
+            role_read_only: "read-only".into(),
+            role_write_only: "write-only".into(),
+        }
+    }
+
+    /// Would the REQUEST-time verifier ever let a token through with this value
+    /// configured? `check_alg_allowed` answers per token `alg`, so the question
+    /// "is this configured value usable at all" is asked by sweeping every alg:
+    /// an unknown `JWT_ALGORITHM` falls to the `_ => false` arm and matches none.
+    fn verifier_accepts(algorithm: &str) -> bool {
+        let a = Authenticator::new(cfg_with_alg(algorithm));
+        EVERY_ALG.iter().any(|&alg| a.check_alg_allowed(alg).is_ok())
+    }
+
+    fn boot_accepts(algorithm: &str) -> bool {
+        cfg_with_alg(algorithm).validate().is_ok()
+    }
+
+    /// The regression this test exists for: `config.rs` refused HS384/HS512 at
+    /// boot while `auth.rs` implemented them, so the broker died on a value its
+    /// own verifier could serve — and the only way to accept an HS512 token was
+    /// `auto`, which also accepts the other six.
+    ///
+    /// The property is stronger than a list: for EVERY candidate spelling, the
+    /// two sides must give the same verdict. Adding an algorithm to either side
+    /// alone fails here, in whichever direction the drift happens.
+    #[test]
+    fn boot_and_the_verifier_accept_the_same_algorithms() {
+        let candidates = [
+            // The supported set.
+            "HS256", "HS384", "HS512", "RS256", "RS384", "RS512", "EdDSA", "auto",
+            // Deliberately unsupported: implemented by `jsonwebtoken` but not
+            // wired here (ES*/PS*), plus the near-misses and the empty value, so
+            // the two sides are pinned on their REFUSALS too, not just their
+            // acceptances.
+            "ES256", "ES384", "PS256", "PS384", "PS512", "none", "None", "HS128",
+            "hs256", "RS128", "eddsa", "", "   ",
+        ];
+        for c in candidates {
+            assert_eq!(
+                boot_accepts(c),
+                verifier_accepts(c),
+                "JWT_ALGORITHM={c:?}: boot validation and the verifier disagree \
+                 (config.rs::AuthConfig::validate vs auth.rs::check_alg_allowed)"
+            );
+        }
+    }
+
+    /// The set itself, pinned. The property above only proves the two sides
+    /// AGREE; this proves they agree on the intended set rather than on some
+    /// other one both drifted to together.
+    #[test]
+    fn the_supported_set_is_exactly_these_eight() {
+        assert_eq!(
+            SUPPORTED_JWT_ALGORITHMS,
+            &["HS256", "HS384", "HS512", "RS256", "RS384", "RS512", "EdDSA", "auto"],
+        );
+        for alg in SUPPORTED_JWT_ALGORITHMS {
+            assert!(boot_accepts(alg), "{alg} is in the set but boot refuses it");
+            assert!(verifier_accepts(alg), "{alg} is in the set but the verifier refuses it");
+        }
+    }
+
+    /// The third copy of the list was the error MESSAGE, which named the set to
+    /// the operator staring at a dead boot. It is built from the const now, so
+    /// this pins the wording the const produces.
+    #[test]
+    fn the_boot_error_names_every_supported_algorithm() {
+        let err = cfg_with_alg("ES256").validate().unwrap_err();
+        for alg in SUPPORTED_JWT_ALGORITHMS {
+            assert!(err.contains(*alg), "{alg} missing from the boot error: {err}");
+        }
+        assert!(
+            err.contains("use HS256, HS384, HS512, RS256, RS384, RS512, EdDSA, or auto"),
+            "unexpected phrasing: {err}"
+        );
+    }
+
+    /// Widening the allow-list must not have widened the key-material check:
+    /// the HS family still boots on a secret alone, and the asymmetric families
+    /// still demand a public key or a JWKS URL.
+    #[test]
+    fn key_material_is_still_required_per_family() {
+        let hs_only_secret = |alg: &str| {
+            let mut c = cfg_with_alg(alg);
+            c.public_key = String::new();
+            c.jwks_url = String::new();
+            c.validate()
+        };
+        for alg in ["HS256", "HS384", "HS512", "auto"] {
+            assert!(hs_only_secret(alg).is_ok(), "{alg} should boot on JWT_SECRET alone");
+        }
+        for alg in ["HS256", "HS384", "HS512", "RS256", "RS384", "RS512", "EdDSA", "auto"] {
+            let mut c = cfg_with_alg(alg);
+            c.secret = String::new();
+            c.public_key = String::new();
+            c.jwks_url = String::new();
+            assert!(c.validate().is_err(), "{alg} with NO key material must not boot");
+        }
+        for alg in ["RS256", "RS384", "RS512", "EdDSA"] {
+            let mut c = cfg_with_alg(alg);
+            c.public_key = String::new();
+            c.jwks_url = String::new();
+            assert!(c.validate().is_err(), "{alg} must not boot on a secret alone");
+        }
+        // Disabled auth validates whatever it is given: the middleware is a
+        // pass-through, so an unsupported value is inert rather than fatal.
+        let mut off = cfg_with_alg("ES256");
+        off.enabled = false;
+        assert!(off.validate().is_ok());
+    }
+}

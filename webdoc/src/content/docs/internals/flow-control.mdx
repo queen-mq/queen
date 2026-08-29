@@ -11,10 +11,12 @@ sourceOfTruth:
   - server/src/handlers/data.rs
   - server/src/fusion.rs
   - server/src/pop_fusion.rs
+  - server/src/pop_autopilot.rs
   - server/src/hotlist.rs
   - server/src/config.rs
 verifiedBy:
   - server/src/admission.rs
+# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
 ---
 
 The broker does not let requests reach PostgreSQL as fast as they arrive. Every write transaction on
@@ -211,6 +213,40 @@ connections away from the log. `queen_kv_pool` exports its size, availability an
 The exception to the exception: a KV write that rides **inside** a push or an ack inherits the slot the
 handler already took and does not take another. That is a bundle of messages, and it belongs in the
 message lane.
+
+## The second control loop, and why it is not a second arbiter
+
+This page opens by replacing several self-balancing loops with one owner, so a
+second feedback loop in the same broker needs accounting for. [Pop
+autopilot](/reference/http/pop#autopilot) is one, and it does not compete with
+the arbiter because the two act on different quantities.
+
+| | Admission arbiter | Pop autopilot |
+| --- | --- | --- |
+| Senses | commit clustering, the shared flush pipeline | ready partitions and the age of the oldest, from the hot-list ring |
+| Decides | how many transactions may be in flight | how much work one admitted pop does |
+| Scope | process-wide, four lanes | one `(tenant, queue, group)` lane, in memory |
+| Costs | a slot per write transaction | no PostgreSQL query at all |
+| Applies to | every hot-path write | only a pop that sent `autopilot=true`, only on the ring path |
+
+A wider sweep is not more slots. It is more partitions inside the same claim,
+which is the same one slot for the Pop lane either way, so the controller cannot
+spend the arbiter's budget however it steers. What it can spend is the value of a
+slot, and that is what its two failure directions look like. Too wide and the
+claim holds its slot while it visits partitions that had nothing, which is the
+speculative scan the controller exists to prevent. Too narrow and ready
+partitions are left behind, their ready-age grows, and that growth is precisely
+the signal the width loop steers on.
+
+The message budget is a constant rather than a loop for a related reason, and it
+is the one worth knowing before raising it. A claimed entry is held `INFLIGHT`
+for the whole round trip, and that hold spans the consumer's own work and its ack,
+not just the SQL. So a deep claim on a backlogged partition stays inflight for as
+long as the client takes to drain it serially, and the tail a consumer sees grows
+with the depth it asked for. `QUEEN_POP_AUTOPILOT_BATCH` therefore ships at 100,
+below the 200 an absent `batch` resolves to in the handler, and a drain-aware
+successor that sizes it from the observed ack rate is the open item behind that
+constant.
 
 ## Degraded signal
 

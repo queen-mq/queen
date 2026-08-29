@@ -24,17 +24,20 @@ sourceOfTruth:
 ---
 
 Everything here lives in the PostgreSQL schema `queen`, created by `server/sql/schema.sql`. That
-file plus exactly 27 files under `server/sql/procedures/` (`001`–`027`) are embedded in the binary
-with `include_str!` and applied at every boot in lexical order under session advisory lock
-`778120010`. All of it is idempotent (`CREATE OR REPLACE`, `IF NOT EXISTS`,
+file plus exactly 31 files under `server/sql/procedures/` (`001`–`031`) are embedded in the binary
+with `include_str!` and applied at every boot in lexical order, one statement per transaction,
+under session advisory lock `778120010`. All of it is idempotent (`CREATE OR REPLACE`, `IF NOT EXISTS`,
 `ADD COLUMN IF NOT EXISTS`), so re-apply is a no-op, and `QUEEN_APPLY_SCHEMA=0` skips the
 step entirely, which lets a privileged role pre-apply the DDL so the broker can run as a
 low-privilege user.
 
-The apply **only creates**. There are no teardown files, no migration blocks and no upgrade
-`ALTER`s: a deployment starts from an empty database, and `schema.sql`'s `CREATE TABLE`s declare
-the final shape directly. Pointing this build at a database written by an earlier schema is
-unsupported: a new version means a fresh database. See [Retired objects](/internals/legacy) for the history.
+The apply **only creates and adds**. There are no teardown files and no migration blocks: a
+deployment starts from an empty database, and `schema.sql`'s `CREATE TABLE`s declare the shape
+directly. Where a later release needed a column on a table an earlier one already declared, the
+file spells the step out as `ADD COLUMN IF NOT EXISTS` beside the `CREATE`, so a database on the
+same line picks it up at the next boot. That is not an upgrade path: pointing this build at a
+database written by a different schema is still unsupported, and a new version means a fresh
+database. See [Retired objects](/internals/legacy) for the history.
 
 The engine needs `CREATE SCHEMA` and **no extensions**, with one floor worth naming: the
 `cgm_identity_uk` index below uses `NULLS NOT DISTINCT`, which needs **PostgreSQL 15 or newer**.
@@ -49,7 +52,11 @@ both `001` (the table) and `019` (the trigger functions) is the point of it. `02
 [KV](/internals/kv) and [timer](/internals/timers) surfaces, applied on every boot like the rest:
 `024` and `025`
 carry their tables and their request-path procedures, `026` the [sweeper](/internals/sweeper)'s two
-slow phases, and `027` the read-only quota poll every broker runs whether or not it sweeps. The
+slow phases, and `027` the read-only quota poll every broker runs whether or not it sweeps.
+`028`–`031` are the maintenance and tenancy surfaces the later releases added: `028` the
+retained-bytes slow lane, `029` the durable per-task lease table that elects one replica per
+[maintenance](/internals/retention) cycle, `030` the whole database footprint of the ephemeral
+queue class (its declarations and quota, never its messages), and `031` the tenant purge. The
 ordering is not cosmetic anywhere: SQL-language function bodies resolve tables at creation time, so
 the DDL files must land before every procedure body that names them.
 
@@ -198,13 +205,14 @@ to carry a queue name, so a deleted queue cascades its shared rows away.
 | `queen.maintenance_leases` | the durable schedule for the cluster-singleton loops (`stats_refresh`, `retained_bytes`, `retention`): one row per task with `next_due_at`, a lease, a fencing token and per-task run history. `enabled = false` pauses a task cluster-wide; the DB clock arbitrates, so pod clocks and replica counts do not shape the cadence |
 | `queen.worker_metrics`, `queen.worker_metrics_summary`, `queen.system_metrics` | the metrics collector's output |
 | `queen.queue_lag_metrics` | per-queue ops counters and lifecycle events. `queue_id UUID NOT NULL` FK to `queues(id)`, cascading; `UNIQUE (bucket_time, queue_id)`. Readers join `queues` for display names; a deleted queue's metric rows cascade away |
-| `queen_streams.queries`, `queen_streams.state` | streaming query registry and state |
+| `queen_streams.queries`, `queen_streams.state`, `queen_streams.quota` | streaming query registry (tenant-scoped: `name` is unique per `tenant_id`), per-`(query, partition, key)` state, and the per-tenant streams grant with its `max_queries` cap. `state` carries no tenant column on purpose: every row is attributable through its `query_id` FK, whatever happened to its partition |
 
 <Aside type="caution">
-`queen_streams.queries` and `queen_streams.state` are `GRANT`ed to `PUBLIC`, and nothing purges
-stream state. `state.partition_id` carries no foreign key on purpose, with the schema comment saying
-a partition cleanup must not silently delete still-relevant state, so a partition holding stream
-state is never reclaimed either.
+All three `queen_streams` tables are `GRANT`ed to `PUBLIC`, and stream state has no TTL: it is
+deleted only by a query reset, by the `queries` cascade, or by a tenant wipe.
+`state.partition_id` carries no foreign key on purpose, with the schema comment saying a partition
+cleanup must not silently delete still-relevant state, so a partition holding stream state is never
+reclaimed either.
 </Aside>
 
 ## Procedures, file by file

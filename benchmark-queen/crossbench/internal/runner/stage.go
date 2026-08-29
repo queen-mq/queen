@@ -30,6 +30,12 @@ type Stage struct {
 	Counters *workload.Counters
 	Stats    *workload.StageCounters
 
+	// topo is carried so a delivery can be attributed to its cohort through
+	// Topology.CohortOf — the single definition of "hot", shared with the
+	// producer's scheduler. Two definitions could drift, and a drifted cohort
+	// boundary would silently corrupt the isolation numbers.
+	topo workload.Topology
+
 	// lanes bounds concurrent in-work messages for this stage. It is the
 	// Little's law figure from SPEC.md §2 with headroom, and it is the same
 	// number for every system: the workload demands it, nobody gets to demand
@@ -39,11 +45,12 @@ type Stage struct {
 
 // NewStage prepares a stage with a lane budget.
 func NewStage(def workload.Stage, rec *workload.Recorder, c *workload.Counters,
-	sc *workload.StageCounters, lanes int) *Stage {
+	sc *workload.StageCounters, lanes int, topo workload.Topology) *Stage {
 	if lanes < 1 {
 		lanes = 1
 	}
-	return &Stage{Def: def, Rec: rec, Counters: c, Stats: sc, lanes: make(chan struct{}, lanes)}
+	return &Stage{Def: def, Rec: rec, Counters: c, Stats: sc, topo: topo,
+		lanes: make(chan struct{}, lanes)}
 }
 
 // Run consumes until ctx is done. It blocks.
@@ -147,7 +154,7 @@ func (s *Stage) handle(ctx context.Context, b broker.Broker, batch *broker.Batch
 		if s.Def.Terminal() {
 			// Only terminal stages observe end-to-end latency; counting an
 			// intermediate hop too would double-count the same event.
-			s.Counters.ObserveE2E(m.Stamp.Flow, now-m.Stamp.TS)
+			s.Counters.ObserveE2E(m.Stamp.Flow, s.topo.CohortOf(m.Stamp.Prop), now-m.Stamp.TS)
 		}
 	}
 	s.Stats.Processed.Add(int64(n))

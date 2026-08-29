@@ -1,0 +1,237 @@
+goload -mode cloud [dev-n200-q3] -> http://10.114.0.2:6711
+  target=proxy tenants=200 sharedQueue=true queue="app-q3" group="workers" partitions=100 brokerTenantHeader=false
+  offered=500.0 msg/s total (2.50/tenant) push-batch=1 -> 2.50 req/s per tenant across 1 producer(s) | max-inflight=4096
+  consumers=1/tenant popBatch=100 popWait=true autoAck=false | payload=256B | duration=120s drain=45s | idleConns=25/client verify=true
+[configure] 200 queue(s) configured in 1.09s
+[11:06:20 load ] offered=     490/s push=     234/s pop=     191/s ack=     176/s shed=    182/s inflight= 4096 | e2e p50=6324.22 p99=39059.46 ms | pushRTT p50=4882.43 p99=31064.06 ms | lag=2608 | err push=370 pop=27 ack=2 (429=0 403=0 5xx=0 to=307 conn=92) empty=11 cross=0 gor=16207
+[drain] producers stopped after 120.2s; draining 45s before the correctness verdict
+[11:07:20 drain] offered=     507/s push=     357/s pop=     245/s ack=     182/s shed=    102/s inflight= 3479 | e2e p50=19791.87 p99=82313.22 ms | pushRTT p50=4489.22 p99=41156.61 ms | lag=9364 | err push=3856 pop=519 ack=162 (429=0 403=0 5xx=2834 to=1347 conn=356) empty=14 cross=0 gor=12169
+
+========== dev-n200-q3 ==========
+offered        498.7 msg/s (59928 msgs, 17020 shed)
+achieved  push    324.4 msg/s (38975 msgs)   pop    217.2 msg/s during load (   266.7 msg/s over load+drain, 44045 msgs)   ack 39711 msgs
+e2eFromSchedule  n=44045     p50=24248.32 p95=96993.28 p99=121110.53 p999=133693.44 max=151068.22 ms
+e2eFromSend      n=44045     p50=23724.03 p95=95944.70 p99=121110.53 p999=133693.44 max=151067.71 ms
+pushRtt          n=38975     p50= 5537.79 p95=28180.48 p99=39583.74 p999=42729.47 max= 52968.98 ms
+ackRtt           n=3509      p50=  104.96 p95=16908.29 p99=42729.47 p999=51642.37 max= 54455.99 ms
+errors push       total=3933 kinds=map[conn:354 http_5xx:2636 timeout:943] codes=map[502/bad_gateway:2636]
+    first conn: push request failed: request failed after 1 attempts: Post "http://10.114.0.2:6711/api/v1/push": dial tcp 10.114.0.2:6711: connect: cannot assign requested address
+    first timeout: push request failed: request failed after 1 attempts: Post "http://10.114.0.2:6711/api/v1/push": context deadline exceeded
+    first http_5xx: push request failed: request failed after 1 attempts: HTTP 502 [bad_gateway]: {"code":"bad_gateway","error":"upstream unreachable"}
+errors pop        total=1158 kinds=map[canceled:200 http_5xx:600 timeout:558] codes=map[502/bad_gateway:600]
+    first http_5xx: pop request failed: request failed after 1 attempts: HTTP 502 [bad_gateway]: {"code":"bad_gateway","error":"upstream unreachable"}
+    first timeout: pop request failed: Get "http://10.114.0.2:6711/api/v1/pop/queue/app-q3?autoAck=false&batch=100&consumerGroup=workers&partitions=100&timeout=5000&wait=true": context deadline exceeded
+errors ack        total=189 kinds=map[conn:4 http_5xx:143 timeout:42] codes=map[502/bad_gateway:143]
+    first timeout: batch ack request failed: request failed after 1 attempts: Post "http://10.114.0.2:6711/api/v1/ack/batch": context deadline exceeded
+    first http_5xx: batch ack request failed: request failed after 1 attempts: HTTP 502 [bad_gateway]: {"code":"bad_gateway","error":"upstream unreachable"}
+    first conn: batch ack request failed: request failed after 1 attempts: Post "http://10.114.0.2:6711/api/v1/ack/batch": dial tcp 10.114.0.2:6711: connect: cannot assign requested address
+bytes     nominal 292 B/msg -> pushed 10.85 MiB, delivered 12.27 MiB
+
+---- delivery correctness (after the drain) ----
+idx  tenant         queue           sentOk  received  missing      dup   extra   cross verdict
+0    cd-0000        app-q3             158       247        0       64      25       0 FAIL
+1    cd-0001        app-q3             216       245        0       27       2       0 FAIL
+2    cd-0002        app-q3             207       207        0        0       0       0 OK
+3    cd-0003        app-q3             197       217        0       19       1       0 FAIL
+4    cd-0004        app-q3             200       239        0       39       0       0 FAIL
+5    cd-0005        app-q3             152       183        0        8      23       0 FAIL
+6    cd-0006        app-q3             176       193        0       15       2       0 FAIL
+7    cd-0007        app-q3             183       184        0        0       1       0 FAIL
+8    cd-0008        app-q3             177       215        0       34       4       0 FAIL
+9    cd-0009        app-q3             207       236        0       25       4       0 FAIL
+10   cd-0010        app-q3             176       207        0       29       2       0 FAIL
+11   cd-0011        app-q3             158       248        0       63      27       0 FAIL
+12   cd-0012        app-q3             175       228        0       32      21       0 FAIL
+13   cd-0013        app-q3             159       247        0       64      24       0 FAIL
+14   cd-0014        app-q3             221       307        0       84       2       0 FAIL
+15   cd-0015        app-q3             199       200        0        0       1       0 FAIL
+16   cd-0016        app-q3             226       227        0        0       1       0 FAIL
+17   cd-0017        app-q3             207       306        0       98       1       0 FAIL
+18   cd-0018        app-q3             229       252        0       22       1       0 FAIL
+19   cd-0019        app-q3             183       219        0       14      22       0 FAIL
+20   cd-0020        app-q3             235       239        0        4       0       0 FAIL
+21   cd-0021        app-q3             148       194        0       21      25       0 FAIL
+22   cd-0022        app-q3             189       208        0       19       0       0 FAIL
+23   cd-0023        app-q3             211       237        0       25       1       0 FAIL
+24   cd-0024        app-q3             179       196        0       17       0       0 FAIL
+25   cd-0025        app-q3             181       185        0        0       4       0 FAIL
+26   cd-0026        app-q3             176       221        0       45       0       0 FAIL
+27   cd-0027        app-q3             190       225        0       33       2       0 FAIL
+28   cd-0028        app-q3             193       195        0        0       2       0 FAIL
+29   cd-0029        app-q3             176       233        0       56       1       0 FAIL
+30   cd-0030        app-q3             204       245        0       36       5       0 FAIL
+31   cd-0031        app-q3             216       219        0        0       3       0 FAIL
+32   cd-0032        app-q3             182       199        0       14       3       0 FAIL
+33   cd-0033        app-q3             202       207        0        0       5       0 FAIL
+34   cd-0034        app-q3             186       233        0       41       6       0 FAIL
+35   cd-0035        app-q3             168       183        0       12       3       0 FAIL
+36   cd-0036        app-q3             164       208        0       42       2       0 FAIL
+37   cd-0037        app-q3             183       205        0       19       3       0 FAIL
+38   cd-0038        app-q3             181       182        0        0       1       0 FAIL
+39   cd-0039        app-q3             204       223        0       14       5       0 FAIL
+40   cd-0040        app-q3             174       192        0       17       1       0 FAIL
+41   cd-0041        app-q3             222       226        0        0       4       0 FAIL
+42   cd-0042        app-q3             196       216        0       17       3       0 FAIL
+43   cd-0043        app-q3             172       174        0        0       2       0 FAIL
+44   cd-0044        app-q3             198       233        0       33       2       0 FAIL
+45   cd-0045        app-q3             190       194        0        0       4       0 FAIL
+46   cd-0046        app-q3             196       251        0       53       2       0 FAIL
+47   cd-0047        app-q3             197       199        0        0       2       0 FAIL
+48   cd-0048        app-q3             204       233        0       27       2       0 FAIL
+49   cd-0049        app-q3             204       207        0        0       3       0 FAIL
+50   cd-0050        app-q3             181       264        0       82       1       0 FAIL
+51   cd-0051        app-q3             184       216        0       30       2       0 FAIL
+52   cd-0052        app-q3             214       217        0        0       3       0 FAIL
+53   cd-0053        app-q3             200       206        0        2       4       0 FAIL
+54   cd-0054        app-q3             201       218        0       16       1       0 FAIL
+55   cd-0055        app-q3             185       260        0       73       2       0 FAIL
+56   cd-0056        app-q3             188       226        0       34       4       0 FAIL
+57   cd-0057        app-q3             180       230        0       47       3       0 FAIL
+58   cd-0058        app-q3             195       219        0       22       2       0 FAIL
+59   cd-0059        app-q3             173       218        0       43       2       0 FAIL
+60   cd-0060        app-q3             205       205        0        0       0       0 OK
+61   cd-0061        app-q3             209       243        0       31       3       0 FAIL
+62   cd-0062        app-q3             200       241        0       40       1       0 FAIL
+63   cd-0063        app-q3             199       274        0       72       3       0 FAIL
+64   cd-0064        app-q3             209       228        0       17       2       0 FAIL
+65   cd-0065        app-q3             209       248        0       36       3       0 FAIL
+66   cd-0066        app-q3             209       253        0       43       1       0 FAIL
+67   cd-0067        app-q3             219       262        0       41       2       0 FAIL
+68   cd-0068        app-q3             210       257        0       47       0       0 FAIL
+69   cd-0069        app-q3             210       235        0       22       3       0 FAIL
+70   cd-0070        app-q3             219       243        0       22       2       0 FAIL
+71   cd-0071        app-q3             221       221        0        0       0       0 OK
+72   cd-0072        app-q3             204       219        0       14       1       0 FAIL
+73   cd-0073        app-q3             178       197        0       16       3       0 FAIL
+74   cd-0074        app-q3             205       249        0       40       4       0 FAIL
+75   cd-0075        app-q3             201       217        0       13       3       0 FAIL
+76   cd-0076        app-q3             231       233        0        0       2       0 FAIL
+77   cd-0077        app-q3             181       203        0       21       1       0 FAIL
+78   cd-0078        app-q3             201       242        0       39       2       0 FAIL
+79   cd-0079        app-q3             194       208        0       13       1       0 FAIL
+80   cd-0080        app-q3             197       224        0       26       1       0 FAIL
+81   cd-0081        app-q3             215       233        0       18       0       0 FAIL
+82   cd-0082        app-q3             189       228        0       38       1       0 FAIL
+83   cd-0083        app-q3             189       214        0       22       3       0 FAIL
+84   cd-0084        app-q3             179       180        0        0       1       0 FAIL
+85   cd-0085        app-q3             184       203        0       17       2       0 FAIL
+86   cd-0086        app-q3             194       215        0       18       3       0 FAIL
+87   cd-0087        app-q3             190       237        0       46       1       0 FAIL
+88   cd-0088        app-q3             238       329        0       87       4       0 FAIL
+89   cd-0089        app-q3             201       221        0       16       4       0 FAIL
+90   cd-0090        app-q3             183       231        0       47       1       0 FAIL
+91   cd-0091        app-q3             246       264        0       17       1       0 FAIL
+92   cd-0092        app-q3             196       243        0       42       5       0 FAIL
+93   cd-0093        app-q3             188       194        0        0       6       0 FAIL
+94   cd-0094        app-q3             185       187        0        0       2       0 FAIL
+95   cd-0095        app-q3             217       233        0       13       3       0 FAIL
+96   cd-0096        app-q3             213       217        0        0       4       0 FAIL
+97   cd-0097        app-q3             204       209        0        3       2       0 FAIL
+98   cd-0098        app-q3             180       226        0       42       4       0 FAIL
+99   cd-0099        app-q3             223       271        0       46       2       0 FAIL
+100  cd-0100        app-q3             202       247        0       39       6       0 FAIL
+101  cd-0101        app-q3             206       214        0        5       3       0 FAIL
+102  cd-0102        app-q3             210       219        0        0       9       0 FAIL
+103  cd-0103        app-q3             211       228        0       10       7       0 FAIL
+104  cd-0104        app-q3             187       196        0        0       9       0 FAIL
+105  cd-0105        app-q3             214       250        0       34       2       0 FAIL
+106  cd-0106        app-q3             193       237        0       36       8       0 FAIL
+107  cd-0107        app-q3             184       191        0        0       7       0 FAIL
+108  cd-0108        app-q3             220       225        1        0       6       0 FAIL  firstMissing=[2]
+109  cd-0109        app-q3             206       206        1        0       1       0 FAIL  firstMissing=[2]
+110  cd-0110        app-q3             173       178        1        0       6       0 FAIL  firstMissing=[2]
+111  cd-0111        app-q3             180       188        1        0       9       0 FAIL  firstMissing=[2]
+112  cd-0112        app-q3             190       241        0       49       2       0 FAIL
+113  cd-0113        app-q3             211       221        0        0      10       0 FAIL
+114  cd-0114        app-q3             166       167        0        0       1       0 FAIL
+115  cd-0115        app-q3             182       185        0        0       3       0 FAIL
+116  cd-0116        app-q3             187       234        0       42       5       0 FAIL
+117  cd-0117        app-q3             214       229        0       11       4       0 FAIL
+118  cd-0118        app-q3             188       246        0       55       3       0 FAIL
+119  cd-0119        app-q3             221       226        0        0       5       0 FAIL
+120  cd-0120        app-q3             188       209        0       13       8       0 FAIL
+121  cd-0121        app-q3             210       214        0        0       4       0 FAIL
+122  cd-0122        app-q3             185       213        0       22       6       0 FAIL
+123  cd-0123        app-q3             194       233        0       37       2       0 FAIL
+124  cd-0124        app-q3             215       225        0        0      10       0 FAIL
+125  cd-0125        app-q3             176       228        0       45       7       0 FAIL
+126  cd-0126        app-q3             227       232        0        0       5       0 FAIL
+127  cd-0127        app-q3             180       234        0       51       3       0 FAIL
+128  cd-0128        app-q3             178       205        0       17      10       0 FAIL
+129  cd-0129        app-q3             208       240        0       28       4       0 FAIL
+130  cd-0130        app-q3             203       216        0       11       2       0 FAIL
+131  cd-0131        app-q3             221       227        1        5       2       0 FAIL  firstMissing=[2]
+132  cd-0132        app-q3             181       186        0        0       5       0 FAIL
+133  cd-0133        app-q3             219       235        0        9       7       0 FAIL
+134  cd-0134        app-q3             215       217        0        0       2       0 FAIL
+135  cd-0135        app-q3             209       218        0        0       9       0 FAIL
+136  cd-0136        app-q3             202       213        0        0      11       0 FAIL
+137  cd-0137        app-q3             182       215        0       32       1       0 FAIL
+138  cd-0138        app-q3             179       182        0        0       3       0 FAIL
+139  cd-0139        app-q3             203       205        1        0       3       0 FAIL  firstMissing=[2]
+140  cd-0140        app-q3             210       219        0        0       9       0 FAIL
+141  cd-0141        app-q3             182       188        0        0       6       0 FAIL
+142  cd-0142        app-q3             182       183        1        0       2       0 FAIL  firstMissing=[2]
+143  cd-0143        app-q3             193       249        1       49       8       0 FAIL  firstMissing=[2]
+144  cd-0144        app-q3             193       204        0        0      11       0 FAIL
+145  cd-0145        app-q3             198       247        0       42       7       0 FAIL
+146  cd-0146        app-q3             174       180        0        0       6       0 FAIL
+147  cd-0147        app-q3             201       208        0        0       7       0 FAIL
+148  cd-0148        app-q3             168       173        1        0       6       0 FAIL  firstMissing=[2]
+149  cd-0149        app-q3             214       223        0        0       9       0 FAIL
+150  cd-0150        app-q3             198       206        0        2       6       0 FAIL
+151  cd-0151        app-q3             216       256        0       35       5       0 FAIL
+152  cd-0152        app-q3             189       195        0        0       6       0 FAIL
+153  cd-0153        app-q3             223       230        1        0       8       0 FAIL  firstMissing=[2]
+154  cd-0154        app-q3             183       228        0       42       3       0 FAIL
+155  cd-0155        app-q3             200       307        1      100       8       0 FAIL  firstMissing=[2]
+156  cd-0156        app-q3             214       217        1        0       4       0 FAIL  firstMissing=[2]
+157  cd-0157        app-q3             218       223        0        0       5       0 FAIL
+158  cd-0158        app-q3             172       243        1       67       5       0 FAIL  firstMissing=[2]
+159  cd-0159        app-q3             187       202        1       11       5       0 FAIL  firstMissing=[2]
+160  cd-0160        app-q3             185       191        1        0       7       0 FAIL  firstMissing=[2]
+161  cd-0161        app-q3             194       203        2        0      11       0 FAIL  firstMissing=[2 3]
+162  cd-0162        app-q3             212       255        0       34       9       0 FAIL
+163  cd-0163        app-q3             170       195        0       21       4       0 FAIL
+164  cd-0164        app-q3             201       215        0        9       5       0 FAIL
+165  cd-0165        app-q3             185       190        0        0       5       0 FAIL
+166  cd-0166        app-q3             173       215        0       38       4       0 FAIL
+167  cd-0167        app-q3             210       220        0        4       6       0 FAIL
+168  cd-0168        app-q3             174       214        0       35       5       0 FAIL
+169  cd-0169        app-q3             190       196        0        3       3       0 FAIL
+170  cd-0170        app-q3             187       213        0       21       5       0 FAIL
+171  cd-0171        app-q3             187       193        1        0       7       0 FAIL  firstMissing=[2]
+172  cd-0172        app-q3             194       198        1        0       5       0 FAIL  firstMissing=[2]
+173  cd-0173        app-q3             194       199        0        0       5       0 FAIL
+174  cd-0174        app-q3             182       228        0       39       7       0 FAIL
+175  cd-0175        app-q3             182       184        0        0       2       0 FAIL
+176  cd-0176        app-q3             172       174        1        0       3       0 FAIL  firstMissing=[2]
+177  cd-0177        app-q3             217       225        0        0       8       0 FAIL
+178  cd-0178        app-q3             192       200        1        0       9       0 FAIL  firstMissing=[2]
+179  cd-0179        app-q3             184       282        1       93       6       0 FAIL  firstMissing=[2]
+180  cd-0180        app-q3             182       216        1       25      10       0 FAIL  firstMissing=[2]
+181  cd-0181        app-q3             237       248        0        6       5       0 FAIL
+182  cd-0182        app-q3             184       209        3       20       8       0 FAIL  firstMissing=[2 3 6]
+183  cd-0183        app-q3             180       212        1       22      11       0 FAIL  firstMissing=[2]
+184  cd-0184        app-q3             190       226        0       34       2       0 FAIL
+185  cd-0185        app-q3             186       193        0        0       7       0 FAIL
+186  cd-0186        app-q3             194       242        0       38      10       0 FAIL
+187  cd-0187        app-q3             177       178        0        0       1       0 FAIL
+188  cd-0188        app-q3             181       188        0        0       7       0 FAIL
+189  cd-0189        app-q3             174       206        0       29       3       0 FAIL
+190  cd-0190        app-q3             175       177        0        0       2       0 FAIL
+191  cd-0191        app-q3             224       230        0        0       6       0 FAIL
+192  cd-0192        app-q3             210       262        1       44       9       0 FAIL  firstMissing=[2]
+193  cd-0193        app-q3             212       251        0       27      12       0 FAIL
+194  cd-0194        app-q3             184       234        0       47       3       0 FAIL
+195  cd-0195        app-q3             199       202        1        0       4       0 FAIL  firstMissing=[2]
+196  cd-0196        app-q3             178       198        0       16       4       0 FAIL
+197  cd-0197        app-q3             172       176        1        0       5       0 FAIL  firstMissing=[2]
+198  cd-0198        app-q3             176       197        0       12       9       0 FAIL
+199  cd-0199        app-q3             187       274        1       86       2       0 FAIL  firstMissing=[2]
+     TOTAL                           38975     44045       31     4158     943       0
+VERDICT: FAIL
+CAUTION: 31 missing may be BACKLOG, not loss — 0 messages were still arriving in the last 2s of the drain and the consumer side hit 1158 error(s) (map[502/bad_gateway:600]). Re-run with a longer -drain, or size -drain to the rate the plan actually permits.
+
+[artifacts] /root/cap16-dev/dev-n200-q3.json
+            /root/cap16-dev/dev-n200-q3-interval.csv

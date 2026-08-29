@@ -1,0 +1,17 @@
+Container RSS at 01:42 UTC, ~7 min after the global OOM at 01:35:14.
+
+  cell-pg          10794 MB   (shared_buffers 4 GB is inside this)
+  cell-broker-a     1592 MB   rolled 00:03:19, so ~100 min of growth
+  cell-broker-b     1757 MB   rolled 00:01:06 -- PASSIVE, push_s=0/pop_s=0
+  cell-proxy         724 MB
+  ---------------------------------
+  sum               14867 MB of 15991 MB total
+
+The passive broker holding MORE anonymous memory than the active one, at zero
+traffic, is the load-bearing observation: it cannot be a workload working set.
+dedup_cache_mb=512 is a fixed reservation per broker, so ~1.1-1.2 GB per broker
+is unexplained and accumulated in ~100 minutes.
+
+RERUN-2026-08-23.md "OPEN ITEM: broker memory grows in steps" recorded
+2135 MB (12:27) -> 2886 MB (14:19), ~300 MB/h combined, and estimated ~16 h of
+headroom. The OOM landed at 01:35 on 2026-08-24, ~14.4 h into the soak.

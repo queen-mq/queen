@@ -17,6 +17,42 @@
 let sessionToken = null;
 let bootstrapping = null;
 
+// Shared-host cluster naming (acting.rs, decision z). On a host listed in
+// QUEEN_PROXY_SHARED_HOSTS the Host label names no cluster, so a session must
+// name one with the act-as header on EVERY call — /api/console/* and
+// /api/v1/* alike. On a per-cluster hostname this stays null and no header is
+// sent: the console routes deliberately ignore it there, and the data plane
+// HONOURS it there (it would retarget the session), so attaching it
+// unconditionally is not an option. App.vue decides from /auth/me whether a
+// cluster must be named, and with which one.
+let actCluster = null;
+let actClusterHeader = 'x-queen-act-cluster';
+
+/** Name the cluster every subsequent apiFetch acts on (a cluster uuid or
+ * slug), or clear it with null. `headerName` is /auth/me's
+ * `act_cluster_header`, so a renamed header cannot strand the console. */
+export function setActCluster(reference, headerName) {
+  actCluster = reference || null;
+  if (headerName) actClusterHeader = headerName;
+}
+
+/** GET /auth/me — the session's identity, clusters, and (crucially) which
+ * cluster this very request resolved to. Cookie-authenticated like
+ * /auth/session-token: /auth/me describes the browser's session (oauth.rs)
+ * and rejects a Bearer. A 401 redirects to login and never resolves. */
+export function fetchMe() {
+  return fetch('/auth/me', { credentials: 'include' }).then((res) => {
+    if (res.status === 401) {
+      redirectToLogin();
+      return new Promise(() => {}); // navigating away; never settles
+    }
+    if (!res.ok) {
+      throw new Error(`could not read the session identity (HTTP ${res.status})`);
+    }
+    return res.json();
+  });
+}
+
 export function redirectToLogin() {
   window.location.href = `/auth/login?next=${encodeURIComponent('/console/')}`;
 }
@@ -54,6 +90,7 @@ export function bootstrapSession() {
 export async function apiFetch(path, options = {}) {
   const token = await bootstrapSession();
   const headers = { ...(options.headers || {}), Authorization: `Bearer ${token}` };
+  if (actCluster) headers[actClusterHeader] = actCluster;
   const res = await fetch(path, { ...options, headers });
   if (res.status === 401) {
     redirectToLogin();

@@ -29,7 +29,7 @@ either way.
 ## What it needs
 
 One PostgreSQL of its own, *pxdb*, which can be a separate database or just a separate schema on
-the broker's. The proxy owns the `queen_proxy` schema there and applies its six migrations at
+the broker's. The proxy owns the `queen_proxy` schema there and applies its eight migrations at
 boot, so nothing has to be created first.
 
 Point it **directly at PostgreSQL, not through a pooler**. It holds a permanent dedicated
@@ -51,6 +51,12 @@ docker run -d --name queen-proxy -p 6711:6711 \
 stable: sessions are signed with it, so changing it logs every human out. The spool volume is
 where metering that could not be written yet is parked, so losing it loses usage rather than
 traffic.
+
+Leave the JWT variables out entirely and the proxy still starts, because an API-key-only proxy is
+a supported shape. It warns at boot that it has no signer, and a console login then answers 503
+instead of issuing a session. What it refuses to start with is JWT material it cannot use: a
+private key that does not parse, or a public key it cannot verify with. Supplied and broken is a
+mistake; absent is a choice.
 
 ```bash
 curl -s http://127.0.0.1:6711/healthz
@@ -133,7 +139,8 @@ failing the boot, and an optional variable set to the empty string counts as uns
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `QUEEN_PROXY_PORT` | `6711` | Bind port. The listener is always `0.0.0.0:PORT`. |
+| `QUEEN_PROXY_PORT` | `6711` | Bind port, plaintext or TLS: there is one listener either way. |
+| `QUEEN_PROXY_BIND_ADDR` | `0.0.0.0` | Bind host, every interface by default. A host or IP only, so a value carrying its own port exits 1 at boot instead of binding somewhere unintended. |
 | `QUEEN_PROXY_TLS_CERT` | unset | Path to a PEM certificate chain. |
 | `QUEEN_PROXY_TLS_KEY` | unset | Path to the matching PEM private key. |
 
@@ -162,12 +169,18 @@ only.
 | `PXDB_DB` | `queen_proxy` | Database name. The proxy owns the `queen_proxy` schema inside it. |
 | `PXDB_USE_SSL` | `false` | `true` connects over TLS. |
 | `PXDB_SSL_REJECT_UNAUTHORIZED` | `true` | With SSL on, `true` validates the chain against the Mozilla roots compiled into the binary; `false` encrypts and accepts any certificate. |
+| `PXDB_SSL_ROOT_CERT` | unset | The PEM content of a CA to validate the chain against instead of those roots. |
 | `PXDB_POOL_SIZE` | `16` | Maximum pooled connections. The dedicated `LISTEN` connection sits outside this pool, so budget one more. |
 
-The two SSL variables behave exactly like the broker's `PG_USE_SSL` and `PG_SSL_REJECT_UNAUTHORIZED`
-([PostgreSQL TLS](/reference/security/postgres-tls)), including the part that catches people: most
-managed PostgreSQL presents a privately rooted chain, so `true` fails validation and `false` is the
-usual answer, at the cost of not proving whose key answered.
+The three SSL variables behave exactly like the broker's `PG_USE_SSL`,
+`PG_SSL_REJECT_UNAUTHORIZED` and `PG_SSL_ROOT_CERT`
+([PostgreSQL TLS](/reference/security/postgres-tls)), down to the same code: both services
+compile the same connector module. Most managed PostgreSQL presents a privately rooted chain, so
+`PXDB_SSL_REJECT_UNAUTHORIZED=true` alone fails validation; the answer is `PXDB_SSL_ROOT_CERT` with
+that provider's CA, which keeps verification on. It takes the certificate content, not a path, and a
+multi-line value does not survive `docker --env-file`. A malformed value is a boot failure, and a CA
+supplied beside `PXDB_SSL_REJECT_UNAUTHORIZED=false` wins over it, with a warning. Both connections
+use it: the pool, and the dedicated `LISTEN` connection.
 
 Two things about pxdb are boot failures rather than degraded modes. An unreachable database is one:
 the proxy takes a connection and runs `SELECT 1` before it serves anything, and a failure there, or

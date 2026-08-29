@@ -1,0 +1,3 @@
+[Mon Aug 24 01:35:14 2026] bash invoked oom-killer: gfp_mask=0x140cca(GFP_HIGHUSER_MOVABLE|__GFP_COMP), order=0, oom_score_adj=0
+[Mon Aug 24 01:35:14 2026] oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null),cpuset=user.slice,mems_allowed=0,global_oom,task_memcg=/system.slice/docker-dbdef8f22cb72825cffb231e91a6779bacbbf020ce8223bf5a3b228debb974b8.scope,task=postgres,pid=805118,uid=999
+[Mon Aug 24 01:35:14 2026] Out of memory: Killed process 805118 (postgres) total-vm:4525776kB, anon-rss:39020kB, file-rss:384kB, shmem-rss:4306048kB, UID:999 pgtables:8736kB oom_score_adj:0

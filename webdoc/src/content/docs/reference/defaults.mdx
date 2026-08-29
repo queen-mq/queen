@@ -14,6 +14,7 @@ sourceOfTruth:
   - server/sql/schema.sql
   - server/sql/procedures/012_configure.sql
   - server/sql/procedures/001_log_schema.sql
+# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
 ---
 
 A default reaches a message through one of three layers, and the layers are
@@ -78,7 +79,8 @@ each of them sits where it does.
 
 | Variable | Default | Effect of the default |
 | --- | --- | --- |
-| `PORT` | `6632` | HTTP listener, bound on `0.0.0.0`. |
+| `PORT` | `6632` | The one port the HTTP listener serves. |
+| `QUEEN_BIND_ADDR` | `0.0.0.0` | Every interface. A host or IP only: a value carrying its own port is a fatal boot error rather than a silent bind somewhere else. It also becomes the mesh listener's address unless `QUEEN_MESH_BIND_ADDR` overrides it. |
 | `QUEEN_MAX_BODY_BYTES` | `67108864` (64 MiB) | Larger request bodies are rejected with 413 before any handler runs. |
 | `DB_POOL_SIZE` | `160` | Upper bound on concurrent PostgreSQL work. A request that cannot get a pooled connection at all answers 500 with `{"error":"pool"}`. |
 | `QUEEN_STMT_TIMEOUT_MS` | `30000` | A statement past this is abandoned, cancelled server-side, and its pooled connection is quarantined. |
@@ -144,8 +146,9 @@ is reset to the value in this table, not left alone. See
 
 | Endpoint | Parameter | Default |
 | --- | --- | --- |
-| `GET /api/v1/pop/queue/:queue` | `batch` | `200` |
-| | `partitions` | `1` |
+| `GET /api/v1/pop/queue/:queue` | `batch` | `200`, unless the request delegated it with `autopilot` |
+| | `partitions` | `1`, unless the request delegated it with `autopilot` |
+| | `autopilot` | absent; `true` asks the broker to size the knobs the request did not send, per parameter |
 | | `autoAck` | `false` |
 | | `wait` | `false` |
 | | `timeout` | the configured pop timeout (30000 ms) |

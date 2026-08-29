@@ -119,6 +119,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          # No Cargo.toml at the repo root, so the bundled rust-cache's default
+          # workspace (the checkout dir) makes its `cargo metadata` probe die
+          # with exit 101. That is non-fatal — it only leaves the job with an
+          # empty cache key, so every run recompiles from scratch — but it
+          # prints a red `Error:` into a green job, which is exactly the noise
+          # that hides a real one. Name the manifests instead.
+          cache-workspaces: server
       - name: cargo test
         run: cargo test --manifest-path server/Cargo.toml --locked
 
@@ -139,6 +147,10 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: clippy, rustfmt
+          # See rust-unit: both manifests, or rust-cache probes the root.
+          cache-workspaces: |
+            crates/queen-protocol
+            clients/client-rust
       - name: queen-protocol tests
         run: cargo test --manifest-path crates/queen-protocol/Cargo.toml --locked
       - name: client tests
@@ -149,19 +161,26 @@ jobs:
       # `shutdown_on_signal`.
       - name: client tests (all features)
         run: cargo test --manifest-path clients/client-rust/Cargo.toml --locked --all-features
+      # Both crates every run. Under `bash -e` the first failure aborted the
+      # step, so a diff in queen-protocol hid every diff in client-rust and the
+      # log named only half of what had to be fixed.
       - name: rustfmt
         run: |
-          cargo fmt --manifest-path crates/queen-protocol/Cargo.toml --check
-          cargo fmt --manifest-path clients/client-rust/Cargo.toml --check
-          cargo fmt --manifest-path supervisor/Cargo.toml --check
+          rc=0
+          cargo fmt --manifest-path crates/queen-protocol/Cargo.toml --check || rc=1
+          cargo fmt --manifest-path clients/client-rust/Cargo.toml --check || rc=1
+          cargo fmt --manifest-path supervisor/Cargo.toml --check || rc=1
+          exit $rc
       - name: clippy
         run: |
+          rc=0
           cargo clippy --manifest-path crates/queen-protocol/Cargo.toml --locked \
-            --all-targets -- -D warnings
+            --all-targets -- -D warnings || rc=1
           cargo clippy --manifest-path clients/client-rust/Cargo.toml --locked \
-            --all-targets --all-features -- -D warnings
+            --all-targets --all-features -- -D warnings || rc=1
           cargo clippy --manifest-path supervisor/Cargo.toml --locked \
-            --all-targets -- -D warnings
+            --all-targets -- -D warnings || rc=1
+          exit $rc
 
   # `rust-version` in the client's Cargo.toml is a promise to anyone on an older
   # toolchain. Every other job runs current stable, so without this the promise
@@ -176,6 +195,9 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: "1.86"
+          cache-workspaces: |
+            crates/queen-protocol
+            clients/client-rust
       - name: cargo check on the declared MSRV
         run: |
           cargo check --manifest-path crates/queen-protocol/Cargo.toml --locked --all-targets
@@ -210,6 +232,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: "1.88"
+          cache-workspaces: server
       - name: cargo check on the declared MSRV, full and lean
         run: |
           cargo check --manifest-path server/Cargo.toml --locked --all-targets

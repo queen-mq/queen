@@ -12,6 +12,9 @@ use crate::http::{HttpClient, Opts};
 pub(crate) struct Inner {
     pub http: Arc<HttpClient>,
     pub buffers: Arc<BufferManager>,
+    /// Process-wide kill switch for pop autopilot, settled from
+    /// `QUEEN_SDK_POP_AUTOPILOT` at `Queen::connect` (see `crate::autopilot`).
+    pub autopilot_off: bool,
 }
 
 impl Inner {

@@ -24,7 +24,14 @@ const client = axios.create({
 const isJsonApiPath = (url = '') => url.startsWith('/api/') || url === '/health'
 
 /** Paths whose cluster attribution is set by the act-as header. */
-const isClusterScoped = (url = '') => url.startsWith('/api/v1/') || url === '/health'
+// `/api/console/*` is here for the SHARED-HOST console (one URL fronting many
+// clusters), where the Host names no cluster and the header is the only thing
+// that can — proxy/src/acting.rs `resolve_route_console`. Everywhere else the
+// console deliberately IGNORES the header (it is read only on a host listed in
+// QUEEN_PROXY_SHARED_HOSTS), so sending it changes nothing on a per-cluster
+// hostname or broker-direct.
+const isClusterScoped = (url = '') =>
+  url.startsWith('/api/v1/') || url.startsWith('/api/console/') || url === '/health'
 
 // ---------------------------------------------------------------------------
 // Request: one place, and only one, attaches the acting cluster.

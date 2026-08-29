@@ -53,6 +53,11 @@ class Recorded:
     path: str
     query: Dict[str, List[str]] = field(default_factory=dict)
     body: Any = None
+    # The query string exactly as it left the client, order included. parse_qs
+    # above answers "was this parameter sent, and with what value"; this answers
+    # "is this the same request the pre-feature SDK sent", which is a stronger
+    # claim and the one the autopilot tests make.
+    raw_query: str = ""
 
     @property
     def route(self) -> str:
@@ -154,11 +159,13 @@ class PopTransport(httpx.AsyncBaseTransport):
             body = raw.decode("utf-8", "replace")
 
         query = request.url.query
+        raw_query = query.decode() if isinstance(query, bytes) else query
         rec = Recorded(
             method=request.method,
             path=request.url.path,
-            query=parse_qs(query.decode() if isinstance(query, bytes) else query),
+            query=parse_qs(raw_query),
             body=body,
+            raw_query=raw_query,
         )
         self.requests.append(rec)
 

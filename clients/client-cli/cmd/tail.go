@@ -73,7 +73,10 @@ quietly replaying the backlog into whatever is downstream of the pipe.`,
 		if tailBatch > 0 {
 			qb = qb.Batch(tailBatch)
 		}
-		if tailMaxParts > 1 {
+		// Typed = pinned, untouched = the broker's to choose. Same reasoning as
+		// `pop`: with pop autopilot an omitted `partitions` no longer means 1,
+		// so `--max-partitions 1` has to reach the wire to hold.
+		if cmd.Flags().Changed("max-partitions") {
 			qb = qb.Partitions(tailMaxParts)
 		}
 		qb = qb.AutoAck(tailAutoAck)
@@ -158,8 +161,8 @@ func init() {
 	tailCmd.Flags().StringVar(&tailPartition, "partition", "", "single partition to tail (default: any)")
 	tailCmd.Flags().BoolVarP(&tailFollow, "follow", "f", false, "keep streaming after the queue drains")
 	tailCmd.Flags().IntVarP(&tailLimit, "limit", "n", 0, "stop after N messages")
-	tailCmd.Flags().IntVar(&tailBatch, "batch", 0, "messages per long-poll round-trip")
-	tailCmd.Flags().IntVar(&tailMaxParts, "max-partitions", 1, "claim up to N partitions per pop (v4 multi-partition)")
+	tailCmd.Flags().IntVar(&tailBatch, "batch", 0, "messages per long-poll round-trip (unset: the broker sizes it)")
+	tailCmd.Flags().IntVar(&tailMaxParts, "max-partitions", 1, "claim up to N partitions per pop; pass it to pin the sweep, leave it out and the broker sizes it")
 	tailCmd.Flags().BoolVar(&tailAutoAck, "auto-ack", false, "ack server-side as messages are emitted")
 	tailCmd.Flags().StringVar(&tailFromMode, "from", "", "subscription mode: all|new|new-only")
 	tailCmd.Flags().StringVar(&tailFromAt, "since", "", "subscription start: 'now', RFC3339, '5m ago'")

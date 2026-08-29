@@ -128,6 +128,33 @@ func printSummary(w io.Writer, r *Result) {
 	fmt.Fprintf(w, "  flow A  p50 %.1f ms   p95 %.1f ms   p99 %.1f ms\n", p50a, p95a, p99a)
 	fmt.Fprintf(w, "  flow B  p50 %.1f ms   p95 %.1f ms   p99 %.1f ms\n", p50b, p95b, p99b)
 
+	if t := r.Topology; t.Skewed() {
+		cold50, cold95, cold99 := c.E2ECohortBoth(workload.CohortCold)
+		hot50, hot95, hot99 := c.E2ECohortBoth(workload.CohortHot)
+		dHot, dCold := c.DeliveredCohort(workload.CohortHot), c.DeliveredCohort(workload.CohortCold)
+		hotRate, coldRate := t.PerLaneRate()
+		ceil := t.LaneCeiling(r.BatchSize)
+		share := 0.0
+		if tot := dHot + dCold; tot > 0 {
+			share = 100 * float64(dHot) / float64(tot)
+		}
+		fmt.Fprintf(w, "\n-- hot-entity isolation (%d hot key(s) at %dx a cold key) --\n",
+			t.HotProps, t.HotFactor)
+		fmt.Fprintf(w, "  offered per lane           hot %.1f/s   cold %.2f/s   (one lane drains at up to %.0f/s at batch %d)\n",
+			hotRate, coldRate, ceil, r.BatchSize)
+		if t.HotSaturated(r.BatchSize) {
+			fmt.Fprintf(w, "  hot lane SATURATED: offered above the ordering-lane ceiling, so the hot\n")
+			fmt.Fprintf(w, "    backlog grows by construction. Read COLD as the result; hot is the disturbance.\n")
+		}
+		fmt.Fprintf(w, "  delivered                  hot %d (%.1f%% of terminal deliveries)   cold %d\n",
+			dHot, share, dCold)
+		fmt.Fprintf(w, "  COLD (the neighbours)      p50 %.1f ms   p95 %.1f ms   p99 %.1f ms\n", cold50, cold95, cold99)
+		fmt.Fprintf(w, "  HOT  (the noisy entity)    p50 %.1f ms   p95 %.1f ms   p99 %.1f ms\n", hot50, hot95, hot99)
+		if cold99 > 0 {
+			fmt.Fprintf(w, "  hot/cold p99 ratio         %.1fx\n", hot99/cold99)
+		}
+	}
+
 	p := r.Provisioned
 	fmt.Fprintf(w, "\n-- cost to serve: what this system needed --\n")
 	fmt.Fprintf(w, "  ordered lanes provisioned  %d\n", p.OrderedLanes)

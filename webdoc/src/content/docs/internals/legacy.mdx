@@ -79,8 +79,9 @@ it dead weight:
   merged form.
 
 None of them ever did anything on a fresh database, and a fresh database is now the only kind
-there is. The remaining procedure files were renumbered into the contiguous `001`–`023` roster
-documented in the [schema catalogue](/internals/schema).
+there is. The remaining procedure files were renumbered into a contiguous roster, `001`–`023` at
+the time and since grown to `031` by later features, documented in the
+[schema catalogue](/internals/schema).
 
 ### The six defects the rows tables were still causing
 
@@ -105,7 +106,11 @@ Everything in `schema.sql` today is either the log engine's or genuinely shared:
 (queue identity *and* configuration, since the merge), `consumer_groups_metadata`,
 `consumer_watermarks`, `stats`, `stats_history`, `retention_history`, `message_traces`,
 `message_trace_names`, `system_state`, `system_metrics`, the worker-metrics tables and
-`queue_lag_metrics`. Do not assume that anything defined there is retired: nothing is.
+`queue_lag_metrics`. Do not assume that anything defined there is retired. One column now is:
+`queen.stats.newest_message_at` lost its last writer in the 2026-08-20 stats-refresh diet (the
+refresh sets it `NULL`, and the wire's `newestMessage` is computed live per request), but it stays
+declared, because `CREATE TABLE IF NOT EXISTS` would never re-create a dropped column while an
+older image's `011` body still names it and would fail its boot re-apply.
 
 Three of them keep a `partition_id` column that carries a **`queen.log_partitions` id with no
 foreign key**: `stats`, `retention_history` and `message_traces`. The constraint-less shape is

@@ -246,15 +246,38 @@ pub async fn handle_queue_depth(
 }
 
 // ------------------------------------------------------- resources LIST API
-// GET /api/v1/resources/queues — queue list via get_queues_v2, enriched with
-// segment counts. get_queues_v2 reads its partitions/messages from queen.stats,
-// which the segments engine leaves empty, so those come back 0; we overlay the
-// live seg_partitions/seg_segments counts (mirrors handle_get_queue's segments
-// enrichment). Namespace/task query filters are accepted but not applied — the
-// full list is a valid superset for the CLI list view.
+// GET /api/v1/resources/queues — queue list via get_queues_v2, the cached
+// queen.stats view (partitions = child_count, retainedBytes, pending/processing,
+// all rewritten by log_refresh_all_stats_v1 at the stats cadence), enriched by
+// default from log_queue_stats_all_v1 — partition count and retained frames
+// LIVE, Θ(the tenant's partitions); the segment count as of the retained-bytes
+// lane's last pass (queen.stats.segment_count, see 028_retained_bytes.sql) —
+// for the dashboard and the CLI list, where a partition count one cadence old
+// reads as wrong. The exact live segment count is handle_get_queue's.
+//
+// `?stats=cached` skips that enrichment and serves the cached view as is. It
+// exists for the proxy's reconciler (proxy/src/registry.rs), which polls this
+// route once per cluster per interval and reads only `name`, `partitions`,
+// `retainedBytes` and the top-level kv/timer bytes — every one of them already
+// in the cached view — so computing a pass over the tenant's partitions and
+// segments for each poll bought it nothing. (Until 2026-08-23 that pass was
+// over the CELL's segments, whatever the tenant's size: see the function's
+// header in 011_log_stats.sql.) A broker older than the parameter ignores it
+// and enriches as before, so the proxy sends it unconditionally.
+//
+// Namespace/task query filters are accepted but not applied — the full list is
+// a valid superset for the CLI list view.
+#[derive(Deserialize)]
+pub struct ListQueuesParams {
+    /// `live` (default): per-queue counts computed now; `cached`: the
+    /// queen.stats view as of the last refresh, nothing computed per call.
+    stats: Option<String>,
+}
+
 pub async fn handle_list_queues(
     State(st): State<Arc<AppState>>,
     Extension(tenant): Extension<crate::tenant::Tenant>,
+    Query(p): Query<ListQueuesParams>,
 ) -> Response {
     let client = match st.pool.get().await {
         Ok(c) => c,
@@ -280,8 +303,11 @@ pub async fn handle_list_queues(
     }
 
     // Enrich each queue with segment-derived counts (best-effort; leave the base
-    // list intact on error).
-    if let Ok(stats) = db::seg_queue_stats_all(&client, tenant.as_str()).await {
+    // list intact on error). Skipped on `?stats=cached`.
+    let live = p.stats.as_deref() != Some("cached");
+    if !live {
+        // nothing to compute: the cached view is the answer
+    } else if let Ok(stats) = db::seg_queue_stats_all(&client, tenant.as_str()).await {
         let map: HashMap<String, (i64, i64, i64)> = stats
             .into_iter()
             .map(|(name, parts, segs, msgs)| (name, (parts, segs, msgs)))

@@ -18,6 +18,27 @@ use crate::http::Opts;
 use crate::inner::Inner;
 use crate::uuid;
 
+/// What one pop returned, plus the broker's account of how it sized it.
+///
+/// `autopilot` is `None` when the pop did not engage autopilot, when the broker
+/// is older than 1.2, or when the answer was a bodiless `204` (an empty
+/// non-conflating pop) with nowhere to carry the echo.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PopOutcome {
+    pub messages: Vec<Message>,
+    pub autopilot: Option<queen_protocol::AutopilotEcho>,
+}
+
+impl PopOutcome {
+    fn empty() -> Self {
+        Self::default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+}
+
 /// Fluent entry point for everything scoped to a queue.
 ///
 /// Created by [`crate::Queen::queue`]. Configuration methods take `self` and
@@ -32,8 +53,16 @@ pub struct QueueBuilder {
     pub(crate) group: Option<String>,
 
     pub(crate) concurrency: usize,
-    pub(crate) batch: i32,
-    pub(crate) max_partitions: i32,
+    /// The CALLER's own values. `None` means the setter was never called, which
+    /// is the dimension pop autopilot gets to choose (see [`crate::autopilot`]);
+    /// the client-side defaults are applied at emission time, not here, because
+    /// filling them in here would erase the difference between "never called
+    /// `batch`" and "called `batch(1)`".
+    pub(crate) batch: Option<i32>,
+    pub(crate) max_partitions: Option<i32>,
+    /// Per-builder override for pop autopilot. `None` = the client default (on
+    /// unless `QUEEN_SDK_POP_AUTOPILOT` turned it off).
+    pub(crate) autopilot: Option<bool>,
     pub(crate) limit: Option<u64>,
     pub(crate) idle: Option<Duration>,
     pub(crate) auto_ack: bool,
@@ -59,8 +88,9 @@ impl QueueBuilder {
             task: None,
             group: None,
             concurrency: 1,
-            batch: 1,
-            max_partitions: 1,
+            batch: None,
+            max_partitions: None,
+            autopilot: None,
             limit: None,
             idle: None,
             // Client-side auto-ack during consume; NOT the server-side
@@ -126,16 +156,54 @@ impl QueueBuilder {
     }
 
     /// Messages per poll.
+    ///
+    /// Leave it unset and the broker sizes it (see [`Self::autopilot`]), where
+    /// it used to mean the client-side default of 1. `batch(0)` is not "a batch
+    /// of zero" and never was: it is the absence of an opinion, so it reads as
+    /// unset.
     pub fn batch(mut self, n: i32) -> Self {
-        self.batch = n.max(1);
+        self.batch = (n > 0).then_some(n);
         self
     }
 
     /// Claim up to `n` partitions per poll, sharing the batch budget and one
     /// lease. The way to drain many sparse lanes without a round-trip each.
+    ///
+    /// Leave it unset and the broker chooses the sweep width (see
+    /// [`Self::autopilot`]); `partitions(1)` pins the legacy single-partition
+    /// behaviour, which is a decision the broker is told about and never
+    /// overrides.
     pub fn partitions(mut self, n: i32) -> Self {
-        self.max_partitions = n.max(1);
+        self.max_partitions = (n > 0).then_some(n);
         self
+    }
+
+    /// Turn broker-side pop sizing on or off for this builder.
+    ///
+    /// On (the default) the broker chooses [`Self::batch`] and
+    /// [`Self::partitions`] for the pops of this builder, per pop, from state
+    /// this client cannot see. Even then, a knob you set explicitly travels on
+    /// the wire as it always did and is never second-guessed: autopilot only
+    /// ever fills the knobs left unset.
+    ///
+    /// `autopilot(false)` restores this SDK's pre-1.2 behaviour byte for byte:
+    /// the client-side defaults come back (batch 1, partitions 1) and no
+    /// autopilot parameter is sent. [`crate::ENV_POP_AUTOPILOT`] does the same
+    /// for a whole process; an explicit call here outranks the environment in
+    /// both directions.
+    ///
+    /// Setting BOTH `batch` and `partitions` leaves autopilot nothing to decide,
+    /// so no autopilot parameter is sent in that case either, whatever this flag
+    /// says.
+    pub fn autopilot(mut self, enabled: bool) -> Self {
+        self.autopilot = Some(enabled);
+        self
+    }
+
+    /// This builder's resolved autopilot decision: its own flag when set,
+    /// otherwise the client-wide default settled at [`crate::Queen::connect`].
+    fn autopilot_enabled(&self) -> bool {
+        self.autopilot.unwrap_or(!self.inner.autopilot_off)
     }
 
     /// Stop after this many messages.
@@ -362,9 +430,16 @@ impl QueueBuilder {
     }
 
     pub(crate) fn pop_params(&self, auto_ack: bool) -> PopParams {
+        // The whole emission rule for the two sizing knobs, in one place: which
+        // of them travel, and what an unset one means. `to_pairs` then renders
+        // it — unlike the other SDKs this client has a single param builder, so
+        // pop and consume cannot drift apart on it.
+        let sizing =
+            crate::autopilot::sizing(self.batch, self.max_partitions, self.autopilot_enabled());
         PopParams {
-            batch: Some(self.batch),
-            partitions: Some(self.max_partitions),
+            batch: sizing.batch,
+            partitions: sizing.partitions,
+            autopilot: sizing.autopilot,
             auto_ack: Some(auto_ack),
             wait: Some(self.wait),
             timeout_millis: Some(self.poll_timeout.as_millis() as u64),
@@ -484,15 +559,35 @@ impl QueueBuilder {
     /// drops the parameter silently, so its absence in the response is the only
     /// evidence there is.
     pub async fn pop(&self) -> Result<Vec<Message>> {
-        self.pop_with_auto_ack(false).await
+        Ok(self.pop_with_auto_ack(false).await?.messages)
     }
 
     /// Claim messages and have the broker commit the cursor immediately.
     pub async fn pop_auto_ack(&self) -> Result<Vec<Message>> {
-        self.pop_with_auto_ack(true).await
+        Ok(self.pop_with_auto_ack(true).await?.messages)
     }
 
-    async fn pop_with_auto_ack(&self, auto_ack: bool) -> Result<Vec<Message>> {
+    /// Claim messages and report what the broker chose for this pop.
+    ///
+    /// The same call as [`Self::pop`]; this is the shape that also carries the
+    /// additive autopilot echo, which is `None` when the pop did not engage
+    /// autopilot, when the broker is older than 1.2, or when the answer was a
+    /// bodiless `204` with nowhere to carry it.
+    ///
+    /// ```no_run
+    /// # async fn demo(client: queen_mq::Queen) -> queen_mq::Result<()> {
+    /// let out = client.queue("events").group("workers").pop_result().await?;
+    /// if let Some(ap) = out.autopilot {
+    ///     println!("{} partitions, batch {}", ap.partitions, ap.batch);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn pop_result(&self) -> Result<PopOutcome> {
+        self.pop_with_auto_ack(false).await
+    }
+
+    async fn pop_with_auto_ack(&self, auto_ack: bool) -> Result<PopOutcome> {
         let path = self.pop_path()?;
         let params = self.pop_params(auto_ack);
         let url = format!("{path}?{}", encode_pairs(&params.to_pairs()));
@@ -516,14 +611,14 @@ impl QueueBuilder {
             // for conflation this is the version check firing on the first
             // round trip rather than an ordinary quiet poll.
             self.check_conflation(None)?;
-            return Ok(Vec::new());
+            return Ok(PopOutcome::empty());
         };
         if resp.is_paused() {
             // Pop maintenance is not a version skew: the request never reached
             // the claim path, so there is no echo to expect and nothing to
             // conclude from its absence.
             tracing::debug!("broker is in pop maintenance; treating as an empty poll");
-            return Ok(Vec::new());
+            return Ok(PopOutcome::empty());
         }
         if !resp.success {
             return Err(Error::Http {
@@ -539,7 +634,10 @@ impl QueueBuilder {
         // that no message from a backlog the caller asked to skip is ever
         // processed. §4.
         self.check_conflation(Some(&resp))?;
-        Ok(resp.messages)
+        Ok(PopOutcome {
+            messages: resp.messages,
+            autopilot: resp.autopilot,
+        })
     }
 
     // ------------------------------------------------------------- lifecycle
@@ -719,7 +817,8 @@ mod tests {
         assert!(pairs.contains(&("batch", "10".to_string())));
         assert!(pairs.contains(&("wait", "true".to_string())));
         assert!(pairs.contains(&("timeout", "30000".to_string())));
-        // autoAck=false is never sent, and partitions=1 is the absence of the key
+        // autoAck=false is never sent, and an unset `partitions` is the broker's
+        // to choose, so it does not travel either.
         assert!(!pairs.iter().any(|(k, _)| *k == "autoAck"));
         assert!(!pairs.iter().any(|(k, _)| *k == "partitions"));
     }
@@ -821,19 +920,38 @@ mod tests {
         );
     }
 
-    // Zero means "the smallest useful amount", not "none": batch=0 would let
-    // the broker apply its own default of 200, partitions=0 is not a claim at
-    // all, and concurrency=0 would spawn no workers and make consume return
-    // instantly having done nothing.
+    // Zero is the ABSENCE of an opinion, and always was — `batch(0)` never meant
+    // "a batch of zero". Before autopilot the absence was resolved here, to 1;
+    // now it is resolved on the wire, by the broker, and only a client that
+    // turned autopilot off gets the old number back. `concurrency` is unrelated
+    // and still clamps: 0 workers would make consume return instantly having
+    // done nothing.
     #[test]
-    fn zero_and_negative_knobs_clamp_to_one() {
+    fn zero_and_negative_sizing_knobs_are_unset() {
         let b = q("orders").batch(0).partitions(-5).concurrency(0);
-        assert_eq!(b.batch, 1);
-        assert_eq!(b.max_partitions, 1);
+        assert_eq!(b.batch, None);
+        assert_eq!(b.max_partitions, None);
         assert_eq!(b.concurrency, 1);
 
         let pairs = b.pop_params(false).to_pairs();
+        assert!(
+            pairs.contains(&("autopilot", "true".to_string())),
+            "neither knob was set, so both are the broker's: {pairs:?}"
+        );
+        assert!(
+            !pairs
+                .iter()
+                .any(|(k, _)| *k == "batch" || *k == "partitions"),
+            "a delegated knob does not travel: {pairs:?}"
+        );
+
+        // Autopilot off: the pre-1.2 request, byte for byte.
+        let pairs = b.autopilot(false).pop_params(false).to_pairs();
         assert!(pairs.contains(&("batch", "1".to_string())), "{pairs:?}");
+        assert!(
+            !pairs.iter().any(|(k, _)| *k == "autopilot"),
+            "autopilot=false is never sent: {pairs:?}"
+        );
         assert!(
             !pairs.iter().any(|(k, _)| *k == "partitions"),
             "partitions=1 is the absence of the key, not partitions=1: {pairs:?}"

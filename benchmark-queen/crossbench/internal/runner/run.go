@@ -73,6 +73,7 @@ type Result struct {
 	BrokerStats map[string]any
 	Elapsed     time.Duration
 	SlowDecodes int64
+	BatchSize   int // per-pop batch cap; sets the per-entity service ceiling
 }
 
 // Run executes the whole workload against one broker and verifies it.
@@ -116,7 +117,7 @@ func Run(ctx context.Context, b broker.Broker, cfg Config) (*Result, error) {
 	for _, def := range defs {
 		sc := &workload.StageCounters{Topic: def.Topic, Group: def.Group}
 		lanes := laneBudget(t, def, cfg.LaneHeadroom)
-		st := NewStage(def, recs.For(def.Topic, def.Group), counters, sc, lanes)
+		st := NewStage(def, recs.For(def.Topic, def.Group), counters, sc, lanes, t)
 		stages = append(stages, st)
 		stageStats = append(stageStats, sc)
 
@@ -167,11 +168,13 @@ func Run(ctx context.Context, b broker.Broker, cfg Config) (*Result, error) {
 	rateB := t.RateEvents - rateA
 	workload.RunProducer(runCtx, &prodWg, b.Publish, workload.ProducerConfig{
 		Topic: t.Topics()[0], Flow: workload.FlowA, Rate: rateA, RampSec: cfg.RampSec,
-		Properties: t.Properties, Shards: cfg.PushShards, ChanCap: cfg.PushChanCap,
+		Properties: t.Properties, HotProps: t.HotProps, HotFactor: t.HotFactor,
+		Shards: cfg.PushShards, ChanCap: cfg.PushChanCap,
 	}, seqA, counters, maxSeqA)
 	workload.RunProducer(runCtx, &prodWg, b.Publish, workload.ProducerConfig{
 		Topic: t.Topics()[1], Flow: workload.FlowB, Rate: rateB, RampSec: cfg.RampSec,
-		Properties: t.Properties, Shards: cfg.PushShards, ChanCap: cfg.PushChanCap,
+		Properties: t.Properties, HotProps: t.HotProps, HotFactor: t.HotFactor,
+		Shards: cfg.PushShards, ChanCap: cfg.PushChanCap,
 		RatesPad: pad,
 	}, seqB, counters, maxSeqB)
 
@@ -241,6 +244,7 @@ func Run(ctx context.Context, b broker.Broker, cfg Config) (*Result, error) {
 		BrokerStats: b.Stats(),
 		Elapsed:     elapsed,
 		SlowDecodes: workload.SlowDecodes(),
+		BatchSize:   cfg.BatchSize,
 	}
 	printSummary(out, res)
 	return res, nil

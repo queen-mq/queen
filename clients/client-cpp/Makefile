@@ -49,7 +49,7 @@ else
 endif
 
 # Targets
-.PHONY: all test retry429 run-retry429 kvtimers run-kvtimers conflation run-conflation buffer run-buffer ephemeral run-ephemeral unit run-unit clean help
+.PHONY: all test retry429 run-retry429 kvtimers run-kvtimers conflation run-conflation buffer run-buffer ephemeral run-ephemeral autopilot run-autopilot unit run-unit clean help
 
 all: test
 
@@ -145,10 +145,27 @@ bin/test_ephemeral: test_ephemeral.cpp queen_client.hpp ../server/vendor/json.hp
 run-ephemeral: bin/test_ephemeral
 	./bin/test_ephemeral
 
-# Every suite that needs no broker, in one command.
-unit: retry429 kvtimers conflation buffer ephemeral
+# Build the pop autopilot wire suite. Broker-free like its siblings, and it has
+# to be: what it pins -- that a delegated knob is OMITTED and a pinned one still
+# travels, that an autopilot-off request is byte-identical to the pre-1.2 one,
+# and that an echo this client does not understand never fails a pop -- is
+# invisible against a live broker, which happily serves every one of those
+# requests.
+autopilot: bin/test_autopilot
+	@echo "Pop autopilot wire test suite built successfully!"
+	@echo "Run with: ./bin/test_autopilot"
 
-run-unit: run-retry429 run-kvtimers run-conflation run-buffer run-ephemeral
+bin/test_autopilot: test_autopilot.cpp queen_client.hpp ../server/vendor/json.hpp ../server/include/threadpool.hpp
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) $(INCLUDES) test_autopilot.cpp -o bin/test_autopilot $(LIBS)
+
+run-autopilot: bin/test_autopilot
+	./bin/test_autopilot
+
+# Every suite that needs no broker, in one command.
+unit: retry429 kvtimers conflation buffer ephemeral autopilot
+
+run-unit: run-retry429 run-kvtimers run-conflation run-buffer run-ephemeral run-autopilot
 
 # Run tests (requires Queen server running)
 run-test: bin/test_client
@@ -208,6 +225,8 @@ help:
 	@echo "  make run-buffer   - Build and run buffer contract tests (no server needed)"
 	@echo "  make ephemeral    - Build ephemeral-queue wire contract tests"
 	@echo "  make run-ephemeral - Build and run ephemeral wire tests (no server needed)"
+	@echo "  make autopilot    - Build pop autopilot wire contract tests"
+	@echo "  make run-autopilot - Build and run pop autopilot wire tests (no server needed)"
 	@echo "  make unit         - Build every suite that needs no broker"
 	@echo "  make run-unit     - Build and run every suite that needs no broker"
 	@echo "  make clean        - Remove build artifacts"

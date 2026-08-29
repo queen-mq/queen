@@ -13,6 +13,7 @@ sourceOfTruth:
   - server/sql/procedures/004_log_pop.sql
   - server/sql/procedures/010_log_admin.sql
   - server/src/config.rs
+# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
 ---
 
 A wildcard pop has to answer "which of this queue's partitions might have work for my group?"
@@ -126,7 +127,10 @@ round-robin across sub-rings, marking each `INFLIGHT` and snapshotting its epoch
 `k = clamp(partitions × 2, 2, 64)`, and the take stops earlier as soon as the marks on the entries
 it has already claimed cover the caller's `batch`. (The
 [fused claim path](/internals/life-of-a-pop#pop-fusion) takes the SQL serve cap 1:1 instead, which
-on the default `partitions=1` is the same 2.) **Checkout width is what bounds how many pops
+on the default `partitions=1` is the same 2.) A pop that opts in with `autopilot=true` has
+`partitions` and `batch` chosen server-side before this formula, steered on two ring facts read in
+one pass: how many partitions are ready, and how long the oldest of them has waited.
+**Checkout width is what bounds how many pops
 can serve one ring at once**: every claimed entry is held `INFLIGHT` for the whole round trip, and
 that hold spans the client's work and its ack, not just the SQL. A deep partition is therefore
 claimed alone, while a sparse ring still claims up to `k`.
@@ -236,6 +240,7 @@ wins the race.
 | Reseed floor | 2 s tick, per-ring interval `QUEEN_HOTLIST_RESEED_MS` (30 s) | re-derive a ring's contents from PostgreSQL, over the partitions written in the last `QUEEN_HOTLIST_RESEED_WINDOW_MS` |
 | Full reseed | per ring, `QUEEN_HOTLIST_RESEED_FULL_MS` (300 s) | the same, over every partition of the queue |
 | Idle sweep | `QUEEN_HOTLIST_IDLE_SWEEP_MS` (300 s) | drop rings and wake gates for queues nobody touched |
+| Unserved trim | `QUEEN_HOTLIST_UNSERVED_TRIM_MS` (30 s) | drop the rings this broker serves no pops for (see the memory section) |
 
 The reseed floor comes in two shapes because the two jobs it does have very different costs. Nearly
 all of its work is discovering data a push created, and a push always stamps `last_write_at`, so the
@@ -269,10 +274,15 @@ never strand a consumer.
 
 ## The reseed floor
 
-`queen.log_hotlist_reseed_v1` enumerates a `(queue, group)`'s probably-pending partitions the same
-way the SQL candidate scan does (`last_offset > committed` or no consumer row), but **keyset
-paginated in id order** rather than `ORDER BY random()`, so the broker can walk a large set in
-bounded chunks. The handler walks pages of 10,000 with a cap of 200 pages, interning each name and
+`queen.log_hotlist_reseed_window_v1` enumerates a `(queue, group)`'s probably-pending partitions
+the same way the SQL candidate scan does (`last_offset > committed` or no consumer row), but
+**keyset paginated in `(last_write_at, id)` order** rather than `ORDER BY random()`, so the broker
+can walk a large set in bounded chunks. It is the one statement both reseed shapes run: a windowed
+pass binds the lookback, and a full walk binds the cutoff to `-infinity` up front, so the window is
+never read. (The dedicated full-walk statement, `log_hotlist_reseed_v1`, survives in the SQL as the
+test suite's oracle, but the broker no longer calls it: under the generic plan `prepare_cached`
+converges to, its id-ordered keyset walk read every partition in the cell per ring rather than the
+queue's own.) The handler walks pages of 10,000 with a cap of 200 pages, interning each name and
 remembering each id.
 
 Three things about it are deliberate:
@@ -292,11 +302,11 @@ Three things about it are deliberate:
   than the `(queue, group)` name, so a completion stamp whose ring was forgotten and recreated
   mid-walk is dropped and counted, and the recreated ring is not credited with a cold-start full
   walk it never had.
-- **The windowed variant pins its cutoff for the whole walk.** Each page is a separate statement, so
-  a per-page `now() - window` would let the lower bound creep forward while the keyset cursor
-  climbs, skipping partitions written into the band between the two. The first page derives the
-  cutoff and returns it, later pages echo it back exactly as they echo the keyset, and the broker
-  never holds a clock of the database's.
+- **The cutoff is pinned for the whole walk.** Each page is a separate statement, so a per-page
+  `now() - window` would let the lower bound creep forward while the keyset cursor climbs, skipping
+  partitions written into the band between the two. The first windowed page derives the cutoff and
+  returns it, later pages echo it back exactly as they echo the keyset, and the broker never holds
+  a clock of the database's. A full walk starts with the cutoff already pinned to `-infinity`.
 
 The periodic floor runs even when the ring is *non-empty*. That is the part that matters: it is what
 recovers a partition erroneously dropped from a busy ring (a cross-broker false clear, a
@@ -375,6 +385,22 @@ Evicting is never a correctness event even if all three checks were somehow wron
 is a cache and the reseed floor rebuilds it on first contact. `QUEEN_HOTLIST_IDLE_SWEEP_MS=0`
 disables the sweep, which means unbounded growth, only sensible for a single-tenant deployment
 that wants the pre-eviction behaviour.
+
+The idle sweep cannot bound one shape: a broker whose rings fill but never drain. Marks arrive on
+paths independent of the broker's own consumers, the reseed floor and peers' mesh hints, so the
+passive half of an active/passive pair accumulates the union of every partition ever momentarily
+pending, and those entries are `READY`, which condition 3 never allows past. A second, faster loop
+covers it: every `QUEEN_HOTLIST_UNSERVED_TRIM_MS` (30 s; 0 disables) the broker drops any queue
+state that went one to two intervals without a single served pop, and on glibc hands the freed
+pages back to the operating system rather than only to the allocator. The discriminator is served
+pops, never entry age: the ready list is FIFO, so a healthy but deeply backlogged ring legitimately
+holds a very old head, and an age rule would discard real work exactly when the cell is furthest
+behind, while what separates a standby is that nothing ever leaves its ring. A claim, an ack's
+promote and a parked pop's ready probe (re-run every backoff interval) all count as service; an
+`INFLIGHT` entry or a concurrently held handle still blocks the drop; and a trimmed ring rebuilds
+through the reseed floor like any other cold start. A consumer that exists but has stopped popping
+is trimmed with its backlog still real, deliberately: reversing that costs one cold-start walk on
+its next pop.
 
 Consumer-group deletion drops rings explicitly rather than waiting for the sweep: deleting a group
 for one queue drops that queue's ring for the group, and deleting it across all queues drops it

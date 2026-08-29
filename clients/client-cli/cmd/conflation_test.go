@@ -156,7 +156,16 @@ func emptyPopBody(extraKeys string) string {
 // resetConflationFlags puts every flag these tests touch back to its default.
 // The cobra tree is a package singleton, so a --conflation left set by one test
 // would silently green the next one.
+//
+// Resetting the VARIABLE is not enough for the flags whose meaning depends on
+// whether they were typed at all (--max-partitions, read through
+// Flags().Changed): pflag sets that bit at parse time and never clears it, so
+// without resetFlagChanged below one test typing --max-partitions would leave
+// every later run in this process believing the operator typed it too.
 func resetConflationFlags() {
+	resetFlagChanged(popCmd, "max-partitions")
+	resetFlagChanged(tailCmd, "max-partitions")
+
 	popGroup, popPartition, popNamespace, popTask = "", "", "", ""
 	popLimit, popBatch, popMaxParts = 1, 0, 1
 	popAutoAck, popWait = false, true
@@ -200,6 +209,18 @@ func runCLI(t *testing.T, server string, args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	return rootCmd.ExecuteContext(ctx)
+}
+
+// resetFlagChanged clears pflag's "the operator typed this" bit for the named
+// flags. Deliberately by name rather than a VisitAll sweep: naming the closure
+// argument would mean importing pflag, which is an indirect dependency of this
+// module and not worth promoting for a test helper.
+func resetFlagChanged(c *cobra.Command, names ...string) {
+	for _, n := range names {
+		if f := c.Flags().Lookup(n); f != nil {
+			f.Changed = false
+		}
+	}
 }
 
 func clearCommandContexts(c *cobra.Command) {

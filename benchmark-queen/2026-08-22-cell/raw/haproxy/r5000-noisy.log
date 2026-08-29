@@ -1,0 +1,82 @@
+goload -mode cloud [r5000-noisy] -> http://10.114.0.2:6711
+  target=proxy tenants=50 sharedQueue=true queue="orders" group="workers" partitions=1 brokerTenantHeader=false
+  offered=2500.0 msg/s total (50.00/tenant) push-batch=10 -> 5.00 req/s per tenant across 1 producer(s) | max-inflight=4096
+  consumers=1/tenant popBatch=100 popWait=true autoAck=false | payload=256B | duration=180s drain=60s | idleConns=86/client verify=true
+[configure] 50 queue(s) configured in 0.05s
+[09:08:50 load ] offered=    2500/s push=    2497/s pop=    1563/s ack=    1563/s shed=      0/s inflight=    8 | e2e p50= 509.95 p99=16580.61 ms | pushRTT p50=  8.90 p99=1122.30 ms | lag=28020 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=847
+[09:09:20 load ] offered=    2500/s push=    2502/s pop=    1407/s ack=    1404/s shed=      0/s inflight=    3 | e2e p50= 626.69 p99=36438.02 ms | pushRTT p50=  9.02 p99=  32.38 ms | lag=60870 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=842
+[09:09:50 load ] offered=    2500/s push=    2501/s pop=    1497/s ack=    1497/s shed=      0/s inflight=    1 | e2e p50= 684.03 p99=60555.26 ms | pushRTT p50=  8.90 p99=  24.96 ms | lag=90970 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=840
+[09:10:20 load ] offered=    2500/s push=    2500/s pop=    1394/s ack=    1397/s shed=      0/s inflight=    2 | e2e p50= 667.65 p99=80216.06 ms | pushRTT p50=  9.15 p99=  26.24 ms | lag=124140 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=305
+[09:10:50 load ] offered=    2500/s push=    2500/s pop=    1418/s ack=    1418/s shed=      0/s inflight=    1 | e2e p50= 675.84 p99=100139.01 ms | pushRTT p50=  9.15 p99=  24.45 ms | lag=156620 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=304
+[drain] producers stopped after 180.0s; draining 60s before the correctness verdict
+[09:11:20 drain] offered=    2500/s push=    2500/s pop=    1481/s ack=    1481/s shed=      0/s inflight=    1 | e2e p50= 708.61 p99=124256.26 ms | pushRTT p50=  9.28 p99=  27.01 ms | lag=187200 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=304
+[09:11:50 drain] offered=       0/s push=       0/s pop=    6240/s ack=    6240/s shed=      0/s inflight=    0 | e2e p50=68681.73 p99=126353.41 ms | pushRTT p50= 12.61 p99=  12.61 ms | lag=0 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=221 cross=0 gor=253
+[09:12:20 drain] offered=       0/s push=       0/s pop=       0/s ack=       0/s shed=      0/s inflight=    0 | e2e p50=   0.00 p99=    0.00 ms | pushRTT p50=  0.00 p99=   0.00 ms | lag=0 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=521 cross=0 gor=254
+
+========== r5000-noisy ==========
+offered       2500.0 msg/s (450000 msgs, 0 shed)
+achieved  push   2500.0 msg/s (450000 msgs)   pop   1459.9 msg/s during load (  1875.0 msg/s over load+drain, 450000 msgs)   ack 450000 msgs
+e2eFromSchedule  n=450000    p50=23724.03 p95=117964.80 p99=126353.41 p999=127401.98 max=127791.93 ms
+e2eFromSend      n=450000    p50=23724.03 p95=117964.80 p99=126353.41 p999=127401.98 max=127791.51 ms
+pushRtt          n=45000     p50=    9.02 p95=   19.33 p99=  124.42 p999= 1171.46 max=  1807.82 ms
+ackRtt           n=7068      p50=    6.75 p95=   15.94 p99=   27.78 p999= 1105.92 max=  1355.24 ms
+errors            none
+bytes     nominal 292 B/msg -> pushed 125.31 MiB, delivered 125.31 MiB
+
+---- delivery correctness (after the drain) ----
+idx  tenant         queue           sentOk  received  missing      dup   extra   cross verdict
+0    noisy-0000     orders            9000      9000        0        0       0       0 OK
+1    noisy-0001     orders            9000      9000        0        0       0       0 OK
+2    noisy-0002     orders            9000      9000        0        0       0       0 OK
+3    noisy-0003     orders            9000      9000        0        0       0       0 OK
+4    noisy-0004     orders            9000      9000        0        0       0       0 OK
+5    noisy-0005     orders            9000      9000        0        0       0       0 OK
+6    noisy-0006     orders            9000      9000        0        0       0       0 OK
+7    noisy-0007     orders            9000      9000        0        0       0       0 OK
+8    noisy-0008     orders            9000      9000        0        0       0       0 OK
+9    noisy-0009     orders            9000      9000        0        0       0       0 OK
+10   noisy-0010     orders            9000      9000        0        0       0       0 OK
+11   noisy-0011     orders            9000      9000        0        0       0       0 OK
+12   noisy-0012     orders            9000      9000        0        0       0       0 OK
+13   noisy-0013     orders            9000      9000        0        0       0       0 OK
+14   noisy-0014     orders            9000      9000        0        0       0       0 OK
+15   noisy-0015     orders            9000      9000        0        0       0       0 OK
+16   noisy-0016     orders            9000      9000        0        0       0       0 OK
+17   noisy-0017     orders            9000      9000        0        0       0       0 OK
+18   noisy-0018     orders            9000      9000        0        0       0       0 OK
+19   noisy-0019     orders            9000      9000        0        0       0       0 OK
+20   noisy-0020     orders            9000      9000        0        0       0       0 OK
+21   noisy-0021     orders            9000      9000        0        0       0       0 OK
+22   noisy-0022     orders            9000      9000        0        0       0       0 OK
+23   noisy-0023     orders            9000      9000        0        0       0       0 OK
+24   noisy-0024     orders            9000      9000        0        0       0       0 OK
+25   noisy-0025     orders            9000      9000        0        0       0       0 OK
+26   noisy-0026     orders            9000      9000        0        0       0       0 OK
+27   noisy-0027     orders            9000      9000        0        0       0       0 OK
+28   noisy-0028     orders            9000      9000        0        0       0       0 OK
+29   noisy-0029     orders            9000      9000        0        0       0       0 OK
+30   noisy-0030     orders            9000      9000        0        0       0       0 OK
+31   noisy-0031     orders            9000      9000        0        0       0       0 OK
+32   noisy-0032     orders            9000      9000        0        0       0       0 OK
+33   noisy-0033     orders            9000      9000        0        0       0       0 OK
+34   noisy-0034     orders            9000      9000        0        0       0       0 OK
+35   noisy-0035     orders            9000      9000        0        0       0       0 OK
+36   noisy-0036     orders            9000      9000        0        0       0       0 OK
+37   noisy-0037     orders            9000      9000        0        0       0       0 OK
+38   noisy-0038     orders            9000      9000        0        0       0       0 OK
+39   noisy-0039     orders            9000      9000        0        0       0       0 OK
+40   noisy-0040     orders            9000      9000        0        0       0       0 OK
+41   noisy-0041     orders            9000      9000        0        0       0       0 OK
+42   noisy-0042     orders            9000      9000        0        0       0       0 OK
+43   noisy-0043     orders            9000      9000        0        0       0       0 OK
+44   noisy-0044     orders            9000      9000        0        0       0       0 OK
+45   noisy-0045     orders            9000      9000        0        0       0       0 OK
+46   noisy-0046     orders            9000      9000        0        0       0       0 OK
+47   noisy-0047     orders            9000      9000        0        0       0       0 OK
+48   noisy-0048     orders            9000      9000        0        0       0       0 OK
+49   noisy-0049     orders            9000      9000        0        0       0       0 OK
+     TOTAL                          450000    450000        0        0       0       0
+VERDICT: PASS
+
+[artifacts] /root/ladder-haproxy/r5000-noisy.json
+            /root/ladder-haproxy/r5000-noisy-interval.csv

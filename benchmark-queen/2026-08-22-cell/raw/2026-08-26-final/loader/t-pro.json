@@ -1,0 +1,78 @@
+{
+  "cell": "cell-01",
+  "plan": "pro",
+  "prefix": "sp",
+  "generatedAt": "2026-08-23T11:11:27Z",
+  "tenants": [
+    {
+      "idx": 0,
+      "tenantSlug": "sp-0000",
+      "clusterSlug": "sp-0000",
+      "tenantId": "9c27698a-df7e-4e97-a0f4-a6c44f29e024",
+      "clusterId": "c1ff9ee5-e605-44e4-ada5-8bbab1dcb2b2",
+      "brokerTenant": "590409b8-366c-4b5f-ab5b-df1638800e7d",
+      "apiKey": "qk_live_0-HDo2Amx9PQZlvgJfDbuT-sLipyx_Lg-Y2NDZqEm6s",
+      "plan": "pro"
+    },
+    {
+      "idx": 1,
+      "tenantSlug": "sp-0001",
+      "clusterSlug": "sp-0001",
+      "tenantId": "c813f1fc-b06d-4364-b008-2b5e6e49776c",
+      "clusterId": "a6171f3a-9c28-4cb7-9701-666b50940582",
+      "brokerTenant": "1b2752a3-492e-445c-aaf8-16738a901fba",
+      "apiKey": "qk_live_wdOGrbP-DEebV2vHwRGs5u7CPSKUqkXfc0bzCOoGxfw",
+      "plan": "pro"
+    },
+    {
+      "idx": 2,
+      "tenantSlug": "sp-0002",
+      "clusterSlug": "sp-0002",
+      "tenantId": "7a5672b3-ddc6-4665-bda1-978ddebd22f7",
+      "clusterId": "f7b2c2c9-3f2d-4e03-868d-79286dd08fb1",
+      "brokerTenant": "6558b4c1-11b1-456b-bf5c-c46365b59b64",
+      "apiKey": "qk_live_zNwJ0mfZEVCueBk4-H4Xes5_S-8ANziJde8glJf2n3o",
+      "plan": "pro"
+    },
+    {
+      "idx": 3,
+      "tenantSlug": "sp-0003",
+      "clusterSlug": "sp-0003",
+      "tenantId": "06d641cb-cb1c-4377-9b5d-95d30a634b79",
+      "clusterId": "b9e85f41-7c4a-4522-a7b9-c902a2c1a910",
+      "brokerTenant": "ba5d4816-3b9d-4ec0-ab34-143be1d5ee1c",
+      "apiKey": "qk_live_9Ro9V6NSKUAGEUqN60px232JrLkN1O64xepia8dYn_w",
+      "plan": "pro"
+    },
+    {
+      "idx": 4,
+      "tenantSlug": "sp-0004",
+      "clusterSlug": "sp-0004",
+      "tenantId": "622035c3-1738-47e8-8ecd-8e6a8b9e0cbf",
+      "clusterId": "70dab6a7-588b-4ab5-9aad-2f2a9426d7c8",
+      "brokerTenant": "5baa0f0a-39c8-46e0-b53a-ef11c52e041b",
+      "apiKey": "qk_live_8JhF0ghi3F0RU_D5-YYTLUmgAAkXfNslVvGxeL5DCxQ",
+      "plan": "pro"
+    },
+    {
+      "idx": 5,
+      "tenantSlug": "sp-0005",
+      "clusterSlug": "sp-0005",
+      "tenantId": "6f9e19b3-64a9-43b0-9b6b-f19eee59bf81",
+      "clusterId": "37a64af4-a9f9-4b0c-bbe0-38465fe36eed",
+      "brokerTenant": "fa9c6518-5c6b-480f-8bdc-558e42469975",
+      "apiKey": "qk_live_a46wTNKKu75hWbD1FhQFcJLthAOFBvfPcwi-JZejqhA",
+      "plan": "pro"
+    },
+    {
+      "idx": 6,
+      "tenantSlug": "sp-0006",
+      "clusterSlug": "sp-0006",
+      "tenantId": "62d03685-2735-4414-9726-0df3128b4322",
+      "clusterId": "e02c3a27-7b33-402c-bf38-6e1172165456",
+      "brokerTenant": "5df94856-5260-4670-a244-2df1a15eb8c1",
+      "apiKey": "qk_live_Il6fVqw9yv0bAXaAyaXpj6Ent_svgb9iLoI7miq_mYc",
+      "plan": "pro"
+    }
+  ]
+}

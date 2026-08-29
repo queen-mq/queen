@@ -147,7 +147,14 @@ impl Kv {
 
     /// Write a key, replacing whatever is there — value **and** expiry.
     pub fn put(&self, ns: &str, key: &str, value: Value, expiry: Expiry) -> WriteBuilder {
-        WriteBuilder::new(self.clone(), KvOpKind::Put, ns, key, Some(value), Some(expiry))
+        WriteBuilder::new(
+            self.clone(),
+            KvOpKind::Put,
+            ns,
+            key,
+            Some(value),
+            Some(expiry),
+        )
     }
 
     /// Write a key **only if it is not there**.
@@ -160,13 +167,7 @@ impl Kv {
     ///
     /// Do not add an `expect` to it: the alias *is* `expect: 0`, and a
     /// different one is a contradiction the broker refuses.
-    pub fn put_if_absent(
-        &self,
-        ns: &str,
-        key: &str,
-        value: Value,
-        expiry: Expiry,
-    ) -> WriteBuilder {
+    pub fn put_if_absent(&self, ns: &str, key: &str, value: Value, expiry: Expiry) -> WriteBuilder {
         WriteBuilder::new(
             self.clone(),
             KvOpKind::PutIfAbsent,
@@ -364,7 +365,9 @@ impl WriteBuilder {
                     .value
                     .ok_or_else(|| Error::Invalid("a put needs a value".into()))?;
                 let expiry = self.expiry.ok_or_else(|| {
-                    Error::Invalid("a put needs an expiry: Expiry::seconds(n) or Expiry::Forever".into())
+                    Error::Invalid(
+                        "a put needs an expiry: Expiry::seconds(n) or Expiry::Forever".into(),
+                    )
                 })?;
                 let built = if kind == KvOpKind::PutIfAbsent {
                     KvOperation::put_if_absent(&self.ns, &self.key, value, expiry)
@@ -533,7 +536,9 @@ mod tests {
     use crate::Queen;
 
     fn kv() -> Kv {
-        Queen::connect(Config::new("http://127.0.0.1:1")).unwrap().kv()
+        Queen::connect(Config::new("http://127.0.0.1:1"))
+            .unwrap()
+            .kv()
     }
 
     #[test]
@@ -560,8 +565,7 @@ mod tests {
         let op = kv().delete("ns", "k").expect(7).operation().unwrap();
         let body = serde_json::to_string(&op).unwrap();
         assert_eq!(
-            body,
-            r#"{"op":"delete","ns":"ns","key":"k","expect":7}"#,
+            body, r#"{"op":"delete","ns":"ns","key":"k","expect":7}"#,
             "a delete carries the key, the fence, and nothing else"
         );
     }

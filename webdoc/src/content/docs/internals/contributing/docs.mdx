@@ -147,8 +147,9 @@ registered in `src/components.ts`. The registered set is `Accordion`, `Accordion
 `AccordionGroup`, `AccordionTrigger`, `Aside`, `Badge`, `Card`, `CardGrid`, `Code`, `CodeGroup`,
 `FileTree`, `Frame`, `LinkButton`, `LinkCard`, `PackageManagers`, `Render`, `Step`, `Steps`,
 `TabItem` and `Tabs`, and nothing else is available without importing it. And remark or rehype
-plugins attached through the MDX integration are dropped, which is why there is no Mermaid on
-this site: diagrams are prose, tables or nothing.
+plugins attached through the MDX integration are dropped, so Mermaid is not wired in as a
+build-time plugin: diagrams are `<pre class="mermaid">` blocks in the page source, rendered in
+the browser by `src/scripts/mermaid.ts`, which the base layout loads on every page.
 
 ## The seven generators
 

@@ -190,9 +190,9 @@ pub(crate) enum Destination {
 type FakeSink = Arc<
     dyn Fn(
             Vec<PushItem>,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<Vec<PushResult>>> + Send>,
-        > + Send
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<PushResult>>> + Send>>
+        + Send
         + Sync,
 >;
 
@@ -971,7 +971,10 @@ mod tests {
             ..Default::default()
         }
         .normalized();
-        assert_eq!(o.max_size, 40, "0 must mean 4 x message_count, not infinity");
+        assert_eq!(
+            o.max_size, 40,
+            "0 must mean 4 x message_count, not infinity"
+        );
 
         let floored = BufferOptions {
             message_count: 100,
@@ -1003,7 +1006,9 @@ mod tests {
         let m = manager();
         let o = opts(10);
         for i in 0..4 {
-            m.add(address("orders", "Default"), item(i), o).await.unwrap();
+            m.add(address("orders", "Default"), item(i), o)
+                .await
+                .unwrap();
         }
         let s = m.stats();
         assert_eq!(s.active_buffers, 1);
@@ -1025,9 +1030,13 @@ mod tests {
     async fn oldest_age_tracks_the_first_message() {
         let m = manager();
         let o = opts(100);
-        m.add(address("orders", "Default"), item(1), o).await.unwrap();
+        m.add(address("orders", "Default"), item(1), o)
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(30)).await;
-        m.add(address("orders", "Default"), item(2), o).await.unwrap();
+        m.add(address("orders", "Default"), item(2), o)
+            .await
+            .unwrap();
         let s = m.stats();
         assert_eq!(s.total_buffered_messages, 2);
         assert!(
@@ -1051,7 +1060,9 @@ mod tests {
         // dropping the batch.
         let m = manager();
         let o = opts(100);
-        m.add(address("orders", "Default"), item(1), o).await.unwrap();
+        m.add(address("orders", "Default"), item(1), o)
+            .await
+            .unwrap();
         let err = m.flush(&address("orders", "Default")).await;
         assert!(
             err.is_err(),
@@ -1330,7 +1341,9 @@ mod tests {
 
         // Draining frees permits, which is what wakes the parked add.
         gate.add_permits(4);
-        blocked.await.expect("the parked add must succeed once room frees");
+        blocked
+            .await
+            .expect("the parked add must succeed once room frees");
         until(|| recorder.sent().len() >= 4, "the stalled batches to land").await;
         assert_eq!(recorder.sent()[..4], [0, 1, 2, 3]);
     }
@@ -1419,7 +1432,10 @@ mod tests {
             outcome.is_err(),
             "a parked add woken by stop() must report that its message was not buffered"
         );
-        assert_eq!(unsent, 2, "stop() must say how much never reached the broker");
+        assert_eq!(
+            unsent, 2,
+            "stop() must say how much never reached the broker"
+        );
         assert!(
             m.add(addr, item(10), o).await.is_err(),
             "a stopped manager must refuse new messages instead of buffering them forever"

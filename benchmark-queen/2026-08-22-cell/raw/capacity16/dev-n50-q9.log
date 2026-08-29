@@ -1,0 +1,76 @@
+goload -mode cloud [dev-n50-q9] -> http://10.114.0.2:6711
+  target=proxy tenants=50 sharedQueue=true queue="app-q9" group="workers" partitions=100 brokerTenantHeader=false
+  offered=125.0 msg/s total (2.50/tenant) push-batch=1 -> 2.50 req/s per tenant across 1 producer(s) | max-inflight=4096
+  consumers=1/tenant popBatch=100 popWait=true autoAck=false | payload=256B | duration=120s drain=45s | idleConns=86/client verify=true
+[configure] 50 queue(s) configured in 0.24s
+[11:00:44 load ] offered=     125/s push=     125/s pop=     125/s ack=     125/s shed=      0/s inflight=    0 | e2e p50=  19.07 p99=  667.65 ms | pushRTT p50=  8.38 p99=  28.54 ms | lag=1 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=303
+[drain] producers stopped after 120.0s; draining 45s before the correctness verdict
+[11:01:44 drain] offered=     125/s push=     125/s pop=     125/s ack=     125/s shed=      0/s inflight=    0 | e2e p50=  16.19 p99=   41.73 ms | pushRTT p50=  6.82 p99=  19.84 ms | lag=1 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=271
+
+========== dev-n50-q9 ==========
+offered        125.0 msg/s (15000 msgs, 0 shed)
+achieved  push    125.0 msg/s (15000 msgs)   pop    125.0 msg/s during load (    90.9 msg/s over load+drain, 15000 msgs)   ack 15000 msgs
+e2eFromSchedule  n=15000     p50=   17.54 p95=   63.74 p99=  497.66 p999=  733.18 max=   775.65 ms
+e2eFromSend      n=15000     p50=   17.02 p95=   63.23 p99=  497.66 p999=  733.18 max=   774.63 ms
+pushRtt          n=15000     p50=    7.52 p95=   16.51 p99=   25.22 p999=   44.80 max=    78.57 ms
+ackRtt           n=14808     p50=    4.32 p95=    9.41 p99=   13.89 p999=   27.78 max=    39.62 ms
+errors            none
+bytes     nominal 292 B/msg -> pushed 4.18 MiB, delivered 4.18 MiB
+
+---- delivery correctness (after the drain) ----
+idx  tenant         queue           sentOk  received  missing      dup   extra   cross verdict
+0    cd-0000        app-q9             300       300        0        0       0       0 OK
+1    cd-0001        app-q9             300       300        0        0       0       0 OK
+2    cd-0002        app-q9             300       300        0        0       0       0 OK
+3    cd-0003        app-q9             300       300        0        0       0       0 OK
+4    cd-0004        app-q9             300       300        0        0       0       0 OK
+5    cd-0005        app-q9             300       300        0        0       0       0 OK
+6    cd-0006        app-q9             300       300        0        0       0       0 OK
+7    cd-0007        app-q9             300       300        0        0       0       0 OK
+8    cd-0008        app-q9             300       300        0        0       0       0 OK
+9    cd-0009        app-q9             300       300        0        0       0       0 OK
+10   cd-0010        app-q9             300       300        0        0       0       0 OK
+11   cd-0011        app-q9             300       300        0        0       0       0 OK
+12   cd-0012        app-q9             300       300        0        0       0       0 OK
+13   cd-0013        app-q9             300       300        0        0       0       0 OK
+14   cd-0014        app-q9             300       300        0        0       0       0 OK
+15   cd-0015        app-q9             300       300        0        0       0       0 OK
+16   cd-0016        app-q9             300       300        0        0       0       0 OK
+17   cd-0017        app-q9             300       300        0        0       0       0 OK
+18   cd-0018        app-q9             300       300        0        0       0       0 OK
+19   cd-0019        app-q9             300       300        0        0       0       0 OK
+20   cd-0020        app-q9             300       300        0        0       0       0 OK
+21   cd-0021        app-q9             300       300        0        0       0       0 OK
+22   cd-0022        app-q9             300       300        0        0       0       0 OK
+23   cd-0023        app-q9             300       300        0        0       0       0 OK
+24   cd-0024        app-q9             300       300        0        0       0       0 OK
+25   cd-0025        app-q9             300       300        0        0       0       0 OK
+26   cd-0026        app-q9             300       300        0        0       0       0 OK
+27   cd-0027        app-q9             300       300        0        0       0       0 OK
+28   cd-0028        app-q9             300       300        0        0       0       0 OK
+29   cd-0029        app-q9             300       300        0        0       0       0 OK
+30   cd-0030        app-q9             300       300        0        0       0       0 OK
+31   cd-0031        app-q9             300       300        0        0       0       0 OK
+32   cd-0032        app-q9             300       300        0        0       0       0 OK
+33   cd-0033        app-q9             300       300        0        0       0       0 OK
+34   cd-0034        app-q9             300       300        0        0       0       0 OK
+35   cd-0035        app-q9             300       300        0        0       0       0 OK
+36   cd-0036        app-q9             300       300        0        0       0       0 OK
+37   cd-0037        app-q9             300       300        0        0       0       0 OK
+38   cd-0038        app-q9             300       300        0        0       0       0 OK
+39   cd-0039        app-q9             300       300        0        0       0       0 OK
+40   cd-0040        app-q9             300       300        0        0       0       0 OK
+41   cd-0041        app-q9             300       300        0        0       0       0 OK
+42   cd-0042        app-q9             300       300        0        0       0       0 OK
+43   cd-0043        app-q9             300       300        0        0       0       0 OK
+44   cd-0044        app-q9             300       300        0        0       0       0 OK
+45   cd-0045        app-q9             300       300        0        0       0       0 OK
+46   cd-0046        app-q9             300       300        0        0       0       0 OK
+47   cd-0047        app-q9             300       300        0        0       0       0 OK
+48   cd-0048        app-q9             300       300        0        0       0       0 OK
+49   cd-0049        app-q9             300       300        0        0       0       0 OK
+     TOTAL                           15000     15000        0        0       0       0
+VERDICT: PASS
+
+[artifacts] /root/cap16-dev/dev-n50-q9.json
+            /root/cap16-dev/dev-n50-q9-interval.csv

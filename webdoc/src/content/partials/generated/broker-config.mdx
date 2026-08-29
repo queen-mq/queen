@@ -10,7 +10,7 @@ description: "Every environment variable the broker reads, with the default the 
       - server/src/fusion.rs (fusion-only overrides)
 */}
 
-The broker is configured entirely through environment variables: 148 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
+The broker is configured entirely through environment variables: 161 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
 
 Two columns record what a variable falls back to. **Also read as** is an older name for the same setting: either name configures the same thing, and the row's name wins when both are set. **Default inherited from** is a different knob whose value this one starts at when it is unset: setting that knob moves this variable and everything else that inherits from it, while setting this variable moves only this one.
 
@@ -20,6 +20,7 @@ Two columns record what a variable falls back to. **Also read as** is an older n
 | --- | --- | --- | --- | --- |
 | `PORT` | string | `6632` |  |  |
 | `QUEEN_APPLY_SCHEMA` | boolean | `true` |  |  |
+| `QUEEN_BIND_ADDR` | string | `0.0.0.0` |  |  |
 | `QUEEN_MAX_BODY_BYTES` | integer | `67108864 (64 MiB)` |  |  |
 
 ### PostgreSQL
@@ -32,6 +33,7 @@ Two columns record what a variable falls back to. **Also read as** is an older n
 | `PG_PASSWORD` | string | `postgres` |  |  |
 | `PG_PORT` | integer | `5432` |  |  |
 | `PG_SSL_REJECT_UNAUTHORIZED` | boolean | `true` |  |  |
+| `PG_SSL_ROOT_CERT` | string | `(empty)` |  |  |
 | `PG_USE_SSL` | boolean | `false` |  |  |
 | `PG_USER` | string | `postgres` |  |  |
 | `QUEEN_STMT_TIMEOUT_MS` | integer | `30000` |  |  |
@@ -64,6 +66,7 @@ Two columns record what a variable falls back to. **Also read as** is an older n
 | --- | --- | --- | --- | --- |
 | `QUEEN_CACHE_REFRESH_INTERVAL_MS` | integer | `60000` |  |  |
 | `QUEEN_MESH_ADVERTISE_HOST` | string | `(empty)` |  |  |
+| `QUEEN_MESH_BIND_ADDR` | string | `0.0.0.0` | `QUEEN_BIND_ADDR` |  |
 | `QUEEN_MESH_PEERS` | string | `(empty)` |  |  |
 | `QUEEN_MESH_PORT` | integer | `6633` |  | `QUEEN_UDP_NOTIFY_PORT` |
 | `QUEEN_SYNC_DEAD_THRESHOLD_MS` | integer | `5000` |  |  |
@@ -84,6 +87,13 @@ Two columns record what a variable falls back to. **Also read as** is an older n
 | `POP_WAIT_BACKOFF_THRESHOLD` | integer | `3` |  |  |
 | `POP_WAIT_INITIAL_INTERVAL_MS` | integer | `100` |  |  |
 | `POP_WAIT_MAX_INTERVAL_MS` | integer | `1000` |  |  |
+| `QUEEN_POP_AUTOPILOT` | string | `on` |  |  |
+| `QUEEN_POP_AUTOPILOT_BATCH` | integer | `100` |  |  |
+| `QUEEN_POP_AUTOPILOT_BURST_CAP` | integer | `0` |  |  |
+| `QUEEN_POP_AUTOPILOT_DWELL_MS` | integer | `500` |  |  |
+| `QUEEN_POP_AUTOPILOT_DWELL_POPS` | integer | `16` |  |  |
+| `QUEEN_POP_AUTOPILOT_MAX_LANES` | integer | `50_000` |  |  |
+| `QUEEN_POP_AUTOPILOT_TARGET_AGE_MS` | number | `25.0` |  |  |
 | `QUEEN_POP_FUSION` | boolean | `false` |  |  |
 | `QUEEN_POP_FUSION_CONCURRENCY` | integer | `1` |  |  |
 | `QUEEN_POP_FUSION_HOLD_MS` | integer | `3` |  |  |
@@ -108,6 +118,7 @@ Two columns record what a variable falls back to. **Also read as** is an older n
 | `QUEEN_HOTLIST_RESEED_MS` | integer | `30000` |  |  |
 | `QUEEN_HOTLIST_RESEED_WINDOW_MS` | integer | `120000 (max of 4x QUEEN_HOTLIST_RESEED_MS and 120000)` |  |  |
 | `QUEEN_HOTLIST_SHARDS` | integer | `8` | `QUEEN_V2_FUSION_SHARDS` |  |
+| `QUEEN_HOTLIST_UNSERVED_TRIM_MS` | integer | `30_000` |  |  |
 | `QUEEN_HOTLIST_WINDOW_BATCH` | integer | `100` |  |  |
 | `QUEEN_V2_FUSION_HOLD_MS` | integer | `3` |  |  |
 | `QUEEN_V2_FUSION_SHARDS` | integer | `8` |  |  |
@@ -211,7 +222,7 @@ Two columns record what a variable falls back to. **Also read as** is an older n
 | `QUEEN_LOG_JSON` | boolean | `false` |  |  |
 | `QUEEN_LOG_RATES_MS` | integer | `10000` |  |  |
 | `QUEEN_LOG_TOPN_QUEUES` | integer | `10` |  |  |
-| `RUST_LOG` | string | `&env_str("LOG_LEVEL", "info` |  |  |
+| `RUST_LOG` | string | `info` |  | `LOG_LEVEL` |
 
 ### Other
 
@@ -226,6 +237,8 @@ Two columns record what a variable falls back to. **Also read as** is an older n
 | `QUEEN_EPHEMERAL_RATE` | integer | `5000` |  |  |
 | `QUEEN_EPHEMERAL_REQUIRE_GRANT` | boolean | `tenancy_header` |  |  |
 | `QUEEN_EPHEMERAL_RETRY_LIMIT` | integer | `5` |  |  |
+| `QUEEN_RETENTION_DUE_CAP` | integer | `0` |  |  |
+| `QUEEN_RETENTION_SAFETY_WALK_MS` | integer | `86_400_000` |  |  |
 
 ### Experiment-only
 

@@ -214,13 +214,14 @@ BEGIN
         FROM part_agg pa
         GROUP BY pa.queue_id
     )
-    -- retained_bytes and newest_message_at are ABSENT from the column list on
-    -- purpose:
-    --   * retained_bytes is owned by log_refresh_retained_bytes_v1
-    --     (028_retained_bytes) on its own slow cadence. A NEW queue therefore
-    --     inserts at the DDL default 0 until that lane's next pass — the
-    --     accepted blind window; the proxy storage quota is hysteretic by
-    --     contract (schema.sql).
+    -- retained_bytes, segment_count and newest_message_at are ABSENT from the
+    -- column list on purpose:
+    --   * retained_bytes and segment_count are owned by
+    --     log_refresh_retained_bytes_v1 (028_retained_bytes) on its own slow
+    --     cadence. A NEW queue therefore inserts at the DDL default 0 until
+    --     that lane's next pass — the accepted blind window; the proxy storage
+    --     quota is hysteretic by contract (schema.sql), and the queue list's
+    --     segment count is informational.
     --   * newest_message_at has no reader anywhere; new rows get NULL.
     INSERT INTO queen.stats (
         stat_type, stat_key, queue_id, partition_id, consumer_group,
@@ -282,6 +283,8 @@ BEGIN
         -- invisible in a SET-list diff, which is how the fatal EXCLUDED
         -- variant would ship by accident).
         retained_bytes       = queen.stats.retained_bytes,
+        -- Same ownership, same explicit self-assignment, same reason.
+        segment_count        = queen.stats.segment_count,
         oldest_pending_at    = EXCLUDED.oldest_pending_at,
         -- Dead column: no reader anywhere (the wire's newestMessage is computed
         -- live per request), no writer since the LATERAL was deleted. NULL is
@@ -772,32 +775,45 @@ $$;
 GRANT EXECUTE ON FUNCTION queen.log_queue_message_stats_v1(TEXT, UUID) TO PUBLIC;
 
 -- ----------------------------------------------------------------------------
--- log_queue_stats_all_v1: broker-wide per-queue counters — the SQL home for
--- db.rs::seg_queue_stats_all (queue LIST enrichment; queen.stats can lag a
--- refresh cadence, this is the live view). Same accounting as above.
+-- log_queue_stats_all_v1: per-queue counters for ONE tenant's queues — the SQL
+-- home for db.rs::seg_queue_stats_all (queue LIST enrichment). partitions and
+-- messages are LIVE and Θ(the tenant's partitions): a count of log_partitions
+-- rows and the watermark arithmetic above. segments is NOT counted here:
+-- it is read from queen.stats.segment_count, which log_refresh_retained_bytes_v1
+-- (028_retained_bytes) fills out of the one scan of log_segments it already
+-- makes for retained_bytes, on its own slow cadence — so the list's cost is flat
+-- at a fixed partition count whatever retention accumulates, and 0 for a queue
+-- the lane has not passed over yet. The queue DETAIL keeps the exact live count
+-- (log_queue_message_stats_v1, O(that queue's segments) per click).
+--
+-- History, because both earlier shapes looked right and were not: until
+-- 2026-08-23 this pre-aggregated `SELECT partition_id, count(*) FROM
+-- log_segments GROUP BY partition_id` in a CTE — no tenant predicate, and a join
+-- qualification cannot be pushed into a GROUP BY subquery, so every call scanned
+-- EVERY segment in the cell (a 1k-partition tenant paid 135 ms for 1.4M rows).
+-- The first fix, a LATERAL count per partition through the PK, was bounded by
+-- the tenant but still Θ(the tenant's segments): on the soak it went from 635 to
+-- 2,204 ms as segments grew 2M -> 9M at a constant 827k partitions, because
+-- retention only starts deleting after the plan's window. Counting is the wrong
+-- shape for a LIST; it belongs to the lane that scans segments anyway.
 -- ----------------------------------------------------------------------------
--- Track B (§5): p_tenant scopes the broker-wide per-queue counters to one tenant.
+-- Track B (§5): p_tenant scopes the per-queue counters to one tenant.
 CREATE OR REPLACE FUNCTION queen.log_queue_stats_all_v1(
     p_tenant UUID DEFAULT '00000000-0000-0000-0000-000000000001')
 RETURNS TABLE (queue_name TEXT, partitions BIGINT, segments BIGINT, messages BIGINT)
 LANGUAGE sql STABLE
 AS $$
-    -- Segment counts pre-aggregated per partition BEFORE the queue join: a
-    -- flat 3-way join would fan a partition's watermark row out once per
-    -- segment and over-count messages by that factor.
-    WITH seg_counts AS (
-        SELECT s.partition_id, count(*)::bigint AS segs
-        FROM queen.log_segments s
-        GROUP BY s.partition_id
-    )
     -- queen.queues is the only queue table; partition->queue is p.queue_id = q.id.
+    -- The 'queue' stat row is one per queue ((stat_type, stat_key) is unique and
+    -- stat_key is the queue id), so MAX() is only there to satisfy the GROUP BY —
+    -- it never merges two rows.
     SELECT q.name,
            count(p.id)::bigint,
-           COALESCE(SUM(sc.segs), 0)::bigint,
+           COALESCE(MAX(st.segment_count), 0)::bigint,
            COALESCE(SUM(GREATEST(p.last_offset - p.log_start + 1, 0)), 0)::bigint
     FROM queen.queues q
+    LEFT JOIN queen.stats st ON st.stat_type = 'queue' AND st.queue_id = q.id
     LEFT JOIN queen.log_partitions p ON p.queue_id = q.id
-    LEFT JOIN seg_counts sc ON sc.partition_id = p.id
     WHERE q.tenant_id = p_tenant
     GROUP BY q.id, q.name
 $$;

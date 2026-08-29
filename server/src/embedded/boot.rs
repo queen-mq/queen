@@ -98,6 +98,11 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
         config::env_bool_checked(k, false).map_err(StartError::Config)?;
     }
 
+    // Same contract for the one NON-boolean knob whose value `config::load()`
+    // refuses to guess at: a malformed PG_SSL_ROOT_CERT is `obs::fatal` in the
+    // binary, and a library must not take the host process down with it.
+    config::check_pg_ssl_root_cert().map_err(StartError::Config)?;
+
     // Same env-driven defaults as the binary (QUEEN_* tuning knobs keep
     // working), with the BrokerConfig fields winning over env where set.
     let mut cfg = config::load();
@@ -211,7 +216,11 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
     pg.pool = Some(deadpool_postgres::PoolConfig::new(cfg.pool_size));
     let pool = if cfg.pg_use_ssl {
         pg.ssl_mode = Some(deadpool_postgres::SslMode::Require);
-        let connector = crate::pgtls::make_connector(cfg.pg_ssl_reject_unauthorized);
+        let connector = crate::pgtls::make_connector(
+            cfg.pg_ssl_reject_unauthorized,
+            cfg.pg_ssl_root_cert.as_deref(),
+        )
+        .map_err(|e| StartError::Config(format!("PG_SSL_ROOT_CERT: {e}")))?;
         pg.create_pool(Some(deadpool_postgres::Runtime::Tokio1), connector)
             .map_err(|e| StartError::Pool(e.to_string()))?
     } else {
@@ -297,8 +306,10 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
         cfg.stmt_timeout,
         cfg.dedup_cache_mb,
         cfg.dedup_cache_enabled,
-        cfg.pg_use_ssl,
-        cfg.pg_ssl_reject_unauthorized,
+        // Same connector the pool got, honouring a BrokerConfig::pg_use_ssl
+        // override; `Err` cannot happen after the pre-pass above, and is an
+        // error rather than an exit because this is the library path.
+        db::cancel_connector(&cfg).map_err(StartError::Config)?,
     );
 
     let (init_maint, init_pop_maint) = match pool.get().await {
@@ -388,6 +399,10 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
         cfg.tenancy_header,
     );
     hotlist.attach_notifier(notifier.clone());
+    // KEEP IN SYNC with main.rs. An embedded broker has no HA peer, so it cannot be the
+    // standby of a pair — but it can still hold a queue nobody pops (a write-only stretch,
+    // a consumer that stopped), which is the same accumulation.
+    hotlist.set_unserved_trim_ms(cfg.hotlist_unserved_trim_ms);
 
     // EPHEMERAL_QUEUES.md §3.2 — KEEP IN SYNC with main.rs (the embedded-API
     // memory rule). The embedded broker is by definition single-broker, which is
@@ -462,6 +477,10 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
         ephemeral: ephemeral.clone(),
         peers: Arc::new(crate::peerclient::PeerClient::new()),
         hotlist: hotlist.clone(),
+        // POP AUTOPILOT (server/src/pop_autopilot.rs) — same construction as
+        // main.rs (KEEP IN SYNC): built unconditionally because it is a kill
+        // switch and not a boot gate, and it costs an empty map when off.
+        autopilot: crate::pop_autopilot::PopAutopilot::new(cfg.pop_autopilot_knobs()),
         hotlist_reseed_ms: cfg.hotlist_reseed_ms,
         hotlist_reseed_full_ms: cfg.hotlist_reseed_full_ms,
         hotlist_reseed_window_ms: cfg.hotlist_reseed_window_ms,
@@ -705,12 +724,35 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
                 tokio::time::sleep(interval).await;
                 let rings = state.hotlist.evict_idle();
                 let gates = state.notifier.evict_idle();
-                if rings > 0 || gates > 0 {
+                let lanes = state.autopilot.evict_idle();
+                if rings > 0 || gates > 0 || lanes > 0 {
                     tracing::debug!(
                         target: "reconcile",
                         rings_evicted = rings,
                         gates_evicted = gates,
+                        autopilot_lanes_evicted = lanes,
                         "idle sweep"
+                    );
+                }
+            }
+        }));
+    }
+
+    // Unserved-ring trim (inlined from reconcile::spawn_unserved_trim for the same handle
+    // reason; 0 disables). Its own timer, deliberately much faster than the idle sweep —
+    // see the rationale on `spawn_unserved_trim`.
+    if cfg.hotlist_unserved_trim_ms > 0 {
+        let state = st.clone();
+        let interval = std::time::Duration::from_millis(cfg.hotlist_unserved_trim_ms as u64);
+        tasks.push(tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                let trimmed = state.hotlist.trim_unserved(crate::util::now_epoch_ms());
+                if trimmed > 0 {
+                    tracing::info!(
+                        target: "reconcile",
+                        rings_trimmed = trimmed,
+                        "unserved-ring trim"
                     );
                 }
             }

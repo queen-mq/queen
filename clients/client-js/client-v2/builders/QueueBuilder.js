@@ -13,6 +13,7 @@ import { isValidUUID } from '../utils/validation.js'
 import { durableAddress } from '../buffer/sinks.js'
 import { QUEUE_DEFAULTS, CONSUME_DEFAULTS, POP_DEFAULTS } from '../utils/defaults.js'
 import { checkConflationResponse, CONFLATION_UNSUPPORTED } from '../utils/conflation.js'
+import { popSizing, parseAutopilotDecision } from '../utils/autopilot.js'
 import * as logger from '../utils/logger.js'
 
 export class QueueBuilder {
@@ -28,7 +29,12 @@ export class QueueBuilder {
 
   // Consume options
   #concurrency = CONSUME_DEFAULTS.concurrency
-  #batch = CONSUME_DEFAULTS.batch
+  // batch / maxPartitions hold the USER's value, and null means the setter was
+  // never called -- which is the dimension pop autopilot gets to choose. The
+  // client-side defaults are applied at emission time (utils/autopilot.js), not
+  // here, because filling them in here would erase the difference between
+  // "never called batch()" and "called batch(1)".
+  #batch = null
   #limit = CONSUME_DEFAULTS.limit
   #idleMillis = CONSUME_DEFAULTS.idleMillis
   #autoAck = CONSUME_DEFAULTS.autoAck
@@ -40,7 +46,10 @@ export class QueueBuilder {
   #subscriptionFrom = CONSUME_DEFAULTS.subscriptionFrom
   #conflation = CONSUME_DEFAULTS.conflation
   #each = false
-  #maxPartitions = 1
+  #maxPartitions = null
+  // Per-call override for pop autopilot: null = the client default (on unless
+  // QUEEN_SDK_POP_AUTOPILOT turned it off).
+  #autopilot = null
 
   // Buffer options
   #bufferOptions = null
@@ -214,8 +223,15 @@ export class QueueBuilder {
     return this
   }
 
+  /**
+   * Pin the message budget for one pop. Leave it unset and the broker sizes it
+   * (see `autopilot`), where it used to mean the client-side default of 1.
+   *
+   * `batch(0)` is not "a batch of zero" and never was: it is the absence of an
+   * opinion, so it reads as unset.
+   */
   batch(size) {
-    this.#batch = Math.max(1, size)
+    this.#batch = size > 0 ? size : null
     return this
   }
 
@@ -228,11 +244,43 @@ export class QueueBuilder {
    * partitions, in a single network round-trip. All N share one leaseId
    * (renewing once extends them all).
    *
-   * Default 1 = legacy single-partition behavior.
+   * Leave it unset and the broker chooses the sweep width (see `autopilot`);
+   * `partitions(1)` pins the legacy single-partition behaviour, which is a
+   * decision the broker is told about and never overrides.
    */
   partitions(n) {
-    this.#maxPartitions = Math.max(1, n)
+    this.#maxPartitions = n > 0 ? n : null
     return this
+  }
+
+  /**
+   * Turn broker-side pop sizing on or off for this builder.
+   *
+   * On (the default) the broker chooses `batch` and `partitions` for the pops
+   * of this builder. Even then, a `batch` or `partitions` set explicitly
+   * travels on the wire as it always did and is never second-guessed: autopilot
+   * only ever fills the knobs left unset.
+   *
+   * `autopilot(false)` restores this SDK's pre-1.2 behaviour byte for byte: the
+   * client-side defaults come back (batch 1, partitions 1) and no autopilot
+   * parameter is sent. QUEEN_SDK_POP_AUTOPILOT=off does the same for a whole
+   * process; an explicit call here outranks the environment in both directions.
+   *
+   * Setting BOTH batch and partitions leaves autopilot nothing to decide, so no
+   * autopilot parameter is sent in that case either, whatever this flag says.
+   */
+  autopilot(enabled = true) {
+    this.#autopilot = !!enabled
+    return this
+  }
+
+  /**
+   * This builder's resolved autopilot decision: its own flag when set,
+   * otherwise the client-wide default settled in the Queen constructor.
+   */
+  #autopilotEnabled() {
+    if (this.#autopilot !== null) return this.#autopilot
+    return !this.#queen || !this.#queen.autopilotOff
   }
 
   limit(count) {
@@ -326,6 +374,11 @@ export class QueueBuilder {
       conflation: this.#conflation,
       each: this.#each,
       maxPartitions: this.#maxPartitions,
+      // Resolved here so ConsumerManager sees a decision and not a null. batch
+      // and maxPartitions keep their null when autopilot is on, and that null
+      // has to survive all the way to #buildParams: it is the ONLY record that
+      // the user said nothing about that dimension.
+      autopilot: this.#autopilotEnabled(),
       signal: options.signal
     }
 
@@ -355,7 +408,27 @@ export class QueueBuilder {
     return this
   }
 
+  /**
+   * Claim messages and report what the broker chose for this pop.
+   *
+   * Same call as `pop()` — this is the shape that also carries the additive
+   * `autopilot` echo, which is null when this pop did not engage autopilot or
+   * the broker is older than 1.2.
+   *
+   *   const { messages, autopilot } = await client.queue('events').group('w').popResult()
+   *   if (autopilot) console.log(autopilot.partitions, autopilot.batch, autopilot.waitMillis)
+   *
+   * @returns {Promise<{messages: object[], autopilot: {partitions: number, batch: number, waitMillis: number}|null}>}
+   */
+  async popResult() {
+    return this.#popWithDecision()
+  }
+
   async pop() {
+    return (await this.#popWithDecision()).messages
+  }
+
+  async #popWithDecision() {
     logger.log('QueueBuilder.pop', { queue: this.#queueName, partition: this.#partition, namespace: this.#namespace, task: this.#task, batch: this.#batch, wait: this.#wait, group: this.#group })
     
     try {
@@ -365,12 +438,24 @@ export class QueueBuilder {
       // Override autoAck to false unless explicitly set
       const effectiveAutoAck = this.#autoAck !== CONSUME_DEFAULTS.autoAck ? this.#autoAck : POP_DEFAULTS.autoAck
       
-      // Build params with correct autoAck for pop
-      const params = new URLSearchParams({
-        batch: this.#batch.toString(),
-        wait: this.#wait.toString(),
-        timeout: this.#timeoutMillis.toString()
+      // Batch, partitions and with them the autopilot flag. The RULE for which
+      // of the three travel lives in one place (utils/autopilot.js) because
+      // consume() builds its query string separately; only the PLACEMENT is
+      // here, and it is the pre-autopilot placement so an autopilot-off request
+      // is byte-identical to the one this SDK used to send.
+      const sizing = popSizing({
+        batch: this.#batch,
+        maxPartitions: this.#maxPartitions,
+        fallbackBatch: POP_DEFAULTS.batch,
+        autopilot: this.#autopilotEnabled()
       })
+
+      // Build params with correct autoAck for pop
+      const params = new URLSearchParams()
+      if (sizing.autopilot) params.append('autopilot', 'true')
+      if (sizing.batch !== null) params.append('batch', sizing.batch)
+      params.append('wait', this.#wait.toString())
+      params.append('timeout', this.#timeoutMillis.toString())
 
       if (this.#group) params.append('consumerGroup', this.#group)
       if (this.#namespace) params.append('namespace', this.#namespace)
@@ -378,7 +463,7 @@ export class QueueBuilder {
       if (effectiveAutoAck) params.append('autoAck', 'true')
       if (this.#subscriptionMode) params.append('subscriptionMode', this.#subscriptionMode)
       if (this.#subscriptionFrom) params.append('subscriptionFrom', this.#subscriptionFrom)
-      if (this.#maxPartitions > 1) params.append('partitions', this.#maxPartitions.toString())
+      if (sizing.partitions !== null) params.append('partitions', sizing.partitions)
       // Conflation (PLAN_CONFLATION §3.1): sent ONLY when true, so an
       // undeclared pop is byte-identical to today. NOTE: this is the pop
       // builder; consume() builds its params in ConsumerManager#buildParams —
@@ -405,14 +490,19 @@ export class QueueBuilder {
         })
       }
 
+      // The broker's own account of how it sized this pop, when the request
+      // engaged autopilot and the answer had a body to carry it (a bodiless 204
+      // cannot, so an empty short pop reports null).
+      const autopilot = parseAutopilotDecision(result)
+
       if (!result || !result.messages) {
         logger.log('QueueBuilder.pop', { status: 'no-messages' })
-        return []
+        return { messages: [], autopilot }
       }
 
       const messages = result.messages.filter(msg => msg != null)
       logger.log('QueueBuilder.pop', { status: 'success', count: messages.length })
-      return messages
+      return { messages, autopilot }
     } catch (error) {
       // Conflation is the one thing this method does NOT swallow. The
       // swallow-to-[] contract exists for transport faults, where [] means "no
@@ -431,7 +521,7 @@ export class QueueBuilder {
       // both are logged with their `.code` rather than raising, matching this
       // method's existing swallow-to-[] contract.
       logger.error('QueueBuilder.pop', { error: error.message, status: error.status, code: error.code })
-      return []
+      return { messages: [], autopilot: null }
     }
   }
 

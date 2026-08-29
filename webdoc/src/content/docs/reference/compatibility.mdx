@@ -1,6 +1,6 @@
 ---
 title: Versions and compatibility
-description: "What 1.0.0 covers, why the HTTP API is the stable compatibility surface and where the beta embedded Rust API stands, what the boot-time schema apply does and does not do, and why coming from 0.16 means a fresh database."
+description: "What a release covers, why the HTTP API is the stable compatibility surface and where the beta embedded Rust API stands, what the boot-time schema apply does and does not do, and why coming from 0.16 means a fresh database."
 type: reference
 tier: operate
 sidebar:
@@ -17,20 +17,21 @@ digest: >-
   A release is one broker binary plus client SDKs at the same version for JavaScript,
   Python, Go, Rust, PHP with Laravel and C++, plus the Go command-line client. There is no Java or
   .NET SDK; those languages use HTTP directly. The deployment model is always-virgin: the
-  broker embeds schema.sql and 25 stored-procedure files numbered 001 to 025, applies all of them
+  broker embeds schema.sql and 31 stored-procedure files numbered 001 to 031, applies all of them
   in lexical order at every boot under a session advisory lock before serving a request, with
   no migration engine, no version table and nothing to run by hand. Every statement is idempotent,
-  and any DDL error aborts the boot naming the failing file, except a deadlock against live
-  traffic, retried up to five attempts. Pointing a newer build at a database created by a
+  and any DDL error aborts the boot naming the failing file, except lock contention against live
+  traffic, retried with backoff. Pointing a newer build at a database created by a
   different build is unsupported, and a downgrade means restoring a dump into a fresh database.
   QUEEN_APPLY_SCHEMA=0 skips the apply, moving DDL and ordering responsibility to the operator: a
   broker that skips it and finds an older schema fails on the first request needing a missing
   object, not at boot.
 ---
 
-Queen MQ 1.0.0 is one broker binary plus a set of client SDKs released at the
-same version: JavaScript, Python, Go, Rust, PHP (Laravel), C++, and a Go
-command-line client. The broker reports its version on `GET /health` and in its boot log; the
+Queen MQ 1.2.1 is one broker binary plus a set of client SDKs released in
+lockstep at 1.2.0 (1.2.1 is a server-only patch): JavaScript, Python, Go, Rust,
+PHP (Laravel), C++, and a Go command-line client. The broker reports its version
+on `GET /health` and in its boot log; the
 value is compiled in from a single file, so the binary, the container tag and the
 health document can never disagree.
 
@@ -72,8 +73,8 @@ not to.
 
 ## The schema is applied at every boot
 
-The broker owns its own schema. It embeds `schema.sql` and 25 stored-procedure
-files (`001`–`025`) into the binary at compile time and applies all of them on
+The broker owns its own schema. It embeds `schema.sql` and 31 stored-procedure
+files (`001`–`031`) into the binary at compile time and applies all of them on
 every start, in lexical file order, before it accepts a request.
 
 Three properties make that safe to do on every boot:
@@ -82,24 +83,34 @@ Three properties make that safe to do on every boot:
   `CREATE OR REPLACE FUNCTION`, `ADD COLUMN IF NOT EXISTS`. Re-applying is a
   no-op when nothing changed.
 - **Serialised across instances.** The apply holds a session advisory lock, so a
-  rolling restart of several brokers cannot run two DDL passes concurrently.
-- **Fail-fast, with one bounded retry.** Any DDL error aborts the boot with the
-  failing file named in the message, except a deadlock against live traffic
-  (`SQLSTATE 40P01`), which the applier retries: five attempts in all, backing
-  off 250 ms times the attempt number between them. The advisory lock serialises
-  appliers against each other but not against a peer that already booted and is
-  running its background cycles, so a rolling restart can genuinely cross a
-  running stats cycle. Re-applying is idempotent, so retrying is the correct
-  answer to that and dying is not. A broker never serves against a schema it
-  could not bring to the expected shape.
+  rolling restart of several brokers cannot run two DDL passes concurrently. A
+  replica waiting its turn polls a try-lock rather than blocking, so it holds no
+  snapshot open against the one applying.
+- **Fail-fast, with bounded patience for locks.** Statements run one per
+  transaction, split out of each file by a dollar-quote-aware splitter, and every
+  lock-taking statement runs under a 2 s `lock_timeout`. The advisory lock
+  serialises appliers against each other but not against a peer that already
+  booted and is running its background cycles, so a statement that cannot get its
+  lock (`SQLSTATE 55P03`) or deadlocks against live traffic (`40P01`) is retried
+  with jittered backoff, up to 40 slices of patience (about three minutes); past
+  that, and on any other DDL error, the boot aborts naming the failing file and
+  statement and the sessions holding the conflicting locks. A
+  `CREATE INDEX CONCURRENTLY` runs with the timeout off and no retry, and a run
+  of `DROP`s is grouped into one transaction with the statement that follows it,
+  so a live peer never observes the gap of a drop-then-create pair. A broker
+  never serves against a schema it could not bring to the expected shape.
 
-The apply **only creates**. Every table and every function is defined exactly
-once, by exactly one file, in its final shape: nothing is dropped, migrated or
-folded at boot, and `schema.sql` carries no upgrade `ALTER`s: the
-`CREATE TABLE`s declare the final columns directly. Order in the file list is
-load-bearing only where a function body has to resolve a table at creation time.
-The table files come first, and the partition-counter trigger attachment comes
-after both the table it attaches to and the functions it binds.
+The apply **only creates and adds**. Every table and every function is defined
+exactly once, by exactly one file: the `CREATE TABLE`s declare the final columns
+for a database created from scratch, and a column added since its table first
+shipped also rides beside it as an idempotent `ADD COLUMN IF NOT EXISTS` (a new
+index on an already-populated hot table as
+`CREATE INDEX CONCURRENTLY IF NOT EXISTS`), so a database created by an earlier
+build of this broker picks the additions up at boot. Nothing is migrated,
+rewritten or folded beyond that. Order in the file list is load-bearing only
+where a function body has to resolve a table at creation time. The table files
+come first, and the partition-counter trigger attachment comes after both the
+table it attaches to and the functions it binds.
 
 ### The deployment model is always-virgin
 
@@ -109,11 +120,13 @@ version table, and nothing to run by hand, because there is nothing to migrate.
 Restarting the same version re-applies the same definitions as a no-op, and a
 rolling restart of identical binaries is safe.
 
-The apply brings an empty database to this version's shape; it does not bring an
-existing one forward. A `CREATE TABLE IF NOT EXISTS` against a table that
-already exists in an older shape leaves the older shape in place, so pointing a
-newer build at a database created by a different build is unsupported: stand up
-a fresh database and cut over. A **downgrade** works the same way: an older
+The apply brings an empty database to this version's shape; an existing one it
+brings forward only where a file spells the step out (the additive column and
+index statements above). A `CREATE TABLE IF NOT EXISTS` against a table that
+already exists in an older shape leaves the older shape in place, so pointing
+the broker at a database created by a different implementation, or by a
+pre-release build, is unsupported: stand up a fresh database and cut over. A
+**downgrade** works the same way: an older
 broker would re-apply its own older definitions over a schema it does not
 understand. Roll back by restoring a dump into a fresh database, not by
 restarting an older image against the current one.
@@ -142,32 +155,32 @@ matrix runs against PostgreSQL 16.
 ## Coming from the retired 0.16 broker
 
 The 0.16 broker was a different implementation: C++, and a different storage
-engine. Replacing it with 1.0.0 is a cutover rather than a data migration, and
-the cutover runs at the application level.
+engine. Replacing it with the current broker is a cutover rather than a data
+migration, and the cutover runs at the application level.
 
 **The move carries no data.** The `migrate` subcommand reports as much: all it
 does is log
 `migration is not supported on the log engine` and exit 1. It never opens a
 database connection, and there are no migration HTTP endpoints either.
 
-**The boot apply only creates.** Nothing is dropped, altered or folded at boot,
-whatever the database already holds. Read that as the always-virgin model rather
-than a compatibility promise: 1.0.0 expects an
-empty database, and against one carrying an earlier broker's tables it would
-create its own objects alongside data it will never read or reconcile.
+**The boot apply never reads what it finds.** It creates and adds its own
+objects, whatever the database already holds; nothing of an earlier engine's is
+dropped, read or reconciled. Read that as the always-virgin model rather than a
+compatibility promise: this broker expects an empty database, and against one
+carrying an earlier broker's tables it would create its own objects alongside
+data it will never read.
 
 <Aside type="danger">
-Pointing 1.0.0 at a database that carries any earlier broker's schema (the 0.16
-engine's tables, or any pre-release build of this one) is **unsupported**. The
-boot will not drop the old data, but 1.0.0 neither reads nor migrates it, and
-same-named tables left in an older shape make the broker's behaviour undefined.
-Give 1.0.0 a fresh database, and keep a `pg_dump` of the old one as
-the record.
+Pointing this broker at a database that carries any earlier broker's schema (the
+0.16 engine's tables, or any pre-release build of this one) is **unsupported**.
+The boot will not drop the old data, but the broker neither reads nor migrates
+it, and same-named tables left in an older shape make its behaviour undefined.
+Give it a fresh database, and keep a `pg_dump` of the old one as the record.
 </Aside>
 
 The practical upgrade is therefore a cutover, not an in-place migration: stand up
-1.0.0 against a clean database, move producers over, let the old consumers drain
-the old broker, and keep a dump of the old database as the record.
+the new broker against a clean database, move producers over, let the old
+consumers drain the old broker, and keep a dump of the old database as the record.
 
 Backup and restore are plain `pg_dump` and `pg_restore`, run against the
 broker's database like any other PostgreSQL workload.

@@ -28,6 +28,7 @@ digest: >-
   reducer with a per-message allow or deny that keeps the denied tail leased and in order. Inside a
   stream the state primitive is `state_ops`, not the KV, and a cycle carries no KV or timer
   operations. Retention never touches stream state.
+# sourceOfTruth re-read 2026-08-27 (through a6cbac22 + working tree): page matches the code.
 ---
 
 A streaming query reads a queue, decides something per message or per time bucket, and pushes the

@@ -9,6 +9,7 @@ use Queen\Buffer\BufferManager;
 use Queen\Consumer\HighLevelConsumer;
 use Queen\Support\ConflationGuard;
 use Queen\Support\Defaults;
+use Queen\Support\PopAutopilot;
 use Queen\Support\Uuid;
 
 class QueueBuilder
@@ -25,7 +26,12 @@ class QueueBuilder
 
     // Consume options
     private int $consumeConcurrency;
-    private int $consumeBatch;
+    // consumeBatch / consumeMaxPartitions hold the USER's value, and null means
+    // the setter was never called -- which is the dimension pop autopilot gets to
+    // choose. The client-side defaults are applied at emission time
+    // (Support\PopAutopilot), not here, because filling them in here would erase
+    // the difference between "never called batch()" and "called batch(1)".
+    private ?int $consumeBatch = null;
     private ?int $consumeLimit;
     private ?int $consumeIdleMillis;
     private bool $consumeAutoAck;
@@ -37,8 +43,10 @@ class QueueBuilder
     private ?string $consumeSubscriptionMode;
     private ?string $consumeSubscriptionFrom;
     private bool $consumeEach = false;
-    private int $consumeMaxPartitions = 1;
+    private ?int $consumeMaxPartitions = null;
     private bool $consumeConflation;
+    /** Per-builder override: null = the client default (on unless the env turned it off). */
+    private ?bool $consumeAutopilot = null;
 
     // Buffer options
     private ?array $bufferOptions = null;
@@ -53,7 +61,6 @@ class QueueBuilder
         // Initialize from consume defaults
         $d = Defaults::CONSUME_DEFAULTS;
         $this->consumeConcurrency = $d['concurrency'];
-        $this->consumeBatch = $d['batch'];
         $this->consumeLimit = $d['limit'];
         $this->consumeIdleMillis = $d['idleMillis'];
         $this->consumeAutoAck = $d['autoAck'];
@@ -208,9 +215,16 @@ class QueueBuilder
         return $this;
     }
 
+    /**
+     * Pin the message budget for one pop.
+     *
+     * Leave it unset and the broker sizes it (see autopilot()), where it used to
+     * mean the client-side default of 1. batch(0) is not "a batch of zero" and
+     * never was: it is the absence of an opinion, so it reads as unset.
+     */
     public function batch(int $size): static
     {
-        $this->consumeBatch = max(1, $size);
+        $this->consumeBatch = $size > 0 ? $size : null;
         return $this;
     }
 
@@ -223,12 +237,47 @@ class QueueBuilder
      * partitions, in a single network round-trip. All N share one leaseId
      * (renewing once extends them all).
      *
-     * Default 1 = legacy single-partition behavior.
+     * Leave it unset and the broker chooses the sweep width (see autopilot());
+     * partitions(1) pins the legacy single-partition behaviour, which is a
+     * decision the broker is told about and never overrides.
      */
     public function partitions(int $n): static
     {
-        $this->consumeMaxPartitions = max(1, $n);
+        $this->consumeMaxPartitions = $n > 0 ? $n : null;
         return $this;
+    }
+
+    /**
+     * Turn broker-side pop sizing on or off for this builder.
+     *
+     * On (the default) the broker chooses `batch` and `partitions` for the pops
+     * of this builder. Even then, a batch or partitions set explicitly travels
+     * on the wire as it always did and is never second-guessed: autopilot only
+     * ever fills the knobs left unset.
+     *
+     * autopilot(false) restores this SDK's pre-1.2 behaviour byte for byte: the
+     * client-side defaults come back (batch 1, partitions 1) and no autopilot
+     * parameter is sent. QUEEN_SDK_POP_AUTOPILOT=off does the same for a whole
+     * process; an explicit call here outranks the environment in both
+     * directions.
+     *
+     * Setting BOTH batch and partitions leaves autopilot nothing to decide, so
+     * no autopilot parameter is sent in that case either, whatever this flag
+     * says.
+     */
+    public function autopilot(bool $enabled = true): static
+    {
+        $this->consumeAutopilot = $enabled;
+        return $this;
+    }
+
+    /**
+     * This builder's resolved autopilot decision: its own flag when set,
+     * otherwise the client-wide default settled in the Queen constructor.
+     */
+    private function autopilotEnabled(): bool
+    {
+        return $this->consumeAutopilot ?? !$this->queen->autopilotOff();
     }
 
     public function limit(int $count): static
@@ -359,6 +408,28 @@ class QueueBuilder
 
     public function pop(): array
     {
+        return $this->popWithDecision()['messages'];
+    }
+
+    /**
+     * Claim messages and report what the broker chose for this pop.
+     *
+     * The same call as pop() — this is the shape that also carries the additive
+     * `autopilot` echo, which is null when this pop did not engage autopilot or
+     * the broker is older than 1.2.
+     *
+     *   ['messages' => array, 'autopilot' => ['partitions' => int, 'batch' => int, 'waitMillis' => int]|null]
+     *
+     * @return array{messages: array, autopilot: array{partitions: int, batch: int, waitMillis: int}|null}
+     */
+    public function popResult(): array
+    {
+        return $this->popWithDecision();
+    }
+
+    /** @return array{messages: array, autopilot: array{partitions: int, batch: int, waitMillis: int}|null} */
+    private function popWithDecision(): array
+    {
         $path = $this->buildPopPath();
 
         // Pop uses POP_DEFAULTS for autoAck unless explicitly changed
@@ -366,11 +437,27 @@ class QueueBuilder
             ? $this->consumeAutoAck
             : Defaults::POP_DEFAULTS['autoAck'];
 
-        $params = [
-            'batch' => (string) $this->consumeBatch,
-            'wait' => $this->consumeWait ? 'true' : 'false',
-            'timeout' => (string) $this->consumeTimeoutMillis,
-        ];
+        // Batch, partitions and with them the autopilot flag. The RULE for which
+        // of the three travel lives in one place (Support\PopAutopilot) because
+        // this SDK has three pop param builders; only the PLACEMENT is here, and
+        // it is the pre-autopilot placement so an autopilot-off request is
+        // byte-identical to the one this SDK used to send.
+        $sizing = PopAutopilot::sizing(
+            $this->consumeBatch,
+            $this->consumeMaxPartitions,
+            Defaults::POP_DEFAULTS['batch'],
+            $this->autopilotEnabled()
+        );
+
+        $params = [];
+        if ($sizing['autopilot']) {
+            $params['autopilot'] = 'true';
+        }
+        if ($sizing['batch'] !== null) {
+            $params['batch'] = $sizing['batch'];
+        }
+        $params['wait'] = $this->consumeWait ? 'true' : 'false';
+        $params['timeout'] = (string) $this->consumeTimeoutMillis;
 
         if ($this->consumeLeaseSeconds !== null) {
             $params['leaseSeconds'] = (string) $this->consumeLeaseSeconds;
@@ -394,8 +481,10 @@ class QueueBuilder
         if ($this->consumeSubscriptionFrom !== null) {
             $params['subscriptionFrom'] = $this->consumeSubscriptionFrom;
         }
-        if ($this->consumeMaxPartitions > 1) {
-            $params['partitions'] = (string) $this->consumeMaxPartitions;
+        // Under autopilot a pinned width travels even when it is 1, because 1 is
+        // then a decision and not the absence of one.
+        if ($sizing['partitions'] !== null) {
+            $params['partitions'] = $sizing['partitions'];
         }
         // Only ever sent when true, the rule autoAck follows above: the broker
         // treats presence as opt-in, and an explicit conflation=false would read
@@ -425,11 +514,19 @@ class QueueBuilder
             $this->task
         );
 
+        // The broker's own account of how it sized this pop, when the request
+        // engaged autopilot and the answer had a body to carry it (a bodiless
+        // 204 cannot, so an empty short pop reports null).
+        $autopilot = PopAutopilot::decision($result);
+
         if (!$result || !isset($result['messages'])) {
-            return [];
+            return ['messages' => [], 'autopilot' => $autopilot];
         }
 
-        return array_filter($result['messages'], fn($msg) => $msg !== null);
+        return [
+            'messages' => array_filter($result['messages'], fn($msg) => $msg !== null),
+            'autopilot' => $autopilot,
+        ];
     }
 
     // ===========================
@@ -484,6 +581,11 @@ class QueueBuilder
             'each' => $this->consumeEach,
             'maxPartitions' => $this->consumeMaxPartitions,
             'conflation' => $this->consumeConflation,
+            // Resolved here so the consumers see a decision and not a null.
+            // batch and maxPartitions keep their null when autopilot is on, and
+            // that null has to survive all the way to the param builders: it is
+            // the ONLY record that the user said nothing about that dimension.
+            'autopilot' => $this->autopilotEnabled(),
         ];
     }
 

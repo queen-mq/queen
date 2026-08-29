@@ -79,7 +79,7 @@ the input and push the output in one PostgreSQL commit, use
 
 - With `batch(1)` the handler gets one message, not a list; `batch(n)` passes the list, and `.each()` is always one at a time.
 - `SIGINT` and `SIGTERM` handlers are always installed, with no way to opt out, and constructing a client off the main thread raises.
-- `pop()` catches every exception, prints `Pop failed: …` and returns `[]`, so an empty list is not an empty queue.
+- `pop()` catches every exception except a conflation the broker cannot honour, prints `Pop failed: …` and returns `[]`, so an empty list is not an empty queue.
 - A rejected ack arrives as HTTP 200 with `success: false` on the item, and this client does not scan the batch for you.
 - Inside `transaction()` the ack context key is `consumer_group`, not `group`.
 

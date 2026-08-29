@@ -6,10 +6,13 @@
 //! migrations/001_init.sql for the table shapes and the limit_overrides
 //! merge convention (mirrored exactly by `merge_limits` below).
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 use crate::config::{Config, PxdbConfig};
@@ -22,6 +25,26 @@ const KEY_POSITIVE_TTL: Duration = Duration::from_secs(30);
 /// truth for "does this hash exist"), while capping how hard a hot loop of
 /// bad keys can hit pxdb.
 const KEY_NEGATIVE_TTL: Duration = Duration::from_secs(5);
+/// Ceiling on NEGATIVE api-key entries (unknown/revoked hashes). Their cache
+/// key is attacker-chosen, so this is the difference between a memo and an
+/// unbounded allocation an anonymous caller drives; see the `Lookup::Absent`
+/// arm of `apply_key_lookup`. At ~230 B per entry this caps them near 2.5 MB,
+/// while still absorbing any realistic burst of retries from one broken client
+/// (a 5 s TTL means the cap is only reached by ~10 000 DISTINCT bad keys inside
+/// one window).
+///
+/// It doubles as the trigger for the prune pass, which is why it is compared
+/// against the WHOLE map's length: a cell with more live api keys than this
+/// would prune on every unknown key instead of every TTL, which costs a walk
+/// and never costs correctness. Positive entries are never dropped by it.
+const KEY_NEGATIVE_MAX: usize = 10_000;
+/// After a refresh pxdb failed to answer, how long an expired entry keeps
+/// being served before another refresh is attempted for it. Bounds the cost
+/// of an outage to one (failing) lookup per entry per second, not per request.
+const REFRESH_BACKOFF: Duration = Duration::from_secs(1);
+/// Default cadence of the batched `api_keys.last_used_at` write
+/// (QUEEN_PROXY_KEY_TOUCH_MS).
+const KEY_TOUCH_FLUSH_MS: u64 = 10_000;
 
 /// The pg_notify channel every queen_proxy.* mutating SQL function targets
 /// (migrations/002_functions.sql via record_operation()).
@@ -36,25 +59,41 @@ const LISTENER_HEALTHY_SESSION_MIN: Duration = Duration::from_secs(10);
 /// pxdb is down, not one per request (every request takes that path during an
 /// outage). Same shape as gateway.rs::maint_log_due.
 const STALE_LOG_INTERVAL: Duration = Duration::from_secs(10);
-static STALE_LOG_NEXT: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+static STALE_LOG: LogGate = LogGate::new();
 
-/// Is a stale-serve line due? Non-blocking try_lock so a concurrent resolver
-/// skips its line rather than waiting on the request path.
-fn stale_log_due(now: Instant) -> bool {
-    let Ok(mut next) = STALE_LOG_NEXT.try_lock() else { return false };
-    match *next {
-        Some(at) if now < at => false,
-        _ => {
-            *next = Some(now + STALE_LOG_INTERVAL);
-            true
+/// One line per STALE_LOG_INTERVAL. Non-blocking try_lock so a concurrent
+/// resolver skips its line rather than waiting on the request path. A struct
+/// (not a bare static) so tests can own a gate instead of sharing the
+/// process-wide one with every other test that happens to log.
+struct LogGate(Mutex<Option<Instant>>);
+
+impl LogGate {
+    const fn new() -> LogGate {
+        LogGate(Mutex::new(None))
+    }
+
+    fn due(&self, now: Instant) -> bool {
+        let Ok(mut next) = self.0.try_lock() else { return false };
+        match *next {
+            Some(at) if now < at => false,
+            _ => {
+                *next = Some(now + STALE_LOG_INTERVAL);
+                true
+            }
         }
     }
+}
+
+/// Is a stale-serve line due on the process-wide gate?
+fn stale_log_due(now: Instant) -> bool {
+    STALE_LOG.due(now)
 }
 
 /// What one pxdb lookup told us. `Absent` (the query ran and matched no row)
 /// and `Unavailable` (pxdb never produced an answer) are deliberately
 /// distinct: the fail-open below is only sound as long as "the DB said no"
 /// can never be confused with "the DB did not answer".
+#[derive(Clone)]
 enum Lookup<T> {
     Found(T),
     Absent,
@@ -103,17 +142,126 @@ fn fallback(miss: Miss, stale_expires_at: Option<Instant>, now: Instant, grace: 
 struct HostEntry {
     ctx: Arc<ClusterCtx>,
     expires_at: Instant,
+    /// Earliest instant a background refresh may be started for this entry
+    /// once it has expired. `expires_at` on insert; pushed out by
+    /// REFRESH_BACKOFF each time pxdb fails to answer.
+    refresh_after: Instant,
 }
+
+type KeyResult = (Arc<ClusterCtx>, Uuid, Scopes);
 
 #[derive(Clone)]
 struct KeyEntry {
     /// None = negative cache (hash not found / revoked at last check).
-    value: Option<(Arc<ClusterCtx>, Uuid, Scopes)>,
+    value: Option<KeyResult>,
     expires_at: Instant,
+    refresh_after: Instant,
 }
 
 type HostMap = RwLock<HashMap<String, HostEntry>>;
 type KeyMap = RwLock<HashMap<String, KeyEntry>>;
+/// Keys a successful lookup has seen since the last `last_used_at` flush.
+type Touched = Mutex<HashSet<Uuid>>;
+
+// ------------------------------------------------------------ single-flight
+
+/// One in-flight pxdb lookup per cache key, shared by every request that
+/// needs it. Before this, every request that arrived while an entry was
+/// expired ran its own lookup: at a 30s TTL under load that was a herd of
+/// dozens of identical SELECTs per expiry -- and for keys dozens of
+/// `last_used_at` UPDATEs serialised on one row, each waiting for the
+/// previous one's fsync, which is how the 2026-08-22 soak wrote
+/// `last_used_at` 103 726 times for 35 keys.
+///
+/// The lookup runs in its own task and applies its outcome to the cache
+/// itself, so a caller that disconnects mid-way neither cancels it nor
+/// strands the others; waiters only learn the outcome.
+struct Flight<T> {
+    done: Notify,
+    /// Set once the task is over, result or not, BEFORE `done` fires. A
+    /// waiter that starts polling after the wakeup (its `Notified` only
+    /// exists from its first poll) reads this instead of waiting for a
+    /// notification that already happened.
+    finished: AtomicBool,
+    result: Mutex<Option<T>>,
+}
+
+struct Flights<T> {
+    map: Mutex<HashMap<String, Arc<Flight<T>>>>,
+}
+
+/// Removes the flight and wakes its waiters when the lookup task finishes --
+/// or unwinds. A panic inside a lookup must not leave the key permanently
+/// "in flight" with every later request parked on it.
+struct FlightCleanup<T> {
+    flights: Arc<Flights<T>>,
+    key: String,
+    flight: Arc<Flight<T>>,
+}
+
+impl<T> Drop for FlightCleanup<T> {
+    fn drop(&mut self) {
+        self.flights.map.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.key);
+        self.flight.finished.store(true, Ordering::SeqCst);
+        self.flight.done.notify_waiters();
+    }
+}
+
+impl<T: Clone + Send + 'static> Flights<T> {
+    fn new() -> Arc<Self> {
+        Arc::new(Flights { map: Mutex::new(HashMap::new()) })
+    }
+
+    /// The flight for `key`: the one in progress, or a new task running
+    /// `work`. Spawned synchronously, so a caller that only wants the lookup
+    /// to happen (a fire-and-forget refresh) drops the handle and is done.
+    fn start<F>(self: &Arc<Self>, key: &str, work: F) -> Arc<Flight<T>>
+    where
+        F: Future<Output = T> + Send + 'static,
+    {
+        let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(f) = map.get(key) {
+            return f.clone();
+        }
+        let f = Arc::new(Flight {
+            done: Notify::new(),
+            finished: AtomicBool::new(false),
+            result: Mutex::new(None),
+        });
+        map.insert(key.to_string(), f.clone());
+        let cleanup = FlightCleanup { flights: self.clone(), key: key.to_string(), flight: f.clone() };
+        tokio::spawn(async move {
+            let out = work.await;
+            *cleanup.flight.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(out);
+            drop(cleanup); // publishes: removes the entry, wakes the waiters
+        });
+        f
+    }
+
+    /// Join the lookup in flight for `key`, starting `work` if there is none.
+    /// Resolves to `None` only if the task died without a result (a panic),
+    /// which callers treat as "pxdb did not answer".
+    fn join<F>(self: &Arc<Self>, key: &str, work: F) -> impl Future<Output = Option<T>>
+    where
+        F: Future<Output = T> + Send + 'static,
+    {
+        Self::wait(self.start(key, work))
+    }
+
+    async fn wait(flight: Arc<Flight<T>>) -> Option<T> {
+        // Register for the wakeup BEFORE checking `finished`: notify_waiters
+        // only reaches futures that already exist, and the task publishes,
+        // flags and notifies back to back. A task already over is read from
+        // the flag, result or not.
+        let notified = flight.done.notified();
+        if !flight.finished.load(Ordering::SeqCst) {
+            notified.await;
+        }
+        flight.result.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+// ----------------------------------------------------------------- the cache
 
 pub struct ClusterCache {
     dev_static: Option<ClusterCtx>,
@@ -134,6 +282,9 @@ pub struct ClusterCache {
     stale_grace: Duration,
     host_cache: Arc<HostMap>,
     key_cache: Arc<KeyMap>,
+    host_flights: Arc<Flights<Lookup<Arc<ClusterCtx>>>>,
+    key_flights: Arc<Flights<Lookup<KeyResult>>>,
+    touched: Arc<Touched>,
 }
 
 impl ClusterCache {
@@ -167,6 +318,9 @@ impl ClusterCache {
             stale_grace: crate::config::stale_grace(),
             host_cache: Arc::new(RwLock::new(HashMap::new())),
             key_cache: Arc::new(RwLock::new(HashMap::new())),
+            host_flights: Flights::new(),
+            key_flights: Flights::new(),
+            touched: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -212,120 +366,103 @@ impl ClusterCache {
         self.resolve_keyed(slug.clone(), RESOLVE_HOST_SQL, slug).await
     }
 
-    /// The shared TTL + fail-open body behind both lookups: `cache_key` names
-    /// the entry, `sql`/`param` name the row.
+    /// The shared body behind both lookups: `cache_key` names the entry,
+    /// `sql`/`param` name the row. Three outcomes, in order:
+    ///   * a fresh entry is served;
+    ///   * an expired entry inside the grace window is served AS IS, and one
+    ///     background refresh is started for it (stale-while-revalidate). Its
+    ///     answer lands in the cache for the next request, so the TTL costs no
+    ///     request its latency and no request a herd. A cluster pxdb has since
+    ///     deleted is answered 421 one request later than before -- still
+    ///     within the TTL, and the control-plane actions that must not wait
+    ///     even that long arrive through NOTIFY invalidation;
+    ///   * nothing servable: one lookup, shared by every request that needs
+    ///     it, then the PLAN §2 rule (`fallback`) on its outcome.
     async fn resolve_keyed(
         &self,
         cache_key: String,
         sql: &'static str,
         param: String,
     ) -> Option<Arc<ClusterCtx>> {
-        let slug = cache_key;
         let pool = self.db.as_ref()?;
+        let now = Instant::now();
 
-        // An expired entry is kept in hand, not dropped: should pxdb turn out
-        // to be unreachable it is the last known-good answer for this slug,
-        // and PLAN §2 wants that served rather than letting a control-plane
-        // outage 421 every cluster in the cell.
         let stale = {
             let cache = self.host_cache.read().unwrap();
-            match cache.get(&slug) {
-                Some(entry) if entry.expires_at > Instant::now() => return Some(entry.ctx.clone()),
-                Some(entry) => Some((entry.ctx.clone(), entry.expires_at)),
+            match cache.get(&cache_key) {
+                Some(e) if e.expires_at > now => return Some(e.ctx.clone()),
+                Some(e) => Some((e.ctx.clone(), e.expires_at, e.refresh_after)),
                 None => None,
             }
         };
 
-        let miss = match lookup_host(pool, sql, &param).await {
-            Lookup::Found(ctx) => {
-                let mut cache = self.host_cache.write().unwrap();
-                cache.insert(slug, HostEntry { ctx: ctx.clone(), expires_at: Instant::now() + HOST_TTL });
-                drop(cache);
-                return Some(ctx);
+        if let Some((ctx, expires_at, refresh_after)) = &stale {
+            if fallback(Miss::NoAnswer, Some(*expires_at), now, self.stale_grace) == Fallback::ServeStale {
+                if now >= *refresh_after {
+                    // Fire-and-forget: one task per key, a second start is a no-op.
+                    let work = host_lookup_work(pool, &self.host_cache, cache_key.clone(), sql, param);
+                    self.host_flights.start(&cache_key, work);
+                }
+                return Some(ctx.clone());
             }
-            Lookup::Absent => Miss::NoSuchRow,
-            Lookup::Unavailable => Miss::NoAnswer,
-        };
+        }
 
-        match fallback(miss, stale.as_ref().map(|(_, at)| *at), Instant::now(), self.stale_grace) {
-            Fallback::ServeStale => stale.map(|(ctx, _)| {
-                if stale_log_due(Instant::now()) {
-                    tracing::warn!(
-                        slug = %slug, grace_s = self.stale_grace.as_secs(),
-                        "pxdb unreachable: serving cluster from expired cache (fail-open, PLAN §2)"
-                    );
-                }
-                ctx
-            }),
-            Fallback::FailClosed => {
-                // Only when there is something to forget: a flood of garbage
-                // Host headers (the common 421 case) must not take the write
-                // lock, and never inserted an entry to begin with.
-                if stale.is_some() {
-                    self.host_cache.write().unwrap().remove(&slug);
-                }
-                None
-            }
-            Fallback::Deny => None,
+        let looked = self
+            .host_flights
+            .join(&cache_key, host_lookup_work(pool, &self.host_cache, cache_key.clone(), sql, param))
+            .await;
+        let miss = match looked {
+            Some(Lookup::Found(ctx)) => return Some(ctx),
+            Some(Lookup::Absent) => Miss::NoSuchRow,
+            Some(Lookup::Unavailable) | None => Miss::NoAnswer,
+        };
+        match fallback(miss, stale.as_ref().map(|(_, at, _)| *at), now, self.stale_grace) {
+            // Served above in practice; kept so the decision stays the one
+            // `fallback`'s tests pin.
+            Fallback::ServeStale => stale.map(|(ctx, _, _)| ctx),
+            Fallback::FailClosed | Fallback::Deny => None,
         }
     }
 
     /// Look up an API key by sha256 hash (hex). Returns the cluster and scopes.
-    pub async fn by_key_hash(&self, hash_hex: &str) -> Option<(Arc<ClusterCtx>, Uuid, Scopes)> {
+    /// Same three-way shape as `resolve_keyed`; a stale negative keeps
+    /// denying while its refresh runs, a stale positive is the fail-open of
+    /// PLAN §2 one refresh away from being confirmed or withdrawn.
+    pub async fn by_key_hash(&self, hash_hex: &str) -> Option<KeyResult> {
         let pool = self.db.as_ref()?;
+        let now = Instant::now();
 
-        // Same fail-open rule as resolve_slug, and needed for it to be worth
-        // anything: a cluster resolved from a stale host entry is still 401
-        // for every API-key request if the key lookup can't degrade too.
         let stale = {
             let cache = self.key_cache.read().unwrap();
             match cache.get(hash_hex) {
-                Some(entry) if entry.expires_at > Instant::now() => return entry.value.clone(),
-                Some(entry) => Some(entry.clone()),
+                Some(e) if e.expires_at > now => return e.value.clone(),
+                Some(e) => Some(e.clone()),
                 None => None,
             }
         };
 
-        let miss = match lookup_key(pool, hash_hex).await {
-            Lookup::Found(result) => {
-                let mut cache = self.key_cache.write().unwrap();
-                cache.insert(
-                    hash_hex.to_string(),
-                    KeyEntry { value: Some(result.clone()), expires_at: Instant::now() + KEY_POSITIVE_TTL },
-                );
-                drop(cache);
-                return Some(result);
-            }
-            Lookup::Absent => Miss::NoSuchRow,
-            Lookup::Unavailable => Miss::NoAnswer,
-        };
-
-        match fallback(miss, stale.as_ref().map(|e| e.expires_at), Instant::now(), self.stale_grace) {
-            Fallback::ServeStale => {
-                let served = stale.and_then(|e| e.value);
-                // Only a positive entry is a fail-open worth reporting; a
-                // stale negative just keeps denying.
-                if served.is_some() && stale_log_due(Instant::now()) {
-                    tracing::warn!(
-                        grace_s = self.stale_grace.as_secs(),
-                        "pxdb unreachable: serving api key from expired cache (fail-open, PLAN §2)"
-                    );
+        if let Some(e) = &stale {
+            if fallback(Miss::NoAnswer, Some(e.expires_at), now, self.stale_grace) == Fallback::ServeStale {
+                if now >= e.refresh_after {
+                    let work = key_lookup_work(pool, &self.key_cache, &self.touched, hash_hex);
+                    self.key_flights.start(hash_hex, work);
                 }
-                served
+                return e.value.clone();
             }
-            Fallback::FailClosed => {
-                // pxdb answered: this hash is unknown or revoked. The negative
-                // entry both denies and replaces any expired positive, so the
-                // grace window can never resurrect a revoked key.
-                let mut cache = self.key_cache.write().unwrap();
-                cache.insert(
-                    hash_hex.to_string(),
-                    KeyEntry { value: None, expires_at: Instant::now() + KEY_NEGATIVE_TTL },
-                );
-                drop(cache);
-                None
-            }
-            Fallback::Deny => None,
+        }
+
+        let looked = self
+            .key_flights
+            .join(hash_hex, key_lookup_work(pool, &self.key_cache, &self.touched, hash_hex))
+            .await;
+        let miss = match looked {
+            Some(Lookup::Found(result)) => return Some(result),
+            Some(Lookup::Absent) => Miss::NoSuchRow,
+            Some(Lookup::Unavailable) | None => Miss::NoAnswer,
+        };
+        match fallback(miss, stale.as_ref().map(|e| e.expires_at), now, self.stale_grace) {
+            Fallback::ServeStale => stale.and_then(|e| e.value),
+            Fallback::FailClosed | Fallback::Deny => None,
         }
     }
 
@@ -350,6 +487,28 @@ impl ClusterCache {
         let key_cache = self.key_cache.clone();
         tokio::spawn(async move {
             listen_forever(pxcfg, host_cache, key_cache).await;
+        });
+    }
+
+    /// Batched `api_keys.last_used_at` writer: a key is "touched" when a
+    /// lookup finds it (once per TTL per key, thanks to single-flight), and
+    /// the set is written as ONE statement every QUEEN_PROXY_KEY_TOUCH_MS,
+    /// off every request path. Best-effort like the inline UPDATE it
+    /// replaces: a failed flush is dropped and the next refresh re-touches.
+    /// No-op without a pxdb (dev-static).
+    pub fn spawn_touch_flush(&self) {
+        let Some(pool) = self.db.clone() else { return };
+        let touched = self.touched.clone();
+        tokio::spawn(async move {
+            let every = Duration::from_millis(
+                crate::config::env_u64("QUEEN_PROXY_KEY_TOUCH_MS", KEY_TOUCH_FLUSH_MS).max(1_000),
+            );
+            let mut tick = tokio::time::interval(every);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                flush_touched(&pool, &touched).await;
+            }
         });
     }
 }
@@ -417,20 +576,216 @@ async fn lookup_key(
         }
     };
 
-    // Best-effort last_used_at bump -- never fail the auth call over it. Only
-    // runs on a cache MISS (once per positive-TTL window per key), not per
-    // request.
-    let key_id_str = result.1.to_string();
+    // `last_used_at` is NOT bumped here: `apply_key_lookup` records the key
+    // and `spawn_touch_flush` writes the set in one statement per interval.
+    Lookup::Found(result)
+}
+
+// ------------------------------------------------------ lookup tasks
+
+/// The body of one host flight: look the row up, apply the outcome to the
+/// cache, hand the outcome to whoever is waiting. Runs in its own task.
+fn host_lookup_work(
+    pool: &deadpool_postgres::Pool,
+    cache: &Arc<HostMap>,
+    cache_key: String,
+    sql: &'static str,
+    param: String,
+) -> impl Future<Output = Lookup<Arc<ClusterCtx>>> + Send + 'static {
+    let pool = pool.clone();
+    let cache = cache.clone();
+    async move {
+        let looked = lookup_host(&pool, sql, &param).await;
+        apply_host_lookup(&cache, &cache_key, &looked);
+        looked
+    }
+}
+
+/// Same, for one key flight.
+fn key_lookup_work(
+    pool: &deadpool_postgres::Pool,
+    cache: &Arc<KeyMap>,
+    touched: &Arc<Touched>,
+    hash_hex: &str,
+) -> impl Future<Output = Lookup<KeyResult>> + Send + 'static {
+    let pool = pool.clone();
+    let cache = cache.clone();
+    let touched = touched.clone();
+    let hash = hash_hex.to_string();
+    async move {
+        let looked = lookup_key(&pool, &hash).await;
+        apply_key_lookup(&cache, &touched, &hash, &looked);
+        looked
+    }
+}
+
+// ------------------------------------------------------ outcome -> cache
+
+/// Apply a host lookup's outcome. Runs inside the single-flight task, so it
+/// happens exactly once per lookup whoever was waiting.
+fn apply_host_lookup(cache: &HostMap, key: &str, looked: &Lookup<Arc<ClusterCtx>>) {
+    match looked {
+        Lookup::Found(ctx) => {
+            let now = Instant::now();
+            cache.write().unwrap().insert(
+                key.to_string(),
+                HostEntry { ctx: ctx.clone(), expires_at: now + HOST_TTL, refresh_after: now + HOST_TTL },
+            );
+        }
+        // pxdb answered "no such row": forget any expired entry so a later
+        // outage can't resurrect a deleted cluster through the grace window.
+        // Only when there is something to forget -- a flood of garbage Host
+        // headers (the common 421 case) must not take the write lock.
+        Lookup::Absent => {
+            if cache.read().unwrap().contains_key(key) {
+                cache.write().unwrap().remove(key);
+            }
+        }
+        // No answer: the entry (if any) stays as the last known-good, and is
+        // not refreshed again before REFRESH_BACKOFF.
+        Lookup::Unavailable => {
+            if !cache.read().unwrap().contains_key(key) {
+                return;
+            }
+            let now = Instant::now();
+            let mut w = cache.write().unwrap();
+            let Some(e) = w.get_mut(key) else { return };
+            e.refresh_after = (now + REFRESH_BACKOFF).max(e.refresh_after);
+            drop(w);
+            if stale_log_due(now) {
+                tracing::warn!(
+                    slug = %key,
+                    "pxdb unreachable: serving cluster from expired cache (fail-open, PLAN §2)"
+                );
+            }
+        }
+    }
+}
+
+/// Apply a key lookup's outcome; same contract as `apply_host_lookup`.
+fn apply_key_lookup(cache: &KeyMap, touched: &Touched, hash_hex: &str, looked: &Lookup<KeyResult>) {
+    match looked {
+        Lookup::Found(result) => {
+            let now = Instant::now();
+            cache.write().unwrap().insert(
+                hash_hex.to_string(),
+                KeyEntry {
+                    value: Some(result.clone()),
+                    expires_at: now + KEY_POSITIVE_TTL,
+                    refresh_after: now + KEY_POSITIVE_TTL,
+                },
+            );
+            touched.lock().unwrap().insert(result.1);
+        }
+        // pxdb answered: this hash is unknown or revoked. The negative entry
+        // both denies and replaces any expired positive, so the grace window
+        // can never resurrect a revoked key.
+        //
+        // BOUNDED, unlike the positive side: the key is a sha256 of whatever
+        // the caller presented, so an unauthenticated caller chooses it, and
+        // nothing else ever removes these — `invalidate_caches` deliberately
+        // retains them (a cluster's invalidation has nothing to say about a
+        // garbage hash) and there is no TTL sweeper. Measured before this cap:
+        // 20 000 distinct garbage bearer tokens grew the process by ~4.6 MB
+        // (~230 B/key) and a sustained single-connection flood reached 99 MB in
+        // about two minutes, monotonically. The shared host is what makes it
+        // reachable with no Host gate in front (there, the key lookup IS the
+        // routing decision), and `limits.check_req` runs after authorize, so
+        // nothing else bounds it.
+        //
+        // `apply_host_lookup` answers the same problem by not caching a miss at
+        // all. Here the miss is worth caching — without it every request
+        // carrying a garbage key is a pxdb round trip — so it is capped
+        // instead: expired negatives are dropped first (they are only worth one
+        // avoided lookup each), and if the cap still holds, this one is simply
+        // not cached. The request is denied either way; only the memo is lost.
+        Lookup::Absent => {
+            let now = Instant::now();
+            let mut w = cache.write().unwrap();
+            let entry =
+                KeyEntry { value: None, expires_at: now + KEY_NEGATIVE_TTL, refresh_after: now + KEY_NEGATIVE_TTL };
+            // Replacing an entry (including an expired POSITIVE one, which is
+            // the revoked-key case) never grows the map, so it is never capped.
+            if w.contains_key(hash_hex) {
+                w.insert(hash_hex.to_string(), entry);
+                return;
+            }
+            // The O(1) length check is the trigger; the pass below is the only
+            // O(n) work, and it both prunes and counts, so a request never
+            // walks the map twice. Under a flood it runs once per ~TTL worth of
+            // keys (the entries it drops are the expired ones), not once per
+            // request.
+            if w.len() >= KEY_NEGATIVE_MAX {
+                let mut negatives = 0usize;
+                // Positives past their TTL are KEPT: the stale-while-revalidate
+                // grace window (`fallback`) is what serves them through a pxdb
+                // outage, and dropping them here would turn a flood into a
+                // fail-CLOSED for live keys. Only expired negatives go, and
+                // only they are counted against the cap.
+                w.retain(|_, e| {
+                    if e.value.is_some() {
+                        return true;
+                    }
+                    if e.expires_at <= now {
+                        return false;
+                    }
+                    negatives += 1;
+                    true
+                });
+                if negatives >= KEY_NEGATIVE_MAX {
+                    tracing::debug!(
+                        negatives,
+                        "negative api-key cache at its cap; denying without caching"
+                    );
+                    return;
+                }
+            }
+            w.insert(hash_hex.to_string(), entry);
+        }
+        Lookup::Unavailable => {
+            if !cache.read().unwrap().contains_key(hash_hex) {
+                return;
+            }
+            let now = Instant::now();
+            let mut w = cache.write().unwrap();
+            let Some(e) = w.get_mut(hash_hex) else { return };
+            e.refresh_after = (now + REFRESH_BACKOFF).max(e.refresh_after);
+            let positive = e.value.is_some();
+            drop(w);
+            // Only a positive entry is a fail-open worth reporting; a stale
+            // negative just keeps denying.
+            if positive && stale_log_due(now) {
+                tracing::warn!("pxdb unreachable: serving api key from expired cache (fail-open, PLAN §2)");
+            }
+        }
+    }
+}
+
+/// One statement for every key touched since the last tick.
+async fn flush_touched(pool: &deadpool_postgres::Pool, touched: &Touched) {
+    let ids: Vec<String> = {
+        let mut set = touched.lock().unwrap();
+        if set.is_empty() {
+            return;
+        }
+        set.drain().map(|id| id.to_string()).collect()
+    };
+    let client = match pool.get().await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!(error = %e, keys = ids.len(), "last_used_at flush: pxdb unavailable (non-fatal)");
+            return;
+        }
+    };
     if let Err(e) = client
         .execute(
-            "UPDATE queen_proxy.api_keys SET last_used_at = now() WHERE id = $1::text::uuid",
-            &[&key_id_str],
+            "UPDATE queen_proxy.api_keys SET last_used_at = now() WHERE id = ANY($1::text[]::uuid[])",
+            &[&ids],
         )
         .await
     {
-        tracing::debug!(error = %e, "by_key_hash: last_used_at update failed (non-fatal)");
+        tracing::debug!(error = %e, keys = ids.len(), "last_used_at flush failed (non-fatal)");
     }
-    Lookup::Found(result)
 }
 
 fn invalidate_caches(host_cache: &HostMap, key_cache: &KeyMap, cluster_id: Uuid) {
@@ -480,11 +835,20 @@ async fn listen_once(pxcfg: &PxdbConfig, host_cache: &Arc<HostMap>, key_cache: &
         .user(&pxcfg.user)
         .password(&pxcfg.password)
         .dbname(&pxcfg.dbname)
-        .application_name("queen-proxy-listen");
+        .application_name("queen-proxy-listen")
+        .connect_timeout(pxcfg.timeout());
     let listen_stmt = format!("LISTEN {INVAL_CHANNEL}");
 
     if pxcfg.use_ssl {
-        let connector = crate::pgtls::make_connector(pxcfg.ssl_reject_unauthorized);
+        // Same trust as the pool, from the same validated material — a LISTEN
+        // connection that trusted a different root set than the pool would be
+        // the worst kind of divergence: invalidations arriving over a link
+        // nobody audited.
+        let connector = crate::pgtls::make_connector(
+            pxcfg.ssl_reject_unauthorized,
+            pxcfg.ssl_root_cert.as_deref(),
+        )
+        .map_err(|e| format!("PXDB_SSL_ROOT_CERT: {e}"))?;
         let (client, connection) = pg.connect(connector).await.map_err(|e| format!("connect: {e}"))?;
         run_listen_session(client, connection, &listen_stmt, host_cache, key_cache, true).await
     } else {
@@ -774,19 +1138,17 @@ fn parse_features(json: &str) -> Features {
     }
 }
 
-/// First DNS label of a Host header, with the port stripped. Lowercased
-/// (DNS is case-insensitive; clusters.slug is stored lowercase). Only
-/// strips a trailing `:port` when what follows the colon is all-digits, so
-/// a colon that isn't a port separator doesn't get silently swallowed.
+/// First DNS label of a Host header, with the port and the DNS root label
+/// stripped. Lowercased (DNS is case-insensitive; clusters.slug is stored
+/// lowercase). The strip is `config::canonical_host` — the SAME one
+/// `Config::is_shared_host` uses, so a host cannot be shared for one of them
+/// and a slug for the other.
 fn slug_from_host(host: &str) -> Option<String> {
     let host = host.trim();
     if host.is_empty() {
         return None;
     }
-    let without_port = match host.rsplit_once(':') {
-        Some((h, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => h,
-        _ => host,
-    };
+    let without_port = crate::config::canonical_host(host);
     let label = without_port.split('.').next()?;
     if label.is_empty() {
         None
@@ -806,6 +1168,12 @@ mod tests {
         assert_eq!(slug_from_host("acme").as_deref(), Some("acme"));
         assert_eq!(slug_from_host(""), None);
         assert_eq!(slug_from_host(":6711"), None); // empty label once the port is stripped
+        // Fully-qualified: the same name, so the same slug. (The first label
+        // was never affected by the root dot; this pins that the shared
+        // `canonical_host` did not change it either.)
+        assert_eq!(slug_from_host("acme.eu1.queenmq.cloud.").as_deref(), Some("acme"));
+        assert_eq!(slug_from_host("acme.:6711").as_deref(), Some("acme"));
+        assert_eq!(slug_from_host("."), None);
     }
 
     #[test]
@@ -924,10 +1292,11 @@ mod tests {
 
     #[test]
     fn stale_log_is_sampled() {
+        let gate = LogGate::new();
         let t0 = Instant::now();
-        assert!(stale_log_due(t0), "first line is always due");
-        assert!(!stale_log_due(t0), "a second stale serve in the same instant is sampled out");
-        assert!(stale_log_due(t0 + STALE_LOG_INTERVAL), "due again once the interval elapses");
+        assert!(gate.due(t0), "first line is always due");
+        assert!(!gate.due(t0), "a second stale serve in the same instant is sampled out");
+        assert!(gate.due(t0 + STALE_LOG_INTERVAL), "due again once the interval elapses");
     }
 
     #[test]
@@ -973,5 +1342,166 @@ mod tests {
         // Junk in the JSONB is not a yes here either.
         assert!(!parse_features(r#"{"ephemeral":"true"}"#).ephemeral);
         assert!(!parse_features(r#"{"ephemeral":1}"#).ephemeral);
+    }
+
+    // ---- single-flight + outcome application ----
+
+    fn ctx(id: u128) -> Arc<ClusterCtx> {
+        Arc::new(ClusterCtx {
+            cluster_id: Uuid::from_u128(id),
+            tenant_id: Uuid::from_u128(id),
+            broker_tenant: Uuid::from_u128(id),
+            slug: format!("c{id}"),
+            cell_base_url: "http://127.0.0.1:1".to_string(),
+            cell_token: None,
+            status: ClusterStatus::Active,
+            limits: EffectiveLimits::default(),
+            features: Features::default(),
+        })
+    }
+
+    #[tokio::test]
+    async fn flights_run_one_lookup_per_key_and_share_the_result() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let flights: Arc<Flights<u32>> = Flights::new();
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut waiters = Vec::new();
+        for _ in 0..32 {
+            let runs = runs.clone();
+            waiters.push(flights.join("k", async move {
+                runs.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                7
+            }));
+        }
+        for w in waiters {
+            assert_eq!(w.await, Some(7));
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "32 concurrent callers, one lookup");
+        assert!(flights.map.lock().unwrap().is_empty(), "released once published");
+        assert_eq!(flights.join("other", async { 9 }).await, Some(9), "keys do not share");
+    }
+
+    #[tokio::test]
+    async fn a_fire_and_forget_refresh_still_runs() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let flights: Arc<Flights<u32>> = Flights::new();
+        let runs = Arc::new(AtomicUsize::new(0));
+        let r = runs.clone();
+        drop(flights.start("k", async move {
+            r.fetch_add(1, Ordering::SeqCst);
+            1
+        }));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "the task was spawned before the future was dropped");
+        assert!(flights.map.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_lookup_that_panics_releases_the_key_and_answers_none() {
+        let flights: Arc<Flights<u32>> = Flights::new();
+        let w1 = flights.join("k", async { panic!("lookup task died") });
+        let w2 = flights.join("k", async { 1 }); // joins the doomed flight
+        assert_eq!(w1.await, None);
+        assert_eq!(w2.await, None);
+        assert!(flights.map.lock().unwrap().is_empty(), "a dead flight must not pin the key");
+        assert_eq!(flights.join("k", async { 2 }).await, Some(2), "the key is usable again");
+    }
+
+    #[test]
+    fn host_outcomes_found_unavailable_absent() {
+        let cache: Arc<HostMap> = Arc::new(RwLock::new(HashMap::new()));
+        apply_host_lookup(&cache, "acme", &Lookup::Found(ctx(1)));
+        assert!(cache.read().unwrap()["acme"].expires_at > Instant::now());
+
+        // Expire it by hand, as it would be when a refresh runs for it.
+        let past = Instant::now() - Duration::from_secs(1);
+        {
+            let mut w = cache.write().unwrap();
+            let e = w.get_mut("acme").unwrap();
+            e.expires_at = past;
+            e.refresh_after = past;
+        }
+        apply_host_lookup(&cache, "acme", &Lookup::Unavailable);
+        assert!(cache.read().unwrap().contains_key("acme"), "kept: it is the fail-open material");
+        assert!(cache.read().unwrap()["acme"].refresh_after > Instant::now(), "no second refresh inside the backoff");
+
+        apply_host_lookup(&cache, "acme", &Lookup::Absent);
+        assert!(!cache.read().unwrap().contains_key("acme"), "pxdb said no: nothing left to resurrect");
+        apply_host_lookup(&cache, "garbage", &Lookup::Absent);
+        assert!(!cache.read().unwrap().contains_key("garbage"), "unknown hosts are never cached");
+    }
+
+    #[test]
+    fn key_outcomes_touch_positives_and_cache_negatives() {
+        let cache: Arc<KeyMap> = Arc::new(RwLock::new(HashMap::new()));
+        let touched: Arc<Touched> = Arc::new(Mutex::new(HashSet::new()));
+        let key_id = Uuid::from_u128(7);
+        apply_key_lookup(&cache, &touched, "h1", &Lookup::Found((ctx(1), key_id, Scopes::all())));
+        assert!(cache.read().unwrap()["h1"].value.is_some());
+        assert!(touched.lock().unwrap().contains(&key_id), "last_used_at is written by the batch");
+
+        // Revoked since: the negative replaces the positive, so no grace
+        // window can serve it again.
+        apply_key_lookup(&cache, &touched, "h1", &Lookup::Absent);
+        let e = cache.read().unwrap()["h1"].clone();
+        assert!(e.value.is_none());
+        assert!(e.expires_at <= Instant::now() + KEY_NEGATIVE_TTL);
+
+        // Unknown hash: a negative too, re-checked at the anti-brute-force cadence.
+        apply_key_lookup(&cache, &touched, "h2", &Lookup::Absent);
+        assert!(cache.read().unwrap()["h2"].value.is_none());
+
+        // No answer for a stale negative: it stays, backed off, and nothing is touched.
+        apply_key_lookup(&cache, &touched, "h2", &Lookup::Unavailable);
+        assert!(cache.read().unwrap()["h2"].value.is_none());
+        assert_eq!(touched.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_flood_of_unknown_keys_cannot_grow_the_cache_without_bound() {
+        // The cache key is a sha256 of what the CALLER presented, so its
+        // cardinality is chosen by an unauthenticated client — on a shared host
+        // with no Host gate in front of the lookup. Measured before the cap:
+        // ~230 B per distinct garbage token, growing monotonically for as long
+        // as the flood lasted.
+        let cache: Arc<KeyMap> = Arc::new(RwLock::new(HashMap::new()));
+        let touched: Arc<Touched> = Arc::new(Mutex::new(HashSet::new()));
+
+        // A live key, cached before the flood starts.
+        let key_id = Uuid::from_u128(7);
+        apply_key_lookup(&cache, &touched, "live", &Lookup::Found((ctx(1), key_id, Scopes::all())));
+
+        for i in 0..(KEY_NEGATIVE_MAX * 2) {
+            apply_key_lookup(&cache, &touched, &format!("{i:064x}"), &Lookup::Absent);
+        }
+        let map = cache.read().unwrap();
+        let negatives = map.values().filter(|e| e.value.is_none()).count();
+        assert!(negatives <= KEY_NEGATIVE_MAX, "negatives unbounded: {negatives}");
+        // The flood must not be able to evict a live key: that would turn a
+        // memory problem into a fail-closed one for real traffic.
+        assert!(map["live"].value.is_some(), "the flood evicted a live key");
+    }
+
+    #[test]
+    fn re_denying_a_hash_already_cached_is_never_capped() {
+        // One broken client retrying the same wrong key forever occupies one
+        // entry, so it must keep being memoised however full the map is —
+        // otherwise the cap turns exactly that case into a pxdb round trip per
+        // request.
+        let cache: Arc<KeyMap> = Arc::new(RwLock::new(HashMap::new()));
+        let touched: Arc<Touched> = Arc::new(Mutex::new(HashSet::new()));
+        for i in 0..KEY_NEGATIVE_MAX {
+            apply_key_lookup(&cache, &touched, &format!("{i:064x}"), &Lookup::Absent);
+        }
+        let hash = format!("{:064x}", 3);
+        apply_key_lookup(&cache, &touched, &hash, &Lookup::Absent);
+        assert!(cache.read().unwrap().contains_key(&hash));
+        // And a REVOKED key still replaces its positive at the cap, or the
+        // grace window would keep serving it.
+        let key_id = Uuid::from_u128(9);
+        apply_key_lookup(&cache, &touched, "revoked", &Lookup::Found((ctx(2), key_id, Scopes::all())));
+        apply_key_lookup(&cache, &touched, "revoked", &Lookup::Absent);
+        assert!(cache.read().unwrap()["revoked"].value.is_none(), "a revoked key must not survive");
     }
 }

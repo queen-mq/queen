@@ -338,3 +338,112 @@ R = 25 000 ev/s for 600 s, P = 1000, 88 503 408 deliveries across 12 streams,
 **0 dups, 0 gaps, 0 order violations**. It is a reference for the shape, not a
 baseline for this campaign — the 8-core campaign re-measures Queen from scratch on
 the same harness as everyone else (§5.1).
+
+---
+
+## 10. Hot-entity isolation cells
+
+Rev 1.1 — 2026-08-22. Added for the isolation campaign; §§0-9 are unchanged and
+every uniform result recorded under them remains valid.
+
+### 10.1 The question
+
+§0 asks what a system costs to serve this workload. This section asks a second
+question the cost table cannot answer:
+
+> When one entity receives far more traffic than the rest, does the pain stay
+> with that entity, or does it spread to its neighbours?
+
+That is the difference between per-key *ordering* and per-key *isolation*.
+Systems that make ordering cheap do not necessarily make isolation cheap, and a
+buyer who reads "ordered by key" as "isolated by key" is buying something that
+was never measured.
+
+### 10.2 The skew
+
+Two knobs, on top of an otherwise unchanged run:
+
+- `-hot-props H` — how many entities are hot. The hot entities are properties
+  `0 .. H-1`: fixed, not random, so any reader can re-derive the cohorts from
+  the raw stream logs without trusting the harness.
+- `-hot-factor F` — each hot entity receives `F` times a cold entity's share of
+  the offered rate.
+
+`H=0` or `F=1` is the uniform workload, executing the same code path. The
+baseline cell is therefore not a different program — it is this program with
+`F=1`, which is what makes the baseline comparable to the skewed cells.
+
+**The offered rate does not change.** Skew redistributes the same R across the
+same P entities. A cell that also raised the rate would be measuring overload,
+not isolation.
+
+**Delivery is interleaved, not bursty.** The producer uses exact integer
+Bresenham: over every window of `H·F + (P−H)` events, exactly `H·F` land on the
+hot cohort, spread as evenly as integer arithmetic permits. A hot entity
+delivered in bursts tests buffering; a hot entity delivered steadily tests
+head-of-line behaviour, and only the second is what a noisy neighbour is. The
+schedule is deterministic: same flags, same sequence, on every system.
+
+The wire format is untouched. Cohort is derived from the stamp's existing
+`prop` field at the moment of observation, so payload sizes, decode costs and
+the correctness contract of §3 are all identical to a uniform run.
+
+### 10.3 What is reported
+
+Per cohort, across both flows: p50 / p95 / p99 end-to-end, CO-corrected from
+the producer's scheduled instant exactly as in §4, plus the delivered count.
+
+**The cold cohort is the result. The hot cohort is the disturbance.** The
+neighbours' latency is what a tenant on a shared cell actually experiences; the
+noisy entity's own latency is a consequence of its own behaviour.
+
+Both are measured **inside the same run**. This is deliberate. Run-to-run
+variance on this harness is large — the 2026-08-04 reproducibility group put
+four identical Queen cells between p50 340 ms and 3 234 ms — so a cold-vs-hot
+delta taken across two runs would sit inside the noise. Within one run, both
+cohorts see the same broker, the same rotation and the same second.
+
+The cross-run comparison that remains meaningful is **cold at F=1 versus cold at
+F=N**: how much the neighbours degrade as one entity gets louder. Report it with
+the spread of the baseline cells, never as a single-run difference.
+
+### 10.4 The lane ceiling, and why it is printed
+
+One entity's messages are ordered, so an entity has a maximum service rate.
+The stage does a batch's simulated work concurrently and commits in order, so
+that ceiling is `perKeyBatch × 1000 / workMs`, not `1000 / workMs`: ordering
+costs a barrier per batch, not serialisation per message.
+
+Every cell prints the hot entity's offered rate, the ceiling at the configured
+batch cap, and whether the former exceeds the latter. When it does, the hot
+cohort's backlog grows for as long as the run lasts, and its percentiles are a
+function of run length rather than a steady state. Such a cell is still valid —
+it is the strongest form of the question — but its hot percentiles must be
+quoted with the run length, and never as "the latency of a hot key".
+
+The per-key batch a system actually achieves is its own property, and part of
+what is being compared: a system that hands over larger per-key batches
+genuinely serves a hot entity faster.
+
+### 10.5 Cell matrix
+
+`H=1` throughout: one noisy entity is the sharpest form of the question and the
+one a reader can picture. The sweep moves `F` only.
+
+| F | what it represents |
+|---:|---|
+| 1 | uniform baseline — the reference for cold |
+| 10 | a busy entity, still inside a serial lane's ceiling |
+| 50 | past the serial ceiling; ordering starts to bind |
+| 200 | one entity taking a sixth of a flow |
+| 1000 | one entity taking half of a flow |
+
+Correctness (§3) applies unchanged to every cell: **0 gaps, 0 dups, 0 order
+violations**, or the cell is a FAIL and is published as one.
+
+### 10.6 What an isolation cell cannot show
+
+It is one hot entity on one broker under one workload shape. It says nothing
+about whether isolation survives node loss, rebalance, or a hot entity that is
+hot for hours rather than minutes. It does not model a hot *tenant* (many
+entities at once) — that is the shared-cell campaign, not this one.

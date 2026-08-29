@@ -1,0 +1,29 @@
+ pct |  db   |  calls   | mean_ms  | total_s |                             q                              
+-----+-------+----------+----------+---------+------------------------------------------------------------
+  49 | queen | 34163341 |     2.83 | 96511.6 | SELECT (t.meta)::text, t.blobs, (t.states)::text FROM quee
+  34 | queen | 32900953 |     2.03 | 66911.7 | SELECT (queen.log_push_multi_v1($1, $2, $3, $4, $5, $6, $7
+   7 | queen | 31100342 |     0.42 | 13214.1 | SELECT (queen.log_ack_multi_v1($1::text[], $2::text[], $3:
+   2 | queen |   308496 |    11.97 |  3693.8 | SELECT r_id::text, r_name, r_write::text, r_cutoff::text F
+   1 | queen |      491 |  5601.95 |  2750.6 | SELECT pg_database_size(current_database()), (SELECT count
+   1 | queen | 13182392 |     0.17 |  2205.4 | SELECT (queen.log_retention_step_v1($1::text::uuid, $2::te
+   1 | queen | 34105750 |     0.06 |  2093.7 | SELECT q.dedup_window_seconds, p.id::text, p.last_offset F
+   1 | queen |      536 |  3683.08 |  1974.1 | SELECT (queen.log_refresh_all_stats_v1())::text
+   1 | queen | 13149458 |     0.12 |  1512.6 | SELECT (queen.log_txns_purge_step_v1($1::text::uuid, $2::t
+   1 | queen |      255 |  5879.04 |  1499.2 | SELECT count(*) FROM queen.log_segments
+   1 | queen | 30215681 |     0.05 |  1449.2 | SELECT EXISTS(SELECT $3 FROM queen.log_partitions p JOIN q
+   1 | queen |       53 | 24979.63 |  1323.9 | SELECT (queen.log_refresh_retained_bytes_v1())::text
+   0 | queen |    18760 |    45.21 |   848.1 | SELECT queue_name, partitions, segments, messages FROM que
+   0 | queen |       27 |  1895.84 |    51.2 | SELECT p.id::text, qq.id::text, CASE WHEN qq.retention_ena
+(14 rows)
+
+
+=== the four watched statements (yesterday -> today) ===
+                       q                        | calls | mean_ms | total_s 
+------------------------------------------------+-------+---------+---------
+ SELECT (queen.log_refresh_all_stats_v1())::tex |   536 | 3683.08 |  1974.1
+ SELECT queue_name, partitions, segments, messa | 18760 |   45.21 |   848.1
+ INSERT INTO queen_proxy.queues(cluster_id, nam |  1002 |    2.37 |     2.4
+ UPDATE queen_proxy.api_keys SET last_used_at = |  2777 |    0.47 |     1.3
+ INSERT INTO queen_proxy.queues(cluster_id, nam |  3096 |    0.11 |     0.3
+(5 rows)
+

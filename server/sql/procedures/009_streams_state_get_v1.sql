@@ -27,6 +27,10 @@
 --   ]
 --
 -- Filter precedence (in order, evaluated as AND):
+--   0. Always: the query must BELONG to p_tenant (Track B §5). A foreign
+--      (query_id, partition_id) therefore reads exactly like a missing key —
+--      an empty `rows` array, success:true — so this endpoint is not an oracle
+--      for the existence of another tenant's query.
 --   1. Always: query_id + partition_id match
 --   2. If `keys` is non-empty: key IN keys[]
 --   3. If `key_prefix` is non-empty: key LIKE prefix || '%'
@@ -47,7 +51,16 @@
 --   ]
 -- ============================================================================
 
-CREATE OR REPLACE FUNCTION queen.streams_state_get_v1(p_requests JSONB)
+-- Track B (§5): p_tenant added LAST with a DEFAULT, so a caller that omits it
+-- lands on the default tenant (OSS behaviour, byte-identical). The DROP is the
+-- pre-tenancy ONE-ARGUMENT signature — left in the catalog it would make a
+-- one-argument call ambiguous against this defaulted one rather than resolve
+-- (same discipline as 004_log_pop.sql's tenant pass).
+DROP FUNCTION IF EXISTS queen.streams_state_get_v1(JSONB);
+CREATE OR REPLACE FUNCTION queen.streams_state_get_v1(
+    p_requests JSONB,
+    p_tenant   UUID DEFAULT '00000000-0000-0000-0000-000000000001'
+)
 RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
@@ -104,6 +117,16 @@ BEGIN
         FROM queen_streams.state s
         WHERE s.query_id     = v_req.query_id
           AND s.partition_id = v_req.partition_id
+          -- OWNERSHIP (Track B §5). state carries no tenant column on purpose
+          -- (002_streams_schema): it is attributable through this FK, so the
+          -- ownership test is one PK probe on queries. Written as a predicate
+          -- rather than a pre-check + error so a foreign query_id returns the
+          -- SAME empty result a never-written key does — the no-oracle posture
+          -- the pid-addressed routes use their 404 for.
+          AND EXISTS (
+              SELECT 1 FROM queen_streams.queries q
+               WHERE q.id = s.query_id AND q.tenant_id = p_tenant
+          )
           AND (
               jsonb_array_length(v_req.keys) = 0
               OR EXISTS (
@@ -136,4 +159,4 @@ BEGIN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION queen.streams_state_get_v1(JSONB) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.streams_state_get_v1(JSONB, UUID) TO PUBLIC;

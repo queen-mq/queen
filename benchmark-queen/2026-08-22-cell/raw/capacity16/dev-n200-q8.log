@@ -1,0 +1,237 @@
+goload -mode cloud [dev-n200-q8] -> http://10.114.0.2:6711
+  target=proxy tenants=200 sharedQueue=true queue="app-q8" group="workers" partitions=100 brokerTenantHeader=false
+  offered=500.0 msg/s total (2.50/tenant) push-batch=1 -> 2.50 req/s per tenant across 1 producer(s) | max-inflight=4096
+  consumers=1/tenant popBatch=100 popWait=true autoAck=false | payload=256B | duration=120s drain=45s | idleConns=25/client verify=true
+[configure] 200 queue(s) configured in 1.08s
+[11:06:20 load ] offered=     500/s push=     253/s pop=     185/s ack=     166/s shed=    183/s inflight= 3596 | e2e p50=6127.62 p99=42729.47 ms | pushRTT p50=5799.94 p99=36962.30 ms | lag=4094 | err push=195 pop=18 ack=5 (429=0 403=0 5xx=0 to=111 conn=107) empty=8 cross=0 gor=14482
+[drain] producers stopped after 120.0s; draining 45s before the correctness verdict
+[11:07:20 drain] offered=     500/s push=     454/s pop=     433/s ack=     394/s shed=      2/s inflight= 3426 | e2e p50=12910.59 p99=77070.34 ms | pushRTT p50=692.22 p99=32899.07 ms | lag=5314 | err push=3025 pop=544 ack=136 (429=0 403=0 5xx=2919 to=564 conn=222) empty=13 cross=0 gor=12554
+
+========== dev-n200-q8 ==========
+offered        499.9 msg/s (59991 msgs, 11139 shed)
+achieved  push    381.6 msg/s (45793 msgs)   pop    309.1 msg/s during load (   295.6 msg/s over load+drain, 48768 msgs)   ack 45837 msgs
+e2eFromSchedule  n=48768     p50=15400.96 p95=68681.73 p99=94896.13 p999=121110.53 max=139904.61 ms
+e2eFromSend      n=48768     p50=15138.82 p95=68681.73 p99=93847.55 p999=121110.53 max=139904.02 ms
+pushRtt          n=45793     p50= 2146.30 p95=25034.75 p99=36438.02 p999=40632.32 max= 45846.29 ms
+ackRtt           n=3898      p50=  122.37 p95=16711.68 p99=31850.50 p999=44302.34 max= 44479.04 ms
+errors push       total=3059 kinds=map[conn:228 http_5xx:2617 timeout:214] codes=map[502/bad_gateway:2617]
+    first timeout: push request failed: request failed after 1 attempts: Post "http://10.114.0.2:6711/api/v1/push": context deadline exceeded
+    first http_5xx: push request failed: request failed after 1 attempts: HTTP 502 [bad_gateway]: {"code":"bad_gateway","error":"upstream unreachable"}
+    first conn: push request failed: request failed after 1 attempts: Post "http://10.114.0.2:6711/api/v1/push": dial tcp 10.114.0.2:6711: connect: cannot assign requested address
+errors pop        total=954 kinds=map[canceled:200 http_5xx:433 timeout:521] codes=map[502/bad_gateway:433]
+    first timeout: pop request failed: Get "http://10.114.0.2:6711/api/v1/pop/queue/app-q8?autoAck=false&batch=100&consumerGroup=workers&partitions=100&timeout=5000&wait=true": context deadline exceeded
+    first http_5xx: pop request failed: request failed after 1 attempts: HTTP 502 [bad_gateway]: {"code":"bad_gateway","error":"upstream unreachable"}
+errors ack        total=146 kinds=map[conn:1 http_5xx:135 timeout:10] codes=map[502/bad_gateway:135]
+    first http_5xx: batch ack request failed: request failed after 1 attempts: HTTP 502 [bad_gateway]: {"code":"bad_gateway","error":"upstream unreachable"}
+    first timeout: batch ack request failed: request failed after 1 attempts: Post "http://10.114.0.2:6711/api/v1/ack/batch": context deadline exceeded
+    first conn: batch ack request failed: request failed after 1 attempts: Post "http://10.114.0.2:6711/api/v1/ack/batch": dial tcp 10.114.0.2:6711: connect: cannot assign requested address
+bytes     nominal 292 B/msg -> pushed 12.75 MiB, delivered 13.58 MiB
+
+---- delivery correctness (after the drain) ----
+idx  tenant         queue           sentOk  received  missing      dup   extra   cross verdict
+0    cd-0000        app-q8             228       256        0       12      16       0 FAIL
+1    cd-0001        app-q8             242       243        0        0       1       0 FAIL
+2    cd-0002        app-q8             238       305        0       66       1       0 FAIL
+3    cd-0003        app-q8             228       254        0       26       0       0 FAIL
+4    cd-0004        app-q8             236       256        0       20       0       0 FAIL
+5    cd-0005        app-q8             208       247        0       20      19       0 FAIL
+6    cd-0006        app-q8             253       319        0       65       1       0 FAIL
+7    cd-0007        app-q8             220       238        0       17       1       0 FAIL
+8    cd-0008        app-q8             216       224        0        7       1       0 FAIL
+9    cd-0009        app-q8             242       243        0        0       1       0 FAIL
+10   cd-0010        app-q8             216       217        0        0       1       0 FAIL
+11   cd-0011        app-q8             225       251        0        9      17       0 FAIL
+12   cd-0012        app-q8             212       246        0       17      17       0 FAIL
+13   cd-0013        app-q8             213       238        0        7      18       0 FAIL
+14   cd-0014        app-q8             239       240        0        0       1       0 FAIL
+15   cd-0015        app-q8             230       230        0        0       0       0 OK
+16   cd-0016        app-q8             205       227        0       21       1       0 FAIL
+17   cd-0017        app-q8             254       254        0        0       0       0 OK
+18   cd-0018        app-q8             219       259        0       40       0       0 FAIL
+19   cd-0019        app-q8             205       245        0       20      20       0 FAIL
+20   cd-0020        app-q8             229       270        0       40       1       0 FAIL
+21   cd-0021        app-q8             226       262        0       15      21       0 FAIL
+22   cd-0022        app-q8             225       245        0       20       0       0 FAIL
+23   cd-0023        app-q8             254       296        0       41       1       0 FAIL
+24   cd-0024        app-q8             229       292        0       63       0       0 FAIL
+25   cd-0025        app-q8             224       243        0       19       0       0 FAIL
+26   cd-0026        app-q8             209       218        0        9       0       0 FAIL
+27   cd-0027        app-q8             214       214        0        0       0       0 OK
+28   cd-0028        app-q8             227       263        0       36       0       0 FAIL
+29   cd-0029        app-q8             220       220        0        0       0       0 OK
+30   cd-0030        app-q8             223       265        0       42       0       0 FAIL
+31   cd-0031        app-q8             227       261        0       34       0       0 FAIL
+32   cd-0032        app-q8             236       245        0        9       0       0 FAIL
+33   cd-0033        app-q8             234       234        0        0       0       0 OK
+34   cd-0034        app-q8             224       236        0       12       0       0 FAIL
+35   cd-0035        app-q8             220       229        0        9       0       0 FAIL
+36   cd-0036        app-q8             224       233        0        9       0       0 FAIL
+37   cd-0037        app-q8             218       226        0        8       0       0 FAIL
+38   cd-0038        app-q8             225       225        0        0       0       0 OK
+39   cd-0039        app-q8             247       247        0        0       0       0 OK
+40   cd-0040        app-q8             242       251        0        9       0       0 FAIL
+41   cd-0041        app-q8             235       235        0        0       0       0 OK
+42   cd-0042        app-q8             226       240        0       14       0       0 FAIL
+43   cd-0043        app-q8             251       251        0        0       0       0 OK
+44   cd-0044        app-q8             231       240        0        9       0       0 FAIL
+45   cd-0045        app-q8             222       247        0       25       0       0 FAIL
+46   cd-0046        app-q8             220       233        0       13       0       0 FAIL
+47   cd-0047        app-q8             237       293        0       56       0       0 FAIL
+48   cd-0048        app-q8             232       289        0       57       0       0 FAIL
+49   cd-0049        app-q8             242       242        0        0       0       0 OK
+50   cd-0050        app-q8             248       262        0       12       2       0 FAIL
+51   cd-0051        app-q8             227       233        0        4       2       0 FAIL
+52   cd-0052        app-q8             214       215        0        0       1       0 FAIL
+53   cd-0053        app-q8             236       238        0        0       2       0 FAIL
+54   cd-0054        app-q8             232       233        0        0       1       0 FAIL
+55   cd-0055        app-q8             242       243        0        0       1       0 FAIL
+56   cd-0056        app-q8             223       247        0       21       3       0 FAIL
+57   cd-0057        app-q8             237       255        0       16       2       0 FAIL
+58   cd-0058        app-q8             211       216        0        2       3       0 FAIL
+59   cd-0059        app-q8             255       263        0        8       0       0 FAIL
+60   cd-0060        app-q8             233       266        0       32       1       0 FAIL
+61   cd-0061        app-q8             226       234        0        6       2       0 FAIL
+62   cd-0062        app-q8             223       233        0        9       1       0 FAIL
+63   cd-0063        app-q8             225       227        0        0       2       0 FAIL
+64   cd-0064        app-q8             221       238        0       17       0       0 FAIL
+65   cd-0065        app-q8             227       231        0        3       1       0 FAIL
+66   cd-0066        app-q8             219       229        0        9       1       0 FAIL
+67   cd-0067        app-q8             240       263        0       21       2       0 FAIL
+68   cd-0068        app-q8             207       239        0       32       0       0 FAIL
+69   cd-0069        app-q8             239       278        0       39       0       0 FAIL
+70   cd-0070        app-q8             226       236        0        9       1       0 FAIL
+71   cd-0071        app-q8             216       218        0        0       2       0 FAIL
+72   cd-0072        app-q8             236       237        0        0       1       0 FAIL
+73   cd-0073        app-q8             237       273        0       36       0       0 FAIL
+74   cd-0074        app-q8             218       219        0        0       1       0 FAIL
+75   cd-0075        app-q8             237       257        0       17       3       0 FAIL
+76   cd-0076        app-q8             221       238        0       13       4       0 FAIL
+77   cd-0077        app-q8             217       254        0       36       1       0 FAIL
+78   cd-0078        app-q8             232       241        0        8       1       0 FAIL
+79   cd-0079        app-q8             233       277        0       44       0       0 FAIL
+80   cd-0080        app-q8             239       308        0       68       1       0 FAIL
+81   cd-0081        app-q8             229       229        0        0       0       0 OK
+82   cd-0082        app-q8             246       247        0        1       0       0 FAIL
+83   cd-0083        app-q8             227       231        0        2       2       0 FAIL
+84   cd-0084        app-q8             223       258        0       34       1       0 FAIL
+85   cd-0085        app-q8             222       225        0        3       0       0 FAIL
+86   cd-0086        app-q8             234       254        0       17       3       0 FAIL
+87   cd-0087        app-q8             242       269        0       27       0       0 FAIL
+88   cd-0088        app-q8             235       303        0       66       2       0 FAIL
+89   cd-0089        app-q8             236       304        0       65       3       0 FAIL
+90   cd-0090        app-q8             226       241        0       13       2       0 FAIL
+91   cd-0091        app-q8             227       266        0       38       1       0 FAIL
+92   cd-0092        app-q8             232       252        0       17       3       0 FAIL
+93   cd-0093        app-q8             242       263        0       18       3       0 FAIL
+94   cd-0094        app-q8             218       229        0        9       2       0 FAIL
+95   cd-0095        app-q8             220       236        0       14       2       0 FAIL
+96   cd-0096        app-q8             221       238        0       15       2       0 FAIL
+97   cd-0097        app-q8             215       233        0       16       2       0 FAIL
+98   cd-0098        app-q8             223       226        0        0       3       0 FAIL
+99   cd-0099        app-q8             221       222        0        0       1       0 FAIL
+100  cd-0100        app-q8             235       241        0        6       0       0 FAIL
+101  cd-0101        app-q8             215       220        0        5       0       0 FAIL
+102  cd-0102        app-q8             233       303        0       70       0       0 FAIL
+103  cd-0103        app-q8             228       237        0        9       0       0 FAIL
+104  cd-0104        app-q8             241       241        0        0       0       0 OK
+105  cd-0105        app-q8             240       245        0        5       0       0 FAIL
+106  cd-0106        app-q8             252       261        0        9       0       0 FAIL
+107  cd-0107        app-q8             230       230        0        0       0       0 OK
+108  cd-0108        app-q8             227       270        0       43       0       0 FAIL
+109  cd-0109        app-q8             234       233        1        0       0       0 FAIL  firstMissing=[1]
+110  cd-0110        app-q8             213       212        1        0       0       0 FAIL  firstMissing=[1]
+111  cd-0111        app-q8             231       230        1        0       0       0 FAIL  firstMissing=[1]
+112  cd-0112        app-q8             240       245        0        5       0       0 FAIL
+113  cd-0113        app-q8             230       235        0        5       0       0 FAIL
+114  cd-0114        app-q8             238       259        1       22       0       0 FAIL  firstMissing=[1]
+115  cd-0115        app-q8             241       240        1        0       0       0 FAIL  firstMissing=[1]
+116  cd-0116        app-q8             231       240        1        9       1       0 FAIL  firstMissing=[3]
+117  cd-0117        app-q8             221       220        1        0       0       0 FAIL  firstMissing=[1]
+118  cd-0118        app-q8             231       242        0       11       0       0 FAIL
+119  cd-0119        app-q8             228       227        1        0       0       0 FAIL  firstMissing=[1]
+120  cd-0120        app-q8             246       297        1       52       0       0 FAIL  firstMissing=[1]
+121  cd-0121        app-q8             217       239        0       22       0       0 FAIL
+122  cd-0122        app-q8             220       219        1        0       0       0 FAIL  firstMissing=[1]
+123  cd-0123        app-q8             217       226        1       10       0       0 FAIL  firstMissing=[2]
+124  cd-0124        app-q8             245       260        2       17       0       0 FAIL  firstMissing=[1 4]
+125  cd-0125        app-q8             231       240        0        9       0       0 FAIL
+126  cd-0126        app-q8             234       264        1       31       0       0 FAIL  firstMissing=[1]
+127  cd-0127        app-q8             229       242        0       13       0       0 FAIL
+128  cd-0128        app-q8             222       221        1        0       0       0 FAIL  firstMissing=[3]
+129  cd-0129        app-q8             227       236        0        9       0       0 FAIL
+130  cd-0130        app-q8             249       260        1       12       0       0 FAIL  firstMissing=[1]
+131  cd-0131        app-q8             228       227        1        0       0       0 FAIL  firstMissing=[1]
+132  cd-0132        app-q8             239       237        2        0       0       0 FAIL  firstMissing=[1 2]
+133  cd-0133        app-q8             229       229        0        0       0       0 OK
+134  cd-0134        app-q8             224       292        1       69       0       0 FAIL  firstMissing=[1]
+135  cd-0135        app-q8             222       220        2        0       0       0 FAIL  firstMissing=[1 4]
+136  cd-0136        app-q8             228       227        1        0       0       0 FAIL  firstMissing=[1]
+137  cd-0137        app-q8             227       237        0       10       0       0 FAIL
+138  cd-0138        app-q8             244       322        0       78       0       0 FAIL
+139  cd-0139        app-q8             249       248        1        0       0       0 FAIL  firstMissing=[1]
+140  cd-0140        app-q8             219       243        1       25       0       0 FAIL  firstMissing=[1]
+141  cd-0141        app-q8             219       219        0        0       0       0 OK
+142  cd-0142        app-q8             233       233        0        0       0       0 OK
+143  cd-0143        app-q8             249       329        2       82       0       0 FAIL  firstMissing=[1 4]
+144  cd-0144        app-q8             198       197        1        0       0       0 FAIL  firstMissing=[1]
+145  cd-0145        app-q8             225       231        0        6       0       0 FAIL
+146  cd-0146        app-q8             235       268        0       33       0       0 FAIL
+147  cd-0147        app-q8             234       233        1        0       0       0 FAIL  firstMissing=[1]
+148  cd-0148        app-q8             220       240        1       21       0       0 FAIL  firstMissing=[1]
+149  cd-0149        app-q8             209       238        2       31       0       0 FAIL  firstMissing=[1 4]
+150  cd-0150        app-q8             240       268        1       29       0       0 FAIL  firstMissing=[1]
+151  cd-0151        app-q8             239       245        0        6       0       0 FAIL
+152  cd-0152        app-q8             226       232        0        6       0       0 FAIL
+153  cd-0153        app-q8             222       239        1       18       0       0 FAIL  firstMissing=[1]
+154  cd-0154        app-q8             230       237        0        7       0       0 FAIL
+155  cd-0155        app-q8             243       268        1       26       0       0 FAIL  firstMissing=[1]
+156  cd-0156        app-q8             222       221        1        0       0       0 FAIL  firstMissing=[1]
+157  cd-0157        app-q8             213       212        1        0       0       0 FAIL  firstMissing=[1]
+158  cd-0158        app-q8             216       249        2       35       0       0 FAIL  firstMissing=[1 2]
+159  cd-0159        app-q8             249       247        2        0       0       0 FAIL  firstMissing=[1 2]
+160  cd-0160        app-q8             239       263        1       25       0       0 FAIL  firstMissing=[1]
+161  cd-0161        app-q8             226       224        2        0       0       0 FAIL  firstMissing=[1 2]
+162  cd-0162        app-q8             235       244        0        9       0       0 FAIL
+163  cd-0163        app-q8             230       234        0        4       0       0 FAIL
+164  cd-0164        app-q8             219       218        1        0       0       0 FAIL  firstMissing=[1]
+165  cd-0165        app-q8             247       246        1        0       0       0 FAIL  firstMissing=[1]
+166  cd-0166        app-q8             234       242        0        8       0       0 FAIL
+167  cd-0167        app-q8             243       243        0        0       0       0 OK
+168  cd-0168        app-q8             224       223        1        0       0       0 FAIL  firstMissing=[1]
+169  cd-0169        app-q8             238       274        0       36       0       0 FAIL
+170  cd-0170        app-q8             237       236        1        0       0       0 FAIL  firstMissing=[1]
+171  cd-0171        app-q8             245       245        0        0       0       0 OK
+172  cd-0172        app-q8             242       242        0        0       0       0 OK
+173  cd-0173        app-q8             221       221        0        0       0       0 OK
+174  cd-0174        app-q8             224       238        1       15       0       0 FAIL  firstMissing=[1]
+175  cd-0175        app-q8             229       228        1        0       0       0 FAIL  firstMissing=[1]
+176  cd-0176        app-q8             216       213        3        0       0       0 FAIL  firstMissing=[1 2 4]
+177  cd-0177        app-q8             198       205        0        7       0       0 FAIL
+178  cd-0178        app-q8             212       212        0        0       0       0 OK
+179  cd-0179        app-q8             230       228        2        0       0       0 FAIL  firstMissing=[1 3]
+180  cd-0180        app-q8             205       203        2        0       0       0 FAIL  firstMissing=[1 4]
+181  cd-0181        app-q8             229       280        2       53       0       0 FAIL  firstMissing=[1 4]
+182  cd-0182        app-q8             216       214        2        0       0       0 FAIL  firstMissing=[1 2]
+183  cd-0183        app-q8             235       235        0        0       0       0 OK
+184  cd-0184        app-q8             231       240        0        9       0       0 FAIL
+185  cd-0185        app-q8             229       251        0       22       0       0 FAIL
+186  cd-0186        app-q8             227       236        0        9       0       0 FAIL
+187  cd-0187        app-q8             216       216        0        0       0       0 OK
+188  cd-0188        app-q8             223       223        0        0       0       0 OK
+189  cd-0189        app-q8             232       238        1        7       0       0 FAIL  firstMissing=[3]
+190  cd-0190        app-q8             240       240        0        0       0       0 OK
+191  cd-0191        app-q8             251       251        0        0       0       0 OK
+192  cd-0192        app-q8             223       222        1        0       0       0 FAIL  firstMissing=[1]
+193  cd-0193        app-q8             216       220        0        4       0       0 FAIL
+194  cd-0194        app-q8             240       240        0        0       0       0 OK
+195  cd-0195        app-q8             215       249        0       34       0       0 FAIL
+196  cd-0196        app-q8             238       245        0        7       0       0 FAIL
+197  cd-0197        app-q8             245       245        0        0       0       0 OK
+198  cd-0198        app-q8             231       239        0        8       0       0 FAIL
+199  cd-0199        app-q8             217       215        2        0       0       0 FAIL  firstMissing=[1 4]
+     TOTAL                           45793     48768       65     2826     214       0
+VERDICT: FAIL
+CAUTION: 65 missing may be BACKLOG, not loss — 0 messages were still arriving in the last 2s of the drain and the consumer side hit 954 error(s) (map[502/bad_gateway:433]). Re-run with a longer -drain, or size -drain to the rate the plan actually permits.
+
+[artifacts] /root/cap16-dev/dev-n200-q8.json
+            /root/cap16-dev/dev-n200-q8-interval.csv

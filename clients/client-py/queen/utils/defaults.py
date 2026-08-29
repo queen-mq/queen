@@ -32,9 +32,19 @@ QUEUE_DEFAULTS: Dict[str, Any] = {
     "encryption_enabled": False,  # No encryption by default
 }
 
+# `batch` and `max_partitions` here are the AUTOPILOT-OFF defaults. With
+# autopilot on (the default) a knob the caller never set is not defaulted at all
+# -- it is omitted from the pop so the broker sizes it (see utils/autopilot.py).
+# These values are what comes back with QueueBuilder.autopilot(False), or with
+# QUEEN_SDK_POP_AUTOPILOT=off for a whole process.
 CONSUME_DEFAULTS: Dict[str, Any] = {
     "concurrency": 1,  # Single worker
-    "batch": 1,  # One message at a time
+    "batch": 1,  # One message at a time (autopilot off only)
+    # v4 multi-partition pop cap (autopilot off only). Listed here at last: §4
+    # of PLAN_CONFLATION calls out by name that `partitions` never made it into
+    # this table, which is how the consume path ended up with a builder option
+    # that had no default to read.
+    "max_partitions": 1,
     "auto_ack": True,  # Client-side auto-ack (NOT sent to server)
     "wait": True,  # Long polling enabled
     "timeout_millis": 30000,  # 30 seconds long poll timeout
@@ -57,8 +67,9 @@ CONSUME_DEFAULTS: Dict[str, Any] = {
     "conflation": False,
 }
 
+# As in CONSUME_DEFAULTS, `batch` is the autopilot-OFF default.
 POP_DEFAULTS: Dict[str, Any] = {
-    "batch": 1,  # One message
+    "batch": 1,  # One message (autopilot off only)
     "wait": False,  # No long polling (immediate return)
     "timeout_millis": 30000,  # 30 seconds if wait=true
     "auto_ack": False,  # Server-side auto-ack (false = manual ack required)

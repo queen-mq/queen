@@ -1,0 +1,36 @@
+goload -mode cloud [pro-q1] -> http://10.114.0.2:6711
+  active partitions: 5000 of 5000 per queue (100.000%)
+  target=proxy tenants=7 sharedQueue=true queue="pro-q1" group="workers" partitions=5000 brokerTenantHeader=false
+  offered=35.0 msg/s total (5.00/tenant) push-batch=1 -> 5.00 req/s per tenant across 1 producer(s) | max-inflight=256
+  consumers=2/tenant popBatch=100 popWait=true autoAck=false | payload=256B | duration=900s drain=60s | idleConns=8/client verify=true
+[configure] 7 queue(s) configured in 0.39s
+[06:03:08 load ] offered=      35/s push=      35/s pop=      35/s ack=      35/s shed=      0/s inflight=    0 | e2e p50=  13.25 p99=  150.53 ms | pushRTT p50=  6.24 p99=  35.58 ms | lag=10 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=4 cross=0 gor=66
+[06:08:08 load ] offered=      35/s push=      35/s pop=      35/s ack=      35/s shed=      0/s inflight=    0 | e2e p50=  16.19 p99=  168.96 ms | pushRTT p50=  7.52 p99=  39.68 ms | lag=10 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=4 cross=0 gor=66
+[drain] producers stopped after 900.0s; draining 60s before the correctness verdict
+[06:13:08 drain] offered=      35/s push=      35/s pop=      35/s ack=      35/s shed=      0/s inflight=    0 | e2e p50=  15.55 p99=  226.30 ms | pushRTT p50=  7.14 p99=  39.68 ms | lag=10 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=6 cross=0 gor=65
+
+========== pro-q1 ==========
+offered         35.0 msg/s (31500 msgs, 0 shed)
+achieved  push     35.0 msg/s (31500 msgs)   pop     35.0 msg/s during load (    32.8 msg/s over load+drain, 31490 msgs)   ack 31490 msgs
+e2eFromSchedule  n=31490     p50=   14.91 p95=   70.14 p99=  175.10 p999=  544.77 max=  1230.83 ms
+e2eFromSend      n=31490     p50=   14.40 p95=   69.12 p99=  175.10 p999=  544.77 max=  1230.28 ms
+pushRtt          n=31500     p50=    6.94 p95=   22.40 p99=   38.14 p999=  122.37 max=   501.80 ms
+ackRtt           n=31314     p50=    4.64 p95=   14.02 p99=   22.40 p999=   44.80 max=   252.22 ms
+errors            none
+bytes     nominal 292 B/msg -> pushed 8.77 MiB, delivered 8.77 MiB
+
+---- delivery correctness (after the drain) ----
+idx  tenant         queue           sentOk  received  missing      dup   extra   cross verdict
+0    sp-0000        pro-q1            4500      4498        2        0       0       0 FAIL  firstMissing=[1 2]
+1    sp-0001        pro-q1            4500      4500        0        0       0       0 OK
+2    sp-0002        pro-q1            4500      4498        2        0       0       0 FAIL  firstMissing=[1 2]
+3    sp-0003        pro-q1            4500      4498        2        0       0       0 FAIL  firstMissing=[1 2]
+4    sp-0004        pro-q1            4500      4499        1        0       0       0 FAIL  firstMissing=[1]
+5    sp-0005        pro-q1            4500      4498        2        0       0       0 FAIL  firstMissing=[1 2]
+6    sp-0006        pro-q1            4500      4499        1        0       0       0 FAIL  firstMissing=[1]
+     TOTAL                           31500     31490       10        0       0       0
+VERDICT: FAIL
+NOTE: consumers were idle at the cutoff and the consume path reported no errors, so 10 missing is real LOSS, not a tail.
+
+[artifacts] /root/soak/gate/pro-q1.json
+            /root/soak/gate/pro-q1-interval.csv

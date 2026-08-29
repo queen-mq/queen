@@ -347,9 +347,14 @@ func (r *Runner) popMessages(ctx context.Context) ([]Message, error) {
 		Wait(true).
 		TimeoutMillis(r.opts.MaxWaitMillis).
 		Group(r.consumerGroup)
-	if r.opts.MaxPartitions > 1 {
-		src = src.Partitions(r.opts.MaxPartitions)
-	}
+	// Unconditional, and it has to be: the runtime has already defaulted
+	// MaxPartitions (to 4), so this is always a decision the streams layer
+	// made. Skipping the call for MaxPartitions == 1 used to be a harmless
+	// optimisation -- 1 was what an omitted `partitions` meant on the wire --
+	// but with pop autopilot an omitted `partitions` means "broker, you
+	// choose", which would widen a query that explicitly asked for one
+	// partition per pop.
+	src = src.Partitions(r.opts.MaxPartitions)
 	if r.opts.SubscriptionMode != "" {
 		src = src.SubscriptionMode(r.opts.SubscriptionMode)
 	}

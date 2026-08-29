@@ -1,0 +1,118 @@
+{
+  "cell": "cell-01",
+  "plan": "dev",
+  "prefix": "sd",
+  "generatedAt": "2026-08-23T11:11:27Z",
+  "tenants": [
+    {
+      "idx": 0,
+      "tenantSlug": "sd-0000",
+      "clusterSlug": "sd-0000",
+      "tenantId": "beffc313-f8de-491a-aaf3-adbeea0a8597",
+      "clusterId": "72620453-0296-4901-a130-865c05f8c1d6",
+      "brokerTenant": "a041be81-a9c3-4ec5-9015-62202bf9ddde",
+      "apiKey": "qk_live_eY-OgwJneF9Kv9kCAwhCWCWmAMduRKHIGIwuuqQiq8M",
+      "plan": "dev"
+    },
+    {
+      "idx": 1,
+      "tenantSlug": "sd-0001",
+      "clusterSlug": "sd-0001",
+      "tenantId": "41acd3c1-bbbf-4b10-8b86-29f17b18bb64",
+      "clusterId": "5d3c6f52-9461-4535-98a2-41dfa0327b27",
+      "brokerTenant": "8e3c4902-637d-4620-9ab0-caffa0ad1e56",
+      "apiKey": "qk_live_tjWR_WK_jRtkgcHHC9W_IOtgHoU-qPIrEsoTiBiFdng",
+      "plan": "dev"
+    },
+    {
+      "idx": 2,
+      "tenantSlug": "sd-0002",
+      "clusterSlug": "sd-0002",
+      "tenantId": "809464cd-47f2-4481-8941-818dd04bf5f0",
+      "clusterId": "211e271c-dc8d-4f0f-8e8a-84a8cae10098",
+      "brokerTenant": "9cbac476-f409-42fa-9b7e-cf69f5977f8c",
+      "apiKey": "qk_live_-6bzYSGG_Mq4pP3EfdKTqOM-U_k5Z5UsI16rAFV5vgE",
+      "plan": "dev"
+    },
+    {
+      "idx": 3,
+      "tenantSlug": "sd-0003",
+      "clusterSlug": "sd-0003",
+      "tenantId": "51c6e1ab-f7de-4887-96d3-6a2ff471c271",
+      "clusterId": "a9ea2784-e317-4b4b-b543-540e99f11f89",
+      "brokerTenant": "50b8a503-9371-4684-8891-c8bd7d2444b6",
+      "apiKey": "qk_live_kkQWA3j0h5WZqImGFKKCBvvVNrn7laapSc7Ysgu7Hfc",
+      "plan": "dev"
+    },
+    {
+      "idx": 4,
+      "tenantSlug": "sd-0004",
+      "clusterSlug": "sd-0004",
+      "tenantId": "8fdbc2a5-f080-479c-bd79-1cd16b9ef61d",
+      "clusterId": "2817d9e4-e36e-4065-ab5e-7afd9e00db96",
+      "brokerTenant": "d8c572cb-161d-4fa9-865d-16317418e044",
+      "apiKey": "qk_live_OcAlmb-nVD8M3D2lu1CLm04-a4yjGUSM4mxYnkETeM8",
+      "plan": "dev"
+    },
+    {
+      "idx": 5,
+      "tenantSlug": "sd-0005",
+      "clusterSlug": "sd-0005",
+      "tenantId": "d2302a0b-70e9-4068-858d-13d12385f8cb",
+      "clusterId": "5f24db21-8edd-4a8c-a4ad-627b1a20ff69",
+      "brokerTenant": "d1d579c3-85c4-4598-b530-b95ff9dfadb0",
+      "apiKey": "qk_live_N8ABHkQiFUlc68Kq7oMAZvBOqsvuVs3iAiDIf0Wr-Lg",
+      "plan": "dev"
+    },
+    {
+      "idx": 6,
+      "tenantSlug": "sd-0006",
+      "clusterSlug": "sd-0006",
+      "tenantId": "70616b6c-e68c-414e-9320-75b69b66080d",
+      "clusterId": "0c7e6789-6c8b-4013-888e-738949822d07",
+      "brokerTenant": "2ed93a02-cb03-46c9-8536-df7655d25fc8",
+      "apiKey": "qk_live_SLYI7AX_el5lj_oao1RwxsGHcl8_CW4ew5hcteeYp8Y",
+      "plan": "dev"
+    },
+    {
+      "idx": 7,
+      "tenantSlug": "sd-0007",
+      "clusterSlug": "sd-0007",
+      "tenantId": "ef47430b-1b0e-454f-a966-abfb75c19e27",
+      "clusterId": "6a46faf6-6904-489d-890f-679b296869c5",
+      "brokerTenant": "b2397ef9-9a33-40b4-a3cd-f2d0e4124a1a",
+      "apiKey": "qk_live_mBw3herL22BH39qOcwLH8J-d6uYFlGx0UgDyKZ-hKFE",
+      "plan": "dev"
+    },
+    {
+      "idx": 8,
+      "tenantSlug": "sd-0008",
+      "clusterSlug": "sd-0008",
+      "tenantId": "64673f30-1ee9-40f4-9624-20afe75cbe32",
+      "clusterId": "a20124d7-05e4-4140-8c8d-dbd7963de7fa",
+      "brokerTenant": "e84a830f-acf0-4edf-bd13-fbc0fed1a4b8",
+      "apiKey": "qk_live_gqphn4Ok3F9vM2f6zRhxn8Es5-wNtJ2I_nZpfGzndjw",
+      "plan": "dev"
+    },
+    {
+      "idx": 9,
+      "tenantSlug": "sd-0009",
+      "clusterSlug": "sd-0009",
+      "tenantId": "2e3394db-c0bc-43a4-ae2d-a967a9d509f5",
+      "clusterId": "61a068c3-306c-4284-a8fe-9fbb409ffbee",
+      "brokerTenant": "00dfa645-e47e-48e2-a1af-2699f4b3424e",
+      "apiKey": "qk_live_fnr4zu_iyGyazBE-I33QZxdmVRaA_UNopme1ySf0sv0",
+      "plan": "dev"
+    },
+    {
+      "idx": 10,
+      "tenantSlug": "sd-0010",
+      "clusterSlug": "sd-0010",
+      "tenantId": "dbfe644d-e5b7-4f9b-a52c-2a59b37dc28e",
+      "clusterId": "e4c72e82-76e3-4f1c-91b7-cac351d59280",
+      "brokerTenant": "49b40535-a117-48f5-a005-b994ee7d1ece",
+      "apiKey": "qk_live_knmo89xz5t34ZzAaFJJR29CBkWmVsZsqst7tvuePTKw",
+      "plan": "dev"
+    }
+  ]
+}

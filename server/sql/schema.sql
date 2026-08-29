@@ -229,6 +229,17 @@ CREATE TABLE IF NOT EXISTS queen.stats (
     -- pass over it (the accepted blind window).
     retained_bytes BIGINT NOT NULL DEFAULT 0,
 
+    -- Live queen.log_segments rows behind this stat row ('queue' rows). Same
+    -- lane, same discipline and the same lag as retained_bytes: counted by
+    -- log_refresh_retained_bytes_v1 inside the one scan of log_segments it
+    -- already makes, self-assigned by 011's counters refresh, read by
+    -- log_queue_stats_all_v1 so the queue LIST no longer counts segments per
+    -- call — that count was Θ(the tenant's segments) per list and grew with
+    -- retention (2026-08-23). A newly created queue reads 0 until the lane's
+    -- first pass over it; the exact live count stays on the queue DETAIL
+    -- (log_queue_message_stats_v1), which is O(that queue's segments) per click.
+    segment_count BIGINT NOT NULL DEFAULT 0,
+
     -- Time bounds (for lag calculations)
     oldest_pending_at TIMESTAMPTZ,
     -- DEAD (2026-08-20, PLAN_STATS_REFRESH.md T1.1): no writer since the stats
@@ -323,6 +334,12 @@ CREATE INDEX IF NOT EXISTS idx_system_state_key ON queen.system_state(key);
 -- ============================================================================
 -- Storage parameters
 -- ============================================================================
+
+-- segment_count for databases that predate the column (precedent:
+-- consumer_groups_metadata.conflation above, 024_kv.sql): CREATE TABLE IF NOT
+-- EXISTS is a silent no-op on the shape. NOT NULL DEFAULT 0 is metadata-only on
+-- PostgreSQL 11+ — no rewrite of the table behind every dashboard read.
+ALTER TABLE queen.stats ADD COLUMN IF NOT EXISTS segment_count BIGINT NOT NULL DEFAULT 0;
 
 ALTER TABLE queen.stats SET (
     autovacuum_vacuum_scale_factor = 0.01,

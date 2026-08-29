@@ -1,0 +1,277 @@
+goload -mode cloud [free-n250-q1] -> http://10.114.0.2:6711
+  target=proxy tenants=250 sharedQueue=true queue="app-q1" group="workers" partitions=100 brokerTenantHeader=false
+  offered=625.0 msg/s total (2.50/tenant) push-batch=1 -> 2.50 req/s per tenant across 1 producer(s) | max-inflight=4096
+  consumers=1/tenant popBatch=100 popWait=true autoAck=false | payload=256B | duration=120s drain=45s | idleConns=21/client verify=true
+[configure] 250 queue(s) configured in 0.18s
+[10:49:38 load ] offered=     625/s push=     625/s pop=     624/s ack=     624/s shed=      0/s inflight=    6 | e2e p50=  17.28 p99=  403.46 ms | pushRTT p50=  7.84 p99=  22.14 ms | lag=58 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=1509
+[10:50:38 load ] offered=     625/s push=     625/s pop=     625/s ack=     625/s shed=      0/s inflight=    4 | e2e p50=  13.89 p99=   27.01 ms | pushRTT p50=  5.98 p99=  15.04 ms | lag=60 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=1507
+[drain] producers stopped after 120.0s; draining 45s before the correctness verdict
+
+========== free-n250-q1 ==========
+offered        625.0 msg/s (75006 msgs, 0 shed)
+achieved  push    625.0 msg/s (75006 msgs)   pop    624.5 msg/s during load (   454.3 msg/s over load+drain, 74958 msgs)   ack 74958 msgs
+e2eFromSchedule  n=74958     p50=   15.17 p95=  148.48 p99=  284.67 p999=  485.38 max=  1129.10 ms
+e2eFromSend      n=74958     p50=   14.78 p95=  148.48 p99=  284.67 p999=  485.38 max=  1128.92 ms
+pushRtt          n=75006     p50=    6.75 p95=   14.40 p99=   19.84 p999=   33.54 max=   121.76 ms
+ackRtt           n=74622     p50=    3.50 p95=    7.84 p99=   11.46 p999=   21.38 max=    37.99 ms
+errors            none
+bytes     nominal 292 B/msg -> pushed 20.89 MiB, delivered 20.87 MiB
+
+---- delivery correctness (after the drain) ----
+idx  tenant         queue           sentOk  received  missing      dup   extra   cross verdict
+0    cf-0000        app-q1             300       300        0        0       0       0 OK
+1    cf-0001        app-q1             300       300        0        0       0       0 OK
+2    cf-0002        app-q1             300       300        0        0       0       0 OK
+3    cf-0003        app-q1             300       300        0        0       0       0 OK
+4    cf-0004        app-q1             300       300        0        0       0       0 OK
+5    cf-0005        app-q1             300       300        0        0       0       0 OK
+6    cf-0006        app-q1             300       300        0        0       0       0 OK
+7    cf-0007        app-q1             300       300        0        0       0       0 OK
+8    cf-0008        app-q1             300       300        0        0       0       0 OK
+9    cf-0009        app-q1             300       300        0        0       0       0 OK
+10   cf-0010        app-q1             300       300        0        0       0       0 OK
+11   cf-0011        app-q1             300       300        0        0       0       0 OK
+12   cf-0012        app-q1             300       300        0        0       0       0 OK
+13   cf-0013        app-q1             300       300        0        0       0       0 OK
+14   cf-0014        app-q1             300       300        0        0       0       0 OK
+15   cf-0015        app-q1             300       300        0        0       0       0 OK
+16   cf-0016        app-q1             300       300        0        0       0       0 OK
+17   cf-0017        app-q1             300       300        0        0       0       0 OK
+18   cf-0018        app-q1             300       300        0        0       0       0 OK
+19   cf-0019        app-q1             300       300        0        0       0       0 OK
+20   cf-0020        app-q1             300       300        0        0       0       0 OK
+21   cf-0021        app-q1             300       300        0        0       0       0 OK
+22   cf-0022        app-q1             300       300        0        0       0       0 OK
+23   cf-0023        app-q1             300       300        0        0       0       0 OK
+24   cf-0024        app-q1             300       300        0        0       0       0 OK
+25   cf-0025        app-q1             300       300        0        0       0       0 OK
+26   cf-0026        app-q1             300       300        0        0       0       0 OK
+27   cf-0027        app-q1             300       300        0        0       0       0 OK
+28   cf-0028        app-q1             300       300        0        0       0       0 OK
+29   cf-0029        app-q1             300       300        0        0       0       0 OK
+30   cf-0030        app-q1             300       300        0        0       0       0 OK
+31   cf-0031        app-q1             300       300        0        0       0       0 OK
+32   cf-0032        app-q1             300       300        0        0       0       0 OK
+33   cf-0033        app-q1             300       300        0        0       0       0 OK
+34   cf-0034        app-q1             300       300        0        0       0       0 OK
+35   cf-0035        app-q1             300       300        0        0       0       0 OK
+36   cf-0036        app-q1             300       300        0        0       0       0 OK
+37   cf-0037        app-q1             300       300        0        0       0       0 OK
+38   cf-0038        app-q1             300       300        0        0       0       0 OK
+39   cf-0039        app-q1             300       300        0        0       0       0 OK
+40   cf-0040        app-q1             300       300        0        0       0       0 OK
+41   cf-0041        app-q1             300       300        0        0       0       0 OK
+42   cf-0042        app-q1             301       301        0        0       0       0 OK
+43   cf-0043        app-q1             300       300        0        0       0       0 OK
+44   cf-0044        app-q1             300       300        0        0       0       0 OK
+45   cf-0045        app-q1             300       300        0        0       0       0 OK
+46   cf-0046        app-q1             300       300        0        0       0       0 OK
+47   cf-0047        app-q1             300       300        0        0       0       0 OK
+48   cf-0048        app-q1             300       300        0        0       0       0 OK
+49   cf-0049        app-q1             300       300        0        0       0       0 OK
+50   cf-0050        app-q1             300       300        0        0       0       0 OK
+51   cf-0051        app-q1             300       300        0        0       0       0 OK
+52   cf-0052        app-q1             300       300        0        0       0       0 OK
+53   cf-0053        app-q1             300       300        0        0       0       0 OK
+54   cf-0054        app-q1             300       300        0        0       0       0 OK
+55   cf-0055        app-q1             300       300        0        0       0       0 OK
+56   cf-0056        app-q1             300       300        0        0       0       0 OK
+57   cf-0057        app-q1             300       300        0        0       0       0 OK
+58   cf-0058        app-q1             300       300        0        0       0       0 OK
+59   cf-0059        app-q1             300       300        0        0       0       0 OK
+60   cf-0060        app-q1             300       300        0        0       0       0 OK
+61   cf-0061        app-q1             300       300        0        0       0       0 OK
+62   cf-0062        app-q1             300       300        0        0       0       0 OK
+63   cf-0063        app-q1             300       300        0        0       0       0 OK
+64   cf-0064        app-q1             300       300        0        0       0       0 OK
+65   cf-0065        app-q1             300       300        0        0       0       0 OK
+66   cf-0066        app-q1             300       300        0        0       0       0 OK
+67   cf-0067        app-q1             300       300        0        0       0       0 OK
+68   cf-0068        app-q1             300       300        0        0       0       0 OK
+69   cf-0069        app-q1             300       300        0        0       0       0 OK
+70   cf-0070        app-q1             300       300        0        0       0       0 OK
+71   cf-0071        app-q1             300       300        0        0       0       0 OK
+72   cf-0072        app-q1             300       300        0        0       0       0 OK
+73   cf-0073        app-q1             300       300        0        0       0       0 OK
+74   cf-0074        app-q1             300       300        0        0       0       0 OK
+75   cf-0075        app-q1             300       300        0        0       0       0 OK
+76   cf-0076        app-q1             300       300        0        0       0       0 OK
+77   cf-0077        app-q1             300       300        0        0       0       0 OK
+78   cf-0078        app-q1             300       300        0        0       0       0 OK
+79   cf-0079        app-q1             300       300        0        0       0       0 OK
+80   cf-0080        app-q1             300       300        0        0       0       0 OK
+81   cf-0081        app-q1             300       300        0        0       0       0 OK
+82   cf-0082        app-q1             300       300        0        0       0       0 OK
+83   cf-0083        app-q1             300       300        0        0       0       0 OK
+84   cf-0084        app-q1             300       300        0        0       0       0 OK
+85   cf-0085        app-q1             300       300        0        0       0       0 OK
+86   cf-0086        app-q1             300       300        0        0       0       0 OK
+87   cf-0087        app-q1             300       300        0        0       0       0 OK
+88   cf-0088        app-q1             300       300        0        0       0       0 OK
+89   cf-0089        app-q1             300       300        0        0       0       0 OK
+90   cf-0090        app-q1             300       300        0        0       0       0 OK
+91   cf-0091        app-q1             300       300        0        0       0       0 OK
+92   cf-0092        app-q1             300       300        0        0       0       0 OK
+93   cf-0093        app-q1             300       300        0        0       0       0 OK
+94   cf-0094        app-q1             300       300        0        0       0       0 OK
+95   cf-0095        app-q1             300       300        0        0       0       0 OK
+96   cf-0096        app-q1             300       300        0        0       0       0 OK
+97   cf-0097        app-q1             300       300        0        0       0       0 OK
+98   cf-0098        app-q1             300       300        0        0       0       0 OK
+99   cf-0099        app-q1             300       300        0        0       0       0 OK
+100  cf-0100        app-q1             300       300        0        0       0       0 OK
+101  cf-0101        app-q1             300       300        0        0       0       0 OK
+102  cf-0102        app-q1             300       300        0        0       0       0 OK
+103  cf-0103        app-q1             300       300        0        0       0       0 OK
+104  cf-0104        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+105  cf-0105        app-q1             300       300        0        0       0       0 OK
+106  cf-0106        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+107  cf-0107        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+108  cf-0108        app-q1             300       300        0        0       0       0 OK
+109  cf-0109        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+110  cf-0110        app-q1             300       300        0        0       0       0 OK
+111  cf-0111        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+112  cf-0112        app-q1             300       300        0        0       0       0 OK
+113  cf-0113        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+114  cf-0114        app-q1             300       300        0        0       0       0 OK
+115  cf-0115        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+116  cf-0116        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+117  cf-0117        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+118  cf-0118        app-q1             300       300        0        0       0       0 OK
+119  cf-0119        app-q1             300       300        0        0       0       0 OK
+120  cf-0120        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+121  cf-0121        app-q1             300       300        0        0       0       0 OK
+122  cf-0122        app-q1             300       300        0        0       0       0 OK
+123  cf-0123        app-q1             300       300        0        0       0       0 OK
+124  cf-0124        app-q1             300       300        0        0       0       0 OK
+125  cf-0125        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+126  cf-0126        app-q1             300       300        0        0       0       0 OK
+127  cf-0127        app-q1             300       300        0        0       0       0 OK
+128  cf-0128        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+129  cf-0129        app-q1             300       300        0        0       0       0 OK
+130  cf-0130        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+131  cf-0131        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+132  cf-0132        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+133  cf-0133        app-q1             300       300        0        0       0       0 OK
+134  cf-0134        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+135  cf-0135        app-q1             300       300        0        0       0       0 OK
+136  cf-0136        app-q1             300       300        0        0       0       0 OK
+137  cf-0137        app-q1             300       300        0        0       0       0 OK
+138  cf-0138        app-q1             300       300        0        0       0       0 OK
+139  cf-0139        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+140  cf-0140        app-q1             301       300        1        0       0       0 FAIL  firstMissing=[1]
+141  cf-0141        app-q1             300       300        0        0       0       0 OK
+142  cf-0142        app-q1             301       301        0        0       0       0 OK
+143  cf-0143        app-q1             300       300        0        0       0       0 OK
+144  cf-0144        app-q1             300       300        0        0       0       0 OK
+145  cf-0145        app-q1             300       300        0        0       0       0 OK
+146  cf-0146        app-q1             300       300        0        0       0       0 OK
+147  cf-0147        app-q1             300       300        0        0       0       0 OK
+148  cf-0148        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+149  cf-0149        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+150  cf-0150        app-q1             300       300        0        0       0       0 OK
+151  cf-0151        app-q1             300       300        0        0       0       0 OK
+152  cf-0152        app-q1             300       300        0        0       0       0 OK
+153  cf-0153        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+154  cf-0154        app-q1             300       300        0        0       0       0 OK
+155  cf-0155        app-q1             300       300        0        0       0       0 OK
+156  cf-0156        app-q1             300       300        0        0       0       0 OK
+157  cf-0157        app-q1             300       300        0        0       0       0 OK
+158  cf-0158        app-q1             300       300        0        0       0       0 OK
+159  cf-0159        app-q1             300       300        0        0       0       0 OK
+160  cf-0160        app-q1             300       300        0        0       0       0 OK
+161  cf-0161        app-q1             300       300        0        0       0       0 OK
+162  cf-0162        app-q1             300       300        0        0       0       0 OK
+163  cf-0163        app-q1             300       300        0        0       0       0 OK
+164  cf-0164        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+165  cf-0165        app-q1             300       300        0        0       0       0 OK
+166  cf-0166        app-q1             300       300        0        0       0       0 OK
+167  cf-0167        app-q1             300       300        0        0       0       0 OK
+168  cf-0168        app-q1             300       300        0        0       0       0 OK
+169  cf-0169        app-q1             300       300        0        0       0       0 OK
+170  cf-0170        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+171  cf-0171        app-q1             300       300        0        0       0       0 OK
+172  cf-0172        app-q1             300       300        0        0       0       0 OK
+173  cf-0173        app-q1             300       300        0        0       0       0 OK
+174  cf-0174        app-q1             300       300        0        0       0       0 OK
+175  cf-0175        app-q1             300       300        0        0       0       0 OK
+176  cf-0176        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+177  cf-0177        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+178  cf-0178        app-q1             300       300        0        0       0       0 OK
+179  cf-0179        app-q1             300       300        0        0       0       0 OK
+180  cf-0180        app-q1             300       300        0        0       0       0 OK
+181  cf-0181        app-q1             300       300        0        0       0       0 OK
+182  cf-0182        app-q1             300       300        0        0       0       0 OK
+183  cf-0183        app-q1             300       300        0        0       0       0 OK
+184  cf-0184        app-q1             300       300        0        0       0       0 OK
+185  cf-0185        app-q1             300       300        0        0       0       0 OK
+186  cf-0186        app-q1             301       300        1        0       0       0 FAIL  firstMissing=[1]
+187  cf-0187        app-q1             300       300        0        0       0       0 OK
+188  cf-0188        app-q1             300       300        0        0       0       0 OK
+189  cf-0189        app-q1             300       300        0        0       0       0 OK
+190  cf-0190        app-q1             300       300        0        0       0       0 OK
+191  cf-0191        app-q1             300       300        0        0       0       0 OK
+192  cf-0192        app-q1             300       300        0        0       0       0 OK
+193  cf-0193        app-q1             300       300        0        0       0       0 OK
+194  cf-0194        app-q1             300       300        0        0       0       0 OK
+195  cf-0195        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+196  cf-0196        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+197  cf-0197        app-q1             300       300        0        0       0       0 OK
+198  cf-0198        app-q1             300       300        0        0       0       0 OK
+199  cf-0199        app-q1             300       300        0        0       0       0 OK
+200  cf-0200        app-q1             300       300        0        0       0       0 OK
+201  cf-0201        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+202  cf-0202        app-q1             300       300        0        0       0       0 OK
+203  cf-0203        app-q1             300       300        0        0       0       0 OK
+204  cf-0204        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+205  cf-0205        app-q1             300       300        0        0       0       0 OK
+206  cf-0206        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+207  cf-0207        app-q1             300       300        0        0       0       0 OK
+208  cf-0208        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+209  cf-0209        app-q1             301       300        1        0       0       0 FAIL  firstMissing=[1]
+210  cf-0210        app-q1             300       300        0        0       0       0 OK
+211  cf-0211        app-q1             300       300        0        0       0       0 OK
+212  cf-0212        app-q1             301       300        1        0       0       0 FAIL  firstMissing=[1]
+213  cf-0213        app-q1             300       300        0        0       0       0 OK
+214  cf-0214        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+215  cf-0215        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+216  cf-0216        app-q1             300       300        0        0       0       0 OK
+217  cf-0217        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+218  cf-0218        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+219  cf-0219        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+220  cf-0220        app-q1             300       300        0        0       0       0 OK
+221  cf-0221        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+222  cf-0222        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+223  cf-0223        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+224  cf-0224        app-q1             300       300        0        0       0       0 OK
+225  cf-0225        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+226  cf-0226        app-q1             300       300        0        0       0       0 OK
+227  cf-0227        app-q1             300       300        0        0       0       0 OK
+228  cf-0228        app-q1             300       300        0        0       0       0 OK
+229  cf-0229        app-q1             300       300        0        0       0       0 OK
+230  cf-0230        app-q1             300       300        0        0       0       0 OK
+231  cf-0231        app-q1             300       300        0        0       0       0 OK
+232  cf-0232        app-q1             300       300        0        0       0       0 OK
+233  cf-0233        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+234  cf-0234        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+235  cf-0235        app-q1             300       300        0        0       0       0 OK
+236  cf-0236        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+237  cf-0237        app-q1             300       300        0        0       0       0 OK
+238  cf-0238        app-q1             300       300        0        0       0       0 OK
+239  cf-0239        app-q1             300       300        0        0       0       0 OK
+240  cf-0240        app-q1             300       300        0        0       0       0 OK
+241  cf-0241        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+242  cf-0242        app-q1             300       300        0        0       0       0 OK
+243  cf-0243        app-q1             300       300        0        0       0       0 OK
+244  cf-0244        app-q1             300       300        0        0       0       0 OK
+245  cf-0245        app-q1             300       300        0        0       0       0 OK
+246  cf-0246        app-q1             300       300        0        0       0       0 OK
+247  cf-0247        app-q1             300       299        1        0       0       0 FAIL  firstMissing=[1]
+248  cf-0248        app-q1             300       300        0        0       0       0 OK
+249  cf-0249        app-q1             300       300        0        0       0       0 OK
+     TOTAL                           75006     74958       48        0       0       0
+VERDICT: FAIL
+NOTE: consumers were idle at the cutoff and the consume path reported no errors, so 48 missing is real LOSS, not a tail.
+
+[artifacts] /root/cap16-free/free-n250-q1.json
+            /root/cap16-free/free-n250-q1-interval.csv

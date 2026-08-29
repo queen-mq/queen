@@ -1,0 +1,20 @@
+2026-08-24T00:03:17.332614023Z ERROR boot: FATAL: schema apply failed: procedures/001_log_schema.sql: db error
+2026-08-24T01:35:18.132385168Z ERROR fusion: bundle log_push_multi error parts=16 error=connection closed suppressed=0
+2026-08-24T01:35:18.459147784Z ERROR retention: lease claim error error=connection closed suppressed=0
+2026-08-24T01:35:18.605671852Z ERROR stats: lease claim error error=connection closed suppressed=0
+2026-08-24T01:35:21.378510293Z ERROR stats: bytes lease claim error error=Error occurred while creating a new object: db error suppressed=0
+2026-08-24T01:35:25.843565077Z ERROR sweeper: fire pass error error=pool: Error occurred while creating a new object: db error suppressed=0
+2026-08-24T01:35:48.618565685Z ERROR stats: lease claim error error=Error occurred while creating a new object: db error suppressed=4
+2026-08-24T01:35:49.44158524Z ERROR retention: lease claim error error=Error occurred while creating a new object: db error suppressed=29
+2026-08-24T01:35:56.33413456Z ERROR sweeper: fire pass error error=pool: Error occurred while creating a new object: db error suppressed=31
+2026-08-24T01:36:18.635962022Z ERROR stats: lease claim error error=Error occurred while creating a new object: db error suppressed=4
+2026-08-24T01:36:19.535162584Z ERROR retention: lease claim error error=Error occurred while creating a new object: db error suppressed=29
+2026-08-24T01:36:21.382462728Z ERROR stats: bytes lease claim error error=Error occurred while creating a new object: db error suppressed=0
+2026-08-24T01:36:26.429221222Z ERROR sweeper: fire pass error error=pool: Error occurred while creating a new object: db error suppressed=29
+2026-08-24T01:36:48.655630512Z ERROR stats: lease claim error error=Error occurred while creating a new object: db error suppressed=4
+2026-08-24T01:36:49.627997637Z ERROR retention: lease claim error error=Error occurred while creating a new object: db error suppressed=29
+2026-08-24T01:36:56.51993689Z ERROR sweeper: fire pass error error=pool: Error occurred while creating a new object: db error suppressed=29
+2026-08-24T01:37:18.672344733Z ERROR stats: lease claim error error=Error occurred while creating a new object: db error suppressed=4
+2026-08-24T01:37:19.717786477Z ERROR retention: lease claim error error=Error occurred while creating a new object: db error suppressed=29
+2026-08-24T01:37:21.386702719Z ERROR stats: bytes lease claim error error=Error occurred while creating a new object: db error suppressed=0
+2026-08-24T01:37:26.61302046Z ERROR sweeper: fire pass error error=pool: Error occurred while creating a new object: db error suppressed=29

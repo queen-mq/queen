@@ -21,6 +21,7 @@ sourceOfTruth:
   - .github/workflows/tests.yml
 verifiedBy:
   - test/run.sh
+# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
 ---
 
 `test/run.sh` is the whole thing. It builds a broker image from the current tree, builds one
@@ -53,11 +54,14 @@ and `--no-build` reuses everything.
 | `go` | the root-package unit tests, then `./tests/` and `./tests/streams_integration/` with `-count=1` so the cache never hides a live-broker failure | `single`, `ha`, `tenanted` |
 | `py` | the whole `pytest` tree under `clients/client-py/tests`, streams included | `single`, `ha`, `tenanted` |
 | `cli` | the `queenctl` end-to-end suite, which needs the Go workspace and `QUEEN_E2E=1` | `single`, `ha`, `tenanted` |
-| `cpp` | `test_retry429` (self-contained, no broker) then `test_client` against the broker | `single`, `ha`, `tenanted` |
+| `cpp` | `test_retry429`, `test_kv_timers` and `test_conflation` (all self-contained, no broker) then `test_client` against the broker | `single`, `ha`, `tenanted` |
+| `laravel` | the PHP client: `phpunit --testsuite Unit` first (broker-free, and it is the half that pins the exact JSON wire shape) then the `Integration` testsuite | `single`, `ha`, `tenanted` |
 | `rust-client` | `cargo test` in `clients/client-rust`: the lib unit tests, then each integration binary in turn. `QUEEN_TEST_URL` is what turns the integration tests on; without it they skip | `single`, `ha`, `tenanted` |
 | `rust` | the broker's in-process unit tests, `cargo test`, no stack and no PostgreSQL | `unit` |
 | `mesh` | asserts the two brokers of an HA pair see each other with zero handshake failures | `ha` |
 | `tenancy` | two-tenant isolation over the HA pair with the trusted tenant header | `ha-tenanted` |
+| `http` | every kv/timer route driven at the raw HTTP wire with no SDK in the way: the executable specification the SDK suites are read against | `single` |
+| `conflation` | the conflation end-to-end scenarios at the raw HTTP wire, no SDK in the way | `single` |
 
 Environment-variable naming diverges between suites. The JavaScript suite reads
 `QUEEN_SERVER_URL`, the Go and Python streams tests read `QUEEN_URL`, the CLI reads
@@ -85,7 +89,7 @@ tally where one exists and compares that too. A divergence fails the run **in ei
 direction**. A behaviour change caused by the flag is a regression even when the flag-on side
 is the greener one.
 
-The `ha` and `ha-tenanted` compose files are the same file as `single` and `ha` respectively,
+The `tenanted` and `ha-tenanted` lanes reuse the `single` and `ha` compose files respectively,
 with `QUEEN_TEST_TENANCY` exported by `run.sh`. Duplicating the stack definitions would let
 the two lanes drift, which is exactly what the parity gate exists to catch.
 
@@ -191,11 +195,10 @@ therefore makes no per-test verification claim about window arithmetic, and the 
 streams do not claim a specific test proves them.
 
 <Aside type="note">
-Two counts in the tree are stale and will mislead you. `test/run.sh`'s header comment and
-`test/README.md` both say the `rust` suite is "50 in-process unit tests"; counting `#[test]`
-and `#[tokio::test]` attributes under `server/src` gives 169 today. `queen_proxy`'s suite is a
-similar size but is **not** part of `test/run.sh` at all. Run it with `cargo test` inside
-`proxy/`.
+One count in the tree is stale and will mislead you. `test/README.md` and a comment in
+`tests.yml` still say the `rust` suite is "50 in-process unit tests"; counting `#[test]`
+and `#[tokio::test]` attributes under `server/src` gives 549 today. `queen_proxy`'s suite is
+**not** part of `test/run.sh` at all. Run it with `cargo test` inside `proxy/`.
 </Aside>
 
 ## A defect in the harness
@@ -226,15 +229,19 @@ Until then, treat the matrix as a fast screen and the per-cell logs as the evide
 ## In CI
 
 `.github/workflows/tests.yml` is the same harness. It compiles the broker once into an artifact
-so the matrix cells load an image instead of recompiling Rust six times, then runs one job per
-suite with `test/run.sh --suite <name> --no-build-broker -j 1`. The Rust unit tests run
-natively in their own job with `cargo test --manifest-path server/Cargo.toml --locked`.
+so the matrix cells load an image instead of recompiling Rust in every cell, then runs one cell
+each for `js`, `go`, `py`, `cli`, `cpp`, `rust-client`, `mesh` and `http` with
+`test/run.sh --suite <name> --no-build-broker -j 1`; the `laravel`, `tenancy` and `conflation`
+suites run locally only. The broker's unit tests run natively in their own job with
+`cargo test --manifest-path server/Cargo.toml --locked`, and three more jobs cover what the
+matrix cannot: the Rust client and `queen-protocol` unit tests plus `rustfmt` and `clippy`, a
+`cargo check` on the client's declared MSRV (1.86), and one on the server's (1.88) that also
+proves the lean `--no-default-features` library shape still builds.
 
-Two other workflows touch tests. `cli.yml` builds and unit-tests `queenctl` on Linux and macOS
-for every change under `clients/client-cli` or `clients/client-go`, and runs its heavier
-end-to-end suite only on pushes and manual dispatch. `cpp-server-build.yml` still exists,
-triggers on the `release` branch, and runs `make deps` and `make build-only` in `server/`,
-targets that no longer exist. It is dead and cannot pass.
+No other workflow runs tests. The C++-era `cli.yml` and `cpp-server-build.yml` are deleted;
+the `cli` matrix cell above is where `queenctl`'s suite runs now, against the broker built
+from the same tree. What remains beside `tests.yml` is `docker-build.yml`, `release-cli.yml`
+and the docs site's `docs.yml`, none of which executes a test suite.
 
 ## Deeper gates, run by hand
 

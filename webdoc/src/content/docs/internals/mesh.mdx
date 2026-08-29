@@ -11,6 +11,7 @@ sourceOfTruth:
   - server/src/main.rs
   - server/src/reconcile.rs
   - server/src/config.rs
+# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
 ---
 
 Queen runs one to three identical broker replicas over one PostgreSQL database. PostgreSQL is the
@@ -39,9 +40,16 @@ A single stock broker binds nothing and sends nothing. Only the in-process waker
 | --- | --- | --- |
 | `QUEEN_MESH_PEERS` | empty | `QUEEN_UDP_PEERS` |
 | `QUEEN_MESH_PORT` | 6633 | `QUEEN_UDP_NOTIFY_PORT` |
+| `QUEEN_MESH_BIND_ADDR` | the HTTP listener's `QUEEN_BIND_ADDR` | none |
+| `QUEEN_MESH_ADVERTISE_HOST` | the OS hostname | none |
 | `QUEEN_SYNC_SECRET` | empty | none |
 | `QUEEN_SYNC_HEARTBEAT_MS` | 1000 | none |
 | `QUEEN_SYNC_DEAD_THRESHOLD_MS` | 5000 | none |
+
+`QUEEN_MESH_BIND_ADDR` narrows where the mesh listener binds without moving the HTTP listener.
+`QUEEN_MESH_ADVERTISE_HOST` is the host this broker tells its peers to reach its HTTP surface on
+(the port is always the HTTP listener's own `PORT`); it feeds the `http_addr` the handshake below
+advertises, and defaults to the OS hostname.
 
 The `QUEEN_UDP_*` names survive as aliases and nothing else about the old transport does. The
 transport is TCP; the names are historical.
@@ -97,6 +105,7 @@ cap, so a multi-partition push meant one datagram per partition.
 | 5 | `HOTLIST_DIRTY_BATCH` | `{items:[{queue, partition, tenant, group?}]}` | mark the peer's hot-list rings pending (idempotent, commutative); no re-broadcast. With `group` the mark is scoped to that group's ring alone, which is what a cursor move means; without it, to every ring of the queue, which is what a push means |
 | 10 | `QUEUE_CONFIG_SET` | `{queue, tenant}` | drop the cached lease time and encryption flag for that queue |
 | 11 | `QUEUE_CONFIG_DELETE` | `{queue, tenant}` | same invalidation |
+| 20 | `EPH_ADMIN` | `{op, tenant, queue}` | apply an [ephemeral-queue](/reference/http/ephemeral/) admin verb (`reset`, `delete`, `config_set`) to the local RAM-class state. The one frame family whose tenant is mandatory: these ops destroy, so a frame without a valid tenant is dropped rather than fanned out |
 | 40 | `MAINTENANCE_MODE_SET` | `{enabled}` | flip the maintenance atomic |
 | 41 | `POP_MAINTENANCE_MODE_SET` | `{enabled}` | flip the pop-maintenance atomic |
 
@@ -123,10 +132,18 @@ lookup.
 ## The handshake
 
 A per-connection handshake replaces per-packet authentication. On connect the dialer sends `HELLO`
-with `{server_id, nonce, mac}` where `mac = HMAC-SHA256(secret, nonce)` over the nonce's hex bytes.
-The listener verifies it in constant time before accepting any further frame. An empty
-`QUEEN_SYNC_SECRET` means open mode: the `HELLO` is still exchanged, to learn the peer's server id,
-but not verified.
+with `{server_id, nonce, mac, http_addr, eph_epoch}` where `mac = HMAC-SHA256(secret, nonce)` over
+the nonce's hex bytes. The listener verifies it in constant time before accepting any further
+frame. An empty `QUEEN_SYNC_SECRET` means open mode: the `HELLO` is still exchanged, to learn the
+peer's server id, but not verified.
+
+The last two fields are the v2 additions and ride the existing frame rather than a new tag: the
+broker's advertised HTTP address (`QUEEN_MESH_ADVERTISE_HOST` plus the HTTP `PORT`) and its
+ephemeral-store epoch, which together admit the peer to the
+[ephemeral queues'](/reference/http/ephemeral/) rendezvous ring. A `HELLO` without the pair, an
+older build or half a pair, still authenticates exactly as before; the peer is only marked not
+ephemeral-capable, so during a rolling upgrade the stats' `eph_members` count runs below
+`servers_alive` and that is the expected reading, not an error.
 
 ## The security reality
 
@@ -141,6 +158,9 @@ State this plainly, because the mechanism above reads as stronger than it is.
   one captured handshake can put every replica into maintenance mode, which diverts all pushes to
   [the disk spool](/deploy/ha/). `POP_MAINTENANCE_MODE_SET` will likewise pause
   consumption cluster-wide.
+- **The frame set includes `EPH_ADMIN`.** [Ephemeral queues](/reference/http/ephemeral/) live in
+  broker RAM with no PostgreSQL underneath, so for them the same attacker is not limited to
+  availability: `reset` and `delete` destroy their contents on receipt.
 - **With no secret configured, not even the replay is needed.**
 
 <Aside type="danger">
@@ -150,9 +170,10 @@ from the other brokers in the cluster: a private network, a security group, or a
 for that. Set it as well, but the network boundary is what actually protects the cluster.
 </Aside>
 
-Nothing on the mesh can corrupt or misdeliver messages, because it carries no data-plane writes and
-PostgreSQL rejects nothing it says. The exposure is availability and operational control, not
-integrity.
+Nothing on the mesh can corrupt or misdeliver a durable queue's messages, because it carries no
+data-plane writes and PostgreSQL rejects nothing it says. For the durable engine the exposure is
+availability and operational control, not integrity; the RAM-class exception above is the one place
+the frame set reaches state PostgreSQL does not hold.
 
 ## What it cannot do
 
@@ -162,8 +183,10 @@ integrity.
   backoff and the reconcile loop's 60-second re-read. You lose latency, not correctness.
 - **It is not ordered across peers.** A frame is a hint that something changed; it never carries a
   version, and receipt is idempotent by construction.
-- **It has no C++ or cross-version wire compatibility requirement.** Rust-only clusters, which is
-  why the wire is this simple.
+- **It has no C++ wire compatibility requirement.** Rust-only clusters, which is why the wire is
+  this simple. The one compatibility rule it does keep is cross-version tolerance during a rolling
+  deploy: an unknown tag is skipped without closing the connection, and a new capability rides new
+  fields on an existing frame (the tenant, the group, the `HELLO` v2 pair) whenever it can.
 
 ## Observing it
 
@@ -171,7 +194,8 @@ Two internal routes return the transport's own statistics:
 `GET /internal/api/shared-state/stats` and `GET /internal/api/inter-instance/stats`. Both emit the
 same body: the local server id, the transport name (`tcp-mesh`), the port, and per peer the host,
 port, whether an outbound connection is established and its resolved remote IP. Alongside that, how
-many peers are alive versus dead by the inbound-liveness threshold, frames sent, received and
+many peers are alive versus dead by the inbound-liveness threshold, how many of the live peers are
+in the ephemeral rendezvous ring (`eph_members`), frames sent, received and
 **dropped**, handshake failures, and the two maintenance flags. With no peers configured the body is
 `{"enabled": false, "reason": "no_peers", ...}`.
 

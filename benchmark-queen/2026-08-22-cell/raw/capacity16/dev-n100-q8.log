@@ -1,0 +1,127 @@
+goload -mode cloud [dev-n100-q8] -> http://10.114.0.2:6711
+  target=proxy tenants=100 sharedQueue=true queue="app-q8" group="workers" partitions=100 brokerTenantHeader=false
+  offered=250.0 msg/s total (2.50/tenant) push-batch=1 -> 2.50 req/s per tenant across 1 producer(s) | max-inflight=4096
+  consumers=1/tenant popBatch=100 popWait=true autoAck=false | payload=256B | duration=120s drain=45s | idleConns=45/client verify=true
+[configure] 100 queue(s) configured in 1.06s
+[11:03:32 load ] offered=     250/s push=     250/s pop=     248/s ack=     248/s shed=      0/s inflight=    6 | e2e p50= 708.61 p99= 2244.61 ms | pushRTT p50= 19.84 p99= 123.39 ms | lag=128 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=661
+[drain] producers stopped after 120.0s; draining 45s before the correctness verdict
+[11:04:32 drain] offered=     250/s push=     250/s pop=     250/s ack=     250/s shed=      0/s inflight=    5 | e2e p50= 464.90 p99= 1384.45 ms | pushRTT p50= 17.28 p99=  48.90 ms | lag=129 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=582
+
+========== dev-n100-q8 ==========
+offered        250.0 msg/s (30000 msgs, 0 shed)
+achieved  push    250.0 msg/s (30000 msgs)   pop    248.9 msg/s during load (   181.8 msg/s over load+drain, 29991 msgs)   ack 29991 msgs
+e2eFromSchedule  n=29991     p50=  552.96 p95= 1531.90 p99= 2088.96 p999= 2539.52 max= 41179.64 ms
+e2eFromSend      n=29991     p50=  552.96 p95= 1531.90 p99= 2088.96 p999= 2539.52 max= 41178.89 ms
+pushRtt          n=30000     p50=   18.30 p95=   43.26 p99=   75.26 p999=  382.98 max=  1173.46 ms
+ackRtt           n=11426     p50=   31.62 p95=   77.31 p99=  102.91 p999=  136.19 max=   179.46 ms
+errors            none
+bytes     nominal 292 B/msg -> pushed 8.35 MiB, delivered 8.35 MiB
+
+---- delivery correctness (after the drain) ----
+idx  tenant         queue           sentOk  received  missing      dup   extra   cross verdict
+0    cd-0000        app-q8             300       300        0        0       0       0 OK
+1    cd-0001        app-q8             300       300        0        0       0       0 OK
+2    cd-0002        app-q8             300       300        0        0       0       0 OK
+3    cd-0003        app-q8             300       300        0        0       0       0 OK
+4    cd-0004        app-q8             300       300        0        0       0       0 OK
+5    cd-0005        app-q8             300       300        0        0       0       0 OK
+6    cd-0006        app-q8             300       300        0        0       0       0 OK
+7    cd-0007        app-q8             300       300        0        0       0       0 OK
+8    cd-0008        app-q8             300       300        0        0       0       0 OK
+9    cd-0009        app-q8             300       300        0        0       0       0 OK
+10   cd-0010        app-q8             300       300        0        0       0       0 OK
+11   cd-0011        app-q8             300       300        0        0       0       0 OK
+12   cd-0012        app-q8             300       300        0        0       0       0 OK
+13   cd-0013        app-q8             300       300        0        0       0       0 OK
+14   cd-0014        app-q8             300       300        0        0       0       0 OK
+15   cd-0015        app-q8             300       300        0        0       0       0 OK
+16   cd-0016        app-q8             300       300        0        0       0       0 OK
+17   cd-0017        app-q8             300       300        0        0       0       0 OK
+18   cd-0018        app-q8             300       300        0        0       0       0 OK
+19   cd-0019        app-q8             300       300        0        0       0       0 OK
+20   cd-0020        app-q8             300       300        0        0       0       0 OK
+21   cd-0021        app-q8             300       300        0        0       0       0 OK
+22   cd-0022        app-q8             300       300        0        0       0       0 OK
+23   cd-0023        app-q8             300       300        0        0       0       0 OK
+24   cd-0024        app-q8             300       300        0        0       0       0 OK
+25   cd-0025        app-q8             300       300        0        0       0       0 OK
+26   cd-0026        app-q8             300       300        0        0       0       0 OK
+27   cd-0027        app-q8             300       300        0        0       0       0 OK
+28   cd-0028        app-q8             300       300        0        0       0       0 OK
+29   cd-0029        app-q8             300       300        0        0       0       0 OK
+30   cd-0030        app-q8             300       300        0        0       0       0 OK
+31   cd-0031        app-q8             300       300        0        0       0       0 OK
+32   cd-0032        app-q8             300       300        0        0       0       0 OK
+33   cd-0033        app-q8             300       300        0        0       0       0 OK
+34   cd-0034        app-q8             300       300        0        0       0       0 OK
+35   cd-0035        app-q8             300       300        0        0       0       0 OK
+36   cd-0036        app-q8             300       300        0        0       0       0 OK
+37   cd-0037        app-q8             300       300        0        0       0       0 OK
+38   cd-0038        app-q8             300       300        0        0       0       0 OK
+39   cd-0039        app-q8             300       300        0        0       0       0 OK
+40   cd-0040        app-q8             300       300        0        0       0       0 OK
+41   cd-0041        app-q8             300       300        0        0       0       0 OK
+42   cd-0042        app-q8             300       300        0        0       0       0 OK
+43   cd-0043        app-q8             300       300        0        0       0       0 OK
+44   cd-0044        app-q8             300       300        0        0       0       0 OK
+45   cd-0045        app-q8             300       300        0        0       0       0 OK
+46   cd-0046        app-q8             300       300        0        0       0       0 OK
+47   cd-0047        app-q8             300       300        0        0       0       0 OK
+48   cd-0048        app-q8             300       300        0        0       0       0 OK
+49   cd-0049        app-q8             300       300        0        0       0       0 OK
+50   cd-0050        app-q8             300       299        1        0       0       0 FAIL  firstMissing=[1]
+51   cd-0051        app-q8             300       300        0        0       0       0 OK
+52   cd-0052        app-q8             300       300        0        0       0       0 OK
+53   cd-0053        app-q8             300       300        0        0       0       0 OK
+54   cd-0054        app-q8             300       300        0        0       0       0 OK
+55   cd-0055        app-q8             300       300        0        0       0       0 OK
+56   cd-0056        app-q8             300       300        0        0       0       0 OK
+57   cd-0057        app-q8             300       300        0        0       0       0 OK
+58   cd-0058        app-q8             300       300        0        0       0       0 OK
+59   cd-0059        app-q8             300       300        0        0       0       0 OK
+60   cd-0060        app-q8             300       300        0        0       0       0 OK
+61   cd-0061        app-q8             300       300        0        0       0       0 OK
+62   cd-0062        app-q8             300       300        0        0       0       0 OK
+63   cd-0063        app-q8             300       299        1        0       0       0 FAIL  firstMissing=[1]
+64   cd-0064        app-q8             300       299        1        0       0       0 FAIL  firstMissing=[1]
+65   cd-0065        app-q8             300       300        0        0       0       0 OK
+66   cd-0066        app-q8             300       300        0        0       0       0 OK
+67   cd-0067        app-q8             300       300        0        0       0       0 OK
+68   cd-0068        app-q8             300       299        1        0       0       0 FAIL  firstMissing=[1]
+69   cd-0069        app-q8             300       299        1        0       0       0 FAIL  firstMissing=[1]
+70   cd-0070        app-q8             300       299        1        0       0       0 FAIL  firstMissing=[1]
+71   cd-0071        app-q8             300       299        1        0       0       0 FAIL  firstMissing=[1]
+72   cd-0072        app-q8             300       300        0        0       0       0 OK
+73   cd-0073        app-q8             300       300        0        0       0       0 OK
+74   cd-0074        app-q8             300       300        0        0       0       0 OK
+75   cd-0075        app-q8             300       300        0        0       0       0 OK
+76   cd-0076        app-q8             300       300        0        0       0       0 OK
+77   cd-0077        app-q8             300       300        0        0       0       0 OK
+78   cd-0078        app-q8             300       300        0        0       0       0 OK
+79   cd-0079        app-q8             300       300        0        0       0       0 OK
+80   cd-0080        app-q8             300       300        0        0       0       0 OK
+81   cd-0081        app-q8             300       300        0        0       0       0 OK
+82   cd-0082        app-q8             300       300        0        0       0       0 OK
+83   cd-0083        app-q8             300       299        1        0       0       0 FAIL  firstMissing=[1]
+84   cd-0084        app-q8             300       299        1        0       0       0 FAIL  firstMissing=[1]
+85   cd-0085        app-q8             300       300        0        0       0       0 OK
+86   cd-0086        app-q8             300       300        0        0       0       0 OK
+87   cd-0087        app-q8             300       300        0        0       0       0 OK
+88   cd-0088        app-q8             300       300        0        0       0       0 OK
+89   cd-0089        app-q8             300       300        0        0       0       0 OK
+90   cd-0090        app-q8             300       300        0        0       0       0 OK
+91   cd-0091        app-q8             300       300        0        0       0       0 OK
+92   cd-0092        app-q8             300       300        0        0       0       0 OK
+93   cd-0093        app-q8             300       300        0        0       0       0 OK
+94   cd-0094        app-q8             300       300        0        0       0       0 OK
+95   cd-0095        app-q8             300       300        0        0       0       0 OK
+96   cd-0096        app-q8             300       300        0        0       0       0 OK
+97   cd-0097        app-q8             300       300        0        0       0       0 OK
+98   cd-0098        app-q8             300       300        0        0       0       0 OK
+99   cd-0099        app-q8             300       300        0        0       0       0 OK
+     TOTAL                           30000     29991        9        0       0       0
+VERDICT: FAIL
+NOTE: consumers were idle at the cutoff and the consume path reported no errors, so 9 missing is real LOSS, not a tail.
+
+[artifacts] /root/cap16-dev/dev-n100-q8.json
+            /root/cap16-dev/dev-n100-q8-interval.csv

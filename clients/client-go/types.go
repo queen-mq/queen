@@ -189,6 +189,10 @@ type ConsumeOptions struct {
 	Task                    string
 	Group                   string
 	Concurrency             int
+	// Batch is the message budget for one pop. 0 = UNSET, which now means the
+	// broker sizes it (see Autopilot); it used to mean the client-side default
+	// of 1. Any non-zero value is a pin: it is sent on the wire as before and
+	// the broker never overrides it.
 	Batch                   int
 	Limit                   int
 	IdleMillis              int
@@ -201,10 +205,33 @@ type ConsumeOptions struct {
 	SubscriptionFrom        string
 	Each                    bool
 	// MaxPartitions is the v4 multi-partition pop cap: claim up to N
-	// partitions in a single call (default 1 = legacy behavior). The
-	// Batch field becomes a global cap on total messages returned across
-	// all claimed partitions.
+	// partitions in a single call. The Batch field becomes a global cap on
+	// total messages returned across all claimed partitions.
+	//
+	// 0 = UNSET, which now means the broker chooses the sweep width (see
+	// Autopilot); it used to mean the client-side default of 1. Any non-zero
+	// value is a pin, 1 included.
 	MaxPartitions           int
+	// Autopilot controls broker-side pop sizing. nil (the default) takes the
+	// client-wide setting, which is ON unless QUEEN_SDK_POP_AUTOPILOT=off was
+	// set in the environment (see EnvPopAutopilot).
+	//
+	// With autopilot on, the knobs left unset above — Batch, MaxPartitions, or
+	// both — are OMITTED from the pop request and chosen by the broker from
+	// state the client cannot see (ready partition count, the age of the oldest
+	// ready message, arrival rate), while the ones set explicitly travel
+	// unchanged and are never second-guessed. Setting both leaves autopilot
+	// nothing to decide and the request goes out exactly as it did before.
+	//
+	// Point it at false to restore this SDK's pre-1.2 behavior byte for byte:
+	// the client-side defaults come back (batch 1, partitions 1) and no
+	// autopilot parameter is sent.
+	//
+	// Requires broker >= 1.2. An older broker ignores the parameter, so the
+	// omitted knobs fall back to its own server-side defaults (batch 200,
+	// partitions 1) rather than to the client-side ones: a sizing difference,
+	// silent by design, with nothing lost or reordered.
+	Autopilot               *bool
 	// Conflation requests last-value delivery for this consumer group: a pop
 	// of a partition returns only its NEWEST visible message and commits
 	// everything below it, so a backlogged partition costs one handler
@@ -226,7 +253,17 @@ type ConsumeOptions struct {
 }
 
 // PopOptions contains options for popping messages.
+//
+// No API takes one: a pop is expressed with the fluent builder
+// (client.Queue(...).Batch(10).Pop(ctx)), and this struct's live role is to
+// carry PopDefaults. It is the description of that surface — including, below,
+// which knobs the broker now sizes on its own. The switch for that is
+// QueueBuilder.Autopilot, or QUEEN_SDK_POP_AUTOPILOT for a whole process.
 type PopOptions struct {
+	// Batch is the message budget for one pop. 0 = UNSET, which now means the
+	// broker sizes it; it used to mean the client-side default of 1 (still the
+	// value in PopDefaults, still what applies with autopilot off). Any
+	// non-zero value is a pin and travels on the wire as before.
 	Batch            int
 	Wait             bool
 	TimeoutMillis    int
@@ -234,7 +271,13 @@ type PopOptions struct {
 	ConsumerGroup    string
 	SubscriptionMode string
 	SubscriptionFrom string
-	// MaxPartitions is the v4 multi-partition cap (default 1).
+	// MaxPartitions is the v4 multi-partition cap. 0 = UNSET, which now means
+	// the broker chooses the sweep width; it used to mean 1. Any non-zero value
+	// is a pin, 1 included.
+	//
+	// Requires broker >= 1.2 for the unset case; an older broker ignores the
+	// autopilot parameter and applies its own defaults (batch 200,
+	// partitions 1) to whatever the client omitted.
 	MaxPartitions    int
 	// Conflation requests last-value delivery for the consumer group. See
 	// ConsumeOptions.Conflation: it is the same group-level policy, and a pop

@@ -58,7 +58,7 @@ verifiedBy:
 The Composer package is `smartpricing/queen-mq`, PSR-4 namespace `Queen\`. It requires PHP 8.3 or
 newer plus Guzzle 7 and `ramsey/uuid`. The client is **synchronous**: there is no promise or
 async variant. Laravel integration (service provider, facade, artisan command) ships in the same
-package and is optional. Version 1.0.0, aligned with the broker.
+package and is optional. Version 1.2.0, aligned with the broker's 1.2 line.
 
 ```php
 use Queen\Queen;
@@ -210,8 +210,9 @@ $queen->queue('orders')
 
 | Method | `pop()` default | `consume()` default | Notes |
 | --- | --- | --- | --- |
-| `batch(int $size)` | `1` | `1` | With `partitions($n)`, the total budget across all claimed partitions. |
-| `partitions(int $n)` | `1` | `1` | Claim up to N partitions per call; all share one `leaseId`. Sent only when `> 1`. |
+| `batch(int $size)` | broker-sized | broker-sized | Total message budget for the call, shared across every partition it claims. Left unset the broker sizes it (pop autopilot); the pre-1.2 client default of `1` comes back with autopilot off. `batch(0)` reads as unset. |
+| `partitions(int $n)` | broker-sized | broker-sized | Claim up to N partitions per call; all share one `leaseId`. Left unset the broker sizes it (pop autopilot). Sent verbatim when set, `1` included, because a pinned width is a decision the broker must not widen; with autopilot off it is sent only when `> 1`. |
+| `autopilot(bool $enabled = true)` | `true` | `true` | Broker-side pop sizing for the knobs above that you did not set. On by default; `false` restores the pre-1.2 client defaults (batch 1, partitions 1) and sends no `autopilot` parameter. `QUEEN_SDK_POP_AUTOPILOT=off` does the same for a whole process, read once when the client is built. Setting both knobs leaves nothing to decide, so no parameter is sent then either. See [pop autopilot](/reference/http/pop#autopilot). Requires broker >= 1.2; an older one applies its own defaults (batch 200, partitions 1) to the omitted knobs, which is a sizing difference and nothing more. |
 | `wait(bool $enabled)` | `false` | `true` | Long-poll. |
 | `timeoutMillis(int $millis)` | `30000` | `30000` | Server-side deadline; the HTTP call adds 5 s of slack. |
 | `leaseSeconds(int $seconds)` | queue default | queue default | Per-pop lease override, clamped to at least one second. Keep framework worker timeouts shorter than this value. |
@@ -242,6 +243,10 @@ PHP's `pop()` does not catch anything. A 4xx, an exhausted 429 budget, a termina
 fault all surface as an exception, so an empty array means an empty queue. This differs from the
 JavaScript and Python clients, which swallow every failure into `[]`.
 </Aside>
+
+#### `popResult(): array`
+
+Returns `['messages' => array, 'autopilot' => array|null]`. It is the same call as `pop()` and returns the messages plus the broker's account of how it sized the claim: `partitions`, `batch`, and an optional `waitMillis` pacing hint the consume loop honours in place of its own delay between empty polls. `autopilot` is `null` when the pop did not engage autopilot, when the broker is older than 1.2, or when the answer was a bodiless `204`, which has no body to carry an echo. See [pop autopilot](/reference/http/pop#autopilot).
 
 #### `consume(Closure $handler): ConsumeBuilder`
 

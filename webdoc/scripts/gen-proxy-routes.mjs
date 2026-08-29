@@ -32,7 +32,12 @@ const MAIN = "server/src/main.rs";
 // 2026-08-21: `classify` grew the ephemeral family (EPHEMERAL_QUEUES.md §5.1),
 // one more `Feature` behind one more default-false plan key, method-exact on
 // every path in it. Re-read and mirrored below.
-const CLASSIFY_FINGERPRINT = "f49462ece2914311";
+// 2026-08-27: `POST /streams/v1/cycle` moved from `Open` to `Mixed` (streams
+// tenant-compat pass): the cycle's sink push_items are the produce half of the
+// family, so the storage/monthly blocks refuse a cycle only when the body
+// actually grows. The op half never names a class here (same as kv/timers), so
+// the mirror below is unchanged and only the class meaning grew. Re-read.
+const CLASSIFY_FINGERPRINT = "00c5c6fc166ac877";
 const OPERATOR_FINGERPRINT = "04d6dea7366b466d";
 
 // --- mirror of `is_operator_route` -----------------------------------------
@@ -147,7 +152,10 @@ const CLASS_MEANING = [
   ["consume", "Pop, ack and lease extension. A `wait=true` pop also holds a parked-consumer slot."],
   ["queue admin", "Configuration, deletions, seeks and subscription changes."],
   ["read", "Listings, status, analytics, DLQ and message reads, all tenant-scoped."],
-  ["gated (streams)", "Available when the plan enables the streams feature."],
+  [
+    "gated (streams)",
+    "Available when the plan enables the streams feature. Registration and the state read are never quota-blocked. The cycle is the produce half of the family: a cycle whose body carries sink `push_items` answers the storage and monthly blocks (refused whole, with the same code the equivalent push would get), its sink queues and partitions pass registry admission, its items answer the per-item payload cap, and its accepted sink messages are billed as push. An ack-only or state-only cycle always passes, so a blocked tenant can keep draining its source.",
+  ],
   ["gated (traces)", "Writing a trace is available when the plan enables the traces feature."],
   [
     "gated (kv)",

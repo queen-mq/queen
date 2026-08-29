@@ -9,10 +9,12 @@ sourceOfTruth:
   - server/src/handlers/data.rs
   - server/sql/procedures/004_log_pop.sql
   - server/src/pop_fusion.rs
+  - server/src/pop_autopilot.rs
   - server/src/config.rs
   - server/src/db.rs
 verifiedBy:
   - clients/client-js/test-v2/pop.js
+# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
 ---
 
 A pop answers one question: *which offsets may this consumer group take from this partition
@@ -82,6 +84,50 @@ length is `COALESCE(leaseSeconds, the queue's lease_time, 60)`. The worker id is
 UUIDv7 per request, and on a leased pop it is what the client gets back as `leaseId`.
 
 When pop maintenance mode is on, every pop answers `204` immediately with no work done.
+
+## Where the width and the batch come from
+
+Two numbers shape everything below. `partitions` is the sweep width, and it is
+what step 1 turns into `k` candidate names. `batch` is the message budget for the
+call, and it is both the stopping rule in step 1 and the cap the claim in step 4
+spends. Before 1.2 both were the client's, and a client that set neither got its
+own SDK's defaults.
+
+Since 1.2 a pop may hand either of them, or both, to the broker by sending
+`autopilot=true` and simply omitting the ones it is delegating. The choice is per
+dimension: a value you send is yours and is never overridden, so
+`autopilot=true&partitions=1` is a manual width of one with an automatic batch.
+The reasoning, and the client side of it, are on
+[pop autopilot](/reference/http/pop#autopilot).
+
+What is worth recording here is where the controller reads its inputs, because
+that is what bounds where it can run at all. It is an in-memory controller keyed
+by `(tenant, queue, group)` and it issues **no PostgreSQL query of its own**:
+before the claim it takes one pass over the ready set of the hot-list ring for
+both of its inputs, how many partitions are servable and how long the oldest of
+them has waited. The width loop steers that ready-age towards
+`QUEEN_POP_AUTOPILOT_TARGET_AGE_MS`, with a dwell in both directions so it cannot
+limit-cycle; the batch a delegated consumer receives is a constant rather than a
+loop, `QUEEN_POP_AUTOPILOT_BATCH`.
+
+Three consequences follow from reading the ring, and each of them is a place the
+parameter is accepted and quietly does nothing:
+
+- **The legacy SQL candidate scan has none of those facts.** With
+  `QUEEN_HOTLIST=0` the branch below runs and an opted-in request resolves to
+  today's defaults.
+- **A pinned-partition pop is one partition by definition**, and a discovery pop
+  spans queues rather than a ring, so neither route has a width to choose.
+- **Conflation owns that dimension already.** Under `conflation=true`,
+  `partitions` is not a sweep width but the message budget, because a conflating
+  pop yields at most one message per partition. A controller width there would
+  silently shrink what the consumer asked for, so the ticket is inert.
+
+The handler has exactly one place where the controller's answer becomes the
+claim's knobs, a `match` on the ticket's plan whose `None` arm is the
+pre-autopilot code path verbatim. That is what makes "a request without the
+parameter is byte-identical" structural rather than asserted: with no plan there
+is nothing at that site to get wrong.
 
 ## Step 1: picking candidates
 

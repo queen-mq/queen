@@ -1,0 +1,62 @@
+goload -mode cloud [pro-n30-q8] -> http://10.114.0.2:6711
+  target=proxy tenants=30 sharedQueue=true queue="app-q8" group="workers" partitions=500 brokerTenantHeader=false
+  offered=75.0 msg/s total (2.50/tenant) push-batch=1 -> 2.50 req/s per tenant across 1 producer(s) | max-inflight=4096
+  consumers=1/tenant popBatch=100 popWait=true autoAck=false | payload=256B | duration=120s drain=45s | idleConns=141/client verify=true
+[configure] 30 queue(s) configured in 2.08s
+[11:17:29 load ] offered=      75/s push=      75/s pop=      75/s ack=      75/s shed=      0/s inflight=    0 | e2e p50=  30.08 p99=  667.65 ms | pushRTT p50= 13.12 p99=  50.43 ms | lag=14 | err push=0 pop=0 ack=0 (429=0 403=0 5xx=0 to=0 conn=0) empty=0 cross=0 gor=183
+[drain] producers stopped after 120.0s; draining 45s before the correctness verdict
+[11:18:29 load ] offered=      75/s push=      68/s pop=      68/s ack=      68/s shed=      0/s inflight=    0 | e2e p50=  30.34 p99=  528.38 ms | pushRTT p50= 14.66 p99=  77.31 ms | lag=12 | err push=432 pop=2307 ack=2 (429=0 403=0 5xx=0 to=2307 conn=434) empty=26 cross=0 gor=221
+
+========== pro-n30-q8 ==========
+offered         75.0 msg/s (9000 msgs, 0 shed)
+achieved  push     71.4 msg/s (8568 msgs)   pop     71.3 msg/s during load (    51.9 msg/s over load+drain, 8558 msgs)   ack 8556 msgs
+e2eFromSchedule  n=8558      p50=   30.34 p95=  342.02 p99=  602.11 p999=  815.10 max= 30388.22 ms
+e2eFromSend      n=8558      p50=   29.82 p95=  342.02 p99=  602.11 p999=  815.10 max= 30388.12 ms
+pushRtt          n=8568      p50=   13.89 p95=   34.05 p99=   59.14 p999=  171.01 max=   595.40 ms
+ackRtt           n=8322      p50=    8.64 p95=   22.14 p99=   33.02 p999=   47.36 max=    57.84 ms
+errors push       total=432 kinds=map[conn:432] codes=map[]
+    first conn: push request failed: request failed after 1 attempts: Post "http://10.114.0.2:6711/api/v1/push": dial tcp 10.114.0.2:6711: connect: connection refused
+errors pop        total=2307 kinds=map[canceled:30 timeout:2307] codes=map[]
+    first timeout: pop request failed: Get "http://10.114.0.2:6711/api/v1/pop/queue/app-q8?autoAck=false&batch=100&consumerGroup=workers&partitions=500&timeout=5000&wait=true": dial tcp 10.114.0.2:6711: connect: connection refused
+errors ack        total=2 kinds=map[conn:2] codes=map[]
+    first conn: ack request failed: request failed after 1 attempts: Post "http://10.114.0.2:6711/api/v1/ack": dial tcp 10.114.0.2:6711: connect: connection refused
+bytes     nominal 292 B/msg -> pushed 2.39 MiB, delivered 2.38 MiB
+
+---- delivery correctness (after the drain) ----
+idx  tenant         queue           sentOk  received  missing      dup   extra   cross verdict
+0    cp-0000        app-q8             286       286        0        0       0       0 OK
+1    cp-0001        app-q8             286       286        0        0       0       0 OK
+2    cp-0002        app-q8             285       285        0        0       0       0 OK
+3    cp-0003        app-q8             286       286        0        0       0       0 OK
+4    cp-0004        app-q8             286       286        0        0       0       0 OK
+5    cp-0005        app-q8             286       286        0        0       0       0 OK
+6    cp-0006        app-q8             286       286        0        0       0       0 OK
+7    cp-0007        app-q8             286       286        0        0       0       0 OK
+8    cp-0008        app-q8             285       285        0        0       0       0 OK
+9    cp-0009        app-q8             286       286        0        0       0       0 OK
+10   cp-0010        app-q8             285       285        0        0       0       0 OK
+11   cp-0011        app-q8             286       286        0        0       0       0 OK
+12   cp-0012        app-q8             285       285        0        0       0       0 OK
+13   cp-0013        app-q8             286       286        0        0       0       0 OK
+14   cp-0014        app-q8             285       285        0        0       0       0 OK
+15   cp-0015        app-q8             285       285        0        0       0       0 OK
+16   cp-0016        app-q8             286       286        0        0       0       0 OK
+17   cp-0017        app-q8             285       285        0        0       0       0 OK
+18   cp-0018        app-q8             285       285        0        0       0       0 OK
+19   cp-0019        app-q8             286       286        0        0       0       0 OK
+20   cp-0020        app-q8             285       283        2        0       0       0 FAIL  firstMissing=[1 2]
+21   cp-0021        app-q8             286       285        1        0       0       0 FAIL  firstMissing=[1]
+22   cp-0022        app-q8             285       284        1        0       0       0 FAIL  firstMissing=[1]
+23   cp-0023        app-q8             286       285        1        0       0       0 FAIL  firstMissing=[1]
+24   cp-0024        app-q8             286       286        1        1       0       0 FAIL  firstMissing=[1]
+25   cp-0025        app-q8             286       285        1        0       0       0 FAIL  firstMissing=[1]
+26   cp-0026        app-q8             285       284        1        0       0       0 FAIL  firstMissing=[1]
+27   cp-0027        app-q8             286       285        1        0       0       0 FAIL  firstMissing=[1]
+28   cp-0028        app-q8             286       286        1        1       0       0 FAIL  firstMissing=[1]
+29   cp-0029        app-q8             285       283        2        0       0       0 FAIL  firstMissing=[1 2]
+     TOTAL                            8568      8558       12        2       0       0
+VERDICT: FAIL
+CAUTION: 12 missing may be BACKLOG, not loss — 0 messages were still arriving in the last 2s of the drain and the consumer side hit 2307 error(s) (map[]). Re-run with a longer -drain, or size -drain to the rate the plan actually permits.
+
+[artifacts] /root/cap16-pro/pro-n30-q8.json
+            /root/cap16-pro/pro-n30-q8-interval.csv

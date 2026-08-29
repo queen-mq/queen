@@ -176,10 +176,22 @@ BEGIN
         -- make every allocator update non-HOT; at most one real change per
         -- second per partition keeps ~all of them HOT. The pop candidate scan
         -- tolerates 2 minutes of slack, so 1s staleness is absorbed.
+        -- Same discipline for the two retention work-list watermarks
+        -- (001_log_schema): they are ALSO indexed, so the write has to be
+        -- byte-identical in steady state — COALESCE returns the existing value
+        -- unchanged, and only the rare EMPTY -> NON-EMPTY transition (this push
+        -- creating the partition's first live row) actually touches the index.
+        -- Sub-millisecond skew against the segment's own created_at is
+        -- deliberate and harmless in both directions: a value a hair LATE hides
+        -- the partition for at most one cycle, a hair EARLY costs one no-op
+        -- step call, and both are measured in microseconds against cutoffs
+        -- measured in hours.
         UPDATE queen.log_partitions SET
-            last_offset   = last_offset + p_msg_count,
-            last_write_at = CASE WHEN clock_timestamp() - last_write_at > interval '1 second'
-                                 THEN clock_timestamp() ELSE last_write_at END
+            last_offset    = last_offset + p_msg_count,
+            oldest_live_at = COALESCE(oldest_live_at, clock_timestamp()),
+            oldest_txn_at  = COALESCE(oldest_txn_at,  clock_timestamp()),
+            last_write_at  = CASE WHEN clock_timestamp() - last_write_at > interval '1 second'
+                                  THEN clock_timestamp() ELSE last_write_at END
         WHERE id = v_pid
         RETURNING last_offset INTO v_last;
         v_base := v_last - p_msg_count + 1;
@@ -187,11 +199,16 @@ BEGIN
         -- ============ DEDUP-OFF: single UPDATE .. RETURNING fast path ========
         -- No probe SELECT at all; the allocator UPDATE takes the row lock and
         -- is the whole serialization story (correctness-free work the seg v1
-        -- engine could not skip, preserved from seg v2).
+        -- engine could not skip, preserved from seg v2). The two watermark
+        -- COALESCEs are byte-identical for a partition that already holds data
+        -- — see the dedup-ON branch above for the full rationale; the two
+        -- branches must stay textually identical here.
         UPDATE queen.log_partitions SET
-            last_offset   = last_offset + p_msg_count,
-            last_write_at = CASE WHEN clock_timestamp() - last_write_at > interval '1 second'
-                                 THEN clock_timestamp() ELSE last_write_at END
+            last_offset    = last_offset + p_msg_count,
+            oldest_live_at = COALESCE(oldest_live_at, clock_timestamp()),
+            oldest_txn_at  = COALESCE(oldest_txn_at,  clock_timestamp()),
+            last_write_at  = CASE WHEN clock_timestamp() - last_write_at > interval '1 second'
+                                  THEN clock_timestamp() ELSE last_write_at END
         WHERE id = v_pid
         RETURNING last_offset INTO v_last;
         IF v_last IS NULL THEN

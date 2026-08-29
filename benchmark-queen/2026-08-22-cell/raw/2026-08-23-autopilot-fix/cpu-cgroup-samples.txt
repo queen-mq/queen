@@ -1,0 +1,20 @@
+Cell CPU measured directly from cgroup v2 (cores), 60-90 s windows.
+Needed because roll-broker.sh changes the container id and the long-running
+sampler.sh caches cgroup paths at startup -- so the cell-broker-a / cell-broker-b
+columns of samples/soak.csv read 0.000 from the 20:53/20:57 rolls onward.
+pg / proxy / lb columns of soak.csv remain valid (those containers were not rolled).
+
+utc_end    pg     brk-a  brk-b  proxy  lb     TOTAL   %of800
+21:13:32   4.562  0.791  0.065  0.437  0.361  6.216   77.7
+21:21:57   4.095  0.894  0.066  0.437  0.360  5.852   73.2
+21:30:48   4.127  0.883  0.066  0.434  0.359  5.869   73.4
+21:40:08   4.386  0.877  0.067  0.445  0.365  6.140   76.8
+21:49:18   4.000  0.837  0.065  0.431  0.357  5.690   71.1
+21:58:28   4.424  0.917  0.069  0.452  0.374  6.236   78.0
+22:07:29   3.672  0.881  0.066  0.430  0.356  5.405   67.6
+22:16:29   3.879  0.900  0.066  0.438  0.362  5.645   70.6
+22:25:38   4.266  0.929  0.100  0.446  0.368  6.109   76.4
+MEAN       4.157  0.879  0.070  0.439  0.363  5.907   73.8
+
+PRE-ROLL reference (broken autopilot, from samples/soak.csv, 20:16-20:47, n=1711):
+           4.221  0.838  0.115  0.446  0.370  5.991   74.9

@@ -2,12 +2,13 @@
 Queue builder for fluent API
 """
 
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Union
 from urllib.parse import urlencode
 
 from ..errors import ConflationUnsupportedError
 from ..types import Message
 from ..utils import logger
+from ..utils.autopilot import AutopilotDecision, parse_autopilot_decision, pop_sizing
 from ..utils.conflation import check_pop_response as check_conflation
 from ..utils.conflation import scope_of as conflation_scope
 from ..utils.defaults import QUEUE_DEFAULTS, CONSUME_DEFAULTS, POP_DEFAULTS
@@ -17,6 +18,19 @@ from .consume_builder import ConsumeBuilder
 from .dlq_builder import DLQBuilder
 from .operation_builder import OperationBuilder
 from .push_builder import PushBuilder
+
+
+class PopResult(NamedTuple):
+    """
+    What one pop returned, plus what the broker chose to make it that size.
+
+    `autopilot` is None when this pop did not engage autopilot, when the broker
+    is older than 1.2, or when the answer was a bodiless 204 (an empty
+    non-conflating pop) with nowhere to carry the echo.
+    """
+
+    messages: List[Dict[str, Any]]
+    autopilot: Optional[AutopilotDecision]
 
 
 class QueueBuilder:
@@ -50,7 +64,7 @@ class QueueBuilder:
 
         # Consume options
         self._concurrency = CONSUME_DEFAULTS["concurrency"]
-        self._batch = CONSUME_DEFAULTS["batch"]
+        self._batch: Optional[int] = None
         self._limit = CONSUME_DEFAULTS["limit"]
         self._idle_millis = CONSUME_DEFAULTS["idle_millis"]
         self._auto_ack = CONSUME_DEFAULTS["auto_ack"]
@@ -62,7 +76,15 @@ class QueueBuilder:
         self._subscription_from = CONSUME_DEFAULTS["subscription_from"]
         self._conflation = CONSUME_DEFAULTS["conflation"]
         self._each = False
-        self._max_partitions = 1
+        # _batch and _max_partitions hold the USER's value, and None means the
+        # setter was never called -- which is the dimension pop autopilot gets
+        # to choose. The client-side defaults are applied at emission time
+        # (utils/autopilot.py), not here, because filling them in here would
+        # erase the difference between "never called batch()" and "called
+        # batch(1)". _autopilot is the per-builder override: None = the client
+        # default (on unless QUEEN_SDK_POP_AUTOPILOT turned it off).
+        self._max_partitions: Optional[int] = None
+        self._autopilot: Optional[bool] = None
 
         # Buffer options
         self._buffer_options: Optional[Dict[str, Any]] = None
@@ -211,8 +233,14 @@ class QueueBuilder:
         return self
 
     def batch(self, size: int) -> "QueueBuilder":
-        """Set batch size"""
-        self._batch = max(1, size)
+        """
+        Pin the message budget for one pop.
+
+        Leave it unset and the broker sizes it (see autopilot()), where it used
+        to mean the client-side default of 1. batch(0) is not "a batch of zero"
+        and never was: it is the absence of an opinion, so it reads as unset.
+        """
+        self._batch = size if size > 0 else None
         return self
 
     def partitions(self, n: int) -> "QueueBuilder":
@@ -225,10 +253,43 @@ class QueueBuilder:
         partitions, in a single network round-trip. All N partitions share
         a single leaseId — renewing once extends them all.
 
-        Default 1 = legacy single-partition behavior.
+        Leave it unset and the broker chooses the sweep width (see
+        autopilot()); partitions(1) pins the legacy single-partition behaviour,
+        which is a decision the broker is told about and never overrides.
         """
-        self._max_partitions = max(1, n)
+        self._max_partitions = n if n > 0 else None
         return self
+
+    def autopilot(self, enabled: bool = True) -> "QueueBuilder":
+        """
+        Turn broker-side pop sizing on or off for this builder.
+
+        On (the default) the broker chooses `batch` and `partitions` for the
+        pops of this builder. Even then, a batch or partitions set explicitly
+        travels on the wire as it always did and is never second-guessed:
+        autopilot only ever fills the knobs left unset.
+
+        autopilot(False) restores this SDK's pre-1.2 behaviour byte for byte:
+        the client-side defaults come back (batch 1, partitions 1) and no
+        autopilot parameter is sent. QUEEN_SDK_POP_AUTOPILOT=off does the same
+        for a whole process; an explicit call here outranks the environment in
+        both directions.
+
+        Setting BOTH batch and partitions leaves autopilot nothing to decide, so
+        no autopilot parameter is sent in that case either, whatever this flag
+        says.
+        """
+        self._autopilot = bool(enabled)
+        return self
+
+    def _autopilot_enabled(self) -> bool:
+        """
+        This builder's resolved autopilot decision: its own flag when set,
+        otherwise the client-wide default settled in the Queen constructor.
+        """
+        if self._autopilot is not None:
+            return self._autopilot
+        return not getattr(self._queen, "autopilot_off", False)
 
     def limit(self, count: int) -> "QueueBuilder":
         """Set message limit"""
@@ -338,6 +399,11 @@ class QueueBuilder:
             "conflation": self._conflation,
             "each": self._each,
             "max_partitions": self._max_partitions,
+            # Resolved here so ConsumerManager sees a decision and not a None.
+            # batch and max_partitions keep their None when autopilot is on, and
+            # that None has to survive all the way to _build_params: it is the
+            # ONLY record that the user said nothing about that dimension.
+            "autopilot": self._autopilot_enabled(),
             "signal": signal,
         }
 
@@ -352,8 +418,26 @@ class QueueBuilder:
         self._wait = enabled
         return self
 
+    async def pop_result(self) -> PopResult:
+        """
+        Claim messages and report what the broker chose for this pop.
+
+        Same call as pop() -- this is the shape that also carries the additive
+        `autopilot` echo, which is None when this pop did not engage autopilot
+        or the broker is older than 1.2.
+
+            res = await client.queue("events").group("workers").pop_result()
+            if res.autopilot:
+                print(res.autopilot.partitions, res.autopilot.batch,
+                      res.autopilot.wait_millis)
+        """
+        return await self._pop_with_decision()
+
     async def pop(self) -> List[Dict[str, Any]]:
         """Pop messages"""
+        return (await self._pop_with_decision()).messages
+
+    async def _pop_with_decision(self) -> PopResult:
         logger.log(
             "QueueBuilder.pop",
             {
@@ -378,12 +462,27 @@ class QueueBuilder:
                 else POP_DEFAULTS["auto_ack"]
             )
 
+            # Batch, partitions and with them the autopilot flag. The RULE for
+            # which of the three travel lives in one place
+            # (utils/autopilot.py) because consume() builds its query string
+            # separately; only the PLACEMENT is here, and it is the
+            # pre-autopilot placement so an autopilot-off request is
+            # byte-identical to the one this SDK used to send.
+            sizing = pop_sizing(
+                self._batch,
+                self._max_partitions,
+                fallback_batch=POP_DEFAULTS["batch"],
+                autopilot=self._autopilot_enabled(),
+            )
+
             # Build params with correct autoAck for pop
-            params: Dict[str, str] = {
-                "batch": str(self._batch),
-                "wait": str(self._wait).lower(),
-                "timeout": str(self._timeout_millis),
-            }
+            params: Dict[str, str] = {}
+            if sizing.autopilot:
+                params["autopilot"] = "true"
+            if sizing.batch is not None:
+                params["batch"] = sizing.batch
+            params["wait"] = str(self._wait).lower()
+            params["timeout"] = str(self._timeout_millis)
 
             if self._group:
                 params["consumerGroup"] = self._group
@@ -397,8 +496,10 @@ class QueueBuilder:
                 params["subscriptionMode"] = self._subscription_mode
             if self._subscription_from:
                 params["subscriptionFrom"] = self._subscription_from
-            if self._max_partitions > 1:
-                params["partitions"] = str(self._max_partitions)
+            # Under autopilot a pinned width travels even when it is 1, because
+            # 1 is then a decision and not the absence of one.
+            if sizing.partitions is not None:
+                params["partitions"] = sizing.partitions
             # Only ever emitted when true, mirroring autoAck: an absent
             # parameter is what keeps every non-conflating pop byte-identical
             # to a pre-1.1.0 one (PLAN_CONFLATION §3.1).
@@ -428,13 +529,18 @@ class QueueBuilder:
                 group=self._group,
             )
 
+            # The broker's own account of how it sized this pop, when the
+            # request engaged autopilot and the answer had a body to carry it (a
+            # bodiless 204 cannot, so an empty short pop reports None).
+            autopilot = parse_autopilot_decision(result)
+
             if not result or not result.get("messages"):
                 logger.log("QueueBuilder.pop", {"status": "no-messages"})
-                return []
+                return PopResult(messages=[], autopilot=autopilot)
 
             messages = [msg for msg in result["messages"] if msg is not None]
             logger.log("QueueBuilder.pop", {"status": "success", "count": len(messages)})
-            return messages
+            return PopResult(messages=messages, autopilot=autopilot)
         except ConflationUnsupportedError:
             # NOT swallowed into [], unlike every other failure below. An empty
             # list here would hide the one thing this error exists to say, and
@@ -454,7 +560,7 @@ class QueueBuilder:
                 {"error": str(error), "status_code": status_code, "code": getattr(error, "code", None)},
             )
             print(f"Pop failed: {error}")
-            return []
+            return PopResult(messages=[], autopilot=None)
 
     def _build_pop_path(self) -> str:
         """Build pop path"""

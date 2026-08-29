@@ -8,6 +8,8 @@ use Queen\Http\HttpClient;
 use Queen\Http\Retry429Policy;
 use Queen\Queen;
 use Queen\Support\ConflationGuard;
+use Queen\Support\Defaults;
+use Queen\Support\PopAutopilot;
 use GuzzleHttp\Promise\Utils as PromiseUtils;
 
 class ConsumerManager
@@ -29,7 +31,12 @@ class ConsumerManager
         $task = $options['task'] ?? null;
         $group = $options['group'] ?? null;
         $concurrency = $options['concurrency'] ?? 1;
-        $batch = $options['batch'] ?? 1;
+        // null means the user said nothing about this dimension, which is what
+        // pop autopilot acts on. The historical default of 1 is applied at
+        // emission time instead (Support\PopAutopilot), and only when autopilot
+        // is off, so that "never called batch()" and "called batch(1)" stay
+        // distinguishable all the way to the wire.
+        $batch = $options['batch'] ?? null;
         $limit = $options['limit'] ?? null;
         $idleMillis = $options['idleMillis'] ?? null;
         $autoAck = $options['autoAck'] ?? true;
@@ -41,11 +48,29 @@ class ConsumerManager
         $each = $options['each'] ?? false;
         $subscriptionMode = $options['subscriptionMode'] ?? null;
         $subscriptionFrom = $options['subscriptionFrom'] ?? null;
-        $maxPartitions = $options['maxPartitions'] ?? 1;
+        $maxPartitions = $options['maxPartitions'] ?? null;
+        // The caller's explicit decision if there is one, otherwise the
+        // client-wide default settled in the Queen constructor. The builder path
+        // has already resolved it; the null case is for callers that drive this
+        // manager with options of their own.
+        $autopilot = $options['autopilot'] ?? !$this->queen->autopilotOff();
         $conflation = $options['conflation'] ?? false;
 
         $path = $this->buildPath($queue, $partition, $namespace, $task);
-        $baseParams = $this->buildParams($batch, $wait, $timeoutMillis, $group, $subscriptionMode, $subscriptionFrom, $namespace, $task, $maxPartitions, $conflation, $leaseSeconds);
+        $baseParams = $this->buildParams(
+            $batch,
+            $wait,
+            $timeoutMillis,
+            $group,
+            $subscriptionMode,
+            $subscriptionFrom,
+            $namespace,
+            $task,
+            $maxPartitions,
+            $conflation,
+            $leaseSeconds,
+            $autopilot,
+        );
         $affinityKey = $this->getAffinityKey($queue, $partition, $namespace, $task, $group);
         // The identity the conflation checks report against: what was asked for,
         // and which (queue, group) pair a declaration conflict belongs to.
@@ -103,7 +128,9 @@ class ConsumerManager
         \Closure $handler,
         string $path,
         string $baseParams,
-        int $batch,
+        // Unused by the worker itself: it is the pop's message budget, and with pop
+        // autopilot null means the broker sized it (Support\PopAutopilot).
+        ?int $batch,
         ?int $limit,
         ?int $idleMillis,
         bool $autoAck,
@@ -213,7 +240,11 @@ class ConsumerManager
 
                 if (!$result || !isset($result['messages']) || empty($result['messages'])) {
                     if (!$wait) {
-                        usleep(100_000);
+                        // The broker's advised pacing when this pop engaged
+                        // autopilot and the broker had an opinion (it knows the
+                        // arrival rate on this queue and this client does not),
+                        // otherwise the historical 100ms.
+                        usleep(PopAutopilot::emptyPollDelayMicros(PopAutopilot::decision($result)));
                     }
                     continue;
                 }
@@ -273,7 +304,9 @@ class ConsumerManager
         \Closure $handler,
         string $path,
         string $baseParams,
-        int $batch,
+        // Unused by the worker itself: it is the pop's message budget, and with pop
+        // autopilot null means the broker sized it (Support\PopAutopilot).
+        ?int $batch,
         ?int $limit,
         ?int $idleMillis,
         bool $autoAck,
@@ -328,7 +361,11 @@ class ConsumerManager
 
                 if (!$result || !isset($result['messages']) || empty($result['messages'])) {
                     if (!$wait) {
-                        usleep(100_000);
+                        // The broker's advised pacing when this pop engaged
+                        // autopilot and the broker had an opinion (it knows the
+                        // arrival rate on this queue and this client does not),
+                        // otherwise the historical 100ms.
+                        usleep(PopAutopilot::emptyPollDelayMicros(PopAutopilot::decision($result)));
                     }
                     continue;
                 }
@@ -563,7 +600,7 @@ class ConsumerManager
     }
 
     private function buildParams(
-        int $batch,
+        ?int $batch,
         bool $wait,
         int $timeoutMillis,
         ?string $group,
@@ -571,15 +608,29 @@ class ConsumerManager
         ?string $subscriptionFrom,
         ?string $namespace,
         ?string $task,
-        int $maxPartitions = 1,
+        ?int $maxPartitions = null,
         bool $conflation = false,
         ?int $leaseSeconds = null,
+        bool $autopilot = true,
     ): string {
-        $params = [
-            'batch' => (string) $batch,
-            'wait' => $wait ? 'true' : 'false',
-            'timeout' => (string) $timeoutMillis,
-        ];
+        // Batch, partitions and with them the autopilot flag. null/0 means the
+        // user set nothing (QueueBuilder leaves it that way on purpose), which is
+        // the dimension the broker gets to choose. THE RULE lives in one place
+        // (Support\PopAutopilot) precisely because this SDK has THREE pop param
+        // builders -- PLAN_CONFLATION §4 opens on that hazard by name; only the
+        // placement of the keys is here, and it is the pre-autopilot placement so
+        // an autopilot-off request is byte-identical.
+        $sizing = PopAutopilot::sizing($batch, $maxPartitions, Defaults::CONSUME_DEFAULTS['batch'], $autopilot);
+
+        $params = [];
+        if ($sizing['autopilot']) {
+            $params['autopilot'] = 'true';
+        }
+        if ($sizing['batch'] !== null) {
+            $params['batch'] = $sizing['batch'];
+        }
+        $params['wait'] = $wait ? 'true' : 'false';
+        $params['timeout'] = (string) $timeoutMillis;
 
         if ($group !== null) {
             $params['consumerGroup'] = $group;
@@ -599,9 +650,11 @@ class ConsumerManager
         if ($task !== null) {
             $params['task'] = $task;
         }
-        // v4 multi-partition pop: drain up to N sparse partitions per call.
-        if ($maxPartitions > 1) {
-            $params['partitions'] = (string) $maxPartitions;
+        // v4 multi-partition pop: drain up to N sparse partitions per call. Under
+        // autopilot a pinned width travels even when it is 1, because 1 is then a
+        // decision and not the absence of one.
+        if ($sizing['partitions'] !== null) {
+            $params['partitions'] = $sizing['partitions'];
         }
         // Last-value delivery, sent only when true: the broker treats presence
         // as opt-in, and conflation=false would read as a DISAGREEMENT with a

@@ -31,8 +31,11 @@ published by a person running a command. Knowing which is which is the point of 
 - `server/build.rs` extracts `version` and exports it as `QUEEN_VERSION`, which is what
   `GET /health`, the boot log and `queenctl ping` report. A version bump therefore forces a
   rebuild of the broker.
-- `build.sh` uses `name` and `version` to tag and push the image locally.
-- `.github/workflows/docker-build.yml` reads both with `jq` for the same purpose in CI.
+- `build.sh` reads `version` with `jq` to tag the broker image it builds or pushes locally.
+- `.github/workflows/docker-build.yml` reads `version` with `jq` for the same purpose in CI.
+
+Neither reads `name`: the image name is `queen` in both, and both take the proxy image's
+version from `proxy/Cargo.toml` instead.
 
 Everything else carries its own version, or none at all.
 
@@ -41,34 +44,45 @@ Everything else carries its own version, or none at all.
 | Broker image | `server/server.json` |
 | `queen-engine` (the broker crate) | `server/Cargo.toml`, which must say the same string as `server/server.json`: the first is what crates.io serves, the second is what the built binary reports on `/health` |
 | JavaScript client | `clients/client-js/package.json` |
-| Python client | `clients/client-py/pyproject.toml` |
+| Python client | `clients/client-py/pyproject.toml` **and** `clients/client-py/queen/__init__.py`, whose `__version__` the package exports: bumping only the first ships a package that misreports itself |
 | PHP/Laravel client | nowhere: `composer.json` has no `version` field; Packagist reads the git tag |
 | Go client | nowhere: the git tag *is* the version |
 | Rust client | `clients/client-rust/Cargo.toml` |
-| `queen-protocol` | `crates/queen-protocol/Cargo.toml`, and the version requirement on the client's dependency on it |
+| `queen-protocol` | `crates/queen-protocol/Cargo.toml`, and the version requirement on EVERY dependency on it: both `clients/client-rust/Cargo.toml` and `server/Cargo.toml` pin it by version beside the path |
 | `queenctl` | nowhere: the tag is the version, injected at build time with `-ldflags` |
 | C++ client | nowhere: header-only, taken at whatever tag you check out |
 | Dashboard (`app/`) | `app/package.json`, private, never published separately |
 
+<Aside type="caution">
+**Bump the lockfiles in the same commit.** Every crate whose version moves rewrites its own
+`Cargo.lock`, and `server/`, `proxy/`, `clients/client-rust/` and `crates/queen-protocol/`
+each keep one. The `v1.2.0` tag shipped with a lockfile a commit behind its manifest, which
+`cargo metadata --locked` catches and a plain build does not, because a plain build simply
+updates the file and moves on. Run it in each of the four directories before tagging.
+</Aside>
+
 ## The versioning rule
 
-**The broker and the SDKs are version-aligned at 1.0.0.** One `MAJOR.MINOR.PATCH` for the
+**The broker and the SDKs are version-aligned since 1.0.0.** One version line across the
 broker image, npm, PyPI, crates.io, Packagist, the Go module tag and the CLI tag, so a client
-version tells you which broker it was released against without a compatibility matrix.
+version tells you which broker line it was released against without a compatibility matrix.
+The alignment is the `MAJOR.MINOR`: a patch that rebuilds only the broker moves only the
+broker.
 
 <Aside type="note">
-At 1.0.0 the numbers agree again. The broker carries `1.0.0` (`server/server.json`, mirrored
-in `server/Cargo.toml`), and so do the proxy (`proxy/Cargo.toml`), the dashboard
-(`app/package.json`), the operator console (`proxy/console/package.json`), the JavaScript and
-Python clients, the Rust client and `queen-protocol`. They did not during the betas: the
-broker reached `1.0.0-beta.4` while everything outside `server/` stayed on `1.0.0-beta.1`,
-because those releases were broker-only and nothing else was rebuilt for them. So a
-`queen-proxy` image and a `queen` image from the same *beta* day can legitimately report
-different prerelease numbers, and there only the `MAJOR.MINOR.PATCH` in front of the suffix
-is the alignment the rule above promises. The Go module, the CLI and the Packagist
-package take their version from git tags, so they are aligned by tagging at release time and
-not by editing a file. `README.md` points at `ghcr.io/queen-mq/queen:latest`, but its prose
-still carries 0.16-era numbers.
+Today the broker (`server/server.json`, mirrored in `server/Cargo.toml`), the proxy
+(`proxy/Cargo.toml`), the JavaScript, Python and Rust clients and `queen-protocol` all carry
+`1.3.0`, with `v1.3.0` tags covering the Go module, the CLI and Packagist. The release before
+it is the exception the rule allows: `1.2.1` was a server-only patch, so the broker sat at
+`1.2.1` while everything else stayed on `1.2.0` and nothing outside `server/` was rebuilt.
+The betas behaved the same way, with the broker at
+`1.0.0-beta.4` while everything else stayed on `1.0.0-beta.1`, and there as here the shared
+`MAJOR.MINOR` in front is the alignment the rule above promises. The dashboard
+(`app/package.json`) and the operator console (`proxy/console/package.json`) still say
+`1.0.0`: both are private and neither is ever published separately. The Go module, the CLI
+and the Packagist package take their version from git tags, so they are aligned by tagging at
+release time and not by editing a file. `README.md` points at `ghcr.io/queen-mq/queen:latest`,
+but its prose still carries 0.16-era numbers.
 </Aside>
 
 ## What CI publishes
@@ -89,8 +103,16 @@ version, `sha-<short>`, and `latest`. The broker also receives `QUEENCTL_VERSION
 `QUEENCTL_COMMIT` as build arguments so that `queenctl version` inside the container matches what
 the broker reports.
 
-Authentication is the workflow's own `GITHUB_TOKEN` under `permissions: packages: write`, so there
-are no registry secrets to rotate. Layer caching is the GitHub Actions cache, **scoped per image**
+Docker Hub is an opt-in **mirror** of the same build, not a second build: with
+`vars.DOCKERHUB_NAMESPACE` plus the `DOCKER_USERNAME` and `DOCKER_PASSWORD` secrets configured,
+buildx pushes the one manifest to `docker.io` under the same three tags, so the images are
+bit-identical across the two registries. Unset, the job publishes to GHCR alone, and a pull
+request never mirrors because secrets do not reach forked pull requests.
+
+Authentication for GHCR is the workflow's own `GITHUB_TOKEN` under
+`permissions: packages: write`, so that registry needs no secrets to rotate; the two Docker
+Hub secrets exist only if the mirror does. Layer caching is the GitHub Actions cache, **scoped
+per image**
 (`scope=${{ matrix.image }}`); a shared scope would make the two matrix legs evict each other's
 layers and cold-build every run.
 
@@ -113,8 +135,12 @@ date go in through `-ldflags`, so `queenctl version` reports the tag.
 
 The directory-prefixed tag shape is required by Go's module proxy for a nested module, and
 GoReleaser wants bare semver, so the workflow strips the prefix into `GORELEASER_CURRENT_TAG`
-and runs with `--skip=validate`. The bare semver tag does not physically exist at the release
-commit, only the prefixed one does.
+and runs with `--skip=validate`, which drops the requirement that the bare tag exist at the
+checkout. In practice it does exist: a release tags the broker and the CLI together, and
+GoReleaser publishes its GitHub Release against the bare tag, so the `queenctl X.Y.Z` release
+lands **on** the `vX.Y.Z` tag. The broker's release notes for that tag and the CLI artifacts
+therefore share one GitHub Release: edit the release that exists rather than creating a second
+one on the same tag.
 
 ## What a human publishes
 
@@ -163,7 +189,7 @@ workflow.
 ## Rollback, and the one place additivity stops
 
 Schema application is idempotent by construction: `server/src/schema.rs` re-applies `schema.sql`
-and the 23 stored-procedure files at every boot (the [schema catalogue](/internals/schema) has
+and the 31 stored-procedure files at every boot (the [schema catalogue](/internals/schema) has
 the mechanism), so re-applying is always safe, and rolling the broker image back to a previous
 1.x is safe at the database level. Note that the procedures are embedded in the binary, so the
 binary and the procedures roll together: you cannot roll one back independently.
@@ -184,11 +210,11 @@ across that boundary is a fresh database. Take a `pg_dump` first if the old data
 The pre-1.0 release checklist, `developer/14-release.md`, is stale like the rest of `developer/`;
 for what each release actually changed, read `CHANGELOG.md` at the repository root.
 
-Two pieces of CI are stale the same way. `.github/workflows/cpp-server-build.yml` triggers on the
-`release` branch and runs `make deps` and `make build-only` in `server/`, targets that were
-removed with the C++ broker; it cannot succeed. And `.github/workflows/cli.yml` pins its
-end-to-end broker to `smartnessai/queen-mq:0.14.3`, so the CLI's end-to-end suite currently
-tests against a pre-log-engine broker.
+The CI that was stale the same way is gone: `cpp-server-build.yml` (C++ `make` targets that no
+longer existed) and `cli.yml` (an end-to-end suite pinned to a pre-log-engine `0.14.3` broker
+image) have both been deleted. Four workflows remain, `docker-build.yml`, `release-cli.yml`,
+`tests.yml` and the docs site's `docs.yml`, and the CLI's end-to-end suite now runs in the
+`cli` cell of the tests matrix, against the broker built from the same tree.
 
 ## Post-release
 

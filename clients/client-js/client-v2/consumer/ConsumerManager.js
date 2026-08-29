@@ -4,6 +4,8 @@
 
 import * as logger from '../utils/logger.js'
 import { checkConflationResponse, CONFLATION_UNSUPPORTED } from '../utils/conflation.js'
+import { popSizing, parseAutopilotDecision, emptyPollDelayMillis } from '../utils/autopilot.js'
+import { CONSUME_DEFAULTS } from '../utils/defaults.js'
 
 export class ConsumerManager {
   #httpClient
@@ -51,6 +53,7 @@ export class ConsumerManager {
       conflation,
       each,
       maxPartitions,
+      autopilot,
       signal
     } = options
 
@@ -70,7 +73,7 @@ export class ConsumerManager {
 
     // Build the path and params for pop requests
     const path = this.#buildPath(queue, partition, namespace, task)
-    const baseParams = this.#buildParams(batch, wait, timeoutMillis, group, subscriptionMode, subscriptionFrom, namespace, task, autoAck, maxPartitions, conflation)
+    const baseParams = this.#buildParams(batch, wait, timeoutMillis, group, subscriptionMode, subscriptionFrom, namespace, task, autoAck, maxPartitions, conflation, this.#autopilotEnabled(autopilot))
     
     // Generate affinity key for consistent routing to same backend
     const affinityKey = this.#getAffinityKey(queue, partition, namespace, task, group)
@@ -174,8 +177,11 @@ export class ConsumerManager {
           if (wait) {
             continue // Long polling timeout, retry
           } else {
-            // Short delay before retry
-            await new Promise(resolve => setTimeout(resolve, 100))
+            // Short delay before retry -- the broker's advised pacing when this
+            // pop engaged autopilot and the broker had an opinion (it knows the
+            // arrival rate on this queue and this client does not), otherwise
+            // the historical 100ms.
+            await new Promise(resolve => setTimeout(resolve, emptyPollDelayMillis(parseAutopilotDecision(result))))
             continue
           }
         }
@@ -472,20 +478,46 @@ export class ConsumerManager {
     throw new Error('Must specify queue, namespace, or task')
   }
 
-  #buildParams(batch, wait, timeoutMillis, group, subscriptionMode, subscriptionFrom, namespace, task, autoAck, maxPartitions, conflation) {
-    const params = new URLSearchParams({
-      batch: batch.toString(),
-      wait: wait.toString(),
-      timeout: timeoutMillis.toString()  // Server expects 'timeout', not 'timeoutMillis'
+  /**
+   * The autopilot decision for one consume: the caller's explicit option if
+   * there is one, otherwise the client-wide default settled in the Queen
+   * constructor. The builder path has already resolved it; the undefined case
+   * is for callers that drive ConsumerManager with options of their own.
+   */
+  #autopilotEnabled(autopilot) {
+    if (typeof autopilot === 'boolean') return autopilot
+    return !this.#queen || !this.#queen.autopilotOff
+  }
+
+  #buildParams(batch, wait, timeoutMillis, group, subscriptionMode, subscriptionFrom, namespace, task, autoAck, maxPartitions, conflation, autopilot = true) {
+    // Batch, partitions and with them the autopilot flag. null/0 means the user
+    // set nothing (QueueBuilder leaves it that way on purpose), which is the
+    // dimension the broker gets to choose. THE RULE lives in one place
+    // (utils/autopilot.js) precisely because this is the SECOND parameter
+    // builder; only the placement of the keys is here, and it is the
+    // pre-autopilot placement so an autopilot-off request is byte-identical.
+    const sizing = popSizing({
+      batch,
+      maxPartitions,
+      fallbackBatch: CONSUME_DEFAULTS.batch,
+      autopilot
     })
+
+    const params = new URLSearchParams()
+    if (sizing.autopilot) params.append('autopilot', 'true')
+    if (sizing.batch !== null) params.append('batch', sizing.batch)
+    params.append('wait', wait.toString())
+    params.append('timeout', timeoutMillis.toString())  // Server expects 'timeout', not 'timeoutMillis'
 
     if (group) params.append('consumerGroup', group)
     if (subscriptionMode) params.append('subscriptionMode', subscriptionMode)
     if (subscriptionFrom) params.append('subscriptionFrom', subscriptionFrom)
     if (namespace) params.append('namespace', namespace)
     if (task) params.append('task', task)
-    // v4 multi-partition pop: drain up to N sparse partitions per call.
-    if (maxPartitions && maxPartitions > 1) params.append('partitions', maxPartitions.toString())
+    // v4 multi-partition pop: drain up to N sparse partitions per call. Under
+    // autopilot a pinned width travels even when it is 1, because 1 is then a
+    // decision and not the absence of one.
+    if (sizing.partitions !== null) params.append('partitions', sizing.partitions)
     // Conflation (PLAN_CONFLATION §3.1): last-value delivery for this group.
     // Sent ONLY when true, so a consumer that never declares it puts no new
     // bytes on the wire. THIS IS THE SECOND PARAMETER BUILDER — the pop() one

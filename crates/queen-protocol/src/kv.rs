@@ -196,11 +196,7 @@ pub struct KvOperation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 
-    #[serde(
-        rename = "keysOnly",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "keysOnly", default, skip_serializing_if = "Option::is_none")]
     pub keys_only: Option<bool>,
 
     /// `put` and `putIfAbsent`. `Some(Value::Null)` is a legal value and is
@@ -794,7 +790,10 @@ mod tests {
         let op = KvOperation::put("ns", "k", Value::Null, Expiry::Forever).unwrap();
         let body = serde_json::to_string(&op).unwrap();
         assert!(body.contains(r#""value":null"#), "{body}");
-        assert_eq!(validate_like_the_procedure(&body_of(&op), false), Verdict::Ok);
+        assert_eq!(
+            validate_like_the_procedure(&body_of(&op), false),
+            Verdict::Ok
+        );
     }
 
     #[test]
@@ -802,8 +801,8 @@ mod tests {
         // The alias desugars to expect:0. Sending expect:5 with it is a
         // contradiction the procedure raises on, and the SDK must not build one
         // by accident — so the constructor never sets `expect` itself.
-        let op = KvOperation::put_if_absent("ns", "k", Value::Bool(true), Expiry::seconds(60))
-            .unwrap();
+        let op =
+            KvOperation::put_if_absent("ns", "k", Value::Bool(true), Expiry::seconds(60)).unwrap();
         assert_eq!(op.expect, None);
         let contradiction = op.clone().expect(5);
         assert_eq!(
@@ -824,7 +823,10 @@ mod tests {
         let op = KvOperation::incr("quota", "acme", 1, Expiry::seconds(60));
         let op = op.unwrap();
         assert_eq!(op.expect, None);
-        assert_eq!(validate_like_the_procedure(&body_of(&op), false), Verdict::Ok);
+        assert_eq!(
+            validate_like_the_procedure(&body_of(&op), false),
+            Verdict::Ok
+        );
     }
 
     #[test]
@@ -957,7 +959,10 @@ mod tests {
             r#"{"index":0,"op":"incr","applied":true,"value":99999999999999999999}"#,
         )
         .unwrap();
-        assert!(huge.counter().is_err(), "a rounded counter is worse than an error");
+        assert!(
+            huge.counter().is_err(),
+            "a rounded counter is worse than an error"
+        );
     }
 
     #[test]

@@ -14,6 +14,7 @@ sourceOfTruth:
   - server/src/schema.rs
   - server/src/handlers/status.rs
   - server/src/admission.rs
+# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
 ---
 
 Three replicas, a headless Service so they can find each other, and a client Service carrying only
@@ -201,9 +202,10 @@ For one replica that accepts losing an unreplayed spool: drop the claim template
 None of these shows up in a `kubectl get`, and each one is the difference between a broker that
 runs and a broker that performs.
 
-- **`PG_PORT` points at PostgreSQL directly, not at a pooler.** The broker holds session-scoped
-  advisory locks across the boot schema apply and across every retention cycle, plus the statements
-  the hot paths prepare once per connection, and all of that lives on one specific backend session.
+- **`PG_PORT` points at PostgreSQL directly, not at a pooler.** The broker holds a session-scoped
+  advisory lock across the boot schema apply and keeps a transaction open across every retention
+  cycle whose one job is holding that cycle's lock, plus the statements the hot paths prepare once
+  per connection, and all of that lives on one specific backend session.
   PgBouncer in session mode is the supported way to pool, and it pins a server connection per
   client, so it multiplexes nothing for a long-lived application pool anyway: 28 client connections
   were measured against 28 backends. It can still recycle the server underneath and drop a held

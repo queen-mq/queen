@@ -1,0 +1,400 @@
+{
+  "runId": "dev-q1",
+  "tool": "goload -mode cloud",
+  "startedAt": "2026-08-23T05:58:08Z",
+  "endedAt": "2026-08-23T06:14:08Z",
+  "loadSec": 900.000134996,
+  "drainSec": 60.000629772,
+  "config": {
+    "autoAck": false,
+    "brokerTenantHeader": false,
+    "completedRetentionSeconds": 259200,
+    "consumersPerTenant": 2,
+    "dedupWindowSeconds": 0,
+    "drainDeliveries": 0,
+    "drainLast2sDeliveries": 0,
+    "drainSec": 60,
+    "durationSec": 900,
+    "fault": "",
+    "group": "workers",
+    "idleConnsPerClient": 8,
+    "leaseTime": 30,
+    "maxInflight": 256,
+    "minPopWaitTime": 0,
+    "note": "",
+    "offeredMsgPerSecPerTenant": 5,
+    "offeredMsgPerSecTotal": 55,
+    "partitions": 2000,
+    "payloadBytes": 256,
+    "popBatch": 100,
+    "popPartitions": 10,
+    "popTimeoutMs": 5000,
+    "popWait": true,
+    "producersPerTenant": 1,
+    "pushBatch": 1,
+    "queue": "dev-q1",
+    "retentionSeconds": 259200,
+    "retries": 0,
+    "retry429Attempts": 1,
+    "sharedQueue": true,
+    "target": "proxy",
+    "tenants": 11,
+    "tenantsFile": "/root/soak/t-dev.json",
+    "timeoutMs": 30000,
+    "url": "http://10.114.0.2:6711",
+    "verify": true
+  },
+  "offered": {
+    "msgPerSec": 54.99999175024568,
+    "reqPerSec": 54.99999175024568,
+    "msgs": 49500,
+    "reqs": 49500,
+    "shedMsgs": 0,
+    "shedReqs": 0
+  },
+  "achieved": {
+    "pushMsgPerSec": 54.99999175024568,
+    "popMsgPerSecLoadPhase": 54.97332508757889,
+    "popMsgPerSecWholeRun": 51.53745894354228,
+    "ackMsgPerSecWholeRun": 51.53745894354228,
+    "pushedMsgs": 49500,
+    "poppedMsgs": 49476,
+    "ackedMsgs": 49476,
+    "pushReqs": 49500,
+    "popReqs": 49484,
+    "ackReqs": 49198,
+    "emptyPops": 264
+  },
+  "latency": {
+    "ackRtt": {
+      "samples": 49198,
+      "p50Ms": 4.128,
+      "p95Ms": 13.12,
+      "p99Ms": 21.632,
+      "p999Ms": 46.336,
+      "maxMs": 267.729
+    },
+    "e2eFromSchedule": {
+      "samples": 49476,
+      "p50Ms": 13.248,
+      "p95Ms": 66.048,
+      "p99Ms": 168.96,
+      "p999Ms": 561.152,
+      "maxMs": 1541.76
+    },
+    "e2eFromSend": {
+      "samples": 49476,
+      "p50Ms": 12.608,
+      "p95Ms": 65.28,
+      "p99Ms": 168.96,
+      "p999Ms": 561.152,
+      "maxMs": 1540.696
+    },
+    "pushRtt": {
+      "samples": 49500,
+      "p50Ms": 5.792,
+      "p95Ms": 19.328,
+      "p99Ms": 35.584,
+      "p999Ms": 100.864,
+      "maxMs": 1165.342
+    }
+  },
+  "errors": {
+    "ack": {
+      "total": 0,
+      "byKind": {},
+      "byCode": {},
+      "retryAfterSamples": 0,
+      "retryAfterAvgSec": 0,
+      "retryAfterMaxSec": 0,
+      "firstMessage": {}
+    },
+    "configure": {
+      "total": 0,
+      "byKind": {},
+      "byCode": {},
+      "retryAfterSamples": 0,
+      "retryAfterAvgSec": 0,
+      "retryAfterMaxSec": 0,
+      "firstMessage": {}
+    },
+    "pop": {
+      "total": 0,
+      "byKind": {
+        "canceled": 22
+      },
+      "byCode": {},
+      "retryAfterSamples": 0,
+      "retryAfterAvgSec": 0,
+      "retryAfterMaxSec": 0,
+      "firstMessage": {}
+    },
+    "push": {
+      "total": 0,
+      "byKind": {},
+      "byCode": {},
+      "retryAfterSamples": 0,
+      "retryAfterAvgSec": 0,
+      "retryAfterMaxSec": 0,
+      "firstMessage": {}
+    }
+  },
+  "bytes": {
+    "perMsgNominalBytes": 292,
+    "pushedNominalBytes": 14454000,
+    "deliveredNominalBytes": 14446992,
+    "note": "nominal = JSON-encoded payload size x messages; excludes HTTP framing and the envelope the broker adds. The authoritative wire bytes are the proxy's own metered bytes_in/bytes_out."
+  },
+  "verify": {
+    "enabled": true,
+    "verdict": "FAIL",
+    "sentOk": 49500,
+    "received": 49476,
+    "missing": 24,
+    "duplicate": 0,
+    "extra": 0,
+    "crossTenant": 0,
+    "undecodable": 0,
+    "tenants": [
+      {
+        "idx": 0,
+        "tenant": "sd-0000",
+        "cluster": "sd-0000",
+        "queue": "dev-q1",
+        "seqAssigned": 4500,
+        "sentOk": 4500,
+        "sentFail": 0,
+        "sentLostFaultInjected": 0,
+        "received": 4497,
+        "missing": 3,
+        "duplicate": 0,
+        "extra": 0,
+        "crossTenantIn": 0,
+        "undecodable": 0,
+        "firstMissingSeqs": [
+          1,
+          2,
+          3
+        ],
+        "ok": false
+      },
+      {
+        "idx": 1,
+        "tenant": "sd-0001",
+        "cluster": "sd-0001",
+        "queue": "dev-q1",
+        "seqAssigned": 4500,
+        "sentOk": 4500,
+        "sentFail": 0,
+        "sentLostFaultInjected": 0,
+        "received": 4497,
+        "missing": 3,
+        "duplicate": 0,
+        "extra": 0,
+        "crossTenantIn": 0,
+        "undecodable": 0,
+        "firstMissingSeqs": [
+          1,
+          2,
+          3
+        ],
+        "ok": false
+      },
+      {
+        "idx": 2,
+        "tenant": "sd-0002",
+        "cluster": "sd-0002",
+        "queue": "dev-q1",
+        "seqAssigned": 4500,
+        "sentOk": 4500,
+        "sentFail": 0,
+        "sentLostFaultInjected": 0,
+        "received": 4499,
+        "missing": 1,
+        "duplicate": 0,
+        "extra": 0,
+        "crossTenantIn": 0,
+        "undecodable": 0,
+        "firstMissingSeqs": [
+          2
+        ],
+        "ok": false
+      },
+      {
+        "idx": 3,
+        "tenant": "sd-0003",
+        "cluster": "sd-0003",
+        "queue": "dev-q1",
+        "seqAssigned": 4500,
+        "sentOk": 4500,
+        "sentFail": 0,
+        "sentLostFaultInjected": 0,
+        "received": 4496,
+        "missing": 4,
+        "duplicate": 0,
+        "extra": 0,
+        "crossTenantIn": 0,
+        "undecodable": 0,
+        "firstMissingSeqs": [
+          1,
+          2,
+          3,
+          4
+        ],
+        "ok": false
+      },
+      {
+        "idx": 4,
+        "tenant": "sd-0004",
+        "cluster": "sd-0004",
+        "queue": "dev-q1",
+        "seqAssigned": 4500,
+        "sentOk": 4500,
+        "sentFail": 0,
+        "sentLostFaultInjected": 0,
+        "received": 4499,
+        "missing": 1,
+        "duplicate": 0,
+        "extra": 0,
+        "crossTenantIn": 0,
+        "undecodable": 0,
+        "firstMissingSeqs": [
+          1
+        ],
+        "ok": false
+      },
+      {
+        "idx": 5,
+        "tenant": "sd-0005",
+        "cluster": "sd-0005",
+        "queue": "dev-q1",
+        "seqAssigned": 4500,
+        "sentOk": 4500,
+        "sentFail": 0,
+        "sentLostFaultInjected": 0,
+        "received": 4497,
+        "missing": 3,
+        "duplicate": 0,
+        "extra": 0,
+        "crossTenantIn": 0,
+        "undecodable": 0,
+        "firstMissingSeqs": [
+          1,
+          2,
+          3
+        ],
+        "ok": false
+      },
+      {
+        "idx": 6,
+        "tenant": "sd-0006",
+        "cluster": "sd-0006",
+        "queue": "dev-q1",
+        "seqAssigned": 4500,
+        "sentOk": 4500,
+        "sentFail": 0,
+        "sentLostFaultInjected": 0,
+        "received": 4497,
+        "missing": 3,
+        "duplicate": 0,
+        "extra": 0,
+        "crossTenantIn": 0,
+        "undecodable": 0,
+        "firstMissingSeqs": [
+          1,
+          2,
+          3
+        ],
+        "ok": false
+      },
+      {
+        "idx": 7,
+        "tenant": "sd-0007",
+        "cluster": "sd-0007",
+        "queue": "dev-q1",
+        "seqAssigned": 4500,
+        "sentOk": 4500,
+        "sentFail": 0,
+        "sentLostFaultInjected": 0,
+        "received": 4498,
+        "missing": 2,
+        "duplicate": 0,
+        "extra": 0,
+        "crossTenantIn": 0,
+        "undecodable": 0,
+        "firstMissingSeqs": [
+          1,
+          2
+        ],
+        "ok": false
+      },
+      {
+        "idx": 8,
+        "tenant": "sd-0008",
+        "cluster": "sd-0008",
+        "queue": "dev-q1",
+        "seqAssigned": 4500,
+        "sentOk": 4500,
+        "sentFail": 0,
+        "sentLostFaultInjected": 0,
+        "received": 4499,
+        "missing": 1,
+        "duplicate": 0,
+        "extra": 0,
+        "crossTenantIn": 0,
+        "undecodable": 0,
+        "firstMissingSeqs": [
+          1
+        ],
+        "ok": false
+      },
+      {
+        "idx": 9,
+        "tenant": "sd-0009",
+        "cluster": "sd-0009",
+        "queue": "dev-q1",
+        "seqAssigned": 4500,
+        "sentOk": 4500,
+        "sentFail": 0,
+        "sentLostFaultInjected": 0,
+        "received": 4498,
+        "missing": 2,
+        "duplicate": 0,
+        "extra": 0,
+        "crossTenantIn": 0,
+        "undecodable": 0,
+        "firstMissingSeqs": [
+          1,
+          2
+        ],
+        "ok": false
+      },
+      {
+        "idx": 10,
+        "tenant": "sd-0010",
+        "cluster": "sd-0010",
+        "queue": "dev-q1",
+        "seqAssigned": 4500,
+        "sentOk": 4500,
+        "sentFail": 0,
+        "sentLostFaultInjected": 0,
+        "received": 4499,
+        "missing": 1,
+        "duplicate": 0,
+        "extra": 0,
+        "crossTenantIn": 0,
+        "undecodable": 0,
+        "firstMissingSeqs": [
+          1
+        ],
+        "ok": false
+      }
+    ]
+  },
+  "faultsInjected": {
+    "dropAck": 0,
+    "dupPush": 0,
+    "loseMsg": 0
+  },
+  "verdict": "FAIL"
+}

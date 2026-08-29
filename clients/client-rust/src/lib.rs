@@ -56,6 +56,7 @@
 //!   calls for these answer 404 on this broker, so they are not offered here.
 
 pub mod admin;
+pub mod autopilot;
 pub mod buffer;
 pub mod config;
 pub mod consumer;
@@ -75,6 +76,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use admin::Admin;
+pub use autopilot::ENV_POP_AUTOPILOT;
 pub use buffer::{BufferOptions, BufferStats};
 pub use config::{Config, HostHeader, Retry429, RetryKind};
 pub use consumer::{Cancel, ConsumeSummary, StopReason};
@@ -82,14 +84,14 @@ pub use ephemeral::{Ephemeral, EphemeralBatch, EphemeralPushed};
 pub use error::{Error, Result};
 pub use kv::{Kv, KvOutcome};
 pub use lb::Strategy;
-pub use queue::QueueBuilder;
+pub use queue::{PopOutcome, QueueBuilder};
 pub use timers::Timers;
 pub use transaction::TransactionBuilder;
 
 // Re-exported so callers do not need a direct dependency on the protocol crate
 // for the types that appear in this client's signatures.
 pub use queen_protocol::{
-    AckResult, AckStatus, DlqParams, DlqResponse, EphemeralAck, EphemeralAckResult,
+    AckResult, AckStatus, AutopilotEcho, DlqParams, DlqResponse, EphemeralAck, EphemeralAckResult,
     EphemeralDelivered, EphemeralOptions, EphemeralOutcome, EphemeralPolicy, EphemeralStatus,
     EphemeralWindowBuffer, Expiry, KvOpKind, KvOperation, KvPrecondition, KvReason, KvResult,
     KvRow, Message, PushItem, PushResult, PushStatus, QueueOptions, SeekRequest, SubscriptionMode,
@@ -123,8 +125,18 @@ impl Queen {
     pub fn connect(config: Config) -> Result<Self> {
         let http = Arc::new(HttpClient::new(config)?);
         let buffers = BufferManager::new(Arc::clone(&http));
+        // Pop autopilot: on unless the environment rolls it back. Read ONCE
+        // here rather than on every pop — it is a deployment-level rollback, and
+        // re-reading it per request would let a running process change wire
+        // shape halfway through. A per-builder `.autopilot(..)` still outranks
+        // it.
+        let autopilot_off = crate::autopilot::disabled_by_env();
         Ok(Self {
-            inner: Arc::new(Inner { http, buffers }),
+            inner: Arc::new(Inner {
+                http,
+                buffers,
+                autopilot_off,
+            }),
         })
     }
 

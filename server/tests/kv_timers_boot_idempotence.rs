@@ -130,10 +130,11 @@ async fn boot(host: &str, port: u16, db: &str, leg: &str) {
             .pg(host.to_string(), port, "postgres", "postgres", db.to_string())
             .pool_size(4)
             // Off so the apply is the only thing touching this database. The
-            // deadlock-retry loop in schema.rs:88-103 exists because a re-apply
-            // can cross a LIVE replica's stats cycle; that is a real hazard and
-            // it has its own test, but here it would only turn a schema failure
-            // into a flake.
+            // per-statement lock_timeout+retry machinery in schema.rs exists
+            // because a re-apply can cross live traffic (the 2026-08-24 boot
+            // deadlock); that hazard has its own suites (schema.rs mod tests,
+            // schema_apply_boot_under_load.rs), but here it would only turn a
+            // schema failure into a flake.
             .retention(false)
             .stats_refresh(false)
             .system_metrics(false)

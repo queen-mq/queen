@@ -29,7 +29,7 @@ cluster id, carrying four counters:
 | --- | --- |
 | `reqs` | Requests, one per proxied call |
 | `msgs` | Billable messages, per the rules below |
-| `bytes_in` | Buffered request bytes. Non-zero only for produce and `/configure`, which are the requests the proxy buffers |
+| `bytes_in` | Buffered request bytes. Non-zero only for the requests the proxy buffers: produce, `/configure`, the ephemeral push and the streams cycle |
 | `bytes_out` | Buffered response bytes, or the upstream `Content-Length` when the response streams through |
 
 Recording is deliberately silent: no log line on the per-request path. Rates and sizes
@@ -41,7 +41,7 @@ belong in aggregated blocks, not per-message lines.
 
 | Class | Which requests |
 | --- | --- |
-| `push` | `POST /api/v1/push` |
+| `push` | `POST /api/v1/push`, and the accepted sink messages of a streams cycle (as messages only, on a second sample; see below) |
 | `txn` | `POST /api/v1/transaction` |
 | `delivery` | Pop routes (`/api/v1/pop/queue/…`) |
 | `configure` | The queue-admin class: `/configure`, deletes, seeks, subscription changes |
@@ -106,6 +106,31 @@ the post-completion debit described in
 
 A `204` (nothing available, or the queue is paused) is `reqs = 1`, `msgs = 0`, and the
 body is not buffered at all.
+
+</AccordionContent>
+</Accordion>
+
+<Accordion>
+<AccordionTrigger>Streams cycle: sink emits billed as push</AccordionTrigger>
+<AccordionContent>
+
+`POST /streams/v1/cycle` is always buffered, both ways. The request itself books one
+`read` sample (`reqs = 1`, `msgs = 0`, bytes both directions), like every gated
+surface. Its sink `push_items` are the part that bills: on a 2xx whose body says
+`success: true`, every request sink group whose matching `(queue, partition)` entry
+in `push_results` came back `queued` bills its item count as `push` messages, on a
+second sample with `reqs = 0` so the request is never double-counted. That is what
+puts stream output in the same `usage_days` rows as ordinary pushes and under the
+monthly message quota.
+
+Not billed: `duplicate` groups (deduplication stored nothing, same rule as push), a
+cycle whose body says `success: false` (the transaction rolled back, sink writes
+included), and a response the proxy cannot parse (`msgs = 0` with a warning).
+
+Nothing else in a cycle is a billable message. The source pop was already metered as
+`delivery` on its own request, and the ack advances a cursor, keeping the reqs-only
+posture `/api/v1/ack` has. An idle-flush or state-only cycle therefore meters as one
+`read` request and nothing more.
 
 </AccordionContent>
 </Accordion>

@@ -15,6 +15,7 @@ sourceOfTruth:
 verifiedBy:
   - clients/client-js/test-v2/transaction.js
   - clients/client-js/test-v2/semantics.js
+# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
 ---
 
 One call, one PostgreSQL transaction, all or nothing. This is how a pipeline stage hands work
@@ -228,7 +229,7 @@ A transaction rolls back when:
 | Cause | Detail |
 | --- | --- |
 | a **duplicate push** | any pushed `transactionId` that already exists in its partition inside the deduplication window aborts the bundle with a `QDUP` error. Unlike `/api/v1/push`, where a duplicate is a per-item `duplicate` status, here it is a rollback |
-| an **ack the broker cannot resolve** | the broker checks up front that every acked `transactionId` resolves in its partition's index; one that does not fails the call with `QTXN ack references unknown transactionId; transaction rolled back` before the writing transaction runs at all, so nothing is written |
+| an **ack the broker cannot resolve** | every acked `transactionId` must resolve in its partition's index. One that resolves nowhere (never pushed, or its index row has aged past the txns window) makes the stored procedure raise `QTXN ack references unknown transactionId; transaction rolled back`, and the rollback takes the pushes and riders with it, so nothing is written. An ack at or below the cursor is not this case: it resolves as already committed |
 | a **rejected ack** | an invalid or expired lease, or a position beyond the leased batch |
 | a **foreign partition** | multi-tenant deployments: an acked `partitionId` that belongs to another tenant |
 | a **lost KV precondition** | a `kv` op carrying `required: true` whose precondition did not hold. This is the expected outcome of a legitimate redelivery rather than a fault, and it has its own response shape below |

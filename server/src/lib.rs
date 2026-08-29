@@ -26,6 +26,7 @@
 #![allow(unused_imports)]
 
 mod ack_fusion;
+mod pop_autopilot;
 mod pop_fusion;
 mod ack_registry;
 mod auth;

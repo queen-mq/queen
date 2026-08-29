@@ -2507,6 +2507,24 @@ $$;
 -- is the correctness floor, so it errs toward over-inclusion. Returns (id, name)
 -- so the broker interns the name and remembers the id for the ack bridge.
 -- p_after_id is the keyset cursor; pass the NIL uuid to start a fresh walk.
+--
+-- NOT CALLED BY THE BROKER since 2026-08-23; kept as the reference enumeration and
+-- as the oracle of tests/hotlist_reseed_window.rs. The broker's full walk is now
+-- log_hotlist_reseed_window_v1 with p_cutoff pinned to '-infinity' (see
+-- handlers/data.rs::hotlist_reseed_run), and this is why: the broker calls through
+-- prepare_cached, so after five executions Postgres may use a GENERIC plan in which
+-- every parameter is unknown — p_limit included, which the planner then assumes
+-- keeps 10% of the rows. That makes an ordered walk of log_partitions_pkey with the
+-- queue (joined as a relation) applied as a join filter AFTERWARDS look 10x cheaper
+-- than the bitmap on the queue's own index, and it wins; at run time p_limit is 10k,
+-- above every queue, so the walk never stops early and every page reads EVERY
+-- partition in the cell. Measured on the 2026-08-22 soak's shape (229 queues, 827k
+-- partitions): 851k buffers and 303 ms per ring against 20k / ~10 ms for the custom
+-- plan, identical for a 500-partition queue; 229 rings per five-minute cycle. The
+-- windowed statement orders by its index's own leading columns and resolves the
+-- queue by scalar subquery, so that plan is not available to it. Do not route the
+-- full walk back here without re-checking EXPLAIN under plan_cache_mode =
+-- force_generic_plan at scale.
 -- ============================================================================
 -- Track B (§5): p_tenant scopes the queue resolution.
 CREATE OR REPLACE FUNCTION queen.log_hotlist_reseed_v1(
@@ -2556,8 +2574,10 @@ $$;
 -- inside v1 on purpose. The broker calls these through prepare_cached, so the plan
 -- can be GENERIC, and a parameter inside an OR does not fold at plan time: the index
 -- bound on (queue_id, last_write_at) would be lost exactly in the case that matters.
--- Two statements, two plans, no branch. v1 is left byte-identical — it is still the
--- full walk, and it is the revert path (QUEEN_HOTLIST_RESEED_FULL_MS=0).
+-- Two statements, two plans, no branch. Since 2026-08-23 the FULL walk is this
+-- statement too, with p_cutoff pinned to '-infinity' (the broker no longer calls v1 —
+-- its header says why); QUEEN_HOTLIST_RESEED_FULL_MS=0 still makes every periodic
+-- pass a full one, through this same plan.
 --
 -- ORDERING IS LOAD-BEARING, and this is the part that is not obvious. The keyset
 -- runs on (last_write_at, id), NOT on id, because under a GENERIC plan `ORDER BY

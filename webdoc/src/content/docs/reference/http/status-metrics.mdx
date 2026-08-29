@@ -21,6 +21,7 @@ sourceOfTruth:
   - server/sql/procedures/019_worker_metrics.sql
   - server/sql/procedures/023_prometheus.sql
   - server/sql/procedures/011_log_stats.sql
+# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
 ---
 
 Four different things are called "status" on this broker, and they answer different
@@ -274,7 +275,7 @@ routes read, and each has its own clock:
 | Loop | Cadence | Writes | Read by |
 | --- | --- | --- | --- |
 | Stats reconciler (`server/src/stats.rs`) | `STATS_INTERVAL_MS`, default `10000` ms, on whichever replica claims the `stats_refresh` row in `queen.maintenance_leases` | `queen.stats` (queue / namespace / task / system rows), from the log tables with watermark arithmetic | `/api/v1/status`, `/api/v1/status/queues`, `/api/v1/status/queues/:queue`, `/api/v1/resources/*` |
-| Retained-bytes lane (`server/src/stats.rs`) | `RETAINED_BYTES_INTERVAL_MS`, default `600000` ms, on whichever replica claims the `retained_bytes` row | `queen.stats.retained_bytes` only (queue rows), from a full `log_segments` scan | the `retainedBytes` fields on the queue routes, and through them the proxy storage quota |
+| Retained-bytes lane (`server/src/stats.rs`) | `RETAINED_BYTES_INTERVAL_MS`, default `600000` ms, on whichever replica claims the `retained_bytes` row | `queen.stats.retained_bytes` and `queen.stats.segment_count` (queue rows), both from the lane's one full `log_segments` scan | the `retainedBytes` fields and the queue list's `segments` count on the queue routes, and through the bytes the proxy storage quota |
 | Metrics collector (`server/src/syscollect.rs`) | `METRICS_FLUSH_MS`, default `60000` ms, on **every** replica | `queen.worker_metrics`, `queen.system_metrics`, `queen.queue_lag_metrics`, `queen.queue_parked_replica` | `/api/v1/status` throughput, `/api/v1/analytics/*`, the `queen_cluster_*` and per-queue Prometheus families |
 | Retention / maintenance (`server/src/retention.rs`) | `RETENTION_INTERVAL`, default `5000` ms, on whichever replica claims the `retention` row | Deletes expired segments; also ages the metrics tables out at `METRICS_RETENTION_DAYS`, default `90` | none |
 

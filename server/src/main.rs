@@ -1,4 +1,5 @@
 mod ack_fusion;
+mod pop_autopilot;
 mod pop_fusion;
 mod ack_registry;
 mod auth;
@@ -241,8 +242,9 @@ async fn main() {
         cfg.stmt_timeout,
         cfg.dedup_cache_mb,
         cfg.dedup_cache_enabled,
-        cfg.pg_use_ssl,
-        cfg.pg_ssl_reject_unauthorized,
+        // Unreachable Err: config::load() already refused to boot on unusable
+        // CA material. Fatal rather than silently plaintext-cancelling.
+        db::cancel_connector(&cfg).unwrap_or_else(|e| obs::fatal(e)),
     );
 
     // Seed the maintenance flags from queen.system_state (parity with the C++
@@ -377,6 +379,8 @@ async fn main() {
         cfg.tenancy_header,
     );
     hotlist.attach_notifier(notifier.clone());
+    // Standby-ring bound: see `HotList::trim_unserved` / `hotlist_unserved_trim_ms`.
+    hotlist.set_unserved_trim_ms(cfg.hotlist_unserved_trim_ms);
     if cfg.hotlist_enabled {
         tracing::info!(
             target: "boot",
@@ -385,6 +389,12 @@ async fn main() {
             "QUEEN_HOTLIST on"
         );
     }
+
+    // POP AUTOPILOT (server/src/pop_autopilot.rs). Constructed unconditionally —
+    // it is a kill switch, not a boot gate (switches.rs's module note), so `off`
+    // is a controller that declines rather than a controller that is absent. Costs
+    // an empty map.
+    let autopilot = pop_autopilot::PopAutopilot::new(cfg.pop_autopilot_knobs());
 
     // EPHEMERAL_QUEUES.md §3.2 — the RAM-class engine. No pool, no schema read,
     // no mesh: it is ready the instant it is constructed, which is why it is
@@ -475,6 +485,7 @@ async fn main() {
         ephemeral: ephemeral.clone(),
         peers: Arc::new(crate::peerclient::PeerClient::new()),
         hotlist: hotlist.clone(),
+        autopilot: autopilot.clone(),
         hotlist_reseed_ms: cfg.hotlist_reseed_ms,
         hotlist_reseed_full_ms: cfg.hotlist_reseed_full_ms,
         hotlist_reseed_window_ms: cfg.hotlist_reseed_window_ms,
@@ -707,6 +718,7 @@ async fn main() {
     // pairs that have gone idle, so an untrusted tenant cannot pin per-name state by
     // polling an unbounded set of queue names.
     reconcile::spawn_idle_sweep(state.clone(), cfg.hotlist_idle_sweep_ms);
+    reconcile::spawn_unserved_trim(state.clone(), cfg.hotlist_unserved_trim_ms);
 
     // PLAN_KV_TIMERS §9.3 — the quota/measurement refresh. Its own loop and NOT a
     // phase of reconcile above, for two reasons that both matter: its cadence is
@@ -1264,7 +1276,7 @@ async fn main() {
         tracing::info!(target: "boot", header = config::TENANT_HEADER, "QUEEN_TENANCY_HEADER on — native tenant scoping ENABLED");
     }
 
-    let addr = format!("0.0.0.0:{}", cfg.port);
+    let addr = config::host_port(&cfg.bind_addr, &cfg.port);
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
         Err(e) => obs::fatal(format!("cannot bind {addr}: {e}")),

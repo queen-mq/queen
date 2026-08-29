@@ -53,12 +53,43 @@
 use std::collections::BinaryHeap;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::sync::Arc;
 
 use crate::notify::Notifier;
 
 // Entry state (one byte in the flat `state` array).
+/// Hand the pages a trim just freed back to the OPERATING SYSTEM, not merely back to
+/// the allocator.
+///
+/// Measured on the soak cell 2026-08-24, and it is why this call exists: after the
+/// unserved-ring trim dropped 209 rings holding 73 155 ready entries — verified, the
+/// hot-list line went `209rings/73155ready` → `0rings/0ready` and stayed there — the
+/// broker's RSS did not move at all, flat at 1548 MB across the whole observation. The
+/// memory WAS freed and reused (had it not been, RSS would have climbed ~1.5 GB per
+/// 30 s cycle instead of ~1 MB), but glibc keeps freed arena pages for its own reuse,
+/// and RSS is the number the OOM killer reads. On a 15.6 GiB cell where Postgres alone
+/// wants ~10.4 GB, "available for this process to reuse later" is not good enough.
+///
+/// Called only on a pass that actually evicted something: the walk is not free, and a
+/// no-op trim has nothing to release. glibc-only — the libc crate exposes it just there,
+/// and a musl or macOS build must still compile, hence the cfg pair.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn release_freed_pages() {
+    // SAFETY: malloc_trim takes an integer padding argument and returns an integer. It
+    // has no pointer contract and no memory-safety obligation for the caller; the worst
+    // it can do is decline to release anything (returns 0).
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
+/// Non-glibc builds (musl, macOS): nothing to do — the allocator either returns pages on
+/// its own or offers no equivalent knob.
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn release_freed_pages() {}
+
 const IDLE: u8 = 0; // not tracked (not in ready ring / wheel / in-flight)
 const READY: u8 = 1; // in the ready ring, claimable now
 const WHEEL: u8 = 2; // deferred / leased — promoted to READY at revisit_at
@@ -175,8 +206,8 @@ pub struct ReseedDue {
 
 /// Which reseed scan to run for a (queue, group) — see [`HotList::reseed_begin`].
 ///
-/// The two differ ONLY in the SQL they call: `Full` runs the classic keyset walk over
-/// every partition of the queue, `Window(ms)` runs the same walk bounded to partitions
+/// The two differ ONLY in the lower bound they pin the one reseed statement to
+/// (`scan_bounds`): `Full` walks every partition of the queue, `Window(ms)` the ones
 /// written in the last `ms`. Both feed rows through `reseed_row`, so every ring-repair
 /// behaviour the rows carry (re-add IDLE, reclaim a stranded INFLIGHT, promote a stale
 /// WHEEL on a non-deferral queue) is identical between them.
@@ -192,6 +223,20 @@ pub enum ReseedMode {
 impl ReseedMode {
     pub fn is_full(self) -> bool {
         matches!(self, ReseedMode::Full)
+    }
+
+    /// The (p_window_ms, p_cutoff) pair the walk binds to `log_hotlist_reseed_window_v1`
+    /// — the ONE statement both modes run. `Window(ms)` lets the first page derive
+    /// `now() - ms` and pins it for the rest of the walk; `Full` pins the bound to
+    /// '-infinity' up front, so the window is never read (the SQL's COALESCE takes the
+    /// cutoff first). The dedicated full-walk statement, `log_hotlist_reseed_v1`, is no
+    /// longer called: under the generic plan `prepare_cached` converges to, it read every
+    /// partition in the cell per ring — its header in 004_log_pop.sql has the numbers.
+    pub fn scan_bounds(self) -> (i64, Option<&'static str>) {
+        match self {
+            ReseedMode::Full => (0, Some("-infinity")),
+            ReseedMode::Window(ms) => (ms, None),
+        }
     }
 }
 
@@ -329,6 +374,13 @@ pub struct Candidate {
     pub name: String,
     /// epoch snapshot for the empty-path CAS (§4).
     pub epoch: u32,
+    /// READY-AGE at checkout: `now - ready_since`, i.e. how long this servable
+    /// lane waited for a pop to visit it. The SAME number `take_batch` feeds to
+    /// `LapStats::record_age` for the admission arbiter — carried out to the
+    /// caller so the POP AUTOPILOT (server/src/pop_autopilot.rs) can steer on the
+    /// arbiter's own variable per (queue, group) without measuring it a second
+    /// time. Costs one i64 per candidate and no extra lock.
+    pub ready_age_ms: i64,
 }
 
 /// The tri-state verdict (§7) the handler feeds back per candidate.
@@ -381,12 +433,67 @@ impl DeferCfg {
 
 // ---------------------------------------------------------------- interning
 
+/// Parse a UUID in text form — dashed or not — into its 16 bytes. Allocation-free, and
+/// `None` for anything that is not exactly 32 hex digits.
+///
+/// It exists so the ack bridge can key on the uuid's VALUE rather than its spelling: see
+/// [`QueueIntern`] for why 36 bytes of text twice per partition was the single largest
+/// line in the broker's memory.
+fn parse_uuid16(s: &str) -> Option<[u8; 16]> {
+    let mut out = [0u8; 16];
+    let mut n = 0usize;
+    let mut hi: Option<u8> = None;
+    for c in s.bytes() {
+        if c == b'-' {
+            continue;
+        }
+        let v = match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            b'A'..=b'F' => c - b'A' + 10,
+            _ => return None,
+        };
+        match hi {
+            None => hi = Some(v),
+            Some(h) => {
+                if n == 16 {
+                    return None; // too long
+                }
+                out[n] = (h << 4) | v;
+                n += 1;
+                hi = None;
+            }
+        }
+    }
+    (n == 16 && hi.is_none()).then_some(out)
+}
+
+/// Partition name ⇄ dense slot index, plus the partition-id bridge the ack path uses.
+///
+/// APPEND-ONLY BY DESIGN, and that is the memory bound: a broker's occupancy grows with
+/// how many distinct partitions it has ever HEARD OF, not with how much work is pending.
+/// On the 2026-08-24 soak cell that ceiling is the whole cell — 827 000 partitions — and
+/// it measured ~1.9 KB apiece, roughly six times the structural content, because the
+/// excess was allocator overhead and fragmentation across FOUR heap allocations per
+/// partition. Both duplications are now gone:
+///
+///   * the name was stored twice, once as the map key and once in `idx_to_name`. It is
+///     now ONE `Arc<str>` shared by both, so cloning the key is a refcount bump.
+///   * the partition id was stored twice AND as 36 bytes of uuid TEXT. A uuid is 16
+///     bytes, so both copies are now inline arrays: zero heap allocations, and the map
+///     key needs no indirection to hash or compare.
+///
+/// Four allocations per partition became one. An id that does not parse as a uuid simply
+/// gets no bridge entry, which the ack path already treats as "unknown partition" and
+/// handles by returning — the ack still lands in Postgres, it just skips the broker-side
+/// promote.
 struct QueueIntern {
-    name_to_idx: HashMap<Box<str>, u32>,
-    idx_to_name: Vec<Box<str>>,
-    // partition-id (uuid text) ↔ index, learned lazily for the ack bridge.
-    id_to_idx: HashMap<Box<str>, u32>,
-    idx_to_id: Vec<Option<Box<str>>>,
+    name_to_idx: HashMap<Arc<str>, u32>,
+    idx_to_name: Vec<Arc<str>>,
+    // partition-id ↔ index, learned lazily for the ack bridge. Keyed by the uuid's 16
+    // bytes, never its text.
+    id_to_idx: HashMap<[u8; 16], u32>,
+    idx_to_id: Vec<Option<[u8; 16]>>,
 }
 
 impl QueueIntern {
@@ -404,9 +511,11 @@ impl QueueIntern {
             return i;
         }
         let i = self.idx_to_name.len() as u32;
-        let b: Box<str> = name.into();
-        self.name_to_idx.insert(b.clone(), i);
-        self.idx_to_name.push(b);
+        // ONE allocation for the name: the map key and the reverse vector share it, so
+        // the `clone` below is a refcount bump rather than a second copy of the string.
+        let a: Arc<str> = Arc::from(name);
+        self.name_to_idx.insert(a.clone(), i);
+        self.idx_to_name.push(a);
         self.idx_to_id.push(None);
         i
     }
@@ -414,18 +523,184 @@ impl QueueIntern {
         self.name_to_idx.get(name).copied()
     }
     fn name_of(&self, idx: u32) -> Option<&str> {
-        self.idx_to_name.get(idx as usize).map(|b| &**b)
+        self.idx_to_name.get(idx as usize).map(|a| &**a)
     }
+    /// Learn (or correct) the id↔slot bridge. The name is interned FIRST and
+    /// unconditionally: callers such as `reseed_row` rely on this to seed the ring, so an
+    /// id that cannot be parsed must still register its partition.
     fn note_id(&mut self, name: &str, id: &str) {
         let i = self.intern(name);
-        if self.idx_to_id[i as usize].as_deref() != Some(id) {
-            let b: Box<str> = id.into();
-            self.id_to_idx.insert(b.clone(), i);
-            self.idx_to_id[i as usize] = Some(b);
+        let Some(bytes) = parse_uuid16(id) else {
+            return;
+        };
+        if self.idx_to_id[i as usize] != Some(bytes) {
+            self.id_to_idx.insert(bytes, i);
+            self.idx_to_id[i as usize] = Some(bytes);
         }
     }
     fn idx_of_id(&self, id: &str) -> Option<u32> {
-        self.id_to_idx.get(id).copied()
+        self.id_to_idx.get(&parse_uuid16(id)?).copied()
+    }
+}
+
+// ----------------------------------------------------------- burst telemetry
+
+/// How an entry ENTERED a ready list — the provenance half of the burst window
+/// below. Three sources, because three is what the question has: did a producer
+/// make this partition ready, did a scheduled deadline come due, or did the
+/// reseed floor learn it from PostgreSQL?
+///
+/// The mapping of the twelve `ready_push_tail` call sites onto the three, since
+/// two of them are not obvious from the name:
+///   * `Mark` — `mark_ring`'s four arms AND every `checkin` re-append (a mark that
+///     raced the dispatch, a budget-skipped `Requeue`, an auto-ack `Took` re-arm).
+///     All of them assert the same fact from the same side: this partition holds
+///     data, said by a write or by a claim that did not consume it.
+///   * `Wheel` — `wheel_drain_due`, plus `promote_ack`'s WHEEL branch, which is
+///     the same promotion with its deadline cut short by an ack.
+///   * `Reseed` — `reseed_row`, the only path that learns from PostgreSQL.
+///
+/// Together they cover EVERY entry into a ready list, so the three window counters
+/// sum to the entries that arrived — which is what makes them readable against
+/// `ring_depth_max` on the same log line.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReadySrc {
+    Mark,
+    Wheel,
+    Reseed,
+}
+
+/// BURST-RESOLVED TELEMETRY (soak cell, 2026-08-24).
+///
+/// e2e p99 ran 330-470 ms while the client's own push RTT p99 was 46-88 ms. The
+/// difference is time an entry spends READY-BUT-UNCLAIMED, and nothing in the log
+/// could see it: the `sizes` line samples `ring_sizes` once per 10 s window and the
+/// per-lane lines reported ready=0 through that same window, while the global
+/// `ring_oldest_ms` ran p99 276 ms / max 387 and `ring_depth` p99 172 / max 393.
+/// The bursts live and die INSIDE one sampling interval — a 10 s sample of a 400 ms
+/// event is not a measurement of it.
+///
+/// So these are WINDOWED MAXIMA: `fetch_max`ed on the paths that ALREADY hold the
+/// value and reset when the `rates` line is emitted. The cost is one relaxed
+/// `fetch_max` per ring transition — no clock read (every caller already carries
+/// `now_ms` or is stamping one), no lock of its own (each update happens under a
+/// sub-ring lock the caller is holding), no allocation.
+///
+/// `max_lane_ready` is THE DISCRIMINATOR between the two regimes that a global
+/// depth of 393 cannot tell apart:
+///   * CONCENTRATED — one lane briefly holds 100+ ready, so the per-request claim
+///     WIDTH is the binder (the burst bypass in `pop_autopilot.rs`).
+///   * SPREAD — 229 lanes at ~1.7 ready each, so the ~9-slot pop admission lane is,
+///     and `pop_wait_max` (admission.rs, same log line) is that regime's witness.
+///
+/// Global drain is ~9 concurrent pop queries x W=1 x ~7 ms RTT ~= 1100 partitions/s,
+/// which is why a spike of 393 costs ~360 ms whichever regime produced it.
+///
+/// One instance per [`HotList`], not a process static: two hot lists in one test
+/// binary must not pollute each other's window (the `FLOOR_*` statics above are the
+/// counter-example, and they are cumulative rather than windowed).
+pub struct BurstStats {
+    /// LIVE count of entries across every ready list of this hot list, maintained
+    /// at exactly the two points `SubRing::len_ready` is (+1 in `ready_push_tail`,
+    /// -1 in `ready_unlink`) plus the whole-list subtraction in `Drop for SubRing`
+    /// — without which `trim_unserved` dropping a standby's 827 000-entry ring
+    /// would leak the gauge upward for the process lifetime.
+    live_ready: AtomicI64,
+    depth_max: AtomicI64,
+    oldest_max_ms: AtomicI64,
+    lane_ready_max: AtomicI64,
+    from_mark: AtomicU64,
+    from_wheel: AtomicU64,
+    from_reseed: AtomicU64,
+}
+
+/// One window's worth of [`BurstStats`], read and reset together.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BurstWindow {
+    pub depth_max: u64,
+    pub oldest_max_ms: i64,
+    pub lane_ready_max: u64,
+    pub from_mark: u64,
+    pub from_wheel: u64,
+    pub from_reseed: u64,
+}
+
+impl BurstStats {
+    fn new() -> Arc<BurstStats> {
+        Arc::new(BurstStats {
+            live_ready: AtomicI64::new(0),
+            depth_max: AtomicI64::new(0),
+            oldest_max_ms: AtomicI64::new(0),
+            lane_ready_max: AtomicI64::new(0),
+            from_mark: AtomicU64::new(0),
+            from_wheel: AtomicU64::new(0),
+            from_reseed: AtomicU64::new(0),
+        })
+    }
+
+    /// One entry entered a ready list. The increment and its `fetch_max` run under
+    /// the caller's sub-ring lock, so they cannot interleave with another entry of
+    /// the SAME sub-ring; across sub-rings a racing pair only ever loses the lower
+    /// of two maxima, which is the direction that cannot invent a burst.
+    #[inline]
+    fn entered(&self, src: ReadySrc) {
+        let live = self.live_ready.fetch_add(1, Ordering::Relaxed) + 1;
+        self.depth_max.fetch_max(live, Ordering::Relaxed);
+        match src {
+            ReadySrc::Mark => &self.from_mark,
+            ReadySrc::Wheel => &self.from_wheel,
+            ReadySrc::Reseed => &self.from_reseed,
+        }
+        .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `n` entries left the ready lists — one on an unlink, a whole list when a
+    /// sub-ring is dropped. Nothing to `fetch_max`: a departure can never raise a
+    /// maximum.
+    #[inline]
+    fn left(&self, n: i64) {
+        if n != 0 {
+            self.live_ready.fetch_sub(n, Ordering::Relaxed);
+        }
+    }
+
+    /// One LANE's instantaneous ready count, from a caller holding it already
+    /// (`ready_peek`, and `take_batch`'s pre-claim pass over the sub-rings).
+    #[inline]
+    pub fn note_lane_ready(&self, ready: usize) {
+        self.lane_ready_max
+            .fetch_max(ready as i64, Ordering::Relaxed);
+    }
+
+    /// The age of a ready entry a caller just read, ms — `ready_peek`'s head age
+    /// and `take_batch`'s per-candidate `ready_age_ms`, both already computed.
+    #[inline]
+    pub fn note_oldest_ms(&self, age_ms: i64) {
+        if age_ms > 0 {
+            self.oldest_max_ms.fetch_max(age_ms, Ordering::Relaxed);
+        }
+    }
+
+    /// Read and RESET the window. Called once per `rates` line and nowhere else: a
+    /// second reader would silently halve every maximum the first one saw.
+    pub fn take_window(&self) -> BurstWindow {
+        BurstWindow {
+            depth_max: self.depth_max.swap(0, Ordering::Relaxed).max(0) as u64,
+            oldest_max_ms: self.oldest_max_ms.swap(0, Ordering::Relaxed).max(0),
+            lane_ready_max: self.lane_ready_max.swap(0, Ordering::Relaxed).max(0) as u64,
+            from_mark: self.from_mark.swap(0, Ordering::Relaxed),
+            from_wheel: self.from_wheel.swap(0, Ordering::Relaxed),
+            from_reseed: self.from_reseed.swap(0, Ordering::Relaxed),
+        }
+    }
+
+    /// The live gauge itself — the instantaneous global ready depth, without the
+    /// 10 s sampling `ring_sizes` imposes. Test-only for now (`adjust_count` in
+    /// pop_autopilot.rs is the precedent): the log line wants the WINDOWED maximum,
+    /// and an unused public reader would be dead code on every build.
+    #[cfg(test)]
+    pub fn live_ready(&self) -> i64 {
+        self.live_ready.load(Ordering::Relaxed)
     }
 }
 
@@ -460,11 +735,17 @@ struct SubRing {
     // rescheduled) are skipped lazily on drain.
     wheel: BinaryHeap<Reverse<(i64, u32)>>,
     len_ready: usize,
+    // The hot list's burst window (see `BurstStats`). Held here rather than passed
+    // down from `HotList` on every call because the two mutation points ARE these
+    // two methods: an `Arc` in the struct keeps all twelve `ready_push_tail` call
+    // sites and `Drop` honest without threading a parameter through any of them.
+    burst: Arc<BurstStats>,
 }
 
 impl SubRing {
-    fn new() -> Self {
+    fn new(burst: Arc<BurstStats>) -> Self {
         SubRing {
+            burst,
             next: Vec::new(),
             prev: Vec::new(),
             epoch: Vec::new(),
@@ -497,7 +778,8 @@ impl SubRing {
         }
     }
 
-    fn ready_push_tail(&mut self, l: u32) {
+    fn ready_push_tail(&mut self, l: u32, src: ReadySrc) {
+        self.burst.entered(src);
         self.ready_since[l as usize] = crate::util::now_epoch_ms();
         self.next[l as usize] = NIL;
         self.prev[l as usize] = self.ready_tail;
@@ -527,6 +809,7 @@ impl SubRing {
         self.next[l as usize] = NIL;
         self.prev[l as usize] = NIL;
         self.len_ready -= 1;
+        self.burst.left(1);
     }
 
     fn ready_pop_head(&mut self) -> Option<u32> {
@@ -558,7 +841,7 @@ impl SubRing {
                 continue;
             }
             self.revisit_at[l as usize] = 0;
-            self.ready_push_tail(l);
+            self.ready_push_tail(l, ReadySrc::Wheel);
             promoted += 1;
         }
         promoted
@@ -572,6 +855,18 @@ impl SubRing {
         } else {
             false
         }
+    }
+}
+
+impl Drop for SubRing {
+    /// Every ring-drop path funnels through here — `evict_idle` (which demands an
+    /// empty ready list, so 0), `forget_group`, a `QueueState` replaced under a
+    /// reseed walk, and above all `trim_unserved`, which drops rings that are FULL
+    /// by design (the standby broker of 2026-08-24 held 827 000 ready entries).
+    /// Subtracting here rather than at each of those call sites is what makes the
+    /// global gauge impossible to leak.
+    fn drop(&mut self) {
+        self.burst.left(self.len_ready as i64);
     }
 }
 
@@ -646,10 +941,10 @@ struct GroupRing {
 }
 
 impl GroupRing {
-    fn new(shards: usize) -> Self {
+    fn new(shards: usize, burst: &Arc<BurstStats>) -> Self {
         let mut subs = Vec::with_capacity(shards);
         for _ in 0..shards {
-            subs.push(Mutex::new(SubRing::new()));
+            subs.push(Mutex::new(SubRing::new(burst.clone())));
         }
         GroupRing {
             subs,
@@ -692,16 +987,53 @@ struct QueueState {
     // effective idle window is [sweep, 2×sweep). A flag, not a timestamp, so the
     // per-access cost is one relaxed store and never a clock read.
     active: std::sync::atomic::AtomicBool,
+    // POP LIVENESS — the standby-ring fix (2026-08-24). `active` above answers "did
+    // ANYTHING touch this queue", because every accessor funnels through `qstate`:
+    // mark, take, checkin, has_ready, reseed, cfg. On a busy cell the answer is always
+    // yes, which is why the idle sweep evicts nothing there. This flag is stamped ONLY
+    // where a CONSUMER touches the ring (`take_batch`, `has_ready`, `ready_peek`,
+    // `checkin`), so its ABSENCE means precisely: this broker served no pop for this
+    // queue.
+    //
+    // Why the distinction is load-bearing. Rings are FILLED by paths independent of
+    // this broker's own traffic — the reseed lane's timer and mesh marks from a peer's
+    // pushes — and DRAINED only by serving pops. A broker behind an active/passive LB
+    // therefore accumulates the monotonic UNION of every (partition, group) that was
+    // ever momentarily pending. Measured on the soak cell 2026-08-24: the PASSIVE
+    // broker held 827 000 ready entries / 2.12 GB RSS against the active one's ~1 ready
+    // / 727 MB, and it was a proximate cause of two global OOMs. `evict_idle` cannot
+    // reclaim any of it — it demands `len_ready == 0`, which a ring nobody drains never
+    // reaches — and since `QueueIntern` is APPEND-ONLY, dropping the whole QueueState is
+    // the only thing that frees the memory at all.
+    //
+    // A flag and not a timestamp, for the same reason `active` is one: one relaxed store
+    // on the pop path, never a clock read. The sweep owns the clock (below).
+    served: std::sync::atomic::AtomicBool,
+    // Epoch-ms of the first trim pass that found `served` unset; 0 = "being served".
+    // Written and read ONLY by `trim_unserved`, which already holds a clock.
+    unserved_since_ms: std::sync::atomic::AtomicI64,
+    // The owning hot list's burst window, carried so `group` can hand it to a ring
+    // it creates without the six `s.group(...)` call sites growing a parameter.
+    burst: Arc<BurstStats>,
 }
 
 impl QueueState {
-    fn new() -> Self {
+    fn new(burst: Arc<BurstStats>) -> Self {
         QueueState {
+            burst,
             intern: Mutex::new(QueueIntern::new()),
             cfg: Mutex::new(DeferCfg::default()),
             groups: Mutex::new(HashMap::new()),
             wake_pending: std::sync::atomic::AtomicBool::new(false),
             active: std::sync::atomic::AtomicBool::new(true),
+            // Born NOT served, unlike `active` above. `active` is a pure CLOCK with no
+            // time term, so a fresh ring needs the birth stamp to survive its first
+            // sweep; the trim has an explicit threshold instead, which already
+            // guarantees any ring at least `unserved_trim_ms` of life whatever pass
+            // first sees it. A birth stamp here would only add a pass of grace nobody
+            // asked for, and the first pop stamps it anyway.
+            served: std::sync::atomic::AtomicBool::new(false),
+            unserved_since_ms: std::sync::atomic::AtomicI64::new(0),
         }
     }
     fn group(&self, group: &str, shards: usize) -> Arc<GroupRing> {
@@ -709,7 +1041,7 @@ impl QueueState {
         if let Some(r) = g.get(group) {
             return r.clone();
         }
-        let r = Arc::new(GroupRing::new(shards));
+        let r = Arc::new(GroupRing::new(shards, &self.burst));
         g.insert(group.to_string(), r.clone());
         r
     }
@@ -776,6 +1108,9 @@ impl LapStats {
 
 pub struct HotList {
     pub lap: LapStats,
+    /// The windowed burst maxima + provenance counters (see [`BurstStats`]). Read
+    /// and reset once per `rates` line by `obs::spawn_reporter`.
+    pub burst: Arc<BurstStats>,
     enabled: bool,
     shards: usize,
     // windowBuffer early-promotion threshold (§6): batch_count >= this ⇒ promote
@@ -836,6 +1171,15 @@ pub struct HotList {
     pub reseeds_dropped: std::sync::atomic::AtomicU64,
     pub marks_local: std::sync::atomic::AtomicU64,
     pub marks_remote: std::sync::atomic::AtomicU64,
+    /// Rings dropped by [`HotList::trim_unserved`] because this broker serves no pops for
+    /// them. Reported by the sweep so a trim is never silent — an operator staring at a
+    /// shrinking RSS needs to see WHICH mechanism shrank it.
+    pub trims_unserved: std::sync::atomic::AtomicU64,
+    /// How long a ring may go without a single served pop before the trim drops it, ms.
+    /// 0 disables the trim entirely (the kill switch: pre-2026-08-24 behaviour, byte for
+    /// byte — no clock read, no walk, no eviction). Set once at boot from
+    /// `QUEEN_HOTLIST_UNSERVED_TRIM_MS`; an atomic only so the setter needs no `&mut`.
+    unserved_trim_ms: std::sync::atomic::AtomicI64,
 }
 
 impl HotList {
@@ -848,6 +1192,7 @@ impl HotList {
     ) -> Arc<HotList> {
         Arc::new(HotList {
             lap: LapStats::new(),
+            burst: BurstStats::new(),
             enabled,
             shards: shards.max(1),
             window_batch: window_batch.max(1),
@@ -865,8 +1210,20 @@ impl HotList {
             reseeds_dropped: std::sync::atomic::AtomicU64::new(0),
             marks_local: std::sync::atomic::AtomicU64::new(0),
             marks_remote: std::sync::atomic::AtomicU64::new(0),
+            trims_unserved: std::sync::atomic::AtomicU64::new(0),
+            // Off unless a boot path opts in, so every existing constructor call site
+            // (and every test) keeps the historical behaviour until told otherwise.
+            unserved_trim_ms: std::sync::atomic::AtomicI64::new(0),
         })
     }
+
+    /// Arm the unserved-ring trim (see [`HotList::trim_unserved`]). Called once at boot
+    /// from `QUEEN_HOTLIST_UNSERVED_TRIM_MS`, before any traffic — same shape as
+    /// [`HotList::attach_notifier`]. 0 leaves it off.
+    pub fn set_unserved_trim_ms(&self, ms: i64) {
+        self.unserved_trim_ms.store(ms.max(0), std::sync::atomic::Ordering::Relaxed);
+    }
+
 
     #[inline]
     pub fn enabled(&self) -> bool {
@@ -909,7 +1266,7 @@ impl HotList {
             s.active.store(true, std::sync::atomic::Ordering::Relaxed);
             return s.clone();
         }
-        let s = Arc::new(QueueState::new());
+        let s = Arc::new(QueueState::new(self.burst.clone()));
         q.insert(qkey.to_string(), s.clone());
         drop(q);
         if self.tenancy {
@@ -1036,14 +1393,14 @@ impl HotList {
                     // §6: windowBuffer ⇒ hold until first_mark + W, unless the
                     // batch is already fat (early promotion).
                     if sub.batch_count[local as usize] >= self.window_batch {
-                        sub.ready_push_tail(local);
+                        sub.ready_push_tail(local, ReadySrc::Mark);
                         woke = true;
                     } else {
                         let at = now_ms + cfg.window as i64 * 1000;
                         sub.wheel_schedule(local, at);
                     }
                 } else {
-                    sub.ready_push_tail(local);
+                    sub.ready_push_tail(local, ReadySrc::Mark);
                     woke = true;
                 }
             }
@@ -1057,7 +1414,7 @@ impl HotList {
                 {
                     // stale heap entry is skipped lazily on drain.
                     sub.revisit_at[local as usize] = 0;
-                    sub.ready_push_tail(local);
+                    sub.ready_push_tail(local, ReadySrc::Mark);
                     woke = true;
                 } else if cfg.window == 0
                     && cfg.delayed == 0
@@ -1077,7 +1434,7 @@ impl HotList {
                     // Canaries for the herd risk: `leased`/`empty` verdict
                     // rates and pop_empty_pct must not rise.
                     sub.revisit_at[local as usize] = 0;
-                    sub.ready_push_tail(local);
+                    sub.ready_push_tail(local, ReadySrc::Mark);
                     woke = true;
                 }
             }
@@ -1389,7 +1746,7 @@ impl HotList {
                     FLOOR_PROMOTE_CLEAR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 } else {
                     sub.revisit_at[local as usize] = 0;
-                    sub.ready_push_tail(local);
+                    sub.ready_push_tail(local, ReadySrc::Wheel);
                     drop(sub);
                     self.wake(qkey);
                     FLOOR_PROMOTE_REQUEUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1440,14 +1797,27 @@ impl HotList {
             Some(s) => s,
             None => return Vec::new(),
         };
+        // POP LIVENESS (see `QueueState::served`): the claim itself is the strongest
+        // possible evidence that this broker serves this queue.
+        s.served.store(true, std::sync::atomic::Ordering::Relaxed);
         let ring = s.group(group, self.shards);
         // Drain due wheel entries into the ready ring across all sub-rings.
+        //
+        // The `lane_ready` sum rides this pass for free: the burst window's
+        // discriminator is ONE lane's instantaneous ready count (see `BurstStats`),
+        // and here every sub-ring lock is already held for the wheel probe. Taken
+        // AFTER the drain and BEFORE the claim, so it is exactly the set this pop is
+        // about to compete for — and it covers pops the autopilot never sees
+        // (`ready_peek` is skipped entirely when QUEEN_POP_AUTOPILOT=off).
+        let mut lane_ready = 0usize;
         for sub in ring.subs.iter() {
             let mut sg = sub.lock().unwrap();
             if sg.wheel_peek_due(now_ms) {
                 sg.wheel_drain_due(now_ms);
             }
+            lane_ready += sg.len_ready;
         }
+        self.burst.note_lane_ready(lane_ready);
         let intern = s.intern.lock().unwrap();
         let want = want.max(1) as u64;
         let mut got: u64 = 0;
@@ -1461,8 +1831,13 @@ impl HotList {
             match sub.ready_pop_head() {
                 Some(local) => {
                     empty_streak = 0;
-                    self.lap
-                        .record_age((now_ms - sub.ready_since[local as usize]) as f64);
+                    let age_ms = now_ms - sub.ready_since[local as usize];
+                    self.lap.record_age(age_ms as f64);
+                    // Same sample, kept as a windowed MAX rather than a percentile
+                    // over a 4096-slot ring: `ready_age_p95` is a distribution over
+                    // the claims that happened, which is precisely what a burst
+                    // shorter than the window hides (see `BurstStats`).
+                    self.burst.note_oldest_ms(age_ms);
                     sub.state[local as usize] = INFLIGHT;
                     // drained is a claim-scoped fact: reset here so only THIS
                     // claim's Took checkin can re-assert it. Without the reset a
@@ -1481,6 +1856,7 @@ impl HotList {
                         out.push(Candidate {
                             name: name.to_string(),
                             epoch: ep,
+                            ready_age_ms: age_ms,
                         });
                     } else {
                         // interning lost the name (should not happen) - drop it.
@@ -1513,6 +1889,11 @@ impl HotList {
             Some(s) => s,
             None => return false,
         };
+        // POP LIVENESS (see `QueueState::served`). This is the probe a PARKED long-poll
+        // re-runs every backoff interval (POP_WAIT_MAX_INTERVAL_MS, default 1s), which is
+        // what makes a parked consumer keep its own ring alive without the trim needing
+        // to interrogate the notifier.
+        s.served.store(true, std::sync::atomic::Ordering::Relaxed);
         let ring = {
             let g = s.groups.lock().unwrap();
             match g.get(group) {
@@ -1527,6 +1908,78 @@ impl HotList {
             }
         }
         false
+    }
+
+    /// POP AUTOPILOT (server/src/pop_autopilot.rs) — the two ring facts the width
+    /// controller steers on, read in ONE pass: how many PARTITIONS are ready in
+    /// the (queue, group) ring, and how long the OLDEST of them has been waiting.
+    ///
+    /// Both are measured over the whole ready set, which is the point. The
+    /// controller's first law sampled ready-age at CLAIM time, on the partitions
+    /// the sweep visited — so at width 1 it only ever measured the promptly-served
+    /// head and reported health while the rest of the ring starved (the bench A/B
+    /// of 2026-08-23; the numbers are in the pop_autopilot module note). These two
+    /// see the partitions nobody visited, which is the population that matters.
+    ///
+    /// O(shards), with no scan and no new bookkeeping: `len_ready` is maintained
+    /// by the list itself, and the ready list is a FIFO stamped on entry
+    /// (`ready_push_tail`), so its HEAD is by construction its oldest entry — one
+    /// pointer dereference per sub-ring. Same non-destructive discipline as
+    /// [`has_ready`], whose shape this is: one brief lock per sub-ring, no
+    /// partition state touched, no ring ever created (a pop of a queue nobody has
+    /// pushed to must allocate nothing).
+    ///
+    /// Deliberately does NOT count due WHEEL entries, which `take_batch` promotes
+    /// on its way in: counting them would mean walking the heap, and the bias is
+    /// the safe direction — it can only make the controller narrower than the ring
+    /// could serve, which the feedback loop then corrects. The caller smooths
+    /// both; the instantaneous count is 0 right after a claim took everything
+    /// INFLIGHT.
+    ///
+    /// Returns `(ready partitions, age in ms of the oldest ready entry)`; the age
+    /// is 0 when the ring holds nothing ready, which the caller reads as "no
+    /// sample" rather than "age zero".
+    pub fn ready_peek(&self, qkey: &str, group: &str, now_ms: i64) -> (usize, i64) {
+        if !self.enabled {
+            return (0, 0);
+        }
+        let s = match self.qstate_existing(qkey) {
+            Some(s) => s,
+            None => return (0, 0),
+        };
+        // POP LIVENESS (see `QueueState::served`): reached only from the autopilot ticket
+        // a pop builds, so it is a consumer touch — but it is NOT the load-bearing one,
+        // since QUEEN_POP_AUTOPILOT=off removes this call entirely.
+        s.served.store(true, std::sync::atomic::Ordering::Relaxed);
+        let ring = {
+            let g = s.groups.lock().unwrap();
+            match g.get(group) {
+                Some(r) => r.clone(),
+                None => return (0, 0),
+            }
+        };
+        let mut n = 0usize;
+        let mut oldest_ms = i64::MAX;
+        for sub in ring.subs.iter() {
+            let sg = sub.lock().unwrap();
+            n += sg.len_ready;
+            if sg.ready_head != NIL {
+                let since = sg.ready_since[sg.ready_head as usize];
+                if since < oldest_ms {
+                    oldest_ms = since;
+                }
+            }
+        }
+        // Both numbers into the burst window on the way out, where they are already
+        // in hand: this is the ONE reader that sees a whole lane's ready set without
+        // claiming any of it, so it is where `max_lane_ready` is exact.
+        self.burst.note_lane_ready(n);
+        if oldest_ms == i64::MAX {
+            return (n, 0);
+        }
+        let oldest = (now_ms - oldest_ms).max(0);
+        self.burst.note_oldest_ms(oldest);
+        (n, oldest)
     }
 
     /// TASK M — how many messages a `take_batch` right now would plausibly be
@@ -1609,6 +2062,10 @@ impl HotList {
             Some(s) => s,
             None => return,
         };
+        // POP LIVENESS (see `QueueState::served`): a consumer returning a lease is as
+        // much "serving this queue" as taking one — a slow consumer that acks every few
+        // seconds without claiming anything new must not have its ring trimmed.
+        s.served.store(true, std::sync::atomic::Ordering::Relaxed);
         let ring = s.group(group, self.shards);
         let intern = s.intern.lock().unwrap();
         for r in &results {
@@ -1667,13 +2124,13 @@ impl HotList {
                     if cfg.window > 0 && cfg.delayed == 0 {
                         sub.wheel_schedule(local, now_ms + cfg.window as i64 * 1000);
                     } else {
-                        sub.ready_push_tail(local);
+                        sub.ready_push_tail(local, ReadySrc::Mark);
                     }
                 }
                 Verdict::Requeue => {
                     // Budget/cap-skipped, un-leased: re-append promptly (never window).
                     sub.batch_count[local as usize] = 0;
-                    sub.ready_push_tail(local);
+                    sub.ready_push_tail(local, ReadySrc::Mark);
                 }
                 Verdict::Leased(until_ms) => {
                     // Never clear a leased candidate (§7): wheel at T + pad, but
@@ -1710,7 +2167,7 @@ impl HotList {
                         }
                     } else {
                         // A mark raced during dispatch — re-append (§4).
-                        sub.ready_push_tail(local);
+                        sub.ready_push_tail(local, ReadySrc::Mark);
                     }
                 }
             }
@@ -1906,12 +2363,12 @@ impl HotList {
                 if cfg.delayed > 0 {
                     sub.wheel_schedule(local, now_ms + cfg.delayed as i64 * 1000 + pad_ms());
                 } else {
-                    sub.ready_push_tail(local);
+                    sub.ready_push_tail(local, ReadySrc::Reseed);
                 }
             }
             WHEEL if !cfg.is_deferral() => {
                 sub.revisit_at[local as usize] = 0;
-                sub.ready_push_tail(local);
+                sub.ready_push_tail(local, ReadySrc::Reseed);
             }
             _ => { /* READY, or a deferral-queue WHEEL: keep the live deadline. */ }
         }
@@ -2342,6 +2799,128 @@ impl HotList {
         evicted.len()
     }
 
+    /// Drop the rings this broker does not SERVE — the standby-broker fix (2026-08-24).
+    ///
+    /// ## Why `evict_idle` cannot do this
+    ///
+    /// `evict_idle` requires `len_ready == 0` and every entry `IDLE`. A ring nobody pops
+    /// satisfies neither: its entries are `READY` and there are as many of them as the
+    /// cell has pending work. Measured on the soak cell, the passive broker of an
+    /// active/passive pair held `229rings/827000ready/0wheel` and 2.12 GB RSS while the
+    /// active one held ~1 ready and 727 MB — and since [`QueueIntern`] is append-only,
+    /// only dropping the whole [`QueueState`] returns that memory to the allocator.
+    ///
+    /// ## The discriminator is CLAIMS, NOT AGE
+    ///
+    /// This is the whole subtlety, and getting it wrong would cause an outage. The ready
+    /// list is FIFO (`ready_push_tail`; claims walk from `ready_head`), so with ~1060
+    /// pops/s each taking ~1 candidate, a LEGITIMATE backlog of 827 000 ready entries
+    /// puts the head at ~780 s. A head age of 13 minutes is therefore exactly what a
+    /// healthy, serving, badly-backlogged broker looks like, and an age-based rule would
+    /// discard real work precisely when a cell is most behind. What actually separates
+    /// the two is whether entries are LEAVING: a served ring drains, however slowly; on
+    /// the standby `ring_oldest_ms` advanced exactly +10 s per 10 s — the same entry sat
+    /// at position zero forever. So the signal is `QueueState::served`, stamped only by
+    /// consumer paths, and never entry age.
+    ///
+    /// ## Parked long-poll pops need no separate interlock
+    ///
+    /// The wait loop re-probes through `has_ready` at most POP_WAIT_MAX_INTERVAL_MS apart
+    /// (default 1 s), so anything parked re-stamps `served` tens of times per trim window
+    /// and can never be a candidate. That is stronger than asking the notifier and costs
+    /// no cross-module lock. (`Arc::strong_count` still covers a pop mid-flight.)
+    ///
+    /// ## What blocks a trim, and what is deliberately droppable
+    ///
+    /// `INFLIGHT` blocks it: a checked-out candidate has a dispatch whose `checkin` /
+    /// `promote_ack` would find no ring. `READY` and `WHEEL` entries are droppable —
+    /// both are re-derived by the §8 reseed floor, which `spawn_idle_sweep` already
+    /// leans on ("the reseed floor rebuilds a ring that was dropped too eagerly"), and a
+    /// wheel entry stranded by a lease has the same net (see the reseed-floor test that
+    /// reclaims a stale lease-parked wheel entry). Nothing here is a source of truth:
+    /// the work lives in Postgres, this is a cache of where to look.
+    ///
+    /// ## The third state, accepted on purpose
+    ///
+    /// Consumers that exist but have STOPPED popping — crash-looping, expired leases, a
+    /// 429-throttled tenant — are indistinguishable from a standby and get trimmed while
+    /// holding a real backlog. That is the right trade only because it is cheap to
+    /// reverse: their next pop re-creates the ring and takes the cold-start full walk.
+    /// It is also self-limiting in the other direction — a ring nobody reads delivers no
+    /// value however full it is.
+    ///
+    /// ## Cost
+    ///
+    /// The `INFLIGHT` scan is O(entries of that queue) under the `queues` lock, but it
+    /// runs only for a queue that has ALREADY failed the `served` check — i.e. only on a
+    /// broker with no consumer traffic for it, where there are no pops to contend with.
+    /// A serving broker returns on the first branch and never walks.
+    pub fn trim_unserved(&self, now_ms: i64) -> usize {
+        let trim_ms = self.unserved_trim_ms.load(std::sync::atomic::Ordering::Relaxed);
+        if !self.enabled || trim_ms <= 0 {
+            return 0;
+        }
+        let mut q = self.queues.lock().unwrap();
+        let mut evicted: Vec<String> = Vec::new();
+        q.retain(|qkey, s| {
+            // Consume the pop-liveness stamp. Set ⇒ a consumer touched this ring since
+            // the last pass ⇒ keep it whatever its depth. THIS is the branch that saves
+            // the lagged-but-healthy queue.
+            if s.served.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                s.unserved_since_ms.store(0, std::sync::atomic::Ordering::Relaxed);
+                return true;
+            }
+            // Same argument as `evict_idle`: the map being the sole holder is what proves
+            // nobody is mid-operation, and holding `queues` stops a new clone appearing.
+            if Arc::strong_count(s) != 1 {
+                return true;
+            }
+            // Start the clock on the first pass that finds it unserved, so the effective
+            // grace is [trim_ms, trim_ms + one pass) rather than a single missed stamp.
+            let since = s.unserved_since_ms.load(std::sync::atomic::Ordering::Relaxed);
+            if since == 0 {
+                s.unserved_since_ms.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                return true;
+            }
+            if now_ms.saturating_sub(since) < trim_ms {
+                return true;
+            }
+            let groups = s.groups.lock().unwrap();
+            let dispatching = groups.values().any(|ring| {
+                ring.subs.iter().any(|sub| {
+                    let sg = sub.lock().unwrap();
+                    sg.state.contains(&INFLIGHT)
+                })
+            });
+            drop(groups);
+            if dispatching {
+                return true;
+            }
+            evicted.push(qkey.clone());
+            false
+        });
+        // Secondary index, same lock order and atomicity argument as `evict_idle`.
+        if self.tenancy && !evicted.is_empty() {
+            let mut idx = self.by_queue.lock().unwrap();
+            for qkey in &evicted {
+                let (_, queue) = crate::handlers::split_tenant_queue(qkey);
+                if let Some(set) = idx.get_mut(queue) {
+                    set.remove(qkey);
+                    if set.is_empty() {
+                        idx.remove(queue);
+                    }
+                }
+            }
+        }
+        drop(q);
+        if !evicted.is_empty() {
+            release_freed_pages();
+        }
+        self.trims_unserved
+            .fetch_add(evicted.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        evicted.len()
+    }
+
     /// Number of live (tenant, queue) ring states — the map the memory bound is stated
     /// over, reported by the idle sweep.
     pub fn queue_count(&self) -> usize {
@@ -2398,6 +2977,544 @@ mod tests {
 
     fn names(c: &[Candidate]) -> Vec<String> {
         c.iter().map(|x| x.name.clone()).collect()
+    }
+
+    // Partition ids are uuids in production (they come straight off a PG `uuid` column),
+    // and the intern now keys the ack bridge on the parsed 16 bytes rather than the text,
+    // so a fixture id has to be a real uuid to reach the bridge at all. These two stand
+    // in for the old ID0 / IDB placeholders.
+    const ID0: &str = "00000000-0000-4000-8000-000000000000";
+    const ID1: &str = "00000000-0000-4000-8000-000000000001";
+    const IDA: &str = "00000000-0000-4000-8000-00000000000a";
+    const IDB: &str = "00000000-0000-4000-8000-00000000000b";
+
+    // ---------------------------------------------------------------------
+    // Unserved-ring trim (the standby-broker fix, 2026-08-24).
+    //
+    // The rig these tests model: an active/passive pair behind one LB sharing one
+    // Postgres. Both brokers' rings are FILLED by the reseed timer and by mesh marks
+    // from the peer's pushes; only the active one's are DRAINED, because only it is
+    // sent pops. On the soak cell the passive broker reached 827 000 ready entries /
+    // 2.12 GB RSS against the active one's ~1 / 727 MB.
+    // ---------------------------------------------------------------------
+
+    // The ack bridge now keys on a uuid's VALUE, not its spelling. That is strictly more
+    // forgiving than the old text key — Postgres always hands back the same lowercase
+    // dashed form — but it is a real semantic change, so it is pinned here.
+    #[test]
+    fn the_ack_bridge_keys_on_the_uuid_value_not_its_spelling() {
+        let mut it = QueueIntern::new();
+        it.note_id("p0", "6ba7b810-9dad-41d1-80b4-00c04fd430c8");
+        let want = Some(0);
+        assert_eq!(it.idx_of_id("6ba7b810-9dad-41d1-80b4-00c04fd430c8"), want, "as written");
+        assert_eq!(it.idx_of_id("6BA7B810-9DAD-41D1-80B4-00C04FD430C8"), want, "upper case");
+        assert_eq!(it.idx_of_id("6ba7b8109dad41d180b400c04fd430c8"), want, "no dashes");
+        assert_eq!(it.idx_of_id("6ba7b810-9dad-41d1-80b4-00c04fd430c9"), None, "a different id");
+    }
+
+    // An id that is not a uuid costs the bridge entry and NOTHING else: the partition is
+    // still interned and still reachable by name, because `reseed_row` seeds the ring
+    // through this path. The ack path treats a missing bridge entry as "unknown
+    // partition" and returns, so the ack still lands in Postgres.
+    #[test]
+    fn an_unparseable_id_still_interns_its_partition() {
+        let mut it = QueueIntern::new();
+        it.note_id("p0", "not-a-uuid");
+        assert_eq!(it.idx_of("p0"), Some(0), "the partition is interned regardless");
+        assert_eq!(it.name_of(0), Some("p0"));
+        assert_eq!(it.idx_of_id("not-a-uuid"), None, "but it gets no bridge entry");
+    }
+
+    #[test]
+    fn parse_uuid16_rejects_what_is_not_a_uuid() {
+        assert!(parse_uuid16("00000000-0000-4000-8000-000000000000").is_some());
+        assert!(parse_uuid16("").is_none(), "empty");
+        assert!(parse_uuid16("00000000-0000-4000-8000-00000000000").is_none(), "too short");
+        assert!(parse_uuid16("00000000-0000-4000-8000-0000000000000").is_none(), "too long");
+        assert!(parse_uuid16("0000000g-0000-4000-8000-000000000000").is_none(), "non-hex");
+        // Dashes are ignored wherever they fall — this is a value parser, not a format
+        // validator, and the only producer is Postgres.
+        assert_eq!(parse_uuid16("--0000000000000000000000000000000a"), parse_uuid16("0000000000000000000000000000000a"));
+    }
+
+    // ------------------------------------------------ burst-resolved telemetry
+
+    // The window's provenance counters and its three maxima, driven through the
+    // three ways an entry can ever reach a ready list. This is the log line the
+    // 2026-08-24 soak cell had no way of writing: `ring_depth`/`ring_oldest_ms` are
+    // one SAMPLE per 10s window, and the bursts that produced a 330-470 ms e2e p99
+    // formed and drained inside it.
+    #[test]
+    fn the_burst_window_attributes_every_entry_and_peaks_at_the_real_depth() {
+        let h = hl1();
+        reg(&h, "q", "g");
+
+        // 1) MARK — three partitions made ready by a push.
+        for p in 0..3 {
+            h.mark_local("q", &format!("p{p}"), 1, 0);
+        }
+        // 2) WHEEL — a deferred partition promoted when its deadline came due.
+        h.set_queue_cfg("q", 2, 0, 0, 0); // delayed 2s ⇒ the mark parks in the wheel
+        h.mark_local("q", "w0", 1, 0);
+        assert_eq!(h.burst.live_ready(), 3, "a wheel park is not ready yet");
+        h.tick(2400); // past commit + D + pad
+
+        // 3) RESEED — a row the §8 floor found in PostgreSQL. Back to a plain
+        // queue, or the deferral config would wheel the row instead of readying it.
+        h.set_queue_cfg("q", 0, 0, 0, 0);
+        walk(&h, "q", "g", 0, &[(ID0, "r0")]);
+
+        assert_eq!(h.burst.live_ready(), 5, "3 marks + 1 wheel + 1 reseed");
+        // The lane peek is where `max_lane_ready` is exact, and it is also the
+        // discriminator: 5 entries in ONE lane, not 5 lanes holding one each. The
+        // clock is the real one (`ready_push_tail` stamps `now_epoch_ms`), so the
+        // age has to be measured against it.
+        let now = crate::util::now_epoch_ms() + 250;
+        assert_eq!(h.ready_peek("q", "g", now).0, 5);
+
+        let w = h.burst.take_window();
+        assert_eq!(w.from_mark, 3, "{w:?}");
+        assert_eq!(w.from_wheel, 1, "{w:?}");
+        assert_eq!(w.from_reseed, 1, "{w:?}");
+        assert_eq!(w.depth_max, 5, "the window's high-water depth");
+        assert_eq!(w.lane_ready_max, 5, "one lane held all five");
+        assert!(
+            w.oldest_max_ms >= 250,
+            "the head's age at the peek: {}",
+            w.oldest_max_ms
+        );
+
+        // Emitting the line RESETS the window — that is what makes it a window and
+        // not a since-boot maximum. The live gauge is not a window and does not move.
+        let after = h.burst.take_window();
+        assert_eq!(
+            after,
+            BurstWindow::default(),
+            "reset on emission: {after:?}"
+        );
+        assert_eq!(
+            h.burst.live_ready(),
+            5,
+            "the live gauge is not part of the reset"
+        );
+
+        // A NEW window peaks at what happens inside it, from zero, even though the
+        // ring never emptied: the entries that were already standing are not
+        // arrivals, so only the depth the next transition reaches is recorded.
+        h.mark_local("q", "p9", 1, 0);
+        let w2 = h.burst.take_window();
+        assert_eq!(w2.from_mark, 1);
+        assert_eq!(w2.from_wheel, 0);
+        assert_eq!(w2.from_reseed, 0);
+        assert_eq!(w2.depth_max, 6, "the live gauge is global and cumulative");
+    }
+
+    // The maxima are FETCH_MAX, not last-write: a burst that has already drained by
+    // the time the reporter looks must still be in the line. This is precisely the
+    // failure the feature exists to fix — `ring_depth` sampled 0 while the tail was
+    // being made.
+    #[test]
+    fn the_maxima_survive_a_burst_that_is_over_before_the_line_is_written() {
+        let h = hl1();
+        reg(&h, "q", "g");
+        for p in 0..40 {
+            h.mark_local("q", &format!("p{p}"), 1, 0);
+        }
+        // …and the whole burst is claimed away again, well before any reporter tick.
+        let claimed = h.take_batch("q", "g", 64, u32::MAX, crate::util::now_epoch_ms());
+        assert_eq!(claimed.len(), 40);
+        assert_eq!(h.burst.live_ready(), 0, "the ring is empty again");
+        assert_eq!(h.ready_peek("q", "g", crate::util::now_epoch_ms()).0, 0);
+
+        let w = h.burst.take_window();
+        assert_eq!(w.depth_max, 40, "the peak, not the value at reporting time");
+        assert_eq!(
+            w.lane_ready_max, 40,
+            "take_batch sees the lane before it claims"
+        );
+        assert_eq!(w.from_mark, 40);
+    }
+
+    // The gauge is LIVE, so every path that removes entries has to be on it — and the
+    // one that matters is `trim_unserved`, which drops rings that are FULL by design
+    // (827 000 ready entries on the standby of the incident). `Drop for SubRing` is
+    // what makes that impossible to forget.
+    #[test]
+    fn dropping_a_ring_full_of_ready_entries_returns_the_gauge_to_zero() {
+        let h = hl_trim(30_000);
+        reg(&h, "q", "g");
+        for p in 0..25 {
+            h.mark_local("q", &format!("p{p}"), 1, 10_000);
+        }
+        assert_eq!(h.burst.live_ready(), 25);
+        assert_eq!(
+            trim_twice(&h, 10_000, 30_000),
+            1,
+            "the unserved ring is dropped"
+        );
+        assert_eq!(h.queue_count(), 0);
+        assert_eq!(
+            h.burst.live_ready(),
+            0,
+            "a dropped ring must not leak its depth into the gauge forever"
+        );
+        // …and the window's arrivals are unaffected: they DID arrive.
+        assert_eq!(h.burst.take_window().from_mark, 25);
+    }
+
+    // Two hot lists in one process keep separate windows. The `FLOOR_*` statics above
+    // are the counter-example this avoids: a per-process gauge would make one test's
+    // ring pollute another's maxima, and on a broker it would make the number
+    // unattributable.
+    #[test]
+    fn each_hot_list_owns_its_own_burst_window() {
+        let a = hl1();
+        let b = hl1();
+        reg(&a, "q", "g");
+        reg(&b, "q", "g");
+        for p in 0..7 {
+            a.mark_local("q", &format!("p{p}"), 1, 0);
+        }
+        b.mark_local("q", "p0", 1, 0);
+        assert_eq!(a.burst.live_ready(), 7);
+        assert_eq!(b.burst.live_ready(), 1);
+        assert_eq!(a.burst.take_window().depth_max, 7);
+        assert_eq!(b.burst.take_window().depth_max, 1);
+    }
+
+    // A trim-armed hot-list. Single shard so the ring walk is deterministic.
+    fn hl_trim(trim_ms: i64) -> Arc<HotList> {
+        let h = HotList::new(true, 1, 100, true, false);
+        h.set_unserved_trim_ms(trim_ms);
+        h
+    }
+
+    // Run the trim twice `trim_ms` apart, which is what a real broker's timer does:
+    // the first pass starts the unserved clock, a later one past the threshold acts.
+    fn trim_twice(h: &HotList, t0: i64, trim_ms: i64) -> usize {
+        h.trim_unserved(t0);
+        h.trim_unserved(t0 + trim_ms + 1)
+    }
+
+    // THE test this whole design exists to pass. A ring with a huge, ANCIENT backlog
+    // that IS being served must never be trimmed: the ready list is FIFO, so at the
+    // soak cell's ~1060 claims/s an honest 827k-entry backlog puts the head at ~780 s,
+    // and anything keyed on entry age would throw away real work exactly when the cell
+    // is furthest behind. Here the entries are 30 MINUTES old — two orders of magnitude
+    // past the threshold — and a claim is arriving.
+    #[test]
+    fn a_lagged_but_served_ring_is_never_trimmed_however_old_its_head_is() {
+        let h = hl_trim(30_000);
+        reg(&h, "q", "g");
+        let t0 = 1_000_000;
+        for i in 0..64 {
+            h.mark_local("q", &format!("p{i}"), 1, t0);
+        }
+        // 30 minutes later the backlog is still there and a consumer is still claiming.
+        let much_later = t0 + 1_800_000;
+        let got = h.take_batch("q", "g", 1, 1, much_later);
+        assert_eq!(got.len(), 1, "a serving consumer is claiming from the backlog");
+        assert!(
+            h.ready_est("q", "g", much_later) > 1,
+            "the backlog must still be deep for this test to mean anything"
+        );
+
+        assert_eq!(h.trim_unserved(much_later), 0, "first pass: served ⇒ keep");
+        assert_eq!(
+            h.trim_unserved(much_later + 30_001),
+            0,
+            "still served since the last pass ⇒ keep, whatever the head age"
+        );
+        assert_eq!(h.queue_count(), 1, "the ring survived");
+        assert_eq!(h.trims_unserved.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    // The standby: the ring fills from marks and reseed rows, nothing ever pops it.
+    // This is the case that must reclaim, and note WHAT it asserts — queue_count going
+    // to 0 means the whole QueueState was dropped, which is the only thing that frees
+    // the append-only QueueIntern.
+    #[test]
+    fn a_ring_no_pop_ever_touched_is_trimmed_whole() {
+        let h = hl_trim(30_000);
+        reg(&h, "q", "g");
+        let t0 = 500_000;
+        for i in 0..32 {
+            h.mark_remote("q", &format!("p{i}"), t0);
+        }
+        walk_rows(&h, "q", "g", t0, &[("11111111-1111-4111-8111-111111111111", "px")]);
+        assert_eq!(h.queue_count(), 1);
+
+        assert_eq!(trim_twice(&h, t0, 30_000), 1, "nothing popped it ⇒ trimmed");
+        assert_eq!(h.queue_count(), 0, "the whole QueueState is gone (intern freed)");
+        assert_eq!(h.trims_unserved.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    // The discriminator itself: the paths that FILL a ring must not look like service.
+    // If a mark or a reseed row stamped pop-liveness, a standby taking 1060 marks/s
+    // would keep every ring alive forever and the fix would be a no-op.
+    #[test]
+    fn marks_and_reseed_rows_do_not_count_as_serving() {
+        let h = hl_trim(30_000);
+        reg(&h, "q", "g");
+        let t0 = 700_000;
+        // Keep marking and reseeding across BOTH passes, exactly as a peer's pushes and
+        // the reseed timer would on a standby.
+        h.mark_local("q", "a", 1, t0);
+        h.mark_remote("q", "b", t0);
+        h.trim_unserved(t0);
+        h.mark_local("q", "c", 1, t0 + 15_000);
+        walk_rows(&h, "q", "g", t0 + 20_000, &[("22222222-2222-4222-8222-222222222222", "d")]);
+        h.note_partition_id("q", "e", "33333333-3333-4333-8333-333333333333");
+        assert_eq!(
+            h.trim_unserved(t0 + 30_001),
+            1,
+            "fill paths are not service: the ring is still trimmed"
+        );
+    }
+
+    // Each of the four consumer paths must keep its own ring alive. checkin matters as
+    // much as take_batch: a slow consumer that acks without claiming anything new is
+    // still serving.
+    #[test]
+    fn every_consumer_path_counts_as_serving() {
+        for probe in ["take_batch", "has_ready", "ready_peek", "checkin"] {
+            let h = hl_trim(30_000);
+            reg(&h, "q", "g");
+            let t0 = 900_000;
+            h.mark_local("q", "p0", 1, t0);
+            h.trim_unserved(t0); // start the unserved clock
+            let t1 = t0 + 20_000;
+            match probe {
+                "take_batch" => {
+                    h.take_batch("q", "g", 1, 1, t1);
+                }
+                "has_ready" => {
+                    h.has_ready("q", "g", t1);
+                }
+                "ready_peek" => {
+                    h.ready_peek("q", "g", t1);
+                }
+                // A real result, because an EMPTY checkin is a no-op that returns before
+                // it ever reaches the ring — correctly, it is not a consumer touch.
+                _ => {
+                    let c = h.take_batch("q", "g", 1, 1, t0);
+                    h.trim_unserved(t0 + 1); // discard take_batch's stamp, restart the clock
+                    h.checkin(
+                        "q",
+                        "g",
+                        vec![CheckinResult {
+                            name: "p0".into(),
+                            epoch: c[0].epoch,
+                            verdict: Verdict::Empty,
+                            drained: false,
+                        }],
+                        t1,
+                        false,
+                        0,
+                    );
+                }
+            }
+            assert_eq!(
+                h.trim_unserved(t0 + 30_001),
+                0,
+                "{probe} is a consumer touch and must keep the ring"
+            );
+        }
+    }
+
+    // A dispatch in flight blocks the trim: checkin/promote_ack for that candidate would
+    // otherwise find no ring. READY and WHEEL entries are deliberately droppable.
+    #[test]
+    fn an_inflight_dispatch_blocks_the_trim() {
+        let h = hl_trim(30_000);
+        reg(&h, "q", "g");
+        let t0 = 1_100_000;
+        h.mark_local("q", "p0", 1, t0);
+        // Claim it and do NOT check it back in: the entry stays INFLIGHT.
+        assert_eq!(h.take_batch("q", "g", 1, 1, t0).len(), 1);
+        // Two full windows with no further service — only INFLIGHT is holding it.
+        h.trim_unserved(t0 + 40_000);
+        assert_eq!(
+            h.trim_unserved(t0 + 80_000),
+            0,
+            "a checked-out candidate must keep its ring"
+        );
+        assert_eq!(h.queue_count(), 1);
+    }
+
+    // Grace: one missed stamp is not enough. The first pass only starts the clock, so the
+    // effective window is [trim_ms, trim_ms + one pass) — a parked long-poll re-probing
+    // every POP_WAIT_MAX_INTERVAL_MS (1 s default) can never fall through it.
+    #[test]
+    fn the_first_unserved_pass_only_starts_the_clock() {
+        let h = hl_trim(30_000);
+        reg(&h, "q", "g");
+        let t0 = 1_200_000;
+        h.mark_local("q", "p0", 1, t0);
+        assert_eq!(h.trim_unserved(t0), 0, "pass 1 only starts the clock");
+        assert_eq!(h.trim_unserved(t0 + 20), 0, "still inside the window");
+        assert_eq!(h.trim_unserved(t0 + 30_020), 1, "past the window ⇒ trimmed");
+    }
+
+    // Service resets the clock, so an intermittent consumer gets the full window again
+    // rather than accumulating credit toward a trim.
+    #[test]
+    fn service_resets_the_unserved_clock() {
+        let h = hl_trim(30_000);
+        reg(&h, "q", "g");
+        let t0 = 1_300_000;
+        h.mark_local("q", "p0", 1, t0);
+        h.trim_unserved(t0);
+        h.trim_unserved(t0 + 10); // clock starts
+        h.has_ready("q", "g", t0 + 25_000); // a consumer shows up late in the window
+        assert_eq!(h.trim_unserved(t0 + 30_020), 0, "the stamp clears the clock");
+        assert_eq!(
+            h.trim_unserved(t0 + 30_030),
+            0,
+            "and the window restarts from here, not from t0"
+        );
+        assert_eq!(h.trim_unserved(t0 + 60_050), 1, "a full fresh window later ⇒ trimmed");
+    }
+
+    // A trimmed ring is a cache drop, never a data loss: the next reseed walk rebuilds it
+    // and the entries are claimable again. This is the §8 reseed floor that the idle
+    // sweep's own doc already relies on.
+    #[test]
+    fn a_trimmed_ring_is_rebuilt_by_the_next_reseed_walk() {
+        let h = hl_trim(30_000);
+        reg(&h, "q", "g");
+        let t0 = 1_400_000;
+        h.mark_local("q", "p0", 1, t0);
+        assert_eq!(trim_twice(&h, t0, 30_000), 1);
+        assert_eq!(h.queue_count(), 0);
+
+        // The consumer comes back: register, reseed from PG, claim.
+        let t1 = t0 + 100_000;
+        reg(&h, "q", "g");
+        walk(&h, "q", "g", t1, &[("44444444-4444-4444-8444-444444444444", "p0")]);
+        let got = h.take_batch("q", "g", 1, 1, t1);
+        assert_eq!(names(&got), vec!["p0".to_string()], "the work is discoverable again");
+    }
+
+    // …and the rebuild is a FULL walk, not a windowed one. This is the assertion that
+    // makes the trim safe rather than merely cheap: a windowed walk only sees partitions
+    // written in the last N ms, so if a trimmed ring were rebuilt from a window, a
+    // partition whose last write predates it would hold pending work that no pop could
+    // ever discover. Both gates below force Full for a ring with no history — `reseed_due`
+    // (last == 0) makes the pop reseed at all, and `reseed_begin` (last_full == 0) makes
+    // that reseed a full walk — so a trimmed ring cannot become an invisible backlog.
+    #[test]
+    fn a_trimmed_ring_is_rebuilt_by_a_full_walk_never_a_windowed_one() {
+        let h = hl_trim(30_000);
+        reg(&h, "q", "g");
+        let t0 = 1_450_000;
+        h.mark_local("q", "p0", 1, t0);
+        // Give the ring a completed FULL walk, so only the trim can reset that history.
+        assert!(walk(&h, "q", "g", t0, &[("55555555-5555-4555-8555-555555555555", "p0")]));
+        assert!(
+            !h.reseed_begin("q", "g", t0 + 1_000, 600_000, 120_000).mode().is_full(),
+            "a ring that just full-walked would otherwise take the cheap windowed walk"
+        );
+
+        assert_eq!(trim_twice(&h, t0 + 2_000, 30_000), 1, "the ring is trimmed");
+
+        let t1 = t0 + 200_000;
+        assert!(
+            h.reseed_due("q", "g", t1, 30_000),
+            "a rebuilt ring owes a reseed before a pop may conclude it is empty"
+        );
+        assert!(
+            h.reseed_begin("q", "g", t1, 600_000, 120_000).mode().is_full(),
+            "and that reseed MUST be the full walk, whatever the full-walk interval says"
+        );
+    }
+
+    // Kill switch: 0 restores the pre-fix behaviour exactly — no clock, no scan, no
+    // eviction, however long nothing pops.
+    #[test]
+    fn the_trim_is_off_at_zero() {
+        let h = hl_trim(0);
+        reg(&h, "q", "g");
+        let t0 = 1_500_000;
+        h.mark_local("q", "p0", 1, t0);
+        for step in 0..5 {
+            assert_eq!(h.trim_unserved(t0 + step * 1_000_000), 0, "disabled ⇒ never trims");
+        }
+        assert_eq!(h.queue_count(), 1);
+        assert_eq!(h.trims_unserved.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    // A disabled hot-list must not grow a trim either (the OSS default path).
+    #[test]
+    fn a_disabled_hotlist_never_trims() {
+        let h = HotList::new(false, 1, 100, true, false);
+        h.set_unserved_trim_ms(30_000);
+        assert_eq!(h.trim_unserved(1), 0);
+        assert_eq!(h.trim_unserved(10_000_000), 0);
+    }
+
+    // With tenancy on, the trim must maintain the by_queue secondary index in lockstep,
+    // exactly as evict_idle does — a stale entry there would let a tenant-less peer wake
+    // fan out to a ring that no longer exists.
+    #[test]
+    fn the_trim_keeps_the_tenant_index_in_lockstep() {
+        let h = HotList::new(true, 1, 100, true, true);
+        h.set_unserved_trim_ms(30_000);
+        let qkey = crate::handlers::tenant_queue_key("t1", "q");
+        reg(&h, &qkey, "g");
+        h.mark_local(&qkey, "p0", 1, 10_000);
+        assert_eq!(h.index_len(), 1, "the index tracks the live ring");
+        assert_eq!(trim_twice(&h, 10_000, 30_000), 1);
+        assert_eq!(h.queue_count(), 0);
+        assert_eq!(h.index_len(), 0, "and is cleaned up with it");
+    }
+
+    // Two brokers, one cell: the standby trims while the active one keeps everything.
+    // This is the shape of the actual production incident.
+    #[test]
+    fn the_standby_trims_while_the_active_broker_keeps_its_rings() {
+        let active = hl_trim(30_000);
+        let standby = hl_trim(30_000);
+        let t0 = 2_000_000;
+        for h in [&active, &standby] {
+            reg(h, "q", "g");
+        }
+        // Every push marks BOTH brokers: local on the one that took it, remote on its
+        // peer. Only the active broker is sent pops. Run long enough that the standby
+        // must reclaim more than once — the steady state is what matters, not one trim.
+        let mut active_trims = 0;
+        let mut standby_trims = 0;
+        let mut standby_peak_ready = 0u64;
+        for round in 0..12 {
+            let now = t0 + round * 10_000;
+            for i in 0..8 {
+                let p = format!("p{round}_{i}");
+                active.mark_local("q", &p, 1, now);
+                standby.mark_remote("q", &p, now);
+            }
+            active.take_batch("q", "g", 8, 64, now);
+            // The standby's ring is re-created by the next mark after a trim, so its
+            // depth is bounded by one trim window of marks — never the accumulated union,
+            // which is the whole point (827 000 entries in the incident).
+            standby_peak_ready = standby_peak_ready.max(standby.ready_est("q", "g", now));
+            active_trims += active.trim_unserved(now);
+            standby_trims += standby.trim_unserved(now);
+        }
+        assert_eq!(active_trims, 0, "the serving broker never loses its ring");
+        assert_eq!(active.queue_count(), 1);
+        assert!(
+            standby_trims >= 2,
+            "the standby must reclaim repeatedly, got {standby_trims} trims"
+        );
+        // 12 rounds × 8 partitions = 96 distinct partitions marked, which is what an
+        // un-trimmed standby would hold (this is the 827 000 of the incident, in
+        // miniature). The trim window is [30 s, 30 s + one 10 s pass), so at 8 marks per
+        // round the ceiling is 4 rounds' worth = 32. The gap between 32 and 96 IS the fix.
+        assert!(
+            standby_peak_ready <= 32,
+            "the standby's depth must stay bounded by one trim window of marks (<=32), \
+             peaked at {standby_peak_ready}"
+        );
     }
 
     // A consumer's first poll registers the (queue, group) ring (then reseeds
@@ -2496,8 +3613,8 @@ mod tests {
         assert_eq!(it.intern("a"), 0); // stable
         assert_eq!(it.intern("c"), 2);
         assert_eq!(it.name_of(1), Some("b"));
-        it.note_id("b", "id-b");
-        assert_eq!(it.idx_of_id("id-b"), Some(1));
+        it.note_id("b", IDB);
+        assert_eq!(it.idx_of_id(IDB), Some(1));
     }
 
     #[test]
@@ -2508,7 +3625,7 @@ mod tests {
         h.mark_local("q", "p0", 1, 0); // no "g" ring yet → lost
         assert!(h.take_batch("q", "g", 10, u32::MAX, 0).is_empty());
         // reseed is what recovers it
-        walk(&h, "q", "g", 0, &[("id0", "p0")]);
+        walk(&h, "q", "g", 0, &[(ID0, "p0")]);
         assert_eq!(names(&h.take_batch("q", "g", 10, u32::MAX, 0)), vec!["p0"]);
     }
 
@@ -2606,7 +3723,7 @@ mod tests {
     fn manual_ack_took_wheels_until_ack_promote() {
         let h = hl1();
         reg(&h, "q", "g");
-        h.note_partition_id("q", "p0", "id0");
+        h.note_partition_id("q", "p0", ID0);
         h.mark_local("q", "p0", 1, 0);
         let c = h.take_batch("q", "g", 1, u32::MAX, 0);
         assert_eq!(names(&c), vec!["p0"]);
@@ -2627,7 +3744,7 @@ mod tests {
         // not immediately re-claimable (we hold the lease)
         assert!(h.take_batch("q", "g", 1, u32::MAX, 200).is_empty());
         // our ack releases the lease → promote pulls it back at once
-        h.promote_ack("q", "g", "id0", 300, false);
+        h.promote_ack("q", "g", ID0, 300, false);
         assert_eq!(names(&h.take_batch("q", "g", 1, u32::MAX, 300)), vec!["p0"]);
     }
 
@@ -2638,7 +3755,7 @@ mod tests {
     fn covered_ack_with_no_marks_clears_to_idle() {
         let h = hl1();
         reg(&h, "q", "g");
-        h.note_partition_id("q", "p0", "id0");
+        h.note_partition_id("q", "p0", ID0);
         h.mark_local("q", "p0", 1, 0);
         let c = h.take_batch("q", "g", 1, u32::MAX, 0);
         assert_eq!(names(&c), vec!["p0"]);
@@ -2650,7 +3767,7 @@ mod tests {
             false,
             60_000,
         );
-        h.promote_ack("q", "g", "id0", 300, true);
+        h.promote_ack("q", "g", ID0, 300, true);
         assert!(
             h.take_batch("q", "g", 1, u32::MAX, 400).is_empty(),
             "caught-up partition must not be re-probed after a covered ack"
@@ -2668,7 +3785,7 @@ mod tests {
     fn leased_verdict_is_reprobed_within_the_cap_not_at_lease_expiry() {
         let h = hl1();
         reg(&h, "q", "g");
-        h.note_partition_id("q", "p0", "id0");
+        h.note_partition_id("q", "p0", ID0);
         h.mark_local("q", "p0", 1, 0);
         let c = h.take_batch("q", "g", 1, u32::MAX, 0);
         assert_eq!(names(&c), vec!["p0"]);
@@ -2707,7 +3824,7 @@ mod tests {
     fn stale_drained_does_not_survive_a_new_claim() {
         let h = hl1();
         reg(&h, "q", "g");
-        h.note_partition_id("q", "p0", "id0");
+        h.note_partition_id("q", "p0", ID0);
         // Cycle 1: single message, clean drain — entry ends IDLE with
         // drained=true persisted at its Took.
         h.mark_local("q", "p0", 1, 0);
@@ -2715,7 +3832,7 @@ mod tests {
         h.checkin("q", "g",
             vec![CheckinResult { name: "p0".into(), epoch: c1[0].epoch, verdict: Verdict::Took, drained: true }],
             10, false, 60_000);
-        h.promote_ack("q", "g", "id0", 20, true); // covered+drained ⇒ IDLE
+        h.promote_ack("q", "g", ID0, 20, true); // covered+drained ⇒ IDLE
         // Cycle 2: a 100-message backlog lands; OUR claim's Took checkin loses
         // the race to a concurrent popper's Leased verdict (ownership gate has
         // already been passed by the Leased one in this simulation).
@@ -2726,7 +3843,7 @@ mod tests {
             40, false, 60_000);
         // The winner's ack arrives (covered): the stale drained=true from cycle
         // 1 must NOT cause a clear — the entry must come back claimable.
-        h.promote_ack("q", "g", "id0", 50, true);
+        h.promote_ack("q", "g", ID0, 50, true);
         assert_eq!(
             names(&h.take_batch("q", "g", 1, u32::MAX, 60)),
             vec!["p0"],
@@ -2742,7 +3859,7 @@ mod tests {
     fn covered_ack_undrained_backlog_promotes() {
         let h = hl1();
         reg(&h, "q", "g");
-        h.note_partition_id("q", "p0", "id0");
+        h.note_partition_id("q", "p0", ID0);
         h.mark_local("q", "p0", 1000, 0);
         let c = h.take_batch("q", "g", 1, u32::MAX, 0);
         h.checkin(
@@ -2753,7 +3870,7 @@ mod tests {
             false,
             60_000,
         );
-        h.promote_ack("q", "g", "id0", 300, true);
+        h.promote_ack("q", "g", ID0, 300, true);
         assert_eq!(
             names(&h.take_batch("q", "g", 1, u32::MAX, 400)),
             vec!["p0"],
@@ -2765,7 +3882,7 @@ mod tests {
     fn covered_ack_with_in_lease_mark_promotes() {
         let h = hl1();
         reg(&h, "q", "g");
-        h.note_partition_id("q", "p0", "id0");
+        h.note_partition_id("q", "p0", ID0);
         h.mark_local("q", "p0", 1, 0);
         let c = h.take_batch("q", "g", 1, u32::MAX, 0);
         h.checkin(
@@ -2777,7 +3894,7 @@ mod tests {
             60_000,
         );
         h.mark_local("q", "p0", 1, 150); // push lands during the lease
-        h.promote_ack("q", "g", "id0", 300, true);
+        h.promote_ack("q", "g", ID0, 300, true);
         assert_eq!(
             names(&h.take_batch("q", "g", 1, u32::MAX, 400)),
             vec!["p0"],
@@ -2792,7 +3909,7 @@ mod tests {
     fn in_flight_mark_survives_took_reset() {
         let h = hl1();
         reg(&h, "q", "g");
-        h.note_partition_id("q", "p0", "id0");
+        h.note_partition_id("q", "p0", ID0);
         h.mark_local("q", "p0", 1, 0);
         let c = h.take_batch("q", "g", 1, u32::MAX, 0);
         h.mark_local("q", "p0", 1, 50); // races the in-flight pop
@@ -2804,7 +3921,7 @@ mod tests {
             false,
             60_000,
         );
-        h.promote_ack("q", "g", "id0", 300, true);
+        h.promote_ack("q", "g", ID0, 300, true);
         assert_eq!(
             names(&h.take_batch("q", "g", 1, u32::MAX, 400)),
             vec!["p0"],
@@ -2922,7 +4039,7 @@ mod tests {
     fn ack_promote_pulls_leased_entry_early() {
         let h = hl1();
         reg(&h, "q", "g");
-        h.note_partition_id("q", "p0", "id0");
+        h.note_partition_id("q", "p0", ID0);
         h.mark_local("q", "p0", 1, 0);
         let c = h.take_batch("q", "g", 1, u32::MAX, 0);
         h.checkin(
@@ -2940,7 +4057,7 @@ mod tests {
         );
         assert!(h.take_batch("q", "g", 1, u32::MAX, 100).is_empty());
         // ack releases the lease early → promote by id
-        h.promote_ack("q", "g", "id0", 100, false);
+        h.promote_ack("q", "g", ID0, 100, false);
         assert_eq!(names(&h.take_batch("q", "g", 1, u32::MAX, 100)), vec!["p0"]);
     }
 
@@ -3155,7 +4272,7 @@ mod tests {
             "periodic floor must be due even with a non-empty ring"
         );
         // The background task runs the keyset scan: reseed_row for the still-pending
-        // p_lost (exactly what log_hotlist_reseed_v1 returns: last_offset>committed).
+        // p_lost (exactly what the reseed walk returns: last_offset>committed).
         walk(&h, "q", "g", due_at, &[("id_lost", "p_lost")]);
         let got: HashSet<String> = names(&h.take_batch("q", "g", 5, u32::MAX, due_at)).into_iter().collect();
         assert!(
@@ -3218,7 +4335,7 @@ mod tests {
     fn reseed_seeds_ring_and_sets_clock() {
         let h = hl1();
         assert!(h.reseed_due("q", "g", 1000, 30_000)); // cold
-        walk(&h, "q", "g", 1000, &[("id0", "p0"), ("id1", "p1")]);
+        walk(&h, "q", "g", 1000, &[(ID0, "p0"), (ID1, "p1")]);
         assert_eq!(names(&h.take_batch("q", "g", 5, u32::MAX, 1000)), vec!["p0", "p1"]);
         assert!(!h.reseed_due("q", "g", 1000, 30_000)); // just reseeded
         assert!(h.reseed_due("q", "g", 40_000, 30_000)); // stale again
@@ -3316,6 +4433,14 @@ mod tests {
             "a full walk must come due within one interval (+jitter, +one step) of the \
              last one, got {t}ms of windowed passes"
         );
+    }
+
+    #[test]
+    fn scan_bounds_pin_the_full_walk_to_minus_infinity() {
+        // A full walk is the windowed statement with its cutoff already bound, so
+        // p_window_ms is unread; a windowed one derives its cutoff on the first page.
+        assert_eq!(ReseedMode::Full.scan_bounds(), (0, Some("-infinity")));
+        assert_eq!(ReseedMode::Window(120_000).scan_bounds(), (120_000, None));
     }
 
     #[test]
@@ -3479,7 +4604,7 @@ mod tests {
         assert_eq!(t.mode(), ReseedMode::Full);
         assert_eq!(off.queue_count(), 0, "disabled must allocate nothing");
         // …and a disabled ticket is inert end to end: no row lands, no stamp does.
-        off.reseed_row(&t, "id0", "p0");
+        off.reseed_row(&t, ID0, "p0");
         assert!(!off.reseed_finish(t, true));
         assert_eq!(off.queue_count(), 0);
     }
@@ -3508,7 +4633,7 @@ mod tests {
         reg(&h, "q", "g");
         let t = h.reseed_begin("q", "g", 1_000, 300_000, 120_000);
         assert!(t.mode().is_full(), "a cold ring owes a full walk");
-        h.reseed_row(&t, "id0", "p0");
+        h.reseed_row(&t, ID0, "p0");
         assert!(h.reseed_finish(t, true), "an untouched ring must take its stamp");
         assert_eq!(
             mode_now(&h, "q", "g", 2_000, 300_000, 120_000),
@@ -3523,7 +4648,7 @@ mod tests {
         let h = hl1();
         reg(&h, "q", "g");
         let t = h.reseed_begin("q", "g", 1_000, 300_000, 120_000);
-        h.reseed_row(&t, "id0", "p0");
+        h.reseed_row(&t, ID0, "p0");
         // The group is deleted and immediately re-registered by the next poll.
         h.forget_group("q", "g");
         h.ensure_group("q", "g");
@@ -3560,10 +4685,10 @@ mod tests {
         let h = hl1();
         reg(&h, "q", "g");
         let t = h.reseed_begin_full("q", "g", 0);
-        h.reseed_row(&t, "id0", "p0"); // before the delete
+        h.reseed_row(&t, ID0, "p0"); // before the delete
         h.forget_group("q", "g");
         h.ensure_group("q", "g");
-        h.reseed_row(&t, "id1", "p1"); // after it — same ticket, dead ring
+        h.reseed_row(&t, ID1, "p1"); // after it — same ticket, dead ring
         h.reseed_finish(t, true);
         assert!(
             h.take_batch("q", "g", 5, u32::MAX, 0).is_empty(),
@@ -3841,7 +4966,7 @@ mod tests {
         h.mark_local("q", "p0", 1, 0); // epoch bump only — still not in the ring
         assert!(h.take_batch("q", "g", 1, u32::MAX, 0).is_empty(), "mark cannot re-add INFLIGHT");
         // The reseed floor re-adds the still-pending partition (last_offset>committed).
-        walk(&h, "q", "g", 0, &[("id0", "p0")]);
+        walk(&h, "q", "g", 0, &[(ID0, "p0")]);
         assert_eq!(
             names(&h.take_batch("q", "g", 1, u32::MAX, 0)),
             vec!["p0"],
@@ -3860,7 +4985,7 @@ mod tests {
         h.mark_local("q", "p0", 1, 0);
         let c = h.take_batch("q", "g", 1, u32::MAX, 0); // p0 INFLIGHT, epoch snapshot
         // reseed reclaims it back to READY while the "pop" is still in flight.
-        walk(&h, "q", "g", 0, &[("id0", "p0")]);
+        walk(&h, "q", "g", 0, &[(ID0, "p0")]);
         // A second pop can now take it (redundant probe — allowed).
         assert_eq!(names(&h.take_batch("q", "g", 1, u32::MAX, 0)), vec!["p0"]);
         // The original pop finally checks in Took: state is INFLIGHT (the 2nd pop's),
@@ -3888,7 +5013,7 @@ mod tests {
     fn reseed_recovers_stale_wheel_entry_on_nondeferral_queue() {
         let h = hl1();
         reg(&h, "q", "g");
-        h.note_partition_id("q", "p0", "id0");
+        h.note_partition_id("q", "p0", ID0);
         h.mark_local("q", "p0", 1, 0);
         let c = h.take_batch("q", "g", 1, u32::MAX, 0);
         assert_eq!(names(&c), vec!["p0"]);
@@ -3908,7 +5033,7 @@ mod tests {
         // reclaim the stale wheel entry — a secondary backstop below the bounded
         // re-probe, for entries stranded by other paths (e.g. a dropped INFLIGHT
         // pop) that the lease cap does not cover.
-        walk_rows(&h, "q", "g", 500, &[("id0", "p0")]);
+        walk_rows(&h, "q", "g", 500, &[(ID0, "p0")]);
         assert_eq!(
             names(&h.take_batch("q", "g", 1, u32::MAX, 500)),
             vec!["p0"],
@@ -3923,11 +5048,11 @@ mod tests {
         let h = hl1();
         reg(&h, "q", "g");
         h.set_queue_cfg("q", 0, 5, 0, 0); // window_buffer = 5s ⇒ deferral queue
-        h.note_partition_id("q", "p0", "id0");
+        h.note_partition_id("q", "p0", ID0);
         h.mark_local("q", "p0", 1, 0); // parked in the wheel at 5000ms (window)
         assert!(h.take_batch("q", "g", 1, u32::MAX, 1_000).is_empty());
         // Reseed must leave the deferral deadline intact.
-        walk_rows(&h, "q", "g", 1_000, &[("id0", "p0")]);
+        walk_rows(&h, "q", "g", 1_000, &[(ID0, "p0")]);
         assert!(
             h.take_batch("q", "g", 1, u32::MAX, 1_000).is_empty(),
             "deferral wheel entry must stay parked until its window is due"
@@ -4098,8 +5223,8 @@ mod tests {
         let h = hl1();
         reg(&h, &k(TA, "orders"), "workers");
         reg(&h, &k(TB, "orders"), "workers");
-        h.note_partition_id(&k(TA, "orders"), "shared-part", "id-a");
-        h.note_partition_id(&k(TB, "orders"), "shared-part", "id-b");
+        h.note_partition_id(&k(TA, "orders"), "shared-part", IDA);
+        h.note_partition_id(&k(TB, "orders"), "shared-part", IDB);
         // Park both in the wheel: mark, take, leased-Took checkin.
         for t in [TA, TB] {
             h.mark_local(&k(t, "orders"), "shared-part", 1, 0);
@@ -4117,13 +5242,13 @@ mod tests {
         }
         // B's partition id must be unknown to A's ring: a shared intern table would
         // resolve it to the same dense index and promote A's entry.
-        h.promote_ack(&k(TA, "orders"), "workers", "id-b", 1, false);
+        h.promote_ack(&k(TA, "orders"), "workers", IDB, 1, false);
         assert!(
             h.take_batch(&k(TA, "orders"), "workers", 10, u32::MAX, 1).is_empty(),
             "another tenant's partition id must not promote this tenant's entry"
         );
         // A's own ack releases A's lease — and only A's.
-        h.promote_ack(&k(TA, "orders"), "workers", "id-a", 1, false);
+        h.promote_ack(&k(TA, "orders"), "workers", IDA, 1, false);
         assert_eq!(
             names(&h.take_batch(&k(TA, "orders"), "workers", 10, u32::MAX, 1)),
             vec!["shared-part"]

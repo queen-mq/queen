@@ -12,6 +12,21 @@ pub const DEFAULT_TENANT: &str = "00000000-0000-0000-0000-000000000001";
 /// against anything (it is opaque; the trust is network — the cell boundary).
 pub const TENANT_HEADER: &str = "x-queen-tenant";
 
+/// The `JWT_ALGORITHM` values the broker accepts, in the order the boot error
+/// lists them. This is the ONE spelling of the set: `AuthConfig::validate` is
+/// matched against it and its "not supported" message is BUILT from it, so the
+/// message can no longer name a set the validation does not enforce.
+///
+/// `auth.rs::check_alg_allowed` is the other half of the contract — the value
+/// accepted at boot must be a value the verifier accepts at request time. The
+/// two used to disagree about HS384/HS512 (refused here, implemented there,
+/// which left pinning HS512 impossible and pushed operators to the strictly
+/// wider `auto`); `auth::tests::boot_and_the_verifier_accept_the_same_algorithms`
+/// now fails if they ever drift apart again.
+pub const SUPPORTED_JWT_ALGORITHMS: &[&str] = &[
+    "HS256", "HS384", "HS512", "RS256", "RS384", "RS512", "EdDSA", "auto",
+];
+
 /// JWT auth configuration, mirroring the C++ `AuthConfig` (server/include/queen/config.hpp).
 /// When `enabled` is false (the default) the auth middleware passes every request
 /// through untouched — this is how the whole existing test-suite runs.
@@ -94,10 +109,14 @@ impl AuthConfig {
             return Ok(());
         }
         match self.algorithm.as_str() {
-            "HS256" | "auto" => {
+            // The whole HMAC family, not just HS256: `auth.rs` verifies HS384 and
+            // HS512 off the same `JWT_SECRET` bytes, so refusing them here only
+            // denied operators the ability to PIN one — `auto`, the workaround,
+            // accepts all seven algorithms and is the weaker posture.
+            "HS256" | "HS384" | "HS512" | "auto" => {
                 if self.secret.is_empty() && self.jwks_url.is_empty() && self.public_key.is_empty() {
                     return Err(format!(
-                        "JWT_ENABLED=true with JWT_ALGORITHM={} but no key material: set JWT_SECRET (HS256), or JWT_PUBLIC_KEY / JWT_JWKS_URL (RS256/EdDSA)",
+                        "JWT_ENABLED=true with JWT_ALGORITHM={} but no key material: set JWT_SECRET (HS256/HS384/HS512), or JWT_PUBLIC_KEY / JWT_JWKS_URL (RS256/EdDSA)",
                         self.algorithm
                     ));
                 }
@@ -111,9 +130,11 @@ impl AuthConfig {
                 }
             }
             other => {
-                return Err(format!(
-                    "JWT_ALGORITHM={other} is not supported (use HS256, RS256, RS384, RS512, EdDSA, or auto)"
-                ));
+                let mut list = SUPPORTED_JWT_ALGORITHMS.join(", ");
+                if let Some(i) = list.rfind(", ") {
+                    list.replace_range(i..i + 2, ", or ");
+                }
+                return Err(format!("JWT_ALGORITHM={other} is not supported (use {list})"));
             }
         }
         Ok(())
@@ -131,6 +152,17 @@ pub struct SyncConfig {
     /// TCP mesh listen/dial port. `QUEEN_MESH_PORT`, falling back to the legacy
     /// `QUEEN_UDP_NOTIFY_PORT` (default 6633).
     pub mesh_port: u16,
+    /// Host the mesh listener binds. `QUEEN_MESH_BIND_ADDR`, defaulting to
+    /// whatever `QUEEN_BIND_ADDR` gives the HTTP listener — so one variable
+    /// moves both listeners, and this second knob exists only for the split
+    /// case (API on loopback, mesh on the pod IP).
+    ///
+    /// Not to be confused with `http_addr` below: bind is who can REACH this
+    /// process, advertise is where peers are TOLD to find it. Narrowing the
+    /// bind while advertising a routable host is the one combination that
+    /// looks configured and connects to nothing, which is why both are on the
+    /// boot line.
+    pub bind_addr: String,
     /// Parsed peer list — (host, port) pairs from `QUEEN_MESH_PEERS` (falling back
     /// to the legacy `QUEEN_UDP_PEERS`). Empty ⇒ no peers ⇒ no mesh.
     pub peers: Vec<(String, u16)>,
@@ -170,6 +202,20 @@ impl SyncConfig {
         // Prefer the new QUEEN_MESH_* names; fall back to the legacy QUEEN_UDP_*
         // ones so existing deployments keep working unchanged.
         let mesh_port = env_int("QUEEN_MESH_PORT", env_int("QUEEN_UDP_NOTIFY_PORT", 6633)) as u16;
+        // Unset ⇒ wherever the HTTP listener binds. Written as a nested default
+        // rather than the empty-sentinel fallback the peer list uses below,
+        // because this is a DEFAULT and that is an ALIAS, and the two read the
+        // same in the docs unless the source distinguishes them. An explicitly
+        // empty value is rejected, not inherited: nobody means "" by it.
+        //
+        // A bad QUEEN_BIND_ADDR is reported under its own name, not this one,
+        // because `load` builds `bind_addr` before `sync` and struct fields are
+        // evaluated in source order.
+        let bind_addr = checked_bind_addr(
+            "QUEEN_MESH_BIND_ADDR",
+            "QUEEN_MESH_PORT",
+            env_str("QUEEN_MESH_BIND_ADDR", &env_str("QUEEN_BIND_ADDR", "0.0.0.0")),
+        );
         let peers_raw = {
             let mesh = env_str("QUEEN_MESH_PEERS", "");
             if !mesh.is_empty() {
@@ -201,6 +247,7 @@ impl SyncConfig {
         SyncConfig {
             enabled: env_bool("QUEEN_SYNC_ENABLED", true),
             mesh_port,
+            bind_addr,
             peers,
             secret: env_str("QUEEN_SYNC_SECRET", ""),
             heartbeat_ms: env_int("QUEEN_SYNC_HEARTBEAT_MS", 1000).max(1) as u64,
@@ -276,6 +323,15 @@ fn parse_mesh_peers(raw: &str, default_port: u16) -> Vec<(String, u16)> {
 
 pub struct Config {
     pub port: String,
+    /// Host the HTTP listener binds — `QUEEN_BIND_ADDR`, default `0.0.0.0`:
+    /// every interface, which is what the address was hardcoded to before the
+    /// knob existed, so an upgrade changes nothing until someone sets it.
+    ///
+    /// HOST only. The port is `PORT` and nowhere else, because a variable that
+    /// could carry its own port would be a second place to write one, and the
+    /// two disagreeing is not a conflict anything downstream could resolve —
+    /// so `load` rejects a value with a port instead of picking a winner.
+    pub bind_addr: String,
     pub pg: deadpool_postgres::Config,
     pub pool_size: usize,
     // Postgres TLS (RUSTFIX item 5). C++ `PG_USE_SSL` (default false) /
@@ -285,6 +341,27 @@ pub struct Config {
     // verification disabled iff `pg_ssl_reject_unauthorized` is false.
     pub pg_use_ssl: bool,
     pub pg_ssl_reject_unauthorized: bool,
+    /// `PG_SSL_ROOT_CERT` — the PEM **CONTENT** of the CA that signed the
+    /// database's certificate, not a path to it (same family shape as
+    /// `PG_PASSWORD`: the value IS the material). Set it and the chain is
+    /// verified against exactly that CA instead of the compiled-in Mozilla set,
+    /// which is what a managed PostgreSQL on a private CA needs — Scaleway RDB,
+    /// Cloud SQL and Aiven all present private chains, and before this knob
+    /// existed the only way to connect at all was
+    /// `PG_SSL_REJECT_UNAUTHORIZED=false`, i.e. encryption with no
+    /// authentication.
+    ///
+    /// A supplied CA REPLACES the Mozilla set and outranks
+    /// `PG_SSL_REJECT_UNAUTHORIZED=false`; both rules, and why, are in
+    /// `pgtls.rs`'s header. Malformed PEM is fatal at boot, never a silent
+    /// fall-back.
+    ///
+    /// **Trap:** a multi-line value does not survive `docker --env-file` or
+    /// systemd's `EnvironmentFile` — they stop at the first newline. Use
+    /// `-e PG_SSL_ROOT_CERT="$(cat ca.pem)"`, a compose block scalar, or a
+    /// Kubernetes secret; or put the PEM on one line with `\n` for the
+    /// newlines, which the parser un-escapes.
+    pub pg_ssl_root_cert: Option<String>,
     pub stmt_timeout: Duration,
     pub zstd_level: i32,
     // Admission arbiter (admission.rs): one budget of concurrent write
@@ -398,6 +475,26 @@ pub struct Config {
     /// worker holds one maintenance-lane admission slot and one pooled
     /// connection while it runs, so raise QUEEN_ADMISSION_SHARE_MAINT with it.
     pub retention_parallelism: usize,
+    /// Ceiling on the DUE PARTITIONS one cycle pulls per queue per rule
+    /// (QUEEN_RETENTION_DUE_CAP; 0 = derive, see `load`). The work list is
+    /// ordered oldest-watermark-first, so anything past the cap is simply the
+    /// next cycle's head — the bound costs latency on a backlog, never
+    /// coverage. Sized against the measured cell: ~500 newly-eligible
+    /// segments/s over a 5 s cycle is ~2500 partition visits, at 2-5 ms a step
+    /// call, so the default leaves ~2x headroom at `retention_parallelism = 1`
+    /// and scales with the workers that have to execute those calls.
+    pub retention_due_cap: usize,
+    /// Cadence of the retention WATERMARK SAFETY WALK
+    /// (QUEEN_RETENTION_SAFETY_WALK_MS, default 86_400_000 = daily). The walk
+    /// re-derives `log_partitions.oldest_live_at` / `oldest_txn_at` from
+    /// reality and repairs drift, so the per-cycle work list is allowed to
+    /// trust a cached fact (001_log_schema). It is ALSO the one-time BACKFILL
+    /// that makes those columns non-NULL in the first place.
+    ///
+    /// 0 disables the RECURRING walk only — the first walk still runs, because
+    /// a broker that skipped it would have an empty work list and retention
+    /// would stop with nothing in the log to say so. See retention.rs.
+    pub retention_safety_walk_ms: u64,
     pub metrics_retention_days: i32,
     pub partition_cleanup_days: i32,
     pub partition_cleanup_enabled: bool,
@@ -444,7 +541,11 @@ pub struct Config {
     // Every one of those is a repair path, so this knob is really "how long may a
     // repair hide" — and it trades directly against database CPU, because the full
     // walk is Theta(partitions in the queue) per ring while the windowed one is
-    // Theta(partitions written in the window).
+    // Theta(partitions written in the window). Both run log_hotlist_reseed_window_v1
+    // — the full one with its lower bound pinned to '-infinity' — since 2026-08-23,
+    // when the dedicated full-walk statement turned out to be Theta(partitions in the
+    // CELL) under the generic plan prepare_cached converges to (its header in
+    // 004_log_pop.sql has the numbers).
     //
     // 0 is the config-only kill switch, and it restores the pre-windowing broker
     // (C2, PLAN_HOTLIST_FOLLOWUP.md) — which is more than the periodic cadence:
@@ -477,6 +578,64 @@ pub struct Config {
     // an unbounded number of distinct queues. 0 disables the sweep (unbounded growth —
     // only for a single-tenant deployment that wants the pre-eviction behaviour).
     pub hotlist_idle_sweep_ms: u64,
+    // `QUEEN_HOTLIST_UNSERVED_TRIM_MS` (default 30000; 0 disables). How long a hot-list
+    // ring may go without a single SERVED POP on this broker before the trim drops it —
+    // see `HotList::trim_unserved` for the full argument. This is the standby-broker
+    // bound: rings are filled by paths that do not depend on this broker's own traffic
+    // (the reseed timer, mesh marks from a peer's pushes) and drained only by pops, so a
+    // broker behind an active/passive LB otherwise accumulates the whole cell's pending
+    // set forever — measured 827 000 ready entries / 2.12 GB RSS on the passive broker of
+    // the 2026-08-24 soak cell, against 727 MB on the active one, and a proximate cause
+    // of two global OOMs. `hotlist_idle_sweep_ms` cannot bound it: that sweep requires an
+    // EMPTY ring, which is exactly what a ring nobody drains never becomes.
+    //
+    // The trim keys on served pops and never on entry age: with ~1060 pops/s a legitimate
+    // 827 000-entry backlog puts the FIFO head at ~780 s, so age cannot tell a starved
+    // standby from a healthy, backlogged, actively-served queue. 0 restores the
+    // pre-2026-08-24 behaviour exactly (no clock read, no scan, no eviction).
+    pub hotlist_unserved_trim_ms: i64,
+    // POP AUTOPILOT (server/src/pop_autopilot.rs) — the broker choosing `partitions`
+    // (and echoing `batch`) for a grouped wildcard pop that opted in with
+    // `?autopilot=true`. A request that does not carry the parameter is treated
+    // byte-identically in every one of the three switch positions, so this knob is
+    // about what the controller may DO, never about whether the surface exists.
+    //
+    // `QUEEN_POP_AUTOPILOT` (on | shadow | off, default on; the boolean spellings
+    // are accepted and mean on/off): `shadow` computes the decision and reports it
+    // without applying it — the rollout position — and `off` removes the controller
+    // entirely, including its in-memory lane state and its logs.
+    //
+    // The rest are the law's constants. `TARGET_AGE_MS` is the ready-age the width
+    // loop steers to (a quarter of it is the shrink threshold); the two DWELL knobs
+    // bound how often one (tenant, queue, group) may change its width, in BOTH
+    // directions, and exist to stop the multiplicative loop from limit-cycling;
+    // `MAX_LANES` bounds the in-memory state on a cell with a very large number of
+    // queues (past it the controller stops creating lanes, which degrades to
+    // today's defaults rather than evicting a live one).
+    //
+    // `BATCH` is the batch handed to a consumer that DELEGATED that dimension, and
+    // only to such a consumer — a client that sends its own `batch` is never
+    // touched by it. It is 100 rather than the 200 an absent field resolves to in
+    // the handler because 100 is what the fleet has actually run (every SDK
+    // defaults to it client-side) and because the matched arms of 2026-08-24
+    // measured 200 at +35% p99. The full argument, and the drain-aware successor
+    // this constant is standing in for, are at
+    // `pop_autopilot::AUTO_BATCH_DEFAULT`.
+    //
+    // `BURST_CAP` is the FEED-FORWARD BURST BYPASS ceiling (0..=64, default 0 =
+    // disabled). With it set, a delegated width becomes `max(W_steady, min(ready,
+    // cap))` for that ONE request: the feedback loop still owns the steady width and
+    // its dwell, but a lane that has 393 partitions ready right now no longer drains
+    // them at width 1 for four dwell periods. It can never exceed what exists at that
+    // instant, so it cannot produce the speculative wide scan the controller exists
+    // to prevent. The full argument is at `pop_autopilot::burst_width`.
+    pub pop_autopilot_mode: String,
+    pub pop_autopilot_batch: i32,
+    pub pop_autopilot_target_age_ms: f64,
+    pub pop_autopilot_dwell_ms: i64,
+    pub pop_autopilot_dwell_pops: u32,
+    pub pop_autopilot_burst_cap: i32,
+    pub pop_autopilot_max_lanes: usize,
     // LOGGING_PLAN.md Phase 1: cadence of the periodic `rates`/`sizes` aggregate
     // log blocks (ms), and how many hot queues the per-queue lines rank & show.
     pub log_rates_ms: u64,
@@ -678,7 +837,7 @@ pub struct Config {
     // while a late KV prune is invisible (the `kv_live_v1` predicate already hides the
     // expired row on the first read) and costs only table size.
     //
-    // LEADERLESS, unlike retention: retention takes session advisory lock 737_001 and
+    // LEADERLESS, unlike retention: retention takes xact advisory lock 737_001 and
     // one replica works per cycle; the sweeper must be the opposite on both axes,
     // due-driven and leaderless, so every replica drains in parallel sharing the work
     // through `SKIP LOCKED`. It takes NO advisory lock, so it consumes no new number
@@ -805,6 +964,50 @@ pub(crate) fn normalize_subscription_mode(raw: &str) -> String {
     }
 }
 
+/// Join a bind host and a port into an authority, bracketing an IPv6 literal.
+/// Unbracketed, `::1` + `6632` is `::1:6632`, which is NOT a `SocketAddr` —
+/// that grammar requires the brackets — so it falls through to the name
+/// resolver, where it survives only because the platform's getaddrinfo happens
+/// to take a bare numeric v6 host. Bracketing keeps the bind on the parse path
+/// rather than resting on that, and puts the canonical form in the boot line,
+/// which is the string an operator pastes into curl. A hostname passes through
+/// untouched and is resolved at bind time.
+pub fn host_port(host: &str, port: &str) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+/// The HTTP listener's bind host, validated. Also the mesh listener's default,
+/// which is why it is a function and not an inline `env_str`.
+fn http_bind_addr() -> String {
+    checked_bind_addr("QUEEN_BIND_ADDR", "PORT", env_str("QUEEN_BIND_ADDR", "0.0.0.0"))
+}
+
+/// FATAL on a bind host that carries a port, or that is explicitly empty.
+/// Both would otherwise be joined with the port into an address nothing
+/// listens on, and the process would die at bind quoting a string no operator
+/// ever wrote (`0.0.0.0:7000:6632`). An IP literal — v4 or v6 — or a hostname
+/// is accepted here; whether the hostname RESOLVES is still the bind's problem,
+/// because resolution can fail for reasons that have nothing to do with config.
+/// `port_key` is the variable that owns the port for THIS listener, so the
+/// message points at the right one rather than at `PORT` for the mesh.
+fn checked_bind_addr(k: &str, port_key: &str, v: String) -> String {
+    if v.is_empty() {
+        crate::obs::fatal(format!(
+            "{k} is set to the empty string — give it a host or IP, or unset it for 0.0.0.0"
+        ));
+    }
+    if v.parse::<std::net::IpAddr>().is_err() && v.contains(':') {
+        crate::obs::fatal(format!(
+            "{k}={v} carries a port — set the host or IP only, the port comes from {port_key}"
+        ));
+    }
+    v
+}
+
 fn env_str(k: &str, def: &str) -> String {
     std::env::var(k).unwrap_or_else(|_| def.to_string())
 }
@@ -911,6 +1114,7 @@ pub fn log_effective(cfg: &Config) {
         target: "boot",
         version = crate::VERSION,
         port = %cfg.port,
+        bind = %cfg.bind_addr,
         pool = cfg.pool_size,
         stmt_timeout_ms = cfg.stmt_timeout.as_millis() as u64,
         max_body_bytes = %env_str("QUEEN_MAX_BODY_BYTES", "<default>"),
@@ -925,6 +1129,21 @@ pub fn log_effective(cfg: &Config) {
         database = %cfg.pg.dbname.clone().unwrap_or_default(),
         use_ssl = cfg.pg_use_ssl,
         ssl_reject_unauthorized = cfg.pg_ssl_reject_unauthorized,
+        // What the pool ACTUALLY trusts, from the same pure functions db.rs
+        // feeds the connector — `plaintext` / `webpki-roots` / `supplied-ca` /
+        // `accept-any`. `ssl_verified` is the one question a security review
+        // asks of this line: is the link to the database AUTHENTICATED, or
+        // merely encrypted? The proxy prints the identical pair for the pxdb.
+        ssl_trust = crate::pgtls::trust_label(
+            cfg.pg_use_ssl,
+            cfg.pg_ssl_root_cert.is_some(),
+            cfg.pg_ssl_reject_unauthorized,
+        ),
+        ssl_verified = crate::pgtls::link_authenticated(
+            cfg.pg_use_ssl,
+            cfg.pg_ssl_root_cert.is_some(),
+            cfg.pg_ssl_reject_unauthorized,
+        ),
         "config: postgres"
     );
     tracing::info!(
@@ -946,6 +1165,7 @@ pub fn log_effective(cfg: &Config) {
         mesh_active = cfg.sync.mesh_active(),
         server_id = %cfg.sync.server_id,
         mesh_port = cfg.sync.mesh_port,
+        mesh_bind = %cfg.sync.bind_addr,
         // EPHEMERAL_QUEUES.md §3.5/§3.6: what peers are told to forward to. On
         // the boot line because a wrong advertised address fails ONLY in the
         // other direction — this broker works perfectly and its peers cannot
@@ -977,6 +1197,7 @@ pub fn log_effective(cfg: &Config) {
         hotlist_reseed_full_ms = cfg.hotlist_reseed_full_ms,
         hotlist_reseed_window_ms = cfg.hotlist_reseed_window_ms,
         hotlist_idle_sweep_ms = cfg.hotlist_idle_sweep_ms,
+        hotlist_unserved_trim_ms = cfg.hotlist_unserved_trim_ms,
         zstd_level = cfg.zstd_level,
         "config: engine"
     );
@@ -988,6 +1209,16 @@ pub fn log_effective(cfg: &Config) {
         pop_wait_backoff_threshold = cfg.pop_wait_backoff_threshold,
         pop_wait_backoff_multiplier = cfg.pop_wait_backoff_multiplier,
         pop_wait_max_ms = cfg.pop_wait_max_interval_ms,
+        // POP AUTOPILOT: on the pop line rather than a block of its own — it is a
+        // pop knob, and §14.4's rule is that a third periodic block is a line
+        // nobody reads.
+        pop_autopilot = %cfg.pop_autopilot_mode,
+        pop_autopilot_batch = cfg.pop_autopilot_batch,
+        pop_autopilot_target_age_ms = cfg.pop_autopilot_target_age_ms,
+        pop_autopilot_dwell_ms = cfg.pop_autopilot_dwell_ms,
+        pop_autopilot_dwell_pops = cfg.pop_autopilot_dwell_pops,
+        pop_autopilot_burst_cap = cfg.pop_autopilot_burst_cap,
+        pop_autopilot_max_lanes = cfg.pop_autopilot_max_lanes,
         admission = %format!(
             "{}/{}/{}", cfg.admission_min, cfg.admission_init, cfg.admission_max),
         admission_pool_reserve = cfg.admission_pool_reserve,
@@ -1020,6 +1251,13 @@ pub fn log_effective(cfg: &Config) {
         retention_interval_ms = cfg.retention_interval_ms,
         retention_batch_size = cfg.retention_batch_size,
         retention_parallelism = cfg.retention_parallelism,
+        // The number ACTUALLY in force, never the formula (the derived-value
+        // rule the kv/timers block below states): an operator reading this line
+        // is trying to explain a delete rate, and "0 = derive" explains nothing.
+        retention_due_cap = cfg.retention_due_cap,
+        // 0 here means "recurring walk off, backfill still runs" — the WARN
+        // above says so at the same boot, so the number can stay bare.
+        retention_safety_walk_ms = cfg.retention_safety_walk_ms,
         metrics_retention_days = cfg.metrics_retention_days,
         partition_cleanup = cfg.partition_cleanup_enabled,
         partition_cleanup_days = cfg.partition_cleanup_days,
@@ -1145,6 +1383,47 @@ const EXTERNAL_BOOL_KEYS: &[(&str, bool)] = &[
     ("QUEEN_V2_BUNDLE_LOG", false),
 ];
 
+/// `PG_SSL_ROOT_CERT` as raw PEM, or `None`. Whitespace-only counts as unset —
+/// an env file that leaves the variable blank must mean "not configured", not
+/// "configured with nothing", which would otherwise boot-fail every deployment
+/// that templates the variable in unconditionally.
+///
+/// Read through this ONE function everywhere (`load`, `db::cancel_tls`, the
+/// embedded pre-pass) so the pool, the cancel connector and the boot gate cannot
+/// disagree about whether a CA is configured — the same discipline the comment
+/// on `cancel_tls` already applies to the two booleans.
+pub(crate) fn pg_ssl_root_cert() -> Option<String> {
+    // Deliberately `env_str` and not a bare `std::env::var`: the webdoc's
+    // config reference is SCRAPED from the env_bool/env_int/env_f64/env_str
+    // call sites in this file (webdoc/scripts/gen-config.mjs), so a knob read
+    // any other way ships undocumented.
+    Some(env_str("PG_SSL_ROOT_CERT", "")).filter(|v| !v.trim().is_empty())
+}
+
+/// Validate the CA material and report the anchor count, WITHOUT exiting: the
+/// binary turns an `Err` into `obs::fatal` in `load()`, the embedded library
+/// path turns it into `StartError::Config` before `load()` can be reached
+/// (`embedded/boot.rs`, exactly as it pre-validates the booleans).
+///
+/// Validated whenever the variable is SET, even with `PG_USE_SSL=false`: a
+/// variable that is set is a statement of intent, and finding out at boot that
+/// the PEM is truncated beats finding out at the next TLS handshake.
+pub(crate) fn check_pg_ssl_root_cert() -> Result<Option<usize>, String> {
+    match pg_ssl_root_cert() {
+        None => Ok(None),
+        Some(pem) => match crate::pgtls::root_store_from_pem(&pem) {
+            Ok(roots) => Ok(Some(roots.len())),
+            Err(e) => Err(format!(
+                "PG_SSL_ROOT_CERT is set but unusable: {e}. It takes the PEM CONTENT of the CA \
+                 certificate that signed the database's certificate — not a path, and not a \
+                 fingerprint. Fix it or unset it; it is not ignored, because a database link \
+                 believed to be verified and silently is not is the failure this variable exists \
+                 to remove."
+            )),
+        },
+    }
+}
+
 pub fn load() -> Config {
     for (k, def) in EXTERNAL_BOOL_KEYS {
         let _ = env_bool(k, *def);
@@ -1227,12 +1506,37 @@ pub fn load() -> Config {
         );
     }
 
+    // --- Postgres TLS trust (spec §0: PG_SSL_ROOT_CERT) --------------------
+    // Malformed CA material is FATAL here, next to the other boot gates. It is
+    // never a fall-back to the compiled-in Mozilla set: falling back would be a
+    // downgrade with no signal, which is precisely what the default of
+    // PG_SSL_REJECT_UNAUTHORIZED=true exists to prevent.
+    let pg_use_ssl = env_bool("PG_USE_SSL", false);
+    let pg_ssl_reject_unauthorized = env_bool("PG_SSL_REJECT_UNAUTHORIZED", true);
+    let pg_ssl_root_cert = pg_ssl_root_cert();
+    let ca_anchors = match check_pg_ssl_root_cert() {
+        Ok(n) => n,
+        Err(e) => crate::obs::fatal(e),
+    };
+    // The legal-but-probably-wrong combinations, worded once in pgtls.rs and
+    // used identically by the proxy against PXDB_*.
+    if let Some(msg) = crate::pgtls::boot_advisory(
+        pg_use_ssl,
+        pg_ssl_root_cert.is_some(),
+        pg_ssl_reject_unauthorized,
+        crate::pgtls::BROKER_VARS,
+    ) {
+        tracing::warn!(target: "boot", anchors = ca_anchors, "{msg}");
+    }
+
     let mut cfg = Config {
         port: env_str("PORT", "6632"),
+        bind_addr: http_bind_addr(),
         pg,
         pool_size,
-        pg_use_ssl: env_bool("PG_USE_SSL", false),
-        pg_ssl_reject_unauthorized: env_bool("PG_SSL_REJECT_UNAUTHORIZED", true),
+        pg_use_ssl,
+        pg_ssl_reject_unauthorized,
+        pg_ssl_root_cert,
         stmt_timeout: Duration::from_millis(env_int("QUEEN_STMT_TIMEOUT_MS", 30000) as u64),
         zstd_level: env_int("QUEEN_V2_ZSTD_LEVEL", 3) as i32,
         admission_init: env_int("QUEEN_ADMISSION_INIT", admission_floor).max(1) as u64,
@@ -1312,6 +1616,16 @@ pub fn load() -> Config {
         pop_fusion_max_inflight: env_int("QUEEN_POP_FUSION_CONCURRENCY", 1).max(1) as u32,
         retention_batch_size: env_int("RETENTION_BATCH_SIZE", 1000).max(1) as usize,
         retention_parallelism: env_int("RETENTION_PARALLELISM", 1).max(1) as usize,
+        // 0 = derive from the two knobs above; resolved right after the struct
+        // is built so the boot line and every reader see the number in force.
+        // Range-CHECKED below, not clamped, for the reason the autopilot batch
+        // is: a due cap nobody chose is how a fleet ends up quietly falling
+        // behind on retention again.
+        retention_due_cap: env_int("QUEEN_RETENTION_DUE_CAP", 0).max(0) as usize,
+        // Range-checked below too. 0 is a legal value here and means "no
+        // recurring walk" — NOT "no walk at all" (retention.rs).
+        retention_safety_walk_ms: env_int("QUEEN_RETENTION_SAFETY_WALK_MS", 86_400_000).max(0)
+            as u64,
         metrics_retention_days: env_int("METRICS_RETENTION_DAYS", 90).max(1) as i32,
         partition_cleanup_days: env_int("PARTITION_CLEANUP_DAYS", 30).max(1) as i32,
         partition_cleanup_enabled: env_bool("QUEEN_PARTITION_CLEANUP_ENABLED", true),
@@ -1337,6 +1651,27 @@ pub fn load() -> Config {
         // so the boot line and every reader see the number actually in force.
         hotlist_reseed_window_ms: env_int("QUEEN_HOTLIST_RESEED_WINDOW_MS", 0).max(0),
         hotlist_idle_sweep_ms: env_int("QUEEN_HOTLIST_IDLE_SWEEP_MS", 300_000).max(0) as u64,
+        hotlist_unserved_trim_ms: env_int("QUEEN_HOTLIST_UNSERVED_TRIM_MS", 30_000).max(0),
+        // POP AUTOPILOT (server/src/pop_autopilot.rs). The mode string is
+        // validated below, next to the other enumerated knobs — an unrecognised
+        // value is fatal rather than silently resolving to the default, the same
+        // rule `env_bool` applies to every boolean in the broker.
+        pop_autopilot_mode: env_str("QUEEN_POP_AUTOPILOT", "on"),
+        // Keep the literal in step with `pop_autopilot::AUTO_BATCH_DEFAULT` — it
+        // is spelled out here because the generated environment reference reads
+        // the default off this call site. Range-checked below, not clamped: a
+        // batch knob that silently corrects itself is how a fat-fingered value
+        // reaches production unnoticed.
+        pop_autopilot_batch: env_int("QUEEN_POP_AUTOPILOT_BATCH", 100) as i32,
+        pop_autopilot_target_age_ms: env_f64("QUEEN_POP_AUTOPILOT_TARGET_AGE_MS", 25.0).max(1.0),
+        pop_autopilot_dwell_ms: env_int("QUEEN_POP_AUTOPILOT_DWELL_MS", 500).max(1),
+        pop_autopilot_dwell_pops: env_int("QUEEN_POP_AUTOPILOT_DWELL_POPS", 16).max(1) as u32,
+        // 0 = the bypass is off and the plan is byte-identical to the feedback
+        // loop's own answer. Range-checked below like `_BATCH`, never clamped: a
+        // ceiling that silently corrects itself is how a value nobody chose reaches
+        // production.
+        pop_autopilot_burst_cap: env_int("QUEEN_POP_AUTOPILOT_BURST_CAP", 0) as i32,
+        pop_autopilot_max_lanes: env_int("QUEEN_POP_AUTOPILOT_MAX_LANES", 50_000).max(0) as usize,
         log_rates_ms: env_int("QUEEN_LOG_RATES_MS", 10000).max(1000) as u64,
         log_top_n_queues: env_int("QUEEN_LOG_TOPN_QUEUES", 10).max(1) as usize,
         tenancy_header,
@@ -1416,6 +1751,91 @@ pub fn load() -> Config {
     // §8 windowed reseed: derive it when unset, then clamp it — see
     // resolve_reseed_window_ms. Resolved here, before anything reads the field, so the
     // boot line and every consumer see the number actually in force.
+    // POP AUTOPILOT: reject a mis-spelled kill switch at boot instead of resolving
+    // it to the default. `QUEEN_POP_AUTOPILOT=shaddow` silently meaning `on` is the
+    // exact failure `env_bool` was rewritten to stop (a knob that reads as set and
+    // behaves as unset, with not a word in the log).
+    if crate::pop_autopilot::Mode::parse(&cfg.pop_autopilot_mode).is_none() {
+        crate::obs::fatal(format!(
+            "QUEEN_POP_AUTOPILOT=\"{}\" is not a mode (expected on/shadow/off, or the \
+             boolean spellings {BOOL_SPELLINGS} for on/off)",
+            cfg.pop_autopilot_mode
+        ));
+    }
+    // Same rule for the delegated batch, and for the same reason the boolean
+    // parser stopped being permissive: `env_int` resolves an unparseable value to
+    // the default silently, so a typo would run the fleet on a number nobody
+    // chose, with not a word in the log. Reject rather than clamp — an operator
+    // who asked for a batch of a million has a misunderstanding a clamp would
+    // hide.
+    {
+        use crate::pop_autopilot::{AUTO_BATCH_MAX, AUTO_BATCH_MIN};
+        let raw = std::env::var("QUEEN_POP_AUTOPILOT_BATCH").ok();
+        let set = raw.as_deref().map(str::trim).filter(|v| !v.is_empty());
+        let parsed = set.map(|v| v.parse::<i32>());
+        match parsed {
+            Some(Err(_)) => crate::obs::fatal(format!(
+                "QUEEN_POP_AUTOPILOT_BATCH=\"{}\" is not an integer (expected \
+                 {AUTO_BATCH_MIN}..={AUTO_BATCH_MAX})",
+                set.unwrap_or_default()
+            )),
+            Some(Ok(v)) if !(AUTO_BATCH_MIN..=AUTO_BATCH_MAX).contains(&v) => {
+                crate::obs::fatal(format!(
+                    "QUEEN_POP_AUTOPILOT_BATCH={v} is outside {AUTO_BATCH_MIN}..={AUTO_BATCH_MAX}"
+                ))
+            }
+            _ => {}
+        }
+    }
+    // Same rule, same reason, for the burst-bypass ceiling.
+    if let Err(e) = burst_cap_verdict(
+        std::env::var("QUEEN_POP_AUTOPILOT_BURST_CAP")
+            .ok()
+            .as_deref(),
+    ) {
+        crate::obs::fatal(e);
+    }
+    // RETENTION WORK LIST (retention.rs / 001_log_schema): same rule again for
+    // the two knobs that govern how much of the due list a cycle takes and how
+    // often the watermarks are re-derived from reality. Both are integers whose
+    // wrong value is INVISIBLE in operation — a due cap of "1O" (letter O)
+    // silently means the default, and a safety walk of "1d" silently means
+    // daily-by-accident — so an unparseable value is fatal rather than
+    // defaulted.
+    for (key, max) in [
+        ("QUEEN_RETENTION_DUE_CAP", crate::retention::DUE_CAP_MAX as i64),
+        ("QUEEN_RETENTION_SAFETY_WALK_MS", crate::retention::SAFETY_WALK_MAX_MS as i64),
+    ] {
+        let raw = std::env::var(key).ok();
+        if let Err(e) = nonneg_env_verdict(key, raw.as_deref(), max) {
+            crate::obs::fatal(e);
+        }
+    }
+    // 0 = derive. batch_size x parallelism x DUE_CAP_FACTOR: the batch size is
+    // the operator's declared appetite for maintenance work per step call, and
+    // the parallelism is how many of those calls a cycle can actually execute
+    // in its period, so the product is the honest budget. At the defaults
+    // (1000 x 1 x 5) that is 5000 due partitions per queue per rule per cycle,
+    // ~2x the ~2500 visits the measured cell needs to keep pace with ~500
+    // newly-eligible segments/s at a 5 s cadence.
+    if cfg.retention_due_cap == 0 {
+        cfg.retention_due_cap = cfg
+            .retention_batch_size
+            .saturating_mul(cfg.retention_parallelism)
+            .saturating_mul(crate::retention::DUE_CAP_FACTOR)
+            .clamp(1, crate::retention::DUE_CAP_MAX);
+    }
+    if cfg.retention_safety_walk_ms == 0 {
+        // Not a lie about "0 disables": the RECURRING walk is what stops. The
+        // first one still has to run or the work list is empty and retention
+        // stops dead with nothing in the log to say so, so the schedule is
+        // pushed a year out rather than switched off (retention.rs).
+        tracing::warn!(target: "boot",
+            "QUEEN_RETENTION_SAFETY_WALK_MS=0 disables the RECURRING retention watermark \
+             walk; the one-time backfill still runs (without it the retention work list \
+             is empty and nothing is ever deleted), and drift introduced later will not \
+             self-heal until the knob is set again");
+    }
     let requested_window_ms = cfg.hotlist_reseed_window_ms;
     cfg.hotlist_reseed_window_ms =
         resolve_reseed_window_ms(requested_window_ms, cfg.hotlist_reseed_ms);
@@ -1443,6 +1863,38 @@ pub fn load() -> Config {
         }
     }
     cfg
+}
+
+impl Config {
+    /// POP AUTOPILOT knobs, resolved once. ONE owner for the mode parse, so the
+    /// two boot paths (`main.rs` and `embedded/boot.rs`) cannot disagree about
+    /// what `QUEEN_POP_AUTOPILOT` said. `load()` has already refused an
+    /// unrecognised value, so the fallback here is unreachable in a booted broker
+    /// and exists only for a `Config` assembled by hand in a test.
+    pub fn pop_autopilot_knobs(&self) -> crate::pop_autopilot::Knobs {
+        crate::pop_autopilot::Knobs {
+            mode: crate::pop_autopilot::Mode::parse(&self.pop_autopilot_mode)
+                .unwrap_or(crate::pop_autopilot::Knobs::defaults().mode),
+            // Clamped here and range-CHECKED in `load()`: the check is what an
+            // operator sees, this is what keeps a hand-assembled `Config` in a
+            // test from handing the claim path a zero.
+            auto_batch: self
+                .pop_autopilot_batch
+                .clamp(crate::pop_autopilot::AUTO_BATCH_MIN, crate::pop_autopilot::AUTO_BATCH_MAX),
+            target_age_ms: self.pop_autopilot_target_age_ms,
+            dwell_ms: self.pop_autopilot_dwell_ms,
+            dwell_pops: self.pop_autopilot_dwell_pops,
+            // Clamped for the same reason `auto_batch` is: `load()` has already
+            // refused an out-of-range value, so this only keeps a hand-assembled
+            // test `Config` from handing the claim path a ceiling above the checkout
+            // limit. 0 stays 0, which is the bypass disabled.
+            burst_cap: self.pop_autopilot_burst_cap.clamp(
+                crate::pop_autopilot::BURST_CAP_MIN,
+                crate::pop_autopilot::BURST_CAP_MAX,
+            ),
+            max_lanes: self.pop_autopilot_max_lanes,
+        }
+    }
 }
 
 /// The widest windowed-reseed lookback that is still a lookback (C1,
@@ -1500,9 +1952,110 @@ fn resolve_reseed_window_ms(requested: i64, reseed_ms: i64) -> i64 {
     want.max(floor).min(RESEED_WINDOW_CEILING_MS)
 }
 
+/// The boot verdict on `QUEEN_POP_AUTOPILOT_BURST_CAP` — the same rule the `_BATCH`
+/// block above applies inline (reject a typo rather than resolving it to the
+/// default; reject rather than clamp), returned as a VALUE so it is unit-testable.
+/// `load()` turns an `Err` into the identical `obs::fatal`, which exits the process
+/// and can therefore never be exercised from a test.
+///
+/// A typo here is worse than elsewhere: the default is 0, so an unparseable value
+/// silently resolving to it would leave the bypass OFF on the exact cell an operator
+/// just turned it on for, with not a word in the log.
+/// Shared verdict for the plain "non-negative integer, 0 has a meaning, there is
+/// a sane ceiling" knobs (the two retention work-list knobs). Same posture as
+/// `burst_cap_verdict`: unset / present-but-empty keeps the documented default,
+/// anything else must parse and be in range or the boot dies naming the value.
+fn nonneg_env_verdict(key: &str, raw: Option<&str>, max: i64) -> Result<(), String> {
+    let set = raw.map(str::trim).filter(|v| !v.is_empty());
+    match set.map(|v| v.parse::<i64>()) {
+        Some(Err(_)) => Err(format!(
+            "{key}=\"{}\" is not an integer (expected 0..={max})",
+            set.unwrap_or_default()
+        )),
+        Some(Ok(v)) if !(0..=max).contains(&v) => Err(format!("{key}={v} is outside 0..={max}")),
+        _ => Ok(()),
+    }
+}
+
+fn burst_cap_verdict(raw: Option<&str>) -> Result<(), String> {
+    use crate::pop_autopilot::{BURST_CAP_MAX, BURST_CAP_MIN};
+    let set = raw.map(str::trim).filter(|v| !v.is_empty());
+    match set.map(|v| v.parse::<i32>()) {
+        Some(Err(_)) => Err(format!(
+            "QUEEN_POP_AUTOPILOT_BURST_CAP=\"{}\" is not an integer (expected \
+             {BURST_CAP_MIN}..={BURST_CAP_MAX}, 0 = disabled)",
+            set.unwrap_or_default()
+        )),
+        Some(Ok(v)) if !(BURST_CAP_MIN..=BURST_CAP_MAX).contains(&v) => Err(format!(
+            "QUEEN_POP_AUTOPILOT_BURST_CAP={v} is outside {BURST_CAP_MIN}..={BURST_CAP_MAX} \
+             (0 = disabled)"
+        )),
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two retention work-list knobs are range-CHECKED at boot for the same
+    /// reason every other enumerated knob is: `env_int` resolves an
+    /// unparseable value to the DEFAULT silently, so a typo would run the fleet
+    /// on a number nobody chose with not a word in the log — and both of these
+    /// are invisible in operation (`QUEEN_RETENTION_DUE_CAP=1O` would just look
+    /// like a slower-than-expected delete rate).
+    #[test]
+    fn the_retention_work_list_knobs_are_range_checked() {
+        let key = "QUEEN_RETENTION_DUE_CAP";
+        let max = crate::retention::DUE_CAP_MAX as i64;
+        // Unset and present-but-empty keep the documented default, like every
+        // other knob.
+        assert_eq!(nonneg_env_verdict(key, None, max), Ok(()));
+        assert_eq!(nonneg_env_verdict(key, Some("   "), max), Ok(()));
+        // 0 is legal and MEANINGFUL on both knobs (derive / no recurring walk).
+        assert_eq!(nonneg_env_verdict(key, Some("0"), max), Ok(()));
+        assert_eq!(nonneg_env_verdict(key, Some(" 5000 "), max), Ok(()));
+        assert!(nonneg_env_verdict(key, Some("1O"), max).is_err(), "letter O must not pass");
+        assert!(nonneg_env_verdict(key, Some("-1"), max).is_err());
+        assert!(nonneg_env_verdict(key, Some(&(max + 1).to_string()), max).is_err());
+        // The safety-walk ceiling is a year: past it the walk is
+        // indistinguishable from off, and off has its own spelling (0).
+        let walk_max = crate::retention::SAFETY_WALK_MAX_MS as i64;
+        assert_eq!(walk_max, 365 * 24 * 3_600_000);
+        assert_eq!(
+            nonneg_env_verdict("QUEEN_RETENTION_SAFETY_WALK_MS", Some("86400000"), walk_max),
+            Ok(())
+        );
+    }
+
+    /// The burst-bypass ceiling is range-CHECKED at boot, not clamped: 0 (disabled)
+    /// and 64 (the checkout ceiling) are the ends of the accepted interval, and both
+    /// a value past it and a value that is not a number at all are fatal.
+    #[test]
+    fn the_burst_cap_accepts_its_range_and_refuses_everything_else() {
+        assert_eq!(crate::pop_autopilot::BURST_CAP_MIN, 0);
+        assert_eq!(
+            crate::pop_autopilot::BURST_CAP_MAX,
+            crate::pop_autopilot::W_CEILING,
+            "a cap above the checkout ceiling could not raise any width"
+        );
+        // Unset and present-but-empty both mean "leave it at the default", the same
+        // rule every other knob follows.
+        assert_eq!(burst_cap_verdict(None), Ok(()));
+        assert_eq!(burst_cap_verdict(Some("  ")), Ok(()));
+        for ok in ["0", "1", "64", " 64 "] {
+            assert_eq!(burst_cap_verdict(Some(ok)), Ok(()), "{ok:?} is in range");
+        }
+        for bad in ["65", "-1", "1000"] {
+            let err = burst_cap_verdict(Some(bad)).unwrap_err();
+            assert!(err.contains("is outside 0..=64"), "{bad:?} -> {err}");
+        }
+        for bad in ["abc", "64.0", "sixty-four"] {
+            let err = burst_cap_verdict(Some(bad)).unwrap_err();
+            assert!(err.contains("is not an integer"), "{bad:?} -> {err}");
+            assert!(err.contains(bad), "the message quotes the value: {err}");
+        }
+    }
 
     #[test]
     fn parses_every_accepted_spelling_case_insensitively() {

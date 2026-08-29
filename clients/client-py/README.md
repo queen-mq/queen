@@ -261,11 +261,62 @@ per-tenant work queues, per-device telemetry). Reduces network round-trips
 from O(P) to O(P / N) while preserving per-partition FIFO ordering.
 
 **When not to use:** few partitions, or each one busy enough to fill
-`batch(B)` on its own. Default is `partitions(1)` which preserves the
-legacy single-partition behaviour.
+`batch(B)` on its own. Leaving `.partitions()` unset hands the sweep width to
+the broker (see Pop Autopilot below); `.partitions(1)` pins the legacy
+single-partition behaviour.
 
 `.partitions(N)` only applies to **wildcard** pops; specifying
 `.partition('name')` ignores the cap.
+
+### Pop Autopilot (Let the Broker Size the Pop)
+
+Since 1.2, `batch` and `partitions` that you do **not** set are chosen by the
+broker, per pop, from state the client cannot see: how many partitions of the
+group are ready, how old their oldest ready message is, how fast messages are
+arriving. The knobs you *do* set are never touched.
+
+```python
+# Both knobs are the broker's: it picks the sweep width and the budget.
+await (queen.queue('events').group('workers')
+       .consume(handler))
+
+# One knob pinned, one delegated: this consumer stays on one partition
+# forever, and the broker sizes the batch for it.
+await (queen.queue('events').group('workers').partitions(1)
+       .consume(handler))
+```
+
+The request carries `autopilot=true` and simply omits the delegated knobs.
+Setting both leaves nothing to decide, so nothing changes on the wire at all.
+
+**Two ways to switch it off**, both restoring the previous client-side
+defaults (batch 1, partitions 1) byte for byte:
+
+```python
+await queen.queue('events').autopilot(False).consume(handler)
+```
+
+```bash
+QUEEN_SDK_POP_AUTOPILOT=off   # whole process, read once at client creation
+```
+
+**What the broker chose** rides back on the response and is there for the
+reading, along with an optional pacing hint the consume loop honours in place
+of its own delay between empty polls:
+
+```python
+res = await queen.queue('events').group('workers').pop_result()
+if res.autopilot:
+    print(f'{res.autopilot.partitions} partitions, batch {res.autopilot.batch}, '
+          f'poll again in {res.autopilot.wait_millis}ms')
+```
+
+**Requires broker >= 1.2.** An older broker ignores the parameter, so the
+omitted knobs take *its* defaults (batch 200, partitions 1) instead of the old
+client-side ones. That is a sizing difference and nothing else — no message is
+lost, reordered or duplicated — so unlike conflation it degrades silently and
+on purpose. Pin the values explicitly, or turn autopilot off, if you need the
+old numbers against an old broker.
 
 ### Transactions (Atomic Operations)
 
@@ -506,10 +557,11 @@ await queen.queue('q').buffer({'message_count': 100, 'time_millis': 1000}).push(
 ### Pop
 
 ```python
-msgs = await queen.queue('q').pop()
+msgs = await queen.queue('q').pop()                            # broker-sized (see Pop Autopilot)
 msgs = await queen.queue('q').batch(10).pop()
 msgs = await queen.queue('q').batch(10).wait(True).pop()
 msgs = await queen.queue('q').batch(200).partitions(50).pop()  # multi-partition pop
+res = await queen.queue('q').pop_result()                      # + what the broker chose
 ```
 
 ### Consume
@@ -620,7 +672,8 @@ await queen.close()  # Flush buffers and close connections
 ```python
 {
     'concurrency': 1,
-    'batch': 1,
+    'batch': 1,                # autopilot OFF only -- unset means the broker sizes it
+    'max_partitions': 1,       # autopilot OFF only -- unset means the broker sizes it
     'auto_ack': True,
     'wait': True,              # Long polling
     'timeout_millis': 30000,
@@ -628,6 +681,11 @@ await queen.close()  # Flush buffers and close connections
     'renew_lease': False
 }
 ```
+
+`batch` and `max_partitions` are the **autopilot-off** defaults: with autopilot
+on (the default) a knob you never set is not defaulted at all, it is delegated
+to the broker. These values are what comes back with `.autopilot(False)` or
+`QUEEN_SDK_POP_AUTOPILOT=off`.
 
 ---
 

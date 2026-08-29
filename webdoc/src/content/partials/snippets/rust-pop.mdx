@@ -9,11 +9,5 @@ description: "Verified snippet extracted from clients/client-rust/tests/docs.rs.
 */}
 
 ```rust title="clients/client-rust/tests/docs.rs"
-let messages = q
-    .queue("orders")
-    .batch(10)
-    .wait(true)
-    .pop()
-    .await
-    .unwrap();
+let messages = q.queue("orders").batch(10).wait(true).pop().await.unwrap();
 ```

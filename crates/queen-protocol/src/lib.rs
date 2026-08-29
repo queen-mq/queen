@@ -35,6 +35,11 @@ pub mod timers;
 pub mod transaction;
 
 pub use ack::{AckBatchItem, AckBatchRequest, AckRequest, AckResult, AckStatus};
+pub use admin::{
+    ConfigureRequest, ConfigureResponse, DlqMessage, DlqParams, DlqResponse, MaintenanceRequest,
+    MaintenanceResponse, QueueOptions, RenewLeaseRequest, RenewLeaseResponse, SeekRequest,
+    SubscriptionRequest, TraceRequest, TraceResponse,
+};
 pub use ephemeral::{
     EphemeralAck, EphemeralAckRequest, EphemeralAckResponse, EphemeralAckResult,
     EphemeralConfigureRequest, EphemeralDeleteResponse, EphemeralDelivered, EphemeralMessage,
@@ -43,26 +48,21 @@ pub use ephemeral::{
     EphemeralStatus, EphemeralWindowBuffer, EPHEMERAL_DEFAULT_PARTITION,
     EPHEMERAL_DEFAULT_WAIT_TIMEOUT_MILLIS, EPHEMERAL_KEY_PREFIX, EPHEMERAL_QUEUE_NOT_FOUND_CODE,
 };
+pub use error::{ErrorBody, ErrorCode};
 pub use kv::{
     Expiry, KvDeleteBody, KvOpKind, KvOperation, KvPutBody, KvReason, KvRequest, KvResponse,
     KvResult, KvRow,
 };
-pub use timers::{
-    TimerListRow, TimerOpKind, TimerOperation, TimerPage, TimerPeek, TimerRequest, TimerResponse,
-    TimerResult, TimerStatus,
-};
-pub use admin::{
-    ConfigureRequest, ConfigureResponse, DlqMessage, DlqParams, DlqResponse, MaintenanceRequest,
-    MaintenanceResponse, QueueOptions, RenewLeaseRequest, RenewLeaseResponse, SeekRequest,
-    SubscriptionRequest, TraceRequest, TraceResponse,
-};
-pub use error::{ErrorBody, ErrorCode};
-pub use pop::{Message, PopParams, PopResponse, SubscriptionMode};
+pub use pop::{AutopilotEcho, Message, PopParams, PopResponse, SubscriptionMode};
 pub use push::{PushItem, PushRequest, PushResult, PushStatus};
 pub use streams::{
     parse_state_key, session_state_key, state_key_for, CycleAck, CycleAckResult, CycleRequest,
     CycleResponse, RegisterRequest, RegisterResponse, SinkPushItem, StateGetRequest,
     StateGetResponse, StateKeyParts, StateOp, StateRow, STATE_KEY_SEP, WATERMARK_STATE_KEY,
+};
+pub use timers::{
+    TimerListRow, TimerOpKind, TimerOperation, TimerPage, TimerPeek, TimerRequest, TimerResponse,
+    TimerResult, TimerStatus,
 };
 pub use transaction::{
     KvPrecondition, TransactionRequest, TransactionResponse, TxnAckOperation, TxnOperation,

@@ -358,7 +358,7 @@ async fn repair_after_group_delete(
 // explicit re-seed the reconsume only resumes at the ≤30s periodic reseed floor
 // (the legacy path was immediate). Re-seed the (queue, group) ring from committed
 // PG state NOW and wake parked pops. Evidence-based by construction:
-// log_hotlist_reseed_v1 returns only partitions with last_offset > committed, so a
+// the reseed walk returns only partitions with last_offset > committed, so a
 // seek-to-end (cursor moved FORWARD) re-adds nothing — no false positive — while a
 // backward/timestamp seek re-adds exactly the re-pending partitions. Over-marking
 // would be a harmless ~0.2ms empty probe; under-marking is the bug we are closing.

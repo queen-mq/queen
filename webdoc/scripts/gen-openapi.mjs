@@ -294,6 +294,18 @@ function requestBody(handler, structs) {
   };
 }
 
+// Per-handler wording where the shared STATUS_TEXT would be wrong for the code
+// this specific route emits. Keyed by handler fn name, then status code.
+const RESPONSE_TEXT_OVERRIDES = {
+  // The streams registration 403 is the grant/quota denial (queen_streams.quota
+  // absent, disabled, or at max_queries), minted by the handler itself, so it
+  // exists with authentication off too. Describing it as a credential-level
+  // failure would send the reader to fix the wrong thing.
+  handle_streams_register: {
+    403: "Streams not granted for this tenant, or its max_queries cap is reached. The body carries denied: true.",
+  },
+};
+
 function responses(handler) {
   const codes = new Set(
     [...handler.body.matchAll(/StatusCode::([A-Z_]+)/g)]
@@ -304,7 +316,10 @@ function responses(handler) {
   // body limit is a layer above every route.
   const out = {};
   for (const code of [...codes].sort()) {
-    const r = { description: STATUS_TEXT[code] ?? "" };
+    const r = {
+      description:
+        RESPONSE_TEXT_OVERRIDES[handler.name]?.[code] ?? STATUS_TEXT[code] ?? "",
+    };
     if (code !== "204") {
       // Success bodies on these routes are assembled as text, not serialized
       // from a type, so the shape is not recoverable here. The schema is left

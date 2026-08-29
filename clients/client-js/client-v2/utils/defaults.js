@@ -51,9 +51,14 @@ export const QUEUE_DEFAULTS = {
   encryptionEnabled: false             // No encryption by default
 }
 
+// batch and maxPartitions here are the AUTOPILOT-OFF defaults. With autopilot on
+// (the default) a knob the caller never set is not defaulted at all -- it is
+// omitted from the pop so the broker sizes it (see utils/autopilot.js). These
+// values are what comes back with QueueBuilder.autopilot(false), or with
+// QUEEN_SDK_POP_AUTOPILOT=off for a whole process.
 export const CONSUME_DEFAULTS = {
   concurrency: 1,                      // Single worker
-  batch: 1,                            // One message at a time
+  batch: 1,                            // One message at a time (autopilot off only)
   autoAck: true,                       // Client-side auto-ack (NOT sent to server)
   wait: true,                          // Long polling enabled
   timeoutMillis: 30000,                // 30 seconds long poll timeout
@@ -63,7 +68,7 @@ export const CONSUME_DEFAULTS = {
   renewLeaseIntervalMillis: null,      // Auto-renewal interval when enabled
   subscriptionMode: null,              // No subscription mode (standard queue mode)
   subscriptionFrom: null,              // No subscription start point
-  maxPartitions: 1,                    // v4 multi-partition pop cap (1 = legacy single-partition)
+  maxPartitions: 1,                    // v4 multi-partition pop cap (autopilot off only)
   // Last-value delivery for this consumer group (PLAN_CONFLATION §1.1): a pop
   // of a partition delivers only the NEWEST visible message and commits past
   // the ones it skipped. Off by default, and only ever SENT when true, so a
@@ -73,8 +78,9 @@ export const CONSUME_DEFAULTS = {
   conflation: false
 }
 
+// As in CONSUME_DEFAULTS, batch is the autopilot-OFF default.
 export const POP_DEFAULTS = {
-  batch: 1,                            // One message
+  batch: 1,                            // One message (autopilot off only)
   wait: false,                         // No long polling (immediate return)
   timeoutMillis: 30000,                // 30 seconds if wait=true
   autoAck: false                       // Server-side auto-ack (false = manual ack required)

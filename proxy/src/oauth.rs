@@ -174,6 +174,11 @@ async fn establish_session(st: &St, headers: &HeaderMap, user: UserRef, next: &s
         Ok(t) => t,
         Err(e) => {
             tracing::error!(target: "oauth", err = %e, "session mint failed");
+            // "No signer at all" is a deliberate, bootable configuration, so it
+            // gets the configuration answer rather than an opaque 500.
+            if !st.keys.can_mint() {
+                return err_no_signer();
+            }
             return err_500("session token could not be minted");
         }
     };
@@ -353,12 +358,14 @@ async fn me(State(st): State<St>, headers: HeaderMap) -> Response {
     }
 
     // The cluster this very request would act on, resolved by the same code
-    // the data plane uses (act-as header, else Host). A failure is reported as
-    // `null`, never as an error: /auth/me must still answer so the SPA can
-    // draw the selector and let the user pick a cluster that DOES work.
-    let acting = crate::acting::resolve_ctx(&st, &headers)
+    // the data plane uses (act-as header, else Host — and on a shared host, the
+    // credential). A failure is reported as `null`, never as an error:
+    // /auth/me must still answer so the SPA can draw the selector and let the
+    // user pick a cluster that DOES work. On a shared host that is the NORMAL
+    // first load: the session has not named a cluster yet, so `null` here is
+    // precisely the signal that the selector must be shown.
+    let acting = crate::acting::peek_ctx(&st, &headers)
         .await
-        .ok()
         .map(|ctx| json!({ "id": ctx.cluster_id.to_string(), "slug": ctx.slug }));
 
     json_response(
@@ -408,6 +415,9 @@ async fn session_token(State(st): State<St>, headers: HeaderMap) -> Response {
         ),
         Err(e) => {
             tracing::error!(target: "oauth", err = %e, "session-token mint failed");
+            if !st.keys.can_mint() {
+                return err_no_signer();
+            }
             err_500("session token could not be minted")
         }
     }
@@ -1371,6 +1381,23 @@ fn err_400(code: &str, msg: &str) -> Response {
 
 fn err_500(msg: &str) -> Response {
     errors::json_error(StatusCode::INTERNAL_SERVER_ERROR, "internal", msg)
+}
+
+/// A login that cannot be served because this proxy holds no signer.
+///
+/// 503 + a message that names the variables, not a bare 500 "internal": a
+/// proxy with a pxdb and no JWT material boots on purpose (config::jwt_boot —
+/// it is the API-key-only shape), so this is a CONFIGURATION answer, not a
+/// crash, and the operator reading it is the one who can fix it. The boot
+/// warning says the same thing; this is what anyone who never reads the boot
+/// log gets instead.
+fn err_no_signer() -> Response {
+    errors::json_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "not_configured",
+        "this proxy has no JWT signer, so it cannot issue sessions: set QUEEN_PROXY_JWT_SECRET \
+         (HS256) or QUEEN_PROXY_JWT_ED25519_PEM (Ed25519) and restart it",
+    )
 }
 
 fn redirect(status: StatusCode, location: &str, set_cookie: Option<&str>) -> Response {

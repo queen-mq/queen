@@ -31,8 +31,8 @@ verifiedBy:
 
 One npm package, `queen-mq`, carries both the broker client and the streaming SDK. It is
 ESM-only (`"type": "module"`), requires Node 22 or newer, and depends on `undici` for its own
-HTTP dispatcher so `close()` can release keep-alive sockets deterministically. Version 1.0.0,
-aligned with the broker.
+HTTP dispatcher so `close()` can release keep-alive sockets deterministically. Version 1.2.0,
+aligned with the broker's 1.2 line.
 
 ```js
 import { Queen, Admin, Stream, tokenBucketGate, slidingWindowGate } from 'queen-mq'
@@ -241,8 +241,9 @@ Both `pop()` and `consume()` read these; the defaults differ between the two.
 
 | Method | `pop()` default | `consume()` default | Notes |
 | --- | --- | --- | --- |
-| `batch(size)` | `1` | `1` | Clamped to `≥ 1`. With `partitions(n)`, this is the total message budget across all claimed partitions. |
-| `partitions(n)` | `1` | `1` | Claim up to N partitions in one call. All share one `leaseId`. Sent only when `> 1`. |
+| `batch(size)` | broker-sized | broker-sized | Total message budget for the call, shared across every partition it claims. Left unset the broker sizes it (pop autopilot); the pre-1.2 client default of `1` comes back with autopilot off. `batch(0)` reads as unset. |
+| `partitions(n)` | broker-sized | broker-sized | Claim up to N partitions per call; all share one `leaseId`. Left unset the broker sizes it (pop autopilot). Sent verbatim when set, `1` included, because a pinned width is a decision the broker must not widen; with autopilot off it is sent only when `> 1`. |
+| `autopilot(enabled)` | `true` | `true` | Broker-side pop sizing for the knobs above that you did not set. On by default; `false` restores the pre-1.2 client defaults (batch 1, partitions 1) and sends no `autopilot` parameter. `QUEEN_SDK_POP_AUTOPILOT=off` does the same for a whole process, read once when the client is built. Setting both knobs leaves nothing to decide, so no parameter is sent then either. See [pop autopilot](/reference/http/pop#autopilot). Requires broker >= 1.2; an older one applies its own defaults (batch 200, partitions 1) to the omitted knobs, which is a sizing difference and nothing more. |
 | `wait(enabled)` | `false` | `true` | Long-poll. |
 | `timeoutMillis(ms)` | `30000` | `30000` | Server-side long-poll deadline. The HTTP layer adds 5 s of slack so the server times out first. Clamped to `≥ 1`. |
 | `autoAck(enabled)` | `false` | `true` | See the warning below: the two mean different things. |
@@ -278,6 +279,10 @@ namespace or task throws.
 distinguish "queue is empty" from "your credentials were revoked". If you need that distinction,
 watch the logs or call the route yourself.
 </Aside>
+
+#### `popResult()`
+
+`async popResult()` → `{ messages, autopilot }`. It is the same call as ``pop()`` and returns the messages plus the broker's account of how it sized the claim: `partitions`, `batch`, and an optional ``waitMillis`` pacing hint the consume loop honours in place of its own delay between empty polls. `autopilot` is `null` when the pop did not engage autopilot, when the broker is older than 1.2, or when the answer was a bodiless `204`, which has no body to carry an echo. See [pop autopilot](/reference/http/pop#autopilot).
 
 #### `consume(handler, options)`
 

@@ -73,6 +73,90 @@ ALTER TABLE queen.log_partitions SET (
 CREATE INDEX IF NOT EXISTS idx_log_partitions_queue_write
     ON queen.log_partitions (queue_id, last_write_at);
 
+-- ----------------------------------------------------------------------------
+-- RETENTION WORK-LIST WATERMARKS (2026-08-24). Two per-partition scalar FACTS:
+-- the created_at of the row sitting AT each purge watermark —
+--   oldest_live_at = created_at of the segment at log_start  (NULL = no live
+--                    segments: retention can never have anything to do here)
+--   oldest_txn_at  = created_at of the log_txns row at txns_start (NULL = the
+--                    sidecar is fully purged)
+--
+-- They exist because retention's work list was Θ(#partitions), not Θ(deletable
+-- work): the cycle materialized ONE ROW PER PARTITION (queues JOIN
+-- log_partitions, 827k rows on the 2026-08-24 soak cell — the exact query that
+-- died on a statement timeout there) and then made a per-partition step call
+-- for each, at 2-5 ms a call, 99.9% of them finding nothing eligible. A serial
+-- pass was 30-70 minutes against newly-eligible segments arriving at ~500/s,
+-- so the measured delete rate (~20 segments/s) could never catch up. With these
+-- columns the cycle instead range-scans, per queue, exactly the partitions that
+-- CAN yield something.
+--
+-- Why a scalar suffices: created_at is monotone in base_offset within a
+-- partition (the PUSHSER invariant, stamped under the allocator row lock — see
+-- this file's header and log_retention_boundary_v1 in 006), so "this partition
+-- has something deletable under cutoff C" is EXACTLY "the row at its watermark
+-- is older than C". No aggregate, no scan.
+--
+-- FACT, never POLICY: the column stores the AGE OF THE OLDEST LIVE DATA, not
+-- eligibility. Cutoffs stay computed from queue config at query time, so an
+-- edit to retention_seconds / dedup_window_seconds applies on the NEXT cycle
+-- with nothing to invalidate and no backfill.
+--
+-- TWO columns, not one: the segment watermark cannot stand in for the sidecar's.
+-- The txns cutoff is now() - GREATEST(dedup_window_seconds,
+-- completed_retention_seconds, 900) — 3600 s by default — while retention
+-- windows are typically far longer, so a segment-derived due test ("oldest
+-- segment older than the txns cutoff") is true for essentially EVERY partition
+-- holding more than an hour of data: 827k of them on the measured cell, i.e.
+-- the very cost class this pair exists to remove. Two facts, two probes, both
+-- Θ(work).
+--
+-- WRITERS (each maintains them in the SAME transaction and under the SAME
+-- log_partitions row lock that moves the watermark itself — if you add a third,
+-- it must too, and the daily safety walk in retention.rs will catch you if you
+-- forget):
+--   * queen.log_retention_step_v1  (006) — the ONLY writer of log_start
+--   * queen.log_txns_purge_step_v1 (006) — the ONLY writer of txns_start
+--   * the push allocator (003) — COALESCE(col, clock_timestamp()), so ONLY the
+--     empty -> non-empty transition writes; for a partition that already holds
+--     data the value is byte-identical and the allocator UPDATE stays HOT,
+--     exactly like the last_write_at quantization it sits next to.
+--   * queue/partition DROP deletes the row — nothing to maintain.
+--
+-- PARTIAL indexes (the retention mirror of idx_log_partitions_queue_write): the
+-- work list only ever probes NON-NULL values, so NULL rows — partitions with
+-- nothing live, of which a large partition population has many — are kept out
+-- of the index entirely. `col < $cutoff` implies `col IS NOT NULL` for a strict
+-- operator, which is what lets the planner match the predicate and still take
+-- the range scan.
+--
+-- COST accepted here: log_start / txns_start are NOT indexed, so the two step
+-- functions' partition UPDATE used to be HOT; with these columns indexed it is
+-- not. At the measured ~500 eligible segments/s that is ~500 extra index tuples
+-- per second on an 827k-entry index, against a table already carrying ~1000
+-- pushes/s of HOT churn and already tuned for it (fillfactor 70, scale_factor 0
+-- / threshold 500 autovacuum, vacuum_truncate off, above).
+--
+-- CONCURRENTLY (2026-08-24 boot-deadlock incident, schema.rs module doc): these
+-- two indexes are the first in this corpus to arrive on an ALREADY-POPULATED
+-- hot table (827k partitions, ~1000 pushes/s on the cell that hit it), so a
+-- plain CREATE INDEX would hold ShareLock — blocking every push — for the whole
+-- build. The applier runs CONCURRENTLY statements outside any transaction with
+-- lock_timeout disabled; on a virgin deployment the table is empty and the
+-- concurrent build costs nothing extra. Indexes born WITH their table stay
+-- plain CREATE INDEX (see the authoring rules in schema.rs).
+-- ----------------------------------------------------------------------------
+ALTER TABLE queen.log_partitions
+    ADD COLUMN IF NOT EXISTS oldest_live_at TIMESTAMPTZ;
+ALTER TABLE queen.log_partitions
+    ADD COLUMN IF NOT EXISTS oldest_txn_at TIMESTAMPTZ;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_log_partitions_queue_oldest
+    ON queen.log_partitions (queue_id, oldest_live_at)
+    WHERE oldest_live_at IS NOT NULL;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_log_partitions_queue_oldest_txn
+    ON queen.log_partitions (queue_id, oldest_txn_at)
+    WHERE oldest_txn_at IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS queen.log_segments (
     partition_id UUID NOT NULL REFERENCES queen.log_partitions(id) ON DELETE CASCADE,
     base_offset BIGINT NOT NULL,

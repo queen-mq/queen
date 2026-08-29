@@ -2,7 +2,11 @@
 -- Log engine (18-log-engine.md §8) — maintenance step functions.
 --
 --   queen.log_retention_boundary_v1   boundary walk helper (offset flavor of
---                                     the retired seg_retention_boundary_v1)
+--                                     the retired seg_retention_boundary_v1);
+--                                     UNBOUNDED — kept for compat, no caller left
+--   queen.log_retention_boundary_windowed_v1
+--                                     the bounded twin the step uses: the walk
+--                                     is clamped to the step's batch horizon
 --   queen.log_retention_step_v1       ONE bounded retention transaction for ONE
 --                                     partition (rules 1+2 of the old sweep)
 --   queen.log_txns_purge_step_v1      same pattern over log_txns / txns_start
@@ -13,6 +17,11 @@
 --                                     delete EMPTY, long-inactive partitions
 --                                     (PARTITION_CLEANUP_DAYS — the C++
 --                                     cleanup_inactive_partitions, restored)
+--   queen.log_watermark_walk_step_v1  BACKFILL + daily SAFETY WALK of the two
+--                                     work-list watermark columns
+--                                     (001_log_schema): one bounded id-range
+--                                     batch per call, repairs drift, writes
+--                                     nothing when reality already agrees
 --
 -- STEP functions, not sweeps: the old seg_retention_sweep_v1 was one call =
 -- one transaction over EVERY partition, so a big backlog held one giant
@@ -70,6 +79,15 @@ CREATE INDEX IF NOT EXISTS idx_retention_history_executed_at
 -- the newest segment (MAX(end_offset)+1 — offsets are per-message now, so
 -- "+1 past the last frame", not "+1 past the last segment seq"). Returns
 -- p_from when there is nothing to delete (empty delete range).
+--
+-- UNBOUNDED, and that is why the step no longer calls it (2026-08-24 bench,
+-- 91M-row queen.log_segments): on a first pass over an all-stale backlog the
+-- LIMIT 1 never matches, so the walk visits every remaining row — and so does
+-- the MAX() arm right after — under the step's partition row lock, and again
+-- on EVERY call because the watermark only advances p_max_rows per call
+-- (a quadratic drain whose first SELECT already blew the statement timeout).
+-- Kept only so nothing external referencing it breaks; the step uses the
+-- windowed twin below.
 -- ----------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION queen.log_retention_boundary_v1(
     p_partition_id UUID,
@@ -99,6 +117,59 @@ END;
 $$;
 
 GRANT EXECUTE ON FUNCTION queen.log_retention_boundary_v1(UUID, BIGINT, TIMESTAMPTZ) TO PUBLIC;
+
+-- ----------------------------------------------------------------------------
+-- Bounded twin of the walk above: same question, clamped to the step's batch
+-- horizon (p_horizon = the base_offset of the (p_max_rows+1)-th live segment,
+-- probed by the caller). One batch can delete at most p_max_rows segments, so
+-- no eligibility question needs an answer past that horizon; clamping there
+-- caps the walk at one batch of PK entries whether or not anything matches.
+-- When nothing inside [p_from, p_horizon) is fresh the boundary is the horizon
+-- itself — everything below it is deletable NOW, and freshness beyond it is
+-- the next call's question. The caller detects that clip (boundary == horizon,
+-- unreachable from the LIMIT 1 arm, whose results are strictly below it) and
+-- answers done=false so its loop re-enters from the advanced watermark:
+-- Θ(batch) per call, Θ(backlog) per drain, instead of Θ(backlog) per call.
+-- p_horizon NULL = at most p_max_rows segments remain: no clamp (COALESCE
+-- pins the range end so the predicate stays one sargable PK condition either
+-- way), and the MAX(end_offset)+1 all-stale arm — now over that naturally
+-- bounded tail — keeps the original "one past the newest segment" semantics.
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION queen.log_retention_boundary_windowed_v1(
+    p_partition_id UUID,
+    p_from BIGINT,
+    p_cutoff TIMESTAMPTZ,
+    p_horizon BIGINT
+) RETURNS BIGINT
+LANGUAGE plpgsql STABLE
+AS $$
+DECLARE
+    v_boundary BIGINT;
+BEGIN
+    SELECT s.base_offset INTO v_boundary
+    FROM queen.log_segments s
+    WHERE s.partition_id = p_partition_id
+      AND s.base_offset >= p_from
+      AND s.base_offset <  COALESCE(p_horizon, 9223372036854775807)
+      AND s.created_at >= p_cutoff
+    ORDER BY s.base_offset LIMIT 1;
+
+    IF v_boundary IS NULL THEN
+        IF p_horizon IS NOT NULL THEN
+            -- Every segment in [p_from, p_horizon) is stale: deletable up to
+            -- the horizon; the caller reports done=false (clip).
+            RETURN p_horizon;
+        END IF;
+        -- everything (if anything) above the watermark is older than the cutoff
+        SELECT max(s.end_offset) + 1 INTO v_boundary FROM queen.log_segments s
+        WHERE s.partition_id = p_partition_id AND s.base_offset >= p_from;
+    END IF;
+
+    RETURN COALESCE(v_boundary, p_from);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION queen.log_retention_boundary_windowed_v1(UUID, BIGINT, TIMESTAMPTZ, BIGINT) TO PUBLIC;
 
 -- ----------------------------------------------------------------------------
 -- log_retention_step_v1: one bounded retention step for one partition.
@@ -166,6 +237,9 @@ DECLARE
     v_new      BIGINT;
     v_done     BOOLEAN;
     v_rows     INT := GREATEST(COALESCE(p_max_rows, 1), 1);
+    v_horizon  BIGINT;
+    v_clipped  BOOLEAN := false;
+    v_oldest   TIMESTAMPTZ;
 BEGIN
     -- The partition row lock serializes this step against the push allocator
     -- and the other maintenance steps; held only to this call's commit.
@@ -176,13 +250,23 @@ BEGIN
         RETURN jsonb_build_object('deleted', 0, 'new_log_start', NULL, 'done', true);
     END IF;
 
+    -- Batch horizon for the boundary walks (see the windowed helper's header):
+    -- the (v_rows+1)-th live segment's base, one bounded PK probe. NULL = the
+    -- whole remaining log fits one batch and the walks need no clamp.
+    SELECT s.base_offset INTO v_horizon
+    FROM queen.log_segments s
+    WHERE s.partition_id = p_pid
+      AND s.base_offset >= v_from
+    ORDER BY s.base_offset
+    OFFSET v_rows LIMIT 1;
+
     v_boundary := v_from;
     v_type := COALESCE(p_history_type, 'retention');
 
     -- Rule 1: time-based retention over ALL segments.
     IF p_all_cutoff IS NOT NULL THEN
         v_boundary := GREATEST(v_boundary,
-            queen.log_retention_boundary_v1(p_pid, v_from, p_all_cutoff));
+            queen.log_retention_boundary_windowed_v1(p_pid, v_from, p_all_cutoff, v_horizon));
     END IF;
     v_b_all := v_boundary;
 
@@ -195,9 +279,17 @@ BEGIN
         IF v_min_next IS NOT NULL AND v_min_next > v_from THEN
             v_boundary := GREATEST(v_boundary, LEAST(
                 v_min_next,
-                queen.log_retention_boundary_v1(p_pid, v_from, p_completed_cutoff)));
+                queen.log_retention_boundary_windowed_v1(p_pid, v_from, p_completed_cutoff, v_horizon)));
         END IF;
     END IF;
+
+    -- A boundary AT the horizon can only come from a clipped walk (the LIMIT 1
+    -- arm answers strictly below it), so the batch below is full and done must
+    -- say false: the truth past the horizon is the next call's question. When
+    -- the true boundary happens to BE the horizon (its segment is the first
+    -- fresh one), the next call re-enters from the advanced watermark and
+    -- resolves to done=true at one bounded walk's cost.
+    v_clipped := v_horizon IS NOT NULL AND v_boundary >= v_horizon;
 
     -- Attribute the delete to the rule that actually moved the boundary (the
     -- caller's explicit type, when given, always wins).
@@ -243,7 +335,28 @@ BEGIN
     -- the mid-segment rule-2 boundary). Guarded update: log_start never moves
     -- backwards.
     v_new := v_max_end + 1;
-    UPDATE queen.log_partitions SET log_start = v_new
+
+    -- WORK-LIST WATERMARK (001_log_schema): the created_at of the segment that
+    -- is oldest-live AFTER this delete, i.e. the one sitting at the new
+    -- log_start. Ranges are disjoint, so the first survivor's base is > the
+    -- last deleted base and therefore >= v_new — one PK probe, no scan. NULL
+    -- when the partition just emptied, which takes it out of the work list's
+    -- partial index entirely.
+    --
+    -- This is THE maintenance point for oldest_live_at on the delete side: it
+    -- runs in this step's own transaction, under the partition row lock taken
+    -- at the top, so no reader can observe log_start and the watermark
+    -- disagreeing, and it rides the SAME row UPDATE as log_start so the pair
+    -- cannot drift on any commit/rollback path.
+    SELECT s.created_at INTO v_oldest
+    FROM queen.log_segments s
+    WHERE s.partition_id = p_pid
+      AND s.base_offset >= v_new
+    ORDER BY s.base_offset LIMIT 1;
+
+    UPDATE queen.log_partitions
+       SET log_start      = v_new,
+           oldest_live_at = v_oldest
     WHERE id = p_pid AND log_start < v_new;
 
     -- Audit row for the Retention analytics (022_retention_analytics).
@@ -254,7 +367,7 @@ BEGIN
     INSERT INTO queen.retention_history (partition_id, messages_deleted, retention_type, executed_at)
     VALUES (p_pid, GREATEST(v_new - v_from, 0)::integer, v_type, NOW());
 
-    v_done := NOT EXISTS (
+    v_done := NOT v_clipped AND NOT EXISTS (
         SELECT 1 FROM queen.log_segments s
         WHERE s.partition_id = p_pid
           AND s.base_offset > v_max_base
@@ -303,6 +416,9 @@ DECLARE
     v_new      BIGINT;
     v_done     BOOLEAN;
     v_rows     INT := GREATEST(COALESCE(p_max_rows, 1), 1);
+    v_horizon  BIGINT;
+    v_clipped  BOOLEAN := false;
+    v_oldest   TIMESTAMPTZ;
 BEGIN
     SELECT p.txns_start INTO v_from
     FROM queen.log_partitions p WHERE p.id = p_pid FOR UPDATE;
@@ -310,19 +426,37 @@ BEGIN
         RETURN jsonb_build_object('deleted', 0, 'new_txns_start', NULL, 'done', true);
     END IF;
 
+    -- Batch horizon, exactly as in log_retention_step_v1 (see the windowed
+    -- helper's header): unclamped, first contact with a deep all-stale sidecar
+    -- scanned every remaining row per call, under this partition row lock.
+    SELECT t.base_offset INTO v_horizon
+    FROM queen.log_txns t
+    WHERE t.partition_id = p_pid
+      AND t.base_offset >= v_from
+    ORDER BY t.base_offset
+    OFFSET v_rows LIMIT 1;
+
     -- Boundary walk (created_at monotone per partition — same PUSHSER
     -- invariant as the segment walk; log_txns rows are stamped with the same
-    -- v_now as their segment, 003_log_push).
+    -- v_now as their segment, 003_log_push), clamped to the batch horizon.
     SELECT t.base_offset INTO v_boundary
     FROM queen.log_txns t
     WHERE t.partition_id = p_pid
       AND t.base_offset >= v_from
+      AND t.base_offset <  COALESCE(v_horizon, 9223372036854775807)
       AND t.created_at >= p_cutoff
     ORDER BY t.base_offset LIMIT 1;
 
     IF v_boundary IS NULL THEN
-        SELECT max(t.end_offset) + 1 INTO v_boundary FROM queen.log_txns t
-        WHERE t.partition_id = p_pid AND t.base_offset >= v_from;
+        IF v_horizon IS NOT NULL THEN
+            -- Everything in the window is stale: purge up to the horizon and
+            -- answer done=false — the rest is the next call's question.
+            v_boundary := v_horizon;
+            v_clipped  := true;
+        ELSE
+            SELECT max(t.end_offset) + 1 INTO v_boundary FROM queen.log_txns t
+            WHERE t.partition_id = p_pid AND t.base_offset >= v_from;
+        END IF;
     END IF;
     v_boundary := COALESCE(v_boundary, v_from);
 
@@ -353,10 +487,26 @@ BEGIN
     GET DIAGNOSTICS v_deleted = ROW_COUNT;
 
     v_new := v_max_end + 1;
-    UPDATE queen.log_partitions SET txns_start = v_new
+
+    -- WORK-LIST WATERMARK, sidecar half (001_log_schema): created_at of the
+    -- log_txns row now sitting at txns_start. Same maintenance-point rules as
+    -- the segment half in log_retention_step_v1 — one PK probe, same
+    -- transaction, same row lock, folded into the same row UPDATE as the
+    -- watermark it describes. NULL = the sidecar is fully purged, which is what
+    -- takes the partition out of the phase-2 due list until the next push
+    -- re-seeds it (COALESCE in 003's allocator).
+    SELECT t.created_at INTO v_oldest
+    FROM queen.log_txns t
+    WHERE t.partition_id = p_pid
+      AND t.base_offset >= v_new
+    ORDER BY t.base_offset LIMIT 1;
+
+    UPDATE queen.log_partitions
+       SET txns_start    = v_new,
+           oldest_txn_at = v_oldest
     WHERE id = p_pid AND txns_start < v_new;
 
-    v_done := NOT EXISTS (
+    v_done := NOT v_clipped AND NOT EXISTS (
         SELECT 1 FROM queen.log_txns t
         WHERE t.partition_id = p_pid
           AND t.base_offset > v_max_base
@@ -589,3 +739,126 @@ END;
 $$;
 
 GRANT EXECUTE ON FUNCTION queen.log_partition_cleanup_step_v1(TIMESTAMPTZ, INT) TO PUBLIC;
+
+-- ----------------------------------------------------------------------------
+-- log_watermark_walk_step_v1: ONE bounded id-range batch of the work-list
+-- watermark walk (oldest_live_at / oldest_txn_at — 001_log_schema). Returns
+-- {"scanned":N,"repaired":M,"last_id":"uuid|null","done":bool}; retention.rs
+-- loops it from last_id until done, exactly like every other step here.
+--
+-- It is ONE function doing TWO jobs, because they are the same statement:
+--
+--   * BACKFILL. The columns are added NULL, so on the first boot after the
+--     redesign every partition is invisible to the per-cycle work list and
+--     retention would silently stop — the worst possible failure mode, since
+--     nothing errors and the disk just grows. The first walk fills them in.
+--   * SAFETY WALK. Re-derived from reality on a slow cadence
+--     (QUEEN_RETENTION_SAFETY_WALK_MS, default daily), so a future writer that
+--     deletes segments or moves a watermark WITHOUT maintaining the columns
+--     self-heals within one walk instead of stranding a partition's data
+--     forever. That is the whole reason the per-cycle path is allowed to trust
+--     a cached fact.
+--
+-- Cost shape: Θ(batch) index entries + ONE PK probe per partition per table.
+-- The probes are the same descents the step functions make, so a full pass over
+-- the 2026-08-24 cell's 827k partitions is ~a minute of index descents — fine
+-- once a day, and fine as a one-off at boot.
+--
+-- WRITES ONLY DRIFT. The UPDATE's IS DISTINCT FROM predicate means a healthy
+-- database takes ZERO row locks in a walk: the statement degenerates to a
+-- read-only scan, so the daily pass cannot stall pushes. Only the initial
+-- backfill (every value NULL) actually locks rows, and then only the ones in
+-- the current batch, for that batch's duration.
+--
+-- OPTIMISTIC GUARD, and it is load-bearing, not decoration. The walk reads the
+-- truth and writes it in one statement but does NOT hold the partition row lock
+-- while doing so (holding 5k of them per batch would queue pushes behind a
+-- maintenance job). Without a guard there is a real lost-update: for an EMPTY
+-- partition the walk computes NULL, a push concurrently inserts the first
+-- segment and COALESCEs the watermark to now(), and the walk's UPDATE then
+-- writes NULL over it — leaving a partition with live data INVISIBLE to
+-- retention until the next walk. So the UPDATE additionally requires
+-- (last_offset, log_start, txns_start) to be unchanged from what this statement
+-- read. Those are precisely the columns every writer of the watermarks also
+-- moves, and PostgreSQL's EvalPlanQual recheck re-evaluates a qual over the
+-- LOCKED ROW'S OWN COLUMNS against the updated version — which is exactly what
+-- this qual is (contrast log_partition_dead_v1's NOT EXISTS legs above, which
+-- EPQ does NOT recheck and which therefore need real locks). A row that moved
+-- under us is skipped, and skipping is safe: whoever moved it maintained the
+-- columns itself.
+--
+-- p_after = the previous batch's last_id (NULL to start). Compared against the
+-- all-zeros uuid so the keyset bound stays ONE sargable PK condition instead of
+-- an OR the planner cannot turn into an index bound; a partition whose
+-- gen_random_uuid() is exactly the nil uuid would be skipped, at odds of 2^-128.
+-- max(uuid) does not exist in PostgreSQL, hence ORDER BY .. DESC LIMIT 1 for the
+-- cursor advance.
+-- ----------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION queen.log_watermark_walk_step_v1(
+    p_after    UUID,
+    p_max_rows INT
+) RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_rows     INT := GREATEST(COALESCE(p_max_rows, 1), 1);
+    v_scanned  BIGINT := 0;
+    v_repaired BIGINT := 0;
+    v_last     UUID;
+BEGIN
+    WITH batch AS (
+        SELECT p.id, p.log_start, p.txns_start, p.last_offset,
+               p.oldest_live_at, p.oldest_txn_at
+        FROM queen.log_partitions p
+        WHERE p.id > COALESCE(p_after, '00000000-0000-0000-0000-000000000000'::uuid)
+        ORDER BY p.id
+        LIMIT v_rows
+    ),
+    truth AS (
+        SELECT b.id, b.log_start, b.txns_start, b.last_offset,
+               s.created_at AS live_at,
+               t.created_at AS txn_at
+        FROM batch b
+        LEFT JOIN LATERAL (
+            SELECT s.created_at
+            FROM queen.log_segments s
+            WHERE s.partition_id = b.id
+              AND s.base_offset >= b.log_start
+            ORDER BY s.base_offset LIMIT 1
+        ) s ON true
+        LEFT JOIN LATERAL (
+            SELECT t.created_at
+            FROM queen.log_txns t
+            WHERE t.partition_id = b.id
+              AND t.base_offset >= b.txns_start
+            ORDER BY t.base_offset LIMIT 1
+        ) t ON true
+    ),
+    fixed AS (
+        UPDATE queen.log_partitions p
+           SET oldest_live_at = tr.live_at,
+               oldest_txn_at  = tr.txn_at
+          FROM truth tr
+         WHERE p.id = tr.id
+           AND (p.oldest_live_at IS DISTINCT FROM tr.live_at
+             OR p.oldest_txn_at  IS DISTINCT FROM tr.txn_at)
+           AND p.last_offset = tr.last_offset
+           AND p.log_start   = tr.log_start
+           AND p.txns_start  = tr.txns_start
+        RETURNING 1
+    )
+    SELECT (SELECT count(*) FROM truth),
+           (SELECT count(*) FROM fixed),
+           (SELECT b.id FROM batch b ORDER BY b.id DESC LIMIT 1)
+      INTO v_scanned, v_repaired, v_last;
+
+    RETURN jsonb_build_object(
+        'scanned',  v_scanned,
+        'repaired', v_repaired,
+        'last_id',  v_last,
+        -- A short batch means the id space is exhausted: nothing follows.
+        'done',     v_scanned < v_rows);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION queen.log_watermark_walk_step_v1(UUID, INT) TO PUBLIC;

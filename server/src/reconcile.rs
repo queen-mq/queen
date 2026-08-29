@@ -204,6 +204,38 @@ pub fn spawn(state: Arc<AppState>, pool: Pool, interval_ms: u64) {
 /// `HotList::evict_idle` / `Notifier::evict_idle`); the §8 reseed floor rebuilds a ring
 /// that was dropped too eagerly, and a gate is a wake fast path whose correctness floor
 /// is the pop's own backoff. `sweep_ms == 0` disables it.
+/// Unserved-ring trim — the standby-broker memory bound. Runs on its OWN, much faster
+/// timer than [`spawn_idle_sweep`], and that separation is the point: the idle sweep's
+/// 5-minute default is right for the thing it bounds (an untrusted tenant naming rings it
+/// never uses), but a standby re-accumulates hundreds of thousands of entries inside one
+/// such window, so bounding this at the same cadence would barely move the number. The
+/// trim's threshold IS its cadence: a ring is dropped after [trim_ms, 2×trim_ms) with no
+/// served pop, which at the 30 s default caps a standby at roughly a minute of marks
+/// instead of the whole cell. See `HotList::trim_unserved` for why the signal is served
+/// pops and never entry age. `trim_ms == 0` disables it.
+pub fn spawn_unserved_trim(state: Arc<AppState>, trim_ms: i64) {
+    if trim_ms <= 0 {
+        tracing::info!(target: "reconcile", "hot-list unserved-ring trim disabled");
+        return;
+    }
+    let interval = Duration::from_millis(trim_ms as u64);
+    tracing::info!(target: "reconcile", trim_ms, "hot-list unserved-ring trim started");
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            let trimmed = state.hotlist.trim_unserved(crate::util::now_epoch_ms());
+            if trimmed > 0 {
+                tracing::info!(
+                    target: "reconcile",
+                    rings_trimmed = trimmed,
+                    rings_live = state.hotlist.queue_count(),
+                    "unserved-ring trim: dropped rings this broker serves no pops for"
+                );
+            }
+        }
+    });
+}
+
 pub fn spawn_idle_sweep(state: Arc<AppState>, sweep_ms: u64) {
     if sweep_ms == 0 {
         tracing::info!(target: "reconcile", "hot-list/gate idle sweep disabled");
@@ -216,13 +248,21 @@ pub fn spawn_idle_sweep(state: Arc<AppState>, sweep_ms: u64) {
             tokio::time::sleep(interval).await;
             let rings = state.hotlist.evict_idle();
             let gates = state.notifier.evict_idle();
-            if rings > 0 || gates > 0 {
+            // POP AUTOPILOT lanes ride the SAME sweep as the rings and gates they
+            // shadow: a lane is one (tenant, queue, group) of in-memory controller
+            // state, it is created by any grouped pop (including a pop of a queue
+            // that does not exist), and this is what bounds the map on a shared
+            // cell — exactly the argument in `hotlist_idle_sweep_ms`.
+            let lanes = state.autopilot.evict_idle();
+            if rings > 0 || gates > 0 || lanes > 0 {
                 tracing::debug!(
                     target: "reconcile",
                     rings_evicted = rings,
                     gates_evicted = gates,
+                    autopilot_lanes_evicted = lanes,
                     rings_live = state.hotlist.queue_count(),
                     gates_live = state.notifier.gate_count(),
+                    autopilot_lanes_live = state.autopilot.lane_count(),
                     "idle sweep"
                 );
             }

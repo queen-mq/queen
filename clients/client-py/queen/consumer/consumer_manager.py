@@ -9,8 +9,14 @@ from urllib.parse import urlencode
 
 from ..errors import ConflationUnsupportedError
 from ..utils import logger
+from ..utils.autopilot import (
+    empty_poll_delay_seconds,
+    parse_autopilot_decision,
+    pop_sizing,
+)
 from ..utils.conflation import check_pop_response as check_conflation
 from ..utils.conflation import scope_of as conflation_scope
+from ..utils.defaults import CONSUME_DEFAULTS
 
 
 class ConsumerManager:
@@ -41,7 +47,7 @@ class ConsumerManager:
         task = options.get("task")
         group = options.get("group")
         concurrency = options.get("concurrency", 1)
-        batch = options.get("batch", 1)
+        batch = options.get("batch")
         limit = options.get("limit")
         idle_millis = options.get("idle_millis")
         auto_ack = options.get("auto_ack", True)
@@ -53,7 +59,13 @@ class ConsumerManager:
         subscription_from = options.get("subscription_from")
         conflation = bool(options.get("conflation", False))
         each = options.get("each", False)
-        max_partitions = options.get("max_partitions", 1)
+        # None means the user said nothing about this dimension, which is what
+        # pop autopilot acts on. The historical default of 1 is applied at
+        # emission time instead (utils/autopilot.py), and only when autopilot is
+        # off, so that "never called partitions()" and "called partitions(1)"
+        # stay distinguishable all the way to the wire.
+        max_partitions = options.get("max_partitions")
+        autopilot = self._autopilot_enabled(options.get("autopilot"))
         signal = options.get("signal")
 
         logger.log(
@@ -77,7 +89,7 @@ class ConsumerManager:
         path = self._build_path(queue, partition, namespace, task)
         base_params = self._build_params(
             batch, wait, timeout_millis, group, subscription_mode, subscription_from, namespace, task, max_partitions,
-            conflation,
+            conflation, autopilot,
         )
 
         # Generate affinity key for consistent routing to same backend
@@ -209,8 +221,12 @@ class ConsumerManager:
                     if wait:
                         continue  # Long polling timeout, retry
                     else:
-                        # Short delay before retry
-                        await asyncio.sleep(0.1)
+                        # Short delay before retry -- the broker's advised
+                        # pacing when this pop engaged autopilot and the broker
+                        # had an opinion (it knows the arrival rate on this
+                        # queue and this client does not), otherwise the
+                        # historical 100ms.
+                        await asyncio.sleep(empty_poll_delay_seconds(parse_autopilot_decision(result)))
                         continue
 
                 messages = [msg for msg in result["messages"] if msg is not None]
@@ -605,6 +621,17 @@ class ConsumerManager:
 
         raise ValueError("Must specify queue, namespace, or task")
 
+    def _autopilot_enabled(self, autopilot: Optional[bool]) -> bool:
+        """
+        The autopilot decision for one consume: the caller's explicit option if
+        there is one, otherwise the client-wide default settled in the Queen
+        constructor. The builder path has already resolved it; the None case is
+        for callers that drive ConsumerManager with options of their own.
+        """
+        if autopilot is not None:
+            return bool(autopilot)
+        return not getattr(self._queen, "autopilot_off", False)
+
     def _build_params(
         self,
         batch: int,
@@ -615,15 +642,32 @@ class ConsumerManager:
         subscription_from: Optional[str],
         namespace: Optional[str],
         task: Optional[str],
-        max_partitions: int = 1,
+        max_partitions: Optional[int] = None,
         conflation: bool = False,
+        autopilot: bool = True,
     ) -> str:
         """Build query parameters"""
-        params: Dict[str, str] = {
-            "batch": str(batch),
-            "wait": str(wait).lower(),
-            "timeout": str(timeout_millis),  # Server expects 'timeout', not 'timeoutMillis'
-        }
+        # Batch, partitions and with them the autopilot flag. None/0 means the
+        # user set nothing (QueueBuilder leaves it that way on purpose), which
+        # is the dimension the broker gets to choose. THE RULE lives in one
+        # place (utils/autopilot.py) precisely because this is the SECOND
+        # parameter builder -- PLAN_CONFLATION §4 opens on that hazard by name;
+        # only the placement of the keys is here, and it is the pre-autopilot
+        # placement so an autopilot-off request is byte-identical.
+        sizing = pop_sizing(
+            batch,
+            max_partitions,
+            fallback_batch=CONSUME_DEFAULTS["batch"],
+            autopilot=autopilot,
+        )
+
+        params: Dict[str, str] = {}
+        if sizing.autopilot:
+            params["autopilot"] = "true"
+        if sizing.batch is not None:
+            params["batch"] = sizing.batch
+        params["wait"] = str(wait).lower()
+        params["timeout"] = str(timeout_millis)  # Server expects 'timeout', not 'timeoutMillis'
 
         if group:
             params["consumerGroup"] = group
@@ -636,8 +680,10 @@ class ConsumerManager:
         if task:
             params["task"] = task
         # v4 multi-partition pop: drain up to N sparse partitions per call.
-        if max_partitions and max_partitions > 1:
-            params["partitions"] = str(max_partitions)
+        # Under autopilot a pinned width travels even when it is 1, because 1 is
+        # then a decision and not the absence of one.
+        if sizing.partitions is not None:
+            params["partitions"] = sizing.partitions
         # Last-value delivery for this group (PLAN_CONFLATION §3.1). Sent only
         # when true so a non-conflating consumer's query string is unchanged.
         # This builder is SEPARATE code from QueueBuilder.pop's inline params --

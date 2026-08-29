@@ -1,0 +1,2 @@
+/cell-broker-a image=sha256:ee7d2d6432125e63251e57a6fec04ce3fead58e71a6d14a29bb3b16c4ca67b62 restarts=1
+/cell-broker-b image=sha256:ee7d2d6432125e63251e57a6fec04ce3fead58e71a6d14a29bb3b16c4ca67b62 restarts=0

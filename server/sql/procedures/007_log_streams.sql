@@ -100,6 +100,33 @@
 -- a second, independent guard — it returns "duplicate" having written NOTHING
 -- — but correctness never depends on it.)
 --
+-- TENANCY (Track B §5, 2026-08-27)
+-- --------------------------------
+-- `p_tenant` scopes BOTH ends of a cycle, and neither was scoped before:
+--
+--   * SOURCE. The source partition is addressed by RAW UUID, so the resolve of
+--     its queue name now also asserts ownership (q2.tenant_id = p_tenant) and
+--     RAISEs when it matches nothing. Pre-tenancy that lookup was decorative —
+--     it fed a metric label — so a bogus or foreign partition_id sailed through
+--     and the cycle happily wrote state rows attributed to a partition of
+--     somebody else's cell, or to no partition at all.
+--   * QUERY. The query_id is likewise a raw UUID and is checked against
+--     queen_streams.queries before any state op runs.
+--   * SINKS. Every by-NAME resolve of queen.queues carries the tenant
+--     predicate, and the lazy provisioning INSERT stamps it. A bare-name join
+--     could otherwise resolve — or worse, multi-match — another tenant's
+--     identically-named queue, and sink emits would land in it.
+--
+-- Failures are generic ('partition not found', 'query not found'): they name no
+-- tenant and do not distinguish "yours and missing" from "someone else's", so a
+-- cycle is not an existence oracle. They RAISE rather than return, which is the
+-- right failure mode INSIDE the per-element block below — the savepoint rolls
+-- back the whole element, exactly like an expired lease does.
+--
+-- With tenancy off every request resolves to the default tenant, which is what
+-- every queue row and every query row already carries by column default, so all
+-- of the above is a no-op and the path is byte-identical.
+--
 -- Output: JSONB ARRAY mirroring input idx, envelope shape IDENTICAL to the
 -- retired rows-era queen.streams_cycle_v1 and the retired seg version: [{ "idx": N,
 -- "result": { ... } }] with the inner result carrying success / query_id /
@@ -109,7 +136,16 @@
 -- said 'seq' (§4 push contract; the runtime only inspects success/error).
 -- ============================================================================
 
-CREATE OR REPLACE FUNCTION queen.log_streams_cycle_v1(p_requests JSONB)
+-- Track B (§5): p_tenant added LAST with a DEFAULT, so a caller that omits it
+-- lands on the default tenant (OSS behaviour, byte-identical). The DROP is the
+-- pre-tenancy ONE-ARGUMENT signature — left in the catalog it would make a
+-- one-argument call ambiguous against this defaulted one rather than resolve
+-- (same discipline as 004_log_pop.sql's tenant pass).
+DROP FUNCTION IF EXISTS queen.log_streams_cycle_v1(JSONB);
+CREATE OR REPLACE FUNCTION queen.log_streams_cycle_v1(
+    p_requests JSONB,
+    p_tenant   UUID DEFAULT '00000000-0000-0000-0000-000000000001'
+)
 RETURNS JSONB
 LANGUAGE plpgsql
 AS $$
@@ -190,15 +226,47 @@ BEGIN
             -- Resolve the source queue name for the runtime's per-queue ack
             -- metric (record_ack_with_queue). Queue identity is the
             -- queen.queues id (log_partitions.queue_id FKs it directly).
+            --
+            -- Track B (§5) SOURCE OWNERSHIP GATE. This lookup used to be
+            -- decorative — a metric label — and NOT FOUND was silently fine, so
+            -- a partition_id belonging to another tenant, or to nothing at all,
+            -- ran the whole cycle and left state rows keyed by a partition this
+            -- cell could never attribute. It is now the gate: the tenant
+            -- predicate closes the foreign-pid hole and the RAISE closes the
+            -- bogus-uuid one. Generic message on purpose — "not found" is the
+            -- same answer for a missing partition and for somebody else's, so
+            -- nothing here can be probed to learn which.
             SELECT q2.name INTO v_source_queue_name
             FROM queen.log_partitions lp
             JOIN queen.queues q2 ON q2.id = lp.queue_id
-            WHERE lp.id = v_partition_id;
+            WHERE lp.id = v_partition_id
+              AND q2.tenant_id = p_tenant;
+
+            IF v_source_queue_name IS NULL THEN
+                RAISE EXCEPTION 'partition not found';
+            END IF;
+
+            -- Track B (§5) QUERY OWNERSHIP GATE, before any state op touches
+            -- queen_streams.state. query_id is a raw uuid off the wire, and the
+            -- state ops below are keyed by it alone: without this, a cycle
+            -- could upsert into (or delete from) another tenant's query state
+            -- for a partition it does own. queries.id is the PK, so this is one
+            -- probe.
+            IF NOT EXISTS (
+                SELECT 1 FROM queen_streams.queries
+                 WHERE id = v_query_id AND tenant_id = p_tenant
+            ) THEN
+                RAISE EXCEPTION 'query not found';
+            END IF;
 
             -- Serialise concurrent cycles + idle-flush sweeps on the same
             -- (query_id, partition_id) state shard. Pre-ack-branch lock so both
             -- ack-bearing cycles and ack-less flush cycles share the key.
-            -- Identical key derivation to the retired rows and seg cycle SPs.
+            -- Identical key derivation to the retired rows and seg cycle SPs —
+            -- and deliberately still tenant-FREE: both halves are uuids, which
+            -- do not collide across tenants, so folding p_tenant in would
+            -- change every existing key for no isolation gain. Both ids are
+            -- verified above to belong to p_tenant before this lock is taken.
             PERFORM pg_advisory_xact_lock(
                 hashtextextended(v_query_id::text || ':' || v_partition_id::text, 0)
             );
@@ -246,10 +314,18 @@ BEGIN
             -- — the global total lock order shared with push bundles
             -- (003_log_push), acks (005_log_ack) and retention
             -- (006_log_maintenance).
+            -- Track B (§5) SINK SCOPING: every by-name resolve of queen.queues
+            -- in this block carries `q2.tenant_id = p_tenant`. Queue identity
+            -- is (tenant_id, name) since the 2026-07-31 merge, so a bare-name
+            -- join is not merely unscoped — it can MULTI-MATCH, silently
+            -- fanning one sink emit across the same-named queues of every
+            -- tenant on the cell (and, in the pre-lock, locking their
+            -- partitions).
             IF jsonb_array_length(v_sink_segments) > 0 THEN
                 SELECT count(*) INTO v_missing
                 FROM jsonb_array_elements(v_sink_segments) s
-                LEFT JOIN queen.queues q2 ON q2.name = s->>'queue'
+                LEFT JOIN queen.queues q2
+                  ON q2.name = s->>'queue' AND q2.tenant_id = p_tenant
                 LEFT JOIN queen.log_partitions p2
                   ON p2.queue_id = q2.id AND p2.name = s->>'partition'
                 WHERE COALESCE(s->>'queue', '') <> '' AND p2.id IS NULL;
@@ -261,23 +337,28 @@ BEGIN
                     -- ONE insert — the row that makes sink-created queues
                     -- visible to namespace/task discovery pops and carries
                     -- retry/DLQ/retention config IS the row log_partitions
-                    -- FKs. ON CONFLICT preserves a /configure row; tenant_id
-                    -- defaults (this cycle path is tenant-less, as before).
+                    -- FKs. ON CONFLICT preserves a /configure row; the queue
+                    -- is STAMPED with the cycle's tenant (it used to take the
+                    -- column default, which is right only for the default
+                    -- tenant), and the conflict target is the same
+                    -- (tenant_id, name) 003_log_push uses.
                     -- ORDER BY the unique key (lock-order discipline).
-                    INSERT INTO queen.queues (name, namespace, task)
-                    SELECT DISTINCT s->>'queue',
+                    INSERT INTO queen.queues (tenant_id, name, namespace, task)
+                    SELECT DISTINCT p_tenant,
+                           s->>'queue',
                            split_part(s->>'queue', '.', 1),
                            CASE WHEN position('.' in s->>'queue') > 0
                                 THEN split_part(s->>'queue', '.', 2) ELSE '' END
                     FROM jsonb_array_elements(v_sink_segments) s
                     WHERE COALESCE(s->>'queue', '') <> ''
-                    ORDER BY 1
+                    ORDER BY 1, 2
                     ON CONFLICT (tenant_id, name) DO NOTHING;
 
                     INSERT INTO queen.log_partitions (queue_id, name)
                     SELECT DISTINCT q2.id, s->>'partition'
                     FROM jsonb_array_elements(v_sink_segments) s
-                    JOIN queen.queues q2 ON q2.name = s->>'queue'
+                    JOIN queen.queues q2
+                      ON q2.name = s->>'queue' AND q2.tenant_id = p_tenant
                     ORDER BY 1, 2
                     ON CONFLICT (queue_id, name) DO NOTHING;
                 END IF;
@@ -287,7 +368,8 @@ BEGIN
                 -- order; duplicate pairs re-lock a held row, a no-op).
                 PERFORM 1
                 FROM jsonb_array_elements(v_sink_segments) s
-                JOIN queen.queues q2 ON q2.name = s->>'queue'
+                JOIN queen.queues q2
+                  ON q2.name = s->>'queue' AND q2.tenant_id = p_tenant
                 JOIN queen.log_partitions p2
                   ON p2.queue_id = q2.id AND p2.name = s->>'partition'
                 ORDER BY p2.id
@@ -304,13 +386,19 @@ BEGIN
                     FROM queen.queues q2
                     JOIN queen.log_partitions p2 ON p2.queue_id = q2.id
                     WHERE q2.name = v_sink->>'queue'
-                      AND p2.name = v_sink->>'partition';
+                      AND p2.name = v_sink->>'partition'
+                      AND q2.tenant_id = p_tenant;
 
                     -- p_verified = -1: no broker dedup-cache claim on this
                     -- inline path — the probe covers the whole window, which
                     -- is always correct (§5). A duplicate verdict wrote
                     -- NOTHING (probe-before-allocate), so it coexists with
                     -- the other sinks' commits without subtransactions.
+                    -- p_tenant is passed even though pid/window are already
+                    -- resolved: the callee re-resolves BY NAME whenever either
+                    -- is NULL (003_log_push), and that fallback must not be
+                    -- able to land on another tenant's identically-named queue
+                    -- — or provision one under the default tenant.
                     v_push_res := queen.log_push_one_v1(
                         v_sink->>'queue',
                         v_sink->>'partition',
@@ -319,7 +407,8 @@ BEGIN
                         -1,
                         decode(v_sink->>'blobB64', 'base64'),
                         v_sink_pid,
-                        v_sink_window);
+                        v_sink_window,
+                        p_tenant);
                     v_push_results := v_push_results || jsonb_build_array(
                         jsonb_build_object(
                             'queue',     v_sink->>'queue',
@@ -473,4 +562,4 @@ BEGIN
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION queen.log_streams_cycle_v1(JSONB) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.log_streams_cycle_v1(JSONB, UUID) TO PUBLIC;

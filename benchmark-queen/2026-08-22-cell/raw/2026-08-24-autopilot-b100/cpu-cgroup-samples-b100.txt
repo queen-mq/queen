@@ -1,0 +1,24 @@
+Cell CPU, autopilot B=100 arm, cgroup v2, 60 s windows.
+(samples/soak.csv broker columns remain 0.000 -- roll-broker.sh changes the
+container id and sampler.sh caches cgroup paths at startup.)
+
+utc_end    pg     brk-a  brk-b  proxy  lb     TOTAL   %of800  note
+00:13:34   4.813  0.829  0.093  0.449  0.368  6.552   81.9    post-roll catch-up
+00:22:46   4.806  0.855  0.094  0.450  0.370  6.575   82.2    post-roll catch-up
+00:32:02   4.048  0.854  0.132  0.448  0.366  5.848   73.1
+00:41:15   4.290  0.851  0.127  0.452  0.371  6.091   76.1
+00:50:25   4.397  0.873  0.100  0.453  0.372  6.195   77.4
+00:59:36   4.219  0.883  0.098  0.448  0.368  6.016   75.2
+01:08:48   4.254  0.892  0.092  0.448  0.366  6.052   75.6
+01:18:01   4.302  0.912  0.092  0.450  0.368  6.124   76.5
+MEAN(n=8)  4.391  0.869  0.104  0.450  0.369  6.182   77.3
+
+01:35:24   3.619  0.791  0.199  0.607  0.403  5.619   70.2    EXCLUDED: spans the
+                                                             01:35:15 OOM + PG
+                                                             crash recovery
+01:51:13   3.971  0.873  0.088  0.451  0.373  5.756   72.0    post-recovery
+
+Comparison (all cgroup-measured, same night):
+  baseline W=10 B=100 : 4.385 0.906 0.071 0.439 0.365  6.166  77.1
+  autopilot B=200 fix : 4.157 0.879 0.070 0.439 0.363  5.907  73.8
+  autopilot B=100     : 4.391 0.869 0.104 0.450 0.369  6.182  77.3
