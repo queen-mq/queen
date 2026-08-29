@@ -41,6 +41,38 @@ class FaultRecoveryHarnessTest(unittest.TestCase):
             document["method"]["sterilized_environment"],
         )
 
+    def test_prefetch_enables_the_production_renewal_fence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "artifacts"
+            result = subprocess.run(
+                [
+                    str(SCRIPT),
+                    "--output",
+                    str(output),
+                    "--queen-prefetch",
+                    "4",
+                    "--queen-ack-batch",
+                    "1",
+                    "--dry-run",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            document = json.loads(
+                (output / "metadata.json").read_text(encoding="utf-8")
+            )
+
+        self.assertTrue(document["settings"]["lease_renewal"])
+        self.assertEqual(
+            "true",
+            document["method"]["sterilized_environment"][
+                "BENCH_LEASE_RENEWAL"
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

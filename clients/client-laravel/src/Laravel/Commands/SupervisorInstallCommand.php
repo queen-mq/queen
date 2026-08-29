@@ -12,6 +12,7 @@ class SupervisorInstallCommand extends Command
         {--manifest= : Pinned release manifest HTTPS URL or an offline local file}
         {--archive= : Offline local release archive (requires --manifest)}
         {--base-url= : HTTPS mirror base URL for both manifest and artifact}
+        {--manifest-sha256= : Trusted expected SHA-256 of the release manifest}
         {--install-path= : Application-local binary installation directory}
         {--force : Revalidate and replace an existing installation}';
 
@@ -36,6 +37,11 @@ class SupervisorInstallCommand extends Command
                     'queen.supervisor_binary.manifest',
                 );
             $archive = $this->optionString('archive');
+            $manifestSha256 = $this->optionString('manifest-sha256')
+                ?? $this->optionalConfigurationString(
+                    $binaryConfig['manifest_sha256'] ?? null,
+                    'queen.supervisor_binary.manifest_sha256',
+                );
             if ($archive !== null && ($explicitManifest === null || $this->isUrl($explicitManifest))) {
                 throw new \InvalidArgumentException(
                     'Offline --archive requires an explicit local --manifest.',
@@ -51,6 +57,7 @@ class SupervisorInstallCommand extends Command
                 archiveSource: $archive,
                 releaseBaseUrl: $baseUrl,
                 force: (bool) $this->option('force'),
+                manifestSha256: $manifestSha256,
             );
         } catch (\Throwable $exception) {
             $this->components->error($exception->getMessage());

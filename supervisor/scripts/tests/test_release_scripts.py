@@ -34,11 +34,12 @@ class ReleaseManifestTest(unittest.TestCase):
                     f"{operating_system}-{arch}".encode()
                 )
 
+            source_commit = "a" * 40
             first = manifest_script.canonical_json(
-                manifest_script.build_manifest("1.2.3", "queen-mq/queen", dist)
+                manifest_script.build_manifest("1.2.3", "queen-mq/queen", source_commit, dist)
             )
             second = manifest_script.canonical_json(
-                manifest_script.build_manifest("1.2.3", "queen-mq/queen", dist)
+                manifest_script.build_manifest("1.2.3", "queen-mq/queen", source_commit, dist)
             )
             self.assertEqual(first, second)
             self.assertTrue(first.endswith(b"\n"))
@@ -46,6 +47,7 @@ class ReleaseManifestTest(unittest.TestCase):
             document = json.loads(first)
             self.assertEqual(1, document["schema_version"])
             self.assertEqual("supervisor/v1.2.3", document["release_tag"])
+            self.assertEqual(source_commit, document["source_commit"])
             self.assertEqual(
                 [
                     ("linux", "amd64"),
@@ -66,7 +68,7 @@ class ReleaseManifestTest(unittest.TestCase):
             dist = Path(temporary)
             (dist / "queen-supervisor-1.2.3-linux-amd64.tar.gz").touch()
             with self.assertRaises(FileNotFoundError):
-                manifest_script.build_manifest("1.2.3", "queen-mq/queen", dist)
+                manifest_script.build_manifest("1.2.3", "queen-mq/queen", "a" * 40, dist)
 
 
 class ReleaseVersionTest(unittest.TestCase):

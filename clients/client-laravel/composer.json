@@ -35,7 +35,7 @@
         "symfony/process": "Required by the PHP worker supervisor",
         "ext-pcntl": "Required by both supervisors and the native Composer launcher on Unix",
         "ext-phar": "Required by queen:supervisor-install to inspect the native release archive",
-        "ext-posix": "Required by Laravel lease-renewal worker fencing on Unix"
+        "ext-posix": "Required by supervisor state/control/dashboard ownership checks, the native installer/launcher, and lease-renewal fencing on Unix"
     },
     "autoload": {
         "psr-4": {

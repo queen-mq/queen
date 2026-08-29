@@ -36,30 +36,62 @@ final class SupervisorBinaryInstaller
         ?string $releaseBaseUrl = null,
         bool $force = false,
         ?array $platform = null,
+        ?string $manifestSha256 = null,
     ): array {
         $platform ??= SupervisorBinary::platform();
-        $installBase = $this->prepareInstallBase($installBase);
-        $lockPath = $installBase . DIRECTORY_SEPARATOR . '.install.lock';
-        $lock = @fopen($lockPath, 'c+b');
-        if ($lock === false || !flock($lock, LOCK_EX)) {
-            if (is_resource($lock)) {
-                fclose($lock);
-            }
-            throw new RuntimeException("Cannot lock Queen supervisor installation directory {$installBase}.");
+        $previousDirectory = getcwd();
+        if (!is_string($previousDirectory) || $previousDirectory === '') {
+            throw new RuntimeException('Cannot determine the working directory before installing Queen supervisor.');
         }
+        $manifestSource = $this->normalizeLocalSource($manifestSource, $previousDirectory);
+        if ($archiveSource !== null) {
+            $archiveSource = $this->normalizeLocalSource($archiveSource, $previousDirectory);
+        }
+        $preparedBase = $this->prepareInstallBase($installBase, $previousDirectory);
+        $installBase = $preparedBase['path'];
+        $expectedBase = $preparedBase['metadata'];
 
+        $lock = null;
+        $locked = false;
         try {
-            return $this->installLocked(
-                $installBase,
+            $this->assertDirectoryStillMatches('.', $expectedBase, 'pinned installation base');
+            $lock = $this->openInstallLock('.' . DIRECTORY_SEPARATOR . '.install.lock');
+            if (!flock($lock, LOCK_EX)) {
+                throw new RuntimeException("Cannot lock Queen supervisor installation directory {$installBase}.");
+            }
+            $locked = true;
+
+            $result = $this->installLocked(
+                '.',
                 $manifestSource,
                 $archiveSource,
                 $releaseBaseUrl,
                 $force,
                 $platform,
+                $manifestSha256,
             );
+            $this->assertDirectoryStillMatches('.', $expectedBase, 'pinned installation base');
+            $this->assertDirectoryStillMatches($installBase, $expectedBase, 'installation base path');
+
+            $relativePrefix = '.' . DIRECTORY_SEPARATOR;
+            if (!is_string($result['binary'] ?? null)
+                || !str_starts_with($result['binary'], $relativePrefix)) {
+                throw new RuntimeException('The Queen supervisor installer returned an invalid binary path.');
+            }
+            $result['binary'] = $installBase . DIRECTORY_SEPARATOR
+                . substr($result['binary'], strlen($relativePrefix));
+
+            return $result;
         } finally {
-            flock($lock, LOCK_UN);
-            fclose($lock);
+            if (is_resource($lock)) {
+                if ($locked) {
+                    flock($lock, LOCK_UN);
+                }
+                fclose($lock);
+            }
+            if (!@chdir($previousDirectory)) {
+                throw new RuntimeException('Cannot restore the working directory after installing Queen supervisor.');
+            }
         }
     }
 
@@ -70,8 +102,19 @@ final class SupervisorBinaryInstaller
         ?string $releaseBaseUrl,
         bool $force,
         array $platform,
+        ?string $expectedManifestHash,
     ): array {
         $manifestJson = $this->readSource($manifestSource, SupervisorReleaseManifest::MAX_BYTES, 'manifest');
+        $manifestHash = hash('sha256', $manifestJson);
+        if ($expectedManifestHash !== null) {
+            $expectedManifestHash = strtolower(trim($expectedManifestHash));
+            if (preg_match('/^[a-f0-9]{64}$/D', $expectedManifestHash) !== 1) {
+                throw new RuntimeException('The pinned Queen supervisor manifest SHA-256 is invalid.');
+            }
+            if (!hash_equals($expectedManifestHash, $manifestHash)) {
+                throw new RuntimeException('The Queen supervisor manifest failed its pinned SHA-256 check.');
+            }
+        }
         $manifest = SupervisorReleaseManifest::fromJson($manifestJson);
         $artifact = $manifest->artifactFor($platform);
         if ($releaseBaseUrl !== null) {
@@ -79,8 +122,24 @@ final class SupervisorBinaryInstaller
                 . '/' . rawurlencode($artifact['filename']);
         }
 
+        $versionDirectory = SupervisorBinary::versionDirectory($installBase);
+        $this->ensureDirectory($versionDirectory);
+        $expectedVersionDirectory = $this->safeDirectoryMetadata(
+            $versionDirectory,
+            'version directory',
+        );
         $targetDirectory = SupervisorBinary::installationDirectory($installBase, $platform);
         $this->ensureDirectory($targetDirectory);
+        $expectedTargetDirectory = $this->safeDirectoryMetadata(
+            $targetDirectory,
+            'target directory',
+        );
+        $this->assertInstallDirectoriesStillMatch(
+            $versionDirectory,
+            $expectedVersionDirectory,
+            $targetDirectory,
+            $expectedTargetDirectory,
+        );
         $binaryPath = SupervisorBinary::binaryPath($installBase, $platform);
         $receiptPath = SupervisorBinary::receiptPath($installBase, $platform);
 
@@ -118,7 +177,16 @@ final class SupervisorBinaryInstaller
             if (!chmod($binaryTemporaryPath, 0755)) {
                 throw new RuntimeException('Cannot mark the Queen supervisor binary executable.');
             }
-            $this->verifyExecutableVersion($binaryTemporaryPath);
+            $this->verifyExecutableVersion(
+                $binaryTemporaryPath,
+                '..' . DIRECTORY_SEPARATOR . '..',
+            );
+            $this->assertInstallDirectoriesStillMatch(
+                $versionDirectory,
+                $expectedVersionDirectory,
+                $targetDirectory,
+                $expectedTargetDirectory,
+            );
 
             $binaryHash = hash_file('sha256', $binaryTemporaryPath);
             if (!is_string($binaryHash)) {
@@ -128,6 +196,8 @@ final class SupervisorBinaryInstaller
                 'schema_version' => 1,
                 'version' => SupervisorBinary::VERSION,
                 'target' => $platform['target'],
+                'source_commit' => $manifest->sourceCommit(),
+                'manifest_sha256' => $manifestHash,
                 'archive_filename' => $artifact['filename'],
                 'archive_sha256' => $artifact['sha256'],
                 'binary_sha256' => strtolower($binaryHash),
@@ -139,14 +209,33 @@ final class SupervisorBinaryInstaller
                 0644,
             );
 
+            $this->assertInstallDirectoriesStillMatch(
+                $versionDirectory,
+                $expectedVersionDirectory,
+                $targetDirectory,
+                $expectedTargetDirectory,
+            );
+
             if (!rename($binaryTemporaryPath, $binaryPath)) {
                 throw new RuntimeException('Cannot atomically publish the Queen supervisor binary.');
             }
             $binaryTemporaryPath = null;
+            $this->assertInstallDirectoriesStillMatch(
+                $versionDirectory,
+                $expectedVersionDirectory,
+                $targetDirectory,
+                $expectedTargetDirectory,
+            );
             if (!rename($receiptTemporaryPath, $receiptPath)) {
                 throw new RuntimeException('Cannot atomically publish the Queen supervisor installation receipt.');
             }
             $receiptTemporaryPath = null;
+            $this->assertInstallDirectoriesStillMatch(
+                $versionDirectory,
+                $expectedVersionDirectory,
+                $targetDirectory,
+                $expectedTargetDirectory,
+            );
 
             return $receipt + ['binary' => $binaryPath, 'installed' => true];
         } finally {
@@ -250,11 +339,74 @@ final class SupervisorBinaryInstaller
         $this->writeFile($destination, $contents, 0600);
     }
 
-    private function verifyExecutableVersion(string $binary): void
+    private function verifyExecutableVersion(string $binary, string $restoreDirectory): void
     {
         if (!function_exists('proc_open')) {
             throw new RuntimeException('proc_open is required to verify the downloaded Queen supervisor.');
         }
+
+        $effectiveUserId = SupervisorBinary::effectiveUserId();
+        $directory = dirname($binary);
+        $filename = basename($binary);
+        $previousDirectory = getcwd();
+        $expectedDirectory = @lstat($directory);
+        $expectedBinary = @lstat($binary);
+        if (!is_string($previousDirectory)
+            || $previousDirectory === ''
+            || $filename === ''
+            || $filename === '.'
+            || $filename === '..'
+            || !is_array($expectedDirectory)
+            || !is_array($expectedBinary)
+            || ($expectedDirectory['mode'] & 0170000) !== 0040000
+            || ($expectedDirectory['mode'] & 0022) !== 0
+            || ($expectedDirectory['uid'] ?? null) !== $effectiveUserId
+            || ($expectedBinary['mode'] & 0170000) !== 0100000
+            || ($expectedBinary['mode'] & 0022) !== 0
+            || ($expectedBinary['mode'] & 0100) === 0
+            || ($expectedBinary['uid'] ?? null) !== $effectiveUserId) {
+            throw new RuntimeException('The downloaded Queen supervisor executable is unsafe.');
+        }
+        if (!@chdir($directory)) {
+            throw new RuntimeException('Cannot pin the downloaded Queen supervisor directory for verification.');
+        }
+
+        try {
+            $pinnedDirectory = @lstat('.');
+            $relativeBinary = '.' . DIRECTORY_SEPARATOR . $filename;
+            $pinnedBinary = @lstat($relativeBinary);
+            if (!is_array($pinnedDirectory)
+                || !is_array($pinnedBinary)
+                || ($pinnedDirectory['mode'] & 0170000) !== 0040000
+                || $pinnedDirectory['dev'] !== $expectedDirectory['dev']
+                || $pinnedDirectory['ino'] !== $expectedDirectory['ino']
+                || ($pinnedDirectory['mode'] & 0022) !== 0
+                || ($pinnedDirectory['uid'] ?? null) !== $effectiveUserId
+                || ($pinnedBinary['mode'] & 0170000) !== 0100000
+                || $pinnedBinary['dev'] !== $expectedBinary['dev']
+                || $pinnedBinary['ino'] !== $expectedBinary['ino']
+                || ($pinnedBinary['mode'] & 0022) !== 0
+                || ($pinnedBinary['mode'] & 0100) === 0
+                || ($pinnedBinary['uid'] ?? null) !== $effectiveUserId) {
+                throw new RuntimeException(
+                    'The downloaded Queen supervisor changed before its version smoke test.',
+                );
+            }
+
+            $this->runExecutableVersionCheck($relativeBinary, $expectedBinary, $effectiveUserId);
+        } finally {
+            if (!@chdir($restoreDirectory)) {
+                throw new RuntimeException('Cannot restore the working directory after supervisor verification.');
+            }
+        }
+    }
+
+    /** @param array<string, int> $expectedBinary */
+    private function runExecutableVersionCheck(
+        string $binary,
+        array $expectedBinary,
+        int $effectiveUserId,
+    ): void {
         $pipes = [];
         $process = @proc_open(
             [$binary, '--version'],
@@ -301,33 +453,197 @@ final class SupervisorBinaryInstaller
         ) {
             throw new RuntimeException('The downloaded Queen supervisor failed its version smoke test.');
         }
+
+        $current = @lstat($binary);
+        if (!is_array($current)
+            || ($current['mode'] & 0170000) !== 0100000
+            || $current['dev'] !== $expectedBinary['dev']
+            || $current['ino'] !== $expectedBinary['ino']
+            || ($current['mode'] & 0022) !== 0
+            || ($current['mode'] & 0100) === 0
+            || ($current['uid'] ?? null) !== $effectiveUserId) {
+            throw new RuntimeException('The downloaded Queen supervisor changed during its version smoke test.');
+        }
     }
 
-    private function prepareInstallBase(string $path): string
+    /** @return array{path: string, metadata: array<string, int>} */
+    private function prepareInstallBase(string $path, string $restoreDirectory): array
     {
-        if (trim($path) === '' || str_contains($path, "\0")) {
-            throw new RuntimeException('The Queen supervisor install path is invalid.');
-        }
-        $this->ensureDirectory($path);
-        if (is_link($path)) {
-            throw new RuntimeException('The Queen supervisor install path must not be a symbolic link.');
-        }
-        $real = realpath($path);
-        if ($real === false || !is_dir($real) || !is_writable($real)) {
-            throw new RuntimeException("Queen supervisor install path {$path} is not writable.");
+        $path = SupervisorBinary::normalizeInstallBasePath($path);
+        SupervisorBinary::assertInstallBaseIsNotFilesystemRoot($path);
+        $parent = dirname($path);
+        $leaf = basename($path);
+        if ($leaf === '' || $leaf === '.' || $leaf === '..') {
+            throw new RuntimeException('The Queen supervisor install path has no safe final component.');
         }
 
-        return $real;
+        $expectedParent = $this->realDirectoryMetadata($parent, 'installation parent');
+        if (!@chdir($parent)) {
+            throw new RuntimeException("Cannot pin Queen supervisor installation parent {$parent}.");
+        }
+
+        try {
+            $this->assertRealDirectoryStillMatches('.', $expectedParent, 'pinned installation parent');
+            if (@lstat($leaf) === false && !@mkdir($leaf, 0755) && @lstat($leaf) === false) {
+                throw new RuntimeException("Cannot create Queen supervisor directory {$path}.");
+            }
+            $metadata = $this->safeDirectoryMetadata($leaf, 'installation base');
+            if (!is_writable($leaf)) {
+                throw new RuntimeException("Queen supervisor install path {$path} is not writable.");
+            }
+            SupervisorBinary::assertInstallBaseIsNotFilesystemRoot($path);
+            if (!@chdir($leaf)) {
+                throw new RuntimeException("Cannot pin Queen supervisor installation directory {$path}.");
+            }
+            $this->assertDirectoryStillMatches('.', $metadata, 'pinned installation base');
+
+            return ['path' => $path, 'metadata' => $metadata];
+        } catch (\Throwable $error) {
+            if (!@chdir($restoreDirectory)) {
+                throw new RuntimeException(
+                    'Cannot restore the working directory after rejecting a Queen supervisor install path.',
+                    previous: $error,
+                );
+            }
+
+            throw $error;
+        }
+    }
+
+    /** @return array<string, int> */
+    private function realDirectoryMetadata(string $path, string $description): array
+    {
+        $metadata = @lstat($path);
+        if (!is_array($metadata) || ($metadata['mode'] & 0170000) !== 0040000) {
+            throw new RuntimeException("Queen supervisor {$description} must be an existing real directory.");
+        }
+
+        return $metadata;
+    }
+
+    /** @param array<string, int> $expected */
+    private function assertRealDirectoryStillMatches(
+        string $path,
+        array $expected,
+        string $description,
+    ): void {
+        $current = $this->realDirectoryMetadata($path, $description);
+        if ($current['dev'] !== $expected['dev'] || $current['ino'] !== $expected['ino']) {
+            throw new RuntimeException("Queen supervisor {$description} changed during installation.");
+        }
+    }
+
+    private function normalizeLocalSource(string $source, string $baseDirectory): string
+    {
+        if ($this->isUrl($source) || str_starts_with($source, DIRECTORY_SEPARATOR)) {
+            return $source;
+        }
+
+        return $baseDirectory . DIRECTORY_SEPARATOR . $source;
+    }
+
+    /** @return array<string, int> */
+    private function safeDirectoryMetadata(string $path, string $description): array
+    {
+        $effectiveUserId = SupervisorBinary::effectiveUserId();
+        $metadata = @lstat($path);
+        if (!is_array($metadata)
+            || ($metadata['mode'] & 0170000) !== 0040000
+            || ($metadata['mode'] & 0022) !== 0
+            || ($metadata['uid'] ?? null) !== $effectiveUserId) {
+            throw new RuntimeException(
+                "Queen supervisor {$description} must be a real, owned directory without group/world write access.",
+            );
+        }
+
+        return $metadata;
+    }
+
+    /** @param array<string, int> $expected */
+    private function assertDirectoryStillMatches(
+        string $path,
+        array $expected,
+        string $description,
+    ): void {
+        $current = $this->safeDirectoryMetadata($path, $description);
+        if ($current['dev'] !== $expected['dev'] || $current['ino'] !== $expected['ino']) {
+            throw new RuntimeException("Queen supervisor {$description} changed during installation.");
+        }
+    }
+
+    /**
+     * @param array<string, int> $expectedVersionDirectory
+     * @param array<string, int> $expectedTargetDirectory
+     */
+    private function assertInstallDirectoriesStillMatch(
+        string $versionDirectory,
+        array $expectedVersionDirectory,
+        string $targetDirectory,
+        array $expectedTargetDirectory,
+    ): void {
+        $this->assertDirectoryStillMatches(
+            $versionDirectory,
+            $expectedVersionDirectory,
+            'version directory',
+        );
+        $this->assertDirectoryStillMatches(
+            $targetDirectory,
+            $expectedTargetDirectory,
+            'target directory',
+        );
     }
 
     private function ensureDirectory(string $path): void
     {
-        if (!is_dir($path) && !@mkdir($path, 0755, true) && !is_dir($path)) {
+        $effectiveUserId = SupervisorBinary::effectiveUserId();
+        if (!is_dir($path) && !@mkdir($path, 0755) && !is_dir($path)) {
             throw new RuntimeException("Cannot create Queen supervisor directory {$path}.");
         }
-        if (is_link($path)) {
-            throw new RuntimeException("Queen supervisor directory {$path} must not be a symbolic link.");
+        $metadata = @lstat($path);
+        if (!is_array($metadata)
+            || ($metadata['mode'] & 0170000) !== 0040000
+            || ($metadata['mode'] & 0022) !== 0
+            || ($metadata['uid'] ?? null) !== $effectiveUserId) {
+            throw new RuntimeException(
+                "Queen supervisor directory {$path} must be a real, owned directory without group/world write access.",
+            );
         }
+    }
+
+    /** @return resource */
+    private function openInstallLock(string $path)
+    {
+        $effectiveUserId = SupervisorBinary::effectiveUserId();
+        $metadata = @lstat($path);
+        if (is_array($metadata) && (
+            ($metadata['mode'] & 0170000) !== 0100000
+            || ($metadata['mode'] & 0022) !== 0
+            || ($metadata['uid'] ?? null) !== $effectiveUserId
+        )) {
+            throw new RuntimeException('The Queen supervisor installation lock is unsafe.');
+        }
+        $handle = @fopen($path, 'c+b');
+        if (!is_resource($handle) || !@chmod($path, 0600)) {
+            if (is_resource($handle)) {
+                fclose($handle);
+            }
+            throw new RuntimeException('Cannot create the Queen supervisor installation lock.');
+        }
+        $current = @lstat($path);
+        $opened = fstat($handle);
+        if (!is_array($current)
+            || !is_array($opened)
+            || ($current['mode'] & 0170000) !== 0100000
+            || ($opened['mode'] & 0170000) !== 0100000
+            || ($opened['mode'] & 0777) !== 0600
+            || $current['dev'] !== $opened['dev']
+            || $current['ino'] !== $opened['ino']
+            || ($opened['uid'] ?? null) !== $effectiveUserId) {
+            fclose($handle);
+            throw new RuntimeException('The Queen supervisor installation lock changed while opening it.');
+        }
+
+        return $handle;
     }
 
     private function assertSafeLocalFile(string $path, int $maximumBytes, string $description): void
@@ -349,9 +665,19 @@ final class SupervisorBinaryInstaller
 
     private function temporaryPath(string $directory, string $prefix, string $suffix = ''): string
     {
-        $path = tempnam($directory, $prefix);
-        if ($path === false) {
+        $createdPath = tempnam($directory, $prefix);
+        if ($createdPath === false) {
             throw new RuntimeException("Cannot create a temporary file in {$directory}.");
+        }
+        $path = rtrim($directory, DIRECTORY_SEPARATOR)
+            . DIRECTORY_SEPARATOR . basename($createdPath);
+        $relativeMetadata = @lstat($path);
+        if (!is_array($relativeMetadata)
+            || ($relativeMetadata['mode'] & 0170000) !== 0100000
+            || ($relativeMetadata['mode'] & 0022) !== 0
+            || ($relativeMetadata['uid'] ?? null) !== SupervisorBinary::effectiveUserId()) {
+            @unlink($path);
+            throw new RuntimeException("Cannot pin a temporary file in {$directory}.");
         }
         if ($suffix !== '') {
             $suffixed = $path . $suffix;

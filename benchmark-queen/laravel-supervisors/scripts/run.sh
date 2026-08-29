@@ -256,6 +256,10 @@ require_decimal "--target-clear" "$TARGET_CLEAR_SECONDS"
 [ "$WORKER_TIMEOUT" -le 86400 ] || die "--worker-timeout must not exceed 86400"
 [ "$RETRY_AFTER" -le 86401 ] || die "--retry-after must not exceed 86401"
 [ "$RETRY_AFTER" -gt $(( QUEEN_PREFETCH * WORKER_TIMEOUT )) ] || die "--retry-after must exceed --queen-prefetch multiplied by --worker-timeout"
+LEASE_RENEWAL=false
+if [ "$QUEEN_PREFETCH" -gt 1 ]; then
+    LEASE_RENEWAL=true
+fi
 case "$DISPATCH_MODE" in single|bulk) ;; *) die "--dispatch-mode must be single or bulk" ;; esac
 case "$SCALING_STRATEGY" in size|time) ;; *) die "--strategy must be size or time" ;; esac
 case "$LEDGER_MODE" in off|durable) ;; *) die "BENCH_LEDGER_MODE must be off or durable" ;; esac
@@ -587,7 +591,7 @@ export BENCHMARK_DISPATCH_MODE="$DISPATCH_MODE"
 export BENCHMARK_QUEUE="$TIMED_QUEUE"
 export BENCHMARK_QUEUES=""
 export BENCHMARK_FAILED_DRIVER="null"
-export BENCHMARK_LEASE_RENEWAL="false"
+export BENCHMARK_LEASE_RENEWAL="$LEASE_RENEWAL"
 export BENCHMARK_QUEEN_PREFETCH="$QUEEN_PREFETCH"
 export BENCHMARK_QUEEN_ACK_BATCH="$QUEEN_ACK_BATCH"
 export BENCHMARK_QUEEN_BULK_BATCH="$QUEEN_BULK_BATCH"
@@ -619,13 +623,13 @@ export QUEEN_POP_FUSION
 export BENCH_TIMEOUT="$WORKER_TIMEOUT"
 export BENCH_RETRY_AFTER="$RETRY_AFTER"
 export BENCH_LEDGER_MODE="$LEDGER_MODE"
-# Timed lanes are deliberately single-queue and exclude failure persistence
-# and the lease-renewal helper. Reassert these values instead of inheriting a
-# feature-parity or reliability-probe environment from the invoking shell.
+# Timed lanes are deliberately single-queue and exclude failure persistence.
+# Multi-message prefetch always includes the production lease-renewal fence;
+# reassert these values instead of inheriting feature-probe environment.
 export BENCH_QUEUE="$TIMED_QUEUE"
 export BENCH_QUEUES=''
 export BENCH_FAILED_DRIVER='null'
-export BENCH_LEASE_RENEWAL='false'
+export BENCH_LEASE_RENEWAL="$LEASE_RENEWAL"
 
 python3 - <<'PY'
 import datetime as dt
@@ -783,7 +787,7 @@ run_lane() {
     # mutates its environment between repetitions.
     export BENCH_QUEUES=''
     export BENCH_FAILED_DRIVER='null'
-    export BENCH_LEASE_RENEWAL='false'
+    export BENCH_LEASE_RENEWAL="$LEASE_RENEWAL"
     if [ "$engine" = "horizon" ]; then
         export BENCH_CONNECTION="redis"
     else

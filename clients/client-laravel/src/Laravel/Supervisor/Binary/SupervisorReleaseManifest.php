@@ -10,6 +10,7 @@ final class SupervisorReleaseManifest
 
     private function __construct(
         private readonly array $artifacts,
+        private readonly string $sourceCommit,
     ) {
     }
 
@@ -36,6 +37,14 @@ final class SupervisorReleaseManifest
                 'The release manifest version does not match the Composer package pin '
                 . SupervisorBinary::VERSION . '.',
             );
+        }
+        if (($manifest['release_tag'] ?? null) !== 'supervisor/v' . SupervisorBinary::VERSION) {
+            throw new RuntimeException('The release manifest tag does not match the pinned supervisor version.');
+        }
+        $sourceCommit = $manifest['source_commit'] ?? null;
+        if (!is_string($sourceCommit)
+            || preg_match('/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/D', $sourceCommit) !== 1) {
+            throw new RuntimeException('The release manifest has no valid source commit.');
         }
         if (!is_array($manifest['artifacts'] ?? null) || $manifest['artifacts'] === []) {
             throw new RuntimeException('The Queen supervisor release manifest has no artifacts.');
@@ -89,7 +98,12 @@ final class SupervisorReleaseManifest
             ];
         }
 
-        return new self($artifacts);
+        return new self($artifacts, $sourceCommit);
+    }
+
+    public function sourceCommit(): string
+    {
+        return $this->sourceCommit;
     }
 
     public function artifactFor(array $platform): array

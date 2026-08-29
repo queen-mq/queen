@@ -30,9 +30,9 @@ return [
     // Opt-in throughput controls. Prefetch leases multiple jobs in one broker
     // request; ack_batch defers successful ACK confirmation until the threshold
     // or the fetched lease is drained. Values greater than one preserve
-    // at-least-once delivery but widen the duplicate/recovery window, so size
-    // retry_after for the maximum time needed to process a prefetched batch.
-    // Queen supervisors enforce retry_after > prefetch * worker timeout.
+    // at-least-once delivery but widen the duplicate/recovery window. A
+    // Laravel worker may pause indefinitely while retaining its prefetched
+    // tail, so Queen supervisors require lease_renewal whenever prefetch > 1.
     'prefetch' => env('QUEEN_PREFETCH', 1),
     'ack_batch' => env('QUEEN_ACK_BATCH', 1),
     // Opt-in data-plane helper for jobs whose runtime cannot be bounded by the
@@ -71,9 +71,21 @@ return [
     'supervisor' => [
         'poll_interval' => env('QUEEN_SUPERVISOR_POLL_INTERVAL', 3),
         'http_timeout' => env('QUEEN_SUPERVISOR_HTTP_TIMEOUT', 5),
+        // A control request is queued in the private state directory. Keep
+        // this above the longest possible supervisor reconcile iteration so
+        // a healthy but busy control loop can still consume it.
+        'control_ttl' => env('QUEEN_SUPERVISOR_CONTROL_TTL', 3600),
+        // A dashboard/CLI heartbeat is evaluated against the value published
+        // by the running generation, not against a newly cached application
+        // config. Null lets the resolver choose loop_budget + 1 second.
+        'heartbeat_timeout' => env('QUEEN_SUPERVISOR_HEARTBEAT_TIMEOUT'),
         'read_bearer_token' => env('QUEEN_SUPERVISOR_READ_BEARER_TOKEN'),
         'shutdown_grace' => env('QUEEN_SUPERVISOR_SHUTDOWN_GRACE', 75),
         'process_limit' => env('QUEEN_SUPERVISOR_PROCESS_LIMIT', 256),
+        // The final directory is 0700. Every existing parent must be owned by
+        // root/the supervisor UID and not group/world-writable, except for a
+        // trusted sticky directory such as /tmp. See the README if storage/
+        // is deployed as 0775.
         'state_directory' => env('QUEEN_SUPERVISOR_STATE_DIRECTORY', storage_path('queen-supervisor')),
         'telemetry_ttl' => env('QUEEN_SUPERVISOR_TELEMETRY_TTL', 300),
         'supervisors' => [
@@ -112,6 +124,22 @@ return [
         ],
     ],
 
+    // Package-native local supervisor dashboard. It is intentionally disabled
+    // until an application opts in. Production access remains denied unless
+    // the application defines the `viewQueenDashboard` Gate ability.
+    'dashboard' => [
+        'enabled' => env('QUEEN_DASHBOARD_ENABLED', false),
+        'path' => env('QUEEN_DASHBOARD_PATH', 'queen'),
+        'domain' => env('QUEEN_DASHBOARD_DOMAIN'),
+        // The web group is always retained by the package so state-changing
+        // controls cannot accidentally lose CSRF protection. Add application
+        // authentication/rate-limit middleware here as needed.
+        'middleware' => ['web'],
+        'refresh_seconds' => env('QUEEN_DASHBOARD_REFRESH_SECONDS', 5),
+        'allow_local' => env('QUEEN_DASHBOARD_ALLOW_LOCAL', true),
+        'failed_jobs_limit' => env('QUEEN_DASHBOARD_FAILED_JOBS_LIMIT', 50),
+    ],
+
     // The Rust supervisor is version-pinned by this Composer package, but is
     // installed explicitly so dependency scripts are never trusted to execute
     // downloaded code. The Composer launcher resolves this application-local
@@ -120,10 +148,15 @@ return [
     'supervisor_binary' => [
         'install_path' => env(
             'QUEEN_SUPERVISOR_INSTALL_PATH',
-            storage_path('queen-supervisor/bin'),
+            // Keep binaries outside the private 0700 runtime-state directory.
+            // The installer intentionally permits 0755 directories, while
+            // both supervisor engines reject shared runtime state.
+            storage_path('queen-supervisor-bin'),
         ),
         'release_base_url' => env('QUEEN_SUPERVISOR_RELEASE_BASE_URL'),
         'manifest' => env('QUEEN_SUPERVISOR_MANIFEST'),
+        // Optional trust pin promoted from a Sigstore-verified manifest.
+        'manifest_sha256' => env('QUEEN_SUPERVISOR_MANIFEST_SHA256'),
     ],
 
     // Backoff for HTTP 429 (rate limited by the proxy), independent of the

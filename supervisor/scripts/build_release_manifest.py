@@ -20,6 +20,7 @@ PLATFORMS = (
 )
 SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+SOURCE_COMMIT = re.compile(r"^(?:[a-f0-9]{40}|[a-f0-9]{64})$")
 
 
 def sha256(path: Path) -> str:
@@ -30,11 +31,18 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def build_manifest(version: str, repository: str, dist: Path) -> dict[str, object]:
+def build_manifest(
+    version: str,
+    repository: str,
+    source_commit: str,
+    dist: Path,
+) -> dict[str, object]:
     if not SEMVER.fullmatch(version):
         raise ValueError("version must be a stable X.Y.Z semantic version")
     if not REPOSITORY.fullmatch(repository):
         raise ValueError("repository must have the form owner/name")
+    if not SOURCE_COMMIT.fullmatch(source_commit):
+        raise ValueError("source_commit must be a lowercase Git object ID")
 
     tag = f"supervisor/v{version}"
     release_base = (
@@ -63,6 +71,7 @@ def build_manifest(version: str, repository: str, dist: Path) -> dict[str, objec
         "name": "queen-supervisor",
         "version": version,
         "release_tag": tag,
+        "source_commit": source_commit,
         "artifacts": artifacts,
     }
 
@@ -86,6 +95,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", required=True)
     parser.add_argument("--repository", required=True)
+    parser.add_argument("--source-commit", required=True)
     parser.add_argument("--dist", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     return parser.parse_args()
@@ -94,7 +104,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
-        payload = canonical_json(build_manifest(args.version, args.repository, args.dist))
+        payload = canonical_json(
+            build_manifest(args.version, args.repository, args.source_commit, args.dist)
+        )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_bytes(payload)
     except (OSError, ValueError) as error:

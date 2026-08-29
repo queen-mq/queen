@@ -67,18 +67,15 @@ opt-in prefetch claims several jobs in one broker request and `ACK_BATCH`
 commits successful jobs together; setting both to the same value lets Queen use
 its whole-lease ACK fast path. Delivery remains at least once, but a process
 crash can redeliver up to the unflushed batch and can leave unprocessed
-prefetched jobs leased until `retry_after`. Size that lease for the worst-case
-time to process the complete batch. Keep both values at `1` for long-running
-jobs, strict per-job ACK confirmation, or comma-separated priority queues.
-Reentrant `pop()` while a prefetched job is still active is rejected.
-Without lease renewal, Queen's PHP and Rust supervisors fail configuration
-export unless `retry_after > prefetch * timeout`; keep additional margin for
-framework and transport overhead. A directly managed `queue:work` process
-cannot validate its CLI timeout against queue configuration, so its process
-manager must enforce the same invariant.
+prefetched jobs leased until `retry_after`. Laravel can pause between those
+jobs for an unbounded period (maintenance mode, `queue:pause` or a Looping
+listener), so Queen's supervisors require `QUEEN_LEASE_RENEWAL=true` whenever
+`QUEEN_PREFETCH>1`; apply the same rule to directly managed `queue:work`.
+Keep prefetch at `1` for a no-helper profile, long-running jobs, strict per-job
+ACK confirmation, or comma-separated priority queues. Reentrant `pop()` while
+a prefetched job is still active is rejected.
 
-Set `QUEEN_LEASE_RENEWAL=true` when the complete prefetched batch cannot be
-bounded by the original lease. Queen lazily starts one persistent PHP CLI
+With renewal enabled, Queen lazily starts one persistent PHP CLI
 helper when a worker claims its first lease; resolving the same connection in
 PHP-FPM for dispatch remains supported. The helper is part of the delivery
 data path, not the Queen supervisor/control plane: it renews the one pop lease
@@ -175,6 +172,7 @@ configuration. The PHP engine is the reference implementation:
 ```bash
 composer require symfony/process
 php -m | grep -q '^pcntl$' # required by the PHP engine and queue workers
+php -m | grep -q '^posix$' # required by the native installer/launcher ownership fence
 ```
 
 ```bash
@@ -194,20 +192,50 @@ vendor/bin/queen-supervisor --php php --artisan artisan
 ```
 
 The Composer package pins the supervisor version and owns its installer and
-launcher, so the PHP integration and compatible Rust executable are released
-together. The executable is intentionally not embedded in the Composer
-archive: the explicit install command selects the current host artifact and
-places it under `storage/queen-supervisor/bin/<version>/<os>-<arch>`. The
-launcher checks its installation receipt and binary SHA-256 on every start,
-then uses `pcntl_exec` to replace PHP; it does not keep a PHP launcher process
-resident and never downloads automatically.
+launcher, so the PHP integration and compatible Rust executable form one
+versioned compatibility set. Publishing the GitHub supervisor release and the
+matching Composer package remains a coordinated release operation rather than
+one atomic registry transaction. The executable is intentionally not embedded
+in the Composer archive: the explicit install command selects the current host
+artifact and places it under
+`storage/queen-supervisor-bin/<version>/<os>-<arch>`. The launcher checks its
+installation receipt and binary SHA-256 on every start. It also requires
+`ext-posix` and revalidates that the installation, version and target
+directories and both files are owned by the effective user and are not
+group/world-writable before
+using `pcntl_exec` to replace PHP. Before that final exec it pins the verified
+target inode as its working directory, rechecks directory/file device and inode,
+and executes `./queen-supervisor`; replacing a writable ancestor after the
+check therefore cannot redirect execution. Relative `--artisan`, `--config`
+and path-like `--php` arguments are resolved against the original application
+directory before the pin. It does not keep a PHP launcher process resident and
+never downloads automatically. The receipt records the canonical manifest
+digest and source commit as well as archive, target and binary digests.
 
-Prebuilt releases are selected without cross-platform fallback for Linux and
-macOS on `amd64`/`x86_64` and `arm64`/`aarch64`. Windows is rejected explicitly
-until worker fencing is safe without Unix signals and process groups. The PHP
-supervisor has the same Unix process-control requirement, so Queen currently
-does not provide a supported Laravel supervisor engine on Windows. A custom
-install path must also be present in the launcher's environment:
+Tagged releases build and publish these precompiled targets; the installer
+selects them without cross-platform fallback:
+
+| Host | amd64 / x86_64 | arm64 / aarch64 |
+| --- | --- | --- |
+| Linux | static musl binary | static musl binary |
+| macOS 12+ | native preview | native preview (Apple Silicon) |
+| Windows | not yet supported | not yet supported |
+
+These are release-pipeline targets, not a claim that assets already exist for
+an unpublished version. Linux amd64/ARM64 and both macOS architectures build
+and smoke on native GitHub-hosted runners. Before declaring the macOS previews generally
+available, add Developer ID signing/notarization and native installer/process
+tree qualification for both architectures.
+
+Windows is rejected explicitly until worker fencing is safe without Unix
+signals and process groups. The PHP supervisor has the same Unix
+process-control requirement, so Queen currently does not provide a supported
+Laravel supervisor engine on native Windows. WSL can run the Linux artifact,
+but is not equivalent to native Windows support. Native support requires a
+Rust process backend based on Job Objects and console control events, Windows
+locking/ACL hardening, an `.exe`-aware launcher/installer and native crash/E2E
+CI; x64 should be qualified before ARM64. A custom install path must also be
+present in the launcher's environment:
 
 ```dotenv
 QUEEN_SUPERVISOR_INSTALL_PATH=/srv/app/var/queen-supervisor
@@ -222,6 +250,19 @@ php artisan queen:supervisor-install \
   --base-url=https://artifacts.example.com/queen/supervisor/v0.1.0
 ```
 
+A deploy that has promoted a Sigstore-verified manifest can pin that exact
+document before any archive is extracted or executed:
+
+```bash
+php artisan queen:supervisor-install \
+  --manifest-sha256="$TRUSTED_QUEEN_SUPERVISOR_MANIFEST_SHA256"
+```
+
+The same value can be supplied as
+`QUEEN_SUPERVISOR_MANIFEST_SHA256`. Do not obtain the trusted value from an
+unsigned checksum downloaded from the same unverified origin; derive it from
+the already verified Sigstore bundle or a controlled artifact registry.
+
 For an air-gapped deployment, transfer the release manifest and archive
 together. Local inputs must be regular non-symlink files; the same pinned
 version, target, filename, SHA-256 and executable `--version` checks remain in
@@ -234,17 +275,31 @@ php artisan queen:supervisor-install \
 ```
 
 Installation is serialized by a local file lock and publishes verified files
-with same-filesystem atomic renames. Failed downloads, oversized inputs, hash
-mismatches, malformed archives and version mismatches leave no runnable new
-installation. Re-run with `--force` to replace and revalidate the pinned
+with same-filesystem atomic renames. The installer first pins the verified
+installation-base inode and uses only relative lock, temporary and publication
+paths from that working directory. The version directory cannot be a symlink or
+shared-writable, and its device/inode and the target's are rechecked around
+publication. The `--version` smoke also pins the target inode before executing
+the temporary binary by a relative path.
+The install base cannot be a filesystem root or contain parent traversal. Its
+immediate parent must already exist as a real directory: Queen pins that parent
+before creating only the final base component. If an application's `storage/`
+directory is itself a symlink, configure `QUEEN_SUPERVISOR_INSTALL_PATH` with
+the real shared-storage target instead.
+Failed downloads, oversized inputs, hash mismatches, malformed archives,
+version mismatches and configured-path replacement leave no runnable new
+installation at that path. A different user able to rename a writable ancestor
+can force the operation to fail, but cannot redirect either executable check;
+processes running with the same effective UID remain inside the supervisor's
+trust boundary. Re-run with `--force` to replace and revalidate the pinned
 version.
 
-Trust boundary: SHA-256 proves that an archive is the artifact named by the
-manifest; it is not by itself a signature. For the default source, manifest
-authenticity rests on HTTPS and GitHub release access controls. In higher
-assurance environments, mirror only a manifest verified against Queen's
-release provenance/attestation, then install from that controlled HTTPS or
-offline source. The published Sigstore bundle can be checked before mirroring:
+Trust boundary: without `--manifest-sha256`, SHA-256 proves that an archive is
+the artifact named by the manifest; it is not by itself a signature. For the
+default source, manifest authenticity rests on HTTPS and GitHub release access
+controls. In higher assurance environments, mirror or pin only a manifest
+verified against Queen's release provenance/attestation. The published
+Sigstore bundle can be checked before mirroring or deriving the trusted pin:
 
 ```bash
 cosign verify-blob \
@@ -273,6 +328,9 @@ strategies are bounded by `min_processes`, `max_processes`,
 The supervisor establishes `processes` in `simple` mode, or at least
 `min_processes` otherwise, immediately; `balance_max_shift` applies only to
 elastic changes above that baseline.
+Workers being gracefully drained remain charged to `process_limit` until they
+actually exit, so a scale-down/reallocation cannot create a temporary process
+spike above the configured cap.
 Both engines cap exponential worker-restart backoff. Only the Rust engine opens
 a circuit after five consecutive crashes and allows a single probe after the
 cooldown; the PHP engine has no open/one-probe state and keeps retrying at
@@ -283,6 +341,9 @@ A minimal supervisor configuration is:
 ```php
 'supervisor' => [
     'poll_interval' => 3,
+    'control_ttl' => 3600,
+    // Optional; null is resolved to just above the conservative loop budget.
+    'heartbeat_timeout' => null,
     'shutdown_grace' => 75, // must exceed every worker timeout
     'state_directory' => storage_path('queen-supervisor'),
     'supervisors' => [
@@ -308,6 +369,15 @@ A minimal supervisor configuration is:
 ],
 ```
 
+Configuration is rejected unless both control TTL and heartbeat timeout are
+strictly longer than a conservative full-loop budget covering polling,
+endpoint failover, bounded process starts, time-strategy telemetry and a
+safety margin. The resolved engine document and each status snapshot are
+limited to 1 MiB, with at most 256 aggregate pools. Telemetry is fail-closed at
+64 KiB per private worker file, 4,096 files, 8,192 directory entries, 16 MiB
+aggregate input and 256 queues per document. These limits are identical in the
+PHP and Rust readers.
+
 Both engines use the same resolved v2 configuration. Inspect it with:
 
 ```bash
@@ -329,9 +399,95 @@ php artisan queen:supervisor continue
 php artisan queen:supervisor terminate
 ```
 
-Pause and continue use Laravel's `SIGUSR2` and `SIGCONT` worker controls;
-terminate drains workers with `SIGTERM` and applies `shutdown_grace` before a
-forced kill. Under systemd or another process manager configured to always
+Status publication is safety-critical in both engines: failure before the
+first heartbeat prevents startup, while a runtime write failure triggers
+worker shutdown and a non-zero master exit. During forced shutdown the master
+keeps `supervisor.lock` and retries/observes child termination; it does not
+publish `stopped` or permit generation takeover merely because SIGKILL was
+requested.
+
+#### Supervisor dashboard
+
+The Laravel package includes a server-rendered local supervisor panel at
+`/queen`, plus a sanitized JSON read model at `/queen/api/status`. It is
+disabled by default:
+
+```dotenv
+QUEEN_DASHBOARD_ENABLED=true
+QUEEN_DASHBOARD_PATH=queen
+QUEEN_DASHBOARD_REFRESH_SECONDS=5
+QUEEN_DASHBOARD_FAILED_JOBS_LIMIT=50
+QUEEN_SUPERVISOR_CONTROL_TTL=3600
+# Optional: otherwise derived just above the bounded control-loop budget.
+QUEEN_SUPERVISOR_HEARTBEAT_TIMEOUT=300
+```
+
+In `local` and `testing`, access is allowed only when
+`queen.dashboard.allow_local` is true. In production the panel is
+deny-by-default, even when enabled, until the application defines the
+`viewQueenDashboard` Gate ability. Attach normal application authentication in
+`queen.dashboard.middleware`, then authorize the authenticated operator:
+
+```php
+use Illuminate\Support\Facades\Gate;
+
+Gate::define('viewQueenDashboard', function ($user): bool {
+    return $user !== null && $user->canOperateQueues();
+});
+```
+
+The package always retains Laravel's `web` middleware so `pause`, `continue`
+and `terminate` remain POST-only and CSRF-protected. Each action also carries
+the exact supervisor `instance_id`; stale pages, replaced supervisors and a
+second pending command receive HTTP 409, while an accepted command uses
+POST/Redirect/GET with an HTTP 303 back to the panel and a queued confirmation.
+Size `QUEEN_SUPERVISOR_CONTROL_TTL` above the longest possible depth/reconcile
+iteration; expired commands are discarded rather than executed late. Liveness
+uses `QUEEN_SUPERVISOR_HEARTBEAT_TIMEOUT`, which must exceed the same bounded
+iteration budget. Both values come from the active generation's status
+snapshot: a cached/configured value from a newer deployment cannot silently
+change the old process's liveness or command expiry. Restart the supervisor to
+activate changed timing. The same Gate protects HTML, JSON and controls.
+
+The read model is deliberately narrower than the raw supervisor/configuration
+files. It exposes heartbeat health, engine, PID, worker/draining pools, restart
+state, the last depth already sampled by the supervisor, a safe worker-config
+allowlist and bounded failed-job metadata. It never returns endpoints, bearer
+tokens, headers, filesystem paths, job payloads, exceptions or raw backend
+errors, and it does not add dashboard-originated broker polling. Database and
+bounded Laravel file failed stores are supported; unsupported or unreachable
+stores are shown as unavailable instead of falling back to an unbounded
+`all()` call. A failed row's index policy is inferred from the configured
+connection; live Queen DLQ existence remains authoritative only in the broker
+dashboard.
+
+No remote scripts, fonts or CDN assets are loaded. Responses carry a strict
+nonce Content Security Policy, `no-store`, frame denial, MIME-sniffing denial
+and a no-referrer policy. Package routes participate in `artisan route:cache`.
+`queen.dashboard.domain`, `path`, `middleware`, refresh interval and failed-job
+row limit can all be configured in the published `config/queen.php`.
+After changing `enabled`, `path`, `domain` or middleware in a cached deployment,
+rebuild both Laravel's configuration and route caches before serving traffic.
+
+The panel reads the one local `state_directory`; relative values are resolved
+from the Laravel application root, exactly like the CLI and supervisor engine.
+It is not a multi-host aggregator. Keep that directory outside the web root.
+Behind a load balancer, route this administrative endpoint to the co-located
+supervisor instance (or use a sticky dedicated admin endpoint); a GET on host A
+followed by a POST on host B intentionally fails the instance fence. Use
+Queen's broker dashboard for global queue analytics and DLQ operations.
+
+The dashboard/control protocol is versioned as `queen.supervisor.status/v1`.
+Deploy the matching Composer package and native binary together, then restart
+the single supervisor master before enabling controls. Older masters are shown
+as unavailable; old and new control documents are intentionally not treated as
+rolling-compatible because silently dropping an instance fence would be unsafe.
+
+Pause drains the current workers with `SIGTERM` and starts no replacements
+until `continue`. This deliberately discards an unprocessed prefetched tail,
+which Queen can redeliver after its lease, instead of letting a stale in-memory
+tail run after an arbitrarily long pause. Terminate applies `shutdown_grace`
+before a forced kill. Under systemd or another process manager configured to always
 restart, `terminate` also reloads Laravel configuration under a fresh master.
 Production supervision therefore requires Unix and PHP `pcntl`.
 
@@ -348,7 +504,21 @@ contains the supervisor token and custom headers: the regular config command
 redacts them, while `--for-engine` includes them.
 Prefer the Rust engine's one-shot Artisan pipe, and protect any credential-bearing
 `--config` file with mode `0600`. Keep `state_directory` outside the web root and
-accessible only to the application user. Multiple broker endpoints provide
+accessible only to the application user. It must be an absolute, non-root path;
+a missing final directory is created as `0700`, while an existing directory must
+already be owned by that user and have mode `0700`—Queen never repairs its mode.
+Every parent must already exist and be owned by root or the supervisor's effective
+UID. Group/world-writable parents are rejected unless they are sticky and owned
+by root or that UID (for example, root-owned `/tmp`); the child below a sticky
+parent must also be owned by root or that UID. A symlink state leaf is rejected.
+Trusted symlink ancestors are validated before resolution, canonicalized once,
+and the acquired leaf device/inode is pinned for the lifetime of the generation,
+so renaming the leaf cannot create a second unnoticed lock namespace. The PHP
+supervisor, CLI control state and dashboard require `ext-posix` for these checks
+and fail closed without it. If the default Laravel `storage` directory is `0775`,
+use a private `0700` parent (or another trusted absolute path) for supervisor
+state instead of weakening this policy.
+Multiple broker endpoints provide
 broker failover, not active-active supervisor leadership.
 
 > **Production limit:** run exactly one supervisor process for an application

@@ -16,17 +16,34 @@ final class AutoScaler
         }
 
         $weights = $depths;
+        $nonFinitePressure = false;
         if (($options['strategy'] ?? 'size') === 'time') {
             foreach ($weights as $queue => $depth) {
-                $weights[$queue] = $depth * ($runtimes[$queue] ?? $options['default_runtime_seconds']);
+                $runtime = $runtimes[$queue] ?? $options['default_runtime_seconds'];
+                $runtime = is_numeric($runtime) ? (float) $runtime : (float) $options['default_runtime_seconds'];
+                if (!is_finite($runtime) || $runtime <= 0.0) {
+                    $runtime = (float) $options['default_runtime_seconds'];
+                }
+                $weight = $depth * $runtime;
+                if (!is_finite($weight)) {
+                    // Overflow means pressure is at least beyond any useful
+                    // scaling threshold. Saturate safely instead of letting
+                    // PHP cast ceil(INF) to zero and downscale a live backlog.
+                    $nonFinitePressure = true;
+                    $weight = PHP_FLOAT_MAX;
+                }
+                $weights[$queue] = $weight;
             }
         }
         $totalPressure = array_sum($weights);
-        $target = $totalPressure > 0
+        $nonFinitePressure = $nonFinitePressure || !is_finite((float) $totalPressure);
+        $target = $nonFinitePressure
+            ? (int) $options['max_processes']
+            : ($totalPressure > 0
             ? (int) ceil($totalPressure / (($options['strategy'] ?? 'size') === 'time'
                 ? $options['target_clear_seconds']
                 : $options['target_jobs_per_process']))
-            : (int) $options['min_processes'];
+            : (int) $options['min_processes']);
         if ($totalPressure > 0 && $options['balance'] === 'auto') {
             // A positive backlog must not be made permanently unreachable by
             // rounding a small global target onto the first declared queue.

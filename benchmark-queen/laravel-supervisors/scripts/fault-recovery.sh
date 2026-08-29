@@ -137,6 +137,10 @@ require_positive_int "--completion-timeout" "$COMPLETION_TIMEOUT"
 [ "$RETRY_AFTER" -gt "$WORKER_TIMEOUT" ] || die "--retry-after must exceed --worker-timeout"
 [ "$KILL_DELAY_MS" -lt "$SLEEP_MS" ] || die "--kill-delay-ms must be shorter than --sleep-ms"
 [ "$JOBS" -ge $(( WORKERS * 4 )) ] || die "--jobs must be at least four times --workers to preserve backlog"
+LEASE_RENEWAL=false
+if [ "$QUEEN_PREFETCH" -gt 1 ]; then
+    LEASE_RENEWAL=true
+fi
 
 OLD_IFS="$IFS"
 IFS=',' read -r -a ENGINES <<EOF
@@ -225,7 +229,7 @@ metadata = {
         "queues": ["benchmark"],
         "bench_queues_csv": "",
         "failed_driver": "null",
-        "lease_renewal": False,
+        "lease_renewal": int(queen_prefetch) > 1,
         "allow_lease_risk": allow_lease_risk == "1",
         "dispatch_mode": "single",
         "build_images": build_images == "1",
@@ -248,7 +252,7 @@ metadata = {
         "sterilized_environment": {
             "BENCH_QUEUES": "",
             "BENCH_FAILED_DRIVER": "null",
-            "BENCH_LEASE_RENEWAL": "false",
+            "BENCH_LEASE_RENEWAL": "true" if int(queen_prefetch) > 1 else "false",
             "BENCH_LEASE_RENEWAL_INTERVAL": "",
         },
     },
@@ -260,9 +264,8 @@ metadata = {
         "This smoke test measures one crash per fresh backend; estimate probabilities with repeated runs.",
         "The lease guard covers the configured sleep floor only; CPU work and framework overhead still "
         "require additional retry_after margin.",
-        "allow_lease_risk bypasses only this harness guard. Current Queen supervisors independently "
-        "reject retry_after <= prefetch * worker timeout; end-to-end negative tests need a pre-guard "
-        "image or a separate test-only execution path.",
+        "allow_lease_risk bypasses only this harness sleep-floor guard. Current Queen supervisors "
+        "always require lease renewal when prefetch is greater than one.",
         "The effect ledger is a fixture-local idempotent transactional witness. It is not atomic with the "
         "queue ACK or an arbitrary external side effect and cannot establish exactly-once delivery.",
     ],
@@ -890,12 +893,12 @@ run_lane() {
     export BENCH_RETRY_AFTER="$RETRY_AFTER"
     export BENCH_DISPATCH_MODE=single
     export BENCH_LEDGER_MODE=durable
-    # The fault protocol is deliberately single-queue, uses no failed-job
-    # persistence and does not start the lease-renewal helper. Never inherit
-    # these feature-probe toggles from the invoking shell.
+    # The fault protocol is deliberately single-queue and uses no failed-job
+    # persistence. Multi-message prefetch includes the production renewal
+    # fence. Never inherit unrelated feature-probe toggles from the caller.
     export BENCH_QUEUES=''
     export BENCH_FAILED_DRIVER='null'
-    export BENCH_LEASE_RENEWAL='false'
+    export BENCH_LEASE_RENEWAL="$LEASE_RENEWAL"
     export BENCH_LEASE_RENEWAL_INTERVAL=''
     export QUEEN_PREFETCH="$QUEEN_PREFETCH"
     export QUEEN_ACK_BATCH="$QUEEN_ACK_BATCH"

@@ -12,9 +12,9 @@ Group=queen
 WorkingDirectory=/srv/queen-app/current
 UMask=0077
 EnvironmentFile=-/etc/queen-supervisor/queen.env
-ExecStartPre=/usr/bin/test -x /usr/local/bin/queen-supervisor
+ExecStartPre=/usr/bin/test -x /srv/queen-app/current/vendor/bin/queen-supervisor
 ExecStartPre=/usr/bin/test -f /srv/queen-app/current/artisan
-ExecStart=/usr/local/bin/queen-supervisor --php /usr/bin/php --artisan /srv/queen-app/current/artisan
+ExecStart=/srv/queen-app/current/vendor/bin/queen-supervisor --php /usr/bin/php --artisan /srv/queen-app/current/artisan
 # `queen:supervisor terminate` exits cleanly so a process manager can reload
 # Laravel configuration under a fresh master.
 Restart=always

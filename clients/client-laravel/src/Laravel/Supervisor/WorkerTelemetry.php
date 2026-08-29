@@ -6,6 +6,10 @@ use Illuminate\Contracts\Queue\Job;
 
 final class WorkerTelemetry
 {
+    private const MAX_FILE_BYTES = 65536;
+
+    private const MAX_QUEUES = 256;
+
     /** @var array<int, int> */
     private array $started = [];
     /** @var array<string, array{samples:int,runtime_ewma_seconds:float,failures:int}> */
@@ -40,6 +44,13 @@ final class WorkerTelemetry
         }
 
         $queue = $job->getQueue();
+        if (!is_string($queue)
+            || $queue === ''
+            || strlen($queue) > 256
+            || preg_match('/[\x00-\x1F\x7F]/', $queue) === 1
+            || (!isset($this->queues[$queue]) && count($this->queues) >= self::MAX_QUEUES)) {
+            return;
+        }
         $stats =& $this->queues[$queue];
         $stats ??= ['samples' => 0, 'runtime_ewma_seconds' => 0.0, 'failures' => 0];
         $duration = max(0.000001, (hrtime(true) - $started) / 1_000_000_000);
@@ -62,8 +73,15 @@ final class WorkerTelemetry
         if (!is_dir($this->directory) && !mkdir($this->directory, 0700, true) && !is_dir($this->directory)) {
             return;
         }
+        $directoryMetadata = @lstat($this->directory);
+        if ($directoryMetadata === false
+            || ($directoryMetadata['mode'] & 0170000) !== 0040000
+            || ($directoryMetadata['mode'] & 07777) !== 0700
+            || (function_exists('posix_geteuid') && ($directoryMetadata['uid'] ?? null) !== posix_geteuid())) {
+            return;
+        }
         $path = $this->path();
-        $temporary = $path . '.tmp';
+        $temporary = $path . '.' . bin2hex(random_bytes(8)) . '.tmp';
         $payload = json_encode([
             'pid' => getmypid(),
             'updated_at_epoch' => time(),
@@ -72,13 +90,18 @@ final class WorkerTelemetry
             'consumer_group' => $this->consumerGroup,
             'queues' => $this->queues,
         ], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
-        if (file_put_contents($temporary, $payload, LOCK_EX) !== false) {
-            chmod($temporary, 0600);
-            if (rename($temporary, $path)) {
-                $this->lastPublish = microtime(true);
-            } else {
-                @unlink($temporary);
-            }
+        if (strlen($payload) > self::MAX_FILE_BYTES) {
+            return;
+        }
+        $written = @file_put_contents($temporary, $payload, LOCK_EX);
+        if ($written !== strlen($payload)) {
+            @unlink($temporary);
+            return;
+        }
+        if (@chmod($temporary, 0600) && @rename($temporary, $path)) {
+            $this->lastPublish = microtime(true);
+        } else {
+            @unlink($temporary);
         }
     }
 

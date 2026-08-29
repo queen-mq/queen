@@ -142,7 +142,9 @@ Compose file and the dispatch manifest. `bulk` uses the same bounded number of
 jobs per Laravel `bulk()` invocation in all lanes; the producer remains outside
 the measured cgroups.
 
-Prefetch and deferred acknowledgement change the lease-risk envelope even
+Prefetch greater than one automatically enables the production lease-renewal
+helper and records it in every artifact; prefetch one retains the no-helper
+baseline. Prefetch and deferred acknowledgement change the lease-risk envelope even
 though delivery remains at least once: a killed worker can cause more already
 claimed jobs to be redelivered. Treat `ack_batch > 1` as a separately labelled
 performance profile, preserve crash-injection tests, and size `retry_after` for

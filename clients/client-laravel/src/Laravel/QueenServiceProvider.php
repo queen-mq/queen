@@ -9,8 +9,14 @@ use Illuminate\Queue\Events\JobFailed;
 use Illuminate\Queue\Events\JobProcessed;
 use Illuminate\Queue\Events\JobProcessing;
 use Illuminate\Support\ServiceProvider;
+use Queen\Laravel\Dashboard\DashboardRepository;
+use Queen\Laravel\Dashboard\FailedJobsReadModel;
+use Queen\Laravel\Http\Middleware\AuthorizeDashboard;
+use Queen\Laravel\Http\Middleware\SecureDashboardResponse;
 use Queen\Laravel\Queue\QueenConnector;
 use Queen\Laravel\Queue\SyncedFailedJobProvider;
+use Queen\Laravel\Supervisor\SupervisorConfiguration;
+use Queen\Laravel\Supervisor\SupervisorState;
 use Queen\Laravel\Supervisor\WorkerTelemetry;
 use Queen\Queen;
 use RuntimeException;
@@ -22,6 +28,7 @@ class QueenServiceProvider extends ServiceProvider
         $this->mergeConfigFrom(__DIR__ . '/../../config/queen.php', 'queen');
 
         $this->registerDefaultQueueConnection();
+        $this->registerDashboardServices();
 
         if ((bool) $this->app['config']->get('queen.sync_failed_jobs', true)) {
             $this->app->extend('queue.failer', function ($provider, $app) {
@@ -181,6 +188,35 @@ class QueenServiceProvider extends ServiceProvider
         ));
     }
 
+    private function registerDashboardServices(): void
+    {
+        $this->app->singleton(FailedJobsReadModel::class, function ($app): FailedJobsReadModel {
+            return new FailedJobsReadModel(
+                $app['config'],
+                function (?string $connection) use ($app): mixed {
+                    if (!$app->bound('db')) {
+                        throw new RuntimeException('Laravel database services are unavailable.');
+                    }
+
+                    return $app['db']->connection($connection);
+                },
+            );
+        });
+
+        $this->app->singleton(DashboardRepository::class, function ($app): DashboardRepository {
+            $directory = SupervisorConfiguration::stateDirectory(
+                $app['config']->get('queen.supervisor.state_directory'),
+                $app->basePath(),
+            );
+
+            return new DashboardRepository(
+                new SupervisorState($directory),
+                $app['config'],
+                fn (int $limit): array => $app->make(FailedJobsReadModel::class)->read($limit),
+            );
+        });
+    }
+
     private function configurationInteger(mixed $value, string $name, int $minimum): int
     {
         $integer = false;
@@ -215,6 +251,8 @@ class QueenServiceProvider extends ServiceProvider
     public function boot(): void
     {
         $this->registerWorkerTelemetry();
+        $this->loadViewsFrom(__DIR__ . '/../../resources/views', 'queen');
+        $this->registerDashboardRoutes();
 
         if ($this->app->runningInConsole()) {
             $this->publishes([
@@ -229,6 +267,63 @@ class QueenServiceProvider extends ServiceProvider
                 Commands\SupervisorInstallCommand::class,
             ]);
         }
+    }
+
+    private function registerDashboardRoutes(): void
+    {
+        if ($this->app['config']->get('queen.dashboard.enabled', false) !== true
+            || $this->app->routesAreCached()) {
+            return;
+        }
+
+        $path = $this->app['config']->get('queen.dashboard.path', 'queen');
+        if (!is_string($path)
+            || trim($path, '/') === ''
+            || strlen($path) > 128
+            || preg_match('/\A[A-Za-z0-9][A-Za-z0-9._~\/-]*\z/D', trim($path, '/')) !== 1
+            || in_array('..', explode('/', trim($path, '/')), true)) {
+            throw new \InvalidArgumentException('queen.dashboard.path must be a safe non-empty route prefix.');
+        }
+
+        $configuredMiddleware = $this->app['config']->get('queen.dashboard.middleware', []);
+        if (!is_array($configuredMiddleware)) {
+            throw new \InvalidArgumentException('queen.dashboard.middleware must be an array of middleware names.');
+        }
+        $middleware = ['web', SecureDashboardResponse::class];
+        foreach ($configuredMiddleware as $entry) {
+            if (!is_string($entry)
+                || $entry === ''
+                || strlen($entry) > 256
+                || preg_match('/[\x00-\x1F\x7F]/', $entry) === 1) {
+                throw new \InvalidArgumentException('queen.dashboard.middleware contains an invalid middleware name.');
+            }
+            if ($entry !== 'web') {
+                $middleware[] = $entry;
+            }
+        }
+        // Application authentication must resolve the user before the Queen
+        // Gate runs. The security-response wrapper remains outside both.
+        $middleware[] = AuthorizeDashboard::class;
+
+        $attributes = [
+            'prefix' => trim($path, '/'),
+            'as' => 'queen.dashboard.',
+            'middleware' => array_values(array_unique($middleware)),
+        ];
+        $domain = $this->app['config']->get('queen.dashboard.domain');
+        if ($domain !== null) {
+            if (!is_string($domain)
+                || $domain === ''
+                || strlen($domain) > 253
+                || preg_match('/\A[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\z/D', $domain) !== 1) {
+                throw new \InvalidArgumentException('queen.dashboard.domain must be a safe hostname pattern.');
+            }
+            $attributes['domain'] = $domain;
+        }
+
+        $this->app['router']->group($attributes, function (): void {
+            require __DIR__ . '/../../routes/dashboard.php';
+        });
     }
 
     private function registerWorkerTelemetry(): void

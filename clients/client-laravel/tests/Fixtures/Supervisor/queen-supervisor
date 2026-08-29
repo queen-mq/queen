@@ -1,4 +1,11 @@
 #!/bin/sh
+if [ "${QUEEN_TEST_LAUNCH_CONTEXT:-}" = "1" ]; then
+    pwd
+    for argument do
+        printf '%s\n' "$argument"
+    done
+    exit 0
+fi
 if [ "${1:-}" = "--version" ]; then
     printf '%s\n' 'queen-supervisor 0.1.0'
     exit 0

@@ -34,6 +34,8 @@ class LaravelSupervisorTest extends TestCase
         $this->assertSame('/app/artisan', $config['artisan']);
         $this->assertSame('/app/storage/queen-supervisor', $config['state_directory']);
         $this->assertSame(5, $config['poll_interval']);
+        $this->assertSame(3600, $config['control_ttl']);
+        $this->assertSame(76, $config['heartbeat_timeout']);
         $this->assertSame('http://queen.test:6632', $config['queen']['url']);
         $this->assertSame('secret', $config['connections']['queen']['bearer_token']);
         $this->assertSame(['high', 'default'], $config['supervisors']['jobs']['queues']);
@@ -122,6 +124,7 @@ class LaravelSupervisorTest extends TestCase
             ['url' => 'https://queen.test', 'headers' => ['Bad Header' => 'value']],
             ['url' => 'https://queen.test', 'headers' => ['Bad,Header' => 'value']],
             ['url' => 'https://queen.test', 'headers' => ['X-Queen' => "ok\r\nInjected: yes"]],
+            ['url' => 'https://queen.test', 'headers' => ['X-Queen' => "ok\x01unsafe"]],
             ['url' => 'https://queen.test', 'bearer_token' => 'token with spaces'],
         ] as $connection) {
             try {
@@ -154,6 +157,24 @@ class LaravelSupervisorTest extends TestCase
                 $this->addToAssertionCount(1);
             }
         }
+    }
+
+    public function testConfigurationRejectsABalanceShiftBeyondThePoolBound(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('balance_max_shift must not exceed max_processes [10]');
+
+        SupervisorConfiguration::resolve([
+            'supervisor' => [
+                'process_limit' => 256,
+                'supervisors' => [
+                    'jobs' => [
+                        'max_processes' => 10,
+                        'balance_max_shift' => 11,
+                    ],
+                ],
+            ],
+        ], '/app');
     }
 
     public function testAutoScalingAllocatesProcessesTowardTheBusyQueue(): void
@@ -211,20 +232,59 @@ class LaravelSupervisorTest extends TestCase
         $this->assertGreaterThan($desired['default'], $desired['high']);
     }
 
+    public function testTimeScalingSaturatesAtMaximumForNonFiniteAggregatePressure(): void
+    {
+        $options = array_replace($this->options(), [
+            'strategy' => 'time',
+            'target_clear_seconds' => 1.0,
+            'default_runtime_seconds' => 1.0,
+            'max_processes' => 10,
+        ]);
+
+        $desired = (new AutoScaler())->desired(
+            $options,
+            ['high' => PHP_INT_MAX, 'default' => PHP_INT_MAX],
+            ['high' => 1.0e308, 'default' => 1.0e308],
+        );
+
+        $this->assertSame(10, array_sum($desired));
+    }
+
+    public function testConfigurationRejectsScalingDurationsThatCanOverflowTheSharedContract(): void
+    {
+        foreach ([
+            ['target_clear_seconds' => 1.0e-308],
+            ['default_runtime_seconds' => 1.0e308],
+        ] as $policy) {
+            try {
+                SupervisorConfiguration::resolve([
+                    'supervisor' => ['supervisors' => ['jobs' => $policy]],
+                ], '/app');
+                $this->fail('An unsafe scaling duration was accepted.');
+            } catch (InvalidArgumentException) {
+                $this->addToAssertionCount(1);
+            }
+        }
+    }
+
     public function testStateCommandsAndTelemetryUseAtomicLocalFiles(): void
     {
         $directory = sys_get_temp_dir() . '/queen-supervisor-test-' . bin2hex(random_bytes(6));
         $state = new SupervisorState($directory);
         $lock = $state->acquireLock();
-        $state->request('pause');
-        $command = $state->command(null);
+        $state->writeStatus(['engine' => 'php', 'state' => 'running', 'pools' => [], 'pool_status' => []]);
+        $instanceId = $state->instanceId();
+        $state->request('pause', $instanceId);
+        $command = $state->command(null, $instanceId);
         $this->assertSame('pause', $command['command']);
-        $this->assertNull($state->command($command['nonce']));
+        $this->assertNull($state->command($command['nonce'], $instanceId));
 
         $telemetry = $state->telemetryDirectory();
-        file_put_contents($telemetry . '/1.json', json_encode([
+        $telemetryFile = $telemetry . '/1.json';
+        file_put_contents($telemetryFile, json_encode([
             'queues' => ['high' => ['samples' => 2, 'runtime_ewma_seconds' => 4.0]],
         ]));
+        chmod($telemetryFile, 0600);
         $this->assertSame(['high' => 4.0], (new TelemetryReader())->runtimes($telemetry, 60));
 
         flock($lock, LOCK_UN);

@@ -14,11 +14,17 @@ class SupervisorConfigCommand extends Command
 
     public function handle(): int
     {
-        $resolved = SupervisorConfiguration::resolve(
-            $this->laravel['config']->get('queen', []),
-            $this->laravel->basePath(),
-            queueConnections: $this->laravel['config']->get('queue.connections', []),
-        );
+        try {
+            $resolved = SupervisorConfiguration::resolve(
+                $this->laravel['config']->get('queen', []),
+                $this->laravel->basePath(),
+                queueConnections: $this->laravel['config']->get('queue.connections', []),
+            );
+        } catch (\InvalidArgumentException $exception) {
+            $this->components->error($exception->getMessage());
+
+            return self::FAILURE;
+        }
         if (!$this->option('for-engine')) {
             $resolved = $this->redact($resolved);
         }
@@ -28,7 +34,17 @@ class SupervisorConfigCommand extends Command
         if ($this->option('pretty')) {
             $flags |= JSON_PRETTY_PRINT;
         }
-        $this->output->writeln(json_encode($resolved, $flags));
+        $json = json_encode($resolved, $flags);
+        // Symfony appends a newline; include it because the Rust reader bounds
+        // the complete stdout transport rather than only the JSON payload.
+        if ($this->option('for-engine') && strlen($json) + 1 > SupervisorConfiguration::MAX_CONFIG_BYTES) {
+            $this->components->error(
+                'Resolved Queen supervisor engine configuration exceeds the 1 MiB transport limit.',
+            );
+
+            return self::FAILURE;
+        }
+        $this->output->writeln($json);
 
         return self::SUCCESS;
     }

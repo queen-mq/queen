@@ -76,6 +76,279 @@ class LaravelSupervisorProductionTest extends TestCase
         ], '/app');
     }
 
+    public function testConfigurationEnforcesRustQueueAndDurationBounds(): void
+    {
+        $queues = array_map(static fn (int $index): string => "queue-{$index}", range(1, 1025));
+        try {
+            SupervisorConfiguration::resolve([
+                'supervisor' => [
+                    'supervisors' => [
+                        'jobs' => ['balance' => 'off', 'queues' => $queues],
+                    ],
+                ],
+            ], '/app');
+            $this->fail('The PHP resolver accepted more queues than the Rust engine supports.');
+        } catch (InvalidArgumentException $error) {
+            $this->assertStringContainsString('1024 queues', $error->getMessage());
+        }
+
+        try {
+            SupervisorConfiguration::resolve([
+                'supervisor' => ['poll_interval' => 31536001],
+            ], '/app');
+            $this->fail('The PHP resolver accepted a timing value rejected by Rust.');
+        } catch (InvalidArgumentException $error) {
+            $this->assertStringContainsString('31536000 seconds', $error->getMessage());
+        }
+    }
+
+    public function testConfigurationRejectsRootStateDirectoryAliasesLikeRust(): void
+    {
+        foreach (['/', '/./', '////./'] as $directory) {
+            try {
+                SupervisorConfiguration::stateDirectory($directory, '/app');
+                $this->fail("The PHP resolver accepted root alias [{$directory}].");
+            } catch (InvalidArgumentException $error) {
+                $this->assertStringContainsString('non-root path', $error->getMessage());
+            }
+
+            try {
+                new SupervisorState($directory);
+                $this->fail("SupervisorState accepted filesystem root alias [{$directory}].");
+            } catch (RuntimeException $error) {
+                $this->assertStringContainsString('filesystem root', $error->getMessage());
+            }
+        }
+
+        if (DIRECTORY_SEPARATOR === '/') {
+            foreach (['C:\\queen-state', '\\\\server\\share\\queen-state'] as $directory) {
+                try {
+                    SupervisorConfiguration::stateDirectory($directory, '/app');
+                    $this->fail("The Unix resolver accepted foreign absolute path [{$directory}].");
+                } catch (InvalidArgumentException $error) {
+                    $this->assertStringContainsString('absolute Unix path', $error->getMessage());
+                }
+            }
+        }
+    }
+
+    public function testStateAcquisitionDoesNotRepairAnExistingSharedDirectory(): void
+    {
+        $parent = $this->temporaryDirectory();
+        $directory = $parent . '/tmp-like';
+        $this->assertTrue(mkdir($directory, 0700));
+        $this->assertTrue(chmod($directory, 0777));
+        clearstatcache(true, $directory);
+        $modeBefore = fileperms($directory) & 07777;
+
+        try {
+            (new SupervisorState($directory))->acquireLock();
+            $this->fail('A shared pre-existing state directory was accepted.');
+        } catch (RuntimeException $error) {
+            $this->assertStringContainsString('must use mode 0700', $error->getMessage());
+        }
+
+        clearstatcache(true, $directory);
+        $this->assertSame($modeBefore, fileperms($directory) & 07777);
+        $this->assertFileDoesNotExist($directory . '/control.lock');
+        $this->assertFileDoesNotExist($directory . '/supervisor.lock');
+    }
+
+    public function testStateAcquisitionRejectsAWritableNonStickyAncestorBeforePublishingLocks(): void
+    {
+        $root = $this->temporaryDirectory();
+        $unsafeParent = $root . '/shared';
+        $stateDirectory = $unsafeParent . '/state';
+        $this->assertTrue(mkdir($unsafeParent, 0700));
+        $this->assertTrue(chmod($unsafeParent, 0777));
+
+        try {
+            (new SupervisorState($stateDirectory))->acquireLock();
+            $this->fail('A state path below a writable non-sticky ancestor was accepted.');
+        } catch (RuntimeException $error) {
+            $this->assertStringContainsString('group/world-writable', $error->getMessage());
+        }
+
+        $this->assertDirectoryDoesNotExist($stateDirectory);
+        $this->assertFileDoesNotExist($stateDirectory . '/control.lock');
+        $this->assertFileDoesNotExist($stateDirectory . '/supervisor.lock');
+    }
+
+    public function testStateAcquisitionAcceptsAPrivateChildBelowATrustedStickyAncestor(): void
+    {
+        $root = $this->temporaryDirectory();
+        $stickyParent = $root . '/sticky';
+        $stateDirectory = $stickyParent . '/state';
+        $this->assertTrue(mkdir($stickyParent, 0700));
+        $this->assertTrue(chmod($stickyParent, 01777));
+
+        $lock = (new SupervisorState($stateDirectory))->acquireLock();
+        $this->assertDirectoryExists($stateDirectory);
+        $this->assertSame(0700, fileperms($stateDirectory) & 07777);
+        $this->assertFileExists($stateDirectory . '/control.lock');
+        $this->assertFileExists($stateDirectory . '/supervisor.lock');
+        fclose($lock);
+    }
+
+    public function testAcquiredGenerationFailsClosedAfterStateDirectoryReplacement(): void
+    {
+        $stateDirectory = $this->temporaryDirectory();
+        $state = new SupervisorState($stateDirectory);
+        $lock = $state->acquireLock();
+        $previousGeneration = $stateDirectory . '-previous';
+        $this->assertTrue(rename($stateDirectory, $previousGeneration));
+        $this->temporaryDirectories[] = $previousGeneration;
+        $this->assertTrue(mkdir($stateDirectory, 0700));
+
+        try {
+            $state->writeStatus(['state' => 'running']);
+            $this->fail('An acquired generation wrote through a replaced state directory path.');
+        } catch (RuntimeException $error) {
+            $this->assertStringContainsString('changed after generation acquisition', $error->getMessage());
+        } finally {
+            fclose($lock);
+        }
+
+        $this->assertFileDoesNotExist($stateDirectory . '/status.json');
+        $this->assertFileExists($previousGeneration . '/supervisor.lock');
+    }
+
+    public function testStateAcquisitionValidatesASymlinkTargetChainBeforeCanonicalizingIt(): void
+    {
+        $root = $this->temporaryDirectory();
+        $unsafeParent = $root . '/shared';
+        $target = $unsafeParent . '/target';
+        $alias = $root . '/alias';
+        $this->assertTrue(mkdir($unsafeParent, 0700));
+        $this->assertTrue(mkdir($target, 0700));
+        $this->assertTrue(chmod($unsafeParent, 0777));
+        $this->assertTrue(symlink($target, $alias));
+
+        try {
+            new SupervisorState($alias . '/state');
+            $this->fail('A symlink through a writable non-sticky target ancestor was accepted.');
+        } catch (RuntimeException $error) {
+            $this->assertStringContainsString('group/world-writable', $error->getMessage());
+        }
+
+        $this->assertDirectoryDoesNotExist($target . '/state');
+        $this->assertTrue(unlink($alias));
+    }
+
+    public function testStateAcquisitionCanonicalizesATrustedSymlinkAncestorOnce(): void
+    {
+        $root = $this->temporaryDirectory();
+        $target = $root . '/target';
+        $alias = $root . '/alias';
+        $this->assertTrue(mkdir($target, 0700));
+        $this->assertTrue(symlink($target, $alias));
+
+        $lock = (new SupervisorState($alias . '/state'))->acquireLock();
+        $this->assertFileExists($target . '/state/supervisor.lock');
+        $this->assertFileDoesNotExist($alias . '/supervisor.lock');
+        fclose($lock);
+        $this->assertTrue(unlink($alias));
+    }
+
+    public function testConfigurationCapsTheAggregateStatusPoolCardinality(): void
+    {
+        $queues = array_map(
+            static fn (int $index): string => "queue-{$index}",
+            range(1, SupervisorConfiguration::MAX_STATUS_POOLS),
+        );
+        $resolved = SupervisorConfiguration::resolve([
+            'supervisor' => [
+                'supervisors' => [
+                    'jobs' => ['balance' => 'off', 'queues' => $queues],
+                ],
+            ],
+        ], '/app');
+        $this->assertCount(SupervisorConfiguration::MAX_STATUS_POOLS, $resolved['supervisors']['jobs']['queues']);
+
+        $queues[] = 'one-too-many';
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('256 aggregate status pools');
+        SupervisorConfiguration::resolve([
+            'supervisor' => [
+                'supervisors' => [
+                    'jobs' => ['balance' => 'off', 'queues' => $queues],
+                ],
+            ],
+        ], '/app');
+    }
+
+    public function testConfigurationBoundsStatusIdentityFields(): void
+    {
+        foreach ([
+            [str_repeat('s', 129), ['default']],
+            ['jobs', [str_repeat('q', 257)]],
+        ] as [$name, $queues]) {
+            try {
+                SupervisorConfiguration::resolve([
+                    'supervisor' => [
+                        'supervisors' => [
+                            $name => ['balance' => 'off', 'queues' => $queues],
+                        ],
+                    ],
+                ], '/app');
+                $this->fail('The PHP resolver accepted a status identity above its byte bound.');
+            } catch (InvalidArgumentException) {
+                $this->addToAssertionCount(1);
+            }
+        }
+    }
+
+    public function testConfigurationRejectsRootAndParentTraversalStatePaths(): void
+    {
+        foreach (['/', '../queen-state', '/srv/app/../queen-state'] as $path) {
+            try {
+                SupervisorConfiguration::resolve([
+                    'supervisor' => ['state_directory' => $path],
+                ], '/app');
+                $this->fail("The PHP resolver accepted unsafe state path [{$path}].");
+            } catch (InvalidArgumentException $error) {
+                $this->assertStringContainsString('absolute, non-root path', $error->getMessage());
+            }
+        }
+    }
+
+    public function testConfigurationRequiresControlTtlAboveTheBoundedDepthLoop(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('must exceed the bounded depth/control loop budget');
+
+        SupervisorConfiguration::resolve([
+            'supervisor' => [
+                'http_timeout' => 10,
+                'control_ttl' => 30,
+                'supervisors' => [
+                    'jobs' => [
+                        'balance' => 'off',
+                        'queues' => array_map(
+                            static fn (int $index): string => "queue-{$index}",
+                            range(1, 64),
+                        ),
+                    ],
+                ],
+            ],
+        ], '/app');
+    }
+
+    public function testConfigurationRequiresHeartbeatTimeoutAboveTheBoundedControlLoop(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('heartbeat_timeout [60]');
+
+        SupervisorConfiguration::resolve([
+            'supervisor' => [
+                'heartbeat_timeout' => 60,
+                'supervisors' => [
+                    'jobs' => ['max_processes' => 10],
+                ],
+            ],
+        ], '/app');
+    }
+
     public function testConfigurationRejectsShutdownGraceAtOrBelowWorkerTimeout(): void
     {
         $this->expectException(InvalidArgumentException::class);
@@ -106,12 +379,10 @@ class LaravelSupervisorProductionTest extends TestCase
         ], '/app');
     }
 
-    public function testConfigurationRejectsLeaseTooShortForThePrefetchedBatch(): void
+    public function testConfigurationRejectsPrefetchWithoutLeaseRenewal(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage(
-            'retry_after must be longer than timeout multiplied by connection prefetch [16]',
-        );
+        $this->expectExceptionMessage('connection prefetch [16] requires lease_renewal');
 
         SupervisorConfiguration::resolve([
             'supervisor' => [
@@ -124,19 +395,20 @@ class LaravelSupervisorProductionTest extends TestCase
         ]);
     }
 
-    public function testConfigurationAcceptsLeaseLongerThanThePrefetchedBatch(): void
+    public function testEvenALongLeaseAndRestCannotMakeUnrenewedPrefetchPauseSafe(): void
     {
-        $config = SupervisorConfiguration::resolve([
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('connection prefetch [16] requires lease_renewal');
+
+        SupervisorConfiguration::resolve([
             'supervisor' => [
                 'supervisors' => [
-                    'jobs' => ['timeout' => 10, 'retry_after' => 161],
+                    'jobs' => ['timeout' => 10, 'retry_after' => 3600, 'rest' => 60],
                 ],
             ],
         ], '/app', queueConnections: [
             'queen' => ['driver' => 'queen', 'prefetch' => 16],
         ]);
-
-        $this->assertSame(161, $config['supervisors']['jobs']['retry_after']);
     }
 
     public function testLeaseRenewalReplacesThePrefetchTimesTimeoutBound(): void
@@ -293,6 +565,92 @@ class LaravelSupervisorProductionTest extends TestCase
         $this->assertFileDoesNotExist($stale);
     }
 
+    public function testTelemetryReaderProgressivelyRecoversFromPidFileChurn(): void
+    {
+        $directory = $this->temporaryDirectory();
+        for ($index = 0; $index < 8192; $index++) {
+            $path = $directory . '/' . sprintf('%05d.json', $index);
+            file_put_contents($path, '{}');
+            chmod($path, 0600);
+        }
+        $sample = $directory . '/latest.json';
+        $scope = [
+            'supervisor' => 'orders',
+            'connection' => 'queen-eu',
+            'consumer_group' => 'orders-v1',
+        ];
+        $this->writeTelemetry($sample, $scope, 1, 4.0);
+        touch($sample, time() + 1);
+
+        $reader = new TelemetryReader();
+        // The first bounded pass fails closed, but still discards enough old
+        // PID files that a subsequent poll can recover.
+        $this->assertSame([], $reader->runtimes($directory, 60, $scope));
+        $this->assertSame(['high' => 4.0], $reader->runtimes($directory, 60, $scope));
+        $this->assertLessThanOrEqual(4096, iterator_count(new \FilesystemIterator($directory)));
+    }
+
+    public function testTimeTelemetryKeepsADeadWorkersFinalSampleUntilOneScan(): void
+    {
+        $stateDirectory = $this->temporaryDirectory();
+        $state = new SupervisorState($stateDirectory);
+        $telemetryDirectory = $state->telemetryDirectory();
+        $scope = [
+            'supervisor' => 'orders',
+            'connection' => 'queen-eu',
+            'consumer_group' => 'orders-v1',
+        ];
+        $supervisor = new PhpSupervisor(
+            $this->createStub(QueueManager::class),
+            ['state_directory' => $stateDirectory, 'telemetry_ttl' => 60],
+        );
+        $schedule = new ReflectionMethod(PhpSupervisor::class, 'scheduleTelemetryCleanup');
+        $observe = new ReflectionMethod(PhpSupervisor::class, 'observedRuntimes');
+        $options = [...$scope, 'strategy' => 'time', 'balance' => 'auto'];
+
+        $finalSample = $telemetryDirectory . '/12345.json';
+        $this->writeTelemetry($finalSample, $scope, 1, 4.0);
+        $schedule->invoke($supervisor, 'orders', $options, 12345);
+        $this->assertFileExists($finalSample);
+        $this->assertSame(['high' => 4.0], $observe->invoke($supervisor, 'orders', $options));
+        $this->assertFileDoesNotExist($finalSample);
+
+        $simpleSample = $telemetryDirectory . '/12346.json';
+        $this->writeTelemetry($simpleSample, $scope, 1, 8.0);
+        $schedule->invoke($supervisor, 'orders', [...$options, 'balance' => 'simple'], 12346);
+        $this->assertFileDoesNotExist($simpleSample);
+    }
+
+    public function testBrokenTelemetryScanStillBoundsPendingPidCleanup(): void
+    {
+        $stateDirectory = $this->temporaryDirectory();
+        file_put_contents($stateDirectory . '/telemetry', 'not-a-directory');
+        chmod($stateDirectory . '/telemetry', 0600);
+        $supervisor = new PhpSupervisor(
+            $this->createStub(QueueManager::class),
+            ['state_directory' => $stateDirectory, 'telemetry_ttl' => 60],
+        );
+        $this->setProperty($supervisor, 'pendingTelemetryCleanup', [
+            'orders' => array_fill_keys(range(10000, 10100), true),
+        ]);
+        $options = [
+            'strategy' => 'time',
+            'balance' => 'auto',
+            'connection' => 'queen-eu',
+            'consumer_group' => 'orders-v1',
+        ];
+
+        try {
+            (new ReflectionMethod(PhpSupervisor::class, 'observedRuntimes'))
+                ->invoke($supervisor, 'orders', $options);
+            $this->fail('A non-directory telemetry path was accepted.');
+        } catch (RuntimeException) {
+            $this->addToAssertionCount(1);
+        }
+
+        $this->assertSame([], $this->property($supervisor, 'pendingTelemetryCleanup'));
+    }
+
     public function testPhpSupervisorOnlyReadsRuntimeTelemetryForTimeStrategy(): void
     {
         $stateDirectory = $this->temporaryDirectory();
@@ -353,6 +711,54 @@ class LaravelSupervisorProductionTest extends TestCase
         $this->assertSame(2, $document['queues']['high']['samples']);
         $this->assertSame(1, $document['queues']['high']['failures']);
         $this->assertEqualsWithDelta(1.4, $document['queues']['high']['runtime_ewma_seconds'], 0.05);
+        $this->assertSame(0600, fileperms($directory . '/' . getmypid() . '.json') & 0777);
+    }
+
+    public function testTelemetryReaderRejectsNonPrivateAndOversizedFiles(): void
+    {
+        $directory = $this->temporaryDirectory();
+        $scope = [
+            'supervisor' => 'orders',
+            'connection' => 'queen-eu',
+            'consumer_group' => 'orders-v1',
+        ];
+        $path = $directory . '/unsafe.json';
+        $this->writeTelemetry($path, $scope, 1, 2.0);
+        chmod($path, 0644);
+
+        $this->assertSame([], (new TelemetryReader())->runtimes($directory, 60, $scope));
+
+        unlink($path);
+        file_put_contents($path, str_repeat('x', 65537));
+        chmod($path, 0600);
+        $this->assertSame([], (new TelemetryReader())->runtimes($directory, 60, $scope));
+    }
+
+    public function testTelemetryReaderRejectsDocumentsWithTooManyQueues(): void
+    {
+        $directory = $this->temporaryDirectory();
+        $queues = [];
+        foreach (range(1, 257) as $index) {
+            $queues["queue-{$index}"] = ['samples' => 1, 'runtime_ewma_seconds' => 1.0];
+        }
+        $path = $directory . '/too-many-queues.json';
+        file_put_contents($path, json_encode(['queues' => $queues], JSON_THROW_ON_ERROR));
+        chmod($path, 0600);
+
+        $this->assertSame([], (new TelemetryReader())->runtimes($directory, 60));
+    }
+
+    public function testTelemetryReaderSkipsOverflowingWeightedEwmas(): void
+    {
+        $directory = $this->temporaryDirectory();
+        $scope = [
+            'supervisor' => 'orders',
+            'connection' => 'queen-eu',
+            'consumer_group' => 'orders-v1',
+        ];
+        $this->writeTelemetry($directory . '/huge.json', $scope, 100, 1.0e308);
+
+        $this->assertSame([], (new TelemetryReader())->runtimes($directory, 60, $scope));
     }
 
     public function testStateLockIsExclusiveAndControlCommandsAreConsumedOnce(): void
@@ -363,6 +769,8 @@ class LaravelSupervisorProductionTest extends TestCase
         $lock = $owner->acquireLock();
 
         try {
+            $owner->writeStatus(['engine' => 'php', 'state' => 'running', 'pools' => [], 'pool_status' => []]);
+            $instanceId = $owner->instanceId();
             $this->assertTrue($observer->isOwned());
 
             try {
@@ -372,11 +780,11 @@ class LaravelSupervisorProductionTest extends TestCase
                 $this->addToAssertionCount(1);
             }
 
-            $owner->request('pause');
-            $command = $owner->command(null);
+            $owner->request('pause', $instanceId);
+            $command = $owner->command(null, $instanceId);
 
             $this->assertSame('pause', $command['command']);
-            $this->assertNull((new SupervisorState($directory))->command(null));
+            $this->assertNull((new SupervisorState($directory))->command(null, $instanceId));
             $this->assertFileDoesNotExist($directory . '/control.json');
         } finally {
             flock($lock, LOCK_UN);
@@ -390,35 +798,414 @@ class LaravelSupervisorProductionTest extends TestCase
     {
         $directory = $this->temporaryDirectory();
         $state = new SupervisorState($directory);
-        $state->request('pause', 'instance-a');
+        $lock = $state->acquireLock();
+        $state->writeStatus(['engine' => 'php', 'state' => 'running', 'pools' => [], 'pool_status' => []]);
+        $instanceId = $state->instanceId();
+        $state->request('pause', $instanceId);
+        $pending = file_get_contents($directory . '/control.json');
+        $pendingDocument = json_decode($pending, true, 8, JSON_THROW_ON_ERROR);
+        $this->assertSame(3600, $pendingDocument['expires_at_epoch'] - $pendingDocument['requested_at_epoch']);
 
         try {
-            $state->request('terminate', 'instance-a');
+            $state->request('terminate', $instanceId);
             $this->fail('A pending command was overwritten.');
         } catch (RuntimeException $exception) {
             $this->assertStringContainsString('already pending', $exception->getMessage());
         }
+        $this->assertSame($pending, file_get_contents($directory . '/control.json'));
 
-        $pause = $state->command(null, 'instance-a');
+        $pause = $state->command(null, $instanceId);
         $this->assertSame('pause', $pause['command']);
-        $state->request('terminate', 'instance-a');
-        $this->assertSame('terminate', $state->command($pause['nonce'], 'instance-a')['command']);
+        $state->request('terminate', $instanceId);
+        $this->assertSame('terminate', $state->command($pause['nonce'], $instanceId)['command']);
+        flock($lock, LOCK_UN);
+        fclose($lock);
+    }
+
+    public function testGenerationTimingIsUsedAndMalformedSnapshotsFailClosed(): void
+    {
+        $directory = $this->temporaryDirectory();
+        $state = new SupervisorState($directory);
+        $lock = $state->acquireLock();
+
+        try {
+            $state->writeStatus([
+                'engine' => 'php',
+                'state' => 'running',
+                'pools' => [],
+                'pool_status' => [],
+                'configuration' => [
+                    'heartbeat_timeout' => 120,
+                    'control_ttl' => 47,
+                ],
+            ]);
+            $status = $state->status();
+            $this->assertTrue($state->isLive($status));
+            $state->request('pause', $state->instanceId());
+            $command = $state->command(null, $state->instanceId());
+            $this->assertSame(
+                47,
+                ($command['expires_at_epoch'] ?? 0) - ($command['requested_at_epoch'] ?? 0),
+            );
+
+            $state->writeStatus([
+                'engine' => 'php',
+                'state' => 'running',
+                'pools' => [],
+                'pool_status' => [],
+                'configuration' => [
+                    'heartbeat_timeout' => '120',
+                    'control_ttl' => 47,
+                ],
+            ]);
+            $malformed = $state->status();
+            $this->assertFalse($state->isLive($malformed));
+            $this->assertFalse($state->isLive($malformed, 120));
+            try {
+                $state->request('terminate', $state->instanceId(), 120, 47);
+                $this->fail('Malformed generation timing accepted a control request.');
+            } catch (RuntimeException $error) {
+                $this->assertStringContainsString('missing, stale', $error->getMessage());
+            }
+            $this->assertFileDoesNotExist($directory . '/control.json');
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
+    public function testMalformedControlDoesNotPoisonThePhpSupervisorInbox(): void
+    {
+        $directory = $this->temporaryDirectory();
+        $state = new SupervisorState($directory);
+        $lock = $state->acquireLock();
+        $state->writeStatus(['engine' => 'php', 'state' => 'running', 'pools' => [], 'pool_status' => []]);
+        $instanceId = $state->instanceId();
+        file_put_contents($directory . '/control.json', '{malformed');
+        chmod($directory . '/control.json', 0600);
+
+        try {
+            $this->assertNull($state->command(null, $instanceId));
+            $this->assertFileDoesNotExist($directory . '/control.json');
+            $state->request('pause', $instanceId);
+            $this->assertSame('pause', $state->command(null, $instanceId)['command']);
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
+    public function testStatusV1IsNormalizedAndCarriesSafeDepthSnapshots(): void
+    {
+        $directory = $this->temporaryDirectory();
+        $supervisor = new PhpSupervisor($this->createStub(QueueManager::class), [
+            'state_directory' => $directory,
+            'supervisors' => [
+                'orders' => ['queues' => ['high', 'default']],
+            ],
+        ]);
+        $stateProperty = new ReflectionProperty($supervisor, 'state');
+        /** @var SupervisorState $state */
+        $state = $stateProperty->getValue($supervisor);
+        $lock = $state->acquireLock();
+
+        try {
+            $this->setProperty($supervisor, 'lastDesired', ['orders' => ['high' => 2, 'default' => 1]]);
+            $this->setProperty($supervisor, 'lastDepths', ['orders' => ['high' => 7, 'default' => 0]]);
+            $this->setProperty($supervisor, 'depthsAvailable', ['orders' => true]);
+            (new ReflectionMethod($supervisor, 'writeStatus'))->invoke($supervisor, 'running');
+            $status = $state->status();
+
+            $this->assertSame(SupervisorState::STATUS_SCHEMA, $status['schema']);
+            $this->assertSame('php', $status['engine']);
+            $this->assertSame($state->instanceId(), $status['instance_id']);
+            $this->assertIsInt($status['updated_at_epoch']);
+            $this->assertFalse($status['paused']);
+            $this->assertFalse($status['stopping']);
+            $this->assertSame(['high', 'default'], array_column($status['pool_status'], 'queue'));
+            $this->assertSame(2, $status['pool_status'][0]['desired']);
+            $this->assertSame(0, $status['pool_status'][0]['running']);
+            $this->assertSame(7, $status['pool_status'][0]['depth']);
+            $this->assertTrue($status['pool_status'][0]['depth_available']);
+            $this->assertSame('closed', $status['pool_status'][0]['restart_state']);
+            $this->assertTrue($status['pool_status'][0]['healthy']);
+            $this->assertSame(0, $status['pools']['orders']['high']['processes']);
+            $this->assertSame(3600, $status['configuration']['control_ttl']);
+            $this->assertSame('orders', $status['configuration']['supervisors'][0]['name']);
+            $this->assertSame('queen', $status['configuration']['supervisors'][0]['connection']);
+            $this->assertSame('laravel', $status['configuration']['supervisors'][0]['consumer_group']);
+            $this->assertSame(['high', 'default'], $status['configuration']['supervisors'][0]['queues']);
+            $this->assertArrayNotHasKey('queen', $status['configuration']);
+            $this->assertArrayNotHasKey('connections', $status['configuration']);
+            $this->assertTrue($state->isLive($status));
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
+    public function testMaximumStatusPoolContractFitsBelowOneMebibyte(): void
+    {
+        $directory = $this->temporaryDirectory();
+        $state = new SupervisorState($directory);
+        $lock = $state->acquireLock();
+        $pools = [];
+        $poolStatus = [];
+        $configuredSupervisors = [];
+        $pid = 1000;
+        foreach (range(1, SupervisorConfiguration::MAX_STATUS_POOLS) as $index) {
+            $supervisor = str_pad("s{$index}", 128, 's');
+            $queue = str_pad("q{$index}", 256, 'q');
+            $pids = range($pid, $pid + 15);
+            $pid += 16;
+            $drainingPids = range($pid, $pid + 15);
+            $pid += 16;
+            $pools[$supervisor][$queue] = [
+                'processes' => 16,
+                'pids' => $pids,
+                'desired' => 16,
+                'draining' => 16,
+                'restart_state' => 'backoff',
+                'restart_failures' => 4,
+                'restart_in_seconds' => 31536000,
+                'depth' => PHP_INT_MAX,
+                'depth_available' => true,
+            ];
+            $poolStatus[] = [
+                'supervisor' => $supervisor,
+                'queue' => $queue,
+                'desired' => 16,
+                'running' => 16,
+                'draining' => 16,
+                'pids' => $pids,
+                'draining_pids' => $drainingPids,
+                'restart_state' => 'backoff',
+                'restart_failures' => 4,
+                'restart_in_seconds' => 31536000,
+                'healthy' => false,
+                'depth' => PHP_INT_MAX,
+                'depth_available' => true,
+            ];
+            $configuredSupervisors[] = [
+                'name' => $supervisor,
+                'connection' => str_repeat('c', 128),
+                'consumer_group' => str_repeat('g', 128),
+                'queues' => [$queue],
+                'balance' => 'off',
+                'strategy' => 'time',
+                'processes' => 16,
+                'min_processes' => 0,
+                'max_processes' => 16,
+                'timeout' => 31535999,
+                'retry_after' => 31536000,
+                'tries' => PHP_INT_MAX,
+                'memory' => PHP_INT_MAX,
+            ];
+        }
+
+        try {
+            $state->writeStatus([
+                'engine' => 'php',
+                'state' => 'running',
+                'draining' => 4096,
+                'pools' => $pools,
+                'pool_status' => $poolStatus,
+                'configuration' => [
+                    'poll_interval' => 31536000,
+                    'http_timeout' => 31536000,
+                    'control_ttl' => 86400,
+                    'heartbeat_timeout' => 86400,
+                    'shutdown_grace' => 31536000,
+                    'telemetry_ttl' => 31536000,
+                    'process_limit' => 4096,
+                    'supervisors' => $configuredSupervisors,
+                ],
+            ]);
+
+            $this->assertLessThan(1048576, filesize($directory . '/status.json'));
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
+    public function testPhpPauseImmediatelyInvalidatesDepthSnapshotsLikeRust(): void
+    {
+        $directory = $this->temporaryDirectory();
+        $supervisor = new PhpSupervisor($this->createStub(QueueManager::class), [
+            'state_directory' => $directory,
+            'supervisors' => [
+                'orders' => ['queues' => ['high']],
+            ],
+        ]);
+        $stateProperty = new ReflectionProperty($supervisor, 'state');
+        /** @var SupervisorState $state */
+        $state = $stateProperty->getValue($supervisor);
+        $lock = $state->acquireLock();
+
+        try {
+            $this->setProperty($supervisor, 'lastDepths', ['orders' => ['high' => 7]]);
+            $this->setProperty($supervisor, 'depthsAvailable', ['orders' => true]);
+            (new ReflectionMethod($supervisor, 'pause'))->invoke($supervisor);
+            (new ReflectionMethod($supervisor, 'writeStatus'))->invoke($supervisor, 'paused');
+
+            $status = $state->status();
+            $this->assertSame('paused', $status['state']);
+            $this->assertNull($status['pool_status'][0]['depth']);
+            $this->assertFalse($status['pool_status'][0]['depth_available']);
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
+    public function testPhpPauseDrainsPrefetchingWorkersAndFencesControlsDuringShutdown(): void
+    {
+        $directory = $this->temporaryDirectory();
+        $options = ['queues' => ['high'], 'strategy' => 'size', 'balance' => 'auto'];
+        $supervisor = new PhpSupervisor($this->createStub(QueueManager::class), [
+            'state_directory' => $directory,
+            'shutdown_grace' => 30,
+            'supervisors' => ['orders' => $options],
+        ]);
+        $process = $this->getMockBuilder(\Symfony\Component\Process\Process::class)
+            ->disableOriginalConstructor()
+            ->onlyMethods(['isRunning', 'signal', 'getPid'])
+            ->getMock();
+        $process->expects($this->once())->method('isRunning')->willReturn(true);
+        $process->expects($this->once())->method('signal')->with(SIGTERM)->willReturnSelf();
+        $process->method('getPid')->willReturn(12345);
+        $this->setProperty($supervisor, 'processes', ['orders' => ['high' => [$process]]]);
+        $this->setProperty($supervisor, 'workerPids', [spl_object_id($process) => 12345]);
+
+        $state = $this->property($supervisor, 'state');
+        $lock = $state->acquireLock();
+        try {
+            (new ReflectionMethod($supervisor, 'pause'))->invoke($supervisor);
+            (new ReflectionMethod($supervisor, 'writeStatus'))->invoke($supervisor, 'paused');
+
+            $status = $state->status();
+            $this->assertSame(0, $status['pool_status'][0]['running']);
+            $this->assertSame(1, $status['pool_status'][0]['draining']);
+            $this->assertSame([], $this->property($supervisor, 'processes')['orders']['high']);
+            $this->assertCount(1, $this->property($supervisor, 'draining'));
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
+    public function testPhpOncePublishesTerminatingBeforeDrainAndRejectsNewControls(): void
+    {
+        if (PHP_OS_FAMILY === 'Windows' || !extension_loaded('pcntl')) {
+            $this->markTestSkipped('Unix process signals are required.');
+        }
+        $directory = $this->temporaryDirectory();
+        $supervisor = new PhpSupervisor($this->createStub(QueueManager::class), [
+            'state_directory' => $directory,
+            'poll_interval' => 1,
+            'shutdown_grace' => 0,
+            'telemetry_ttl' => 60,
+            'supervisors' => [],
+        ]);
+        /** @var SupervisorState $state */
+        $state = $this->property($supervisor, 'state');
+        $process = $this->getMockBuilder(\Symfony\Component\Process\Process::class)
+            ->disableOriginalConstructor()
+            ->onlyMethods(['isRunning', 'getPid'])
+            ->getMock();
+        $process->expects($this->once())->method('isRunning')->willReturnCallback(
+            function () use ($state): bool {
+                $status = $state->status();
+                $this->assertSame('terminating', $status['state']);
+                $this->assertTrue($status['stopping']);
+                $this->assertFalse($state->isLive($status));
+                try {
+                    $state->request('pause', $status['instance_id']);
+                    $this->fail('A control command was accepted after shutdown began.');
+                } catch (RuntimeException $error) {
+                    $this->assertStringContainsString('stopping', $error->getMessage());
+                }
+
+                return false;
+            },
+        );
+        $process->method('getPid')->willReturn(null);
+        $this->setProperty($supervisor, 'processes', ['orders' => ['high' => [$process]]]);
+
+        $supervisor->run(true);
+        $this->assertSame('stopped', $state->status()['state']);
+    }
+
+    public function testStatusReadsAreReadOnlyAndLivenessRejectsFutureOrReleasedOwners(): void
+    {
+        $missing = sys_get_temp_dir() . '/queen-supervisor-missing-' . bin2hex(random_bytes(8));
+        $reader = new SupervisorState($missing);
+        $this->assertNull($reader->status());
+        $this->assertFalse($reader->isOwned());
+        $this->assertDirectoryDoesNotExist($missing);
+
+        $directory = $this->temporaryDirectory();
+        $state = new SupervisorState($directory);
+        $lock = $state->acquireLock();
+        $state->writeStatus(['engine' => 'php', 'state' => 'running', 'pools' => [], 'pool_status' => []]);
+        $status = $state->status();
+        $this->assertTrue($state->isLive($status));
+        try {
+            $state->request('pause', 'replaced-instance');
+            $this->fail('A stale supervisor generation was accepted.');
+        } catch (RuntimeException $error) {
+            $this->assertStringContainsString('stale', $error->getMessage());
+        }
+        $this->assertFileDoesNotExist($directory . '/control.json');
+
+        $status['updated_at_epoch'] = time() + 60;
+        file_put_contents($directory . '/status.json', json_encode($status, JSON_THROW_ON_ERROR));
+        chmod($directory . '/status.json', 0600);
+        $this->assertFalse($state->isLive($state->status()));
+
+        $state->writeStatus(['engine' => 'php', 'state' => 'running', 'pools' => [], 'pool_status' => []]);
+        $live = $state->status();
+        flock($lock, LOCK_UN);
+        fclose($lock);
+        $this->assertFalse($state->isLive($live));
+    }
+
+    public function testStateReadersRejectSymlinksAndInsecureModesWithoutRepairingThem(): void
+    {
+        $directory = $this->temporaryDirectory();
+        $state = new SupervisorState($directory);
+        $state->writeStatus(['engine' => 'php', 'state' => 'running', 'pools' => [], 'pool_status' => []]);
+        chmod($directory . '/status.json', 0644);
+        try {
+            $state->status();
+            $this->fail('An insecure status mode was accepted.');
+        } catch (RuntimeException $error) {
+            $this->assertStringContainsString('bounded regular file', $error->getMessage());
+        }
+        clearstatcache(true, $directory . '/status.json');
+        $this->assertSame(0644, fileperms($directory . '/status.json') & 0777);
+
+        chmod($directory . '/status.json', 0600);
+        rename($directory . '/status.json', $directory . '/target.json');
+        symlink($directory . '/target.json', $directory . '/status.json');
+        try {
+            $state->status();
+            $this->fail('A symbolic-link status document was accepted.');
+        } catch (RuntimeException $error) {
+            $this->assertStringContainsString('bounded regular file', $error->getMessage());
+        }
+        $this->assertTrue(is_link($directory . '/status.json'));
     }
 
     public function testControlAndStatusReadersRejectUnsafeOrOversizedFiles(): void
     {
         $directory = $this->temporaryDirectory();
         $state = new SupervisorState($directory);
-        file_put_contents($directory . '/control.json', str_repeat('x', 65537));
+        file_put_contents($directory . '/control.json', str_repeat('x', 16385));
 
-        try {
-            $state->command(null);
-            $this->fail('An oversized control document was accepted.');
-        } catch (RuntimeException $exception) {
-            $this->assertStringContainsString('bounded regular file', $exception->getMessage());
-        }
-
-        unlink($directory . '/control.json');
+        $this->assertNull($state->command(null, 'instance-a'));
+        $this->assertFileDoesNotExist($directory . '/control.json');
         file_put_contents($directory . '/status.json', str_repeat('x', 1048577));
         $this->expectException(RuntimeException::class);
         $this->expectExceptionMessage('bounded regular file');
@@ -468,7 +1255,7 @@ class LaravelSupervisorProductionTest extends TestCase
         $this->assertSame('orders', $document['supervisor']);
         $this->assertSame('31', $document['retry_after']);
         $this->assertSame('0', $document['block_for']);
-        $this->assertSame($stateDirectory . '/telemetry', $document['telemetry_directory']);
+        $this->assertSame(realpath($stateDirectory) . '/telemetry', $document['telemetry_directory']);
     }
 
     public function testPhpSupervisorDoesNotExposeTelemetryToSizeOrFixedSimpleWorkers(): void
@@ -732,12 +1519,148 @@ class LaravelSupervisorProductionTest extends TestCase
 
         $before = microtime(true);
         $method->invoke($supervisor, 'orders', 'high', $options, 'test');
-        $first = $this->property($supervisor, 'restartAfter')['orders:high'];
+        $first = array_values($this->property($supervisor, 'restartAfter'))[0];
         $method->invoke($supervisor, 'orders', 'high', $options, 'test');
-        $second = $this->property($supervisor, 'restartAfter')['orders:high'];
+        $second = array_values($this->property($supervisor, 'restartAfter'))[0];
 
         $this->assertEqualsWithDelta($before + 2, $first, 0.1);
         $this->assertEqualsWithDelta($before + 4, $second, 0.1);
+    }
+
+    public function testRestartBackoffKeysCannotCollideOnColons(): void
+    {
+        $supervisor = new PhpSupervisor(
+            $this->createStub(QueueManager::class),
+            ['state_directory' => $this->temporaryDirectory()],
+        );
+        $method = new ReflectionMethod(PhpSupervisor::class, 'registerCrash');
+        $options = ['restart_backoff' => 1, 'restart_backoff_max' => 8, 'stable_after' => 60];
+
+        $method->invoke($supervisor, 'a', 'b:c', $options, 'test');
+        $method->invoke($supervisor, 'a:b', 'c', $options, 'test');
+
+        $this->assertCount(2, $this->property($supervisor, 'restartAfter'));
+        $this->assertCount(2, $this->property($supervisor, 'crashCount'));
+    }
+
+    public function testDrainingWorkersRemainInsideTheGlobalProcessLimit(): void
+    {
+        $supervisor = new PhpSupervisor(
+            $this->createStub(QueueManager::class),
+            ['state_directory' => $this->temporaryDirectory(), 'process_limit' => 2],
+        );
+        $this->setProperty($supervisor, 'processes', [
+            'orders' => ['high' => [new \Symfony\Component\Process\Process(['true'])]],
+        ]);
+        $this->setProperty($supervisor, 'draining', [[
+            'process' => new \Symfony\Component\Process\Process(['true']),
+            'deadline' => microtime(true) + 30,
+            'label' => 'orders:low',
+            'supervisor' => 'orders',
+            'queue' => 'low',
+        ]]);
+        $method = new ReflectionMethod(PhpSupervisor::class, 'remainingProcessSlots');
+
+        $this->assertSame(0, $method->invoke($supervisor));
+        $this->setProperty($supervisor, 'draining', []);
+        $this->assertSame(1, $method->invoke($supervisor));
+    }
+
+    public function testForcedDrainRemainsTrackedUntilTheWorkerActuallyExits(): void
+    {
+        if (PHP_OS_FAMILY === 'Windows' || !defined('SIGKILL')) {
+            $this->markTestSkipped('Unix process signals are required.');
+        }
+        $supervisor = new PhpSupervisor(
+            $this->createStub(QueueManager::class),
+            ['state_directory' => $this->temporaryDirectory(), 'process_limit' => 1],
+        );
+        $process = new \Symfony\Component\Process\Process(['/bin/sh', '-c', 'sleep 30']);
+        $process->start();
+        $this->setProperty($supervisor, 'draining', [[
+            'process' => $process,
+            'deadline' => microtime(true) - 1,
+            'label' => 'orders:high',
+            'supervisor' => 'orders',
+            'queue' => 'high',
+        ]]);
+        $reap = new ReflectionMethod(PhpSupervisor::class, 'reapDraining');
+        $slots = new ReflectionMethod(PhpSupervisor::class, 'remainingProcessSlots');
+
+        try {
+            $reap->invoke($supervisor);
+            $this->assertCount(1, $this->property($supervisor, 'draining'));
+            $this->assertSame(0, $slots->invoke($supervisor));
+
+            $deadline = microtime(true) + 2;
+            while ($process->isRunning() && microtime(true) < $deadline) {
+                usleep(10_000);
+            }
+            $reap->invoke($supervisor);
+            $this->assertCount(0, $this->property($supervisor, 'draining'));
+            $this->assertSame(1, $slots->invoke($supervisor));
+        } finally {
+            if ($process->isRunning()) {
+                $process->stop(0, SIGKILL);
+            }
+        }
+    }
+
+    public function testShutdownObservesWorkerDeathAfterForcedKillBeforeClearingTracking(): void
+    {
+        $supervisor = new PhpSupervisor(
+            $this->createStub(QueueManager::class),
+            ['state_directory' => $this->temporaryDirectory(), 'shutdown_grace' => 0],
+        );
+        $process = $this->getMockBuilder(\Symfony\Component\Process\Process::class)
+            ->disableOriginalConstructor()
+            ->onlyMethods(['isRunning', 'signal'])
+            ->getMock();
+        $process->expects($this->exactly(3))
+            ->method('isRunning')
+            ->willReturnOnConsecutiveCalls(true, true, false);
+        $signals = [];
+        $process->expects($this->exactly(2))
+            ->method('signal')
+            ->willReturnCallback(function (int $signal) use (&$signals, $process) {
+                $signals[] = $signal;
+
+                return $process;
+            });
+        $this->setProperty($supervisor, 'processes', ['orders' => ['high' => [$process]]]);
+
+        (new ReflectionMethod(PhpSupervisor::class, 'shutdown'))->invoke($supervisor);
+
+        $this->assertSame([SIGTERM, SIGKILL], $signals);
+        $this->assertSame([], $this->property($supervisor, 'processes'));
+    }
+
+    public function testTelemetryCleanupCannotAbortShutdownOwnershipFencing(): void
+    {
+        $directory = $this->temporaryDirectory();
+        $supervisor = new PhpSupervisor(
+            $this->createStub(QueueManager::class),
+            ['state_directory' => $directory, 'shutdown_grace' => 0],
+            output: static fn (): null => null,
+        );
+        $process = $this->getMockBuilder(\Symfony\Component\Process\Process::class)
+            ->disableOriginalConstructor()
+            ->onlyMethods(['isRunning', 'getPid'])
+            ->getMock();
+        $process->expects($this->once())->method('isRunning')->willReturn(false);
+        $process->method('getPid')->willReturn(12345);
+        $this->setProperty($supervisor, 'processes', ['orders' => ['high' => [$process]]]);
+        $this->setProperty($supervisor, 'workerPids', [spl_object_id($process) => 12345]);
+        $telemetry = (new SupervisorState($directory))->telemetryDirectory();
+        file_put_contents($telemetry . '/12345.json', '{}');
+        chmod($telemetry . '/12345.json', 0600);
+        chmod($telemetry, 0755);
+
+        (new ReflectionMethod(PhpSupervisor::class, 'shutdown'))->invoke($supervisor);
+
+        $this->assertSame([], $this->property($supervisor, 'processes'));
+        $this->assertFileExists($telemetry . '/12345.json');
+        chmod($telemetry, 0700);
     }
 
     private function temporaryDirectory(): string
@@ -763,6 +1686,7 @@ class LaravelSupervisorProductionTest extends TestCase
                 ],
             ],
         ], JSON_THROW_ON_ERROR));
+        chmod($path, 0600);
     }
 
     private function setStartedAt(WorkerTelemetry $telemetry, Job $job, int $startedAt): void

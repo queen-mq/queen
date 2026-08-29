@@ -67,10 +67,11 @@ Scale-down sends `SIGTERM` and moves workers to a separately tracked draining
 set, so the control loop remains responsive while an in-flight job finishes;
 the shared grace deadline still ends with a forced kill when needed. Draining
 workers continue to consume `process_limit` capacity, preventing repeated
-rebalances from exceeding the configured global safety limit. The Rust engine
-targets the worker process group for termination; pause/continue target only
-the Artisan leader so job subprocesses never receive Laravel control signals.
-The PHP engine targets the Artisan worker process itself.
+rebalances from exceeding the configured global safety limit. Both engines
+send graceful termination only to the Artisan leader, allowing an active
+lease-renewal helper to protect the in-flight job; a forced kill targets the
+whole worker process group in the Rust engine. The PHP engine targets the
+Artisan worker process itself.
 
 Runtime files are matched on supervisor, connection and consumer group. The
 `time` strategy combines each matching worker's runtime EWMA using a capped
@@ -111,9 +112,11 @@ php artisan queen:supervisor continue
 php artisan queen:supervisor terminate
 ```
 
-Pause sends `SIGUSR2`, continue sends `SIGCONT`, and terminate initiates a
-graceful `SIGTERM` shutdown. Remaining workers are killed after
-`shutdown_grace`. The Artisan status command also checks the shared lock and
+Pause gracefully drains the current worker generation and starts no replacement
+until `continue`; this prevents a prefetched, leased tail from becoming stale
+during an unbounded operator pause. Continue reconciles fresh workers, while
+terminate initiates a graceful `SIGTERM` shutdown. Remaining workers are killed
+after `shutdown_grace`. The Artisan status command also checks the shared lock and
 adds `live`; a leftover `running`/`paused` document is reported as `stale` when
 no engine owns it.
 Status and commands carry a per-start `instance_id`; a delayed command aimed at
@@ -146,13 +149,21 @@ A minimal systemd service for the Rust engine is:
 Type=simple
 User=app
 Group=app
-WorkingDirectory=/srv/app
+WorkingDirectory=/srv/queen-app/current
 UMask=0077
-ExecStart=/usr/local/bin/queen-supervisor --php /usr/bin/php --artisan artisan
+ExecStart=/srv/queen-app/current/vendor/bin/queen-supervisor --php /usr/bin/php --artisan artisan
 Restart=always
 RestartSec=2
+KillMode=mixed
+SendSIGKILL=yes
 TimeoutStopSec=90
 ```
+
+`KillMode=mixed` sends the initial `SIGTERM` only to the supervisor master, so
+the master can drain each worker without prematurely killing its lease-renewal
+helper; systemd still applies the final `SIGKILL` to the whole cgroup after the
+deadline. Keep `SendSIGKILL=yes`, and set `TimeoutStopSec` strictly above the
+configured `shutdown_grace`.
 
 A complete editable unit is shipped as
 [`dist/queen-supervisor.service.example`](dist/queen-supervisor.service.example);
@@ -164,7 +175,8 @@ For the PHP engine, replace `ExecStart` with
 `terminationGracePeriodSeconds` value greater than `shutdown_grace`.
 
 Both engines currently target Unix. Laravel workers require PHP `pcntl` for
-pause, continue and graceful signal handling. The Rust engine also creates a
+pause, continue and graceful signal handling; the native installer/launcher
+also requires PHP `posix` to enforce file ownership. The Rust engine creates a
 process group per worker so a forced shutdown cannot leave descendants behind.
 If `queen-supervisor` is the container entrypoint, use a real init process
 (Docker `--init`, Compose `init: true`, tini or an equivalent reaper). This is
@@ -192,9 +204,20 @@ file descriptor before any JSON is parsed.
 Keep `state_directory` writable only by the application user. It contains the
 PID lock, local control requests, status, worker PIDs and runtime telemetry; it
 must never be served by the web application or included in public artifacts.
-The Rust engine requires an absolute, non-root path. It creates a missing final
+Both engines require an absolute, non-root path. They create a missing final
 directory with mode `0700`; a pre-existing directory must already be owned by
 the supervisor user with mode `0700` and is never silently re-permissioned.
+Every parent must already exist and be owned by root or the supervisor's
+effective UID. A group/world-writable parent is rejected unless it is sticky
+and owned by root or that UID (root-owned `/tmp` is supported); its child must
+also be root- or effective-UID-owned. The state leaf cannot be a symlink.
+Trusted symlink ancestors are checked before they are resolved and then
+canonicalized once. Acquisition pins the leaf device/inode, and all subsequent
+control/status operations fail closed if that path is renamed or replaced.
+The PHP engine, local CLI control state and Laravel dashboard require
+`ext-posix` to enforce the same ownership policy. A typical Laravel `storage`
+directory using mode `0775` is therefore not a safe parent: configure a private
+`0700` parent or another trusted absolute state path.
 
 ## Build
 
@@ -214,6 +237,19 @@ coordinated with the Laravel package. Composer installs the launcher and
 `queen:supervisor-install`; that installer selects a native binary from the
 manifest for the exact `SupervisorBinary::VERSION`. CI refuses a release unless
 that version, the tag, `Cargo.toml` and `Cargo.lock` all agree.
+
+The installer pins its verified installation-base inode before it creates the
+lock, temporary files or published files; its version smoke and the Composer
+launcher additionally pin the target directory. The intermediate version
+directory must be a real owner-owned directory without shared write access;
+the installer rechecks its device/inode and the target's around publication.
+They compare device/inode, ownership and modes and execute through a relative path. This closes
+ancestor-rename substitution between verification and exec on Unix; processes
+already running under the same effective UID remain trusted.
+The install base cannot be a filesystem root or contain parent traversal. Its
+immediate parent must already exist as a real directory and is pinned before
+Queen creates the final base component. Point a custom install path at the real
+target when the application's `storage/` directory is itself a symlink.
 
 Tags named `supervisor/vX.Y.Z` publish these precompiled archives:
 
