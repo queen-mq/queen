@@ -44,6 +44,24 @@ ignored by Git. The top-level report lists every raw run without cross-profile
 ratios; `reports/<profile>-rNN.{md,json}` contains the paired comparisons for
 each profile and repetition.
 
+Aggregate a repeated campaign only after all lanes have finished:
+
+```console
+python3 scripts/campaign-stats.py results/<campaign> \
+  --baseline horizon \
+  --json-output results/<campaign>/campaign-stats.json \
+  --markdown-output results/<campaign>/campaign-stats.md
+```
+
+The campaign report retains every run, reports median, quartiles, IQR and
+range, and computes deterministic paired-bootstrap 95% confidence intervals
+for candidate/baseline ratios. Pairing is by repetition and is fail-closed:
+missing artifacts, failed correctness or quiescence, sampler errors, OOM, PSS
+gaps, or mismatched workload/environment/resource budgets suppress the ratio
+and are listed explicitly. Bootstrap intervals describe run-to-run variation
+on this host; they are not population guarantees, and fewer than three valid
+pairs are labelled unstable.
+
 ### Controlled optimization factors
 
 The historical behaviour remains the default. Optimization campaigns can vary
@@ -164,6 +182,7 @@ Use the application commands for progress and the common latency summary:
 ```console
 php artisan bench:count <run-id>
 php artisan bench:results <run-id> --expected=10000 --wait=300
+php artisan bench:queue-state --run-id=<run-id> --wait=300
 ```
 
 `bench:results` reports unique completions, raw records, duplicates, maximum
@@ -171,9 +190,37 @@ attempt and nearest-rank p50/p95/p99 values. The raw events remain the source
 of truth. Horizon dashboard latency is not a common metric and must not be
 substituted for these timestamps.
 
+Completion is not the final correctness boundary: a worker writes its result
+before Laravel deletes or acknowledges the job. The automated runner therefore
+requires the normalized queue size (and ready, reserved and delayed components
+when exposed by the driver) to remain zero for one second. The final probe is
+saved as `queue-state.final.json`; a missing, timed-out or non-empty probe makes
+the analyzer's correctness gate fail.
+
 The monotonic timestamps are comparable across processes and containers only
 when they share the same kernel. The supplied Compose environment has that
 property. They are not a distributed-clock protocol.
+
+### Worker crash/recovery diagnostic
+
+`fault-recovery.sh` targets exactly one non-master worker with `SIGKILL`, then
+checks replacement of the process, redelivery of an in-flight job, the exact
+completed job set, container restart/OOM state, and a queue that remains empty
+for the final settle window. Every lane uses a fresh backend and retains its
+timeline, process identities, raw events, queue state, logs and container
+evidence even when the harness fails closed.
+
+```console
+scripts/fault-recovery.sh \
+  --output results/fault-$(date -u +%Y%m%dT%H%M%SZ) \
+  --engines horizon,queen-php,queen-rust --no-build
+```
+
+This is deliberately labelled `diagnostic_smoke`. A single injected crash
+does not estimate a failure probability, completion is recorded before ACK,
+and the fixture has no idempotent external side-effect ledger. Repeat the
+scenario with fixed seeds and report every run; do not describe a clean run as
+proof of exactly-once effects or backend crash durability.
 
 ## Requirements
 
@@ -326,8 +373,8 @@ python3 scripts/analyze.py summarize "results/$RUN_ID" \
 ```
 
 The wrapper fails the sample on a health timeout, missing jobs, duplicates,
-non-one attempts, sampler errors, OOM events or cleanup failure. It never
-silently reuses an artifact directory or backend.
+non-one attempts, a non-quiescent final queue, sampler errors, OOM events or
+cleanup failure. It never silently reuses an artifact directory or backend.
 
 A complete retained run has this shape:
 
@@ -337,6 +384,7 @@ artifacts/<run-id>/
 ├── compose.resolved.yml
 ├── dispatch.json
 ├── events/worker-<pid>.jsonl
+├── queue-state.final.json
 ├── stats.jsonl
 ├── results.json
 └── summary.json
@@ -446,7 +494,9 @@ For results intended for publication:
 8. Publish per-run values plus median and dispersion (IQR or a documented
    confidence interval). A single best run is not a benchmark result.
 
-Horizon performs queue monitoring and metrics writes in Redis, while Queen's
-supervisors write their own runtime telemetry. These are product behaviours,
-not noise to selectively disable. If a second stripped microbenchmark is run,
-label it separately from the production-shaped comparison.
+Horizon performs queue monitoring and metrics writes in Redis. Queen workers
+write runtime telemetry only for the `time` strategy, which consumes it;
+`size` and fixed/simple pools deliberately avoid unused telemetry I/O. These
+are product behaviours, not benchmark-only switches. If a second stripped
+microbenchmark is run, label it separately from the production-shaped
+comparison.

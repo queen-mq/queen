@@ -22,6 +22,7 @@ from typing import Any, Iterable, Sequence
 
 SUMMARY_SCHEMA = "queen.laravel-supervisors.summary/v1"
 REPORT_SCHEMA = "queen.laravel-supervisors.report/v1"
+QUEUE_STATE_SCHEMA = "queen.laravel-supervisors.queue-state/v1"
 FAILURE_WORDS = {"failed", "failure", "error", "exception", "dead", "timeout"}
 ROLE_PRIORITY = {"worker": 5, "orchestrator": 4, "app": 3, "backend": 2, "stack": 1}
 
@@ -720,9 +721,124 @@ def limited_ids(values: Iterable[str], maximum: int) -> dict[str, Any]:
     return {"count": len(ordered), "ids": ordered[:maximum], "truncated": len(ordered) > maximum}
 
 
+def final_queue_state(run_directory: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    path = run_directory / "queue-state.final.json"
+    errors: list[str] = []
+    try:
+        raw = load_object(path)
+    except ValueError as exception:
+        return {
+            "artifact": str(path),
+            "artifact_valid": False,
+            "quiescent": False,
+            "gate_passed": False,
+            "state": {"size": None, "ready": None, "reserved": None, "delayed": None},
+            "supported": {"ready": None, "reserved": None, "delayed": None},
+            "validation_errors": [str(exception)],
+        }
+
+    if raw.get("schema") != QUEUE_STATE_SCHEMA:
+        errors.append(f"schema must be {QUEUE_STATE_SCHEMA}")
+    for key in ("run_id", "connection", "queue"):
+        expected = manifest.get(key)
+        actual = raw.get(key)
+        if not isinstance(actual, str) or not actual:
+            errors.append(f"{key} must be a non-empty string")
+        elif isinstance(expected, str) and actual != expected:
+            errors.append(f"{key} does not match dispatch manifest")
+    if not isinstance(raw.get("implementation"), str) or not raw["implementation"]:
+        errors.append("implementation must be a non-empty string")
+
+    state = raw.get("state")
+    if not isinstance(state, dict):
+        errors.append("state must be an object")
+        state = {}
+    supported = raw.get("supported")
+    if not isinstance(supported, dict):
+        errors.append("supported must be an object")
+        supported = {}
+
+    normalized_state: dict[str, int | None] = {}
+    size = nonnegative_integer(state.get("size"))
+    normalized_state["size"] = size
+    if size is None:
+        errors.append("state.size must be a non-negative integer")
+    elif size != 0:
+        errors.append("state.size is not zero")
+
+    normalized_supported: dict[str, bool | None] = {}
+    for label in ("ready", "reserved", "delayed"):
+        is_supported = supported.get(label)
+        normalized_supported[label] = is_supported if isinstance(is_supported, bool) else None
+        if not isinstance(is_supported, bool):
+            errors.append(f"supported.{label} must be boolean")
+        count = nonnegative_integer(state.get(label))
+        normalized_state[label] = count
+        if is_supported is True:
+            if count is None:
+                errors.append(f"state.{label} must be a non-negative integer when supported")
+            elif count != 0:
+                errors.append(f"state.{label} is not zero")
+
+    probe_errors = raw.get("probe_errors")
+    if not isinstance(probe_errors, list) or any(not isinstance(value, str) for value in probe_errors):
+        errors.append("probe_errors must be a list of strings")
+        probe_errors = []
+    elif probe_errors:
+        errors.append("final queue probe contains errors")
+
+    checks = nonnegative_integer(raw.get("checks"))
+    if checks is None or checks < 1:
+        errors.append("checks must be a positive integer")
+    settle_ns = nonnegative_integer(raw.get("settle_ns"))
+    settled_for_ns = nonnegative_integer(raw.get("settled_for_ns"))
+    if settle_ns is None:
+        errors.append("settle_ns must be a non-negative integer")
+    if settled_for_ns is None:
+        errors.append("settled_for_ns must be a non-negative integer")
+    elif settle_ns is not None and settled_for_ns < settle_ns:
+        errors.append("queue was not empty for the required settle interval")
+
+    started_at_ns = nonnegative_integer(raw.get("started_at_ns"))
+    finished_at_ns = nonnegative_integer(raw.get("finished_at_ns"))
+    elapsed_ns = nonnegative_integer(raw.get("elapsed_ns"))
+    if started_at_ns is None or finished_at_ns is None or elapsed_ns is None:
+        errors.append("queue observation timestamps must be non-negative integers")
+    elif finished_at_ns < started_at_ns or elapsed_ns != finished_at_ns - started_at_ns:
+        errors.append("queue observation timestamps are inconsistent")
+
+    quiescent = raw.get("quiescent") is True
+    if not quiescent:
+        errors.append("queue did not reach quiescence")
+    if raw.get("timed_out") is not False:
+        errors.append("queue observation timed out")
+
+    artifact_valid = not errors
+    return {
+        "artifact": str(path),
+        "artifact_valid": artifact_valid,
+        "quiescent": quiescent,
+        "gate_passed": artifact_valid and quiescent,
+        "run_id": raw.get("run_id"),
+        "connection": raw.get("connection"),
+        "queue": raw.get("queue"),
+        "implementation": raw.get("implementation"),
+        "state": normalized_state,
+        "supported": normalized_supported,
+        "checks": checks,
+        "elapsed_ns": elapsed_ns,
+        "settle_ns": settle_ns,
+        "settled_for_ns": settled_for_ns,
+        "probe_error_count": nonnegative_integer(raw.get("probe_error_count")),
+        "last_probe_error": raw.get("last_probe_error"),
+        "validation_errors": errors,
+    }
+
+
 def summarize_run(run_directory: Path, maximum_ids: int = 100) -> dict[str, Any]:
     manifest = load_object(run_directory / "dispatch.json")
     events = event_snapshot(run_directory, manifest)
+    queue_state = final_queue_state(run_directory, manifest)
     expected = events["expected"]
     selected: dict[str, dict[str, Any]] = events["selected"]
     completions: dict[str, list[dict[str, Any]]] = events["completions"]
@@ -905,6 +1021,7 @@ def summarize_run(run_directory: Path, maximum_ids: int = 100) -> dict[str, Any]
         and bool(samples)
         and oom_events == 0
         and pss_complete
+        and queue_state["gate_passed"]
     )
 
     return {
@@ -941,7 +1058,9 @@ def summarize_run(run_directory: Path, maximum_ids: int = 100) -> dict[str, Any]
             "max_attempt": max_attempt,
             "attempt_records": len(attempts),
             "attempts_valid": attempts_valid,
+            "queue_quiescent": queue_state["gate_passed"],
         },
+        "queue_state": queue_state,
         "throughput": {
             "headline_jobs_per_second": duration_rate(len(selected), dispatch_to_complete_ns),
             "dispatch_to_last_completion_ns": dispatch_to_complete_ns,
@@ -1155,24 +1274,34 @@ def orchestrator_memory(summary: dict[str, Any]) -> tuple[str, Any]:
     return "rss", value_at(resources, "rss_bytes", "max")
 
 
+def summary_is_correct(summary: dict[str, Any]) -> bool:
+    return (
+        value_at(summary, "correctness", "correct") is True
+        and value_at(summary, "queue_state", "gate_passed") is True
+    )
+
+
 def markdown_report(report: dict[str, Any]) -> str:
     lines = [
         "# Laravel supervisor benchmark",
         "",
-        "Correctness is a gate: resource and latency comparisons are not valid for incomplete, duplicate or failed runs.",
+        "Correctness is a gate: resource and latency comparisons are not valid for incomplete, duplicate, failed or non-quiescent runs.",
         "",
-        "| Scenario | Correct | Completed | Missing | Duplicates | Failed | jobs/s | E2E p50 ms | p95 ms | p99 ms | Peak workers | To peak s | Return s |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Scenario | Correct | Queue idle | Queue size | Completed | Missing | Duplicates | Failed | jobs/s | E2E p50 ms | p95 ms | p99 ms | Peak workers | To peak s | Return s |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for scenario in report["scenarios"]:
         summary = scenario["summary"]
         correctness = summary["correctness"]
+        queue_state = summary.get("queue_state", {})
         latency = summary["latency"]["end_to_end"]
         scaling = summary["scaling"]
         lines.append(
-            "| {label} | {correct} | {completed}/{expected} | {missing} | {duplicates} | {failed} | {rate} | {p50} | {p95} | {p99} | {peak} | {to_peak} | {drain} |".format(
+            "| {label} | {correct} | {queue_idle} | {queue_size} | {completed}/{expected} | {missing} | {duplicates} | {failed} | {rate} | {p50} | {p95} | {p99} | {peak} | {to_peak} | {drain} |".format(
                 label=scenario["label"].replace("|", "\\|"),
-                correct="yes" if correctness["correct"] else "NO",
+                correct="yes" if summary_is_correct(summary) else "NO",
+                queue_idle="yes" if queue_state.get("gate_passed") is True else "NO",
+                queue_size=decimal(value_at(queue_state, "state", "size"), 0),
                 completed=correctness["unique_completed"],
                 expected=correctness["expected"],
                 missing=correctness["missing"]["count"],
@@ -1260,6 +1389,7 @@ def report_command(args: argparse.Namespace) -> int:
         return 2
 
     baseline_summary = scenarios[0]["summary"]
+    baseline_correct = summary_is_correct(baseline_summary)
     baseline_memory_metric, baseline_memory = orchestrator_memory(baseline_summary)
     comparisons: list[dict[str, Any]] = []
     for scenario in [] if args.no_comparisons else scenarios[1:]:
@@ -1268,33 +1398,35 @@ def report_command(args: argparse.Namespace) -> int:
         comparable_memory_metric = (
             baseline_memory_metric if baseline_memory_metric == scenario_memory_metric else None
         )
+        comparison_eligible = baseline_correct and summary_is_correct(summary)
         comparisons.append(
             {
                 "label": scenario["label"],
+                "eligible": comparison_eligible,
                 "throughput_ratio": ratio(
                     value_at(summary, "throughput", "headline_jobs_per_second"),
                     value_at(baseline_summary, "throughput", "headline_jobs_per_second"),
-                ),
+                ) if comparison_eligible else None,
                 "end_to_end_p95_ratio": ratio(
                     value_at(summary, "latency", "end_to_end", "p95_ms"),
                     value_at(baseline_summary, "latency", "end_to_end", "p95_ms"),
-                ),
+                ) if comparison_eligible else None,
                 "orchestrator_cpu_ratio": ratio(
                     value_at(summary, "resources", "orchestrator", "cpu_seconds"),
                     value_at(baseline_summary, "resources", "orchestrator", "cpu_seconds"),
-                ),
+                ) if comparison_eligible else None,
                 "orchestrator_peak_memory_ratio": ratio(scenario_memory, baseline_memory)
-                if comparable_memory_metric is not None
+                if comparable_memory_metric is not None and comparison_eligible
                 else None,
-                "orchestrator_memory_metric": comparable_memory_metric,
+                "orchestrator_memory_metric": comparable_memory_metric if comparison_eligible else None,
                 "app_cpu_ratio": ratio(
                     value_at(summary, "resources", "app", "cpu_seconds"),
                     value_at(baseline_summary, "resources", "app", "cpu_seconds"),
-                ),
+                ) if comparison_eligible else None,
                 "app_peak_memory_ratio": ratio(
                     value_at(summary, "resources", "app", "memory_current_bytes", "max"),
                     value_at(baseline_summary, "resources", "app", "memory_current_bytes", "max"),
-                ),
+                ) if comparison_eligible else None,
             }
         )
     report = {
@@ -1302,7 +1434,7 @@ def report_command(args: argparse.Namespace) -> int:
         "baseline": scenarios[0]["label"],
         "scenarios": scenarios,
         "comparisons": comparisons,
-        "all_correct": all(item["summary"]["correctness"]["correct"] for item in scenarios),
+        "all_correct": all(summary_is_correct(item["summary"]) for item in scenarios),
     }
     markdown = markdown_report(report)
     if args.output:

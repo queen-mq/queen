@@ -42,7 +42,13 @@ attempt, workload checksum and sink-lock wait. The run can be polled with:
 ```console
 php artisan bench:count example
 php artisan bench:results example --expected=1000 --wait=300
+php artisan bench:queue-state --run-id=example --wait=300
 ```
+
+`bench:queue-state` waits until the connection's portable `size()` and every
+available ready, reserved and delayed count remain zero for the settle window.
+The campaign stores its JSON output as `queue-state.final.json`; the analyzer
+requires that artifact before a run can be correct.
 
 `hrtime()` values are comparable only while all containers share one kernel,
 which is true for the local Compose campaign. Use a fresh run identifier and

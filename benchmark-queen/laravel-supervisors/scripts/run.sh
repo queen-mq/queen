@@ -415,6 +415,7 @@ export BENCHMARK_QUEEN_BULK_BATCH="$QUEEN_BULK_BATCH"
 export BENCHMARK_QUEEN_PARTITIONS="$QUEEN_PARTITIONS"
 export BENCHMARK_QUEEN_POP_FUSION="$QUEEN_POP_FUSION"
 export BENCHMARK_SAMPLE_INTERVAL="$SAMPLE_INTERVAL"
+export BENCHMARK_POST_DRAIN="$POST_DRAIN_SECONDS"
 export BENCHMARK_STRATEGY="$SCALING_STRATEGY"
 export BENCHMARK_BALANCE_COOLDOWN="$BALANCE_COOLDOWN"
 export BENCHMARK_BALANCE_MAX_SHIFT="$BALANCE_MAX_SHIFT"
@@ -456,6 +457,20 @@ settings = {
     "queen_partitions": int(os.environ["BENCHMARK_QUEEN_PARTITIONS"]),
     "queen_pop_fusion": os.environ["BENCHMARK_QUEEN_POP_FUSION"] == "1",
     "sample_interval_seconds": float(os.environ["BENCHMARK_SAMPLE_INTERVAL"]),
+    "post_drain_seconds_by_profile": {
+        profile: (
+            int(os.environ["BENCHMARK_POST_DRAIN"])
+            if os.environ["BENCHMARK_POST_DRAIN"] != "auto"
+            else (
+                int(os.environ["BENCHMARK_BALANCE_COOLDOWN"])
+                * (int(os.environ["BENCHMARK_MAX_WORKERS"]) - int(os.environ["BENCHMARK_MIN_WORKERS"]))
+                + 2
+                if profile == "auto"
+                else 2
+            )
+        )
+        for profile in os.environ["BENCHMARK_PROFILES"].split(",")
+    },
     "autoscaling_strategy": os.environ["BENCHMARK_STRATEGY"],
     "balance_cooldown_seconds": int(os.environ["BENCHMARK_BALANCE_COOLDOWN"]),
     "balance_max_shift": int(os.environ["BENCHMARK_BALANCE_MAX_SHIFT"]),
@@ -654,8 +669,38 @@ run_lane() {
         sleep "$post_drain"
     fi
 
+    # Freeze resource evidence before the correctness probe. The probe can be
+    # richer (and therefore costlier) on Queen than on Redis; sampling it would
+    # turn the observer itself into a backend CPU result.
     docker stop --time 10 "$CURRENT_MONITOR" >/dev/null
     CURRENT_MONITOR=""
+
+    # A completion record is written before Laravel deletes/acknowledges the
+    # job. Require the backend to remain empty for one second so a lane cannot
+    # pass with a live reservation, delayed retry or ready job left behind.
+    # Probe only after the measured post-drain window: queue introspection is
+    # instrumentation and must not bias backend CPU against richer drivers.
+    if [ "$completion_status" -eq 0 ]; then
+        quiescence_wait="$WAIT_TIMEOUT"
+        quiescence_settle_ms=1000
+    else
+        # Preserve a diagnostic snapshot without adding another full timeout
+        # to a run which has already failed its completion gate.
+        quiescence_wait=0
+        quiescence_settle_ms=0
+    fi
+    set +e
+    producer php artisan bench:queue-state --no-ansi \
+        --run-id="$run_id" \
+        --connection="$BENCH_CONNECTION" \
+        --queue="$BENCH_QUEUE" \
+        --wait="$quiescence_wait" \
+        --poll-ms=100 \
+        --settle-ms="$quiescence_settle_ms" \
+        >"${CURRENT_HOST_RUN}/queue-state.final.json"
+    quiescence_status=$?
+    set -e
+
     docker run --rm --user 0:0 \
         --mount "type=volume,src=${CURRENT_STATS_VOLUME},dst=/from,readonly" \
         --mount "type=bind,src=${CURRENT_HOST_RUN},dst=/to" \
@@ -667,13 +712,22 @@ run_lane() {
         --mount "type=bind,src=${CURRENT_HOST_RUN},dst=/to" \
         "$APP_IMAGE" sh -ceu 'cp -a "/from/$1/." /to/' sh "$run_id"
 
+    set +e
     python3 "${SCRIPT_DIR}/analyze.py" summarize "$CURRENT_HOST_RUN" \
         --output "${CURRENT_HOST_RUN}/summary.json"
+    analysis_status=$?
+    set -e
     REPORT_INPUTS+=("${engine}-${profile}-${repetition_label}=${CURRENT_HOST_RUN}")
 
     finish_lane
     if [ "$completion_status" -ne 0 ]; then
         die "$run_id did not complete all $JOBS jobs; inspect ${CURRENT_HOST_RUN}"
+    fi
+    if [ "$quiescence_status" -ne 0 ]; then
+        die "$run_id did not reach queue quiescence; inspect ${CURRENT_HOST_RUN}/queue-state.final.json"
+    fi
+    if [ "$analysis_status" -ne 0 ]; then
+        die "$run_id failed analysis; inspect ${CURRENT_HOST_RUN}/summary.json"
     fi
 }
 
