@@ -378,7 +378,13 @@ class QueenQueue extends BaseQueue implements QueueContract
             return null;
         }
 
-        $this->registerPopBatch($messages);
+        // Batch accounting exists only to know when deferred ACKs must flush.
+        // The production-safe synchronous path handles every delivery before
+        // returning to pop(), so allocating keys/counters for it is pure hot-
+        // path overhead.
+        if ($this->ackBatch > 1) {
+            $this->registerPopBatch($messages);
+        }
         if (count($messages) > 1) {
             $this->prefetched[$queue] = ['messages' => $messages, 'next' => 1];
         }

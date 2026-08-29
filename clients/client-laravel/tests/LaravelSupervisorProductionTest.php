@@ -188,6 +188,40 @@ class LaravelSupervisorProductionTest extends TestCase
         $this->assertFileDoesNotExist($stale);
     }
 
+    public function testPhpSupervisorOnlyReadsRuntimeTelemetryForTimeStrategy(): void
+    {
+        $stateDirectory = $this->temporaryDirectory();
+        $supervisor = new PhpSupervisor(
+            $this->createStub(QueueManager::class),
+            [
+                'state_directory' => $stateDirectory,
+                'telemetry_ttl' => 60,
+            ],
+        );
+        $options = [
+            'strategy' => 'size',
+            'connection' => 'queen-eu',
+            'consumer_group' => 'orders-v1',
+        ];
+
+        $method = new ReflectionMethod(PhpSupervisor::class, 'observedRuntimes');
+        $this->assertSame([], $method->invoke($supervisor, 'orders', $options));
+        $this->assertDirectoryDoesNotExist($stateDirectory . '/telemetry');
+
+        $telemetryDirectory = (new SupervisorState($stateDirectory))->telemetryDirectory();
+        $this->writeTelemetry($telemetryDirectory . '/matching.json', [
+            'supervisor' => 'orders',
+            'connection' => 'queen-eu',
+            'consumer_group' => 'orders-v1',
+        ], 2, 4.0);
+        $options['strategy'] = 'time';
+
+        $this->assertSame(['high' => 4.0], $method->invoke($supervisor, 'orders', $options));
+
+        $options['balance'] = 'simple';
+        $this->assertSame([], $method->invoke($supervisor, 'orders', $options));
+    }
+
     public function testWorkerTelemetryPublishesScopedEwma(): void
     {
         $directory = $this->temporaryDirectory();
@@ -265,6 +299,7 @@ class LaravelSupervisorProductionTest extends TestCase
             'consumer_group' => 'orders-v1',
             'queues' => ['high', 'default'],
             'balance' => 'off',
+            'strategy' => 'time',
             'sleep' => 0,
             'timeout' => 30,
             'tries' => 3,
@@ -290,6 +325,53 @@ class LaravelSupervisorProductionTest extends TestCase
         $this->assertSame('31', $document['retry_after']);
         $this->assertSame('0', $document['block_for']);
         $this->assertSame($stateDirectory . '/telemetry', $document['telemetry_directory']);
+    }
+
+    public function testPhpSupervisorDoesNotExposeTelemetryToSizeOrFixedSimpleWorkers(): void
+    {
+        $stateDirectory = $this->temporaryDirectory();
+        $supervisor = new PhpSupervisor(
+            $this->createStub(QueueManager::class),
+            [
+                'state_directory' => $stateDirectory,
+                'cwd' => dirname(__DIR__),
+                'php_binary' => PHP_BINARY,
+                'artisan' => __DIR__ . '/Fixtures/FakeArtisan.php',
+                'shutdown_grace' => 1,
+            ],
+        );
+        $options = [
+            'connection' => 'queen-eu',
+            'consumer_group' => 'orders-v1',
+            'queues' => ['high', 'default'],
+            'balance' => 'simple',
+            'strategy' => 'time',
+            'sleep' => 0,
+            'timeout' => 30,
+            'tries' => 3,
+            'memory' => 128,
+            'backoff' => 0,
+            'max_jobs' => 0,
+            'max_time' => 0,
+            'rest' => 0,
+            'force' => false,
+        ];
+
+        $previous = getenv('QUEEN_SUPERVISOR_TELEMETRY_DIR');
+        putenv('QUEEN_SUPERVISOR_TELEMETRY_DIR=/tmp/inherited-queen-telemetry');
+        try {
+            $method = new ReflectionMethod(PhpSupervisor::class, 'startWorker');
+            $process = $method->invoke($supervisor, 'orders', 'high', $options);
+            $this->assertSame(0, $process->wait());
+        } finally {
+            putenv(is_string($previous)
+                ? 'QUEEN_SUPERVISOR_TELEMETRY_DIR=' . $previous
+                : 'QUEEN_SUPERVISOR_TELEMETRY_DIR');
+        }
+        $document = json_decode(trim($process->getOutput()), true, 512, JSON_THROW_ON_ERROR);
+
+        $this->assertFalse($document['telemetry_directory']);
+        $this->assertDirectoryDoesNotExist($stateDirectory . '/telemetry');
     }
 
     public function testPhpSupervisorUsesTheV2ReadOnlyConnectionInsteadOfTheWorkerClient(): void

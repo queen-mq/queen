@@ -93,11 +93,7 @@ final class PhpSupervisor
                             );
                         }
                         $depths = $this->depths($options);
-                        $runtimes = $this->telemetry->runtimes(
-                            $this->state->telemetryDirectory(),
-                            $this->config['telemetry_ttl'],
-                            ['supervisor' => $name, 'connection' => $options['connection'], 'consumer_group' => $options['consumer_group']],
-                        );
+                        $runtimes = $this->observedRuntimes($name, $options);
                         $desired = $this->scaler->desired($options, $depths, $runtimes);
                         $this->lastDesired[$name] = $desired;
                     } catch (\Throwable $error) {
@@ -196,6 +192,20 @@ final class PhpSupervisor
             $ordered[$queue] = $depths[$queue];
         }
         return $ordered;
+    }
+
+    /** @return array<string, float> */
+    private function observedRuntimes(string $name, array $options): array
+    {
+        if (($options['strategy'] ?? 'size') !== 'time' || ($options['balance'] ?? 'auto') === 'simple') {
+            return [];
+        }
+
+        return $this->telemetry->runtimes(
+            $this->state->telemetryDirectory(),
+            $this->config['telemetry_ttl'],
+            ['supervisor' => $name, 'connection' => $options['connection'], 'consumer_group' => $options['consumer_group']],
+        );
     }
 
     private function depthClient(string $connectionName): Queen
@@ -312,7 +322,11 @@ final class PhpSupervisor
         }
 
         $environment = [
-            'QUEEN_SUPERVISOR_TELEMETRY_DIR' => $this->state->telemetryDirectory(),
+            // `false` also removes a value inherited by the supervisor.
+            'QUEEN_SUPERVISOR_TELEMETRY_DIR' => ($options['strategy'] ?? 'size') === 'time'
+                && ($options['balance'] ?? 'auto') !== 'simple'
+                ? $this->state->telemetryDirectory()
+                : false,
             'QUEEN_LARAVEL_CONSUMER_GROUP' => $options['consumer_group'],
             'QUEEN_LARAVEL_CONNECTION' => $options['connection'],
             'QUEEN_LARAVEL_SUPERVISOR' => $name,

@@ -12,6 +12,7 @@ class QueenJob extends Job implements JobContract
     private ?\Throwable $failureException = null;
     private ?string $manualRetryId = null;
     private ?string $rawBody = null;
+    private ?array $decodedPayload = null;
 
     public function __construct(
         Container $container,
@@ -59,8 +60,34 @@ class QueenJob extends Job implements JobContract
     {
         $this->failureException = $e;
         $this->manualRetryId ??= Uuid::v7();
+        // getRawBody() now decorates the payload with the stable manual-retry
+        // hand-off. Do not let an earlier worker metadata lookup retain the
+        // undecorated decoded value through Laravel's failure pipeline.
+        $this->decodedPayload = null;
 
         parent::fail($e);
+    }
+
+    public function payload(): array
+    {
+        // Laravel asks for the same decoded payload repeatedly while resolving
+        // timeout, tries, retry-until, handler metadata and the job id. Queen's
+        // message is immutable for a delivery and Guzzle normally gave us an
+        // array already, so avoid both a JSON encode and every repeated decode.
+        if ($this->decodedPayload !== null) {
+            return $this->decodedPayload;
+        }
+        $data = $this->message['data'] ?? $this->message['payload'] ?? [];
+        if ($this->manualRetryId === null && is_array($data)) {
+            return $this->decodedPayload = $data;
+        }
+
+        return $this->decodedPayload = json_decode(
+            $this->getRawBody(),
+            true,
+            512,
+            JSON_THROW_ON_ERROR,
+        );
     }
 
     public function attempts(): int

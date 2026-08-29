@@ -443,15 +443,7 @@ fn run(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     continue;
                 }
-                let runtimes = read_runtimes(
-                    &Path::new(&config.state_directory).join("telemetry"),
-                    config.telemetry_ttl,
-                    TelemetryScope {
-                        supervisor: &name,
-                        connection: &options.connection,
-                        consumer_group: &options.consumer_group,
-                    },
-                );
+                let runtimes = supervisor_runtimes(&config, &name, options);
                 let raw = desired(options, &depths, &runtimes);
                 let current = current_allocation(&pools, &name, options);
                 let target = stabilize_desired(
@@ -1265,6 +1257,27 @@ fn fail_open_desired(options: &SupervisorConfig) -> HashMap<String, usize> {
     )
 }
 
+fn supervisor_runtimes(
+    config: &Config,
+    name: &str,
+    options: &SupervisorConfig,
+) -> HashMap<String, f64> {
+    if options.strategy != "time" || options.balance == "simple" {
+        return HashMap::new();
+    }
+
+    let directory = Path::new(&config.state_directory).join("telemetry");
+    read_runtimes(
+        &directory,
+        config.telemetry_ttl,
+        TelemetryScope {
+            supervisor: name,
+            connection: &options.connection,
+            consumer_group: &options.consumer_group,
+        },
+    )
+}
+
 fn read_runtimes(directory: &Path, ttl: u64, scope: TelemetryScope<'_>) -> HashMap<String, f64> {
     let mut totals: HashMap<String, f64> = HashMap::new();
     let mut samples: HashMap<String, u64> = HashMap::new();
@@ -1728,13 +1741,16 @@ fn worker_command(config: &Config, name: &str, queue: &str, o: &SupervisorConfig
         .env("QUEEN_LARAVEL_CONNECTION", &o.connection)
         .env("QUEEN_LARAVEL_SUPERVISOR", name)
         .env("QUEEN_LARAVEL_RETRY_AFTER", o.retry_after.to_string())
-        .env(
-            "QUEEN_SUPERVISOR_TELEMETRY_DIR",
-            Path::new(&config.state_directory).join("telemetry"),
-        )
+        .env_remove("QUEEN_SUPERVISOR_TELEMETRY_DIR")
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    if o.strategy == "time" && o.balance != "simple" {
+        command.env(
+            "QUEEN_SUPERVISOR_TELEMETRY_DIR",
+            Path::new(&config.state_directory).join("telemetry"),
+        );
+    }
     if o.force {
         command.arg("--force");
     }
@@ -2175,6 +2191,49 @@ mod tests {
     }
 
     #[test]
+    fn worker_telemetry_is_only_enabled_for_time_strategy() {
+        let size_config = config(options("simple"));
+        let size_command = worker_command(
+            &size_config,
+            "default",
+            "high",
+            &size_config.supervisors["default"],
+        );
+        assert!(size_command.get_envs().any(|(name, value)| {
+            name == std::ffi::OsStr::new("QUEEN_SUPERVISOR_TELEMETRY_DIR") && value.is_none()
+        }));
+
+        let mut time_options = options("auto");
+        time_options.strategy = "time".into();
+        let time_config = config(time_options);
+        let time_command = worker_command(
+            &time_config,
+            "default",
+            "high",
+            &time_config.supervisors["default"],
+        );
+        let telemetry = time_command
+            .get_envs()
+            .find(|(name, _)| *name == std::ffi::OsStr::new("QUEEN_SUPERVISOR_TELEMETRY_DIR"))
+            .and_then(|(_, value)| value);
+        let expected = Path::new(&time_config.state_directory).join("telemetry");
+        assert_eq!(telemetry, Some(expected.as_os_str()));
+
+        let mut fixed_time_options = options("simple");
+        fixed_time_options.strategy = "time".into();
+        let fixed_time_config = config(fixed_time_options);
+        let fixed_time_command = worker_command(
+            &fixed_time_config,
+            "default",
+            "high",
+            &fixed_time_config.supervisors["default"],
+        );
+        assert!(fixed_time_command.get_envs().any(|(name, value)| {
+            name == std::ffi::OsStr::new("QUEEN_SUPERVISOR_TELEMETRY_DIR") && value.is_none()
+        }));
+    }
+
+    #[test]
     fn time_strategy_uses_runtime_pressure() {
         let mut options = options("auto");
         options.strategy = "time".into();
@@ -2227,6 +2286,39 @@ mod tests {
         let expected = (4.0 * 2.0 + 10.0 * 100.0) / 102.0;
         assert!((runtimes["high"] - expected).abs() < 1e-12);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn supervisor_only_reads_runtime_telemetry_for_time_strategy() {
+        let state_directory = temporary_directory("telemetry-strategy");
+        let telemetry_directory = state_directory.join("telemetry");
+        fs::create_dir(&telemetry_directory).unwrap();
+        write_telemetry(
+            &telemetry_directory,
+            "worker.json",
+            "default",
+            "queen",
+            "workers",
+            2,
+            4.0,
+        );
+
+        let mut size_config = config(options("simple"));
+        size_config.state_directory = state_directory.to_string_lossy().into_owned();
+        assert!(
+            supervisor_runtimes(&size_config, "default", &size_config.supervisors["default"],)
+                .is_empty()
+        );
+
+        let mut time_options = options("auto");
+        time_options.strategy = "time".into();
+        let mut time_config = config(time_options);
+        time_config.state_directory = state_directory.to_string_lossy().into_owned();
+        let runtimes =
+            supervisor_runtimes(&time_config, "default", &time_config.supervisors["default"]);
+        assert_eq!(runtimes, HashMap::from([("high".into(), 4.0)]));
+
+        fs::remove_dir_all(state_directory).unwrap();
     }
 
     #[test]

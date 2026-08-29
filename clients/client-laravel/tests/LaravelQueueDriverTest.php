@@ -315,6 +315,9 @@ class LaravelQueueDriverTest extends TestCase
             $failedBody = $event->job->getRawBody();
         });
         $job = $queue->pop('emails');
+        // Exercise failure after Laravel has already decoded worker metadata;
+        // Queen must invalidate that cache before adding retry provenance.
+        $job->payload();
         $job->fail(new \RuntimeException('failed intentionally'));
 
         $payload = json_decode($failedBody, true, 512, JSON_THROW_ON_ERROR);
@@ -351,6 +354,12 @@ class LaravelQueueDriverTest extends TestCase
         $this->assertSame('job-123', $job->getJobId());
         $this->assertSame(3, $job->attempts());
         $this->assertSame($this->payload('job-123'), json_decode($job->getRawBody(), true));
+        $this->assertSame($this->payload('job-123'), $job->payload());
+
+        $message = new \ReflectionProperty(QueenJob::class, 'message');
+        $changed = $this->popResponse($this->payload('changed'))['messages'][0];
+        $message->setValue($job, $changed);
+        $this->assertSame($this->payload('job-123'), $job->payload());
 
         parse_str($handler->requests[0]->getUri()->getQuery(), $query);
         $this->assertSame('/api/v1/pop/queue/emails', $handler->requests[0]->getUri()->getPath());
