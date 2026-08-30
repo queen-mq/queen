@@ -51,6 +51,7 @@ class QueenQueue extends BaseQueue implements QueueContract
         private int $prefetch = 1,
         private int $ackBatch = 1,
         private int $bulkBatch = 100,
+        private bool $popAutopilot = false,
         private ?LeaseRenewer $leaseRenewer = null,
         private ?\Closure $failedJobRetryHandler = null,
     ) {
@@ -416,7 +417,13 @@ class QueenQueue extends BaseQueue implements QueueContract
             ->conflation(false)
             ->subscriptionMode('all')
             ->batch($this->prefetch)
-            ->partitions($this->partitionCount)
+            // Only the sweep width is ever delegated. The batch stays pinned to
+            // prefetch because the local prefetch buffer, the ack_batch bound
+            // and the lease budget are all sized from it, and partitionCount
+            // keeps striping pushes either way. partitions(0) is the builder's
+            // "unset" spelling, which is what makes the broker size it.
+            ->partitions($this->popAutopilot ? 0 : $this->partitionCount)
+            ->autopilot($this->popAutopilot)
             ->autoAck(false)
             ->leaseSeconds($this->retryAfter)
             ->wait($this->blockFor > 0)

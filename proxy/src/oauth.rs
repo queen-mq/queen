@@ -208,10 +208,11 @@ async fn establish_session(st: &St, headers: &HeaderMap, user: UserRef, next: &s
 /// they run out their `SESSION_TOKEN_TTL_S` (15 min).
 async fn logout(State(st): State<St>, headers: HeaderMap) -> Response {
     revoke_presented_session(&st, &headers).await;
-    let cookie = clear_cookie(&st, &headers);
     let mut resp = json_response(StatusCode::OK, json!({ "ok": true }));
-    if let Ok(v) = HeaderValue::from_str(&cookie) {
-        resp.headers_mut().insert(header::SET_COOKIE, v);
+    for cookie in clear_cookies(&st, &headers) {
+        if let Ok(v) = HeaderValue::from_str(&cookie) {
+            resp.headers_mut().append(header::SET_COOKIE, v);
+        }
     }
     resp
 }
@@ -223,7 +224,7 @@ async fn logout(State(st): State<St>, headers: HeaderMap) -> Response {
 /// looking logged in). A failed DB call is warned, not surfaced: the cookie is
 /// cleared either way.
 async fn revoke_presented_session(st: &St, headers: &HeaderMap) {
-    let Some(tok) = read_cookie(headers, &st.cfg.cookie_name) else { return };
+    let Some(tok) = presented_session(st, headers) else { return };
     let Ok(claims) = st.keys.verify_jwt_claims(&tok) else { return };
     let Some(pool) = st.db.as_ref() else { return };
     let Ok(client) = pool.get().await else {
@@ -293,7 +294,7 @@ async fn me(State(st): State<St>, headers: HeaderMap) -> Response {
     // Cookie only: `/auth/me` describes the BROWSER's session. A bearer would
     // answer the same, but the SPA boots from the cookie and keeping one
     // source here avoids reporting a session the browser does not hold.
-    let Some(tok) = read_cookie(&headers, &st.cfg.cookie_name) else {
+    let Some(tok) = presented_session(&st, &headers) else {
         return errors::err_401("no session");
     };
     let claims = match st.keys.verify_jwt_claims(&tok) {
@@ -433,7 +434,7 @@ async fn session_token(
         let presented = q.token.as_deref().unwrap_or("").trim();
         return establish_handoff(&st, &headers, presented, q.next.as_deref()).await;
     }
-    let Some(tok) = read_cookie(&headers, &st.cfg.cookie_name) else {
+    let Some(tok) = presented_session(&st, &headers) else {
         return errors::err_401("no session");
     };
     let claims = match st.keys.verify_jwt_claims(&tok) {
@@ -556,14 +557,33 @@ async fn establish_handoff(
         return handoff_refused();
     }
     tracing::info!(target: "oauth", jti = %jti, ttl_s = max_age_s, "console handoff accepted");
-    let cookie = build_session_cookie(
-        &st.cfg.cookie_name,
-        token,
-        st.cfg.cookie_domain.as_deref(),
-        cookie_is_secure(st, headers),
-        max_age_s,
-    );
+    // The adopted token goes in a CELL-SCOPED cookie, never the fleet one.
+    //
+    // It names this cell in `aud` and every sibling enforces its own, so
+    // writing it to the fleet cookie — which is what this used to do — REPLACED
+    // the browser's `.queenmq.cloud` session with a credential only this host
+    // accepts, and every sibling console answered 401 BadAudience until the
+    // next portal login. Harmless on a one-cell fleet, wrong with two.
+    // `auth::cell_cookie_name_of` carries the rest of the argument.
+    let secure = cookie_is_secure(st, headers);
+    let cookie = handoff_cookie(&st.cfg.cookie_name, token, secure, max_age_s);
     no_store(redirect(StatusCode::SEE_OTHER, &next, Some(&cookie)))
+}
+
+/// The `Set-Cookie` an accepted handoff emits. Pure, so the shape the handler
+/// ships is the shape the tests pin — the attributes ARE the fix, and a test
+/// that rebuilt them beside the handler would keep passing while the handler
+/// drifted back to the fleet cookie.
+fn handoff_cookie(fleet_name: &str, token: &str, secure: bool, max_age_s: u64) -> String {
+    build_session_cookie(
+        &crate::auth::cell_cookie_name_of(fleet_name, secure),
+        token,
+        // No `Domain`: host-only is what keeps the siblings' cookie intact, and
+        // it is also what `__Host-` requires of the name above.
+        None,
+        secure,
+        max_age_s,
+    )
 }
 
 /// One answer for every rejected handoff: a 401 on the errors contract, and
@@ -1407,7 +1427,12 @@ fn redirect_uri(st: &St, headers: &HeaderMap, provider: &str) -> Option<String> 
 
 /// Secure flag: set when the edge terminated TLS (X-Forwarded-Proto=https) or a
 /// cookie Domain is configured (cloud is always HTTPS behind Cloudflare).
-fn cookie_is_secure(st: &St, headers: &HeaderMap) -> bool {
+///
+/// `pub(crate)` because it also picks which of the two cell-cookie names a
+/// request is read under (`auth::cell_cookie_name_of`): the name a session is
+/// SET under and the name it is READ under must be derived the same way, or a
+/// handoff would set a cookie nothing ever looks for.
+pub(crate) fn cookie_is_secure(st: &St, headers: &HeaderMap) -> bool {
     st.cfg.cookie_domain.is_some()
         || header_str(headers, "x-forwarded-proto").map(|v| v.eq_ignore_ascii_case("https")).unwrap_or(false)
 }
@@ -1442,26 +1467,39 @@ fn session_cookie(st: &St, headers: &HeaderMap, token: &str) -> String {
     )
 }
 
-fn clear_cookie(st: &St, headers: &HeaderMap) -> String {
-    build_session_cookie(
+/// BOTH `Set-Cookie` lines a logout emits: the fleet cookie, and the
+/// cell-scoped one this host may have set when it adopted a console handoff.
+///
+/// Together, deliberately. The cell cookie is the credential the reader
+/// PREFERS on this host (`auth::read_session_cookie`), so a logout that cleared
+/// only the fleet cookie would leave the console it established still open in
+/// the same browser — the visible half of the session gone and the load-bearing
+/// half untouched.
+fn clear_cookies(st: &St, headers: &HeaderMap) -> [String; 2] {
+    clear_cookie_pair(
         &st.cfg.cookie_name,
-        "",
         st.cfg.cookie_domain.as_deref(),
         cookie_is_secure(st, headers),
-        0,
     )
 }
 
-fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
-    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    for kv in raw.split(';') {
-        if let Some((k, v)) = kv.split_once('=') {
-            if k.trim() == name {
-                return Some(v.trim().to_string());
-            }
-        }
-    }
-    None
+/// The pair on its own, for the same reason `handoff_cookie` is pure.
+fn clear_cookie_pair(fleet_name: &str, fleet_domain: Option<&str>, secure: bool) -> [String; 2] {
+    [
+        build_session_cookie(fleet_name, "", fleet_domain, secure, 0),
+        handoff_cookie(fleet_name, "", secure, 0),
+    ]
+}
+
+/// The session token THIS BROWSER presents to THIS host, read under the one
+/// precedence every surface shares (`auth::read_session_cookie`): the
+/// cell-scoped cookie a console handoff established here, else the fleet
+/// cookie. Endpoints that describe or end the browser's session — `/auth/me`,
+/// `/auth/session-token`, logout's revoke — must all see the same one it
+/// authenticates with, or a console opened by handoff would be a session
+/// `/auth/me` reports as absent and logout leaves running.
+fn presented_session(st: &St, headers: &HeaderMap) -> Option<String> {
+    crate::auth::read_session_cookie(&st.cfg.cookie_name, cookie_is_secure(st, headers), headers)
 }
 
 /// Client IP for the login throttle: leftmost X-Forwarded-For, else X-Real-IP,
@@ -1999,16 +2037,73 @@ mod tests {
         // jwt_ttl_s: it cannot mint a replacement when the token dies.
         assert_eq!(max_age_s, 3600);
 
-        let cookie = build_session_cookie(
-            "queen_session",
-            &token,
-            Some("queenmq.cloud"),
-            true,
-            max_age_s,
+        // The cookie establish_handoff ships: the CELL-scoped name, host-only.
+        let cookie = handoff_cookie("queen_session", &token, true, max_age_s);
+        assert!(
+            cookie.starts_with(&format!("__Host-queen_session_cell={token};")),
+            "cookie is the token, under the cell name: {cookie}"
         );
-        assert!(cookie.starts_with(&format!("queen_session={token};")), "cookie is the token");
-        for attr in ["Path=/", "HttpOnly", "SameSite=Lax", "Max-Age=3600", "Domain=queenmq.cloud", "Secure"] {
+        for attr in ["Path=/", "HttpOnly", "SameSite=Lax", "Max-Age=3600", "Secure"] {
             assert!(cookie.contains(attr), "missing {attr} in {cookie}");
+        }
+    }
+
+    /// ⚠ The regression this cookie's shape exists for.
+    ///
+    /// The handoff token names ONE cell in `aud`, and every sibling enforces
+    /// its own (`auth::audience_ok`). This host used to adopt it under the
+    /// FLEET cookie's name and the fleet's `Domain`, which is one jar key: the
+    /// browser's `.queenmq.cloud` cookie was REPLACED by a credential only this
+    /// cell accepts, and every sibling console answered 401 BadAudience until
+    /// the user logged in at the portal again. Invisible on a one-cell fleet,
+    /// which is why it shipped.
+    ///
+    /// Two properties keep it fixed, and neither is sufficient alone: no
+    /// `Domain` (so the fleet cookie is untouched everywhere else), and a name
+    /// of its own (so the two do not collide in the jar HERE — see
+    /// `auth::cell_cookie_name_of`).
+    #[test]
+    fn an_established_handoff_leaves_the_fleet_cookie_alone() {
+        let (auth_host, cell) = handoff_pair();
+        let now = now_secs();
+        let token =
+            crate::auth::testkit::mint_at(&auth_host, Uuid::new_v4(), now + 3600, None).unwrap();
+        let (_, max_age_s) = establish_of(decide_handoff(&cell, &token, None, now));
+
+        let cookie = handoff_cookie("queen_session", &token, true, max_age_s);
+        assert!(
+            !cookie.contains("Domain="),
+            "host-only, or the siblings lose their session: {cookie}"
+        );
+        assert!(
+            !cookie.starts_with("queen_session="),
+            "must not be the fleet cookie's own name: {cookie}"
+        );
+        // `__Host-` is only legal on exactly this attribute set, and the
+        // browser drops the cookie outright if it is not met.
+        assert!(cookie.contains("Secure") && cookie.contains("Path=/"));
+    }
+
+    /// The fleet cookie's shape is unchanged: `Domain` is still what the login
+    /// path sets, so ordinary SSO is untouched by the handoff's cookie.
+    #[test]
+    fn the_login_cookie_is_still_the_fleet_wide_one() {
+        let cookie = build_session_cookie("queen_session", "tok", Some(".queenmq.cloud"), true, 60);
+        assert!(cookie.starts_with("queen_session=tok;"));
+        assert!(cookie.contains("Domain=.queenmq.cloud"), "{cookie}");
+    }
+
+    /// A logout has to clear BOTH, or it ends the half of the session the
+    /// browser shows and leaves the half this host actually reads.
+    #[test]
+    fn a_logout_clears_the_cell_cookie_as_well_as_the_fleet_one() {
+        let cleared = clear_cookie_pair("queen_session", Some(".queenmq.cloud"), true);
+        assert!(cleared[0].starts_with("queen_session=;"), "{}", cleared[0]);
+        assert!(cleared[0].contains("Domain=.queenmq.cloud"));
+        assert!(cleared[1].starts_with("__Host-queen_session_cell=;"), "{}", cleared[1]);
+        assert!(!cleared[1].contains("Domain="), "{}", cleared[1]);
+        for c in &cleared {
+            assert!(c.contains("Max-Age=0"), "a clear is Max-Age=0: {c}");
         }
     }
 
@@ -2092,10 +2187,37 @@ mod tests {
         assert!(!is_handoff(true, None));
         // Verify-only, but no token: the SPA's own call, which still answers
         // the 503 it always did rather than being read as an empty handoff.
+        // That 503 is a contract, not a dead end — see the test below.
         assert!(!is_handoff(false, None));
         assert!(!is_handoff(false, Some("")));
         assert!(!is_handoff(false, Some("   ")));
         assert!(is_handoff(false, Some("a.b.c")));
+    }
+
+    #[tokio::test]
+    async fn the_no_signer_answer_is_the_contract_the_console_reads() {
+        // Where the case above lands: a verify-only cell cannot mint, so the
+        // SPA's own /auth/session-token call falls through to `err_no_signer`.
+        //
+        // The console reads THIS pair — 503 plus `code: "not_configured"` — to
+        // decide it must run on the session cookie instead of a bearer
+        // (console/src/api.js, `isNoSigner`). It is deliberately both halves:
+        // a bare 503 is also what a load balancer says in front of a restarting
+        // instance, and the console must keep treating that one as an error.
+        //
+        // Change either half without changing api.js and every fleet cell's
+        // /console/ goes back to dying on load with "could not start a session
+        // (HTTP 503)" — measured against a real cell on 2026-08-29.
+        let resp = err_no_signer();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(resp.headers().get(header::CONTENT_TYPE).unwrap(), "application/json");
+
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["code"], "not_configured");
+        // The prose half belongs to the operator reading it, not to the
+        // console, so it may be reworded freely — but it has to be there.
+        assert!(body["error"].as_str().is_some_and(|s| !s.is_empty()));
     }
 
     // --- resolution policy --------------------------------------------------

@@ -96,6 +96,52 @@ class LaravelQueueDriverTest extends TestCase
         $this->assertSame('30000', $query['timeout']);
     }
 
+    public function testPopPinsBothSizingKnobsWhileAutopilotIsOff(): void
+    {
+        $handler = new PlanHandler([[
+            'status' => 200,
+            'json' => ['success' => true, 'messages' => []],
+        ]]);
+        [$queue] = $this->queueFor($handler, ['prefetch' => 4]);
+
+        $this->assertNull($queue->pop('emails'));
+
+        parse_str($handler->requests[0]->getUri()->getQuery(), $query);
+        $this->assertArrayNotHasKey('autopilot', $query);
+        $this->assertSame('4', $query['batch']);
+        $this->assertSame('8', $query['partitions']);
+    }
+
+    public function testAutopilotDelegatesOnlyTheSweepWidthToTheBroker(): void
+    {
+        $handler = new PlanHandler([[
+            'status' => 200,
+            'json' => ['success' => true, 'messages' => []],
+        ]]);
+        [$queue] = $this->queueFor($handler, ['autopilot' => true, 'prefetch' => 4]);
+
+        $this->assertNull($queue->pop('emails'));
+
+        parse_str($handler->requests[0]->getUri()->getQuery(), $query);
+        $this->assertSame('true', $query['autopilot']);
+        // The batch stays the worker's own prefetch budget; only the width is
+        // left for the broker to size, so it must not travel.
+        $this->assertSame('4', $query['batch']);
+        $this->assertArrayNotHasKey('partitions', $query);
+    }
+
+    public function testAutopilotLeavesThePushStripeModulusAlone(): void
+    {
+        $handler = new PlanHandler([['status' => 201, 'json' => [['status' => 'queued']]]]);
+        [$queue] = $this->queueFor($handler, ['autopilot' => true]);
+
+        $this->assertSame('job-123', $queue->pushRaw(json_encode($this->payload('job-123')), 'emails'));
+
+        $body = json_decode((string) $handler->requests[0]->getBody(), true);
+        $expectedSlot = hexdec(substr(hash('sha256', 'job-123'), 0, 8)) % 8;
+        $this->assertSame(sprintf('job-%04d', $expectedSlot), $body['items'][0]['partition']);
+    }
+
     public function testPushRawStoresTheLaravelPayloadOnADeterministicStripe(): void
     {
         $handler = new PlanHandler([["status" => 201, "json" => [["status" => "queued"]]]]);

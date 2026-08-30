@@ -83,25 +83,33 @@ pub enum Credential {
 
 /// Read the credential out of an API request. Authorization wins over the
 /// cookie when both are present (an explicit token is a deliberate act; the
-/// cookie merely rides along). Pure — `cookie_name` instead of `&St` — so the
-/// precedence rules are unit-testable without an AppState.
+/// cookie merely rides along). Pure — `cookie_name` + `secure` instead of
+/// `&St` — so the precedence rules are unit-testable without an AppState.
+///
+/// `secure` is `oauth::cookie_is_secure` for this request; it only picks which
+/// of the two cell-cookie names is looked for (see `cell_cookie_name_of`).
 ///
 /// A cookie is NOT accepted on a cross-document navigation here; see
 /// `is_navigation`.
-pub fn read_credential(cookie_name: &str, headers: &HeaderMap) -> Credential {
-    read_credential_inner(cookie_name, headers, false)
+pub fn read_credential(cookie_name: &str, secure: bool, headers: &HeaderMap) -> Credential {
+    read_credential_inner(cookie_name, secure, headers, false)
 }
 
 /// The same, for the DOCUMENT surface (the webapp shell in webapp.rs), where a
 /// navigation is the normal and only way the page is ever loaded. Serving the
 /// SPA is a read of static bytes: there is no state to forge, so the rule that
 /// protects the API would only break the app.
-pub fn read_credential_for_document(cookie_name: &str, headers: &HeaderMap) -> Credential {
-    read_credential_inner(cookie_name, headers, true)
+pub fn read_credential_for_document(
+    cookie_name: &str,
+    secure: bool,
+    headers: &HeaderMap,
+) -> Credential {
+    read_credential_inner(cookie_name, secure, headers, true)
 }
 
 fn read_credential_inner(
     cookie_name: &str,
+    secure: bool,
     headers: &HeaderMap,
     cookie_on_navigation: bool,
 ) -> Credential {
@@ -121,7 +129,7 @@ fn read_credential_inner(
     if !cookie_on_navigation && is_navigation(headers) {
         return Credential::None;
     }
-    match read_cookie(cookie_name, headers) {
+    match read_session_cookie(cookie_name, secure, headers) {
         // A cookie is only ever a HUMAN session. A `qk_` value sitting in one
         // is nonsense (nothing mints that) and is dropped rather than promoted
         // to a data-plane credential — a cookie is attached by the browser,
@@ -129,6 +137,75 @@ fn read_credential_inner(
         Some(t) if !t.is_empty() && !t.starts_with(API_KEY_PREFIX) => Credential::Session(t),
         _ => Credential::None,
     }
+}
+
+/// The name of the CELL-SCOPED session cookie: the one a verify-only host sets
+/// for itself when it adopts a console handoff (`oauth::establish_handoff`).
+///
+/// # ⚠ Why it is not simply the fleet cookie's name
+///
+/// The handoff token names ONE cell in `aud`, and every sibling enforces its
+/// own (`audience_ok`). Setting it under the fleet cookie's name *and* the
+/// fleet's `Domain` — which is what this used to do — REPLACES the browser's
+/// `.queenmq.cloud` cookie with a credential only this cell accepts, and every
+/// sibling console then answers 401 until the user logs in at the portal
+/// again. The adopted token has to go somewhere the fleet cookie is not.
+///
+/// Host-only alone does not get there. A jar keys cookies by name+domain+path,
+/// so a host-only `<name>` and a `Domain=.queenmq.cloud` `<name>` coexist and
+/// the browser sends BOTH — under one name, in an order this code does not
+/// choose. RFC 6265 §5.4 sorts equal paths by creation time, oldest first, so
+/// the one that arrives first is the FLEET cookie (set at login, before any
+/// handoff), and a reader taking the first match would ignore the session the
+/// user just established. A distinct name is what makes the precedence below a
+/// decision rather than an accident of what the jar happens to emit.
+///
+/// # ⚠ Why the `__Host-` prefix, and why only when `Secure`
+///
+/// Same reasoning as queen-control's control cookie. Host-only is not the same
+/// as un-shadowable: any sibling answering on the fleet domain can set a
+/// `Domain=.queenmq.cloud` cookie of this name, and the browser would present
+/// it here alongside ours. `__Host-` closes that at the browser — a
+/// `Set-Cookie` carrying the prefix is rejected outright unless it has
+/// `Secure`, no `Domain` and `Path=/`, which is exactly what this cookie is —
+/// so no other host can put a cookie of this name in the jar.
+///
+/// The prefix is dropped when `secure` is false because that same rule
+/// requires `Secure`: over plain http a `__Host-` cookie is not stored at all,
+/// and local dev could not hold a session. That deployment has no fleet domain
+/// and so no sibling to be shadowed from, which is the condition
+/// `oauth::cookie_is_secure` already keys on.
+pub fn cell_cookie_name_of(fleet_name: &str, secure: bool) -> String {
+    if secure {
+        format!("__Host-{fleet_name}_cell")
+    } else {
+        format!("{fleet_name}_cell")
+    }
+}
+
+/// The session token this request presents, most specific cookie first.
+///
+/// The CELL cookie wins over the fleet one on the host that set it. It is the
+/// deliberate act — the user clicked through a console handoff *to this cell* —
+/// and it is at least as fresh as the fleet cookie by construction: the handoff
+/// token is minted from the caller's own control-plane session and clamped to
+/// what is left of it, and this cookie's `Max-Age` is the token's own remaining
+/// life, so it can never sit in the jar outliving its token.
+///
+/// The one case it can be stale is a session revoked at the portal while this
+/// cookie is still inside `exp`; that host then answers 401 until the user
+/// clicks the console link again, which re-establishes it. That is the same
+/// click that opened the console, and it is a better failure than the reverse
+/// order, where a browser holding any fleet cookie would silently ignore every
+/// handoff it was ever sent.
+pub(crate) fn read_session_cookie(
+    fleet_name: &str,
+    secure: bool,
+    headers: &HeaderMap,
+) -> Option<String> {
+    read_cookie(&cell_cookie_name_of(fleet_name, secure), headers)
+        .filter(|v| !v.is_empty())
+        .or_else(|| read_cookie(fleet_name, headers))
 }
 
 /// Is this a cross-document NAVIGATION (a link, a form, a redirect, the
@@ -249,7 +326,8 @@ pub async fn authenticate(
     if st.cfg.dev_insecure {
         return Ok(Principal::ApiKey { key_id: uuid::Uuid::nil(), scopes: Scopes::all() });
     }
-    let token = match read_credential(&st.cfg.cookie_name, headers) {
+    let secure = crate::oauth::cookie_is_secure(st, headers);
+    let token = match read_credential(&st.cfg.cookie_name, secure, headers) {
         // --- API key path (opaque, hashed lookup) ---
         Credential::ApiKey(key) => {
             let hash = key_hash_hex(&key);
@@ -1908,7 +1986,7 @@ mod tests {
     fn credential_prefers_authorization_over_cookie() {
         let h = headers_with(Some("queen_session=cookietoken"), Some("Bearer explicit"));
         assert_eq!(
-            read_credential("queen_session", &h),
+            read_credential("queen_session", true, &h),
             Credential::Session("explicit".to_string())
         );
     }
@@ -1917,25 +1995,92 @@ mod tests {
     fn credential_falls_back_to_the_session_cookie() {
         let h = headers_with(Some("other=1; queen_session=abc123; another=2"), None);
         assert_eq!(
-            read_credential("queen_session", &h),
+            read_credential("queen_session", true, &h),
             Credential::Session("abc123".to_string())
         );
         // exact name match only
         let h2 = headers_with(Some("queen_session_v2=wrong; queen_session=right"), None);
         assert_eq!(
-            read_credential("queen_session", &h2),
+            read_credential("queen_session", true, &h2),
             Credential::Session("right".to_string())
+        );
+    }
+
+    // ---- fleet cookie vs cell cookie ---------------------------------------
+
+    /// ⚠ The precedence the console handoff depends on, and the reason the two
+    /// cookies do not share a name.
+    ///
+    /// A browser on `<cell>.queenmq.cloud` presents the fleet cookie (set at the
+    /// portal, `Domain=.queenmq.cloud`) AND, once a handoff was established
+    /// here, this host's own cell cookie. The session the user just established
+    /// has to win — and it has to win whichever way round the jar emits them.
+    /// RFC 6265 §5.4 sorts equal paths oldest-first, which puts the FLEET
+    /// cookie first in the real case, so a rule that took the header's first
+    /// match would take the wrong one every time.
+    #[test]
+    fn the_cell_cookie_wins_over_the_fleet_cookie_on_the_host_that_set_it() {
+        for raw in [
+            "queen_session=fleet; __Host-queen_session_cell=cell",
+            "__Host-queen_session_cell=cell; queen_session=fleet",
+        ] {
+            let h = headers_with(Some(raw), None);
+            assert_eq!(
+                read_credential("queen_session", true, &h),
+                Credential::Session("cell".to_string()),
+                "cell cookie must win, order notwithstanding: {raw}"
+            );
+        }
+    }
+
+    /// And on every cell the user has NOT opened a console on — which is every
+    /// sibling, and the whole point of the fix — the fleet cookie is the
+    /// session, exactly as before.
+    #[test]
+    fn the_fleet_cookie_is_the_session_where_no_handoff_was_established() {
+        let h = headers_with(Some("other=1; queen_session=fleet"), None);
+        assert_eq!(
+            read_credential("queen_session", true, &h),
+            Credential::Session("fleet".to_string())
+        );
+        // An empty cell cookie is not a session either: a cleared cookie the
+        // browser still sends must fall through, not shadow a live fleet one.
+        let h = headers_with(Some("__Host-queen_session_cell=; queen_session=fleet"), None);
+        assert_eq!(
+            read_credential("queen_session", true, &h),
+            Credential::Session("fleet".to_string())
+        );
+    }
+
+    /// The name follows `Secure`, because `__Host-` is only storable with it.
+    /// Over plain http (local dev, no fleet domain, nothing to be shadowed by)
+    /// the plain name is what both halves use.
+    #[test]
+    fn the_cell_cookie_carries_the_host_prefix_only_when_secure() {
+        assert_eq!(cell_cookie_name_of("queen_session", true), "__Host-queen_session_cell");
+        assert_eq!(cell_cookie_name_of("queen_session", false), "queen_session_cell");
+
+        let h = headers_with(Some("queen_session_cell=cell; queen_session=fleet"), None);
+        assert_eq!(
+            read_credential("queen_session", false, &h),
+            Credential::Session("cell".to_string())
+        );
+        // ...and a Secure host does not read the unprefixed name, which any
+        // sibling on the fleet domain could have set.
+        assert_eq!(
+            read_credential("queen_session", true, &h),
+            Credential::Session("fleet".to_string())
         );
     }
 
     #[test]
     fn credential_recognises_api_keys_by_prefix() {
         let h = headers_with(None, Some("Bearer qk_live_abc"));
-        assert_eq!(read_credential("queen_session", &h), Credential::ApiKey("qk_live_abc".to_string()));
+        assert_eq!(read_credential("queen_session", true, &h), Credential::ApiKey("qk_live_abc".to_string()));
         // a bare (non-Bearer) Authorization value is accepted verbatim, as the
         // old bearer parse did
         let h2 = headers_with(None, Some("qk_live_abc"));
-        assert_eq!(read_credential("queen_session", &h2), Credential::ApiKey("qk_live_abc".to_string()));
+        assert_eq!(read_credential("queen_session", true, &h2), Credential::ApiKey("qk_live_abc".to_string()));
     }
 
     #[test]
@@ -1943,7 +2088,7 @@ mod tests {
         // A cookie is attached by the browser, not chosen per request: it must
         // never be able to widen a caller into a data-plane key.
         let h = headers_with(Some("queen_session=qk_live_abc"), None);
-        assert_eq!(read_credential("queen_session", &h), Credential::None);
+        assert_eq!(read_credential("queen_session", true, &h), Credential::None);
     }
 
     #[test]
@@ -1954,11 +2099,11 @@ mod tests {
         // Sec-Fetch-Mode: navigate.
         let mut h = headers_with(Some("queen_session=abc123"), None);
         h.insert("sec-fetch-mode", axum::http::HeaderValue::from_static("navigate"));
-        assert_eq!(read_credential("queen_session", &h), Credential::None);
+        assert_eq!(read_credential("queen_session", true, &h), Credential::None);
         // ... but the app shell itself IS loaded by navigation, and serving
         // static bytes forges nothing.
         assert_eq!(
-            read_credential_for_document("queen_session", &h),
+            read_credential_for_document("queen_session", true, &h),
             Credential::Session("abc123".to_string())
         );
     }
@@ -1969,32 +2114,32 @@ mod tests {
         // cannot attach one, so the navigation rule never applies to it.
         let mut h = headers_with(None, Some("Bearer qk_live_abc"));
         h.insert("sec-fetch-mode", axum::http::HeaderValue::from_static("navigate"));
-        assert_eq!(read_credential("queen_session", &h), Credential::ApiKey("qk_live_abc".to_string()));
+        assert_eq!(read_credential("queen_session", true, &h), Credential::ApiKey("qk_live_abc".to_string()));
 
         // The SPA's own XHR, and any non-browser client (no Sec-Fetch-* at all).
         for mode in ["cors", "same-origin", "no-cors"] {
             let mut h = headers_with(Some("queen_session=abc123"), None);
             h.insert("sec-fetch-mode", axum::http::HeaderValue::from_str(mode).unwrap());
             assert_eq!(
-                read_credential("queen_session", &h),
+                read_credential("queen_session", true, &h),
                 Credential::Session("abc123".to_string()),
                 "mode {mode}"
             );
         }
         let bare = headers_with(Some("queen_session=abc123"), None);
-        assert_eq!(read_credential("queen_session", &bare), Credential::Session("abc123".to_string()));
+        assert_eq!(read_credential("queen_session", true, &bare), Credential::Session("abc123".to_string()));
     }
 
     #[test]
     fn credential_none_when_nothing_usable_is_present() {
-        assert_eq!(read_credential("queen_session", &headers_with(None, None)), Credential::None);
+        assert_eq!(read_credential("queen_session", true, &headers_with(None, None)), Credential::None);
         // empty Authorization falls through to the (absent) cookie
         assert_eq!(
-            read_credential("queen_session", &headers_with(None, Some("Bearer   "))),
+            read_credential("queen_session", true, &headers_with(None, Some("Bearer   "))),
             Credential::None
         );
         assert_eq!(
-            read_credential("queen_session", &headers_with(Some("queen_session="), None)),
+            read_credential("queen_session", true, &headers_with(Some("queen_session="), None)),
             Credential::None
         );
     }

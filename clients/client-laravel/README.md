@@ -75,6 +75,17 @@ Keep prefetch at `1` for a no-helper profile, long-running jobs, strict per-job
 ACK confirmation, or comma-separated priority queues. Reentrant `pop()` while
 a prefetched job is still active is rejected.
 
+`QUEEN_AUTOPILOT=true` hands the pop sweep width to the broker instead of
+sending the fixed `QUEEN_PARTITIONS` value: the broker sizes it per
+`(queue, group)` from ready-partition pressure and ready age, within the same
+1..64 range. Only that dimension is delegated. The pop batch stays pinned to
+`QUEEN_PREFETCH`, because the local prefetch buffer, the `ACK_BATCH` bound and
+the lease budget are all sized from it, and `QUEEN_PARTITIONS` still selects the
+push stripe. It requires a broker with the hot list enabled and pop autopilot
+not set to `off`/`shadow`; older brokers ignore the parameter and fall back to
+their own default width. The default `false` keeps the request identical to
+previous releases.
+
 With renewal enabled, Queen lazily starts one persistent PHP CLI
 helper when a worker claims its first lease; resolving the same connection in
 PHP-FPM for dispatch remains supported. The helper is part of the delivery
@@ -1299,6 +1310,7 @@ return [
     'block_for' => env('QUEEN_BLOCK_FOR', 0),
     'prefetch' => env('QUEEN_PREFETCH', 1),
     'ack_batch' => env('QUEEN_ACK_BATCH', 1),
+    'autopilot' => env('QUEEN_AUTOPILOT', false),
     'lease_renewal' => env('QUEEN_LEASE_RENEWAL', false),
     'lease_renewal_interval' => env('QUEEN_LEASE_RENEWAL_INTERVAL'),
     'lease_renewal_timeout' => env('QUEEN_LEASE_RENEWAL_TIMEOUT', 5),

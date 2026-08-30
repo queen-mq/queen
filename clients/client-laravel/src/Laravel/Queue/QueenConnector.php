@@ -57,6 +57,7 @@ class QueenConnector implements ConnectorInterface
         $ackBatch = self::boundedInteger($config['ack_batch'] ?? 1, 'ack_batch', 1, $prefetch);
         $bulkBatch = self::boundedInteger($config['bulk_batch'] ?? 100, 'bulk_batch', 1, 1000);
         $dispatchAfterCommit = self::boolean($config['after_commit'] ?? false, 'after_commit');
+        $popAutopilot = self::boolean($config['autopilot'] ?? false, 'autopilot');
         $leaseRenewal = self::boolean($config['lease_renewal'] ?? false, 'lease_renewal');
         $leaseRenewalIntervalOption = $config['lease_renewal_interval'] ?? null;
         $leaseRenewalInterval = self::boundedInteger(
@@ -177,6 +178,7 @@ class QueenConnector implements ConnectorInterface
             prefetch: $prefetch,
             ackBatch: $ackBatch,
             bulkBatch: $bulkBatch,
+            popAutopilot: $popAutopilot,
             leaseRenewer: $leaseRenewer,
             failedJobRetryHandler: $this->failedJobRetryHandler,
         );

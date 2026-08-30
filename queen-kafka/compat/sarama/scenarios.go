@@ -88,6 +88,10 @@ func scenarioVersions(r *runner, st *state) {
 		{19, 2, 6}, // CreateTopics    — M7 F1; v7 answers a topic id
 		{20, 1, 5}, // DeleteTopics    — M7 F1; v6 names topics by id
 		{22, 0, 4}, // InitProducerId  — M7 F3; v5 exists for KIP-890 only
+		{24, 0, 3}, // AddPartitionsToTxn — M9; v4 is a DIFFERENT request, the one a coordinator sends a leader
+		{25, 0, 3}, // AddOffsetsToTxn    — M9; at v4 the client stops sending this API at all
+		{26, 0, 3}, // EndTxn             — M9; v5's response carries a TV2 epoch bump this facade does not perform
+		{28, 0, 3}, // TxnOffsetCommit    — M9; the max is a FLOOR: kafka-clients throws below v3 whenever group metadata is set
 		{29, 1, 3}, // DescribeAcls    — M7 F4; SECURITY_DISABLED, v0 is KIP-896's floor
 		{30, 1, 3}, // CreateAcls      — M7 F4
 		{31, 1, 3}, // DeleteAcls      — M7 F4
@@ -109,8 +113,8 @@ func scenarioVersions(r *runner, st *state) {
 			"%s advertised v%d..v%d (want v%d..v%d)",
 			apiName(want.key), got.MinVersion, got.MaxVersion, want.min, want.max)
 	}
-	r.check(len(resp.ApiKeys) == len(wantAPIs) && len(resp.ApiKeys) == 28,
-		"exactly 28 APIs advertised and every one of them has a row above, got %d", len(resp.ApiKeys))
+	r.check(len(resp.ApiKeys) == len(wantAPIs) && len(resp.ApiKeys) == 32,
+		"exactly 32 APIs advertised and every one of them has a row above, got %d", len(resp.ApiKeys))
 
 	// The twelve keys M7 ADDED. This loop asserted their ABSENCE until F1/F2/F3
 	// and then F4 landed, and it is inverted rather than deleted because the
