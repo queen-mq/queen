@@ -53,7 +53,12 @@ and every other API applies the same name rule through
 | Code | Retriable | When | Notes |
 |---|---|---|---|
 | `INVALID_REQUIRED_ACKS` (21) | no | `acks` is not 0, 1 or -1 | |
-| `TRANSACTIONAL_ID_AUTHORIZATION_FAILED` (53) | no | a `transactional_id` on the request, or the transactional flag on a batch | Fatal and final for the producer, and unmistakably about transactions. Kafka Streams stops here with a sentence instead of appearing to work. |
+| `TRANSACTIONAL_ID_AUTHORIZATION_FAILED` (53) | no | the transactional flag on a batch whose REQUEST carries no `transactional.id` | **Narrowed in M9.** A `transactional_id` on the request is no longer refused — it is a STAGE (`crate::txn`), and the records are written by `EndTxn(commit)`. What is left here is a transactional BATCH with no id on the request: there is no transaction to stage it in and no producer identity to fence it against. |
+| `INVALID_TXN_STATE` (48) | no | a transactional produce for a `transactional.id` this facade holds no binding for, or for a partition the transaction never added | **M9.** The first is the crash path: a restart, or a connection that moved. Fatal in the Java transactional producer, and it has to be — the transaction genuinely cannot continue, and no other answer keeps an application from believing an uncommitted commit. The second is Kafka's own rule: a producer must send `AddPartitionsToTxn` for a partition before producing to it. |
+| `MESSAGE_TOO_LARGE` (10) | no | a transactional produce past `QUEEN_KAFKA_TXN_MAX_BYTES` or `QUEEN_KAFKA_TXN_MAX_RECORDS` | **M9, and a deviation with no Kafka analogue** — a Kafka transaction has no size, because its records are appended as they arrive. Not retriable, deliberately: waiting will not make a 12 MiB transaction fit an 8 MiB stage. The transaction becomes abortable and the producer must abort it. |
+| `PRODUCER_FENCED` (90) | no | a transactional produce whose epoch is below the one this facade holds | **M9.** A second producer took the `transactional.id`. |
+| `INVALID_PRODUCER_EPOCH` (47) | no | a transactional produce whose epoch is ABOVE the one this facade holds | **M9.** An epoch this facade never granted. |
+| `INVALID_PRODUCER_ID_MAPPING` (49) | no | a transactional produce whose `producer_id` is not the one this `transactional.id` holds | **M9.** |
 | `INVALID_RECORD` (87) | no | a CONTROL batch | A control batch is written by a transaction coordinator; this facade is nobody's. |
 | `UNSUPPORTED_FOR_MESSAGE_FORMAT` (43) | no | the records are a pre-v2 message set | Until M7 F3 this was also the answer to any batch carrying a producer id. It is not any more: the idempotent producer is implemented and the four codes below are what a producer id can now be answered with. |
 | `OUT_OF_ORDER_SEQUENCE_NUMBER` (45) | no (KIP-360) | an idempotent batch would leave a GAP, or this facade holds no sequence window for that producer | Refusing the gap is what makes "idempotent" a claim about ORDER and not only about duplicates: **nothing is written**. An absent window is the same code because the recovery is the same — the producer bumps its epoch through InitProducerId v3 and resets. Apache Kafka 3.9.1 *accepts* the absent-window case (measured); the facade does not, because it has no durable producer state and an absent window is common rather than rare here. |
@@ -119,8 +124,19 @@ with no record at that time.
 | Code | Retriable | When | Notes |
 |---|---|---|---|
 | `INVALID_GROUP_ID` (24) | no | an empty group id, or one past 255 characters | Apache Kafka answers this here too. The Java client raises `KafkaException` naming it, which is the right end for a misconfiguration. |
-| `INVALID_REQUEST` (42) | no | a `key_type` this facade does not serve (the transaction coordinator) | |
-| `COORDINATOR_NOT_AVAILABLE` (15) | yes | the group registry is at its cap, or the actor could not be reached | Every client retries this after re-discovering the coordinator. |
+| `INVALID_REQUEST` (42) | no | a `key_type` that is neither 0 (group) nor 1 (transaction) | **Corrected in M9.** This row used to say "the transaction coordinator", which the handler never answered: `key_type == 1` was answered `COORDINATOR_NOT_AVAILABLE` (15), and that mismatch is what hid the 20-second hang below. |
+| `TRANSACTIONAL_ID_AUTHORIZATION_FAILED` (53) | no | `key_type == 1` (a transaction coordinator) **in cluster mode** | **M9.** In SINGLE-NODE mode there is no error at all: this process is the transaction coordinator and answers its own address, exactly as it answers a group key. In cluster mode there is none, and the code has to be FATAL — a retriable one costs the client the whole of `max.block.ms` (see below). |
+| `COORDINATOR_NOT_AVAILABLE` (15) | yes | the group registry is at its cap, or the actor could not be reached, or a clustered node's view of the live set is stale | Every client retries this after re-discovering the coordinator. |
+
+**The 20 seconds, and why the code here is the whole of it.** Measured
+2026-08-29 with kafka-clients 4.3.1: a producer with `transactional.id` set asks
+FindCoordinator for a TRANSACTION coordinator *first*, and while this handler
+answered `COORDINATOR_NOT_AVAILABLE` — retriable — the Java
+`FindCoordinatorHandler` re-enqueued the lookup and looped for the whole of
+`max.block.ms` (~190 requests over 20 s) without ever sending an InitProducerId.
+Advertising key 22 did not change that and was never going to, because the
+client never got far enough to send key 22. The fix is the code, and it is in
+this table.
 
 ## JoinGroup (v0–v4) — top level
 
@@ -571,24 +587,75 @@ real owner's offsets.
 
 | Code | Retriable | When | Notes |
 |---|---|---|---|
-| `TRANSACTIONAL_ID_AUTHORIZATION_FAILED` (53) | no | a non-empty `transactional_id` | The same code and the same sentence `Produce` gives a transactional id, so a user meets ONE message about transactions and not two. Fatal in the Java client, out of `InitProducerIdHandler`. An EMPTY id is **not** a transactional id and is granted normally: brod's hand-rolled encoder writes a null one as `""` (`idempotent::transactional_id`). |
+| `TRANSACTIONAL_ID_AUTHORIZATION_FAILED` (53) | no | a non-empty `transactional_id` **in cluster mode** | The same code and the same sentence `handlers::find_coordinator` gives, so a user meets ONE message about transactions and not two. Fatal in the Java client, out of `InitProducerIdHandler`. An EMPTY id is **not** a transactional id and is granted normally: brod's hand-rolled encoder writes a null one as `""` (`idempotent::transactional_id`). |
+| `INVALID_REQUEST` (42) | no | a `transactional_id` longer than the key column it is stored in | **M9.** Refused before anything is minted, so an id this facade could not store leaves no state behind. |
+| `INVALID_TRANSACTION_TIMEOUT` (50) | no | `transaction.timeout.ms` above `QUEEN_KAFKA_TXN_MAX_TIMEOUT_MS` (default 900 000) or not positive | **M9.** Kafka's own answer for exactly this, with Kafka's own default, so a producer that meets it on a real broker meets it here. |
+| `CONCURRENT_TRANSACTIONS` (51) | yes | a third producer moved the key between this facade's claim and its epoch bump, or the process is at `QUEEN_KAFKA_TXN_MAX_OPEN` | **M9.** Retriable and literally true. ONE retry happens inside the facade and then the backoff is the client's — a CAS loop in a request handler is what 024_kv.sql:585-587 forbids. |
+| `COORDINATOR_NOT_AVAILABLE` (15) | yes | the transaction store could not be reached for the claim | **M9.** A 429 becomes `CONCURRENT_TRANSACTIONS` instead, and NOT a throttle: the throttle belongs on calls whose volume is what a cap is about, and `initTransactions()` happens once per producer lifetime. |
 
-That is the only error this API can answer. The handler makes **no call to
-Queen at all** — the connection is already authenticated, so there is no
-catalog to read, no push to make and nothing to be unavailable — which is
-exactly the property the biggest onboarding papercut wanted: the answer is a
-number and a zero, on the same turn of the connection loop.
+**The idempotent half still makes no call to Queen at all** — the connection is
+already authenticated, so there is no catalog to read, no push to make and
+nothing to be unavailable, which is exactly the property the biggest onboarding
+papercut wanted. **The transactional half does**: one `putIfAbsent` on a fresh
+id, two writes when a second producer takes an id somebody already holds. That
+second write is the fencing.
 
-**A transactional client does not reach this handler, and the refusal it does
-meet is not fast.** Measured 2026-08-29 with kafka-clients 4.3.1: a producer
-with `transactional.id` set asks `FindCoordinator` for a TRANSACTION coordinator
-first, the facade answers that `COORDINATOR_NOT_AVAILABLE` (15) — which is
-**retriable** — and the client loops there for the whole of `max.block.ms`
-(~190 requests over 20 s) without ever sending an InitProducerId.
-`initTransactions()` therefore still costs 20 s, exactly as it did before key 22
-was advertised. Advertising the key did not change that and was never going to;
-the fix is a fatal code on the FindCoordinator transaction path, which is
-outside M7 F3's scope. Sent straight at node 0, this handler refuses in ~10 ms.
+## AddPartitionsToTxn (v0–v3) — per partition
+
+v0–v3 has per-partition error codes and **no top-level one**, so a request-wide
+refusal is replicated across every partition — the same shape OffsetCommit uses,
+and the same thing Apache Kafka does on an API with no top-level code.
+
+| Code | Retriable | When | Notes |
+|---|---|---|---|
+| `INVALID_TXN_STATE` (48) | no | no binding for this `transactional.id` on this facade; the transaction is past its `transaction.timeout.ms`; a partition past `MAX_TXN_PARTITIONS` (200); a transaction already poisoned by a cap | The cap has no `error_message` field to name itself in below v4, so it names itself in a sampled log line instead. |
+| `PRODUCER_FENCED` (90) | no | the request epoch is BELOW the bound one | A second producer took the id. |
+| `INVALID_PRODUCER_EPOCH` (47) | no | the request epoch is ABOVE the bound one | An epoch this facade never granted. |
+| `INVALID_PRODUCER_ID_MAPPING` (49) | no | the `producer_id` is not the one this `transactional.id` holds | |
+| `CONCURRENT_TRANSACTIONS` (51) | yes | a commit for this transaction is in flight | |
+| `UNKNOWN_TOPIC_OR_PARTITION` (3) | yes | a `__`-prefixed topic, or a negative partition index | The same name rule, from the same helper, as every other path. A topic that merely does not EXIST yet is **not** refused: the produce path auto-creates. |
+| `INVALID_TOPIC_EXCEPTION` (17) | no | a name that is not a legal Kafka topic name | |
+
+## AddOffsetsToTxn (v0–v3) — top level
+
+| Code | Retriable | When | Notes |
+|---|---|---|---|
+| `INVALID_TXN_STATE` (48) | no | no binding, an expired transaction, or a SECOND, different `group_id` in one transaction | The second group is a stated deviation from Apache Kafka, which allows several. The offset budget is `WIRE_KV_MAX_OPS − 1 fence − 1 group index`, so a silent second group would silently shrink how many partitions a transaction can commit. |
+| `PRODUCER_FENCED` (90) / `INVALID_PRODUCER_EPOCH` (47) / `INVALID_PRODUCER_ID_MAPPING` (49) | no | as AddPartitionsToTxn | |
+| `INVALID_GROUP_ID` (24) | no | an empty group id, or one past 255 characters | The same rule the six group-addressed APIs apply, from the same place. |
+
+## TxnOffsetCommit (v0–v3) — per partition
+
+This API has no top-level error code, exactly as OffsetCommit has none.
+
+| Code | Retriable | When | Notes |
+|---|---|---|---|
+| `UNKNOWN_MEMBER_ID` (25) | no | a member id this coordinator never issued, **or a non-null `group_instance_id`** | The second is the honest answer rather than a refusal of the version: `group.instance.id` is only expressible at JoinGroup v5, which is outside the advertised window, so a consumer of this facade can never have one and the field can only ever arrive null. |
+| `ILLEGAL_GENERATION` (22) | no | a generation that has ended | The same `coordinator::check_commit` an ordinary OffsetCommit passes, so the group APIs cannot grow two opinions about a valid committer. |
+| `INVALID_COMMIT_OFFSET_SIZE` (28) | no | a negative offset other than -1; a composed key past the store's key column; more partitions than one bundle's KV rider holds (`MAX_TXN_OFFSETS`, 62) | All three for one reason: **a commit this facade cannot store must not read back later as "never committed"**. |
+| `OFFSET_METADATA_TOO_LARGE` (12) | no | metadata past `offset.metadata.max.bytes` (4096) | Kafka's own number and Kafka's own code. |
+| `UNKNOWN_TOPIC_OR_PARTITION` (3) | yes | a `__` or unnameable topic, or a negative partition index | |
+| `INVALID_TXN_STATE` (48) / `PRODUCER_FENCED` (90) / `INVALID_PRODUCER_EPOCH` (47) / `INVALID_PRODUCER_ID_MAPPING` (49) | no | as AddPartitionsToTxn | |
+
+Nothing is WRITTEN by this request. The offsets are staged and `EndTxn(commit)`
+writes them, in the same Postgres transaction as the records — which is the
+whole of exactly-once processing here.
+
+## EndTxn (v0–v3) — top level
+
+| Code | Retriable | When | Notes |
+|---|---|---|---|
+| `PRODUCER_FENCED` (90) | no | the commit's `required` precondition lost: another producer holds this `transactional.id` | **Zero records and zero offsets were written** — a lost `required` precondition raises 23514 out of `kv_apply_v1` and rolls the whole bundle back (005_log_ack.sql). Asserted by reading the log, not by trusting the code. |
+| `INVALID_TXN_STATE` (48) | no | no binding for this `transactional.id`; the transaction expired; a cap poisoned it | **The crash path.** Fatal, and it has to be: a facade that died mid-transaction lost the stage, and this is the only answer that cannot let an application believe an uncommitted commit. A commit that landed and whose response was lost also answers this — a FALSE NEGATIVE, which is the safe direction, because the offsets landed atomically with the records and a restarted application reprocesses nothing. |
+| `COORDINATOR_NOT_AVAILABLE` (15) | yes | the bundle could not be sent: a transport failure, a 5xx, a 429 (with `throttle_time_ms`) | **The stage is KEPT**, so the client's retry commits the same records. Dropping it here would turn a retry into a silent empty commit. |
+| `CONCURRENT_TRANSACTIONS` (51) | yes | a bundle for this transaction is already in flight | |
+| `INVALID_PRODUCER_EPOCH` (47) / `INVALID_PRODUCER_ID_MAPPING` (49) | no | as AddPartitionsToTxn | |
+
+`committed = false` answers **0** for an unheld or expired transaction as well
+as for a held one: a lost stage IS an aborted transaction, because nothing of it
+ever reached the log. A FENCED producer is still told it is fenced, because that
+is a fact about the producer rather than about the transaction — one that
+believes it still owns its id would open another transaction it cannot commit.
 
 ## SaslHandshake (v0–v1) / SaslAuthenticate (v0–v1)
 

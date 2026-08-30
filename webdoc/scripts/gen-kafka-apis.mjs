@@ -88,7 +88,20 @@ function parseAdvertised(text) {
 // rather than a capability — the ACL trio, and CreatePartitions — and both are
 // justified in the const's own doc block by the refusal being Apache Kafka's own
 // answer rather than "this broker is too old".
-const ADVERTISED_FINGERPRINT = "9c03576e2f98e071";
+// 2026-08-30: M9 appended FOUR rows — AddPartitionsToTxn, AddOffsetsToTxn,
+// EndTxn and TxnOffsetCommit, all 0-3 — and moved three of them out of ABSENT
+// (AddOffsetsToTxn was never listed there). Thirty-two rows. They share one
+// ceiling argument and it is a new one for this table: KIP-896 dropped no
+// version of any of the four, so every floor is the schema's own 0, and every
+// ceiling is KIP-890's transaction protocol 2, which this facade does not
+// perform. Two of the four stop for a stronger reason than "the version adds
+// nothing": AddPartitionsToTxn v4 is a DIFFERENT request that only another
+// broker sends, and TxnOffsetCommit's FLOOR of 3 is mandatory rather than
+// preferred, because kafka-clients throws below it whenever group metadata is
+// set and every consume-transform-produce loop sets it. InitProducerId's 0-4 is
+// untouched: M9 changed what that handler does with a transactional id, not
+// what is advertised.
+const ADVERTISED_FINGERPRINT = "40da963cf0ec746c";
 
 /** One sentence per API: what the boundary is, not what the API does. */
 const WINDOW_REASON = {
@@ -105,9 +118,9 @@ const WINDOW_REASON = {
   OffsetCommit:
     "Ceiling: v7 carries `group_instance_id` (static membership, out of scope). Floor: v0 and v1 are the ZooKeeper-era offset store.",
   OffsetFetch:
-    "Ceiling: v8 fetches offsets for several groups in one request and changes the response shape. v7's `require_stable` is answered honestly, because there are no open transactions here to withhold anything from.",
+    "Ceiling: v8 fetches offsets for several groups in one request and changes the response shape. v7's `require_stable` is answered honestly rather than ignored: it asks the broker to withhold offsets belonging to an open transaction, and since M9 an offset belonging to an open transaction is not in the store at all \u2014 the store write happens at COMMIT, in the same Postgres transaction as the records. Every offset returned is stable by construction, so UNSTABLE_OFFSET_COMMIT (88) is a code this facade never needs.",
   FindCoordinator:
-    "Ceiling: v4 is the batched form, which exists for clusters where groups live on different brokers. Here the answer is this process, for every key, always.",
+    "Ceiling: v4 is the batched form, which exists for clusters where groups live on different brokers. In single-node mode the answer is this process for every key, group or transaction. In cluster mode a GROUP key resolves to the rendezvous owner over the live node set, and a TRANSACTION key is refused TRANSACTIONAL_ID_AUTHORIZATION_FAILED \u2014 fatal on purpose, so `initTransactions()` stops instead of looping on a retriable code for the whole of `max.block.ms`.",
   JoinGroup:
     "Ceiling: v5 carries `group_instance_id` (static membership, out of scope). v4 is also where MEMBER_ID_REQUIRED lands, and that is implemented.",
   Heartbeat: "Ceiling: v3 carries `group_instance_id` (static membership, out of scope).",
@@ -131,7 +144,7 @@ const WINDOW_REASON = {
   DeleteGroups:
     "The whole schema. v2 is the flexible encoding and adds no field, and there is no version of this API that asks for something the facade cannot answer.",
   InitProducerId:
-    "Ceiling: v5 exists for KIP-890's transaction protocol 2, and transactions are refused here \u2014 advertising the version that exists only for them would be advertising a refusal. v3 is load-bearing rather than a nicety: it is KIP-360's epoch bump, and it is what turns a sequence window this facade has lost (a restart, an evicted entry) into a reset the producer recovers from instead of a fatal error. Read the REQUEST schema for the cap, not the key's `valid_versions()`, which answers wider because it takes the maximum of request and response.",
+    "Ceiling: v5 exists for KIP-890's transaction protocol 2, which this facade does not perform \u2014 the same ceiling argument the four transaction rows make. Since M9 this key grants a `transactional.id` as well as an idempotent one, so what stops at v5 is a PROTOCOL the facade does not run rather than a feature it refuses; in cluster mode a transactional id is still answered TRANSACTIONAL_ID_AUTHORIZATION_FAILED. v3 is load-bearing rather than a nicety: it is KIP-360's epoch bump, and it is what turns a sequence window this facade has lost (a restart, an evicted entry) into a reset the producer recovers from instead of a fatal error. Read the REQUEST schema for the cap, not the key's `valid_versions()`, which answers wider because it takes the maximum of request and response.",
   DescribeAcls:
     "The whole schema window, and no ceiling to argue: every field of the request and the response is marked v1-v3, so nothing varies inside it but the flexible encoding (v2). Floor: the schema's own, which is KIP-896's, since v0 was dropped. What is advertised is a REFUSAL. Every call answers SECURITY_DISABLED, which is what an Apache Kafka broker with no authorizer answers, because Queen has no ACL model to answer anything else from.",
   CreateAcls:
@@ -144,6 +157,14 @@ const WINDOW_REASON = {
     "The whole schema window (v1 is the flexible encoding and adds no field), and the key that matters: `kafka-configs.sh --alter` has sent this since Kafka 2.3 and has no fallback to the deprecated key 33, so this is what an operator's command actually lands on. What it can write is bounded by what the facade can write LOSSLESSLY. Queen's configure route is a whole-row upsert whose columns mostly cannot be read back, so an alter lands only on a topic this facade created and every other topic is refused with the reason.",
   CreatePartitions:
     "The whole schema window; nothing varies inside it but the flexible encoding (v2). What is advertised is a REFUSAL, because Queen declares no width per queue at all: a partition exists once something has been written to it. Two of the three answers are Apache Kafka's own sentences byte for byte, since a DECREASE and an EQUAL count are refused by a real broker too, and only an increase is a capability gap. The alternative, no row at all, would tell an operator to upgrade their broker, which is the wrong diagnosis in all three cases.",
+  AddPartitionsToTxn:
+    "Ceiling: v4 is a DIFFERENT REQUEST, not a wider one. The flat (transactional_id, producer_id, producer_epoch, topics) of v0-v3 becomes a `transactions[]` array with a `verify_only` flag — KIP-890's coordinator-to-partition-leader verification, which a client never sends and only another broker does. Floor: the schema's own, since KIP-896 dropped nothing here.",
+  AddOffsetsToTxn:
+    "The whole window a client uses. Every field of the schema is marked v0-v4 and v3 is already the flexible encoding, so v3 answers everything v4 does; v4 exists for KIP-890's transaction protocol 2, in which the client stops sending this API at all and the coordinator infers the offsets partition. Advertising it would advertise a protocol this facade does not run.",
+  EndTxn:
+    "Ceiling: v5's RESPONSE carries `producer_id` and `producer_epoch` — the transaction-protocol-2 epoch bump performed inside EndTxn, which this facade does not perform — and v4 is the version pair that exists on the way to it. v3 is the flexible encoding and asks for nothing that cannot be answered.",
+  TxnOffsetCommit:
+    "The FLOOR is the load-bearing number here, and it is measured rather than preferred: TxnOffsetCommitRequest$Builder.build(short) in kafka-clients 3.9.2 throws UnsupportedVersionException below v3 whenever group metadata is set, and every KIP-447 consume-transform-produce loop sets it — so advertising this API below 3 would make the flagship use case throw before any wire traffic. Ceiling: the same transaction-protocol-2 bump as the other three, which adds no field a client fills in.",
   OffsetDelete:
     "One version, so there is no window to argue. It is the last thing `kafka-consumer-groups.sh` could not do here, and Kafka's guard for it is not membership but SUBSCRIPTION: a live consumer group's subscribed topics are refused and everything else is deletable. The facade keeps that rule exactly rather than approximating it, because the coordinator holds each member's JoinGroup metadata verbatim and those bytes are a ConsumerProtocolSubscription.",
 };
@@ -159,16 +180,15 @@ const WINDOW_REASON = {
  *
  * Since M7 F4 this is the COMPLETE decision record rather than a selection: the
  * nineteen admin keys below are the same nineteen pinned by
- * `classify_the_absent_admin_apis` in `versions.rs`, and the four transaction
- * and KIP-848 keys above them are pinned by their own tests. Each row says what
+ * `classify_the_absent_admin_apis` in `versions.rs`, and ConsumerGroupHeartbeat
+ * above them is pinned by its own test. M9 removed the three transaction keys
+ * that used to head this list — AddPartitionsToTxn, EndTxn and TxnOffsetCommit
+ * are advertised now, and their windows are in the table above. Each row says what
  * a client wants the key for and what its absence costs a real tool, because
  * "not implemented" and "no tool needs it" are different answers and a reader
  * arriving here is usually holding a tool.
  */
 const ABSENT = [
-  ["AddPartitionsToTxn", "Enrols a partition in an open transaction.", "Transactions and exactly-once are excluded by plan. InitProducerId IS advertised, for the idempotent producer alone: a non-transactional grant is answered, a `transactional.id` is refused."],
-  ["EndTxn", "Commits or aborts a transaction.", "Same exclusion."],
-  ["TxnOffsetCommit", "Commits consumer offsets inside a transaction.", "Same exclusion, and the reason Kafka Streams cannot run against the facade."],
   ["ConsumerGroupHeartbeat", "The KIP-848 broker-side rebalance protocol.", "Excluded by plan; groups use the classic Join/Sync protocol."],
   ["DeleteRecords", "Truncates a partition below an offset. `kafka-delete-records.sh`, and the \"Clear messages\" button in kafka-ui and AKHQ.", "Queen has no truncate-to-offset primitive: a queue's log start moves by retention and by dropping the queue, both time-driven. Implementing it would mean reporting a low watermark that did not move, which is a fabricated value a tool would act on. DeleteTopics then CreateTopics is the workaround, and both work."],
   ["OffsetForLeaderEpoch", "Detects log truncation after a leader change.", "Every leader epoch this facade reports is -1, in Metadata, in ListOffsets, in OffsetFetch and in every record batch, so a consumer's subscription state never holds one and the request is never built. No tool sends it directly, and the cost of the absence is nothing measurable."],
@@ -187,8 +207,8 @@ const ABSENT = [
   ["DescribeQuorum", "Describes the KRaft metadata quorum. `kafka-metadata-quorum.sh`.", "No Raft log and no voters, so every field would be invented. The one thing UIs actually render from it, a controller id, is already in every Metadata answer. kafka-ui feature-detects and hides its KRaft panel."],
   ["DescribeCluster", "Cluster id, controller and broker list in one call.", "Answerable truthfully, and deliberately not answered: every client in the compatibility matrix already resolves describeCluster() from a plain Metadata request, so advertising it would move five live suites onto a code path none of them exercises today for a measured gain of zero. The trigger that flips this is the first client whose describeCluster() stops falling back."],
   ["DescribeProducers", "Per-partition producer state: id, epoch, last sequence. `kafka-transactions.sh find-hanging`.", "The facade's idempotence window is PROCESS state and is deliberately lost on restart. Answering from it would advertise durable producer state the facade does not have; answering an empty list would say nothing is producing while producers produce. Both are lies."],
-  ["DescribeTransactions", "Describes one transaction's state.", "The registry it would read does not exist. After transactions land it would still be answered per node, because that state is per process, which is exactly where a listing stops being useful."],
-  ["ListTransactions", "Lists transactions in flight.", "Same reason."],
+  ["DescribeTransactions", "Describes one transaction's state.", "Transactions landed in M9 and this key still does not, for the reason that survived them: an open transaction is a stage held by ONE facade process, on the connection that opened it. A node can describe only its own, so an operator asking a load-balanced address would get a different answer per connection, and `kafka-transactions.sh` would report a transaction as absent because it asked the wrong node."],
+  ["ListTransactions", "Lists transactions in flight.", "Same reason, and it is the one that bites harder: a LIST that is per node reads as the whole cluster's and is not."],
 ];
 
 // ---------------------------------------------------------------------------

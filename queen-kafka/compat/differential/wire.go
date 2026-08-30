@@ -578,7 +578,15 @@ var errNames = map[int16]string{
 	74: "FENCED_LEADER_EPOCH", 75: "UNKNOWN_LEADER_EPOCH",
 	76: "UNSUPPORTED_COMPRESSION_TYPE", 78: "OFFSET_NOT_AVAILABLE",
 	79: "MEMBER_ID_REQUIRED", 81: "GROUP_MAX_SIZE_REACHED",
-	82: "FENCED_INSTANCE_ID", 87: "UNKNOWN_TOPIC_ID",
+	82: "FENCED_INSTANCE_ID",
+	// 87 is INVALID_RECORD and 100 is UNKNOWN_TOPIC_ID. This table said 87
+	// was UNKNOWN_TOPIC_ID until M9, which is the one kind of bug a name
+	// table can have that makes a scenario report the wrong FACT rather than
+	// no fact: a produce refused for a malformed batch would have been read
+	// as a topic-id mismatch. Both names are Apache Kafka's own
+	// (org.apache.kafka.common.protocol.Errors), and the crate the facade
+	// answers from agrees (kafka-protocol 0.18 error.rs:271 and :284).
+	87: "INVALID_RECORD", 100: "UNKNOWN_TOPIC_ID",
 	// M7 F2's two: the pair DeleteGroups answers with, and the reason both
 	// brokers agree on them is that they are Kafka's own rule (a group with
 	// members is not deletable) and Kafka's own answer for a name it has never
@@ -594,6 +602,18 @@ var errNames = map[int16]string{
 	// but SUBSCRIPTION, and this is the code both brokers answer for a topic a
 	// live consumer group is still subscribed to.
 	86: "GROUP_SUBSCRIBED_TO_TOPIC",
+	// M9's family: every code the transaction path on either side can emit.
+	// Without these the transactions scenario prints N/UNKNOWN_ERROR_NAME for
+	// exactly the assertions it exists to make. 19 and 20 are here for the
+	// oracle rather than the facade: Kafka answers a transactional produce
+	// whose KIP-890 verification did not complete with NOT_ENOUGH_REPLICAS,
+	// which is retriable and is a rig symptom rather than a difference.
+	19: "NOT_ENOUGH_REPLICAS", 20: "NOT_ENOUGH_REPLICAS_AFTER_APPEND",
+	46: "DUPLICATE_SEQUENCE_NUMBER", 48: "INVALID_TXN_STATE",
+	49: "INVALID_PRODUCER_ID_MAPPING", 50: "INVALID_TRANSACTION_TIMEOUT",
+	51: "CONCURRENT_TRANSACTIONS", 52: "TRANSACTION_COORDINATOR_FENCED",
+	53: "TRANSACTIONAL_ID_AUTHORIZATION_FAILED", 55: "OPERATION_NOT_ATTEMPTED",
+	90: "PRODUCER_FENCED", 105: "TRANSACTIONAL_ID_NOT_FOUND",
 }
 
 func errName(code int16) string {

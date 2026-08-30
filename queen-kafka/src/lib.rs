@@ -38,6 +38,7 @@ pub mod throttle;
 pub mod tls;
 pub mod topic_config;
 pub mod topic_record;
+pub mod txn;
 pub mod versions;
 pub mod wire;
 
@@ -126,6 +127,19 @@ pub struct Facade {
     /// at most [`idempotent::WINDOW`] batches of a producer that was mid-stream
     /// ([`idempotent`]).
     pub producers: Arc<idempotent::Producers>,
+    /// The transactional producers this facade is holding a STAGE for (M9,
+    /// [`txn`]), shared by every connection for three reasons `txn::Txns` names
+    /// and one that is visible from here: the InitProducerId fence has to drop
+    /// a stage another connection built.
+    ///
+    /// The THIRD piece of state that is neither configuration nor derived from
+    /// Queen, and the only one whose loss a client is told about in words: a
+    /// restart loses every open transaction, and the next request naming one is
+    /// answered INVALID_TXN_STATE, which is fatal. That is the honest answer
+    /// and it is safe in the only direction that matters — nothing partial can
+    /// be in the log, because a transaction's records are written by ONE call
+    /// and only at commit.
+    pub txns: Arc<txn::Txns>,
     /// Queen as each SNI name sees it. Shared by every connection.
     lanes: Arc<Lanes>,
     /// Listener policy, read by [`conn`] and by nothing downstream of it.
@@ -212,6 +226,10 @@ impl Facade {
             // be the same object on every connection of the process, or the
             // window would be lost at the one moment it is needed.
             producers: Arc::clone(&self.producers),
+            // The Arc, for the same reason as the window above and one more:
+            // the byte cap on staged records is a budget for the PROCESS, so a
+            // per-connection copy would be one budget per connection.
+            txns: Arc::clone(&self.txns),
             lanes: Arc::clone(&self.lanes),
             policy: self.policy,
         }
@@ -246,6 +264,10 @@ impl Facade {
             // container, because the map is process-wide and its LRU has to be
             // one budget for the whole process.
             producers: Arc::clone(&self.producers),
+            // NOT re-scoped either, and for the same reason: the tenant is
+            // inside the stage's own key ([`txn`]) rather than around the
+            // container.
+            txns: Arc::clone(&self.txns),
             lanes: Arc::clone(&self.lanes),
             policy: self.policy,
         }
@@ -422,10 +444,10 @@ impl Facade {
     /// other: the root lane's client is the same object as `queen`, and its
     /// catalog is the same object as `catalog`. A caller that built them apart
     /// would give a connection with no SNI a different cache from the process's.
-    // Eight positional arguments, and they are eight because a `Facade` is
-    // eight independent things a boot decides — a parameter struct would move
-    // the same list one file away and stop the compiler from telling a caller
-    // which one it forgot.
+    // Nine positional arguments, and they are nine because a `Facade` is nine
+    // independent things a boot decides — a parameter struct would move the
+    // same list one file away and stop the compiler from telling a caller which
+    // one it forgot.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         advertised_host: String,
@@ -435,6 +457,7 @@ impl Facade {
         queen_token: Option<String>,
         queen: Arc<dyn queen::QueenApi>,
         coordinator: coordinator::Coordinator,
+        txns: Arc<txn::Txns>,
         policy: Policy,
     ) -> Facade {
         let catalog = Arc::new(queen::Catalog::new(Arc::clone(&queen)));
@@ -452,6 +475,11 @@ impl Facade {
             // right answer (an empty tracker) and a caller that could choose
             // would be a caller that could give two connections two windows.
             producers: Arc::new(idempotent::Producers::new()),
+            // PASSED, unlike the producer window above, because this one
+            // carries the caps of §5.2 and those are configuration: a caller
+            // that could not choose them would be a facade whose memory bound
+            // is a constant an operator cannot move.
+            txns,
             policy,
         }
     }
@@ -694,6 +722,7 @@ mod tests {
                 join_delay: JOIN_WINDOW,
                 ..Default::default()
             }),
+            Arc::new(txn::Txns::default()),
             Policy::default(),
         )
     }

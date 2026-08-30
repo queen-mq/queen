@@ -411,6 +411,25 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 
 /// Max operations in one `POST /api/v1/kv` (`QUEEN_KV_MAX_OPS_PER_CALL`).
 pub const MAX_KV_OPS_PER_CALL: usize = 256;
+/// Max KV operations in the rider array of one `POST /api/v1/transaction`.
+///
+/// DELIBERATELY tighter than [`MAX_KV_OPS_PER_CALL`] and it is not this
+/// facade's choice: the wire guard refuses the body at 64
+/// (server/src/handlers/data.rs, `WIRE_KV_MAX_OPS`) and `kv_apply_v1` carries
+/// the same number for `p_in_wire => TRUE`, because the KV row lock taken at
+/// step 0 of a bundle is held for the whole of it — every push, every blob, the
+/// fsync. Mirrored here so a bundle that would be refused is never built.
+///
+/// It is also the arithmetic behind [`crate::txn::MAX_TXN_OFFSETS`]: one
+/// operation is the transaction's own fence and one is the group index, so 62
+/// offsets is what is left.
+pub const WIRE_KV_MAX_OPS: usize = 64;
+/// Max keys summed over the KV rider of one transaction
+/// (server/src/handlers/data.rs, `WIRE_KV_MAX_KEYS`). Every operation this
+/// facade puts in a bundle is a single-key `put`, so this cannot bind before
+/// [`WIRE_KV_MAX_OPS`] does; it is mirrored so a later operation kind cannot
+/// reach the broker's guard instead of this one.
+pub const WIRE_KV_MAX_KEYS: usize = 256;
 /// Max keys summed over one call's operations (`QUEEN_KV_MAX_KEYS_PER_CALL`).
 /// A `getMany` counts its key array; a `getPrefix` counts its clamped limit.
 pub const MAX_KV_KEYS_PER_CALL: usize = 1024;
@@ -562,6 +581,41 @@ impl KvOp {
         ttl_seconds: u64,
     ) -> KvOp {
         KvOp::put_ttl(ns, key, value, ttl_seconds, Some(0))
+    }
+
+    /// `putIfAbsent` on a key that never expires — the claim a
+    /// `transactional.id` is taken with ([`crate::txn`]).
+    ///
+    /// NOT `required`, deliberately: losing this claim is not an error, it is
+    /// the answer "somebody already holds this id, and here is the version and
+    /// the value they hold it at" — which is precisely what the caller needs to
+    /// bump the epoch without a second round trip (024_kv.sql:1467-1471).
+    pub fn put_if_absent(ns: &str, key: &str, value: serde_json::Value) -> KvOp {
+        KvOp::Put {
+            ns: ns.to_string(),
+            key: key.to_string(),
+            value,
+            forever: true,
+            ttl_seconds: None,
+            expect: Some(0),
+            required: false,
+        }
+    }
+
+    /// A conditional write that never expires and answers a VERDICT rather than
+    /// aborting: the epoch bump of [`crate::txn`], which loses to a third
+    /// producer racing for the same `transactional.id` and must be told so
+    /// rather than rolling anything back.
+    pub fn put_expecting(ns: &str, key: &str, value: serde_json::Value, expect: i64) -> KvOp {
+        KvOp::Put {
+            ns: ns.to_string(),
+            key: key.to_string(),
+            value,
+            forever: true,
+            ttl_seconds: None,
+            expect: Some(expect),
+            required: false,
+        }
     }
 
     /// A FENCED write that never expires: conditional on `expect`, and
@@ -810,6 +864,37 @@ pub trait QueenApi: Send + Sync + 'static {
         let _ = host;
         None
     }
+
+    /// `POST /api/v1/transaction` — records and KV writes in ONE Postgres
+    /// transaction (M9, [`crate::txn`]).
+    ///
+    /// The only call in the facade that is not a single-kind operation, and the
+    /// only one whose failure taxonomy includes a lost precondition. The
+    /// guarantee is the stored procedure's own
+    /// (server/sql/procedures/005_log_ack.sql, `log_transaction_wire_v1`):
+    /// *"All-or-nothing by construction: one call = one transaction, every
+    /// failure path RAISEs, so a duplicate push or a rejected ack rolls back
+    /// every other operation in the batch"*, and *"a KV precondition marked
+    /// `required:true` raises 23514 out of `kv_apply_v1` and rolls the bundle
+    /// back the same way"*. That second sentence is what makes a fenced
+    /// transaction write exactly zero records.
+    ///
+    /// Answers one [`KvAnswer`] per operation of `kv`, aligned by the `opIndex`
+    /// the wire stamps on every rider result. The push echoes are checked and
+    /// then dropped: the wire builds them without the `baseOffset` the stored
+    /// procedure returned (server/src/handlers/data.rs), and a transactional
+    /// producer has already been answered `base_offset = -1` for every record
+    /// by the time this call is made, so there is nothing an offset here could
+    /// be told to.
+    ///
+    /// `kv` must already be within [`WIRE_KV_MAX_OPS`] and
+    /// [`WIRE_KV_MAX_KEYS`], which are tighter than the `/api/v1/kv` ceilings.
+    fn transaction<'a>(
+        &'a self,
+        items: &'a [PushItem],
+        kv: &'a [KvOp],
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Vec<KvAnswer>>>;
 }
 
 // --------------------------------------------------------------------- client
@@ -1140,6 +1225,40 @@ impl QueenApi for HttpQueen {
         })
     }
 
+    fn transaction<'a>(
+        &'a self,
+        items: &'a [PushItem],
+        kv: &'a [KvOp],
+        token: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Vec<KvAnswer>>> {
+        Box::pin(async move {
+            // A bundle with no records carries NO `operations` entry at all,
+            // and that is a route the broker has and takes deliberately: an
+            // `operations` array that is empty beside a KV rider goes straight
+            // to the KV procedure instead of the wire, which is a short
+            // transaction rather than one holding the outermost lock space for
+            // the whole bundle (server/src/handlers/data.rs, `txn_kv_only`).
+            // A consume-only exactly-once loop — read, filter everything away,
+            // commit the offsets — is exactly that shape.
+            let operations: Vec<TxnOperation<'_>> = if items.is_empty() {
+                Vec::new()
+            } else {
+                vec![TxnOperation::Push { items }]
+            };
+            let payload = serde_json::to_string(&TransactionBody {
+                operations: &operations,
+                kv,
+            })
+            .map_err(|e| Error::Body(format!("cannot serialize the transaction body: {e}")))?;
+            let body = Self::send(
+                self.request(reqwest::Method::POST, "/api/v1/transaction", token)
+                    .body(payload),
+            )
+            .await?;
+            align_transaction_results(&body, items.len(), kv.len())
+        })
+    }
+
     /// A second handle on the SAME `reqwest::Client`, differing only in the
     /// `Host` header it writes. Cloning the client is what makes this cheap
     /// enough to do per SNI name: a `reqwest::Client` clone shares the
@@ -1158,6 +1277,171 @@ impl QueenApi for HttpQueen {
 #[derive(Serialize)]
 struct KvBody<'a> {
     operations: &'a [KvOp],
+}
+
+/// The transaction wire's body.
+///
+/// `kv` is a TOP-LEVEL rider beside `operations` and never inside it, and that
+/// is a stated rule of the route rather than a style: two Go struct fields
+/// carrying the same JSON key at one level are silently dropped by
+/// `encoding/json`, so a `kv` leg inside an operation would let a bundle commit
+/// with the gate it existed for simply absent (server/src/handlers/data.rs).
+///
+/// The rider is always serialized, even when empty. A bundle with no KV
+/// operations is not one this facade ever builds — the fence at index 0 is what
+/// makes a commit a commit — and an absent array would read as "no gate" rather
+/// than as "no operations".
+#[derive(Serialize)]
+struct TransactionBody<'a> {
+    operations: &'a [TxnOperation<'a>],
+    kv: &'a [KvOp],
+}
+
+/// One entry of the flat `operations` array, demuxed by `type` on the broker.
+/// Push is the only kind this facade sends: acks belong to Queen's own consumer
+/// protocol and the Kafka fetch path takes no lease.
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum TxnOperation<'a> {
+    Push { items: &'a [PushItem] },
+}
+
+/// One result of a transaction, as the wire scatters it into the flat space.
+///
+/// `opIndex` is present only on a RIDER result and is what aligns a KV answer
+/// to the operation that asked for it (server/src/handlers/data.rs,
+/// `txn_scatter_rider`). A push echo carries `index` alone.
+#[derive(Deserialize)]
+struct TxnResultEntry {
+    #[serde(default)]
+    index: usize,
+    #[serde(rename = "opIndex", default)]
+    op_index: Option<usize>,
+    #[serde(rename = "type", default)]
+    kind: String,
+    #[serde(default = "yes")]
+    success: bool,
+    #[serde(flatten)]
+    kv: KvAnswer,
+}
+
+#[derive(Deserialize)]
+struct TransactionResponseBody {
+    #[serde(default = "yes")]
+    success: bool,
+    #[serde(default)]
+    reason: String,
+    #[serde(default)]
+    error: String,
+    /// The loser's whole verdict, when the failure is a lost precondition
+    /// (server/src/handlers/data.rs, `txn_precondition_json`). `failedIndex` is
+    /// in the FLAT operation space — `kv_base + the kv ordinal` — and is
+    /// translated back here, because a caller thinks in the array it sent.
+    #[serde(rename = "failedIndex", default)]
+    failed_index: Option<usize>,
+    #[serde(rename = "kvReason", default)]
+    kv_reason: Option<String>,
+    #[serde(default)]
+    version: Option<i64>,
+    #[serde(default)]
+    value: serde_json::Value,
+    #[serde(default)]
+    results: Vec<TxnResultEntry>,
+}
+
+/// Match a transaction response back to the operations that produced it.
+///
+/// Three things happen here and each one is a defect this would otherwise hide:
+///
+///   * `success: false` is HTTP **200**, deliberately, so that a lost
+///     precondition pollutes no retry policy and no error metric
+///     (server/sql/procedures/005_log_ack.sql). `reason: "kv_precondition"`
+///     therefore has to become [`Error::Precondition`] here or a fenced
+///     transaction would read as a committed one.
+///   * the loser's verdict arrives in the FLAT operation space
+///     (`failedIndex = kv_base + the kv ordinal`, server/src/handlers/data.rs
+///     `txn_precondition_json`), so it is translated back into the `kv` array
+///     the caller sent — a caller thinks in the array it built, and an index
+///     that silently means something else is the class of defect the whole
+///     alignment discipline exists for. A body that carries no verdict at all —
+///     an older broker, or a DETAIL too large to have stayed valid JSON —
+///     degrades to the fence's own index, which is 0 by construction because
+///     the fence is the only conditional operation this facade ever sends.
+///   * every KV operation must come back exactly once. A body that answers
+///     short is a broker whose wire procedure has no KV leg, and reading that
+///     as a successful gate is precisely the silent misalignment the route's
+///     own count guard exists for.
+fn align_transaction_results(body: &str, items: usize, kv: usize) -> Result<Vec<KvAnswer>> {
+    let parsed: TransactionResponseBody =
+        serde_json::from_str(body).map_err(|e| Error::Body(e.to_string()))?;
+    if !parsed.success {
+        return Err(match parsed.reason.as_str() {
+            "kv_precondition" => Error::Precondition {
+                failed_index: parsed
+                    .failed_index
+                    .map_or(0, |flat| flat.saturating_sub(items)),
+                reason: parsed.kv_reason.unwrap_or_default(),
+                version: parsed.version.unwrap_or_default(),
+                value: parsed.value,
+            },
+            other => Error::Body(format!(
+                "the transaction answered success=false, reason={other}: {}",
+                Snippet(&parsed.error)
+            )),
+        });
+    }
+    let mut out: Vec<Option<KvAnswer>> = (0..kv).map(|_| None).collect();
+    let mut echoes = 0usize;
+    for r in parsed.results {
+        match r.op_index {
+            // A push echo. Nothing reads it but its own success flag: an
+            // unsuccessful one on a bundle that reported `success: true` is a
+            // contradiction the caller must not resolve by guessing.
+            None => {
+                if !r.success {
+                    return Err(Error::Body(format!(
+                        "the transaction committed but operation {} reports success=false",
+                        r.index
+                    )));
+                }
+                echoes += 1;
+            }
+            Some(at) if r.kind == "kv" => {
+                let slot = out.get_mut(at).ok_or_else(|| {
+                    Error::Body(format!("transaction kv result {at} is out of range"))
+                })?;
+                if slot.is_some() {
+                    return Err(Error::Body(format!(
+                        "transaction kv result {at} appears twice"
+                    )));
+                }
+                *slot = Some(KvAnswer { index: at, ..r.kv });
+            }
+            // A rider kind this facade did not send. Named rather than ignored.
+            Some(at) => {
+                return Err(Error::Body(format!(
+                    "the transaction answered a `{}` rider at {at}, and this facade sent none",
+                    r.kind
+                )))
+            }
+        }
+    }
+    if echoes != items {
+        return Err(Error::Body(format!(
+            "the transaction answered {echoes} push results for {items} records"
+        )));
+    }
+    out.into_iter()
+        .enumerate()
+        .map(|(i, r)| {
+            r.ok_or_else(|| {
+                Error::Body(format!(
+                    "the transaction answered nothing for kv operation {i}; the bundle committed \
+                     and its gate cannot be trusted"
+                ))
+            })
+        })
+        .collect()
 }
 
 #[derive(Deserialize)]
@@ -1879,6 +2163,25 @@ pub mod testing {
         pub kv_calls: Mutex<Vec<Vec<KvOp>>>,
         /// When set, the next KV call fails with exactly this error.
         pub kv_error: Mutex<Option<Error>>,
+        /// A SECOND WRITER, landing between two of the facade's own calls.
+        ///
+        /// One entry is popped per KV call and applied to the store BEFORE that
+        /// call is processed; `None` means "nothing this time". It is the only
+        /// way to reach the arm where a compare-and-set loses to a third party
+        /// that moved the version mid-sequence — a race between three producers,
+        /// which a sequential double cannot otherwise produce, and which is
+        /// exactly the arm that must hand the backoff to the client instead of
+        /// looping.
+        pub kv_interpose: Mutex<std::collections::VecDeque<Option<KvOp>>>,
+        /// Every `POST /api/v1/transaction`, as it was sent: the records and
+        /// the KV rider, together, because what M9 asserts about a commit is a
+        /// property of the two ARRAYS AT ONCE — that the fence is at index 0
+        /// and that a bundle which lost it carries no records anywhere.
+        pub transactions: Mutex<Vec<(Vec<PushItem>, Vec<KvOp>)>>,
+        /// When set, the next transaction fails with exactly this error — the
+        /// EndTxn verdict table needs a transport failure and a 5xx, which
+        /// `fail` cannot express separately.
+        pub transaction_error: Mutex<Option<Error>>,
         /// The KV store itself, per (namespace, key) — the same "behave like the
         /// thing, not like a script" as `logs`, so a commit and the fetch that
         /// reads it back can be tested against each other.
@@ -1887,7 +2190,7 @@ pub mod testing {
         /// procedure's key column is `COLLATE "C"`, so a prefix read comes back
         /// in BYTE order and pages with a cursor in that order. A `HashMap` here
         /// would let a paging bug pass.
-        kv: Mutex<std::collections::BTreeMap<(String, String), Stored>>,
+        kv: Mutex<Store>,
         /// `queen.kv_version_seq`. A SEQUENCE and not `version + 1`, which is
         /// what makes a version unique across the whole store and rules out an
         /// ABA (024_kv.sql:133-140). It starts well above zero so that a test
@@ -1906,6 +2209,13 @@ pub mod testing {
         /// The credential every identity call was made with, in call order.
         identity_calls: Mutex<Vec<Option<String>>>,
     }
+
+    /// The fake key/value store, and the working copy a call applies to.
+    ///
+    /// A `BTreeMap`, and that is load-bearing rather than tidy: the stored
+    /// procedure's key column is `COLLATE "C"`, so a prefix read comes back in
+    /// BYTE order and pages with a cursor in that order.
+    type Store = std::collections::BTreeMap<(String, String), Stored>;
 
     /// One row of the fake key/value store.
     ///
@@ -1984,6 +2294,9 @@ pub mod testing {
                 logs: Mutex::new(HashMap::new()),
                 kv_calls: Mutex::new(Vec::new()),
                 kv_error: Mutex::new(None),
+                kv_interpose: Mutex::new(std::collections::VecDeque::new()),
+                transactions: Mutex::new(Vec::new()),
+                transaction_error: Mutex::new(None),
                 kv: Mutex::new(std::collections::BTreeMap::new()),
                 kv_version: std::sync::atomic::AtomicI64::new(1_000),
                 kv_read_rows: Mutex::new(None),
@@ -2311,6 +2624,16 @@ pub mod testing {
             self.inner.identity(token)
         }
 
+        fn transaction<'a>(
+            &'a self,
+            items: &'a [PushItem],
+            kv: &'a [KvOp],
+            token: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<Vec<KvAnswer>>> {
+            self.note();
+            self.inner.transaction(items, kv, token)
+        }
+
         fn with_host(&self, host: &str) -> Option<Arc<dyn QueenApi>> {
             Some(Arc::new(Routed {
                 host: Some(host.to_string()),
@@ -2586,197 +2909,276 @@ pub mod testing {
                 if keys > MAX_KV_KEYS_PER_CALL {
                     return Err(Error::status(400, format!("{keys} keys in one call")));
                 }
-                let cut = *self.kv_read_rows.lock().unwrap();
-                let now = tokio::time::Instant::now();
+                let interposed = self.kv_interpose.lock().unwrap().pop_front().flatten();
                 let mut kv = self.kv.lock().unwrap();
-                // VALIDATE-THEN-APPLY, and all-or-nothing on an escalation
-                // (024_kv.sql §6.1 point 1 and point 5): a `required`
-                // precondition that loses raises `check_violation`, which
-                // aborts the TRANSACTION — so the writes that already applied
-                // in the same call must not survive either. The working copy is
-                // what makes that true here rather than merely intended; it is
-                // affordable because a test's store is tens of keys.
+                if let Some(op) = interposed {
+                    let mut other = kv.clone();
+                    self.apply_kv(std::slice::from_ref(&op), &mut other)?;
+                    *kv = other;
+                }
                 let mut working = kv.clone();
-                let mut answers = Vec::with_capacity(ops.len());
-                for (index, op) in ops.iter().enumerate() {
-                    let answer = match op {
-                        KvOp::Put {
-                            ns,
-                            key,
-                            value,
-                            ttl_seconds,
-                            expect,
-                            required,
-                            ..
-                        } => {
-                            let at = (ns.clone(), key.clone());
-                            let current = working.get(&at);
-                            let effective = effective_version(current, now);
-                            let (applied, reason) = match expect {
-                                None => (true, None),
-                                // "Must not exist", and it WINS against an
-                                // expired-but-unpruned row.
-                                Some(0) => (effective == 0, Some("exists")),
-                                // A PURE UPDATE: an `expect: N > 0` on an
-                                // absent key creates NOTHING.
-                                Some(n) => match effective {
-                                    0 => (false, Some("absent")),
-                                    v => (v == *n, Some("version")),
-                                },
-                            };
-                            if applied {
-                                let version = self.next_version();
-                                working.insert(
-                                    at,
-                                    Stored {
-                                        value: value.clone(),
-                                        version,
-                                        expires_at: ttl_seconds
-                                            .map(|s| now + Duration::from_secs(s)),
-                                    },
-                                );
-                                KvAnswer {
-                                    applied: Some(true),
-                                    version,
-                                    value: value.clone(),
-                                    ..empty_answer(index, "put")
-                                }
-                            } else {
-                                if *required {
-                                    // The whole call, including `working`, is
-                                    // discarded: nothing was written.
-                                    return Err(Error::Precondition {
-                                        failed_index: index,
-                                        reason: reason.unwrap_or_default().to_string(),
-                                        version: effective,
-                                        value: current
-                                            .filter(|r| r.live(now))
-                                            .map(|r| r.value.clone())
-                                            .unwrap_or(serde_json::Value::Null),
-                                    });
-                                }
-                                KvAnswer {
-                                    applied: Some(false),
-                                    version: effective,
-                                    reason: reason.map(str::to_string),
-                                    // An expired row is not a value: the loser
-                                    // sees the same nothing a reader would.
-                                    value: current
-                                        .filter(|r| r.live(now))
-                                        .map(|r| r.value.clone())
-                                        .unwrap_or(serde_json::Value::Null),
-                                    ..empty_answer(index, "put")
-                                }
-                            }
-                        }
-                        KvOp::Delete { ns, key, expect } => {
-                            let at = (ns.clone(), key.clone());
-                            let effective = effective_version(working.get(&at), now);
-                            let (applied, reason) = match expect {
-                                None => (effective != 0, Some("absent")),
-                                Some(0) => (effective == 0, Some("exists")),
-                                Some(n) => match effective {
-                                    0 => (false, Some("absent")),
-                                    v => (v == *n, Some("version")),
-                                },
-                            };
-                            if applied {
-                                working.remove(&at);
-                            }
-                            KvAnswer {
-                                applied: Some(applied),
-                                // The version that WAS there either way: what was
-                                // removed, or what stopped the removal.
-                                version: effective,
-                                reason: (!applied).then(|| reason.unwrap_or_default().to_string()),
-                                ..empty_answer(index, "delete")
-                            }
-                        }
-                        KvOp::GetMany { ns, keys } => {
-                            let mut rows = Vec::new();
-                            let mut missing = Vec::new();
-                            let mut truncated = false;
-                            // Sorted, because the stored procedure returns rows
-                            // ordered by key and spends its byte budget in that
-                            // order — which is what decides WHICH keys a
-                            // truncated read drops.
-                            let mut sorted: Vec<&String> = keys.iter().collect();
-                            sorted.sort();
-                            for key in sorted {
-                                // The WORKING copy, because the stored
-                                // procedure applies every write before the
-                                // first read (§6.1 point 2), so a get after a
-                                // put in one call sees the put.
-                                match working
-                                    .get(&(ns.clone(), key.clone()))
-                                    .filter(|row| row.live(now))
-                                {
-                                    Some(row) => {
-                                        if cut.is_some_and(|c| rows.len() >= c) {
-                                            truncated = true;
-                                            continue;
-                                        }
-                                        rows.push(KvRow {
-                                            key: key.clone(),
-                                            value: row.value.clone(),
-                                            version: row.version,
-                                        });
-                                    }
-                                    None => missing.push(key.clone()),
-                                }
-                            }
-                            KvAnswer {
-                                rows,
-                                missing,
-                                truncated,
-                                ..empty_answer(index, "getMany")
-                            }
-                        }
-                        KvOp::GetPrefix {
-                            ns,
-                            prefix,
-                            limit,
-                            after,
-                        } => {
-                            let limit = (*limit).clamp(1, MAX_KV_PREFIX_LIMIT) as usize;
-                            let limit = cut.map_or(limit, |c| limit.min(c));
-                            let mut rows = Vec::new();
-                            let mut truncated = false;
-                            for ((row_ns, key), row) in working.iter() {
-                                if row_ns != ns || !key.starts_with(prefix) || !row.live(now) {
-                                    continue;
-                                }
-                                // Exclusive, and in byte order: the same cursor
-                                // the SP implements with `key > after`.
-                                if after.as_ref().is_some_and(|a| key <= a) {
-                                    continue;
-                                }
-                                if rows.len() == limit {
-                                    truncated = true;
-                                    break;
-                                }
-                                rows.push(KvRow {
-                                    key: key.clone(),
-                                    value: row.value.clone(),
-                                    version: row.version,
-                                });
-                            }
-                            let next_after = truncated
-                                .then(|| rows.last().map(|r| r.key.clone()))
-                                .flatten();
-                            KvAnswer {
-                                rows,
-                                truncated,
-                                next_after,
-                                ..empty_answer(index, "getPrefix")
-                            }
-                        }
-                    };
-                    answers.push(answer);
+                let answers = self.apply_kv(ops, &mut working)?;
+                *kv = working;
+                Ok(answers)
+            })
+        }
+
+        /// One atomic bundle, with the property the whole M9 design rests on:
+        /// the KV rider is applied FIRST and the records land only if it did.
+        /// A `required` precondition that loses returns `Err` having written
+        /// neither — which is the double's model of
+        /// `log_transaction_wire_v1`'s "one call = one transaction".
+        ///
+        /// The scripted failures are taken BEFORE either half, and that is the
+        /// one place this differs from a broker: `push_error` set mid-bundle
+        /// would otherwise leave the KV writes behind, which is a state the
+        /// stored procedure cannot produce and no test should be able to
+        /// script.
+        fn transaction<'a>(
+            &'a self,
+            items: &'a [PushItem],
+            kv_ops: &'a [KvOp],
+            token: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<Vec<KvAnswer>>> {
+            Box::pin(async move {
+                self.tokens.lock().unwrap().push(token.map(str::to_string));
+                self.transactions
+                    .lock()
+                    .unwrap()
+                    .push((items.to_vec(), kv_ops.to_vec()));
+                if let Some(e) = self.transaction_error.lock().unwrap().take() {
+                    return Err(e);
+                }
+                if let Some(e) = self.fail.lock().unwrap().clone() {
+                    return Err(Error::Transport(e));
+                }
+                // The WIRE's ceilings, which are tighter than `/api/v1/kv`'s
+                // and are refused with the whole bundle
+                // (server/src/handlers/data.rs, `txn_check_kv`).
+                if kv_ops.len() > WIRE_KV_MAX_OPS {
+                    return Err(Error::status(
+                        400,
+                        format!("{} kv operations in one transaction", kv_ops.len()),
+                    ));
+                }
+                let keys: usize = kv_ops.iter().map(KvOp::keys).sum();
+                if keys > WIRE_KV_MAX_KEYS {
+                    return Err(Error::status(
+                        400,
+                        format!("{keys} kv keys in one transaction"),
+                    ));
+                }
+                let mut kv = self.kv.lock().unwrap();
+                let mut logs = self.logs.lock().unwrap();
+                let mut working = kv.clone();
+                let answers = self.apply_kv(kv_ops, &mut working)?;
+                for it in items {
+                    let lane = logs
+                        .entry((it.queue.clone(), it.partition.clone()))
+                        .or_default();
+                    lane.payloads.push(it.payload.clone());
                 }
                 *kv = working;
                 Ok(answers)
             })
+        }
+    }
+
+    impl FakeQueen {
+        /// Apply KV operations to a WORKING copy of the store, with
+        /// `kv_apply_v1`'s own rules (server/sql/procedures/024_kv.sql).
+        ///
+        /// VALIDATE-THEN-APPLY, and all-or-nothing on an escalation (§6.1
+        /// point 1 and point 5): a `required` precondition that loses raises
+        /// `check_violation`, which aborts the TRANSACTION — so the writes that
+        /// already applied in the same call must not survive either. The
+        /// working copy is what makes that true here rather than merely
+        /// intended; it is affordable because a test's store is tens of keys.
+        ///
+        /// Shared by `kv` and `transaction` so the two surfaces cannot disagree
+        /// about what a precondition means — which is the whole reason the
+        /// transaction bundle can be trusted to write nothing when its fence is
+        /// lost.
+        fn apply_kv(&self, ops: &[KvOp], working: &mut Store) -> Result<Vec<KvAnswer>> {
+            let cut = *self.kv_read_rows.lock().unwrap();
+            let now = tokio::time::Instant::now();
+            let mut answers = Vec::with_capacity(ops.len());
+            for (index, op) in ops.iter().enumerate() {
+                let answer = match op {
+                    KvOp::Put {
+                        ns,
+                        key,
+                        value,
+                        ttl_seconds,
+                        expect,
+                        required,
+                        ..
+                    } => {
+                        let at = (ns.clone(), key.clone());
+                        let current = working.get(&at);
+                        let effective = effective_version(current, now);
+                        let (applied, reason) = match expect {
+                            None => (true, None),
+                            // "Must not exist", and it WINS against an
+                            // expired-but-unpruned row.
+                            Some(0) => (effective == 0, Some("exists")),
+                            // A PURE UPDATE: an `expect: N > 0` on an
+                            // absent key creates NOTHING.
+                            Some(n) => match effective {
+                                0 => (false, Some("absent")),
+                                v => (v == *n, Some("version")),
+                            },
+                        };
+                        if applied {
+                            let version = self.next_version();
+                            working.insert(
+                                at,
+                                Stored {
+                                    value: value.clone(),
+                                    version,
+                                    expires_at: ttl_seconds.map(|s| now + Duration::from_secs(s)),
+                                },
+                            );
+                            KvAnswer {
+                                applied: Some(true),
+                                version,
+                                value: value.clone(),
+                                ..empty_answer(index, "put")
+                            }
+                        } else {
+                            if *required {
+                                // The whole call, including `working`, is
+                                // discarded: nothing was written.
+                                return Err(Error::Precondition {
+                                    failed_index: index,
+                                    reason: reason.unwrap_or_default().to_string(),
+                                    version: effective,
+                                    value: current
+                                        .filter(|r| r.live(now))
+                                        .map(|r| r.value.clone())
+                                        .unwrap_or(serde_json::Value::Null),
+                                });
+                            }
+                            KvAnswer {
+                                applied: Some(false),
+                                version: effective,
+                                reason: reason.map(str::to_string),
+                                // An expired row is not a value: the loser
+                                // sees the same nothing a reader would.
+                                value: current
+                                    .filter(|r| r.live(now))
+                                    .map(|r| r.value.clone())
+                                    .unwrap_or(serde_json::Value::Null),
+                                ..empty_answer(index, "put")
+                            }
+                        }
+                    }
+                    KvOp::Delete { ns, key, expect } => {
+                        let at = (ns.clone(), key.clone());
+                        let effective = effective_version(working.get(&at), now);
+                        let (applied, reason) = match expect {
+                            None => (effective != 0, Some("absent")),
+                            Some(0) => (effective == 0, Some("exists")),
+                            Some(n) => match effective {
+                                0 => (false, Some("absent")),
+                                v => (v == *n, Some("version")),
+                            },
+                        };
+                        if applied {
+                            working.remove(&at);
+                        }
+                        KvAnswer {
+                            applied: Some(applied),
+                            // The version that WAS there either way: what was
+                            // removed, or what stopped the removal.
+                            version: effective,
+                            reason: (!applied).then(|| reason.unwrap_or_default().to_string()),
+                            ..empty_answer(index, "delete")
+                        }
+                    }
+                    KvOp::GetMany { ns, keys } => {
+                        let mut rows = Vec::new();
+                        let mut missing = Vec::new();
+                        let mut truncated = false;
+                        // Sorted, because the stored procedure returns rows
+                        // ordered by key and spends its byte budget in that
+                        // order — which is what decides WHICH keys a
+                        // truncated read drops.
+                        let mut sorted: Vec<&String> = keys.iter().collect();
+                        sorted.sort();
+                        for key in sorted {
+                            // The WORKING copy, because the stored
+                            // procedure applies every write before the
+                            // first read (§6.1 point 2), so a get after a
+                            // put in one call sees the put.
+                            match working
+                                .get(&(ns.clone(), key.clone()))
+                                .filter(|row| row.live(now))
+                            {
+                                Some(row) => {
+                                    if cut.is_some_and(|c| rows.len() >= c) {
+                                        truncated = true;
+                                        continue;
+                                    }
+                                    rows.push(KvRow {
+                                        key: key.clone(),
+                                        value: row.value.clone(),
+                                        version: row.version,
+                                    });
+                                }
+                                None => missing.push(key.clone()),
+                            }
+                        }
+                        KvAnswer {
+                            rows,
+                            missing,
+                            truncated,
+                            ..empty_answer(index, "getMany")
+                        }
+                    }
+                    KvOp::GetPrefix {
+                        ns,
+                        prefix,
+                        limit,
+                        after,
+                    } => {
+                        let limit = (*limit).clamp(1, MAX_KV_PREFIX_LIMIT) as usize;
+                        let limit = cut.map_or(limit, |c| limit.min(c));
+                        let mut rows = Vec::new();
+                        let mut truncated = false;
+                        for ((row_ns, key), row) in working.iter() {
+                            if row_ns != ns || !key.starts_with(prefix) || !row.live(now) {
+                                continue;
+                            }
+                            // Exclusive, and in byte order: the same cursor
+                            // the SP implements with `key > after`.
+                            if after.as_ref().is_some_and(|a| key <= a) {
+                                continue;
+                            }
+                            if rows.len() == limit {
+                                truncated = true;
+                                break;
+                            }
+                            rows.push(KvRow {
+                                key: key.clone(),
+                                value: row.value.clone(),
+                                version: row.version,
+                            });
+                        }
+                        let next_after = truncated
+                            .then(|| rows.last().map(|r| r.key.clone()))
+                            .flatten();
+                        KvAnswer {
+                            rows,
+                            truncated,
+                            next_after,
+                            ..empty_answer(index, "getPrefix")
+                        }
+                    }
+                };
+                answers.push(answer);
+            }
+            Ok(answers)
         }
     }
 
@@ -3483,6 +3885,15 @@ mod tests {
 
         fn kv<'a>(
             &'a self,
+            _: &'a [KvOp],
+            _: Option<&'a str>,
+        ) -> BoxFuture<'a, Result<Vec<KvAnswer>>> {
+            unreachable!("the stall test only lists")
+        }
+
+        fn transaction<'a>(
+            &'a self,
+            _: &'a [PushItem],
             _: &'a [KvOp],
             _: Option<&'a str>,
         ) -> BoxFuture<'a, Result<Vec<KvAnswer>>> {

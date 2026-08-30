@@ -33,6 +33,23 @@
 pub const DOMAIN_PARTITION: u8 = 0x01;
 /// The domain tag of group ownership.
 pub const DOMAIN_GROUP: u8 = 0x02;
+/// The domain tag of `transactional.id` ownership — **defined and unused in
+/// v1** (M9, [`crate::txn`]).
+///
+/// Ownership of a `transactional.id` is a rendezvous over the live set exactly
+/// as group ownership is, and it needs its own domain byte so that a topic, a
+/// group and a transactional id spelled the same are not correlated onto one
+/// node — the same reason [`DOMAIN_GROUP`] exists.
+///
+/// Nothing calls it, and that is the honest state of things rather than an
+/// oversight: transactions are single-node because the STAGE cannot move
+/// between facades, and no ownership rule fixes that — a producer sends
+/// `Produce` to the partition leader and `EndTxn` to the coordinator, which in
+/// a cluster are different processes. The constant is here so that the day the
+/// stage is durable, the change is a module swap and not a protocol change; and
+/// its rows are in the pinned table below, which is additive by construction
+/// because the domain byte is the first byte of the hashed buffer.
+pub const DOMAIN_TXN: u8 = 0x03;
 
 /// FNV-1a, 64-bit. Offset basis and prime are the published constants.
 pub fn fnv1a64(bytes: &[u8]) -> u64 {
@@ -172,6 +189,11 @@ mod tests {
                 0x8f3da208494794ac,
             ),
             (DOMAIN_GROUP, b"".to_vec(), 1, 0xd27a13771d92b307),
+            // DOMAIN_TXN, pinned before anything routes on it: the day cluster
+            // mode grows a transaction coordinator, this table is what stops
+            // the scheme moving under it.
+            (DOMAIN_TXN, b"tx-1".to_vec(), 1, 0x56f5e1427f0231ec),
+            (DOMAIN_TXN, b"tx-1".to_vec(), 2, 0x7a6079306c934186),
             (
                 DOMAIN_GROUP,
                 b"a group with spaces".to_vec(),
@@ -203,13 +225,21 @@ mod tests {
         );
     }
 
-    /// The domain tag is not decoration: a group and a topic that share a name
-    /// must not share a derivation.
+    /// The domain tag is not decoration: a group, a topic and a transactional
+    /// id that share a name must not share a derivation.
     #[test]
     fn the_domains_are_separate() {
         assert_ne!(
             score(DOMAIN_PARTITION, b"orders", 1),
             score(DOMAIN_GROUP, b"orders", 1)
+        );
+        assert_ne!(
+            score(DOMAIN_TXN, b"orders", 1),
+            score(DOMAIN_GROUP, b"orders", 1)
+        );
+        assert_ne!(
+            score(DOMAIN_TXN, b"orders", 1),
+            score(DOMAIN_PARTITION, b"orders", 1)
         );
     }
 

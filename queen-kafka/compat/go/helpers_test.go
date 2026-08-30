@@ -94,9 +94,14 @@ func TestMain(m *testing.M) {
 // newClient builds a client every test in this package can share the defaults
 // of. Two of those defaults are load-bearing:
 //
-//   - DisableIdempotentWrite, because InitProducerId is deliberately not
-//     implemented (PLAN_QUEEN_KAFKA.md: no transactions, no EOS) and franz-go
-//     is idempotent by default — without it the first produce never happens.
+//   - DisableIdempotentWrite. This is now a CHOICE and no longer a necessity:
+//     M7 F3 implemented InitProducerId and the sequence window, and M9
+//     implemented transactions, so an idempotent franz-go producer works here.
+//     The tests in this package assert the offsets a plain produce returns and
+//     drive hand-built batches with fixed sequences, and an idempotent client
+//     would put its own producer id and sequence on every one of them. The
+//     idempotent and transactional paths have their own homes: idempotent_test.go
+//     here, and compat/transactions for the client-visible transaction loop.
 //   - ManualPartitioner, because every test names the partition it writes to.
 //     The assertions are then about the facade's mapping (Kafka partition n =
 //     Queen partition n) and not about a partitioner's hash.

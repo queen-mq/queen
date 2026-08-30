@@ -15,6 +15,8 @@
 //! [`metadata::not_a_topic_here`].
 
 pub mod acls;
+pub mod add_offsets_to_txn;
+pub mod add_partitions_to_txn;
 pub mod alter_configs;
 pub mod api_versions;
 pub mod create_partitions;
@@ -23,6 +25,7 @@ pub mod delete_groups;
 pub mod delete_topics;
 pub mod describe_configs;
 pub mod describe_groups;
+pub mod end_txn;
 pub mod fetch;
 pub mod find_coordinator;
 pub mod heartbeat;
@@ -40,6 +43,7 @@ pub mod produce;
 pub mod sasl_authenticate;
 pub mod sasl_handshake;
 pub mod sync_group;
+pub mod txn_offset_commit;
 
 /// Fixtures shared by the handler tests. One place to build a [`crate::Facade`]
 /// so that a new field on it does not have to be invented eleven times, and so
@@ -54,6 +58,7 @@ pub mod testing {
     use crate::coordinator::{Coordinator, GroupConfig};
     use crate::queen::testing::FakeQueen;
     use crate::queen::QueenApi;
+    use crate::txn::Txns;
     use crate::{Facade, Policy};
 
     /// A facade over a fake Queen holding `queues`, as `(name, live lanes)`.
@@ -88,6 +93,7 @@ pub mod testing {
             Cluster::Enabled(state),
             host,
             port,
+            Arc::new(Txns::default()),
         );
         (facade, api)
     }
@@ -101,7 +107,27 @@ pub mod testing {
             Cluster::Single,
             "kafka.example.com".to_string(),
             9092,
+            Arc::new(Txns::default()),
         )
+    }
+
+    /// A facade whose transaction stage carries `limits` rather than the
+    /// defaults — the only way a cap test can reach a ceiling without staging
+    /// eight megabytes of fixture.
+    pub fn facade_with_txn_limits(
+        queues: &[(&str, i64)],
+        limits: crate::txn::Limits,
+    ) -> (Facade, Arc<FakeQueen>) {
+        let api = FakeQueen::with(queues);
+        let facade = build(
+            Arc::clone(&api) as Arc<dyn QueenApi>,
+            Policy::default(),
+            Cluster::Single,
+            "kafka.example.com".to_string(),
+            9092,
+            Arc::new(Txns::new(limits)),
+        );
+        (facade, api)
     }
 
     fn build(
@@ -110,6 +136,7 @@ pub mod testing {
         cluster: Cluster,
         advertised_host: String,
         advertised_port: u16,
+        txns: Arc<Txns>,
     ) -> Facade {
         Facade::new(
             advertised_host,
@@ -127,6 +154,7 @@ pub mod testing {
                 join_delay: Duration::ZERO,
                 ..GroupConfig::default()
             }),
+            txns,
             policy,
         )
     }

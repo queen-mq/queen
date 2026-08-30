@@ -7,12 +7,13 @@ rig has to fake, and only under `--m5` (see below). `js/`, `librdkafka/` and
 `java/` are M6's other client rows and run against the same stack — see
 [The rest of the M6 client matrix](#the-rest-of-the-m6-client-matrix).
 
-Two suites stand up their own stack instead, because the shape they measure is
+Three suites stand up their own stack instead, because the shape they measure is
 not one broker and one facade:
 
 | Suite | Shape | Ports and containers |
 | --- | --- | --- |
 | [`cluster/`](cluster) | **cluster mode**: one Postgres, two mesh-wired Queen brokers on it, three clustered facades, one facade with the cluster config absent, and two unclustered facades. Nine scenarios, run by `cluster/rig-cluster.sh` | 32400-32419, container `qkx-c2-pg` |
+| [`transactions/`](transactions) | **M9 transactions**: one Postgres, one broker and THREE facades — the one under test, one with `QUEEN_KAFKA_NODE_ID` set so the cluster-mode refusal can be measured, and one with the transaction caps at their floor. Nine scenarios over Java kafka-clients 4.3.1 and franz-go, run by `transactions/run.sh` | 32910-32914, container `qkt-acc-pg` |
 | [`embedded/`](embedded) | **embedded mode** (`QUEEN_KAFKA_EMBEDDED=true` on the BROKER, which then supervises the facade as a child process), run by `embedded/rig-embedded.sh` | see its own README |
 
 `embedded/` is on disk with its own README and rig and is **not claimed by any
@@ -66,7 +67,7 @@ module outside itself.
 | `TestConsumerGroupTwoMembersSplitThePartitions` | two members of one group: every record delivered exactly once, no partition read by both, both members assigned something |
 | `TestConsumerGroupResumesFromCommittedOffsets` | a committed offset overrides `auto.offset.reset`: a second consumer told to start at the beginning resumes where the group stopped |
 | `TestConsumerGroupRebalancesWhenAMemberLeaves` | LeaveGroup triggers a rebalance and the survivor reaches every record, with no gap and no duplicate across the two generations |
-| `TestFindCoordinatorIsTheFacade` | the group coordinator is the broker Metadata advertises; there is no transaction coordinator |
+| `TestFindCoordinatorIsTheFacade` | the group coordinator is the broker Metadata advertises, and since M9 so is the TRANSACTION coordinator (`key_type` 1) in single-node mode |
 | `TestSimpleConsumerCommitsAndReadsBackEveryTopic` | a client with no membership commits at generation -1, and reads its offsets back both by name and through the all-topics (null) form |
 | `TestGroupSingleMemberConsumesCommitsAndExits` | one member reads 200 keyed records over every partition, commits, and Close() returns: the committed offsets are read back through OffsetFetch, not believed from the client |
 | `TestGroupTwoMembersSplitThePartitionsEagerly` | the same split under range/round-robin rather than cooperative-sticky, asserted on the assignment the members were GIVEN (4 and 4 over 8 partitions) as well as on what arrived |
@@ -96,8 +97,11 @@ every test pins. The last three are F4's.
 | `go/admin_acls_test.go` | 6 | DescribeAcls, CreateAcls and DeleteAcls at v1, v2 and v3: the code, both message literals, an empty `resources`, one result per creation and per filter, and an empty request list answering an empty result list with no error |
 
 The differential (`differential/rig-diff.sh run`, which diffs every answer
-against `apache/kafka:3.9.1` in KRaft) grew with it: **16 scenarios**, 84
-divergences, 62 classified `deliberate`, 22 `accepted`, **0 left to classify**.
+against `apache/kafka:3.9.1` in KRaft) grew with it, and again with M9's
+`transactions` scenario: **17 scenarios**, 100 divergences from a cold stack (74
+`deliberate`, 26 `accepted`) or 97 from a warm one (72, 25), and **0 left to
+classify** either way. The three-row difference is the oracle's own transaction
+coordinator warming up, which its accepted rows already name.
 F4 added three: `acls` (`admin_acls.go`), `createpartitions` and `offsetdelete`
 (`admin_partitions.go`, `admin_offsets.go`). `acls` and `offsetdelete` are held
 to a **zero-divergence** bar rather than a classified one, because both APIs'
@@ -177,9 +181,17 @@ for each code beside it is `src/throttle.rs`.
 
 - **`kgo.DisableIdempotentWrite()` is no longer needed** (2026-08-29, M7 F3).
   franz-go is an idempotent producer by default and `InitProducerId` is now
-  advertised, so a stock `kgo.NewClient` produces. Transactions are still
-  refused: it is idempotence that landed, not EOS. Tests written before F3 that
-  still pass the option are unaffected, since disabling it is legal.
+  advertised, so a stock `kgo.NewClient` produces. Tests written before F3 that
+  still pass the option are unaffected, since disabling it is legal, and the
+  ones in `go/` keep it on purpose: they assert the offsets a plain produce
+  returns and drive hand-built batches with fixed sequences, and an idempotent
+  client would put its own producer id and sequence on every one of them.
+- **Transactions landed in M9** (2026-08-30) and are NOT exercised from `go/`.
+  `kgo.TransactionalID` and `GroupTransactSession` work; the whole
+  client-visible transaction path — Java and franz-go, fencing, the caps, a
+  crash mid-transaction, and an exactly-once loop with an induced SIGKILL —
+  lives in [`transactions/`](transactions), which stands up its own stack on
+  32910-32914 and is run with `transactions/run.sh`.
 - **acks=0 offsets are invented by the client.** There is no response to read
   them from, so franz-go fills them from its own per-partition counter. Nothing
   about them is an assertion on the facade.

@@ -85,22 +85,21 @@ func TestInitProducerIdBumpsAKnownProducersEpoch(t *testing.T) {
 		first.ProducerID, first.ProducerEpoch, second.ProducerEpoch)
 }
 
-// Transactions stay refused, and the point of this test is the CLOCK: before
-// key 22 was advertised, a transactional producer's initTransactions() blocked
-// for the whole of max.block.ms (the campaign measured 20 s) because the Sender
-// held a request no node claimed to support. Advertising the key is what makes
-// THIS refusal immediate.
+// A transactional id is GRANTED since M9, and the point of this test is still
+// the CLOCK. Before key 22 was advertised, a transactional producer's
+// initTransactions() blocked for the whole of max.block.ms (the campaign
+// measured 20 s) because the Sender held a request no node claimed to support;
+// then it blocked for the same 20 s on a RETRIABLE FindCoordinator refusal.
+// M9 makes both immediate: FindCoordinator(TRANSACTION) answers this facade
+// itself and InitProducerId mints a pid at epoch 0.
 //
-// Sent straight at node 0 rather than through the client's own routing, and
-// that is a finding rather than a convenience: a client with a transactional.id
-// asks FindCoordinator for a TRANSACTION coordinator first, and the facade
-// answers that COORDINATOR_NOT_AVAILABLE (`handlers::find_coordinator`) — a
-// RETRIABLE code, so the client loops there and never reaches this handler.
-// TestATransactionalClientNeverReachesInitProducerId below measures that path;
-// this one measures the handler.
-func TestATransactionalIdIsRefusedImmediately(t *testing.T) {
+// Sent straight at node 0 rather than through the client's own routing, which
+// keeps this a test of the HANDLER; the routing is
+// TestATransactionCoordinatorIsThisFacade below, and the whole client-visible
+// path is compat/transactions.
+func TestATransactionalIdIsGrantedImmediately(t *testing.T) {
 	cl := newClient(t)
-	id := "qk-f3-tx-" + fmt.Sprint(time.Now().UnixNano())
+	id := "qk-m9-tx-" + fmt.Sprint(time.Now().UnixNano())
 	req := kmsg.NewPtrInitProducerIDRequest()
 	req.TransactionalID = &id
 	req.TransactionTimeoutMillis = 60_000
@@ -109,15 +108,21 @@ func TestATransactionalIdIsRefusedImmediately(t *testing.T) {
 	resp := initProducerIDAtNode0(t, cl, req)
 	took := time.Since(start)
 
-	// 53 = TRANSACTIONAL_ID_AUTHORIZATION_FAILED, the same code and the same
-	// sentence the produce path gives a transactional id.
-	if resp.ErrorCode != 53 {
-		t.Fatalf("a transactional id answered error %d, want 53", resp.ErrorCode)
+	if resp.ErrorCode != 0 {
+		t.Fatalf("a transactional id answered error %d, want a grant", resp.ErrorCode)
+	}
+	if resp.ProducerID <= 0 {
+		t.Fatalf("producer id %d is not usable", resp.ProducerID)
+	}
+	// A FRESH transactional id is claimed at epoch 0; a second init of the same
+	// id is what bumps it, and that fencing is compat/transactions scenario 3.
+	if resp.ProducerEpoch != 0 {
+		t.Fatalf("a fresh transactional id came back at epoch %d, want 0", resp.ProducerEpoch)
 	}
 	if took > 2*time.Second {
-		t.Fatalf("the refusal took %s; it is supposed to be immediate", took)
+		t.Fatalf("the grant took %s; it is supposed to be immediate", took)
 	}
-	t.Logf("a transactional id was refused with error 53 in %s", took)
+	t.Logf("a transactional id was granted pid %d epoch %d in %s", resp.ProducerID, resp.ProducerEpoch, took)
 }
 
 // An EMPTY transactional id is not a transactional id: brod's hand-rolled
@@ -326,20 +331,27 @@ func TestAStaleEpochIsFenced(t *testing.T) {
 	t.Logf("epoch 0 after epoch 1 answered error 47: %s", errMsg(stale))
 }
 
-// What a transactional client ACTUALLY meets, measured rather than assumed. It
-// never reaches InitProducerId: FindCoordinator for a TRANSACTION coordinator
-// (key_type 1) is answered COORDINATOR_NOT_AVAILABLE, which is RETRIABLE, so
-// the client retries until its own deadline. The refusal is unmistakable and it
-// is not instant — see the F3 report; making it instant means a fatal code in
-// `handlers::find_coordinator`, which is not this stage's file.
-func TestATransactionalClientNeverReachesInitProducerId(t *testing.T) {
+// What a transactional client ACTUALLY meets, measured rather than assumed, and
+// the exact answer that ended the campaign's 20 second hang. FindCoordinator for
+// a TRANSACTION coordinator (key_type 1) used to be answered
+// COORDINATOR_NOT_AVAILABLE, which is RETRIABLE, so the client looped there
+// until max.block.ms and never reached InitProducerId at all. Since M9 it is
+// answered with THIS facade, error 0, in single-node mode.
+//
+// In cluster mode the same request is answered
+// TRANSACTIONAL_ID_AUTHORIZATION_FAILED (53), which is FATAL, so the client
+// stops instead of looping. This rig is single-node; compat/transactions
+// scenario 7 runs a facade with QUEEN_KAFKA_NODE_ID set and measures that.
+func TestATransactionCoordinatorIsThisFacade(t *testing.T) {
 	cl := newClient(t)
-	id := "qk-f3-txroute-" + fmt.Sprint(time.Now().UnixNano())
+	id := "qk-m9-txroute-" + fmt.Sprint(time.Now().UnixNano())
 	req := kmsg.NewPtrFindCoordinatorRequest()
 	req.CoordinatorKey = id
 	req.CoordinatorType = 1 // TRANSACTION
 
+	start := time.Now()
 	resp, err := cl.Request(ctxFor(t, 20*time.Second), req)
+	took := time.Since(start)
 	if err != nil {
 		t.Fatalf("FindCoordinator(TRANSACTION): %v", err)
 	}
@@ -347,15 +359,18 @@ func TestATransactionalClientNeverReachesInitProducerId(t *testing.T) {
 	if !ok {
 		t.Fatalf("FindCoordinator: unexpected response type %T", resp)
 	}
-	// 15 = COORDINATOR_NOT_AVAILABLE.
-	if fc.ErrorCode != 15 {
-		t.Fatalf("FindCoordinator(TRANSACTION) answered error %d, want 15", fc.ErrorCode)
+	if fc.ErrorCode != 0 {
+		t.Fatalf("FindCoordinator(TRANSACTION) answered error %d, want 0", fc.ErrorCode)
 	}
-	msg := ""
-	if fc.ErrorMessage != nil {
-		msg = *fc.ErrorMessage
+	if fc.NodeID != 0 || fc.Port <= 0 {
+		t.Fatalf("FindCoordinator(TRANSACTION) answered node %d port %d, want node 0 and a real port",
+			fc.NodeID, fc.Port)
 	}
-	t.Logf("a transaction coordinator was refused with error 15: %s", msg)
+	if took > 2*time.Second {
+		t.Fatalf("the answer took %s; the whole point of M9's fix is that it is immediate", took)
+	}
+	t.Logf("the transaction coordinator is node %d at %s:%d, answered in %s",
+		fc.NodeID, fc.Host, fc.Port, took)
 }
 
 // ------------------------------------------------------ the lost-window proof

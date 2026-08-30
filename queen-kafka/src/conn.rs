@@ -31,14 +31,15 @@ use std::time::Duration;
 
 use bytes::{Buf, Bytes, BytesMut};
 use kafka_protocol::messages::{
-    AlterConfigsRequest, ApiKey, ApiVersionsRequest, CreateAclsRequest, CreatePartitionsRequest,
-    CreateTopicsRequest, DeleteAclsRequest, DeleteGroupsRequest, DeleteTopicsRequest,
-    DescribeAclsRequest, DescribeConfigsRequest, DescribeGroupsRequest, FetchRequest,
+    AddOffsetsToTxnRequest, AddPartitionsToTxnRequest, AlterConfigsRequest, ApiKey,
+    ApiVersionsRequest, CreateAclsRequest, CreatePartitionsRequest, CreateTopicsRequest,
+    DeleteAclsRequest, DeleteGroupsRequest, DeleteTopicsRequest, DescribeAclsRequest,
+    DescribeConfigsRequest, DescribeGroupsRequest, EndTxnRequest, FetchRequest,
     FindCoordinatorRequest, HeartbeatRequest, IncrementalAlterConfigsRequest,
     InitProducerIdRequest, JoinGroupRequest, LeaveGroupRequest, ListGroupsRequest,
     ListOffsetsRequest, MetadataRequest, OffsetCommitRequest, OffsetDeleteRequest,
     OffsetFetchRequest, ProduceRequest, RequestHeader, ResponseHeader, SaslAuthenticateRequest,
-    SaslHandshakeRequest, SyncGroupRequest,
+    SaslHandshakeRequest, SyncGroupRequest, TxnOffsetCommitRequest,
 };
 use kafka_protocol::protocol::{Decodable, Encodable};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -46,14 +47,16 @@ use tokio::net::TcpListener;
 use tokio_util::codec::{Encoder, LengthDelimitedCodec};
 
 use crate::handlers::{
-    acls, alter_configs, api_versions, create_partitions, create_topics, delete_groups,
-    delete_topics, describe_configs, describe_groups, fetch, find_coordinator, heartbeat,
-    incremental_alter_configs, init_producer_id, join_group, leave_group, list_groups,
-    list_offsets, metadata, offset_commit, offset_delete, offset_fetch, produce, sasl_authenticate,
-    sasl_handshake, sync_group,
+    acls, add_offsets_to_txn, add_partitions_to_txn, alter_configs, api_versions,
+    create_partitions, create_topics, delete_groups, delete_topics, describe_configs,
+    describe_groups, end_txn, fetch, find_coordinator, heartbeat, incremental_alter_configs,
+    init_producer_id, join_group, leave_group, list_groups, list_offsets, metadata, offset_commit,
+    offset_delete, offset_fetch, produce, sasl_authenticate, sasl_handshake, sync_group,
+    txn_offset_commit,
 };
 use crate::obs::Sampler;
 use crate::sasl::SaslState;
+use crate::txn;
 use crate::versions::{self, Support};
 use crate::Facade;
 
@@ -316,6 +319,15 @@ pub struct Conn {
     /// rate limiting reads it, so a proxy that rewrites the peer address costs
     /// an operator a column and nothing else.
     pub peer: String,
+    /// This connection's identity inside [`crate::txn::Txns`].
+    ///
+    /// Minted per accepted connection and never reused, so dropping everything
+    /// this connection staged is one comparison. It exists because a
+    /// transaction's STAGE is process-wide state that belongs to a connection:
+    /// keyed on `Conn` it could not be dropped by the InitProducerId fence,
+    /// could not be charged against a process-wide byte budget, and would have
+    /// no single place for the timeout sweep to walk.
+    pub id: txn::ConnId,
 }
 
 impl Conn {
@@ -332,7 +344,23 @@ impl Conn {
             sasl,
             sni,
             peer,
+            id: txn::next_conn_id(),
         }
+    }
+}
+
+impl Drop for Conn {
+    /// A closed connection has no open transaction, so its stage is dropped
+    /// here.
+    ///
+    /// This is the ORDINARY path for a producer that closes and the CRASH path
+    /// for one that does not, and both are safe for the same reason: a lost
+    /// stage IS an aborted transaction, because nothing of it was ever written
+    /// to the log. What it buys is the memory, immediately, instead of at the
+    /// timeout sweep — which matters most for the producer that opened a large
+    /// transaction and then died.
+    fn drop(&mut self) {
+        self.facade.txns.drop_connection(self.id);
     }
 }
 
@@ -787,7 +815,13 @@ pub async fn dispatch(conn: &mut Conn, frame: Bytes) -> Reply {
             // id is minted from process state, so the grant cannot fail for
             // infrastructure reasons and cannot be slow. That is the property
             // the papercut fix wants (`handlers::init_producer_id`).
-            let body = init_producer_id::handle(&conn.facade, &req);
+            // No longer synchronous: the IDEMPOTENT half still awaits nothing,
+            // and the TRANSACTIONAL half claims the id with a compare-and-set
+            // against Queen (`handlers::init_producer_id`). The connection id
+            // goes with it, because the stage that claim opens belongs to this
+            // connection and is dropped when it closes.
+            let body =
+                init_producer_id::handle(&conn.facade, &req, conn.id, conn.facade.token()).await;
             respond(key, header.correlation_id, &body, api_version)
         }
         // ---------------------------------- M7 F4: the remaining admin surface
@@ -865,6 +899,53 @@ pub async fn dispatch(conn: &mut Conn, frame: Bytes) -> Reply {
                 Err(e) => return Reply::Close(format!("OffsetDelete v{api_version} body: {e}")),
             };
             let body = offset_delete::handle(&conn.facade, &req, conn.facade.token()).await;
+            respond(key, header.correlation_id, &body, api_version)
+        }
+        // ------------------------------------------------------ M9: transactions
+        //
+        // Three of these four await nothing at all: a transaction's partitions,
+        // its group and its offsets are STAGED in this process
+        // (`crate::txn`), and the only request that talks to Queen is EndTxn —
+        // which is the whole design, because that one call is one Postgres
+        // transaction carrying every record and every offset together.
+        //
+        // None of them takes `api_version`: nothing inside `0..=3` changes a
+        // field, a code or a shape for any of the four, so the request version
+        // is only the encoding `respond` uses.
+        ApiKey::AddPartitionsToTxn => {
+            let req = match AddPartitionsToTxnRequest::decode(&mut buf, api_version) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Reply::Close(format!("AddPartitionsToTxn v{api_version} body: {e}"))
+                }
+            };
+            let body = add_partitions_to_txn::handle(&conn.facade, &req, conn.facade.token());
+            respond(key, header.correlation_id, &body, api_version)
+        }
+        ApiKey::AddOffsetsToTxn => {
+            let req = match AddOffsetsToTxnRequest::decode(&mut buf, api_version) {
+                Ok(r) => r,
+                Err(e) => return Reply::Close(format!("AddOffsetsToTxn v{api_version} body: {e}")),
+            };
+            let body = add_offsets_to_txn::handle(&conn.facade, &req, conn.facade.token());
+            respond(key, header.correlation_id, &body, api_version)
+        }
+        ApiKey::EndTxn => {
+            let req = match EndTxnRequest::decode(&mut buf, api_version) {
+                Ok(r) => r,
+                Err(e) => return Reply::Close(format!("EndTxn v{api_version} body: {e}")),
+            };
+            // THE call. Every staged record and every staged offset of this
+            // transaction go to Queen in one bundle, or none of them does.
+            let body = end_txn::handle(&conn.facade, &req, conn.facade.token()).await;
+            respond(key, header.correlation_id, &body, api_version)
+        }
+        ApiKey::TxnOffsetCommit => {
+            let req = match TxnOffsetCommitRequest::decode(&mut buf, api_version) {
+                Ok(r) => r,
+                Err(e) => return Reply::Close(format!("TxnOffsetCommit v{api_version} body: {e}")),
+            };
+            let body = txn_offset_commit::handle(&conn.facade, &req, conn.facade.token()).await;
             respond(key, header.correlation_id, &body, api_version)
         }
         // Unreachable while the table and this match agree, which is the point:
@@ -1478,6 +1559,34 @@ mod tests {
                     ApiKey::CreatePartitions => create_partitions_request(version, 1),
                     ApiKey::OffsetDelete => {
                         offset_delete_request(version, 1, &format!("walk-{version}"))
+                    }
+                    // The transaction family. Its OWN transactional id per
+                    // version, and the per-version trick is REQUIRED here
+                    // rather than convenient: the four requests share one piece
+                    // of state, so a fixture reusing one id would meet the
+                    // stage the previous version left and be answered a
+                    // different error — a fenced epoch, a second group, a
+                    // transaction already committing.
+                    //
+                    // Each id is bound first, because these four APIs answer a
+                    // request for an id no InitProducerId claimed with
+                    // INVALID_TXN_STATE, which is a RESPONSE and would pass
+                    // this test while exercising nothing.
+                    ApiKey::AddPartitionsToTxn => {
+                        bind_txn(&f, version);
+                        add_partitions_to_txn_request(version, 1, &txn_id(version))
+                    }
+                    ApiKey::AddOffsetsToTxn => {
+                        bind_txn(&f, version);
+                        add_offsets_to_txn_request(version, 1, &txn_id(version))
+                    }
+                    ApiKey::EndTxn => {
+                        bind_txn(&f, version);
+                        end_txn_request(version, 1, &txn_id(version))
+                    }
+                    ApiKey::TxnOffsetCommit => {
+                        bind_txn(&f, version);
+                        txn_offset_commit_request(version, 1, &txn_id(version))
                     }
                     other => panic!("{other:?} is advertised but this test cannot build one"),
                 };
@@ -3166,6 +3275,116 @@ mod tests {
             .with_transaction_timeout_ms(60_000)
             .with_producer_id(ProducerId(-1))
             .with_producer_epoch(-1)
+            .encode(&mut out, api_version)
+            .unwrap();
+        out.freeze()
+    }
+
+    // ------------------------------------------------------------ transactions
+
+    /// The `transactional.id` the dispatch walk uses at one version.
+    fn txn_id(version: i16) -> String {
+        format!("walk-txn-{version}")
+    }
+
+    /// Bind that id, the way InitProducerId would have. The four transaction
+    /// APIs all refuse an id no producer claimed, so the walk claims it first.
+    fn bind_txn(f: &Conn, version: i16) {
+        let tenant = f.facade.catalog.tenant_key(f.facade.token());
+        f.facade
+            .txns
+            .bind(
+                &tenant,
+                &txn_id(version),
+                7,
+                0,
+                100,
+                f.id,
+                Duration::from_secs(60),
+            )
+            .expect("the fixture is under the open-transaction cap");
+    }
+
+    fn txn_header(key: ApiKey, api_version: i16, correlation_id: i32) -> BytesMut {
+        let mut out = BytesMut::new();
+        RequestHeader::default()
+            .with_request_api_key(key as i16)
+            .with_request_api_version(api_version)
+            .with_correlation_id(correlation_id)
+            .with_client_id(Some(StrBytes::from_static_str("queen-kafka-test")))
+            .encode(&mut out, key.request_header_version(api_version))
+            .unwrap();
+        out
+    }
+
+    fn add_partitions_to_txn_request(api_version: i16, correlation_id: i32, id: &str) -> Bytes {
+        use kafka_protocol::messages::add_partitions_to_txn_request::AddPartitionsToTxnTopic;
+        use kafka_protocol::messages::{ProducerId, TopicName, TransactionalId};
+
+        let mut out = txn_header(ApiKey::AddPartitionsToTxn, api_version, correlation_id);
+        AddPartitionsToTxnRequest::default()
+            .with_v3_and_below_transactional_id(TransactionalId(StrBytes::from_string(
+                id.to_string(),
+            )))
+            .with_v3_and_below_producer_id(ProducerId(7))
+            .with_v3_and_below_producer_epoch(0)
+            .with_v3_and_below_topics(vec![AddPartitionsToTxnTopic::default()
+                .with_name(TopicName(StrBytes::from_static_str("orders")))
+                .with_partitions(vec![0])])
+            .encode(&mut out, api_version)
+            .unwrap();
+        out.freeze()
+    }
+
+    fn add_offsets_to_txn_request(api_version: i16, correlation_id: i32, id: &str) -> Bytes {
+        use kafka_protocol::messages::{GroupId, ProducerId, TransactionalId};
+
+        let mut out = txn_header(ApiKey::AddOffsetsToTxn, api_version, correlation_id);
+        AddOffsetsToTxnRequest::default()
+            .with_transactional_id(TransactionalId(StrBytes::from_string(id.to_string())))
+            .with_producer_id(ProducerId(7))
+            .with_producer_epoch(0)
+            .with_group_id(GroupId(StrBytes::from_static_str("walk-txn-group")))
+            .encode(&mut out, api_version)
+            .unwrap();
+        out.freeze()
+    }
+
+    fn end_txn_request(api_version: i16, correlation_id: i32, id: &str) -> Bytes {
+        use kafka_protocol::messages::{ProducerId, TransactionalId};
+
+        let mut out = txn_header(ApiKey::EndTxn, api_version, correlation_id);
+        EndTxnRequest::default()
+            .with_transactional_id(TransactionalId(StrBytes::from_string(id.to_string())))
+            .with_producer_id(ProducerId(7))
+            .with_producer_epoch(0)
+            // ABORT, so the walk writes nothing: a commit would send a bundle
+            // and this test is about the dispatch table.
+            .with_committed(false)
+            .encode(&mut out, api_version)
+            .unwrap();
+        out.freeze()
+    }
+
+    fn txn_offset_commit_request(api_version: i16, correlation_id: i32, id: &str) -> Bytes {
+        use kafka_protocol::messages::txn_offset_commit_request::{
+            TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic,
+        };
+        use kafka_protocol::messages::{GroupId, ProducerId, TopicName, TransactionalId};
+
+        let mut out = txn_header(ApiKey::TxnOffsetCommit, api_version, correlation_id);
+        TxnOffsetCommitRequest::default()
+            .with_transactional_id(TransactionalId(StrBytes::from_string(id.to_string())))
+            .with_group_id(GroupId(StrBytes::from_static_str("walk-txn-group")))
+            .with_producer_id(ProducerId(7))
+            .with_producer_epoch(0)
+            .with_generation_id(-1)
+            .with_member_id(StrBytes::from_static_str(""))
+            .with_topics(vec![TxnOffsetCommitRequestTopic::default()
+                .with_name(TopicName(StrBytes::from_static_str("orders")))
+                .with_partitions(vec![TxnOffsetCommitRequestPartition::default()
+                    .with_partition_index(0)
+                    .with_committed_offset(1)])])
             .encode(&mut out, api_version)
             .unwrap();
         out.freeze()

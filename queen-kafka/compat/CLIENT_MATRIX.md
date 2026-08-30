@@ -19,7 +19,11 @@ clients reach it: **M7** added the topics and groups admin APIs and the
 idempotent producer, and **cluster mode** made two or three facades address one
 group correctly. A fourth, overnight into **2026-08-30**, finished the admin
 surface: M7 **F4** added the config WRITE half, CreatePartitions, OffsetDelete
-and the ACL family, taking the advertised table from 21 keys to 28. All have
+and the ACL family, taking the advertised table from 21 keys to 28. **M9**, the
+same night, added the four transaction APIs and took it to **32**: a
+transactional producer and a same-process exactly-once loop work, and the
+boundary that comes with them is stated in full under "What every client meets".
+All have
 their own sections below, and all changed rows in the table above. Which rows were re-measured afterwards and which were not is
 stated explicitly, because "expected to work" and "measured" are different
 claims and this file has only ever made the second one.
@@ -34,9 +38,9 @@ it applies.
 | Client | Versions tested | Verified | Result | Mandatory config | Main caveat | Suite |
 | --- | --- | --- | --- | --- | --- | --- |
 | Java kafka-clients | 3.9.1 | M6 | PASS | none (`enable.idempotence=false` was mandatory until M7 F3) | AdminClient is unusable beyond metadata | [`java/`](java) |
-| Java kafka-clients | 4.3.1, 3.6.2 | 2026-08-29 | PASS | none since M7 F3; the scored suite runs on a DEFAULT producer | 4.x negotiates every advertised API to the top of its window; KIP-896 raised no floor above a facade cap | [`java-matrix/`](java-matrix) |
-| Spring Boot + spring-kafka | Boot 3.5.16, spring-kafka 3.3.16, kafka-clients 3.9.2 | 2026-08-29, re-measured after M7 | PASS | none (`NewTopic` beans work since M7 F1, as long as no bean asks for `cleanup.policy=compact`; the idempotence property is unnecessary since M7 F3, measured with Boot itself and no longer inherited from the kafka-clients row) | `missing-topics-fatal=true` and Micrometer observation are safe; they only reach Metadata | [`spring-kafka/`](spring-kafka) |
-| franz-go | (M6 pin) | M6 | PASS | none since M7 F3 (`kgo.DisableIdempotentWrite()` was mandatory before it) | none beyond the shared list | [`go/`](go) |
+| Java kafka-clients | 4.3.1, 3.6.2 | 2026-08-29; transactions 2026-08-30 | PASS | none since M7 F3; the scored suite runs on a DEFAULT producer, and since M9 a `transactional.id` needs nothing either | 4.x negotiates every advertised API to the top of its window; KIP-896 raised no floor above a facade cap | [`java-matrix/`](java-matrix), [`transactions/`](transactions) |
+| Spring Boot + spring-kafka | Boot 3.5.16, spring-kafka 3.3.16, kafka-clients 3.9.2 | 2026-08-29, re-measured after M7 | PASS | none (`NewTopic` beans work since M7 F1, as long as no bean asks for `cleanup.policy=compact`; the idempotence property is unnecessary since M7 F3). Since M9 a `KafkaTransactionManager` bean needs nothing either, and it is the same-process shape M9 supports — measured through the raw client in `transactions/`, not yet through Boot itself | `missing-topics-fatal=true` and Micrometer observation are safe; they only reach Metadata | [`spring-kafka/`](spring-kafka) |
+| franz-go | (M6 pin); 1.21.x for the EOS lane | M6; transactions 2026-08-30 | PASS | none since M7 F3 (`kgo.DisableIdempotentWrite()` was mandatory before it); `kgo.TransactionalID` and `GroupTransactSession` need nothing since M9 | none beyond the shared list | [`go/`](go), [`transactions/eos/`](transactions/eos) |
 | segmentio/kafka-go | v0.4.51 | 2026-08-29 | PASS | set `RequiredAcks` explicitly on a `&kafka.Writer{}` literal; configure TLS/SASL on both `Transport` and `Dialer` | its `Conn` path writes OffsetCommit v2 and OffsetFetch v1 with no negotiation, exactly on the advertised floors | [`kafka-go/`](kafka-go) |
 | IBM/sarama | v1.60.2, v1.45.2 | 2026-08-29 | PARTIAL | nothing at v1.46.0 and above (`Producer.Idempotent = true` included, since M7 F3); **`Config.Version = sarama.V1_0_0_0` below v1.46.0** | below v1.46.0 the producer works while the consumer loops on EOF for ever | [`sarama/`](sarama) |
 | librdkafka (C) | 2.15 via kcat 1.7 | M6 | PASS | none | declines zstd against this facade | [`librdkafka/`](librdkafka) |
@@ -91,7 +95,7 @@ comment. Treat that row as F3's measurement plus an unverified edit.
 | kcat, confluent-kafka-python, node-rdkafka, @confluentinc/kafka-javascript | **no** | idempotence was refused by an ApiVersions check on key 22, which is now advertised | expected to work, not re-measured |
 | aiokafka | **no** | same ApiVersions mechanism | expected to work, not re-measured. Its suite still carries the stale "14 keys" text and a fail-open idempotence section |
 | kafkajs, kafka-python, brod | **no** | these never send `InitProducerId` unless asked for transactions | unchanged by M7 |
-| `apache/kafka:3.9.1` as a differential oracle | **yes** | `differential/rig-diff.sh`, every scenario including the three new admin ones and `idempotent` | `83 divergence(s): 61 deliberate, 22 accepted as harmless, 0 to classify by hand` |
+| `apache/kafka:3.9.1` as a differential oracle | **yes** | `differential/rig-diff.sh`, 17 scenarios including `idempotent` and M9's new `transactions` | **0 to classify by hand** (2026-08-30, after M9): `100 divergence(s): 74 deliberate, 26 accepted` from a cold stack, `97: 72, 25` from a warm one. The three extra rows are the ORACLE warming up — its `__transaction_state` partitions are still loading for the first minute, so it answers NOT_COORDINATOR to the first transactional InitProducerId and NONE to the same question later |
 
 The differential total floats between 82 and 83 from run to run, and the reason
 is worth knowing before anyone reads a delta as a regression. The two counts
@@ -153,21 +157,87 @@ What each client does with idempotence left ON, measured before F3 and after:
 | @platformatic/kafka | `UnsupportedApiError: Unsupported API InitProducerId`, off ApiVersions, no bytes sent | **measured** (2026-08-29, after F3): 90 ok across all 11 scenarios and SASL. Its idempotent scenario was informational and printed a success line unconditionally; it is now a measurement |
 | kafka-go, kafka-python, brod | not reachable: these clients never send `InitProducerId` unless you ask for transactions | unchanged |
 
-**Transactions are still refused, and `initTransactions()` is still slow.**
-This is the one thing F3 did NOT fix, and the reason is worth writing down
-because it is not the one everybody assumed. A producer with `transactional.id`
-set asks `FindCoordinator` for a TRANSACTION coordinator *before* it sends
-InitProducerId. The facade answers that `COORDINATOR_NOT_AVAILABLE`, which is
-**retriable**, so the client loops there — measured 2026-08-29 with
-kafka-clients 4.3.1: ~190 FindCoordinator requests over 20 s, zero
-InitProducerId requests, then `TimeoutException` after `max.block.ms`. That is
-identical to the pre-F3 measurement. The InitProducerId handler itself refuses a
-transactional id in **~10 ms** with `TRANSACTIONAL_ID_AUTHORIZATION_FAILED` when
-reached directly, so making the whole call fast means a fatal code on the
-FindCoordinator transaction path — outside F3's scope.
+**Transactions work since M9 (2026-08-30), in one process, and the boundary is
+the sentence that has to travel with the word.** A transaction here is a STAGE
+held by one facade process, on the connection that opened it, committed by one
+`POST /api/v1/transaction`. `beginTransaction` / `send` /
+`sendOffsetsToTransaction` / `commitTransaction` on one producer in one process
+is exactly that shape, so it works; a two-phase commit that finishes from
+another process does not (see the Flink and Spark rows below).
+
+`initTransactions()` was the 20 second hang F3 recorded, and the cause was not
+the one everybody assumed. It was **FindCoordinator**, not InitProducerId: a
+producer with `transactional.id` set asks for a TRANSACTION coordinator before
+it sends key 22, the facade answered `COORDINATOR_NOT_AVAILABLE` (retriable), and
+the Java client re-enqueued the lookup until `max.block.ms` — ~190
+FindCoordinator requests over 20 s, zero InitProducerId requests. M9 answers
+`key_type = 1` with this facade in single mode. Measured with kafka-clients
+4.3.1 on 2026-08-30:
+
+| | `initTransactions()` |
+| --- | --- |
+| before M9 | 20 000 ms, then `TimeoutException` |
+| M9, single mode, cold JVM | **471 ms** and **557 ms** |
+| M9, single mode, warm JVM | **119 ms** and **112 ms** |
+| M9, cluster mode (`QUEEN_KAFKA_NODE_ID` set) | **214 ms** and **251 ms**, then a fatal `TransactionalIdAuthorizationException` |
+
+Two numbers per row because it was measured on two clean runs of
+`compat/transactions/run.sh` (scenarios s2 and s7) rather than once, and the
+spread is the JVM's, not the facade's.
+
+The cluster-mode row is a refusal by CONFIGURATION and not by capability, and it
+is fast on purpose: 53 is fatal in the Java client, so the call returns instead
+of looping on a code that will never change.
+
+**Setting `isolation.level=read_committed` is correct here and costs nothing.**
+Both isolation levels return the same records on this facade, because no
+uncommitted record ever enters the log: an open transaction's records are staged
+in the facade and an aborted transaction's are dropped. Set it anyway if the
+application might ever run against a real Kafka. The spelling per family, and a
+family with no spelling gets an explicit "not exposed" rather than a
+plausible-looking key:
+
+| Family | Spelling |
+| --- | --- |
+| Java kafka-clients | `isolation.level=read_committed` |
+| Spring Boot | `spring.kafka.consumer.isolation-level=read_committed` |
+| librdkafka family — confluent-kafka-python, Confluent.Kafka, node-rdkafka, @confluentinc/kafka-javascript, rust-rdkafka, rdkafka-ruby, php-rdkafka, kcat | `isolation.level=read_committed` |
+| franz-go | `kgo.FetchIsolationLevel(kgo.ReadCommitted())` |
+| segmentio/kafka-go | `ReaderConfig{ IsolationLevel: kafka.ReadCommitted }` |
+| IBM/sarama | `Config.Consumer.IsolationLevel = sarama.ReadCommitted` |
+| aiokafka | `AIOKafkaConsumer(isolation_level="read_committed")` |
+| kafka-python | `KafkaConsumer(isolation_level="read_committed")` (default `"read_uncommitted"`, `consumer/group.py:322`) |
+| kafkajs | **inverted, and read_committed is already the DEFAULT.** There is no `isolationLevel` on `ConsumerConfig`; the knob is `readUncommitted: boolean`, default `false`, which `src/index.js:152-155` maps to `ISOLATION_LEVEL.READ_COMMITTED`. Nothing to set |
+| @platformatic/kafka | `new Consumer({ isolationLevel: FetchIsolationLevels.READ_COMMITTED })` — a number, from the `FetchIsolationLevels` enum in `dist/apis/enumerations.js` |
+| brod | `isolation_level` in the consumer config, and like kafkajs its default is already `read_committed` (`brod_consumer.erl:221`). Nothing to set |
+
+**Every spelling above was read out of the installed package**, not out of a
+memory of the docs, because the four the design expected to be missing turned
+out to be the four with the surprises: two of them default to `read_committed`
+already and one takes a number rather than a string. Nothing here is guessed and
+no client in the matrix lacks the control.
+
+**The transaction stage is capped, and the caps have no Kafka analogue.** A
+Kafka transaction has no size, because its records are appended as they arrive;
+one here is held in memory until commit. Past `QUEEN_KAFKA_TXN_MAX_BYTES`
+(8 MiB) or `QUEEN_KAFKA_TXN_MAX_RECORDS` (50 000) the produce is answered
+`MESSAGE_TOO_LARGE`; past 62 offsets in one `sendOffsetsToTransaction` it is
+`INVALID_COMMIT_OFFSET_SIZE`; a `transaction.timeout.ms` above 900 000 is
+`INVALID_TRANSACTION_TIMEOUT`, which is Kafka's own code and Kafka's own default
+bound. Each surfaces as a named exception in the Java client rather than a hang,
+which is what `compat/transactions` scenario 6 measures.
+
+**One divergence a transactional producer can see:
+`RecordMetadata.offset()` is -1 inside a transaction.** No offset exists until
+the commit allocates them, so the produce answer carries -1 rather than a
+fabricated number. Verified in kafka-clients bytecode that `RecordMetadata`
+keeps -1 unchanged rather than adding the batch index, so nothing invented
+reaches an application. Every non-transactional produce still answers a real
+offset.
 
 **Both halves of the admin surface have landed: TOPICS in M7 F1, GROUPS in M7
-F2, and the WRITE half in M7 F4 (2026-08-30).** The advertised table is 28 keys.
+F2, and the WRITE half in M7 F4 (2026-08-30).** The advertised table is 32 keys
+since M9 added the four transaction ones.
 The thirteen admin keys are CreateTopics (19), DeleteTopics (20),
 DescribeConfigs (32), AlterConfigs (33), IncrementalAlterConfigs (44),
 CreatePartitions (37), ListGroups (16), DescribeGroups (15), DeleteGroups (42),
@@ -700,17 +770,24 @@ if let Some(id) = req
 
 This matches Apache Kafka, which does not gate on the field at all: a produce is
 transactional to a real broker when the RECORD BATCH carries the
-`isTransactional` attribute bit. That bit is still refused, in `stage`, which is
-where the refusal always belonged, and so are control batches and a producer id.
-A NON-EMPTY transactional id still answers 53 with the same message and writes
-nothing. Verified with a hand-built raw Produce v7 frame, no Kafka library
-involved, three sends differing in one field:
+`isTransactional` attribute bit. That bit is what `stage` reads, which is where
+the decision always belonged. Verified with a hand-built raw Produce v7 frame,
+no Kafka library involved, three sends differing in one field:
 
 ```
 ok    transactional_id=absent (protocol null, -1)       error_code=0   (want 0)  baseOffset=0
 ok    transactional_id=empty string (what brod sends)   error_code=0   (want 0)  baseOffset=0
 ok    transactional_id=non-empty "tx-probe"             error_code=53  (want 53)  baseOffset=-1
 ```
+
+**The third row is history since M9 (2026-08-30).** A non-empty
+`transactional.id` is no longer a refusal: it is a stage, and the batch is
+written by `EndTxn(commit)` at `base_offset = -1` — the same -1 in that column,
+now for the opposite reason. What still answers 53 is a transactional id in
+CLUSTER MODE, and what still answers `INVALID_TXN_STATE` is the
+`isTransactional` bit on a request that carries no id at all. The empty-string
+row, which is the one this section exists for, is unchanged and still the reason
+every Elixir producer can produce here.
 
 Stock brod, with `kpro_req_lib.erl:308` confirmed unpatched before the run, is
 now 58 assertions and 0 failures: 512 messages over 8 partitions with keys and
@@ -1129,27 +1206,43 @@ None of these is a client row that failed. Each needs a facility the facade
 deliberately does not have, and each should be reported as known-unsupported
 rather than as untested.
 
-**Transactions and exactly-once, in any client.** `AddPartitionsToTxn`,
-`AddOffsetsToTxn`, `EndTxn` and `TxnOffsetCommit` are absent (M7 backlog).
-`InitProducerId` IS advertised since M7 F3, for the idempotent producer alone: a
-non-transactional grant is answered and a `transactional.id` is refused. This is
-a cross-cutting mode, not a library: Java transactions, franz-go transaction
-sessions, librdkafka's transactional API and sarama's transactional producer are
-all the same answer.
+**Transactions are NO LONGER on this list, and what replaced them is a
+boundary rather than a refusal.** `AddPartitionsToTxn`, `AddOffsetsToTxn`,
+`EndTxn` and `TxnOffsetCommit` are advertised v0-v3 since M9 (2026-08-30), and a
+transactional producer works: Java, Spring's `KafkaTransactionManager`,
+franz-go's `GroupTransactSession` and librdkafka's transactional API all commit.
+What is out of scope is the SHAPE below, and each row says which half it fails
+on.
 
-**Kafka Streams.** Needs transactions, plus CreateTopics for its repartition and
-changelog topics, plus log compaction for state stores. All three are stated
-non-goals.
+**Two-phase commit across a process boundary: Flink `KafkaSink EXACTLY_ONCE`
+and Spark's structured-streaming EOS writer.** Both pre-commit at a checkpoint
+and call `commitTransaction()` on checkpoint-completion, which after a failover
+happens in a DIFFERENT process, from a producer reconstructed out of the saved
+`(transactional.id, producer id, epoch)`. That `EndTxn` reaches a facade holding
+no stage and is answered `INVALID_TXN_STATE` — fatal, so the job cannot recover.
+The happy path works and the recovery path is the entire point of the feature,
+so the honest answer is **no**. This is a correction of the pre-M9 text, not an
+upgrade of it: the reason has changed from "transactions are absent" to "a
+transaction here lives in one process", and the verdict has not.
+
+**Kafka Streams.** Still no, and **not for the transaction reason**. Streams
+additionally needs `cleanup.policy=compact` for its changelog and repartition
+topics, which the facade refuses with `INVALID_CONFIG` and refuses deliberately:
+accepting it and compacting nothing would eat the state store. The dependency is
+compaction, compaction is a stated non-goal, and **"transactions landed" must
+never be said as though it brought Streams closer.** It brought it no closer at
+all.
 
 **Kafka Connect, MirrorMaker 2, Debezium, ksqlDB.** The Connect worker needs an
 AdminClient surface to provision its config, offset and status topics, and all
-three of those are compacted. MirrorMaker 2 has ListGroups and DescribeGroups
-since M7 F2 and still needs AlterConsumerGroupOffsets to mirror offsets.
+three of those are compacted — the same non-goal. Connect's exactly-once source
+support has the two-phase shape on top of that. MirrorMaker 2 has ListGroups and
+DescribeGroups since M7 F2 and still needs AlterConsumerGroupOffsets to mirror
+offsets.
 
-**Flink and Spark Kafka connectors.** Both resolve partitions and initial
-offsets through AdminClient; Flink's exactly-once sink also needs transactions.
-Flink's at-least-once path might work, but it is unproven and should not be
-claimed.
+**Flink and Spark, at-least-once.** Both resolve partitions and initial offsets
+through AdminClient, which has worked since M7. The at-least-once paths might
+work and are unproven, and should not be claimed either way.
 
 **Admin and monitoring UIs**: kafbat/kafka-ui, AKHQ, Conduktor, Redpanda
 Console, Cruise Control, Burrow, kafka-lag-exporter. These used to fail at

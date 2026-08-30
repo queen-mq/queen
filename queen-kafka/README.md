@@ -24,11 +24,16 @@ their committed offsets, which live in Queen.
   DeleteGroups, OffsetDelete, and the ACL trio. `kafka-topics.sh`,
   `kafka-configs.sh --describe` and `--alter`, and `kafka-consumer-groups.sh`
   all work against it.
+- **Transactions**: a transactional producer and a same-process
+  consume-transform-produce loop, atomic across records and offsets. Read the
+  boundary under [Transactions](#transactions-what-works-and-the-boundary)
+  before you plan around it.
 - **Cloud fit**: TLS with SNI, SASL/PLAIN (the password is your Queen token),
   429s mapped to `throttle_time_ms`.
 
-The advertised table is 28 API keys. The thirteen admin keys and
-`InitProducerId` landed on 2026-08-29 and 2026-08-30:
+The advertised table is 32 API keys. The thirteen admin keys,
+`InitProducerId` and the four transaction keys landed on 2026-08-29 and
+2026-08-30:
 
 | API | key | versions | Notes |
 | --- | --- | --- | --- |
@@ -45,13 +50,49 @@ The advertised table is 28 API keys. The thirteen admin keys and
 | DescribeAcls | 29 | v1-v3 | `SECURITY_DISABLED`, the answer of a Kafka with no authorizer |
 | CreateAcls | 30 | v1-v3 | the same, one result per creation |
 | DeleteAcls | 31 | v1-v3 | the same, one result per filter |
-| InitProducerId | 22 | v0-v4 | idempotence only, never transactions |
+| InitProducerId | 22 | v0-v4 | the idempotent producer, and since M9 the transactional one; refused in cluster mode |
+| AddPartitionsToTxn | 24 | v0-v3 | enrols a partition in the open transaction. v4 is a broker-to-broker request, not a client one |
+| AddOffsetsToTxn | 25 | v0-v3 | one group per transaction, not several |
+| EndTxn | 26 | v0-v3 | commit sends the whole stage as ONE `POST /api/v1/transaction`; abort drops it and writes nothing |
+| TxnOffsetCommit | 28 | v0-v3 | v3 is the FLOOR and it is mandatory: kafka-clients throws below it whenever group metadata is set |
+
+## Transactions: what works, and the boundary
+
+Since M9 a transactional producer works. `initTransactions`,
+`beginTransaction`, `send`, `sendOffsetsToTransaction`, `commitTransaction` and
+`abortTransaction` all do what they say, the records and the consumer offsets
+commit atomically in one Postgres transaction, and a second producer taking the
+same `transactional.id` fences the first with zero of its records in the log.
+Measured against real clients in [`compat/transactions`](compat/transactions):
+Java kafka-clients 4.3.1 and franz-go, including a SIGKILL between the last send
+and the commit that leaves 200 records, 200 distinct keys, 0 duplicates and 0
+missing.
+
+**The boundary is one sentence: a transaction here is a STAGE held by one
+facade process, on the connection that opened it.** That is enough for a
+transactional producer and for a consume-transform-produce loop in one process,
+which is Spring's `KafkaTransactionManager` and every stock Java or franz-go EOS
+loop. It is not enough for a two-phase commit that finishes somewhere else:
+Flink's `KafkaSink EXACTLY_ONCE` and Spark's structured-streaming writer commit
+after a failover from a DIFFERENT process, that `EndTxn` reaches a facade
+holding no stage, and it is answered `INVALID_TXN_STATE` — fatal, so the job
+cannot recover. **Transactions also change nothing for Kafka Streams**, whose
+dependency is log compaction and not transactions.
+
+Three things to know before you meet them. Records are STAGED in memory until
+the commit, so a transaction is capped in five places with no Kafka analogue
+(`QUEEN_KAFKA_TXN_MAX_*`, defaults 8 MiB / 50 000 records / 128 MiB per process
+/ 1024 open / 900 s), and past a cap the producer must abort. A transactional
+produce answers `base_offset = -1`, because no offset exists until the commit
+allocates them. And **cluster mode refuses transactions outright**: with
+`QUEEN_KAFKA_NODE_ID` set, `initTransactions()` raises
+`TransactionalIdAuthorizationException` in about 250 ms rather than hanging.
 
 ## What it refuses, loudly
 
-Transactions and EOS (so no Kafka Streams apps), log compaction, KIP-848 and
-static membership. Unsupported requests fail fast with clear error codes, never
-hangs.
+Log compaction (which is what keeps Kafka Streams and Kafka Connect's
+exactly-once source support out), KIP-848 and static membership. Unsupported
+requests fail fast with clear error codes, never hangs.
 
 The ALTER half of the admin surface is no longer on that list, and the shape of
 what is left changed on 2026-08-30. AlterConfigs and IncrementalAlterConfigs
@@ -65,12 +106,8 @@ SCRAM (the facade mints no credentials; Queen does), and client quotas (the
 quota is per tenant, and altering one would let a tenant raise its own cap).
 Each of those closes the connection if sent anyway, which is Apache Kafka's own
 answer to an unparseable request and unreachable for a client that read
-ApiVersions. Three consequences worth knowing before you meet them:
+ApiVersions. Two consequences worth knowing before you meet them:
 
-- **`initTransactions()` is still slow, not fast-failed.** A transactional
-  producer asks FindCoordinator for a TRANSACTION coordinator before it sends
-  `InitProducerId`; that answer is retriable, so the client loops until
-  `max.block.ms`. Set no `transactional.id`.
 - **The idempotence window is in memory and per facade.** A facade restart, an
   eviction (65 536 tracked producer-partitions) or a connection landing on
   another facade costs at-least-once for at most the five in-flight batches.

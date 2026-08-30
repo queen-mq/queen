@@ -313,15 +313,74 @@ var deliberate = []classification{
 			"it costs no entropy per recovery. Either answer satisfies every client: the Java client takes " +
 			"whatever the response says (TransactionManager.setProducerIdAndEpoch) and resets its own sequences " +
 			"because it asked for a bump. Measured on both sides above: bump.error_code is NONE on both"},
-	{regexp.MustCompile(`^initproducerid/initproducerid\.transactional\.error_code$`),
-		"both brokers refuse a transactional id and neither grants one (transactional.granted_an_id is false on " +
-			"both, which is the part a client acts on). The CODES differ because the refusals are different " +
-			"facts: Kafka 3.9.1 answers NOT_COORDINATOR because this broker is not the coordinator for that " +
-			"transactional id, which is retriable and tells the client to go and find the right node. The facade " +
-			"answers TRANSACTIONAL_ID_AUTHORIZATION_FAILED (53) — fatal and final — because there is no right " +
-			"node: transactions are excluded by plan and a retriable code would send the client round a loop " +
-			"that cannot end. Same code and same sentence handlers::produce gives a transactional id, so a user " +
-			"meets one message about transactions and not two"},
+	{regexp.MustCompile(`^initproducerid/initproducerid\.transactional\.(error_code|granted_an_id)$`),
+		"REWRITTEN BY M9, and it no longer says what it said: the facade GRANTS a transactional id now (single " +
+			"mode; crate::txn), so this scenario's `granted_an_id` is true here and false on the oracle. The " +
+			"oracle's false is a WARM-UP and not a refusal — Kafka answers NOT_COORDINATOR while its " +
+			"__transaction_state partitions are still loading, the same first-minute transient the " +
+			"extras/initproducerid entry below already names, and this scenario is the second of eight to run. " +
+			"The settled comparison is in the `transactions` scenario further down the same report, which " +
+			"retries those three coordinator codes before recording: there init.error_code is NONE and " +
+			"init.granted_an_id is true on BOTH brokers. Two facts do stay genuinely different and neither is " +
+			"here: the producer id's value (info, never diffed) and cluster mode, where this facade answers " +
+			"TRANSACTIONAL_ID_AUTHORIZATION_FAILED (53) — fatal, so initTransactions() returns in milliseconds " +
+			"instead of looping to max.block.ms — because transactions are single-node by configuration"},
+
+	// --------------------------------------------------------- M9: transactions
+	{regexp.MustCompile(`^transactions/\w+\.produce\d+\.base_offset$`),
+		"THE M9 divergence, and the one the design asks to be ratified rather than assumed harmless. Kafka " +
+			"appends a transactional batch to the log as it arrives and answers the real offset; this facade " +
+			"STAGES it and allocates no offset until EndTxn(commit), so the produce answer has no offset to " +
+			"carry and says -1. The Java client's RecordMetadata keeps -1 unchanged rather than adding the " +
+			"batch index (bytecode-verified), so no fabricated offset ever reaches an application: what an " +
+			"application loses is RecordMetadata.offset() inside a transaction, and what it gains is that " +
+			"nothing partial is ever in the log. Every non-transactional produce still answers a real offset, " +
+			"which is produce-consume's own assertion"},
+	{regexp.MustCompile(`^transactions/commit\.log_end_offset$`),
+		"Kafka advances the partition by N+1 — the records plus the COMMIT MARKER, a control batch it writes " +
+			"into the data partition — and this facade by N, because it writes no markers at all: a committed " +
+			"transaction here is one Postgres transaction of ordinary records. The consequence a client can see " +
+			"is measured beside this and is nothing: commit.read_committed_records is 10 on both. The oracle's " +
+			"marker is written after EndTxn returns, so the runner settles on lso == hw before asking, or this " +
+			"row would be the runner's timing rather than a difference"},
+	{regexp.MustCompile(`^transactions/abort\.log_end_offset$`),
+		"the same marker rule with the aborted records added: Kafka advances by N+1 and LEAVES the aborted " +
+			"records in the log for the client to filter, this facade advances by 0 because an aborted " +
+			"transaction is a stage that is dropped and never reached the log. This is the direction that " +
+			"cannot lose data — there is nothing to filter because there is nothing there"},
+	{regexp.MustCompile(`^transactions/read_uncommitted\.visible_before_commit$`),
+		"the ONE place a consumer of this facade sees LESS than it would see of Kafka, and the second " +
+			"divergence M9 asks to be ratified. A read_uncommitted consumer of Kafka sees an open " +
+			"transaction's records immediately; here it sees them at commit. Nothing a real client does " +
+			"depends on the difference: read_uncommitted is the DEFAULT, so the records an ordinary consumer " +
+			"sees are the same records in the same order, later by the producer's own commit cadence, and no " +
+			"client library exposes 'records that may yet be rolled back' as a state an application can act " +
+			"on. It also means read_committed and read_uncommitted return the same records here, which is why " +
+			"the read_committed lag on this facade reaches 0 where Kafka's stops at 1 per partition",
+	},
+	{regexp.MustCompile(`^transactions/fetch\.(aborted_transactions|last_stable_offset)$`),
+		"the two fields a read_committed client uses to filter, measured after an ABORT. Kafka's " +
+			"aborted_transactions names the producer whose records the client must now skip and its last " +
+			"stable offset trails the high watermark; the facade's list is always empty and its LSO is always " +
+			"the high watermark, because no uncommitted record ever entered the log and there is nothing for a " +
+			"client to skip. A client that does the filtering correctly against Kafka does nothing at all here, " +
+			"which is the only behaviour this pair drives"},
+	{regexp.MustCompile(`^transactions/endtxn\.unknown\.`),
+		"an EndTxn for a transactional id neither broker was asked to open, and both refuse it fatally with a " +
+			"NON-retriable code — which is the property a client acts on. The codes differ because the two " +
+			"brokers know different things: Kafka has durable coordinator state, finds a mapping for the id " +
+			"and refuses the producer id in it (INVALID_PRODUCER_ID_MAPPING, 49); the facade holds no stage, " +
+			"so what it is refusing is the whole transaction (INVALID_TXN_STATE, 48). 48 is also what it " +
+			"answers a transaction it LOST — a restart, a moved connection — and that is the answer that " +
+			"matters: it is the only one that cannot let an application believe an uncommitted commit",
+	},
+	{regexp.MustCompile(`^transactions/addpartitions\.unknown_topic\.error_code$`),
+		"documented in compat/ERRORS.md under AddPartitionsToTxn: a topic that merely does not exist yet is " +
+			"NOT refused here, because the produce path auto-creates and the enrolment is not the surface that " +
+			"decides whether a topic may exist. Kafka refuses it UNKNOWN_TOPIC_OR_PARTITION, which is " +
+			"retriable, so a client meeting either answer refreshes metadata and produces. Neither broker " +
+			"CREATES anything from the enrolment: addpartitions.unknown_topic.exists_after is false on both, " +
+			"which is the part that would have been a defect"},
 	{regexp.MustCompile(`^initproducerid/initproducerid\.empty_transactional\.`),
 		"MEASURED, and the divergence is the fix: Apache Kafka refuses a ZERO-LENGTH transactional id " +
 			"INVALID_REQUEST, because \"\" is not null and fails its own validation. The facade reads it as the " +
@@ -465,12 +524,22 @@ var accepted = []classification{
 	{regexp.MustCompile(`^produce-consume/\w+\.produce1\.log_start_offset$`),
 		"the produce answer carries no log start offset (-1, the field's own default in Kafka's schema and the " +
 			"Java client's) because a push reports offsets and statuses and no lower bound: filling it in would " +
-			"cost a bounds probe per produce, on the write path, for a field only the idempotent producer reads " +
-			"— and that producer, implemented since M7 F3, does not need it: the facade never answers " +
-			"UNKNOWN_PRODUCER_ID (59), which is the one code whose client-side recovery consults this field. It " +
-			"answers OUT_OF_ORDER_SEQUENCE_NUMBER for a lost window instead, whose recovery is KIP-360's epoch " +
-			"bump and reads nothing here (crate::idempotent). The fetch path reports the real log start on both " +
-			"sides, which is where a client looks for it"},
+			"cost a bounds probe per produce, on the write path. The REASON was rewritten by M9, because the " +
+			"old one — 'a field only the idempotent producer reads, and that producer is refused outright' — " +
+			"stopped being true when F3 implemented the idempotent producer and stopped being defensible when " +
+			"M9 implemented transactions. The true reason is narrower and survives both: the client's only use " +
+			"for this field is UNKNOWN_PRODUCER_ID (59) recovery, which reasons about how far the log start has " +
+			"moved, and this facade never answers 59. It answers OUT_OF_ORDER_SEQUENCE_NUMBER for a lost window " +
+			"instead, whose recovery is KIP-360's epoch bump and reads nothing here (crate::idempotent). The " +
+			"fetch path reports the real log start on both sides, which is where a client looks for it"},
+	{regexp.MustCompile(`^transactions/(addpartitions|addoffsets|endtxn|txnoffsetcommit)\.v4\.unsupported$`),
+		"one version above the facade's advertised ceiling of 3, where the facade closes the connection — what " +
+			"it does for every version outside its window, and what Apache Kafka does for a version it does not " +
+			"know (extras/metadata_v99 closes identically on both). Kafka 3.9.1 simply knows these four " +
+			"versions. Each ceiling has its own argument in versions.rs and AddPartitionsToTxn's is the " +
+			"strongest: its v4 is a DIFFERENT REQUEST — KIP-890's coordinator-to-leader verification, carrying " +
+			"a transactions[] array and a verify_only flag — that only another broker sends, and the oracle's " +
+			"own answer to a CLIENT that sends it is the 'no response, connection left open' recorded here"},
 
 	// ------------------------------------------------ M7 F1: topics admin
 	{regexp.MustCompile(`^createtopics/create\.duplicate\.error_codes$`),

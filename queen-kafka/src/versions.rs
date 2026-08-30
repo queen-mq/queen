@@ -93,9 +93,14 @@ pub struct Api {
 ///     ceiling is the OTHER boundary, v8, where one request fetches offsets for
 ///     SEVERAL GROUPS and the response changes shape to match. v7's
 ///     `require_stable` is answered honestly rather than ignored: it asks the
-///     broker to withhold offsets belonging to an open transaction, and there
-///     are none here (`handlers::produce` refuses every shape of transaction),
-///     so every offset this facade returns is stable by construction.
+///     broker to withhold offsets belonging to an open transaction, and an
+///     offset belonging to an open transaction is not in the store at all —
+///     since M9 the store write happens at COMMIT, inside the same Postgres
+///     transaction as the records ([`crate::txn`]). So every offset this facade
+///     returns is stable by construction, this row keeps its v7 ceiling, and
+///     UNSTABLE_OFFSET_COMMIT (88) is a code it never needs. The sentence was
+///     true before M9 because transactions were refused; it is true after M9
+///     for a stronger reason.
 ///
 /// THE SASL APIS (M5) are advertised whether or not `QUEEN_KAFKA_SASL` is on,
 /// and that is deliberate rather than an oversight. Apache Kafka advertises
@@ -283,6 +288,56 @@ pub struct Api {
 /// provisioner declaring 12 partitions against a facade whose default is 1024 is
 /// a decrease.
 ///
+/// THE TRANSACTION APIS (M9) are four rows and one shared ceiling argument, and
+/// the argument is NOT the usual one: KIP-896 dropped no version of any of
+/// them, so every floor is the schema's own 0 and the whole question is where
+/// each one stops.
+///
+///   * `0..=3` for AddPartitionsToTxn, where the schema goes to 5. **v4 is a
+///     DIFFERENT REQUEST.** The flat `(transactional_id, producer_id,
+///     producer_epoch, topics)` of v0-v3 is replaced at v4 by a
+///     `transactions[]` array carrying a per-transaction `verify_only` flag —
+///     KIP-890's coordinator-to-partition-leader VERIFICATION request, which a
+///     client never sends. Advertising v4 would advertise a request shape this
+///     facade could only ever receive from another broker, and it is the same
+///     class of boundary that stops OffsetFetch at v7 and FindCoordinator at
+///     v3: the version where the API stops being one question and becomes a
+///     batch.
+///   * `0..=3` for AddOffsetsToTxn, where the schema goes to 4. Every field of
+///     the whole schema is marked `0-4` and v3 is the flexible encoding, so v3
+///     answers everything v4 does. v4 exists for KIP-890's transaction protocol
+///     2, in which the client **stops sending this API at all** and the
+///     coordinator infers the offsets partition — so this is the ListOffsets-v7
+///     rule ("advertising the version that makes it askable would be
+///     advertising a refusal") applied to a SEMANTIC instead of to a field.
+///   * `0..=3` for EndTxn, where the schema goes to 5. v5's RESPONSE carries
+///     `producer_id` and `producer_epoch` — the TV2 epoch bump performed inside
+///     EndTxn, which this facade does not perform — and v4 is the version pair
+///     that exists only on the way to it. v3 is the flexible encoding and asks
+///     for nothing that cannot be answered.
+///   * `0..=3` for TxnOffsetCommit, where the schema goes to 5. **v3 is
+///     MANDATORY and that is measured, not preferred**:
+///     `TxnOffsetCommitRequest$Builder.build(short)` in kafka-clients 3.9.2
+///     throws `UnsupportedVersionException` for any version below 3 whenever
+///     group metadata is set, and every KIP-447 consume-transform-produce loop
+///     sets it — so advertising this API below v3 would make the flagship use
+///     case throw before any wire traffic. The ceiling is the same TV2 bump as
+///     the others, which adds no field.
+///
+/// v3 carries `group_instance_id`, and it is deliberately NOT the
+/// DescribeGroups case. The rule that caps five group APIs is that a field this
+/// facade does not model must not be negotiable; here the field can only ever
+/// be null, because `group.instance.id` is expressible only at JoinGroup v5,
+/// which is outside the advertised window — a consumer configured with one
+/// fails at join and never reaches a transactional offset commit. A non-null
+/// one is still answered rather than ignored
+/// ([`crate::handlers::txn_offset_commit`]).
+///
+/// InitProducerId keeps its `0..=4` unchanged: M9 changes what the
+/// transactional branch of that handler DOES, not what is advertised.
+/// FindCoordinator keeps its `0..=3`, and what changes there is the answer to
+/// `key_type == 1` ([`crate::handlers::find_coordinator`]).
+///
 /// OffsetDelete has exactly one version, so there is no window to argue: `0..=0`
 /// is the schema. It is advertised now, and the reason recorded here for leaving
 /// it out — *a partial reset with no membership guard in front of it* — is
@@ -441,6 +496,30 @@ pub const ADVERTISED: &[Api] = &[
         key: ApiKey::OffsetDelete,
         min: 0,
         max: 0,
+    },
+    // ---- M9: transactions. Four rows, appended in key order, each stopping
+    // one version below KIP-890's transaction protocol 2 — except
+    // AddPartitionsToTxn, which stops one version below a request only another
+    // broker sends. See the paragraph above.
+    Api {
+        key: ApiKey::AddPartitionsToTxn,
+        min: 0,
+        max: 3,
+    },
+    Api {
+        key: ApiKey::AddOffsetsToTxn,
+        min: 0,
+        max: 3,
+    },
+    Api {
+        key: ApiKey::EndTxn,
+        min: 0,
+        max: 3,
+    },
+    Api {
+        key: ApiKey::TxnOffsetCommit,
+        min: 0,
+        max: 3,
     },
 ];
 
@@ -889,21 +968,78 @@ mod tests {
             advertised.max
         );
 
-        // Transactions stay absent, and this is where that is asserted now that
-        // key 22 itself is advertised: the produce-side transaction APIs have no
-        // row at all.
-        for absent in [
-            ApiKey::AddPartitionsToTxn,
-            ApiKey::AddOffsetsToTxn,
-            ApiKey::EndTxn,
-            ApiKey::TxnOffsetCommit,
+        // The four produce-side transaction APIs used to be asserted ABSENT
+        // right here. M9 advertises them, and their own windows are pinned in
+        // `classify_the_transaction_apis` below.
+    }
+
+    /// The four transaction APIs (M9), and the two different reasons their
+    /// ceilings are all v3.
+    ///
+    /// Three of them stop one version below KIP-890's transaction protocol 2,
+    /// which is a SEMANTIC this facade does not implement rather than a field
+    /// it cannot answer. AddPartitionsToTxn stops for a stronger reason: v4 is
+    /// a different request altogether, the coordinator-to-leader verification
+    /// shape, which no client ever sends.
+    ///
+    /// The floors are all 0 and that is worth pinning too: unlike Produce,
+    /// CreateTopics and the ACL family, KIP-896 dropped no version of any
+    /// transaction API, so a floor above 0 would refuse a version a real broker
+    /// serves.
+    #[test]
+    fn classify_the_transaction_apis() {
+        use kafka_protocol::messages::{
+            AddOffsetsToTxnRequest, AddPartitionsToTxnRequest, EndTxnRequest,
+            TxnOffsetCommitRequest,
+        };
+
+        for (key, request_max) in [
+            (
+                ApiKey::AddPartitionsToTxn,
+                <AddPartitionsToTxnRequest as Message>::VERSIONS.max,
+            ),
+            (
+                ApiKey::AddOffsetsToTxn,
+                <AddOffsetsToTxnRequest as Message>::VERSIONS.max,
+            ),
+            (ApiKey::EndTxn, <EndTxnRequest as Message>::VERSIONS.max),
+            (
+                ApiKey::TxnOffsetCommit,
+                <TxnOffsetCommitRequest as Message>::VERSIONS.max,
+            ),
         ] {
+            let k = key as i16;
             assert_eq!(
-                classify(absent as i16, 0),
-                Support::UnknownApi,
-                "{absent:?} is a transaction API and must not be advertised"
+                classify(k, 0),
+                Support::Advertised(key),
+                "{key:?} v0: KIP-896 dropped no version of any transaction API"
+            );
+            assert_eq!(classify(k, 3), Support::Advertised(key), "{key:?} v3");
+            assert_eq!(
+                classify(k, 4),
+                Support::UnsupportedVersion(key),
+                "{key:?} v4 is KIP-890's transaction protocol 2"
+            );
+            // The InitProducerId trap, generalised, per key.
+            let advertised = lookup(k).expect("the transaction APIs are advertised");
+            assert!(
+                advertised.max <= request_max,
+                "{key:?} is advertised at v{} and its request decoder stops at v{request_max}",
+                advertised.max
             );
         }
+
+        // v3 is MANDATORY for TxnOffsetCommit and not merely available:
+        // `TxnOffsetCommitRequest$Builder.build(short)` throws below it whenever
+        // group metadata is set, which every KIP-447 loop does. A row that
+        // capped this API lower would make Spring's transactional listener
+        // throw before any wire traffic, so the floor of the CEILING is pinned
+        // as a number.
+        let txn_offsets = lookup(ApiKey::TxnOffsetCommit as i16).expect("advertised");
+        assert!(
+            txn_offsets.max >= 3,
+            "TxnOffsetCommit must reach v3 or every consume-transform-produce loop throws"
+        );
     }
 
     /// The ACL family, and the two boundaries that are the whole of its window.
@@ -1091,15 +1227,11 @@ mod tests {
             classify(ApiKey::ConsumerGroupHeartbeat as i16, 0),
             Support::UnknownApi
         );
-        // Transactions, excluded by the same paragraph. InitProducerId used to
-        // be asserted here beside it and is not any more: M7 F3 advertises the
-        // key for the IDEMPOTENT producer, which is not a transaction — the
-        // transactional half of it is refused inside the handler
-        // (`handlers::init_producer_id`) rather than by not existing.
-        assert_eq!(
-            classify(ApiKey::TxnOffsetCommit as i16, 0),
-            Support::UnknownApi
-        );
+        // TxnOffsetCommit used to be asserted here beside it and is not any
+        // more: M9 advertises the four transaction APIs, and what is refused is
+        // now a transaction this facade cannot serve — a cluster-mode
+        // deployment, or a stage it does not hold — rather than the API itself.
+        //
         // ...and something that is not a Kafka API key at all.
         assert_eq!(classify(31_000, 0), Support::UnknownApi);
         assert_eq!(classify(-7, 0), Support::UnknownApi);

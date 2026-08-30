@@ -7,6 +7,7 @@ use std::time::Duration;
 use queen_kafka::cluster::{self, registry, Cluster, ClusterState};
 use queen_kafka::coordinator::{Coordinator, GroupConfig};
 use queen_kafka::handlers::metadata;
+use queen_kafka::txn;
 use queen_kafka::{conn, queen, tls, Facade, Policy};
 
 /// Resolved configuration. Every field is validated at boot — a Kafka facade
@@ -53,6 +54,11 @@ struct Config {
     /// plaintext listener, which is the default and the whole of the OSS
     /// deployment. Both or neither — see `resolve`.
     tls: Option<(String, String)>,
+    /// The transaction stage's caps (M9, [`queen_kafka::txn`]). Every one of
+    /// them is a deviation with NO Kafka analogue — a Kafka transaction has no
+    /// size, because records are appended as they arrive — so each is loud on a
+    /// bad value and each names its own derivation in `txn.rs`.
+    txns: txn::Limits,
     /// What the listener does to a connection before a handler sees it: SASL,
     /// and SNI-derived Host forwarding.
     policy: Policy,
@@ -85,6 +91,7 @@ impl std::fmt::Debug for Config {
             .field("cluster_heartbeat", &self.cluster_heartbeat)
             .field("cluster_ttl", &self.cluster_ttl)
             .field("groups", &self.groups)
+            .field("txns", &self.txns)
             .field("tls", &self.tls)
             .field("policy", &self.policy)
             .finish()
@@ -348,6 +355,65 @@ impl Config {
             ));
         }
 
+        // ------------------------------------------------------ transactions
+        //
+        // The stage is a memory amplifier: records are held in this process
+        // from the first transactional Produce until EndTxn. These four numbers
+        // and the timeout are what bound it, in size and in time, and there is
+        // no Kafka setting any of them corresponds to — so an operator meets
+        // them here or not at all. Loud on a bad value, like every knob above.
+        let txns = txn::Limits {
+            max_txn_bytes: bytes(
+                "QUEEN_KAFKA_TXN_MAX_BYTES",
+                &env,
+                txn::DEFAULT_MAX_TXN_BYTES,
+                64 * 1024,
+                64 * 1024 * 1024,
+            )?,
+            max_txn_records: count(
+                "QUEEN_KAFKA_TXN_MAX_RECORDS",
+                &env,
+                txn::DEFAULT_MAX_TXN_RECORDS,
+                1,
+                5_000_000,
+            )?,
+            max_staged_bytes: bytes(
+                "QUEEN_KAFKA_TXN_MAX_STAGED_BYTES",
+                &env,
+                txn::DEFAULT_MAX_STAGED_BYTES,
+                1024 * 1024,
+                8 * 1024 * 1024 * 1024,
+            )?,
+            max_open: count(
+                "QUEEN_KAFKA_TXN_MAX_OPEN",
+                &env,
+                txn::DEFAULT_MAX_OPEN,
+                1,
+                1_000_000,
+            )?,
+            max_timeout: millis(
+                "QUEEN_KAFKA_TXN_MAX_TIMEOUT_MS",
+                &env,
+                txn::DEFAULT_MAX_TIMEOUT_MS,
+                1_000,
+                7_200_000,
+            )?,
+        };
+        // A per-transaction cap above the process budget is a knob that cannot
+        // be reached, which is the same class of defect as one that does
+        // nothing: the first transaction to fill the process would be answered
+        // retriably for ever while its own cap said there was room.
+        if txns.max_txn_bytes > txns.max_staged_bytes {
+            return Err(format!(
+                "QUEEN_KAFKA_TXN_MAX_BYTES={} is larger than \
+                 QUEEN_KAFKA_TXN_MAX_STAGED_BYTES={}. The second is the budget for the whole \
+                 process, so a transaction could never reach its own cap and would be answered \
+                 REQUEST_TIMED_OUT instead. Raise the process budget or lower the per-transaction \
+                 one.",
+                txns.max_txn_bytes, txns.max_staged_bytes
+            ));
+        }
+
         Ok(Config {
             queen_url,
             queen_token,
@@ -360,6 +426,7 @@ impl Config {
             cluster_heartbeat,
             cluster_ttl,
             groups: GroupConfig::resolve(&|k| get(k))?,
+            txns,
             tls,
             policy: Policy {
                 sasl_plain,
@@ -387,6 +454,48 @@ fn millis(
             _ => Err(format!(
                 "{key}={v} is not a duration this facade will run on — give it a whole number of \
                  milliseconds in {min_ms}..={max_ms}, or unset it for {default_ms}"
+            )),
+        },
+    }
+}
+
+/// A byte-count knob, bounded at both ends and LOUD on a bad value — the same
+/// rule as [`millis`], for a number whose typo is an out-of-memory rather than
+/// a slow loop.
+fn bytes(
+    key: &str,
+    env: &impl Fn(&str) -> Option<String>,
+    default: usize,
+    min: usize,
+    max: usize,
+) -> Result<usize, String> {
+    match env(key) {
+        None => Ok(default),
+        Some(v) => match v.parse::<usize>() {
+            Ok(n) if (min..=max).contains(&n) => Ok(n),
+            _ => Err(format!(
+                "{key}={v} is not a byte count this facade will run on — give it a whole number \
+                 of bytes in {min}..={max}, or unset it for {default}"
+            )),
+        },
+    }
+}
+
+/// A plain count knob, same rule.
+fn count(
+    key: &str,
+    env: &impl Fn(&str) -> Option<String>,
+    default: usize,
+    min: usize,
+    max: usize,
+) -> Result<usize, String> {
+    match env(key) {
+        None => Ok(default),
+        Some(v) => match v.parse::<usize>() {
+            Ok(n) if (min..=max).contains(&n) => Ok(n),
+            _ => Err(format!(
+                "{key}={v} is not a count this facade will run on — give it a whole number in \
+                 {min}..={max}, or unset it for {default}"
             )),
         },
     }
@@ -636,6 +745,17 @@ async fn main() {
         }
     };
 
+    // The transaction stage, and the one task it needs.
+    //
+    // The sweep is spawned unconditionally and costs one wake a second over a
+    // map that is empty on a deployment nobody produces transactionally to. It
+    // is what bounds the stage in TIME: a producer that opens a transaction and
+    // disappears without closing its TCP connection — a hung JVM, a partitioned
+    // network — holds its staged bytes until either this or `conn::IDLE_TIMEOUT`
+    // fires, and this is usually first.
+    let txns = Arc::new(txn::Txns::new(cfg.txns));
+    tokio::spawn(txn::sweep_loop(Arc::clone(&txns)));
+
     let facade = Arc::new(Facade::new(
         cfg.advertised_host.clone(),
         cfg.advertised_port,
@@ -651,6 +771,10 @@ async fn main() {
         // rejoin — the same sequence a Kafka broker failover produces. What
         // they resume FROM is in Queen and was never here.
         Coordinator::new(cfg.groups),
+        // Empty at boot for the same reason and with a louder consequence: a
+        // transaction open across a restart is one the client is told about,
+        // fatally (`queen_kafka::txn`).
+        Arc::clone(&txns),
         cfg.policy,
     ));
 
@@ -1030,6 +1154,7 @@ mod tests {
 
         // ...and the whole struct is the one the pre-cluster resolve produced.
         let expected = Config {
+            txns: txn::Limits::default(),
             queen_url: "http://localhost:6632".to_string(),
             queen_token: None,
             listen_addr: "0.0.0.0:9092".to_string(),

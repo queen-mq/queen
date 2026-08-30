@@ -4,9 +4,91 @@ Goal: unmodified Kafka clients (kcat, kafkajs, franz-go, librdkafka) produce and
 consume against Queen by changing `bootstrap.servers` only. `queen-kafka` is a
 separate binary deployed beside the broker (OSS) or beside the proxy (Cloud).
 
-Non-goals, stated loudly in docs: transactions/EOS (excludes Kafka Streams apps),
-log compaction, KIP-848 group protocol. Unsupported APIs fail with clear Kafka
-error codes, never mysteriously.
+Non-goals, stated loudly in docs: log compaction (which is what excludes Kafka
+Streams and Kafka Connect's exactly-once source support, and it is a stated
+non-goal rather than a gap — accepting `cleanup.policy=compact` and compacting
+nothing would eat a state store), and the KIP-848 group protocol. Unsupported
+APIs fail with clear Kafka error codes, never mysteriously.
+
+**Transactions were a non-goal until M9 and are now a bounded capability**, and
+the boundary is the sentence that must travel with the word: a transaction here
+is a STAGE held by one facade process, on the connection that opened it, and
+committed by one `POST /api/v1/transaction`. That covers a transactional
+producer and a same-process consume-transform-produce loop, which is Spring's
+`KafkaTransactionManager` and every stock Java or franz-go EOS loop. It does not
+cover a two-phase commit across a failover — Flink's `KafkaSink EXACTLY_ONCE`
+and Spark's structured-streaming writer pre-commit at a checkpoint and commit
+from a DIFFERENT process, and that `EndTxn` reaches a facade holding no stage —
+and it does not bring Kafka Streams any closer, because Streams' dependency is
+compaction. "Transactions landed" must never be said without that last clause.
+
+## STATUS M9 — transactions (2026-08-30)
+
+The advertised table goes from 28 keys to **32**: AddPartitionsToTxn (24),
+AddOffsetsToTxn (25), EndTxn (26) and TxnOffsetCommit (28), all `0..=3`. Nothing
+already advertised moved. InitProducerId keeps its `0..=4` and FindCoordinator
+its `0..=3`; what changed on those two is the ANSWER, not the window.
+
+**The shape, in one paragraph.** A `transactional.id` is claimed in Queen KV
+under `qk:txn:<tenant>:<id>` by a compare-and-set, which is the fencing: a second
+producer taking the same id bumps the epoch and the first one is answered
+PRODUCER_FENCED (90) for ever after. A transactional Produce does not push — it
+STAGES the records in this process and answers `base_offset = -1`.
+AddOffsetsToTxn and TxnOffsetCommit stage offsets beside them.
+`EndTxn(commit)` sends the whole stage as **one** `POST /api/v1/transaction`,
+with the fence CAS as KV operation index 0 carrying `required: true`, so a
+fenced producer's commit raises 23514 out of `kv_apply_v1` and the whole bundle
+rolls back: zero records, zero offsets. `EndTxn(abort)` drops the stage and
+writes nothing at all. That single atomic POST is the whole of exactly-once
+processing here, and it is why the offsets and the records cannot disagree.
+
+**What it costs.** The stage is a memory amplifier, so it is capped in five
+places, none of which has a Kafka analogue: `QUEEN_KAFKA_TXN_MAX_BYTES`
+(8 MiB), `QUEEN_KAFKA_TXN_MAX_RECORDS` (50 000),
+`QUEEN_KAFKA_TXN_MAX_STAGED_BYTES` (128 MiB, the whole process),
+`QUEEN_KAFKA_TXN_MAX_OPEN` (1024) and `QUEEN_KAFKA_TXN_MAX_TIMEOUT_MS`
+(900 000, which is Kafka's own default for `transaction.max.timeout.ms`). Two
+more are derived rather than chosen and cannot be set: at most 200 partitions per
+transaction, and at most 62 offsets, which is `WIRE_KV_MAX_OPS − 1 fence − 1
+group index`. A 1 s sweep expires a transaction past its timeout, and a
+disconnect drops that connection's stage.
+
+**What it unlocks, and what it does not.** Yes: the stock Java transactional
+producer, Spring's `KafkaTransactionManager`, franz-go's `GroupTransactSession`,
+and the librdkafka transactional API — all same-process. No: Flink's
+`KafkaSink EXACTLY_ONCE` and Spark's structured-streaming writer, for the
+two-phase reason in the non-goals above, and Kafka Streams and Connect's
+exactly-once source, for the compaction reason. **Cluster mode refuses
+transactions outright**: with `QUEEN_KAFKA_NODE_ID` set, FindCoordinator's
+`key_type = 1` and InitProducerId's transactional branch both answer
+TRANSACTIONAL_ID_AUTHORIZATION_FAILED (53) — fatal, so `initTransactions()`
+returns in milliseconds instead of hanging. That is a refusal by CONFIGURATION,
+not by capability: a stage held by one process cannot be honoured by a node the
+client's next request is routed to.
+
+**The 20 second hang is gone, and it was not where it looked.** The M7 F3 row
+recorded `initTransactions()` costing the whole of `max.block.ms` and blamed the
+missing InitProducerId. It was FindCoordinator: `key_type = 1` was answered
+COORDINATOR_NOT_AVAILABLE (15), which is retriable, so the Java client re-enqueued
+the lookup until `max.block.ms` and never sent key 22 at all. Measured after the
+fix, over two clean runs of `compat/transactions/run.sh`: **471-557 ms cold**
+and **112-119 ms warm** in single mode, **214-251 ms** and fatal in cluster
+mode, against a 20 000 ms baseline.
+
+New: `src/txn.rs` (the registry, the state machine, the caps, the sweep) and
+`handlers/{add_partitions_to_txn,add_offsets_to_txn,end_txn,txn_offset_commit}.rs`.
+`queen.rs` gains the `transaction` trait method and both implementations;
+`conn.rs` gains a connection id and the teardown; `find_coordinator.rs`,
+`init_producer_id.rs` and `produce.rs` gain their transactional branches.
+
+Verified: `cargo test --locked` 786 + 20 + 34 = 840 passing, clippy
+`-D warnings` and fmt clean; `compat/rig.sh --m5 -count=1` 91/91;
+`compat/transactions/run.sh` 9 scenarios, 38 named checks, 0 FAIL, exit 0,
+including a SIGKILL between the last send and the commit that leaves 200
+records, 200 distinct keys, 0 duplicates and 0 missing; the differential runner
+against apache/kafka:3.9.1 ends at **0 to classify** — 100 divergences (74
+deliberate, 26 accepted) from a cold stack, 97 (72, 25) from a warm one, the
+three-row difference being the oracle's own transaction-coordinator warm-up.
 
 ## STATUS M7 (2026-08-29)
 
@@ -489,12 +571,47 @@ Known open, in the order they matter:
   session from the next inside the window's key, so bumping it invalidates the
   old session while keeping the producer's identity stable and costs no entropy
   per recovery. Every client takes whatever the response says.
-- **A transactional producer is refused, but not quickly** (M7 F3). Its
-  `initTransactions()` still costs the whole of `max.block.ms` (measured 20 s),
-  because the client loops on FindCoordinator's retriable
-  COORDINATOR_NOT_AVAILABLE and never reaches InitProducerId — which refuses in
-  ~10 ms. A fatal code on that FindCoordinator arm is the fix and was out of
-  M7 F3's scope.
+- **A transactional produce answers `base_offset = -1`** *(awaiting
+  ratification — see STATUS M9)*. Kafka appends the batch as it arrives and
+  answers the real offset; here no offset exists until `EndTxn(commit)`
+  allocates them all, and the client has to be answered first. The Java client's
+  `RecordMetadata` keeps -1 unchanged rather than adding the batch index
+  (verified in kafka-clients bytecode), so no fabricated offset ever reaches an
+  application — what an application loses is `RecordMetadata.offset()` inside a
+  transaction, and what it gains is that nothing partial is ever in the log.
+  Every NON-transactional produce still answers a real offset.
+- **A committed transaction advances the log end offset by N and not N+1**
+  (M9). Kafka writes a commit or abort MARKER into the data partition; this
+  facade writes records and nothing else. Nothing a client reads differs: the
+  differential runner measures 10 records read at `read_committed` on both
+  brokers for the same transaction. An ABORTED transaction advances it by 0
+  here and by N+1 on Kafka, which also leaves the aborted records in the log for
+  the client to filter — there is nothing to filter here because there is
+  nothing there.
+- **`read_uncommitted` sees LESS than Kafka does** *(awaiting ratification —
+  see STATUS M9)*. An open transaction's records are invisible until commit, and
+  aborted records are never visible at all. `read_uncommitted` is the DEFAULT, so
+  an ordinary consumer sees the same records in the same order, later by the
+  producer's own commit cadence; no client library exposes "records that may yet
+  be rolled back" as a state an application can act on. The upside is measured:
+  a `read_committed` consumer's lag here reaches 0, where against Kafka it stops
+  at 1 per partition because of the marker.
+- **The transaction stage's caps have no Kafka analogue** (M9). A Kafka
+  transaction has no size, because its records are appended as they arrive; one
+  here is held in this process until commit, so it is bounded by five knobs and
+  two derived numbers (STATUS M9 lists them). Past a cap the transaction is
+  answered MESSAGE_TOO_LARGE or INVALID_COMMIT_OFFSET_SIZE, becomes abortable,
+  and the producer must abort it. Not retriable, deliberately: waiting does not
+  make a 12 MiB transaction fit an 8 MiB stage.
+- **Transactions are unavailable in cluster mode** (M9), by configuration and
+  not by capability. With `QUEEN_KAFKA_NODE_ID` set, FindCoordinator `key_type=1`
+  and InitProducerId's transactional branch both answer
+  TRANSACTIONAL_ID_AUTHORIZATION_FAILED (53), which is FATAL, so
+  `initTransactions()` returns in ~214 ms rather than looping on a retriable
+  code. A stage lives in one process; a node that does not hold it cannot honour
+  the commit, and a retriable refusal would send the client round a loop that
+  cannot end. The durable-stage design that would lift this is a much larger
+  project and is not started.
 - **Offsets never expire on their own; DeleteGroups is the only thing that
   removes them** *(awaiting ratification — see STATUS M7 F2)*. M7 F2 adds
   `kafka-consumer-groups.sh --delete`, with Kafka's own rule that only an empty
@@ -653,6 +770,15 @@ M6 SHIPPED. Client matrix is franz-go, kafkajs, librdkafka (kcat and
     `versions.rs` by `webdoc/scripts/gen-kafka-apis.mjs`. The compat lane is in
     `compat/rig.sh` and stays out of release-day CI.
 
+M7 SHIPPED in four waves (F1-F4). The admin surface, from 14 advertised keys to
+    28: topics, groups, ACLs, configs, partitions, offset deletion, and the
+    idempotent producer.
+
+M9 SHIPPED. Transactions, 28 keys to 32, with the boundary stated in the
+    non-goals above and the whole shape in STATUS M9. Its acceptance suite is
+    `compat/transactions/run.sh`, which stands up its own stack on 32910-32914
+    and runs nine scenarios against real Java and franz-go clients.
+
 ## Testing (how to run it)
 
 - Unit: `cargo test --locked` in `queen-kafka/` (the coordinator FSM drives
@@ -686,6 +812,16 @@ logged), `QUEEN_KAFKA_ADDR` (default `0.0.0.0:9092`),
 `QUEEN_KAFKA_GROUP_MAX_SESSION_TIMEOUT_MS` (300000), plus `LOG_LEVEL` /
 `RUST_LOG` and `QUEEN_LOG_JSON`. Every one is validated at boot and a bad value
 is a boot failure, never a silent default.
+
+Added by M9, all five bounding the transaction stage:
+`QUEEN_KAFKA_TXN_MAX_BYTES` (8 MiB, 64 KiB..=64 MiB),
+`QUEEN_KAFKA_TXN_MAX_RECORDS` (50000, 1..=5000000),
+`QUEEN_KAFKA_TXN_MAX_STAGED_BYTES` (128 MiB, 1 MiB..=8 GiB, the whole process),
+`QUEEN_KAFKA_TXN_MAX_OPEN` (1024, 1..=1000000) and
+`QUEEN_KAFKA_TXN_MAX_TIMEOUT_MS` (900000, 1000..=7200000, which is Kafka's own
+`transaction.max.timeout.ms` default). A per-transaction byte cap above the
+process budget is a boot failure, because it is a knob that could never be
+reached.
 
 ## Later, deliberately out of this plan
 

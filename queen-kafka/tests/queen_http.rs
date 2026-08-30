@@ -815,3 +815,179 @@ async fn a_hostile_queue_name_cannot_leave_its_path_segment() {
         "DELETE /api/v1/resources/queues/..%2F..%2Fadmin%3Fx%3D1 HTTP/1.1"
     );
 }
+
+// ------------------------------------------------------------- transactions
+//
+// `POST /api/v1/transaction` (M9). This is the one route where the BODY SHAPE
+// is load-bearing in a way no double can check: `kv` is a top-level rider
+// beside `operations` and never inside it, for a stated reason
+// (server/src/handlers/data.rs — two Go struct fields carrying the same JSON
+// key at one level are silently dropped by `encoding/json`, so a `kv` leg
+// inside an operation would let a bundle commit with the gate it existed for
+// simply absent). A transaction whose fence rode in the wrong place would
+// commit every record of a FENCED producer.
+
+/// The success body of the wire, as `handle_transaction` writes it: the push
+/// echoes take the flat ordinals and the KV rider is scattered after them,
+/// carrying `opIndex` and `type` (server/src/handlers/data.rs,
+/// `txn_scatter_rider`).
+const TXN_BODY: &str = r#"{"transactionId":"0190aaaa-0000-7000-8000-000000000001",
+ "success":true,
+ "results":[
+  {"index":0,"type":"push","success":true,"transactionId":"t","messageId":"m","queueName":"orders"},
+  {"index":1,"type":"push","success":true,"transactionId":"t","messageId":"m","queueName":"orders"},
+  {"index":2,"opIndex":0,"type":"kv","op":"put","applied":true,"version":7701},
+  {"index":3,"opIndex":1,"type":"kv","op":"put","applied":true,"version":7702}
+ ]}"#;
+
+fn fence() -> KvOp {
+    KvOp::fence(
+        "queen-kafka",
+        "qk:txn:tx-1",
+        serde_json::json!({"pid": 7, "epoch": 0, "state": "committed", "seq": 1}),
+        7700,
+    )
+}
+
+fn offset_put() -> KvOp {
+    KvOp::put(
+        "queen-kafka",
+        "qk:group:g:orders:3",
+        serde_json::json!({"offset": 42}),
+    )
+}
+
+/// THE bundle, byte for byte: `operations` carries one push group and `kv` is a
+/// TOP-LEVEL array beside it, with the fence at index 0 carrying `expect` and
+/// `required`.
+#[tokio::test]
+async fn a_transaction_posts_the_records_and_the_kv_rider_in_one_body() {
+    let (base, seen) = stub(vec![Canned::new(200, TXN_BODY)]).await;
+    let api = HttpQueen::new(&base).unwrap();
+
+    let answers = api
+        .transaction(&items(), &[fence(), offset_put()], Some("tenant-token"))
+        .await
+        .unwrap();
+
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen[0].line, "POST /api/v1/transaction HTTP/1.1");
+    assert_eq!(
+        seen[0].authorization.as_deref(),
+        Some("Bearer tenant-token")
+    );
+    assert_eq!(
+        seen[0].body,
+        r#"{"operations":[{"type":"push","items":[{"queue":"orders","partition":"3","payload":{"k":null,"v":"b25l"}},{"queue":"orders","partition":"3","payload":{"k":null,"v":"dHdv"}}]}],"kv":[{"op":"put","ns":"queen-kafka","key":"qk:txn:tx-1","value":{"epoch":0,"pid":7,"seq":1,"state":"committed"},"forever":true,"expect":7700,"required":true},{"op":"put","ns":"queen-kafka","key":"qk:group:g:orders:3","value":{"offset":42},"forever":true}]}"#
+    );
+
+    // The KV answers come back aligned to the array that was SENT, not to the
+    // flat space they arrived in: the fence is answer 0 and its new version is
+    // what the next transaction expects.
+    assert_eq!(answers.len(), 2);
+    assert_eq!(answers[0].applied, Some(true));
+    assert_eq!(answers[0].version, 7701);
+    assert_eq!(answers[1].version, 7702);
+}
+
+/// A bundle with no records carries NO `operations` entry, which is the route
+/// the broker takes to the short KV transaction instead of the wire — the shape
+/// a consume-only exactly-once loop produces.
+#[tokio::test]
+async fn a_transaction_with_no_records_sends_an_empty_operations_array() {
+    let (base, seen) = stub(vec![Canned::new(
+        200,
+        r#"{"transactionId":"t","success":true,
+            "results":[{"index":0,"opIndex":0,"type":"kv","op":"put","applied":true,"version":9001}]}"#,
+    )])
+    .await;
+    let api = HttpQueen::new(&base).unwrap();
+
+    let answers = api.transaction(&[], &[fence()], None).await.unwrap();
+
+    let seen = seen.lock().unwrap().clone();
+    assert!(
+        seen[0].body.starts_with(r#"{"operations":[],"kv":["#),
+        "{}",
+        seen[0].body
+    );
+    assert_eq!(answers[0].version, 9001);
+}
+
+/// THE fence, on the wire. A lost `required` precondition is HTTP **200** with
+/// `success:false` — deliberately, so it pollutes no retry policy and no error
+/// metric — and it has to become `Error::Precondition` here or a fenced
+/// transaction would read as a committed one.
+#[tokio::test]
+async fn a_lost_precondition_is_a_200_that_must_not_read_as_a_commit() {
+    let (base, _) = stub(vec![Canned::new(
+        200,
+        r#"{"transactionId":"t","success":false,"ok":false,"reason":"kv_precondition",
+            "error":"QKV precondition failed","failedIndex":2,"kvReason":"version",
+            "version":8888,"value":{"pid":7,"epoch":1},"results":[]}"#,
+    )])
+    .await;
+    let api = HttpQueen::new(&base).unwrap();
+
+    match api
+        .transaction(&items(), &[fence(), offset_put()], None)
+        .await
+    {
+        Err(queen_kafka::queen::Error::Precondition {
+            failed_index,
+            reason,
+            version,
+            value,
+        }) => {
+            // The wire reports the FLAT ordinal (`kv_base + the kv ordinal`,
+            // and kv_base is the two push items here); the caller is answered
+            // in the array it sent.
+            assert_eq!(failed_index, 0, "the fence is operation 0 of the kv array");
+            assert_eq!(reason, "version");
+            assert_eq!(version, 8888);
+            assert_eq!(value.get("epoch").and_then(|e| e.as_i64()), Some(1));
+        }
+        other => panic!("a lost fence must not read as a commit: {other:?}"),
+    }
+}
+
+/// A failure that is NOT a precondition is not silently a commit either, and it
+/// names itself rather than becoming a bare "something went wrong".
+#[tokio::test]
+async fn a_failed_transaction_that_is_not_a_precondition_names_its_reason() {
+    let (base, _) = stub(vec![Canned::new(
+        200,
+        r#"{"transactionId":"t","success":false,"reason":"duplicate",
+            "error":"QDUP duplicate push","results":[]}"#,
+    )])
+    .await;
+    let api = HttpQueen::new(&base).unwrap();
+    let e = api
+        .transaction(&items(), &[fence()], None)
+        .await
+        .unwrap_err();
+    let text = e.to_string();
+    assert!(text.contains("duplicate"), "{text}");
+}
+
+/// The count guard, which is the one that matters operationally: a broker whose
+/// wire procedure has no KV leg answers no `kv` results at all, and reading that
+/// as a successful gate is exactly the silent misalignment the route's own guard
+/// exists for.
+#[tokio::test]
+async fn a_transaction_that_answers_no_kv_results_is_an_error_not_a_commit() {
+    let (base, _) = stub(vec![Canned::new(
+        200,
+        r#"{"transactionId":"t","success":true,
+            "results":[
+             {"index":0,"type":"push","success":true},
+             {"index":1,"type":"push","success":true}]}"#,
+    )])
+    .await;
+    let api = HttpQueen::new(&base).unwrap();
+    let e = api
+        .transaction(&items(), &[fence()], None)
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("kv operation 0"), "{e}");
+}

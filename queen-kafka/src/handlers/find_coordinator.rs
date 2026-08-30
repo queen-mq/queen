@@ -26,16 +26,29 @@
 //! anything, so it answers COORDINATOR_NOT_AVAILABLE — "I cannot tell you", the
 //! code every client retries — rather than guessing itself.
 //!
-//! ## The two things it says no to
+//! ## The TRANSACTION coordinator (`key_type` 1), and the 20 seconds it cost
 //!
-//! A TRANSACTION coordinator (`key_type` 1). There is none: transactions are
-//! excluded by PLAN_QUEEN_KAFKA.md and `handlers::produce` refuses every shape
-//! of one, so pointing a transactional producer at this process would only move
-//! the failure to `InitProducerId` — an API this build does not advertise,
-//! whose absence closes the connection. COORDINATOR_NOT_AVAILABLE is the answer
-//! Kafka itself gives while a coordinator cannot be resolved, and a client's
-//! response to it is to retry rather than to crash, which is the correct
-//! behaviour for a facade that may one day grow one.
+//! In single-node mode this process IS the transaction coordinator (M9,
+//! [`crate::txn`]) and answers itself, exactly as it answers a group key.
+//!
+//! In CLUSTER mode there is none, and the refusal is deliberately FATAL rather
+//! than retriable. That is a correction, and the reason is measured: this
+//! handler used to answer COORDINATOR_NOT_AVAILABLE (15), which is RETRIABLE,
+//! and the Java `FindCoordinatorHandler` answers a retriable code by
+//! re-enqueueing the lookup. So `initTransactions()` looped on coordinator
+//! discovery for the whole of `max.block.ms` and never sent InitProducerId at
+//! all — the 20 seconds `compat/java-matrix/README.md` recorded, whose stated
+//! mechanism is *"FindCoordinator succeeds, so the client keeps waiting on a
+//! response it will never negotiate"*. Advertising key 22 does not fix it,
+//! because the client never gets far enough to send key 22.
+//!
+//! TRANSACTIONAL_ID_AUTHORIZATION_FAILED (53) does fix it: it is fatal in the
+//! Java client, so the call returns in milliseconds. It is also the same code
+//! and the same sentence [`crate::handlers::init_producer_id`] gives a
+//! transactional id under cluster mode, so a user meets ONE message about
+//! transactions and not two.
+//!
+//! ## The other thing it says no to
 //!
 //! An EMPTY group id. Kafka reserves it — a consumer with `group.id=""` is a
 //! configuration mistake, not a group — and INVALID_GROUP_ID is a permanent
@@ -64,14 +77,15 @@ const NO_NODE: i32 = -1;
 ///
 ///   1. an invalid group id, which is permanent and must not be handed an
 ///      address to send a doomed join to;
-///   2. a transaction coordinator, which does not exist;
-///   3. single mode, which answers self, byte for byte as it always has;
+///   2. a transaction coordinator in cluster mode, which does not exist;
+///   3. single mode, which answers self, byte for byte as it always has —
+///      including for a transaction key, which this process now coordinates;
 ///   4. cluster mode with a stale view, which cannot answer;
 ///   5. cluster mode with a fresh view, which answers the OWNER — with error
 ///      code 0 whether or not the owner is this node.
 pub fn handle(facade: &Facade, req: &FindCoordinatorRequest) -> FindCoordinatorResponse {
     let key = req.key.as_str();
-    if let Some((error, message)) = refusal(key, req.key_type) {
+    if let Some((error, message)) = refusal(key, req.key_type, facade.cluster.state().is_some()) {
         tracing::debug!(
             target: "kafka",
             key_type = req.key_type,
@@ -80,6 +94,10 @@ pub fn handle(facade: &Facade, req: &FindCoordinatorRequest) -> FindCoordinatorR
         );
         return refused(error, message);
     }
+    // A TRANSACTION key never reaches the group rendezvous: cluster mode has
+    // already refused it above, and in single mode the answer is this process
+    // without a hash — which is what `owner_of_group` answers for `Single` too,
+    // so the two paths meet at the same arm rather than at the same number.
     let (node_id, host, port) =
         match facade.cluster.owner_of_group(key) {
             // Single mode reaches this arm too, and it is the same answer it has
@@ -119,7 +137,12 @@ fn refused(error: ResponseError, message: String) -> FindCoordinatorResponse {
 }
 
 /// Why this request cannot be answered with an address, if it cannot.
-fn refusal(key: &str, key_type: i8) -> Option<(ResponseError, String)> {
+///
+/// `clustered` is read from CONFIGURATION and not from the live view, and that
+/// is the whole of the transaction gate: a cluster-mode deployment that happens
+/// to have one live node must not serve transactions, because a node joining
+/// would break them mid-flight. Deterministic beats opportunistic.
+fn refusal(key: &str, key_type: i8, clustered: bool) -> Option<(ResponseError, String)> {
     match key_type {
         // The same rule the six group-addressed APIs apply, from the same
         // place: a name this facade will refuse to join must not be answered
@@ -132,10 +155,17 @@ fn refusal(key: &str, key_type: i8) -> Option<(ResponseError, String)> {
             ),
         )),
         KEY_TYPE_GROUP => None,
+        // Single mode: this process is the transaction coordinator, and the
+        // answer falls through to the same self-address a group key gets.
+        KEY_TYPE_TRANSACTION if !clustered => None,
+        // Cluster mode: FATAL, and see the module header for why a retriable
+        // code here costs `max.block.ms` instead of a millisecond.
         KEY_TYPE_TRANSACTION => Some((
-            ResponseError::CoordinatorNotAvailable,
-            "this broker has no transaction coordinator: queen-kafka does not implement \
-             transactions or exactly-once semantics"
+            ResponseError::TransactionalIdAuthorizationFailed,
+            "queen-kafka serves transactions in single-node mode only, and QUEEN_KAFKA_NODE_ID is \
+             set on this facade: a transaction's records are staged on the node that received the \
+             produce, and its EndTxn arrives at the coordinator, which in a cluster is a different \
+             process. Unset QUEEN_KAFKA_NODE_ID, or remove transactional.id from this producer."
                 .to_string(),
         )),
         other => Some((
@@ -195,20 +225,22 @@ mod tests {
         assert_eq!(resp.port, NO_NODE);
     }
 
-    /// A transactional producer is told there is no transaction coordinator
-    /// rather than being handed one that cannot honour a transaction.
+    /// M9: in single-node mode this process IS the transaction coordinator, and
+    /// it answers the same address it answers a group key with — which is what
+    /// makes a transactional producer reuse the connection it already has.
     #[test]
-    fn there_is_no_transaction_coordinator() {
-        let resp = handle(&facade(&[]), &request("txn-1", KEY_TYPE_TRANSACTION));
-        assert_eq!(
-            resp.error_code,
-            ResponseError::CoordinatorNotAvailable.code()
-        );
-        assert!(resp
-            .error_message
-            .as_ref()
-            .is_some_and(|m| m.as_str().contains("transaction")));
-        assert_eq!(resp.node_id.0, NO_NODE);
+    fn the_transaction_coordinator_is_this_facade_in_single_mode() {
+        let f = facade(&[]);
+        let resp = handle(&f, &request("txn-1", KEY_TYPE_TRANSACTION));
+        assert_eq!(resp.error_code, 0);
+        assert_eq!(resp.node_id.0, SINGLE_NODE_ID);
+        assert_eq!(resp.host.as_str(), f.advertised_host);
+        assert_eq!(resp.port, i32::from(f.advertised_port));
+        // ...and it is the SAME answer a group gets, byte for byte.
+        let group = handle(&f, &request("txn-1", KEY_TYPE_GROUP));
+        assert_eq!(resp.node_id.0, group.node_id.0);
+        assert_eq!(resp.host.as_str(), group.host.as_str());
+        assert_eq!(resp.port, group.port);
     }
 
     #[test]
@@ -310,6 +342,45 @@ mod tests {
             .is_some_and(|m| m.as_str().contains("stale")));
     }
 
+    /// THE fast-fail. In cluster mode a transaction key is refused with a code
+    /// the Java client treats as FATAL, so `initTransactions()` raises in
+    /// milliseconds instead of re-enqueueing the lookup for the whole of
+    /// `max.block.ms` — the measured 20 seconds of
+    /// `compat/java-matrix/README.md`. A retriable code here is the defect;
+    /// this test is what stops one coming back.
+    #[tokio::test]
+    async fn a_clustered_facade_refuses_a_transaction_coordinator_fatally() {
+        let (f, _) = crate::handlers::testing::clustered(&[], &THREE, 1);
+        let resp = handle(&f, &request("txn-1", KEY_TYPE_TRANSACTION));
+        assert_eq!(
+            resp.error_code,
+            ResponseError::TransactionalIdAuthorizationFailed.code(),
+            "a retriable code here costs the client max.block.ms"
+        );
+        assert!(!ResponseError::TransactionalIdAuthorizationFailed.is_retriable());
+        assert!(resp
+            .error_message
+            .as_ref()
+            .is_some_and(|m| m.as_str().contains("QUEEN_KAFKA_NODE_ID")));
+        assert_eq!(resp.node_id.0, NO_NODE);
+        assert_eq!(resp.port, NO_NODE);
+    }
+
+    /// ...and the gate is on CONFIGURATION, not on the live view: a clustered
+    /// facade that is currently alone still refuses, because a node joining
+    /// would break a transaction that was already staged.
+    #[tokio::test]
+    async fn a_clustered_facade_alone_still_refuses_transactions() {
+        let (f, _) = crate::handlers::testing::clustered(&[], &[(1, "only.example.com", 9092)], 1);
+        assert_eq!(
+            handle(&f, &request("txn-1", KEY_TYPE_TRANSACTION)).error_code,
+            ResponseError::TransactionalIdAuthorizationFailed.code()
+        );
+        // A GROUP key at the same node is served: this refusal is about
+        // transactions and about nothing else.
+        assert_eq!(handle(&f, &request("g", KEY_TYPE_GROUP)).error_code, 0);
+    }
+
     /// The refusals that come FIRST keep coming first: a clustered facade must
     /// not hand an address to a group id it would refuse to join.
     #[tokio::test]
@@ -321,7 +392,7 @@ mod tests {
         );
         assert_eq!(
             handle(&f, &request("txn-1", KEY_TYPE_TRANSACTION)).error_code,
-            ResponseError::CoordinatorNotAvailable.code()
+            ResponseError::TransactionalIdAuthorizationFailed.code()
         );
         assert_eq!(
             handle(&f, &request("whatever", 7)).error_code,

@@ -19,6 +19,19 @@
 # Kafka runs with auto.create.topics.enable=true and num.partitions=8, which is
 # what the facade's QUEEN_KAFKA_DEFAULT_PARTITIONS is set to below: the two
 # brokers then disagree about a topic's width only if one of them is wrong.
+#
+# Kafka gets a THIRD listener, BROKER on 9094, and it is the inter-broker one.
+# It exists for the transactions scenario and was found by that scenario: the
+# broker's own transaction coordinator opens a client connection to the
+# inter-broker listener's ADVERTISED address to verify a partition (KIP-890),
+# and while that was PLAINTEXT the address was 127.0.0.1:29092 — the host's
+# published port, which resolves inside the container to nothing. Every
+# transactional produce was then answered NOT_ENOUGH_REPLICAS (19), the
+# retriable code KIP-890 chose for a verification that did not complete, and the
+# oracle appeared to refuse transactions it in fact supports. BROKER advertises
+# localhost:9094, which is reachable from inside the container, so the
+# coordinator can reach itself; the PLAINTEXT listener the suite dials is
+# unchanged, port for port.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -79,12 +92,12 @@ up() {
     -p "$KAFKA_PORT":9092 \
     -e KAFKA_NODE_ID=1 \
     -e KAFKA_PROCESS_ROLES=broker,controller \
-    -e KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093 \
-    -e KAFKA_ADVERTISED_LISTENERS="PLAINTEXT://127.0.0.1:$KAFKA_PORT" \
+    -e KAFKA_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093,BROKER://:9094 \
+    -e KAFKA_ADVERTISED_LISTENERS="PLAINTEXT://127.0.0.1:$KAFKA_PORT,BROKER://localhost:9094" \
     -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
-    -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
+    -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,BROKER:PLAINTEXT \
     -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@localhost:9093 \
-    -e KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT \
+    -e KAFKA_INTER_BROKER_LISTENER_NAME=BROKER \
     -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
     -e KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR=1 \
     -e KAFKA_TRANSACTION_STATE_LOG_MIN_ISR=1 \

@@ -170,6 +170,21 @@ enum Slot {
     /// is written — Kafka's own duplicate semantics, and the reason a retry
     /// after a lost response is invisible.
     Duplicate(i64),
+    /// A TRANSACTIONAL entry: its records are in this transaction's stage and
+    /// will be written by `EndTxn(commit)`, in one bundle with every other
+    /// partition's ([`crate::txn`]).
+    ///
+    /// Answered `error_code = 0` with `base_offset = -1`, because the offset
+    /// has not been allocated — the client must be answered before it will send
+    /// EndTxn, and the log has not been touched. -1 is a first-class sentinel
+    /// in the Java client rather than a hole: `RecordMetadata`'s constructor
+    /// compares the base offset to `-1L` and, when it matches, stores it
+    /// UNCHANGED instead of adding the batch index (verified in
+    /// kafka-clients-3.9.2 bytecode), so `RecordMetadata.offset()` is -1 and
+    /// `hasOffset()` false for every record — never a fabricated `0, 1, 2 …`.
+    /// `TransactionManager.updateLastAckedOffset` also returns immediately on
+    /// -1, so the producer's own bookkeeping is built for the sentinel.
+    Staged,
     /// Answer this error, and write nothing.
     Reject(ResponseError, String),
 }
@@ -184,6 +199,14 @@ enum Slot {
 struct Idem<'a> {
     producers: &'a idempotent::Producers,
     tenant: &'a crate::identity::TenantKey,
+    /// The transaction this request belongs to, when it belongs to one: the
+    /// `transactional.id` of the REQUEST, and the stage it names.
+    ///
+    /// `None` is every produce this facade has ever served. When it is `Some`,
+    /// nothing is pushed: the records are staged and the write happens at
+    /// EndTxn.
+    txn: Option<&'a str>,
+    txns: &'a crate::txn::Txns,
 }
 
 /// Handle one Produce request. `None` means "write no response frame", which is
@@ -249,32 +272,17 @@ async fn build(facade: &Facade, req: &ProduceRequest, token: Option<&str>) -> Pr
     // `handlers::init_producer_id` has to read this field exactly the same way:
     // a producer that met one answer here and another there would meet two
     // different stories about transactions.
-    if let Some(id) =
-        idempotent::transactional_id(req.transactional_id.as_ref().map(|id| id.0.as_str()))
-    {
-        // TRANSACTIONAL_ID_AUTHORIZATION_FAILED rather than a generic refusal:
-        // it is a code every client already handles as fatal-and-final for the
-        // producer (it aborts rather than retrying), it names the transactional
-        // id as the thing that was refused, and it cannot be mistaken for a
-        // transient broker problem the way UNKNOWN_SERVER_ERROR can. Kafka
-        // Streams and any `transactional.id` producer stops here with a clear
-        // message instead of appearing to work.
-        tracing::warn!(
-            target: "kafka",
-            transactional_id = %id,
-            "produce with a transactional id: transactions are out of scope"
-        );
-        return uniform(
-            req,
-            ResponseError::TransactionalIdAuthorizationFailed,
-            format!(
-                "queen-kafka does not implement transactions, so it will not accept the \
-                 transactional id `{}` — remove transactional.id (and exactly-once processing) \
-                 from this producer",
-                id
-            ),
-        );
-    }
+    // M9: a non-empty transactional id is no longer a refusal, it is a STAGE.
+    // Nothing this handler decodes for such a request is pushed; the records go
+    // into the transaction's stage and `EndTxn(commit)` writes every partition
+    // of it in one bundle ([`crate::txn`]).
+    //
+    // In CLUSTER mode the id never gets this far: InitProducerId refuses it, so
+    // no binding exists and every entry below is answered INVALID_TXN_STATE by
+    // the stage itself. That is deliberate — one gate, at the identity, rather
+    // than a second opinion here that could disagree with it.
+    let transactional =
+        idempotent::transactional_id(req.transactional_id.as_ref().map(|id| id.0.as_str()));
 
     let plans = topic_plans(facade, req, token).await;
 
@@ -282,6 +290,8 @@ async fn build(facade: &Facade, req: &ProduceRequest, token: Option<&str>) -> Pr
     let idem = Idem {
         producers: &facade.producers,
         tenant: &tenant,
+        txn: transactional,
+        txns: facade.txns.as_ref(),
     };
 
     let mut items: Vec<PushItem> = Vec::new();
@@ -309,7 +319,9 @@ async fn build(facade: &Facade, req: &ProduceRequest, token: Option<&str>) -> Pr
     }
 
     // One push for the whole request, or none at all when nothing survived the
-    // staging. `pushed` is what every Push slot is answered from.
+    // staging. A TRANSACTIONAL request never reaches it: its entries answer
+    // `Slot::Staged` and leave `items` empty, because its write is EndTxn's.
+    // `pushed` is what every Push slot is answered from.
     let pushed = if items.is_empty() {
         None
     } else {
@@ -487,7 +499,7 @@ fn stage(
                 .to_string(),
         );
     }
-    if let Some((error, why)) = refuse(&infos) {
+    if let Some((error, why)) = refuse(&infos, idem.txn.is_some()) {
         tracing::warn!(target: "kafka", topic, partition = p.index, %why, "refusing a record batch");
         return Slot::Reject(error, why);
     }
@@ -581,6 +593,24 @@ fn stage(
     };
 
     let start = items.len();
+    // A transactional entry builds its items in a buffer of its own: they are
+    // charged and moved into the stage together, so a partition's answer is one
+    // error code rather than "some of your records".
+    let mut staged: Vec<PushItem> = Vec::new();
+    let items: &mut Vec<PushItem> = if idem.txn.is_some() {
+        &mut staged
+    } else {
+        items
+    };
+    // The staged BYTES, measured on the records themselves rather than on the
+    // wire: `MAX_TXN_BYTES` is derived from what the envelope becomes in the
+    // commit's request body (~1.4x for base64 plus ~120 B of JSON per item), so
+    // the number that must be charged is the one that arithmetic starts from.
+    // The batch headers declare a record COUNT and no uncompressed size, so the
+    // count is charged before anything is decompressed (above, against the
+    // request's own `decompress::Budget`) and the bytes are charged here, as
+    // they are measured.
+    let mut bytes = 0usize;
     for batch in &batches {
         // The headers as the producer sent them: in order, and with any name it
         // repeated still there. `Record.headers` is a map and has already lost
@@ -605,6 +635,7 @@ fn stage(
             );
         }
         for (i, record) in batch.set.records.iter().enumerate() {
+            bytes = bytes.saturating_add(record_bytes(record));
             items.push(PushItem {
                 queue: topic.to_string(),
                 // The Queen partition NAME is the Kafka partition index written
@@ -617,10 +648,103 @@ fn stage(
             });
         }
     }
-    match items.len() - start {
-        0 => Slot::Empty,
-        len => Slot::Push { start, len, seq },
+    let produced = items.len() - start;
+    let Some(id) = idem.txn else {
+        return match produced {
+            0 => Slot::Empty,
+            len => Slot::Push { start, len, seq },
+        };
+    };
+
+    // ------------------------------------------------------------ the stage
+    //
+    // From here nothing is pushed. The records go into this transaction's
+    // stage and `EndTxn(commit)` writes them, so the partition is answered
+    // `base_offset = -1` — see [`Slot::Staged`] for why that sentinel is safe.
+    if produced == 0 {
+        return Slot::Empty;
     }
+    // The pid and the epoch of a transactional produce are in the BATCH
+    // HEADER, not in the request: the request carries only the id. They were
+    // already checked to agree across the entry by `producers::check`.
+    let (pid, epoch) = (infos[0].producer_id, infos[0].producer_epoch);
+    match idem
+        .txns
+        .stage_records(idem.tenant, id, pid, epoch, topic, p.index, staged, bytes)
+    {
+        Ok(Ok(())) => {
+            // The sequence window advances at STAGE time for a transactional
+            // batch, because the stage IS the append as far as this producer's
+            // retries are concerned: a Produce whose response was lost must be
+            // answered as the duplicate it is rather than staged twice, or the
+            // commit would carry the records twice. The remembered base offset
+            // is the -1 sentinel this entry was answered with, so a duplicate
+            // is answered the same -1 and no fabricated offset can escape.
+            if let Some(pending) = &seq {
+                idem.producers.commit(pending, NO_OFFSET, produced);
+            }
+            Slot::Staged
+        }
+        // Not retriable, and that is right: waiting will not make a transaction
+        // that is too large fit a stage that is not.
+        Ok(Err(crate::txn::Full::Transaction)) => Slot::Reject(
+            ResponseError::MessageTooLarge,
+            format!(
+                "this transaction is past QUEEN_KAFKA_TXN_MAX_BYTES or \
+                 QUEEN_KAFKA_TXN_MAX_RECORDS ({} records staged here); abort it and send less",
+                produced
+            ),
+        ),
+        // RETRIABLE, and deliberately a different answer: the transaction is
+        // fine and the PROCESS is full, so the same request succeeds once
+        // another transaction commits. REQUEST_TIMED_OUT is already this
+        // handler's back-pressure code.
+        Ok(Err(crate::txn::Full::Process)) => Slot::Reject(
+            ResponseError::RequestTimedOut,
+            "this facade is holding as many staged transactional records as \
+             QUEEN_KAFKA_TXN_MAX_STAGED_BYTES allows; retry"
+                .to_string(),
+        ),
+        // Kafka's own rule, and what makes the partition set of
+        // `AddPartitionsToTxn` mean something: a transaction may only write a
+        // partition it added.
+        Ok(Err(crate::txn::Full::Partitions)) => Slot::Reject(
+            ResponseError::InvalidTxnState,
+            format!(
+                "{topic}-{} is not in this transaction: a producer must send \
+                 AddPartitionsToTxn for a partition before producing to it",
+                p.index
+            ),
+        ),
+        // Unreachable: `stage_records` answers no offset verdict.
+        Ok(Err(crate::txn::Full::Offsets)) => Slot::Reject(
+            ResponseError::UnknownServerError,
+            "the transaction stage answered an offset verdict to a record".to_string(),
+        ),
+        Err(fault) => Slot::Reject(
+            fault.code(),
+            format!("this transactional produce cannot be staged: {fault:?}"),
+        ),
+    }
+}
+
+/// What one record costs the stage.
+///
+/// The key, the value and every header name and value — the bytes that become
+/// the payload envelope. It is an under-count of the JSON the commit will
+/// serialize by a constant factor per record, which is exactly what
+/// `MAX_TXN_BYTES`'s derivation accounts for; what it must never be is an
+/// over-count of a client's ability to spend memory, and it is not, because
+/// every byte here is a byte the client sent.
+fn record_bytes(record: &kafka_protocol::records::Record) -> usize {
+    let key = record.key.as_ref().map_or(0, |k| k.len());
+    let value = record.value.as_ref().map_or(0, |v| v.len());
+    let headers: usize = record
+        .headers
+        .iter()
+        .map(|(name, value)| name.len() + value.as_ref().map_or(0, |v| v.len()))
+        .sum();
+    key + value + headers
 }
 
 /// The batch flags this facade will not accept, with the reason a client sees.
@@ -646,13 +770,18 @@ fn stage(
 /// Checked on the batch headers, so a batch is refused before it is
 /// decompressed. An EMPTY batch carrying a flag writes nothing either way and
 /// is left to the "no records" path.
-fn refuse(infos: &[BatchDecodeInfo]) -> Option<(ResponseError, String)> {
+fn refuse(infos: &[BatchDecodeInfo], transactional: bool) -> Option<(ResponseError, String)> {
     for info in infos {
-        if info.transactional {
+        // A transactional BATCH is accepted only when the REQUEST names the
+        // transaction it belongs to. Without the id there is no stage to put it
+        // in and no producer identity to fence it against, so this stays the
+        // refusal it always was — and it is the same code and the same class of
+        // answer, which is what keeps a client from meeting two stories.
+        if info.transactional && !transactional {
             return Some((
                 ResponseError::TransactionalIdAuthorizationFailed,
-                "queen-kafka does not implement transactions, and will not accept a transactional \
-                 record batch"
+                "a transactional record batch arrived without a transactional id on the request, \
+                 so there is no transaction to stage it in"
                     .to_string(),
             ));
         }
@@ -692,6 +821,11 @@ fn render(
                 // Already in the log, at these offsets. Nothing was pushed and
                 // nothing is committed: the window already remembers this batch.
                 Slot::Duplicate(base) => appended(p.index, *base),
+                // Staged, not written. -1 is the offset, and it is the same -1
+                // a duplicate of a staged batch is answered with, because the
+                // window remembers the sentinel rather than a place in a log
+                // nothing has been appended to.
+                Slot::Staged => appended(p.index, NO_OFFSET),
                 Slot::Push { start, len, seq } => match pushed {
                     // `get` and not an index: a handler must not panic on
                     // anything a broker answered, however wrong it is.
@@ -1004,6 +1138,11 @@ mod tests {
     struct Window {
         producers: idempotent::Producers,
         tenant: crate::identity::TenantKey,
+        /// The transaction stage, empty unless a test binds one. A `stage` test
+        /// that is about the ordinary produce path must see `txn: None`, which
+        /// is what every produce this facade has ever served carries.
+        txns: crate::txn::Txns,
+        txn: Option<String>,
     }
 
     impl Window {
@@ -1011,13 +1150,46 @@ mod tests {
             Window {
                 producers: idempotent::Producers::new(),
                 tenant: crate::identity::TenantKey::Tenant("test".into()),
+                txns: crate::txn::Txns::default(),
+                txn: None,
             }
+        }
+
+        /// The same window, with one transaction bound and open over
+        /// `partitions` — what InitProducerId and AddPartitionsToTxn would have
+        /// left behind.
+        fn transactional(id: &str, pid: i64, epoch: i16, partitions: &[(&str, i32)]) -> Window {
+            let w = Window {
+                txn: Some(id.to_string()),
+                ..Window::new()
+            };
+            w.txns
+                .bind(
+                    &w.tenant,
+                    id,
+                    pid,
+                    epoch,
+                    100,
+                    1,
+                    std::time::Duration::from_secs(60),
+                )
+                .expect("under the open-transaction cap");
+            let wanted: Vec<(String, i32)> = partitions
+                .iter()
+                .map(|(t, p)| ((*t).to_string(), *p))
+                .collect();
+            w.txns
+                .add_partitions(&w.tenant, id, pid, epoch, &wanted)
+                .expect("the binding is this producer's");
+            w
         }
 
         fn idem(&self) -> Idem<'_> {
             Idem {
                 producers: &self.producers,
                 tenant: &self.tenant,
+                txn: self.txn.as_deref(),
+                txns: &self.txns,
             }
         }
     }
@@ -1380,34 +1552,30 @@ mod tests {
     // -------------------------------------------------------- what is refused
 
     #[tokio::test]
-    async fn a_transactional_id_is_refused_before_anything_is_written() {
+    async fn a_transactional_produce_with_no_binding_is_refused_before_anything_is_written() {
         let (f, api) = facade(&[("orders", 1)], 4);
         let req = simple("orders", 0, &[record(None, b"v")])
             .with_transactional_id(Some(StrBytes::from_static_str("tx-1").into()));
         let resp = handle(&f, &req, None).await.unwrap();
 
+        // M9: this is no longer TRANSACTIONAL_ID_AUTHORIZATION_FAILED. An id
+        // no InitProducerId claimed on THIS facade has no stage to put records
+        // in — a restart, a facade the connection moved to, a producer that
+        // skipped initTransactions() — and INVALID_TXN_STATE is the code whose
+        // meaning is exactly that. It is fatal in the Java transactional
+        // producer, which is right: the transaction genuinely cannot continue.
         let p = answer(&resp, "orders", 0);
-        assert_eq!(
-            p.error_code,
-            ResponseError::TransactionalIdAuthorizationFailed.code()
-        );
+        assert_eq!(p.error_code, ResponseError::InvalidTxnState.code());
         assert!(p
             .error_message
             .as_ref()
             .unwrap()
             .as_str()
-            .contains("transactions"));
+            .contains("cannot be staged"));
         assert!(
             api.pushed().is_empty(),
             "a transactional produce was written"
         );
-        // The refusal is decided before Queen is touched at all, so a
-        // transactional producer cannot even conjure the topic.
-        assert!(
-            api.created().is_empty(),
-            "a refused produce created a queue"
-        );
-        assert_eq!(api.list_count(), 0, "a refused produce read the catalog");
     }
 
     /// The shape every Erlang producer sends. `kafka_protocol` encodes a NULL
@@ -1436,10 +1604,11 @@ mod tests {
 
     /// The three shapes of the field side by side, so neither half of the line
     /// above can be widened or narrowed on its own: absent and empty are the
-    /// same statement, and anything else is still refused with 53.
+    /// same statement, and anything else takes the transactional path — which,
+    /// with no binding, refuses.
     #[tokio::test]
-    async fn only_a_non_empty_transactional_id_is_refused() {
-        let refused = ResponseError::TransactionalIdAuthorizationFailed.code();
+    async fn only_a_non_empty_transactional_id_takes_the_transactional_path() {
+        let refused = ResponseError::InvalidTxnState.code();
         for (id, expected) in [(None, 0), (Some(""), 0), (Some("tx-1"), refused)] {
             let (f, api) = facade(&[("orders", 1)], 4);
             let mut req = simple("orders", 0, &[record(None, b"v")]);
@@ -1462,12 +1631,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_transactional_batch_is_refused() {
+    async fn a_transactional_batch_without_a_transactional_id_is_refused() {
         let (f, api) = facade(&[("orders", 1)], 4);
         let mut r = record(None, b"v");
         r.transactional = true;
         // A transactional batch carries a producer id in practice; the flag
-        // alone is what is being tested, so the id stays absent.
+        // alone is what is being tested, so the id stays absent — and an absent
+        // id is what makes this a refusal after M9: there is no transaction to
+        // stage the batch in.
         let resp = handle(&f, &simple("orders", 0, &[r]), None).await.unwrap();
         assert_eq!(
             answer(&resp, "orders", 0).error_code,
@@ -1864,6 +2035,237 @@ mod tests {
             .map(|p| p.index)
             .collect();
         assert_eq!(order, [3, 0, 1]);
+    }
+
+    // ---------------------------------------------------------- transactions
+
+    /// One transactional record, as a producer writes it: the BATCH carries the
+    /// `isTransactional` bit and the producer's `(pid, epoch)`, while the
+    /// REQUEST carries the `transactional.id`.
+    fn txn_record(pid: i64, epoch: i16, sequence: i32, value: &[u8]) -> Record {
+        Record {
+            transactional: true,
+            producer_id: pid,
+            producer_epoch: epoch,
+            sequence,
+            ..record(None, value)
+        }
+    }
+
+    fn txn_entry(index: i32, records: &[Record]) -> PartitionProduceData {
+        PartitionProduceData::default()
+            .with_index(index)
+            .with_records(Some(batch(records, Compression::None)))
+    }
+
+    /// A capped stage with one transaction bound and open over `orders-0`.
+    fn capped(limits: crate::txn::Limits) -> Window {
+        let w = Window {
+            txns: crate::txn::Txns::new(limits),
+            txn: Some("tx".to_string()),
+            ..Window::new()
+        };
+        w.txns
+            .bind(
+                &w.tenant,
+                "tx",
+                7,
+                0,
+                100,
+                1,
+                std::time::Duration::from_secs(60),
+            )
+            .expect("under the open-transaction cap");
+        w.txns
+            .add_partitions(&w.tenant, "tx", 7, 0, &[("orders".into(), 0)])
+            .expect("the binding is this producer's");
+        w
+    }
+
+    /// THE produce half of the design: a transactional entry is STAGED and not
+    /// pushed, and it is answered `base_offset = -1` because the offset has not
+    /// been allocated — the client must be answered before it will send EndTxn.
+    #[test]
+    fn a_transactional_entry_is_staged_and_never_pushed() {
+        let w = Window::transactional("tx", 7, 0, &[("orders", 0)]);
+        let mut items = Vec::new();
+        let budget = decompress::Budget::new(MAX_DECOMPRESSED_BYTES, MAX_RECORDS_PER_REQUEST);
+        let slot = stage(
+            &mut items,
+            "orders",
+            Plan::Serve(4),
+            &txn_entry(0, &[txn_record(7, 0, 0, b"a"), txn_record(7, 0, 1, b"b")]),
+            &budget,
+            &w.idem(),
+        );
+        assert!(matches!(slot, Slot::Staged), "{slot:?}");
+        assert!(items.is_empty(), "a transactional entry was pushed");
+        assert_eq!(
+            w.txns
+                .with(&w.tenant, "tx", 7, 0, |t| t.staged.len())
+                .unwrap(),
+            2
+        );
+        // -1 is what a staged partition is answered with, and it is a
+        // first-class sentinel in the Java client rather than a hole: see
+        // [`Slot::Staged`].
+        assert_eq!(appended(0, NO_OFFSET).base_offset, NO_OFFSET);
+    }
+
+    /// Kafka's own rule, and what makes the partition set of AddPartitionsToTxn
+    /// mean anything: a transaction may only write a partition it added.
+    #[test]
+    fn a_partition_not_in_the_transaction_is_refused() {
+        let w = Window::transactional("tx", 7, 0, &[("orders", 0)]);
+        let mut items = Vec::new();
+        let budget = decompress::Budget::new(MAX_DECOMPRESSED_BYTES, MAX_RECORDS_PER_REQUEST);
+        match stage(
+            &mut items,
+            "orders",
+            Plan::Serve(4),
+            &txn_entry(1, &[txn_record(7, 0, 0, b"a")]),
+            &budget,
+            &w.idem(),
+        ) {
+            Slot::Reject(e, why) => {
+                assert_eq!(e, ResponseError::InvalidTxnState);
+                assert!(why.contains("AddPartitionsToTxn"), "{why}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert_eq!(w.txns.staged_bytes(), 0);
+    }
+
+    /// A producer that resends a staged batch after a lost response must not
+    /// stage it twice, or the commit would carry those records twice — and the
+    /// duplicate is answered the same -1, never a fabricated offset.
+    #[test]
+    fn a_resent_transactional_batch_is_not_staged_twice() {
+        let w = Window::transactional("tx", 7, 0, &[("orders", 0)]);
+        let mut items = Vec::new();
+        let budget = decompress::Budget::new(MAX_DECOMPRESSED_BYTES, MAX_RECORDS_PER_REQUEST);
+        let entry = txn_entry(0, &[txn_record(7, 0, 0, b"a"), txn_record(7, 0, 1, b"b")]);
+        assert!(matches!(
+            stage(
+                &mut items,
+                "orders",
+                Plan::Serve(4),
+                &entry,
+                &budget,
+                &w.idem()
+            ),
+            Slot::Staged
+        ));
+        match stage(
+            &mut items,
+            "orders",
+            Plan::Serve(4),
+            &entry,
+            &budget,
+            &w.idem(),
+        ) {
+            Slot::Duplicate(base) => assert_eq!(
+                base, NO_OFFSET,
+                "a staged batch was remembered at a real offset"
+            ),
+            other => panic!("expected a duplicate, got {other:?}"),
+        }
+        assert_eq!(
+            w.txns
+                .with(&w.tenant, "tx", 7, 0, |t| t.staged.len())
+                .unwrap(),
+            2,
+            "the resend was staged a second time"
+        );
+    }
+
+    /// A fenced producer stages nothing, and learns it at the produce rather
+    /// than at the commit.
+    #[test]
+    fn a_fenced_producer_stages_nothing() {
+        let w = Window::transactional("tx", 7, 0, &[("orders", 0)]);
+        w.txns
+            .bind(
+                &w.tenant,
+                "tx",
+                7,
+                1,
+                101,
+                2,
+                std::time::Duration::from_secs(60),
+            )
+            .unwrap();
+        let mut items = Vec::new();
+        let budget = decompress::Budget::new(MAX_DECOMPRESSED_BYTES, MAX_RECORDS_PER_REQUEST);
+        match stage(
+            &mut items,
+            "orders",
+            Plan::Serve(4),
+            &txn_entry(0, &[txn_record(7, 0, 0, b"a")]),
+            &budget,
+            &w.idem(),
+        ) {
+            Slot::Reject(e, _) => assert_eq!(e, ResponseError::ProducerFenced),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert_eq!(w.txns.staged_bytes(), 0);
+    }
+
+    /// The per-transaction cap is NOT retriable, and that is right: waiting
+    /// will not make a transaction that is too large fit a stage that is not.
+    #[test]
+    fn a_transaction_past_its_byte_cap_is_message_too_large() {
+        let w = capped(crate::txn::Limits {
+            max_txn_bytes: 8,
+            ..crate::txn::Limits::default()
+        });
+        let mut items = Vec::new();
+        let budget = decompress::Budget::new(MAX_DECOMPRESSED_BYTES, MAX_RECORDS_PER_REQUEST);
+        match stage(
+            &mut items,
+            "orders",
+            Plan::Serve(4),
+            &txn_entry(0, &[txn_record(7, 0, 0, &[0u8; 64])]),
+            &budget,
+            &w.idem(),
+        ) {
+            Slot::Reject(e, why) => {
+                assert_eq!(e, ResponseError::MessageTooLarge);
+                assert!(!ResponseError::MessageTooLarge.is_retriable());
+                assert!(why.contains("QUEEN_KAFKA_TXN_MAX_BYTES"), "{why}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// The PROCESS cap answers something different on purpose: the transaction
+    /// is fine and the process is full, so the same request succeeds once
+    /// another transaction commits.
+    #[test]
+    fn the_process_stage_cap_is_retriable() {
+        let w = capped(crate::txn::Limits {
+            max_staged_bytes: 8,
+            ..crate::txn::Limits::default()
+        });
+        let mut items = Vec::new();
+        let budget = decompress::Budget::new(MAX_DECOMPRESSED_BYTES, MAX_RECORDS_PER_REQUEST);
+        match stage(
+            &mut items,
+            "orders",
+            Plan::Serve(4),
+            &txn_entry(0, &[txn_record(7, 0, 0, &[0u8; 64])]),
+            &budget,
+            &w.idem(),
+        ) {
+            Slot::Reject(e, _) => {
+                assert_eq!(e, ResponseError::RequestTimedOut);
+                assert!(
+                    ResponseError::RequestTimedOut.is_retriable(),
+                    "the process cap must be retriable"
+                );
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
     }
 
     // ------------------------------------------------- the expansion ceiling

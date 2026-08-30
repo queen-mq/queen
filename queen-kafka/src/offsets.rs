@@ -124,7 +124,12 @@ const INDEX_PREFIX: &str = "qk:groups:";
 /// Ceiling on one key, in bytes — Postgres-side, `queen.kv_check_names_v1`.
 /// A group id and a topic name can each be long enough that the composed key
 /// passes it; see [`key`].
-const MAX_KEY_BYTES: usize = 512;
+///
+/// Visible to [`crate::txn`], which composes a key of its own under the same
+/// namespace and is bounded by the same column. One constant, so a transaction
+/// key that would be refused by Postgres is refused here for the same reason
+/// and at the same number.
+pub(crate) const MAX_KEY_BYTES: usize = 512;
 
 /// Ceiling on a commit's metadata string, in bytes. Kafka's own
 /// `offset.metadata.max.bytes` default, and its own error code for exceeding
@@ -328,7 +333,12 @@ pub fn parse_key(group: &str, key: &str) -> Option<(String, i32)> {
 /// `svc.billing`) is not either. What it does catch is the separator, the
 /// escape character itself, and the bytes Postgres `TEXT` cannot hold. See the
 /// module header for why both matter.
-fn escape(s: &str) -> String {
+///
+/// Visible to [`crate::txn`] for the same reason [`MAX_KEY_BYTES`] is: a
+/// `transactional.id` is an arbitrary string and its key lives under the same
+/// namespace, so the two must be escaped by ONE function or a key written by
+/// one and read by the other could disagree about where a separator is.
+pub(crate) fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
@@ -622,9 +632,38 @@ pub async fn index(
     api.kv(&ops, token).await.map(|_| ())
 }
 
+/// The `put` one committed offset is written with.
+///
+/// Extracted so that [`crate::txn`]'s bundle sends the same bytes an ordinary
+/// OffsetCommit sends: a transactional commit and a plain one must produce
+/// byte-identical rows, or an offset written by one and read by the other would
+/// depend on which path wrote it. UNCONDITIONAL, because the gate on a
+/// transactional commit is the fence at index 0 of the bundle and not the
+/// offset itself.
+pub fn commit_op(key: &str, committed: &Committed) -> KvOp {
+    KvOp::put(NAMESPACE, key, committed.to_value())
+}
+
+/// The `put` a group's index row is written with, or `None` when the key will
+/// not fit.
+///
+/// The same row [`index`] writes, as an OPERATION rather than a call, so a
+/// transaction can carry it inside its own bundle: a group whose offsets are
+/// committed atomically with a batch of records must appear in ListGroups
+/// atomically with them too, or a crash between the two would leave a group
+/// that has offsets and does not list.
+pub fn index_op(group: &str, protocol_type: &str, now_ms: i64) -> Option<KvOp> {
+    let key = index_key(group)?;
+    let value = Indexed {
+        protocol_type: protocol_type.to_string(),
+    }
+    .to_value(now_ms);
+    Some(KvOp::put(NAMESPACE, &key, value))
+}
+
 /// Wall-clock milliseconds. Not tokio's: this is a timestamp that is STORED and
 /// read by a person, and a paused test clock would write 1970 into the database.
-fn now_millis() -> i64 {
+pub(crate) fn now_millis() -> i64 {
     std::time::UNIX_EPOCH
         .elapsed()
         .map(|d| d.as_millis() as i64)

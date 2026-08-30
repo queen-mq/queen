@@ -322,8 +322,18 @@ func TestFindCoordinatorIsTheFacade(t *testing.T) {
 			resp.NodeID, resp.Host, resp.Port, b.NodeID, b.Host, b.Port)
 	}
 
-	// There is no transaction coordinator, and saying so is better than
-	// handing back one that cannot honour a transaction.
+	// M9: since transactions landed, this process IS the transaction
+	// coordinator in single-node mode, and it names itself for key_type 1 the
+	// same way it names itself for a group. Before M9 this arm asserted a
+	// refusal, which was the honest answer while there was no coordinator; it
+	// is now the wrong one, and asserting it would pin the 20 s
+	// `initTransactions()` hang the M9 design measured and removed
+	// (find_coordinator.rs, "The TRANSACTION coordinator (key_type 1)").
+	//
+	// The cluster-mode arm — QUEEN_KAFKA_NODE_ID set, answered
+	// TRANSACTIONAL_ID_AUTHORIZATION_FAILED (53), fatal so the client stops
+	// rather than looping on discovery — is exercised by the cluster rig and by
+	// compat/transactions/run.sh, not here: this rig runs single-node.
 	txn := kmsg.NewPtrFindCoordinatorRequest()
 	txn.CoordinatorKey = "some-transactional-id"
 	txn.CoordinatorType = 1
@@ -331,9 +341,12 @@ func TestFindCoordinatorIsTheFacade(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindCoordinator(transaction): %v", err)
 	}
-	if txnResp.ErrorCode == 0 {
-		t.Errorf("a transaction coordinator was advertised: node %d at %s:%d",
-			txnResp.NodeID, txnResp.Host, txnResp.Port)
+	if txnResp.ErrorCode != 0 {
+		t.Fatalf("FindCoordinator(transaction): error code %d", txnResp.ErrorCode)
+	}
+	if txnResp.NodeID != b.NodeID || txnResp.Host != b.Host || txnResp.Port != b.Port {
+		t.Errorf("transaction coordinator is %d/%s:%d, metadata advertises %d/%s:%d",
+			txnResp.NodeID, txnResp.Host, txnResp.Port, b.NodeID, b.Host, b.Port)
 	}
 }
 
