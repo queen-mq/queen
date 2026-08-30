@@ -1900,8 +1900,9 @@ pub async fn pop_discover(
 
 // ------------------------------------------------------ consumer groups
 // GET /api/v1/consumer-groups -> queen.get_consumer_groups_v4()
-// (010_log_admin; reads queen.log_consumers). Returns the SP
-// result JSON array as text.
+// (010_log_admin; reads queen.log_consumers AND the Kafka facade's committed
+// offsets in queen.kv — every row carries `kind`: "queen" or "kafka").
+// Returns the SP result JSON array as text.
 pub async fn get_consumer_groups(
     client: &deadpool_postgres::Client,
     tenant: &str,
@@ -1914,7 +1915,9 @@ pub async fn get_consumer_groups(
 }
 
 // GET /api/v1/consumer-groups/lagging -> queen.get_lagging_partitions_v1($1)
-// (010_log_admin).
+// (010_log_admin; both engines since the Kafka mirror — each entry carries
+// `kind`, and a Kafka entry has a null worker_id because a KV commit names no
+// member).
 pub async fn get_lagging_partitions(
     client: &deadpool_postgres::Client,
     min_lag_seconds: i32,
@@ -1930,7 +1933,10 @@ pub async fn get_lagging_partitions(
 }
 
 // GET /api/v1/consumer-groups/:group -> queen.get_consumer_group_details_v1($1)
-// (010_log_admin).
+// (010_log_admin). Keyed BY QUEUE NAME, so this is the one view where a Queen
+// group and a Kafka group of the same name on the same queue cannot both be
+// shown: the native entry wins and the per-queue object's `kind` says which
+// store it came from. The list endpoint above renders both.
 pub async fn get_consumer_group_details(
     client: &deadpool_postgres::Client,
     group: &str,

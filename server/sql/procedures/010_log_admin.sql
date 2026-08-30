@@ -385,6 +385,85 @@ END;
 $$;
 
 -- ============================================================================
+-- queen.kv_qk_unescape — the inverse of queen-kafka/src/offsets.rs::escape.
+--
+-- The Kafka facade keeps its committed offsets in queen.kv under keys shaped
+-- qk:group:<esc group>:<esc topic>:<partition>, where `esc` percent-encodes
+-- every byte outside [A-Za-z0-9._-]. That escaping is not decoration: a Kafka
+-- GROUP ID is an arbitrary string, so without it group `a` on topic `b` and
+-- group `a:b` on topic `0` compose the same key (offsets.rs states the case).
+-- The consumer-group views below therefore split the key on the ESCAPED text
+-- and decode afterwards; this is the decode.
+--
+-- Byte-for-byte with offsets.rs::unescape, including its two deliberate
+-- leniencies: `%` needs two more bytes AFTER it or it stands as itself, and a
+-- pair that is not hex stands as itself ("a key that does not round-trip must
+-- still be recognisable in a log"). Hex digits are matched by code point, not
+-- by convert_from, so a non-ASCII byte in the pair can never raise here.
+--
+-- ONE deviation, and it is forced: offsets.rs finishes with from_utf8_lossy,
+-- and Postgres TEXT cannot hold either invalid UTF-8 or a NUL — the exact
+-- bytes escape() exists to carry. A decode that cannot be represented returns
+-- the ESCAPED form unchanged rather than raising, so one pathological row can
+-- never fail the whole console read. The fast path (no '%' at all, which is
+-- every ordinary group id and every legal Kafka topic name) returns the input
+-- without entering the block, so the subtransaction the EXCEPTION handler
+-- costs is paid only by keys that actually carry an escape.
+-- ============================================================================
+CREATE OR REPLACE FUNCTION queen.kv_qk_unescape(p_in TEXT)
+RETURNS TEXT
+LANGUAGE plpgsql
+IMMUTABLE STRICT
+AS $$
+DECLARE
+    v_in  BYTEA;
+    v_len INTEGER;
+    v_out BYTEA;
+    i     INTEGER;
+    h1    INTEGER;
+    h2    INTEGER;
+BEGIN
+    IF position('%' IN p_in) = 0 THEN
+        RETURN p_in;
+    END IF;
+
+    BEGIN
+        v_in  := convert_to(p_in, 'UTF8');
+        v_len := octet_length(v_in);
+        v_out := ''::bytea;
+        i     := 0;                       -- 0-based, get_byte's indexing
+        WHILE i < v_len LOOP
+            -- 37 = '%'. `i + 2 < v_len` is offsets.rs's own bound: both hex
+            -- bytes must exist, so a trailing '%4' is literal.
+            IF get_byte(v_in, i) = 37 AND i + 2 < v_len THEN
+                h1 := CASE
+                        WHEN get_byte(v_in, i + 1) BETWEEN 48 AND 57  THEN get_byte(v_in, i + 1) - 48
+                        WHEN get_byte(v_in, i + 1) BETWEEN 65 AND 70  THEN get_byte(v_in, i + 1) - 55
+                        WHEN get_byte(v_in, i + 1) BETWEEN 97 AND 102 THEN get_byte(v_in, i + 1) - 87
+                      END;
+                h2 := CASE
+                        WHEN get_byte(v_in, i + 2) BETWEEN 48 AND 57  THEN get_byte(v_in, i + 2) - 48
+                        WHEN get_byte(v_in, i + 2) BETWEEN 65 AND 70  THEN get_byte(v_in, i + 2) - 55
+                        WHEN get_byte(v_in, i + 2) BETWEEN 97 AND 102 THEN get_byte(v_in, i + 2) - 87
+                      END;
+                IF h1 IS NOT NULL AND h2 IS NOT NULL THEN
+                    v_out := v_out || set_byte('\x00'::bytea, 0, h1 * 16 + h2);
+                    i := i + 3;
+                    CONTINUE;
+                END IF;
+            END IF;
+            v_out := v_out || set_byte('\x00'::bytea, 0, get_byte(v_in, i));
+            i := i + 1;
+        END LOOP;
+        RETURN convert_from(v_out, 'UTF8');
+    EXCEPTION WHEN others THEN
+        -- Not representable as TEXT (invalid UTF-8, or an embedded NUL).
+        RETURN p_in;
+    END;
+END;
+$$;
+
+-- ============================================================================
 -- queen.get_consumer_groups_v4 — LOG redefinition.
 -- Groups are computed from queen.log_consumers / log_partitions. The former
 -- rows-engine block (a CTE pipeline over the dropped rows coordination tables,
@@ -452,10 +531,112 @@ BEGIN
         -- never priced.
         JOIN queen.queues q ON q.id = p.queue_id AND q.tenant_id = p_tenant
     ),
+    -- ------------------------------------------------------------ kafka (KV)
+    -- THE SMART MIRROR. A Kafka consumer group's cursors are not in
+    -- log_consumers at all: the facade commits them to queen.kv (the M4
+    -- decision, queen-kafka/src/offsets.rs — "offsets and existence are
+    -- Queen's, liveness is this process's"). Without this leg a group that a
+    -- real Kafka client is actively draining is INVISIBLE in the console, and
+    -- the operator's only lag number is the one Kafka's own admin API gives.
+    -- So the KV rows are shaped exactly like v2_base and UNION ALL'd into
+    -- v2_data below: one CTE, and the covering probe, the lag arithmetic, the
+    -- aggregation and the JSON shape are then literally the same code for both
+    -- engines. READ ONLY — nothing here writes, and KV stays the single source
+    -- of truth for a Kafka offset.
+    --
+    -- APPLY ORDER, deliberately relied on: this file is 010 and queen.kv is
+    -- created by 024 (schema.rs PROCEDURES). plpgsql does not resolve a body at
+    -- CREATE, so the function is created against a table that does not exist
+    -- yet and resolves at first CALL — by which time the whole list has been
+    -- applied. Both files always move together in one apply, so there is no
+    -- version of this schema where the function exists and the table does not.
+    --
+    -- THE RANGE, and why it is not a LIKE. queen.kv's PK is
+    -- (tenant_id, namespace, key) with key COLLATE "C", so
+    -- key >= 'qk:group:' AND key < 'qk:group;' is an index-prefix range scan on
+    -- that PK — no new index (024_kv.sql argues at length why this table must
+    -- not grow one: fillfactor 70 + UPDATE churn, every added index makes the
+    -- counter updates non-HOT). ';' is 0x3B, one past ':' (0x3A) in byte order,
+    -- which COLLATE "C" guarantees is the same on every machine and survives a
+    -- libc/ICU upgrade. It also provably EXCLUDES the group index: an offsets
+    -- key has ':' at position 9, the bound has ';', and qk:groups: has 's'
+    -- (0x73) — 0x3A < 0x3B < 0x73. qk:fence:/qk:txn:/qk:node: differ at
+    -- position 4 and are nowhere near the range. A left-anchored LIKE would
+    -- usually plan the same way but states none of this and can be defeated by
+    -- a '%' in the data.
+    --
+    -- THE OFF-BY-ONE, which is the single most important line here. Queen's
+    -- log_consumers.committed is the LAST CONSUMED offset; a Kafka committed
+    -- offset is the NEXT RECORD TO READ. So the KV value feeds the native
+    -- formula as (offset - 1), and a fully caught-up Kafka group reads lag 0
+    -- instead of 1. Pinned by kafka_lag_is_head_minus_committed_offset.
+    --
+    -- SPLIT ON THE ESCAPED KEY, decode after (queen.kv_qk_unescape above).
+    -- escape() percent-encodes ':', so neither the escaped group nor the
+    -- escaped topic can contain a raw separator and the remainder splits into
+    -- exactly three fields — the SQL equivalent of offsets.rs::parse_key's
+    -- rsplit_once. Decoding first would reintroduce the very ambiguity the
+    -- escaping exists to remove.
+    --
+    -- COLLATE "default" on the two join keys is not cosmetic: kv.key is
+    -- COLLATE "C", the collation propagates through substr/split_part, and
+    -- comparing that against queues.name / log_partitions.name (database
+    -- default) is an implicit-vs-implicit mismatch — 42P21/42P22 at PARSE time,
+    -- which is exactly what server/tests/kv_collation_42p22.rs exists to catch.
+    -- Spelling the explicit collation on the KV side rather than forcing "C" on
+    -- the other keeps queues_tenant_name_uk and log_partitions(queue_id, name)
+    -- sargable.
+    --
+    -- Kafka topic = Queen queue name; Kafka partition n = the Queen partition
+    -- NAMED "n" (queen-kafka/src/handlers/produce.rs, server/src/handlers/
+    -- fetch.rs). The queues join carries tenant_id, the same guard fetch.rs
+    -- documents, so a KV row naming another tenant's topic yields NO row; a
+    -- topic this tenant does not own yields no row either, which is the correct
+    -- answer (no partition head to be lagging against). A partition committed
+    -- to but never pushed to has no log_partitions row — they are materialised
+    -- lazily — and correctly contributes nothing.
+    kafka_base AS (
+        SELECT p.id                        AS partition_id,
+               k.grp                       AS consumer_group,
+               (k.off - 1)                 AS committed,
+               NULL::bigint                AS total_consumed,
+               q.name::text                AS queue_name,
+               GREATEST(p.last_offset - GREATEST(k.off - 1, p.log_start - 1), 0) AS pending,
+               'kafka'::text               AS kind
+        FROM (
+            SELECT queen.kv_qk_unescape(split_part(substr(kv.key, 10), ':', 1)) AS grp,
+                   queen.kv_qk_unescape(split_part(substr(kv.key, 10), ':', 2)) AS topic,
+                   split_part(substr(kv.key, 10), ':', 3)                       AS part_name,
+                   (kv.value->>'offset')::bigint                                AS off
+            FROM queen.kv
+            WHERE kv.tenant_id = p_tenant
+              AND kv.namespace = 'queen-kafka'
+              -- substr(key, 10) drops the 9-char literal 'qk:group:'.
+              AND kv.key >= 'qk:group:' AND kv.key < 'qk:group;'
+              -- §5.7 of the KV contract: an expired row is never returned and
+              -- never counts as existing, sweeper or no sweeper.
+              AND (kv.expires_at IS NULL OR kv.expires_at > now())
+              -- A row in the range that is not one of ours is skipped, never
+              -- an error: the value must actually carry a numeric offset.
+              AND jsonb_typeof(kv.value->'offset') = 'number'
+        ) k
+        JOIN queen.queues q
+          ON q.name = (k.topic COLLATE "default") AND q.tenant_id = p_tenant
+        JOIN queen.log_partitions p
+          ON p.queue_id = q.id AND p.name = (k.part_name COLLATE "default")
+    ),
     v2_data AS (
-        SELECT b.consumer_group, b.queue_name, b.total_consumed, b.pending,
+        SELECT b.consumer_group, b.queue_name, b.total_consumed, b.pending, b.kind,
                l.oldest_unconsumed_at
-        FROM v2_base b
+        FROM (
+            SELECT partition_id, consumer_group, committed, total_consumed,
+                   queue_name, pending, 'queen'::text AS kind
+            FROM v2_base
+            UNION ALL
+            SELECT partition_id, consumer_group, committed, total_consumed,
+                   queue_name, pending, kind
+            FROM kafka_base
+        ) b
         LEFT JOIN LATERAL (
             -- The inner probe pins the scan start at the covering segment, so
             -- a lagging cursor never walks its consumed-but-retained prefix;
@@ -492,17 +673,28 @@ BEGIN
     v2_aggregated AS (
         SELECT consumer_group,
                queue_name,
+               kind,
                COUNT(*) AS member_count,
                SUM(CASE WHEN pending > 0 THEN 1 ELSE 0 END) AS partitions_with_lag,
                SUM(pending) AS total_lag,
                COALESCE(MAX(EXTRACT(EPOCH FROM (NOW() - oldest_unconsumed_at))::integer), 0) AS max_time_lag,
                CASE
                    WHEN COALESCE(MAX(EXTRACT(EPOCH FROM (NOW() - oldest_unconsumed_at))::integer), 0) > 300 THEN 'Lagging'
+                   -- KV has no total_consumed, and it needs none: a COMMITTED
+                   -- OFFSET IS evidence of consumption, which is the whole
+                   -- thing total_consumed > 0 stands in for on the native side.
+                   -- A Kafka group is therefore never 'Dead' here — it has a
+                   -- durable cursor, and Kafka itself would list it.
+                   WHEN kind = 'kafka' THEN 'Stable'
                    WHEN MAX(total_consumed) > 0 THEN 'Stable'
                    ELSE 'Dead'
                END AS state
         FROM v2_data
-        GROUP BY consumer_group, queue_name
+        -- kind is IN the grouping, so a Queen group and a Kafka group that
+        -- share a name on one queue render as TWO rows. That is the honest
+        -- answer: they are two cursors in two stores, moving independently,
+        -- and collapsing them would invent a lag number belonging to neither.
+        GROUP BY consumer_group, queue_name, kind
     )
     SELECT COALESCE(jsonb_agg(
         jsonb_build_object(
@@ -521,16 +713,28 @@ BEGIN
             'maxTimeLag', max_time_lag,
             'state', state,
             'storage', 'segments',
+            -- ADDITIVE, and the only new key: which store this cursor lives in.
+            -- Every pre-existing key on a native row is byte-identical to what
+            -- it was before the Kafka leg existed (pinned by
+            -- native_rows_are_byte_identical_to_before). 'storage' stays
+            -- 'segments' on both — it describes the QUEUE, not the cursor.
+            'kind', a.kind,
             -- §2.6: the real durable declaration, no longer three NULLs.
+            -- NULL/false on a Kafka row by construction of the join below:
+            -- subscription mode and conflation are Queen queue-group policy and
+            -- the facade declares none.
             'subscriptionMode', g.subscription_mode,
             'subscriptionTimestamp', g.subscription_timestamp,
             'subscriptionCreatedAt', g.created_at,
             'conflation', COALESCE(g.conflation, false)
-        ) ORDER BY a.consumer_group, a.queue_name
+        ) ORDER BY a.consumer_group, a.queue_name, a.kind
     ), '[]'::jsonb) INTO v_v2
     FROM v2_aggregated a
     LEFT JOIN cgm g ON g.consumer_group = a.consumer_group
-                   AND g.queue_name = a.queue_name;
+                   AND g.queue_name = a.queue_name
+                   -- A Kafka group must never inherit the metadata of the
+                   -- same-named native group on the same queue.
+                   AND a.kind = 'queen';
 
     -- Was `v_result || v_v2` with v_result the (always empty) rows array.
     RETURN v_v2;
@@ -948,41 +1152,86 @@ BEGIN
     -- The former rows CTE (consumer_lag, over the dropped coordination/message
     -- tables) that produced the first half of the array is gone.
     -- -------------------------------------------------------------- log (v2)
-    WITH log_lag AS (
+    -- lag_base is the two engines' cursors in one shape — native log_consumers
+    -- rows and the Kafka facade's KV commits — so the covering probe below runs
+    -- ONCE, over both. The kv leg is the kafka_base of get_consumer_groups_v4;
+    -- its full rationale (the COLLATE "C" PK range, why not a LIKE, the
+    -- next-record-to-read off-by-one, splitting the ESCAPED key, the tenant
+    -- guard on the queues join) is written out there and not repeated.
+    -- The tenant predicate now sits INSIDE each branch rather than after the
+    -- LATERAL: same rows, and it keeps the promise the sibling's probe comment
+    -- makes, that another tenant's cursors are never priced by the probe.
+    WITH lag_base AS (
         SELECT
             c.consumer_group,
-            q.name AS queue_name,
+            q.name::text AS queue_name,
             p.name AS partition_name,
             p.id AS partition_id,
             c.worker_id,
+            c.committed,
             GREATEST(p.last_offset - GREATEST(c.committed, p.log_start - 1), 0) AS pending,
-            l.oldest_unconsumed_at
+            'queen'::text AS kind
         FROM queen.log_consumers c
         JOIN queen.log_partitions p ON p.id = c.partition_id
         -- Queue identity is the queen.queues id now (log_queues is merged away).
         JOIN queen.queues q ON q.id = p.queue_id
+        WHERE q.tenant_id = p_tenant
+        UNION ALL
+        SELECT
+            k.grp,
+            q.name::text,
+            p.name,
+            p.id,
+            -- KV carries no worker id: a Kafka commit names a group and a
+            -- partition, never the member that wrote it.
+            NULL::text,
+            (k.off - 1),
+            GREATEST(p.last_offset - GREATEST(k.off - 1, p.log_start - 1), 0),
+            'kafka'::text
+        FROM (
+            SELECT queen.kv_qk_unescape(split_part(substr(kv.key, 10), ':', 1)) AS grp,
+                   queen.kv_qk_unescape(split_part(substr(kv.key, 10), ':', 2)) AS topic,
+                   split_part(substr(kv.key, 10), ':', 3)                       AS part_name,
+                   (kv.value->>'offset')::bigint                                AS off
+            FROM queen.kv
+            WHERE kv.tenant_id = p_tenant
+              AND kv.namespace = 'queen-kafka'
+              AND kv.key >= 'qk:group:' AND kv.key < 'qk:group;'
+              AND (kv.expires_at IS NULL OR kv.expires_at > now())
+              AND jsonb_typeof(kv.value->'offset') = 'number'
+        ) k
+        JOIN queen.queues q
+          ON q.name = (k.topic COLLATE "default") AND q.tenant_id = p_tenant
+        JOIN queen.log_partitions p
+          ON p.queue_id = q.id AND p.name = (k.part_name COLLATE "default")
+    ),
+    log_lag AS (
+        SELECT
+            b.consumer_group, b.queue_name, b.partition_name, b.partition_id,
+            b.worker_id, b.pending, b.kind,
+            l.oldest_unconsumed_at
+        FROM lag_base b
         -- The pending gate + covering probe (rationale at
         -- get_consumer_groups_v4): a caught-up cursor touches no segment, a
         -- lagging one pays two PK probes instead of a walk of its partition's
-        -- whole segment range. The pending>0 gate is spelled inline (the alias
-        -- above is not in scope here), same arithmetic.
+        -- whole segment range. Unchanged; it now just reads its cursor from the
+        -- union above instead of from log_consumers directly.
         LEFT JOIN LATERAL (
             SELECT s2.created_at AS oldest_unconsumed_at
             FROM queen.log_segments s2
-            WHERE p.last_offset > GREATEST(c.committed, p.log_start - 1)
-              AND s2.partition_id = c.partition_id
+            WHERE b.pending > 0
+              AND s2.partition_id = b.partition_id
               AND s2.base_offset >= COALESCE((
                     SELECT s1.base_offset
                     FROM queen.log_segments s1
-                    WHERE s1.partition_id = c.partition_id
-                      AND s1.base_offset <= c.committed + 1
+                    WHERE s1.partition_id = b.partition_id
+                      AND s1.base_offset <= b.committed + 1
                     ORDER BY s1.base_offset DESC
                     LIMIT 1), 0)
-              AND s2.end_offset > c.committed
+              AND s2.end_offset > b.committed
             ORDER BY s2.base_offset
             LIMIT 1
         ) l ON TRUE
-        WHERE q.tenant_id = p_tenant
     )
     SELECT COALESCE(jsonb_agg(
         jsonb_build_object(
@@ -991,6 +1240,8 @@ BEGIN
             'partition_name', partition_name,
             'partition_id', partition_id,
             'worker_id', worker_id,
+            -- Additive, same meaning as in get_consumer_groups_v4.
+            'kind', kind,
             'offset_lag', pending,
             'time_lag_seconds', lag_seconds,
             'lag_hours', ROUND(lag_seconds / 3600.0, 2),
@@ -1034,19 +1285,60 @@ BEGIN
     -- The former rows body (partition_data, over the dropped coordination/message
     -- tables) that was merged in front of the log object is gone.
     -- -------------------------------------------------------------- log (v2)
-    WITH log_data AS (
+    -- detail_base is the two engines' cursors for THIS group in one shape, so
+    -- the covering probe below runs once over both. The kv leg is the
+    -- kafka_base of get_consumer_groups_v4 and its rationale lives there.
+    WITH detail_base AS (
         SELECT
-            q.name AS queue_name,
+            q.name::text AS queue_name,
             p.name AS partition_name,
+            p.id AS partition_id,
             c.worker_id,
             c.total_consumed,
             c.lease_expires_at,
+            c.committed,
             GREATEST(p.last_offset - GREATEST(c.committed, p.log_start - 1), 0)::bigint AS offset_lag,
-            EXTRACT(EPOCH FROM (NOW() - l.oldest_unconsumed_at))::integer AS time_lag_seconds
+            'queen'::text AS kind
         FROM queen.log_consumers c
         JOIN queen.log_partitions p ON p.id = c.partition_id
         -- Queue identity is the queen.queues id now (log_queues is merged away).
         JOIN queen.queues q ON q.id = p.queue_id
+        WHERE c.consumer_group = p_consumer_group AND q.tenant_id = p_tenant
+        UNION ALL
+        SELECT
+            q.name::text,
+            p.name,
+            p.id,
+            NULL::text,                       -- no worker id in a KV commit
+            NULL::bigint,                     -- and no total_consumed
+            NULL::timestamptz,                -- and no lease: a Kafka fetch takes none
+            (k.off - 1),
+            GREATEST(p.last_offset - GREATEST(k.off - 1, p.log_start - 1), 0)::bigint,
+            'kafka'::text
+        FROM (
+            SELECT queen.kv_qk_unescape(split_part(substr(kv.key, 10), ':', 1)) AS grp,
+                   queen.kv_qk_unescape(split_part(substr(kv.key, 10), ':', 2)) AS topic,
+                   split_part(substr(kv.key, 10), ':', 3)                       AS part_name,
+                   (kv.value->>'offset')::bigint                                AS off
+            FROM queen.kv
+            WHERE kv.tenant_id = p_tenant
+              AND kv.namespace = 'queen-kafka'
+              AND kv.key >= 'qk:group:' AND kv.key < 'qk:group;'
+              AND (kv.expires_at IS NULL OR kv.expires_at > now())
+              AND jsonb_typeof(kv.value->'offset') = 'number'
+        ) k
+        JOIN queen.queues q
+          ON q.name = (k.topic COLLATE "default") AND q.tenant_id = p_tenant
+        JOIN queen.log_partitions p
+          ON p.queue_id = q.id AND p.name = (k.part_name COLLATE "default")
+        WHERE k.grp = p_consumer_group
+    ),
+    log_data AS (
+        SELECT
+            b.queue_name, b.partition_name, b.worker_id, b.total_consumed,
+            b.lease_expires_at, b.offset_lag, b.kind,
+            EXTRACT(EPOCH FROM (NOW() - l.oldest_unconsumed_at))::integer AS time_lag_seconds
+        FROM detail_base b
         -- The pending gate + covering probe (rationale at
         -- get_consumer_groups_v4) replacing the correlated MIN that walked the
         -- partition's whole segment range per cursor — this is the per-group
@@ -1055,35 +1347,36 @@ BEGIN
         LEFT JOIN LATERAL (
             SELECT s2.created_at AS oldest_unconsumed_at
             FROM queen.log_segments s2
-            WHERE p.last_offset > GREATEST(c.committed, p.log_start - 1)
-              AND s2.partition_id = c.partition_id
+            WHERE b.offset_lag > 0
+              AND s2.partition_id = b.partition_id
               AND s2.base_offset >= COALESCE((
                     SELECT s1.base_offset
                     FROM queen.log_segments s1
-                    WHERE s1.partition_id = c.partition_id
-                      AND s1.base_offset <= c.committed + 1
+                    WHERE s1.partition_id = b.partition_id
+                      AND s1.base_offset <= b.committed + 1
                     ORDER BY s1.base_offset DESC
                     LIMIT 1), 0)
-              AND s2.end_offset > c.committed
+              AND s2.end_offset > b.committed
             ORDER BY s2.base_offset
             LIMIT 1
         ) l ON TRUE
-        WHERE c.consumer_group = p_consumer_group AND q.tenant_id = p_tenant
     )
     SELECT jsonb_object_agg(
-        queue_name,
+        ld.queue_name,
         (SELECT jsonb_build_object(
             -- PLAN_CONFLATION §2.6: the group's durable delivery policy on THIS
             -- queue, so the details view can say why one queue's lag is log lag
-            -- and another's is work.
-            'conflation', COALESCE((
+            -- and another's is work. A Kafka group declares none — conflation is
+            -- Queen queue-group policy — so the lookup is not even attempted.
+            'conflation', CASE WHEN ld.kind = 'kafka' THEN false ELSE COALESCE((
                 SELECT m.conflation
                 FROM queen.consumer_groups_metadata m
                 JOIN queen.queues q2 ON q2.id = m.queue_id AND q2.tenant_id = p_tenant
                 WHERE m.consumer_group = p_consumer_group
                   AND m.partition_name = ''
                   AND q2.name = ld.queue_name
-                LIMIT 1), false),
+                LIMIT 1), false) END,
+            'kind', ld.kind,
             'partitions', jsonb_agg(
                 jsonb_build_object(
                     'partition', partition_name,
@@ -1095,9 +1388,21 @@ BEGIN
                     'leaseActive', (lease_expires_at IS NOT NULL AND lease_expires_at > NOW())
                 ) ORDER BY partition_name
             )
-        ) FROM log_data ld2 WHERE ld2.queue_name = ld.queue_name)
+        ) FROM log_data ld2
+          WHERE ld2.queue_name = ld.queue_name AND ld2.kind = ld.kind)
     ) INTO v_log
-    FROM (SELECT DISTINCT queue_name FROM log_data) ld;
+    -- THE ONE PLACE THE TWO ENGINES CANNOT BOTH BE SHOWN. This result is keyed
+    -- BY QUEUE NAME, so a Queen group and a Kafka group of the same name on the
+    -- same queue collide on the object key — unlike the list endpoint, which
+    -- carries kind in its GROUP BY and renders both. The native entry wins
+    -- (DISTINCT ON, 'queen' first) and 'kind' says which one you are looking
+    -- at, so the view never silently mixes two stores' partitions into one
+    -- array. The list endpoint is where the full picture is.
+    FROM (
+        SELECT DISTINCT ON (queue_name) queue_name, kind
+        FROM log_data
+        ORDER BY queue_name, CASE WHEN kind = 'queen' THEN 0 ELSE 1 END
+    ) ld;
 
     -- Was `COALESCE(v_rows,'{}') || COALESCE(v_log,'{}')`; jsonb_object_agg
     -- returns NULL over zero rows, so the COALESCE on the log side stays.
@@ -1122,6 +1427,11 @@ GRANT EXECUTE ON FUNCTION queen.log_seek_partition_v1(TEXT, TEXT, TEXT, BOOLEAN,
 GRANT EXECUTE ON FUNCTION queen.hotlist_repair_publish_v1(UUID, TEXT, TEXT, TEXT, TEXT) TO PUBLIC;
 GRANT SELECT, INSERT, UPDATE, DELETE ON queen.hotlist_repairs TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.get_consumer_groups_v4(UUID) TO PUBLIC;
+-- The three views above are SECURITY INVOKER, so a non-owner caller needs the
+-- decode helper too — otherwise granting the view and then calling it fails on
+-- the unescape instead of the read. queen.kv itself already grants SELECT
+-- (024_kv.sql).
+GRANT EXECUTE ON FUNCTION queen.kv_qk_unescape(TEXT) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.list_messages_v1(JSONB) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.get_dlq_messages_v1(JSONB) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.record_trace_v1(JSONB) TO PUBLIC;

@@ -171,6 +171,37 @@ pub fn loopback_url(local: &std::net::SocketAddr) -> String {
     }
 }
 
+/// The URL the child is given for `QUEEN_URL`: the operator's if they set one,
+/// the loopback we bound otherwise.
+///
+/// Loopback is right for the single-deployment case this mode was built for. It
+/// is WRONG for a Queen Cloud cell, where the facade must reach the broker
+/// THROUGH the cell proxy so that every Kafka request crosses the proxy's auth,
+/// tenant scoping, metering and quotas. There is no way to express that with an
+/// injected loopback, and an operator who sets `QUEEN_URL` has said something
+/// specific that this supervisor has no better information than.
+///
+/// Empty is not "set": `QUEEN_URL=` is an unset variable spelled by a Helm
+/// template that resolved to nothing, and inheriting it would send the child to
+/// its own boot-time refusal (queen-kafka/src/queen.rs, `normalize_base_url`).
+/// So the same trim-and-reject-empty rule every other knob here follows.
+pub fn child_queen_url(inherited: Option<&str>, loopback: &str) -> String {
+    match inherited.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(explicit) => explicit.to_string(),
+        None => loopback.to_string(),
+    }
+}
+
+/// Which branch [`child_queen_url`] took, for the one line an operator greps
+/// when they need to know whether the facade is hairpinning through a proxy or
+/// talking to the listener in its own process.
+fn queen_url_source(inherited: Option<&str>) -> &'static str {
+    match inherited.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(_) => "QUEEN_URL (explicit)",
+        None => "loopback (bound listener)",
+    }
+}
+
 /// The one auth posture embedded mode cannot fix by itself, worded once.
 ///
 /// With `JWT_ENABLED=true` the broker requires a token on every data path the
@@ -196,7 +227,9 @@ pub fn auth_advisory(
         "JWT_ENABLED=true with QUEEN_KAFKA_EMBEDDED=true, but the facade has no credential: \
          every produce and fetch it makes will be answered 401. Give the child a QUEEN_TOKEN, \
          or set QUEEN_KAFKA_SASL=plain so each Kafka client presents its own Queen token. \
-         The loopback hop is authenticated like any other."
+         The hop the child makes is authenticated like any other client's, whether it is the \
+         loopback this supervisor injects or the QUEEN_URL an operator set (see \
+         child_queen_url) — there is no exempt door."
             .to_string(),
     )
 }
@@ -338,6 +371,10 @@ struct Inner {
 pub struct Supervisor {
     bin: PathBuf,
     queen_url: String,
+    /// Which branch [`child_queen_url`] took. Logged at every spawn, never
+    /// acted on — an operator debugging a hairpin must be able to read "the
+    /// facade is calling the proxy" out of the boot log.
+    queen_url_from: &'static str,
     grace: Duration,
     /// Raised once by [`Supervisor::shutdown`]. `notify_one` and not
     /// `notify_waiters`: it stores a permit, so a stop that arrives while the loop
@@ -545,14 +582,21 @@ where
     });
 }
 
-/// Start supervising. Call AFTER the HTTP listener is bound: `queen_url` names it,
+/// Start supervising. Call AFTER the HTTP listener is bound: `loopback` names it,
 /// and a child that dialled before the socket existed would burn a restart on
 /// nothing. (The facade itself never calls the broker at boot in single-node mode
 /// — the first call is a client's Metadata — so this is belt and braces.)
-pub fn spawn(cfg: &KafkaFacadeConfig, bin: PathBuf, queen_url: String) -> Arc<Supervisor> {
+///
+/// `loopback` is the DEFAULT and not the answer: an explicitly set `QUEEN_URL` in
+/// this process's own environment wins ([`child_queen_url`]), which is what makes
+/// a Cloud cell possible — there the facade must reach the broker through the
+/// proxy, and no address derived from the local listener can express that.
+pub fn spawn(cfg: &KafkaFacadeConfig, bin: PathBuf, loopback: String) -> Arc<Supervisor> {
+    let inherited = std::env::var("QUEEN_URL").ok();
     let sup = Arc::new(Supervisor {
         bin,
-        queen_url,
+        queen_url: child_queen_url(inherited.as_deref(), &loopback),
+        queen_url_from: queen_url_source(inherited.as_deref()),
         grace: Duration::from_millis(cfg.shutdown_grace_ms),
         stop: Notify::new(),
         done: Notify::new(),
@@ -618,6 +662,7 @@ async fn run(sup: Arc<Supervisor>) {
             pid,
             bin = %sup.bin.display(),
             queen_url = %sup.queen_url,
+            queen_url_from = sup.queen_url_from,
             "queen-kafka facade started (embedded)"
         );
 
@@ -741,6 +786,50 @@ mod tests {
         assert_eq!(url("127.0.0.1:32601"), "http://127.0.0.1:32601");
         assert_eq!(url("10.0.0.7:6632"), "http://10.0.0.7:6632");
         assert_eq!(url("[::1]:6632"), "http://[::1]:6632");
+    }
+
+    /// The Cloud case. A cell's facade must call the broker THROUGH the proxy,
+    /// and the only way to say so is an explicit `QUEEN_URL`.
+    #[test]
+    fn an_explicit_queen_url_wins_over_the_loopback() {
+        assert_eq!(
+            child_queen_url(Some("http://proxy:6711"), "http://127.0.0.1:6632"),
+            "http://proxy:6711"
+        );
+        // Trimmed, the same rule `resolve_bin` follows.
+        assert_eq!(
+            child_queen_url(Some("  http://proxy:6711  "), "http://127.0.0.1:6632"),
+            "http://proxy:6711"
+        );
+        assert_eq!(
+            queen_url_source(Some("http://proxy:6711")),
+            "QUEEN_URL (explicit)"
+        );
+    }
+
+    /// `QUEEN_URL=` is an unset variable spelled by a Helm template that
+    /// resolved to nothing. Inheriting it would send the child to its own
+    /// boot-time refusal instead of to this broker.
+    #[test]
+    fn an_empty_queen_url_is_not_set() {
+        for empty in ["", "   ", "\t"] {
+            assert_eq!(
+                child_queen_url(Some(empty), "http://127.0.0.1:6632"),
+                "http://127.0.0.1:6632",
+                "{empty:?}"
+            );
+            assert_eq!(queen_url_source(Some(empty)), "loopback (bound listener)");
+        }
+    }
+
+    /// The OSS shape is unchanged: nothing set, the loopback we bound.
+    #[test]
+    fn no_queen_url_is_still_the_loopback_we_bound() {
+        assert_eq!(
+            child_queen_url(None, "http://127.0.0.1:6632"),
+            "http://127.0.0.1:6632"
+        );
+        assert_eq!(queen_url_source(None), "loopback (bound listener)");
     }
 
     #[test]
