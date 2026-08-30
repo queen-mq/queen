@@ -88,9 +88,16 @@ func scenarioVersions(r *runner, st *state) {
 		{19, 2, 6}, // CreateTopics    — M7 F1; v7 answers a topic id
 		{20, 1, 5}, // DeleteTopics    — M7 F1; v6 names topics by id
 		{22, 0, 4}, // InitProducerId  — M7 F3; v5 exists for KIP-890 only
+		{29, 1, 3}, // DescribeAcls    — M7 F4; SECURITY_DISABLED, v0 is KIP-896's floor
+		{30, 1, 3}, // CreateAcls      — M7 F4
+		{31, 1, 3}, // DeleteAcls      — M7 F4
 		{32, 1, 4}, // DescribeConfigs — M7 F1; the whole schema
+		{33, 0, 2}, // AlterConfigs    — M7 F4; the deprecated full-replacement write
 		{36, 0, 1}, // SaslAuthenticate
-		{42, 0, 2}, // DeleteGroups    — M7 F2; the whole schema
+		{37, 0, 3}, // CreatePartitions        — M7 F4; refuses, with Kafka's own sentences
+		{42, 0, 2}, // DeleteGroups            — M7 F2; the whole schema
+		{44, 0, 1}, // IncrementalAlterConfigs — M7 F4; what kafka-configs.sh --alter sends
+		{47, 0, 0}, // OffsetDelete            — M7 F4; the whole schema is v0
 	}
 	for _, want := range wantAPIs {
 		got, ok := adv[want.key]
@@ -102,16 +109,16 @@ func scenarioVersions(r *runner, st *state) {
 			"%s advertised v%d..v%d (want v%d..v%d)",
 			apiName(want.key), got.MinVersion, got.MaxVersion, want.min, want.max)
 	}
-	r.check(len(resp.ApiKeys) == len(wantAPIs) && len(resp.ApiKeys) == 21,
-		"exactly 21 APIs advertised and every one of them has a row above, got %d", len(resp.ApiKeys))
+	r.check(len(resp.ApiKeys) == len(wantAPIs) && len(resp.ApiKeys) == 28,
+		"exactly 28 APIs advertised and every one of them has a row above, got %d", len(resp.ApiKeys))
 
-	// The five keys M7 ADDED. This loop asserted their ABSENCE until F1/F2/F3
-	// landed, and it is inverted rather than deleted because the absence was
-	// the reason sarama's whole ClusterAdmin was unreachable here (see the
-	// `edges` scenario): the file has to keep saying which keys moved, and a
-	// build that dropped one has to fail on this line rather than somewhere
-	// downstream in an admin call that suddenly times out.
-	for _, k := range []int16{16, 19, 20, 22, 32} {
+	// The twelve keys M7 ADDED. This loop asserted their ABSENCE until F1/F2/F3
+	// and then F4 landed, and it is inverted rather than deleted because the
+	// absence was the reason sarama's whole ClusterAdmin was unreachable here
+	// (see the `edges` scenario): the file has to keep saying which keys moved,
+	// and a build that dropped one has to fail on this line rather than
+	// somewhere downstream in an admin call that suddenly times out.
+	for _, k := range []int16{16, 19, 20, 22, 29, 30, 31, 32, 33, 37, 44, 47} {
 		_, present := adv[k]
 		r.check(present, "%s (key %d) is advertised since M7 — it was deliberately absent before", apiName(k), k)
 	}

@@ -44,7 +44,7 @@
 // WHAT THE FACADE'S SURFACE COSTS THIS CLIENT
 //
 //  - Admin.createTopics / deleteTopics / listGroups WORK since M7 F1/F2. The
-//    facade advertises 21 API keys now and the topics-admin trio is on the
+//    facade advertises 28 API keys now and the topics-admin trio is on the
 //    list, so the `metadata` scenario creates a topic and deletes it again.
 //    Before M7 this client raised UnsupportedApiError off ApiVersions without
 //    sending a byte, and that refusal is what this file used to assert. One

@@ -37,6 +37,7 @@ pub mod secret;
 pub mod throttle;
 pub mod tls;
 pub mod topic_config;
+pub mod topic_record;
 pub mod versions;
 pub mod wire;
 

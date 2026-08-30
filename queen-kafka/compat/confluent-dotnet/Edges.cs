@@ -165,7 +165,7 @@ public static class Edges
 
     private static void Admin(string bootstrap, string runId)
     {
-        Program.Section("edge: AdminClient against the 21-API-key surface");
+        Program.Section("edge: AdminClient against the 28-API-key surface");
 
         if (!Want("metadata") && !Want("createtopics") && !Want("describecluster")
             && !Want("listgroups") && !Want("describeconfigs")) return;

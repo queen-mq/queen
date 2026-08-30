@@ -586,6 +586,14 @@ var errNames = map[int16]string{
 	39: "INVALID_REPLICA_ASSIGNMENT", 40: "INVALID_CONFIG",
 	68: "NON_EMPTY_GROUP", 69: "GROUP_ID_NOT_FOUND",
 	89: "THROTTLING_QUOTA_EXCEEDED",
+	// M7 F4's ACL family. Both brokers answer it for the same reason — neither
+	// has an authorizer configured — so this name appears on both sides of the
+	// diff or the scenario has found something.
+	54: "SECURITY_DISABLED",
+	// M7 F4's OffsetDelete guard. Kafka's rule for this API is not membership
+	// but SUBSCRIPTION, and this is the code both brokers answer for a topic a
+	// live consumer group is still subscribed to.
+	86: "GROUP_SUBSCRIBED_TO_TOPIC",
 }
 
 func errName(code int16) string {

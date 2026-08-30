@@ -299,12 +299,34 @@ public class QueenKafkaMatrix {
         expectUsable(table, "DescribeGroups",  0, 3, 3);   // v4 is group_instance_id
         expectUsable(table, "DeleteGroups",    0, 2, 2);   // the whole schema
 
+        // M7 F4's seven. Three of them — the ACL family — are the only rows in
+        // this whole table whose advertised MINIMUM is not 0, because KIP-896
+        // dropped v0 from each schema, and a client floor rising past a facade
+        // ceiling is exactly what this file exists to catch. AlterConfigs is
+        // here even though 4.x AdminClient no longer calls it: the wire key is
+        // still advertised and a 3.x client on this same table does use it.
+        //
+        // OffsetDelete (key 47) is deliberately absent from this block. It IS
+        // advertised — kafka-consumer-groups.sh --delete-offsets reaches it —
+        // but a producer/consumer client never negotiates it, so it does not
+        // appear in the ApiVersions table this file parses out of the client's
+        // own log. compat/go/admin_offsets_test.go is where that key is pinned.
+        expectUsable(table, "DescribeAcls",            1, 3, 3);
+        expectUsable(table, "CreateAcls",              1, 3, 3);
+        expectUsable(table, "DeleteAcls",              1, 3, 3);
+        expectUsable(table, "AlterConfigs",            0, 2, 2);
+        expectUsable(table, "CreatePartitions",        0, 3, 3);
+        expectUsable(table, "IncrementalAlterConfigs", 0, 1, 1);
+
         // ...and the other half of the inversion: none of them may still be
         // sitting in the client's UNSUPPORTED list. A client that recorded a
         // key as both negotiated and unsupported would mean the table above was
         // read from the wrong connection.
         for (String arrived : List.of("CreateTopics", "DeleteTopics", "DescribeConfigs",
-                                      "ListGroups", "DescribeGroups", "DeleteGroups")) {
+                                      "ListGroups", "DescribeGroups", "DeleteGroups",
+                                      "DescribeAcls", "CreateAcls", "DeleteAcls",
+                                      "AlterConfigs", "CreatePartitions",
+                                      "IncrementalAlterConfigs")) {
             check(!unsupported.contains(arrived),
                 arrived + " is no longer in the client's unsupported list (M7 advertises it)");
         }

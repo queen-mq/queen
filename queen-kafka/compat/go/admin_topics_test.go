@@ -479,19 +479,29 @@ func TestDescribeConfigsOnATopic(t *testing.T) {
 	if r.ErrorCode != errNone {
 		t.Fatalf("describe %s: error code %d (%v)", topic, r.ErrorCode, r.ErrorMessage)
 	}
-	// The two the facade can name the enforcer of, and no invented third.
+	// The two the facade can name the enforcer of, and no invented fourth.
 	if v, ok := configValue(r, "cleanup.policy"); !ok || v != "delete" {
 		t.Fatalf("cleanup.policy = %q (present=%v), want delete", v, ok)
 	}
 	if v, ok := configValue(r, "min.insync.replicas"); !ok || v != "1" {
 		t.Fatalf("min.insync.replicas = %q (present=%v), want 1", v, ok)
 	}
-	// Nothing here can be altered through the facade (AlterConfigs is not
-	// advertised), and a UI that greys out its edit button on this flag is
-	// being told the truth.
+	// ...and the third, since M7 F4: this topic was created THROUGH the facade,
+	// so the facade has its own record of the options bag it posted and reports
+	// retention from it. The bag named no retention, so what is in force is
+	// Queen's default — retention off — which is Kafka's -1, reported as a
+	// DEFAULT because nobody set it.
+	if v, ok := configValue(r, "retention.ms"); !ok || v != "-1" {
+		t.Fatalf("retention.ms = %q (present=%v), want -1 for a topic this facade created", v, ok)
+	}
+	// `read_only` is PER ROW now. The two rows whose only legal value is the one
+	// already reported cannot be changed and say so; retention can be, because
+	// AlterConfigs and IncrementalAlterConfigs land on it. A UI that greys out
+	// its edit button on this flag is still being told the truth.
+	writable := map[string]bool{"retention.ms": true}
 	for _, c := range r.Configs {
-		if !c.ReadOnly {
-			t.Fatalf("%s is reported writable, but AlterConfigs is not advertised", c.Name)
+		if c.ReadOnly == writable[c.Name] {
+			t.Fatalf("%s: read_only=%v, want %v", c.Name, c.ReadOnly, !writable[c.Name])
 		}
 		if c.IsSensitive {
 			t.Fatalf("%s is reported sensitive; nothing here is a credential", c.Name)

@@ -94,6 +94,7 @@ use kafka_protocol::protocol::StrBytes;
 use crate::cluster::Placement;
 use crate::queen::Queue;
 use crate::throttle;
+use crate::topic_record;
 use crate::Facade;
 
 /// The facade is the whole cluster, and it is node 0 of it.
@@ -592,6 +593,9 @@ pub(crate) async fn create_absent(
         .collect();
     let mut created = 0usize;
     let mut deferred = 0usize;
+    // The names that actually landed, for the config records written after the
+    // loop. See [`record_auto_creates`].
+    let mut recordable: Vec<String> = Vec::new();
     for (name, p) in planned.iter_mut() {
         if !matches!(p, Plan::Create) {
             continue;
@@ -624,6 +628,7 @@ pub(crate) async fn create_absent(
                     partitions = facade.default_partitions,
                     "auto-created a queue for a Kafka topic"
                 );
+                recordable.push(name.to_string());
                 // The queue exists but has no partitions yet: Queen materialises
                 // them on the first push. The advertised width is the configured
                 // default, which is the same number the next refresh will
@@ -647,6 +652,65 @@ pub(crate) async fn create_absent(
                  were answered LEADER_NOT_AVAILABLE and will be created as the client retries"
             );
         }
+    }
+    record_auto_creates(facade, &recordable, token).await;
+}
+
+/// Write the facade's own record of what an auto-create applied
+/// ([`crate::topic_record`]).
+///
+/// The bag is EMPTY, because that is literally what the auto-create path sends:
+/// `Catalog::create` posts `POST /api/v1/configure` with no options at all, so
+/// every one of `configure_queue_v1`'s nineteen columns is at the stored
+/// procedure's default — which is the invariant the record exists to state.
+/// Writing the empty bag is therefore not bookkeeping about nothing: it is what
+/// makes a later `--alter retention.ms` on an auto-created topic land instead of
+/// being refused as untracked.
+///
+/// ONE extra `catalog.refresh()` and ONE KV call, and both only when something
+/// was actually created — which is once per topic lifetime. A Metadata that
+/// creates nothing, which is every Metadata after the first, pays neither.
+///
+/// A failure here never fails the Metadata: the queue exists and is served, one
+/// line says the record is missing, and the topic behaves as untracked until an
+/// alter re-establishes it.
+async fn record_auto_creates(facade: &Facade, created: &[String], token: Option<&str>) {
+    if created.is_empty() {
+        return;
+    }
+    let fresh = match facade.catalog.refresh(token).await {
+        Ok(queues) => queues,
+        Err(e) => {
+            tracing::warn!(
+                target: "kafka",
+                error = %e,
+                topics = created.len(),
+                "the queues were auto-created but their config records were not written"
+            );
+            return;
+        }
+    };
+    let ids: HashMap<&str, Option<String>> = fresh
+        .iter()
+        .map(|q| (q.name.as_str(), q.id.clone()))
+        .collect();
+    let records: Vec<(String, topic_record::Record)> = created
+        .iter()
+        .map(|name| {
+            let qid = ids.get(name.as_str()).cloned().flatten();
+            (
+                name.clone(),
+                topic_record::Record::new(qid, serde_json::Map::new()),
+            )
+        })
+        .collect();
+    if let Err(e) = topic_record::store_many(facade.queen.as_ref(), &records, token).await {
+        tracing::warn!(
+            target: "kafka",
+            error = %e,
+            topics = records.len(),
+            "the queues were auto-created but their config records were not written"
+        );
     }
 }
 
@@ -1183,6 +1247,7 @@ mod tests {
         api.queues.lock().unwrap().push(crate::queen::Queue {
             name: "orders".into(),
             partitions: 40,
+            id: None,
         });
 
         let resp = handle(&f, &request(Some(&["orders"]), true), 9, None).await;
@@ -1205,19 +1270,64 @@ mod tests {
         let resp = handle(&f, &request(Some(&["a", "b", "c"]), true), 9, None).await;
 
         assert_eq!(api.created(), ["a", "b", "c"]);
-        assert_eq!(api.list_count(), 2, "one plan list + one shared re-read");
+        // One plan list, one shared re-read before the creates, and one AFTER
+        // them for the queue ids the config records are pinned to
+        // (`record_auto_creates`). Three for the request, not three per topic,
+        // and none of them on a Metadata that creates nothing.
+        assert_eq!(api.list_count(), 3);
         for n in ["a", "b", "c"] {
             assert_eq!(named(&resp, n).error_code, 0);
             assert_eq!(named(&resp, n).partitions.len(), 4);
         }
     }
 
-    /// A request with nothing to create does not re-read at all.
+    /// A request with nothing to create does not re-read at all, and does not
+    /// touch the record store either — which is every Metadata after the first,
+    /// on the hottest path this facade has.
     #[tokio::test]
     async fn a_request_that_creates_nothing_costs_one_call() {
         let (f, api) = facade(&[("orders", 2)], 4);
         handle(&f, &request(Some(&["orders"]), true), 9, None).await;
         assert_eq!(api.list_count(), 1);
+        assert!(api.kv_calls.lock().unwrap().is_empty());
+    }
+
+    /// An auto-create records an EMPTY bag ([`crate::topic_record`]), which is
+    /// literally what it posted: `Catalog::create` sends `/configure` with no
+    /// options, so every one of the nineteen columns is at the stored
+    /// procedure's default. Writing that down is what makes a later
+    /// `kafka-configs.sh --alter` on an auto-created topic land instead of
+    /// being refused as untracked.
+    #[tokio::test]
+    async fn an_auto_create_records_the_empty_bag_it_sent() {
+        let (f, api) = facade(&[], 4);
+        handle(&f, &request(Some(&["a", "b"]), true), 9, None).await;
+
+        for topic in ["a", "b"] {
+            assert_eq!(
+                api.kv_get(crate::offsets::NAMESPACE, &topic_record::key(topic))
+                    .unwrap_or_else(|| panic!("{topic} was auto-created without a record"))["set"],
+                serde_json::json!({})
+            );
+        }
+        // ONE KV call for the whole request, not one per topic.
+        assert_eq!(api.kv_calls.lock().unwrap().len(), 1);
+    }
+
+    /// ...and an auto-create whose record could not be written still serves the
+    /// topic. The queue exists; the topic simply behaves as untracked until an
+    /// alter re-establishes it.
+    #[tokio::test]
+    async fn an_auto_create_whose_record_write_fails_still_serves_the_topic() {
+        let (f, api) = facade(&[], 4);
+        api.fail_kv(crate::queen::Error::Transport("kv is down".into()));
+        let resp = handle(&f, &request(Some(&["orders"]), true), 9, None).await;
+
+        assert_eq!(named(&resp, "orders").error_code, 0);
+        assert_eq!(api.created(), ["orders"]);
+        assert!(api
+            .kv_get(crate::offsets::NAMESPACE, &topic_record::key("orders"))
+            .is_none());
     }
 
     #[tokio::test]

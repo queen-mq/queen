@@ -235,6 +235,44 @@ new blast radius. And committed offsets under `qk:group:*:<topic>:*` are not
 removed with the topic and become orphans; Kafka has the same shape, and
 DeleteGroups (below) is the tool for them.
 
+## DescribeAcls, CreateAcls, DeleteAcls (v1–v3)
+
+Three keys, one answer, and the answer is Apache Kafka's own. A broker with no
+`authorizer.class.name` refuses all three `SECURITY_DISABLED (54)`, and so does
+this facade, at every version and for every filter.
+
+| Code | Retriable | When | Notes |
+|---|---|---|---|
+| `SECURITY_DISABLED` (54) | no | always | DescribeAcls carries it at the **top level** with an empty `resources`, message `No Authorizer is configured on the broker`. CreateAcls and DeleteAcls carry it **per element** (one result per creation, one per filter, `matching_acls` empty), message `No Authorizer is configured.` |
+
+**Two different sentences, and that is not a typo.** Apache Kafka's
+`AclApis.handleDescribeAcls` builds its response by hand and sets *"No
+Authorizer is configured on the broker"* with no full stop, while create and
+delete go through `SecurityDisabledException("No Authorizer is configured.")`.
+Both were recorded off `apache/kafka:3.9.1` and both are pinned, because the
+acceptance bar for this family is a byte-for-byte match and the first attempt at
+it used one string for all three.
+
+**Per element, not top level, on the two writes.** Kafka's `getErrorResponse`
+maps over the request, so an empty `creations` or `filters` list answers an
+empty result list and **no error at all**. A top-level-only error on those two
+would decode in a Java client as "the call succeeded and returned nothing",
+which is the opposite of the answer.
+
+**What this does not claim.** The facade does authenticate (SASL/PLAIN carrying
+a Queen bearer) and Queen does authorize (401/403 arrive here as
+TOPIC_AUTHORIZATION_FAILED and GROUP_AUTHORIZATION_FAILED where they arise).
+"No Authorizer is configured." is true in Kafka's narrow sense, because there is
+no principal/resource/operation table for a client to read or write, and saying
+more on the wire would cost the byte-for-byte match. The fuller explanation is
+here and in `CLIENT_MATRIX.md`, not in the response.
+
+Nothing is read, nothing is written, and no Queen call is made: the handlers do
+not take a `Facade` at all. In cluster mode every node answers identically,
+because there is nothing to own. `kafka-acls.sh --list`, `--add` and `--remove`
+all print `Error while executing ACL command: <the message>` and exit 1, which
+is what they print against a real Kafka with security off.
+
 ## DescribeConfigs (v1–v4) — per resource
 
 | Code | Retriable | When | Notes |
@@ -251,15 +289,137 @@ because Queen exposes **no HTTP read of a queue's configuration**:
 `GET /api/v1/resources/queues/:queue` answers no config at all, and
 `GET /api/v1/status/queues/:queue` answers leaseTime, retryLimit, retryDelay,
 ttl, maxQueueSize and deadLetterQueue and not `retentionEnabled`/
-`retentionSeconds`. So `retention.ms` is **writable and not readable** here:
-CreateTopics sets it, and the create's own v5+ config echo is where a client
-reads it back. Omitting a key is protocol-legal; reporting a plausible default
-for a knob nothing honours is not.
+`retentionSeconds`. Omitting a key is protocol-legal; reporting a plausible
+default for a knob nothing honours is not.
 
-Every key is `read_only = true` and `is_sensitive = false`, and the synonym list
-is empty. None of that is laziness: AlterConfigs is not advertised, so nothing
-here can be changed through this facade, and nothing here inherits its value
-from anything else.
+**`retention.ms` is the third key, and only for a topic this facade created.**
+Since M7 F4 the facade keeps its own record of the options bag it posted to
+`POST /api/v1/configure` for each topic
+([`src/topic_record.rs`](../src/topic_record.rs)), and retention is reported out
+of that record — so a topic created through CreateTopics or auto-created through
+Metadata round-trips its retention, and a topic the facade did not create still
+omits the key. A record with retention enabled reports the window at the
+resolution Queen stored it (whole seconds), sourced `TOPIC`; a record with no
+retention reports `-1` sourced `DEFAULT`, because Queen's default is retention
+off and that IS Kafka's `-1`.
+
+The record is pinned to the queue's `id`, so a queue dropped and recreated under
+the same name is caught and the key is omitted rather than answered from the
+dead record. **The one window that remains, stated plainly:** a retention
+changed OUTSIDE this facade — the Queen console, another SDK — between two
+facade writes is invisible here, and the value reported is the one the facade
+last applied. It is the same last-writer-wins two admins have against a real
+Kafka, and it is said on the wire too, in the row's `documentation`.
+
+`is_sensitive = false` on every key and the synonym list is empty: nothing here
+is a credential and nothing here inherits its value from anything else.
+`read_only` is **per row**. `cleanup.policy` and `min.insync.replicas` are
+`true`, because the only value either accepts is the one already reported;
+`retention.ms` is `false` on a tracked topic, because AlterConfigs and
+IncrementalAlterConfigs really do land on it. Every BROKER row is `true`. A UI
+that greys out its edit button on this flag is being told the truth.
+
+## AlterConfigs (v0–v2) — per resource
+
+The deprecated FULL-REPLACEMENT form. **Prefer IncrementalAlterConfigs**: this
+key means "the resource's configuration becomes exactly what this request
+names", so an AlterConfigs naming only `cleanup.policy=delete` turns retention
+off, because retention is a key it did not name. That is what a real broker does
+with key 33 and it is why Kafka deprecated it.
+
+| Code | Retriable | When | Notes |
+|---|---|---|---|
+| `UNKNOWN_TOPIC_OR_PARTITION` (3) | yes (+metadata) | a TOPIC resource the catalog does not have, or a `__`/illegal name | The same `not_a_topic_here` rule as every read path, so a client can tell "there is nothing to change" from "you cannot change this". |
+| `INVALID_CONFIG` (40) | no | a topic this facade did not create (or whose queue has been replaced since); an unknown key; a value the facade cannot honour; `cleanup.policy=compact`; any BROKER config | The Java AdminClient turns 40 into a non-retriable `InvalidConfigurationException` whose message `kafka-configs.sh` prints verbatim, which is where each of these sentences has to land to be read at all. |
+| `INVALID_REQUEST` (42) | no | a BROKER resource named anything but `` or this node's id; any resource type other than topic (2) and broker (4) | Identical to DescribeConfigs' rule, because it is the same fact. |
+| `TOPIC_AUTHORIZATION_FAILED` (29) | no | Queen answered 401 or 403 | |
+| `REQUEST_TIMED_OUT` (7) | yes | Queen was unreachable, answered 429 (with the wait on `throttle_time_ms`) or 5xx; the queue list or the config record could not be read; the record could not be written after a successful configure | KIP-599's `THROTTLING_QUOTA_EXCEEDED` is deliberately NOT used: neither of these APIs has a version at which a client is required to understand it, and a code outside the closed set the client accepts ends the application instead of making it retry. |
+
+**Why an untracked topic is refused rather than altered.**
+`POST /api/v1/configure` is a whole-row upsert over nineteen columns
+(`server/sql/procedures/012_configure.sql`) and **thirteen of them cannot be read
+back through any Queen route**. So a "set just this one key" write would reset a
+tenant's dedup window, lease time, retry limit, TTL and DLQ flag to the stored
+procedure's defaults. What makes an alter possible at all is the record above:
+for a topic the facade created, the complete bag is known by construction, and
+the write is that bag merged with the request. For every other topic there is
+nothing to merge onto and the only alternative would be to guess at thirteen
+columns, so the answer is `INVALID_CONFIG` with a sentence that says exactly
+that. On a deployment that predates M7 F4 this is every topic; recreating a
+topic through this facade, or setting the value in the Queen console, are the
+two ways out.
+
+**A failed record write is a retriable refusal, not a silent success.** The order
+is: configure, then record. If the record write fails the record is DELETED and
+the call answers `REQUEST_TIMED_OUT` — absence is the one honest state, because a
+describe then omits `retention.ms` rather than reporting the value from before
+the alter, and the client's retry re-applies a write that is idempotent.
+
+**Cluster mode has no ownership gate.** These are topic-addressed, `/configure`
+is a write any node may make and the record is in shared KV, so two nodes
+altering one topic is last-writer-wins — which is what Apache Kafka's
+AlterConfigs is, having no optimistic concurrency of its own.
+
+## IncrementalAlterConfigs (v0–v1) — per resource
+
+The DELTA form, and **the one `kafka-configs.sh --alter` actually sends** —
+`ConfigCommand` has used it since Kafka 2.3 and 3.9's has no fallback to key 33.
+Everything the request does not name is left exactly as it is: the write is the
+stored bag merged with the delta, posted whole.
+
+Every code and every rule above applies unchanged. The one addition is the
+operation:
+
+| Code | Retriable | When | Notes |
+|---|---|---|---|
+| `INVALID_CONFIG` (40) | no | `APPEND` or `SUBTRACT` on `retention.ms` or `min.insync.replicas` | Those operations are legal only for LIST-typed configs and neither of those is one. |
+| `INVALID_CONFIG` (40) | no | `SUBTRACT delete` from `cleanup.policy` | It computes an empty policy, and a topic with no cleanup policy is not a thing this facade or Kafka will have. `APPEND compact` computes `[delete,compact]` and meets the ordinary compaction refusal, which is the message an operator needs. |
+| `INVALID_REQUEST` (42) | no | a `config_operation` that is not SET (0), DELETE (1), APPEND (2) or SUBTRACT (3) | Named rather than silently treated as a SET. |
+
+`DELETE` resets a key to its default by dropping it out of the bag, which leaves
+`configure_queue_v1`'s own default in force — for `retention.ms` that is
+retention off, which is Kafka's `-1`. The request's `value` is ignored for a
+DELETE, which is what Kafka does.
+
+`validate_only` is honoured on both APIs: everything is computed, the response is
+built the same way, and nothing is written. A delta that computes to the bag
+already stored writes nothing either, and answers 0.
+
+## CreatePartitions (v0–v3) — per topic
+
+| Code | Retriable | When | Notes |
+|---|---|---|---|
+| `UNKNOWN_TOPIC_OR_PARTITION` (3) | no | no such queue in the catalog, a `__`-prefixed name, or an illegal one | One rule and one code, the same as every other non-Metadata API. The `error_message` is null here, because the oracle sends none for this code either. |
+| `INVALID_PARTITIONS` (37) | no | the count equals the advertised width, is below it, or is above it | Three different sentences; see below. Every one of them is a refusal, and nothing is ever written. |
+| `INVALID_REPLICA_ASSIGNMENT` (39) | no | an INCREASE that carries a non-empty `assignments` | The same sentence `CreateTopics` gives the same field: one logical broker, no partition placed on any node, so an explicit placement cannot be honoured. A DECREASE that carries an assignment is still `INVALID_PARTITIONS`, because that is the order the oracle applies the two checks in. |
+| `TOPIC_AUTHORIZATION_FAILED` (29) | no | Queen answered 401 or 403 on the catalog read | |
+| `REQUEST_TIMED_OUT` (7) | yes | the catalog could not be read: unreachable, 429 or 5xx | A 429's `Retry-After` rides out as `throttle_time_ms`. |
+
+**This whole API is a refusal, and two thirds of it is Apache Kafka's own.**
+Queen declares no width per queue: `POST /api/v1/configure` has no `partitions`
+option, `queen.queues` has no such column, and a lane exists once something has
+been pushed to it. The width advertised is `max(live lanes,
+QUEEN_KAFKA_DEFAULT_PARTITIONS)`, and the second half of that is a broker
+start-up setting rather than a per-topic one, so no write widens one topic.
+
+The three messages, the first two recorded off `apache/kafka:3.9.1` in KRaft
+mode rather than copied from a document:
+
+* count equal to the current width: `Topic already has N partition(s).`
+* count below it (a DECREASE, which a real broker refuses too):
+  `The topic X currently has N partition(s); M would not be an increase.`
+* count above it: the facade's own sentence, which names
+  `QUEEN_KAFKA_DEFAULT_PARTITIONS` and the alternative of producing to the
+  higher lanes directly.
+
+Note there is no separate "below 1" answer, and that is measured too:
+`--partitions 0` takes the DECREASE branch on the oracle, because the width is
+never negative and the comparison catches every non-positive count first.
+
+The deviation is the third case only. A provisioner declaring 12 partitions
+against a facade whose default is 1024 is a decrease, where this answer is
+indistinguishable from a real broker's. `validate_only` changes nothing, because
+nothing is written on any path.
 
 ## ListGroups (v0–v4) — top level
 
@@ -347,6 +507,65 @@ deletes is `qk:group:<group>:*` and `qk:groups:<group>` under the connection's
 own credential. A group's fence key (`qk:fence:<group>`, cluster mode only) is
 left alone — it belongs to `src/cluster/fence.rs`, and a stale fence on a
 recreated group is resolved by that module's own discovery.
+
+## OffsetDelete (v0) — top level and per partition
+
+Top level, and when one of these is set the `topics` list is EMPTY, which is the
+shape `OffsetDeleteRequest.getErrorResponse` builds and the one the Java
+AdminClient reads before it looks at any partition:
+
+| Code | Retriable | When | Notes |
+|---|---|---|---|
+| `INVALID_GROUP_ID` (24) | no | the group id is empty or longer than 255 characters | The same rule as DescribeGroups and DeleteGroups. |
+| `GROUP_ID_NOT_FOUND` (69) | no | no live actor for the group and no row under `qk:groups:` | Kafka's own answer, measured. |
+| `INVALID_REQUEST` (42) | no | the request named more than 4096 partitions | A ceiling rather than a limit anyone meets. Without it one frame buys an unbounded run of admin calls on a muted connection. Split the request. |
+| `NOT_COORDINATOR` (16) | yes | **cluster mode only**: this node is not the rendezvous owner | Applied before anything is read or written. A non-owner must not delete a group another node is running, and must not read that group's membership to decide the subscription rule either. |
+| `COORDINATOR_NOT_AVAILABLE` (15) | yes | **cluster mode only**: the view is too old to say; or the existence read failed | |
+| `GROUP_AUTHORIZATION_FAILED` (30) | no | Queen answered 401 or 403 on the existence read | |
+| `UNKNOWN_SERVER_ERROR` (-1) | no | a body this facade could not read | |
+
+Per partition:
+
+| Code | Retriable | When | Notes |
+|---|---|---|---|
+| `GROUP_SUBSCRIBED_TO_TOPIC` (86) | no | a live consumer group is subscribed to the topic | Kafka's guard for this API, kept exactly. Also what an undecodable member subscription answers; see below. |
+| `UNKNOWN_TOPIC_OR_PARTITION` (3) | no | a `__`-prefixed name, an illegal name, or a negative partition index | |
+| `COORDINATOR_NOT_AVAILABLE` (15) | yes | the delete call failed: Queen unreachable, a 408, a 429 or a 5xx | |
+| `GROUP_AUTHORIZATION_FAILED` (30) | no | Queen answered 401 or 403 on the delete | |
+| `NOT_COORDINATOR` (16) | yes | **cluster mode only**: the fence was lost inside the write | Nothing was removed. The client re-runs FindCoordinator and deletes where it should have. |
+
+**Kafka's rule here is SUBSCRIPTION, not membership**, and it is kept exactly
+(measured against `apache/kafka:3.9.1`): an empty group has every named
+partition deletable; a live group running the `consumer` protocol has a
+partition deletable only if the group is not subscribed to its topic, so a live
+group's offsets for an UNSUBSCRIBED topic are deleted; and a live group of any
+other protocol type has everything deletable. The subscription is decoded from
+each member's JoinGroup metadata, which is a two-byte version followed by a
+`ConsumerProtocolSubscription`. **If any member's bytes cannot be read, the
+group counts as subscribed to everything the request named**, so the failure
+mode is a refused delete rather than a wrong one.
+
+**Deleting an offset that was never committed is error 0**, not a failure. The
+store answers `applied:false` for a key that is not there, and reading that as a
+verdict would turn `--delete-offsets` on a fresh group into a run of spurious
+errors. Kafka answers 0 for the same thing.
+
+**The group's existence row is NOT touched, and that is a deliberate
+deviation.** This API removes offsets; DeleteGroups removes the group, and stays
+the only thing that does. On `apache/kafka:3.9.1`, deleting the LAST offsets of
+an already-empty group makes the group vanish from `--list` and answer
+GROUP_ID_NOT_FOUND to the next request, while a partial delete leaves it listed
+(both measured). Here it stays listed either way. Matching the oracle would mean
+a prefix walk on every OffsetDelete to find out whether anything is left, and
+would make this API a second way to delete a group.
+
+**A failure part-way through leaves some offsets deleted, and that is said
+rather than papered over.** There is no transaction across a KV batch boundary.
+Every delete is idempotent, the affected partitions answer the retriable code,
+and re-running finishes the job. In cluster mode the batch carries the group's
+fence at operation 0 with `required:true`, exactly as an offset COMMIT does, so
+a node stale about the live set removes nothing at all rather than removing the
+real owner's offsets.
 
 ## InitProducerId (v0–v4) — top level
 

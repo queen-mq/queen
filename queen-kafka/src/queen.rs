@@ -197,6 +197,18 @@ pub struct Queue {
     /// module's.
     #[serde(default)]
     pub partitions: i64,
+    /// The queue's `id`, as `GET /api/v1/resources/queues` reports it
+    /// (018_stats.sql:249). Read as an OPAQUE token and compared for equality
+    /// only: it is what tells [`crate::handlers::describe_configs`] that the
+    /// config record it found belongs to the queue that is there NOW, and not
+    /// to one that was dropped and recreated under the same name
+    /// ([`crate::topic_record`]).
+    ///
+    /// `Option`, because absence is a real answer and not a parse failure: a
+    /// Queen that does not report an id leaves the staleness check with nothing
+    /// to compare, and [`crate::topic_record`] says what that degrades to.
+    #[serde(default)]
+    pub id: Option<String>,
 }
 
 /// One message to write, as `POST /api/v1/push` takes it.
@@ -1948,6 +1960,7 @@ pub mod testing {
                         .map(|(n, p)| Queue {
                             name: n.to_string(),
                             partitions: *p,
+                            id: None,
                         })
                         .collect(),
                 ),
@@ -2365,6 +2378,7 @@ pub mod testing {
                 self.queues.lock().unwrap().push(Queue {
                     name: name.to_string(),
                     partitions: 0,
+                    id: None,
                 });
                 Ok(())
             })
@@ -2393,6 +2407,7 @@ pub mod testing {
                 self.queues.lock().unwrap().push(Queue {
                     name: name.to_string(),
                     partitions: 0,
+                    id: None,
                 });
                 Ok(())
             })
@@ -2815,13 +2830,19 @@ mod tests {
         assert_eq!(
             parsed.queues,
             vec![
+                // ...and the `id`, which is read here for one purpose only:
+                // it is the token `topic_record` pins a config record to, so
+                // a queue dropped and recreated under the same name cannot be
+                // described from the old record.
                 Queue {
                     name: "orders".into(),
-                    partitions: 12
+                    partitions: 12,
+                    id: Some("0d5a1e9c-1f7f-4f2f-9a02-6b6b1f0b1a11".into()),
                 },
                 Queue {
                     name: "clicks".into(),
-                    partitions: 0
+                    partitions: 0,
+                    id: Some("1d5a1e9c-1f7f-4f2f-9a02-6b6b1f0b1a12".into()),
                 },
             ]
         );
@@ -3390,6 +3411,7 @@ mod tests {
                     .map(|(n, p)| Queue {
                         name: n.to_string(),
                         partitions: *p,
+                        id: None,
                     })
                     .collect(),
                 through: tokio::sync::Semaphore::new(0),

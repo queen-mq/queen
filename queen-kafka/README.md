@@ -19,32 +19,53 @@ their committed offsets, which live in Queen.
   exist), ListOffsets earliest/latest.
 - **Consumer groups**: the classic protocol (JoinGroup/SyncGroup/Heartbeat),
   rebalancing, offsets durable in Queen KV.
-- **Admin**: CreateTopics, DeleteTopics, DescribeConfigs, ListGroups,
-  DescribeGroups, DeleteGroups. `kafka-topics.sh`, `kafka-configs.sh --describe`
-  and `kafka-consumer-groups.sh` all work against it.
+- **Admin**: CreateTopics, DeleteTopics, DescribeConfigs, AlterConfigs,
+  IncrementalAlterConfigs, CreatePartitions, ListGroups, DescribeGroups,
+  DeleteGroups, OffsetDelete, and the ACL trio. `kafka-topics.sh`,
+  `kafka-configs.sh --describe` and `--alter`, and `kafka-consumer-groups.sh`
+  all work against it.
 - **Cloud fit**: TLS with SNI, SASL/PLAIN (the password is your Queen token),
   429s mapped to `throttle_time_ms`.
 
-The advertised table is 21 API keys. The six admin keys and `InitProducerId`
-landed on 2026-08-29:
+The advertised table is 28 API keys. The thirteen admin keys and
+`InitProducerId` landed on 2026-08-29 and 2026-08-30:
 
 | API | key | versions | Notes |
 | --- | --- | --- | --- |
 | CreateTopics | 19 | v2-v6 | `--partitions` and `--replication-factor` are accepted and reported back as the facade's own width and 1; `cleanup.policy=compact` is refused |
 | DeleteTopics | 20 | v1-v5 | deletes the underlying Queen queue, which native producers may share |
-| DescribeConfigs | 32 | v1-v4 | topics and this broker; `retention.ms` is writable and not readable |
+| DescribeConfigs | 32 | v1-v4 | topics and this broker; `retention.ms` round-trips for topics this facade created |
+| AlterConfigs | 33 | v0-v2 | the deprecated FULL-REPLACEMENT form: a key the request does not name is reset to its default. Prefer key 44 |
+| IncrementalAlterConfigs | 44 | v0-v1 | the delta form, and the one `kafka-configs.sh --alter` sends. Only on topics this facade created |
+| CreatePartitions | 37 | v0-v3 | an advertised refusal: Queen declares no width per queue. A decrease and an equal count answer Kafka's own sentences |
 | ListGroups | 16 | v0-v4 | live membership merged with a durable index of every group that ever committed |
 | DescribeGroups | 15 | v0-v3 | members, host, client id and the assignment |
 | DeleteGroups | 42 | v0-v2 | irreversibly removes committed offsets; refuses a group with members |
+| OffsetDelete | 47 | v0 | `--delete-offsets`, with Kafka's subscription rule: a live group's subscribed topics are refused |
+| DescribeAcls | 29 | v1-v3 | `SECURITY_DISABLED`, the answer of a Kafka with no authorizer |
+| CreateAcls | 30 | v1-v3 | the same, one result per creation |
+| DeleteAcls | 31 | v1-v3 | the same, one result per filter |
 | InitProducerId | 22 | v0-v4 | idempotence only, never transactions |
 
 ## What it refuses, loudly
 
-Transactions and EOS (so no Kafka Streams apps), log compaction, KIP-848,
-static membership, and the ALTER half of the admin surface (AlterConfigs,
-AlterConsumerGroupOffsets, the ACL APIs). Unsupported requests fail fast with
-clear error codes, never hangs. Two consequences worth knowing before you meet
-them:
+Transactions and EOS (so no Kafka Streams apps), log compaction, KIP-848 and
+static membership. Unsupported requests fail fast with clear error codes, never
+hangs.
+
+The ALTER half of the admin surface is no longer on that list, and the shape of
+what is left changed on 2026-08-30. AlterConfigs and IncrementalAlterConfigs
+land; AlterConsumerGroupOffsets always worked, because it rides OffsetCommit and
+needs no key of its own; the ACL APIs answer `SECURITY_DISABLED` exactly as an
+Apache Kafka with no authorizer does. What stays absent is the surface with no
+Queen primitive behind it: DeleteRecords (nothing truncates to an offset),
+DescribeLogDirs (Postgres segments, not log directories), partition reassignment
+and leader election (one logical broker, no replicas), delegation tokens and
+SCRAM (the facade mints no credentials; Queen does), and client quotas (the
+quota is per tenant, and altering one would let a tenant raise its own cap).
+Each of those closes the connection if sent anyway, which is Apache Kafka's own
+answer to an unparseable request and unreachable for a client that read
+ApiVersions. Three consequences worth knowing before you meet them:
 
 - **`initTransactions()` is still slow, not fast-failed.** A transactional
   producer asks FindCoordinator for a TRANSACTION coordinator before it sends
@@ -54,6 +75,12 @@ them:
   eviction (65 536 tracked producer-partitions) or a connection landing on
   another facade costs at-least-once for at most the five in-flight batches.
   Real Kafka persists producer state in the log; this does not.
+- **A config alter needs a topic this facade created.** Queen's
+  `POST /api/v1/configure` is a whole-row upsert over nineteen columns and
+  thirteen of them have no HTTP read, so the facade keeps its own record of the
+  bag it posted and alters only topics it has one for. Every other topic is
+  refused `INVALID_CONFIG` with that sentence. `retention.ms` reads back out of
+  the same record, which is what makes the round trip work at all.
 
 Verified live against kafkajs, librdkafka (kcat and confluent-kafka), Java
 kafka-clients 3.9 and 4.3, franz-go, segmentio/kafka-go, sarama, Spring Boot,

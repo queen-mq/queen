@@ -69,6 +69,7 @@ use std::collections::HashSet;
 
 use crate::handlers::metadata::{self, advertised_partitions};
 use crate::topic_config::{self, Applied};
+use crate::topic_record;
 use crate::{queen, throttle, Facade};
 
 /// Ceiling on the topics ONE request creates.
@@ -182,6 +183,9 @@ pub async fn handle(
 
     let mut created = 0usize;
     let mut results = Vec::with_capacity(planned.len());
+    // The bags that actually landed, for the config records written after the
+    // loop. See [`record_what_was_created`].
+    let mut recordable: Vec<(String, serde_json::Map<String, serde_json::Value>)> = Vec::new();
     for (topic, plan) in planned {
         let name = topic.name.clone();
         let applied = match plan {
@@ -252,6 +256,7 @@ pub async fn handle(
                     configs = applied.options.len(),
                     "created a queue for a Kafka topic (CreateTopics)"
                 );
+                recordable.push((name.to_string(), applied.options.clone()));
                 results.push(made(name, width, &applied));
             }
             Err(e) => {
@@ -268,9 +273,73 @@ pub async fn handle(
         }
     }
 
+    record_what_was_created(facade, &recordable, token).await;
+
     CreateTopicsResponse::default()
         .with_throttle_time_ms(throttle_ms.unwrap_or(0))
         .with_topics(results)
+}
+
+/// Write the facade's own record of what each create applied
+/// ([`crate::topic_record`]), so that a later DescribeConfigs can report the
+/// retention back and a later alter can merge onto it rather than reset
+/// eighteen columns it cannot read.
+///
+/// ONE extra `catalog.refresh()` per REQUEST, not per topic, and only when
+/// something was actually created — which on this path is once per topic
+/// lifetime. It is taken AFTER the creates rather than reusing the one before
+/// them because the queue `id` a record is pinned to only exists once the queue
+/// does, and it also makes the widths in the response current, which is a small
+/// bonus rather than the reason.
+///
+/// **A create is never failed by this.** If the refresh or the KV write does
+/// not land, the topic exists, the client is told so, one line says the record
+/// is missing, and the topic simply behaves as untracked until the next alter
+/// re-establishes it. Bookkeeping that can fail a create is worse than
+/// bookkeeping that can be absent.
+async fn record_what_was_created(
+    facade: &Facade,
+    created: &[(String, serde_json::Map<String, serde_json::Value>)],
+    token: Option<&str>,
+) {
+    if created.is_empty() {
+        return;
+    }
+    let fresh = match facade.catalog.refresh(token).await {
+        Ok(queues) => queues,
+        Err(e) => {
+            tracing::warn!(
+                target: "kafka",
+                error = %e,
+                topics = created.len(),
+                "the topics were created but their config records were not written; they will \
+                 describe without retention until an alter re-establishes them"
+            );
+            return;
+        }
+    };
+    let ids: std::collections::HashMap<&str, Option<String>> = fresh
+        .iter()
+        .map(|q| (q.name.as_str(), q.id.clone()))
+        .collect();
+    let records: Vec<(String, topic_record::Record)> = created
+        .iter()
+        .map(|(name, options)| {
+            let qid = ids.get(name.as_str()).cloned().flatten();
+            (
+                name.clone(),
+                topic_record::Record::new(qid, options.clone()),
+            )
+        })
+        .collect();
+    if let Err(e) = topic_record::store_many(facade.queen.as_ref(), &records, token).await {
+        tracing::warn!(
+            target: "kafka",
+            error = %e,
+            topics = records.len(),
+            "the topics were created but their config records were not written"
+        );
+    }
 }
 
 /// Everything decidable about one requested topic without touching Queen: the
@@ -345,7 +414,11 @@ fn made(name: TopicName, width: i32, applied: &Applied) -> CreatableTopicResult 
                     CreatableTopicConfigs::default()
                         .with_name(StrBytes::from_string(r.name.to_string()))
                         .with_value(Some(StrBytes::from_string(r.value.clone())))
-                        .with_read_only(topic_config::READ_ONLY)
+                        // Per row since M7 F4: the create's own echo of a
+                        // retention it just applied is writable, because the
+                        // record this create is about to write is what makes an
+                        // alter of it land (`topic_record`).
+                        .with_read_only(r.read_only)
                         .with_config_source(r.source as i8)
                         .with_is_sensitive(topic_config::IS_SENSITIVE)
                 })
@@ -576,13 +649,111 @@ mod tests {
         assert!(echoed.contains(&("retention.ms".into(), "604800000".into())));
         assert!(echoed.contains(&("cleanup.policy".into(), "delete".into())));
         assert!(echoed.contains(&("min.insync.replicas".into(), "1".into())));
-        // Nothing this facade reports can be altered through it.
-        assert!(r.topics[0]
+        // `read_only` is per row since M7 F4: the two rows whose only legal
+        // value is the one already reported cannot be changed, and the
+        // retention this create just applied can — the record written below is
+        // what makes an alter of it land.
+        let flags: Vec<(String, bool)> = r.topics[0]
             .configs
             .as_ref()
             .unwrap()
             .iter()
-            .all(|c| c.read_only));
+            .map(|c| (c.name.to_string(), c.read_only))
+            .collect();
+        assert!(
+            flags.contains(&("cleanup.policy".into(), true)),
+            "{flags:?}"
+        );
+        assert!(
+            flags.contains(&("min.insync.replicas".into(), true)),
+            "{flags:?}"
+        );
+        assert!(flags.contains(&("retention.ms".into(), false)), "{flags:?}");
+    }
+
+    /// The create writes the facade's own record of the bag it sent
+    /// ([`crate::topic_record`]) — which is what a later describe reports the
+    /// retention from and what a later alter merges onto.
+    #[tokio::test]
+    async fn a_create_records_the_bag_it_sent() {
+        let (f, api) = facade_and_queen(&[]);
+        handle(
+            &f,
+            &request(vec![
+                with_configs("sessions", &[("retention.ms", Some("604800000"))]),
+                // ...and one with no configs at all, whose bag is EMPTY. That
+                // record is not bookkeeping about nothing: it is what makes a
+                // later `--alter` on this topic land instead of being refused
+                // as untracked.
+                with_configs("plain", &[]),
+            ]),
+            6,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            api.kv_get(crate::offsets::NAMESPACE, &topic_record::key("sessions"))
+                .unwrap()["set"],
+            serde_json::json!({"retentionEnabled": true, "retentionSeconds": 604_800})
+        );
+        assert_eq!(
+            api.kv_get(crate::offsets::NAMESPACE, &topic_record::key("plain"))
+                .unwrap()["set"],
+            serde_json::json!({})
+        );
+        // One post-create refresh for the whole request, not one per topic:
+        // the plan read, and the read that carries the queue ids.
+        assert_eq!(api.list_count(), 2);
+        // ...and one KV call for both records.
+        assert_eq!(api.kv_calls.lock().unwrap().len(), 1);
+    }
+
+    /// Bookkeeping that can fail a create is worse than bookkeeping that can be
+    /// absent. The topic exists, the client is told so, and the topic simply
+    /// behaves as untracked until an alter re-establishes it.
+    #[tokio::test]
+    async fn a_create_whose_record_write_fails_still_succeeds() {
+        let (f, api) = facade_and_queen(&[]);
+        api.fail_kv(Error::Transport("kv is down".into()));
+        let r = handle(
+            &f,
+            &request(vec![with_configs(
+                "sessions",
+                &[("retention.ms", Some("604800000"))],
+            )]),
+            6,
+            None,
+        )
+        .await;
+
+        assert_eq!(code(&r, "sessions"), 0, "a create failed on bookkeeping");
+        assert_eq!(api.configured().len(), 1, "the queue was not created");
+        assert!(api
+            .kv_get(crate::offsets::NAMESPACE, &topic_record::key("sessions"))
+            .is_none());
+    }
+
+    /// A create that was refused leaves NO record. It is the other half of the
+    /// rule above and it is what keeps the record from ever describing a queue
+    /// that was not made: `record_what_was_created` is given only the names
+    /// whose `/configure` actually returned, so a failed plan read — which
+    /// refuses every create in the request — writes nothing at all.
+    #[tokio::test]
+    async fn a_refused_create_leaves_no_record() {
+        let (f, api) = facade_and_queen(&[]);
+        api.fail_list(Error::Transport("queen is down".into()));
+        let r = handle(&f, &request(vec![with_configs("later", &[])]), 6, None).await;
+
+        assert_ne!(code(&r, "later"), 0);
+        assert!(api.configured().is_empty());
+        assert!(api
+            .kv_get(crate::offsets::NAMESPACE, &topic_record::key("later"))
+            .is_none());
+        assert!(
+            api.kv_calls.lock().unwrap().is_empty(),
+            "a refused create still reached the record store"
+        );
     }
 
     /// The name rule is Metadata's, in the code this surface answers it with.

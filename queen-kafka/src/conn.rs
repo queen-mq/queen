@@ -31,10 +31,12 @@ use std::time::Duration;
 
 use bytes::{Buf, Bytes, BytesMut};
 use kafka_protocol::messages::{
-    ApiKey, ApiVersionsRequest, CreateTopicsRequest, DeleteGroupsRequest, DeleteTopicsRequest,
-    DescribeConfigsRequest, DescribeGroupsRequest, FetchRequest, FindCoordinatorRequest,
-    HeartbeatRequest, InitProducerIdRequest, JoinGroupRequest, LeaveGroupRequest,
-    ListGroupsRequest, ListOffsetsRequest, MetadataRequest, OffsetCommitRequest,
+    AlterConfigsRequest, ApiKey, ApiVersionsRequest, CreateAclsRequest, CreatePartitionsRequest,
+    CreateTopicsRequest, DeleteAclsRequest, DeleteGroupsRequest, DeleteTopicsRequest,
+    DescribeAclsRequest, DescribeConfigsRequest, DescribeGroupsRequest, FetchRequest,
+    FindCoordinatorRequest, HeartbeatRequest, IncrementalAlterConfigsRequest,
+    InitProducerIdRequest, JoinGroupRequest, LeaveGroupRequest, ListGroupsRequest,
+    ListOffsetsRequest, MetadataRequest, OffsetCommitRequest, OffsetDeleteRequest,
     OffsetFetchRequest, ProduceRequest, RequestHeader, ResponseHeader, SaslAuthenticateRequest,
     SaslHandshakeRequest, SyncGroupRequest,
 };
@@ -44,9 +46,10 @@ use tokio::net::TcpListener;
 use tokio_util::codec::{Encoder, LengthDelimitedCodec};
 
 use crate::handlers::{
-    api_versions, create_topics, delete_groups, delete_topics, describe_configs, describe_groups,
-    fetch, find_coordinator, heartbeat, init_producer_id, join_group, leave_group, list_groups,
-    list_offsets, metadata, offset_commit, offset_fetch, produce, sasl_authenticate,
+    acls, alter_configs, api_versions, create_partitions, create_topics, delete_groups,
+    delete_topics, describe_configs, describe_groups, fetch, find_coordinator, heartbeat,
+    incremental_alter_configs, init_producer_id, join_group, leave_group, list_groups,
+    list_offsets, metadata, offset_commit, offset_delete, offset_fetch, produce, sasl_authenticate,
     sasl_handshake, sync_group,
 };
 use crate::obs::Sampler;
@@ -787,6 +790,83 @@ pub async fn dispatch(conn: &mut Conn, frame: Bytes) -> Reply {
             let body = init_producer_id::handle(&conn.facade, &req);
             respond(key, header.correlation_id, &body, api_version)
         }
+        // ---------------------------------- M7 F4: the remaining admin surface
+        //
+        // The ACL family is answered without a facade, without a Queen call and
+        // without a version: nothing in `1..=3` changes a field, a code or a
+        // shape, so the request version is only the encoding `respond` uses
+        // (`handlers::acls`).
+        ApiKey::DescribeAcls => {
+            let req = match DescribeAclsRequest::decode(&mut buf, api_version) {
+                Ok(r) => r,
+                Err(e) => return Reply::Close(format!("DescribeAcls v{api_version} body: {e}")),
+            };
+            let body = acls::describe(&req);
+            respond(key, header.correlation_id, &body, api_version)
+        }
+        ApiKey::CreateAcls => {
+            let req = match CreateAclsRequest::decode(&mut buf, api_version) {
+                Ok(r) => r,
+                Err(e) => return Reply::Close(format!("CreateAcls v{api_version} body: {e}")),
+            };
+            let body = acls::create(&req);
+            respond(key, header.correlation_id, &body, api_version)
+        }
+        ApiKey::DeleteAcls => {
+            let req = match DeleteAclsRequest::decode(&mut buf, api_version) {
+                Ok(r) => r,
+                Err(e) => return Reply::Close(format!("DeleteAcls v{api_version} body: {e}")),
+            };
+            let body = acls::delete(&req);
+            respond(key, header.correlation_id, &body, api_version)
+        }
+        // The write half of the config surface. Neither takes `api_version`:
+        // nothing in `0..=2` or `0..=1` changes a field, a code or a shape, so
+        // the request version is only the encoding `respond` uses. Both are
+        // Queen writes and both are awaited.
+        ApiKey::AlterConfigs => {
+            let req = match AlterConfigsRequest::decode(&mut buf, api_version) {
+                Ok(r) => r,
+                Err(e) => return Reply::Close(format!("AlterConfigs v{api_version} body: {e}")),
+            };
+            let body = alter_configs::handle(&conn.facade, &req, conn.facade.token()).await;
+            respond(key, header.correlation_id, &body, api_version)
+        }
+        ApiKey::IncrementalAlterConfigs => {
+            let req = match IncrementalAlterConfigsRequest::decode(&mut buf, api_version) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Reply::Close(format!(
+                        "IncrementalAlterConfigs v{api_version} body: {e}"
+                    ))
+                }
+            };
+            let body =
+                incremental_alter_configs::handle(&conn.facade, &req, conn.facade.token()).await;
+            respond(key, header.correlation_id, &body, api_version)
+        }
+        // The two remaining admin writes. Neither takes `api_version` either:
+        // nothing in `0..=3` or at OffsetDelete's one version changes a field, a
+        // code or a shape, so the request version is only the encoding
+        // `respond` uses.
+        ApiKey::CreatePartitions => {
+            let req = match CreatePartitionsRequest::decode(&mut buf, api_version) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Reply::Close(format!("CreatePartitions v{api_version} body: {e}"))
+                }
+            };
+            let body = create_partitions::handle(&conn.facade, &req, conn.facade.token()).await;
+            respond(key, header.correlation_id, &body, api_version)
+        }
+        ApiKey::OffsetDelete => {
+            let req = match OffsetDeleteRequest::decode(&mut buf, api_version) {
+                Ok(r) => r,
+                Err(e) => return Reply::Close(format!("OffsetDelete v{api_version} body: {e}")),
+            };
+            let body = offset_delete::handle(&conn.facade, &req, conn.facade.token()).await;
+            respond(key, header.correlation_id, &body, api_version)
+        }
         // Unreachable while the table and this match agree, which is the point:
         // a row added to `versions::ADVERTISED` without an arm here is a clean
         // close and a log line, not a wrong answer on the wire.
@@ -1373,6 +1453,32 @@ mod tests {
                     // "mint me one" sentinel, which is the arm every client
                     // opens with.
                     ApiKey::InitProducerId => init_producer_id_request(version, 1),
+                    // The ACL family: one filter, one creation, one filter. No
+                    // per-version name trick is needed and that is the point of
+                    // the family — nothing is created, so no version of the walk
+                    // can leave state behind for the next one to trip over.
+                    ApiKey::DescribeAcls => describe_acls_request(version, 1),
+                    ApiKey::CreateAcls => create_acls_request(version, 1),
+                    ApiKey::DeleteAcls => delete_acls_request(version, 1),
+                    // The config write half: a TOPIC resource on the fixture's
+                    // one queue, which has no config record, so every version
+                    // answers the same untracked refusal and none of them
+                    // writes anything for the next version to trip over.
+                    ApiKey::AlterConfigs => alter_configs_request(version, 1),
+                    ApiKey::IncrementalAlterConfigs => {
+                        incremental_alter_configs_request(version, 1)
+                    }
+                    // The two remaining admin writes. Neither leaves anything
+                    // behind for the next version of the walk: CreatePartitions
+                    // never writes at all, and the OffsetDelete names a group
+                    // per version so that the first pass's delete cannot turn
+                    // the second pass into GROUP_ID_NOT_FOUND — still a
+                    // response, but a different one, and this test is about the
+                    // dispatch table.
+                    ApiKey::CreatePartitions => create_partitions_request(version, 1),
+                    ApiKey::OffsetDelete => {
+                        offset_delete_request(version, 1, &format!("walk-{version}"))
+                    }
                     other => panic!("{other:?} is advertised but this test cannot build one"),
                 };
                 match dispatch(&mut f, frame).await {
@@ -3095,5 +3201,404 @@ mod tests {
         let minted = granted.len();
         granted.dedup();
         assert_eq!(granted.len(), minted, "two producers were given one id");
+    }
+
+    // -------------------------------------- M7 F4: the ACL family (29, 30, 31)
+
+    /// A DescribeAcls request the way `kafka-acls.sh --list` composes one: the
+    /// ANY filter, which matches everything a broker holds.
+    fn describe_acls_request(api_version: i16, correlation_id: i32) -> Bytes {
+        let mut out = BytesMut::new();
+        RequestHeader::default()
+            .with_request_api_key(ApiKey::DescribeAcls as i16)
+            .with_request_api_version(api_version)
+            .with_correlation_id(correlation_id)
+            .with_client_id(Some(StrBytes::from_static_str("queen-kafka-test")))
+            .encode(
+                &mut out,
+                ApiKey::DescribeAcls.request_header_version(api_version),
+            )
+            .unwrap();
+        DescribeAclsRequest::default()
+            .with_resource_type_filter(1) // ANY
+            .with_pattern_type_filter(1) // ANY
+            .with_operation(1) // ANY
+            .with_permission_type(1) // ANY
+            .encode(&mut out, api_version)
+            .unwrap();
+        out.freeze()
+    }
+
+    /// A CreateAcls request the way `kafka-acls.sh --add --allow-principal
+    /// User:alice --operation Read --topic orders` composes one.
+    fn create_acls_request(api_version: i16, correlation_id: i32) -> Bytes {
+        use kafka_protocol::messages::create_acls_request::AclCreation;
+
+        let mut out = BytesMut::new();
+        RequestHeader::default()
+            .with_request_api_key(ApiKey::CreateAcls as i16)
+            .with_request_api_version(api_version)
+            .with_correlation_id(correlation_id)
+            .with_client_id(Some(StrBytes::from_static_str("queen-kafka-test")))
+            .encode(
+                &mut out,
+                ApiKey::CreateAcls.request_header_version(api_version),
+            )
+            .unwrap();
+        CreateAclsRequest::default()
+            .with_creations(vec![AclCreation::default()
+                .with_resource_type(2) // TOPIC
+                .with_resource_name(StrBytes::from_static_str("orders"))
+                .with_resource_pattern_type(3) // LITERAL
+                .with_principal(StrBytes::from_static_str("User:alice"))
+                .with_host(StrBytes::from_static_str("*"))
+                .with_operation(3) // READ
+                .with_permission_type(3)]) // ALLOW
+            .encode(&mut out, api_version)
+            .unwrap();
+        out.freeze()
+    }
+
+    /// A DeleteAcls request the way `kafka-acls.sh --remove` composes one.
+    fn delete_acls_request(api_version: i16, correlation_id: i32) -> Bytes {
+        use kafka_protocol::messages::delete_acls_request::DeleteAclsFilter;
+
+        let mut out = BytesMut::new();
+        RequestHeader::default()
+            .with_request_api_key(ApiKey::DeleteAcls as i16)
+            .with_request_api_version(api_version)
+            .with_correlation_id(correlation_id)
+            .with_client_id(Some(StrBytes::from_static_str("queen-kafka-test")))
+            .encode(
+                &mut out,
+                ApiKey::DeleteAcls.request_header_version(api_version),
+            )
+            .unwrap();
+        DeleteAclsRequest::default()
+            .with_filters(vec![DeleteAclsFilter::default()
+                .with_resource_type_filter(2)
+                .with_resource_name_filter(Some(StrBytes::from_static_str("orders")))
+                .with_pattern_type_filter(3)
+                .with_operation(3)
+                .with_permission_type(3)])
+            .encode(&mut out, api_version)
+            .unwrap();
+        out.freeze()
+    }
+
+    /// End to end through the dispatcher at every advertised version, decoded
+    /// with the client half of `kafka-protocol` — which is the half that matters
+    /// here, because the whole value of answering 54 instead of closing the
+    /// connection is that a client can READ the refusal and print it.
+    #[tokio::test]
+    async fn the_acl_family_round_trips_security_disabled_through_dispatch() {
+        use crate::handlers::acls::{NO_AUTHORIZER, NO_AUTHORIZER_ON_THE_BROKER};
+        use kafka_protocol::messages::{
+            CreateAclsResponse, DeleteAclsResponse, DescribeAclsResponse,
+        };
+
+        let mut f = conn();
+        for version in 1i16..=3 {
+            let mut buf = sent(dispatch(&mut f, describe_acls_request(version, 54)).await);
+            let header = ResponseHeader::decode(
+                &mut buf,
+                ApiKey::DescribeAcls.response_header_version(version),
+            )
+            .unwrap();
+            let body = DescribeAclsResponse::decode(&mut buf, version).unwrap();
+            assert!(buf.is_empty(), "v{version}: {} trailing bytes", buf.len());
+            assert_eq!(header.correlation_id, 54);
+            assert_eq!(body.error_code, 54, "v{version}");
+            // Describe carries the oracle's LONGER sentence; the two writes
+            // below carry the short one. Kafka really does use two literals.
+            assert_eq!(
+                body.error_message.as_ref().map(|s| s.as_str()),
+                Some(NO_AUTHORIZER_ON_THE_BROKER),
+                "v{version}"
+            );
+            assert!(body.resources.is_empty(), "v{version}");
+
+            let mut buf = sent(dispatch(&mut f, create_acls_request(version, 55)).await);
+            ResponseHeader::decode(
+                &mut buf,
+                ApiKey::CreateAcls.response_header_version(version),
+            )
+            .unwrap();
+            let body = CreateAclsResponse::decode(&mut buf, version).unwrap();
+            assert!(buf.is_empty(), "v{version}: {} trailing bytes", buf.len());
+            // ONE result for ONE creation. A top-level-only error would decode
+            // as "the call succeeded and created nothing".
+            assert_eq!(body.results.len(), 1, "v{version}");
+            assert_eq!(body.results[0].error_code, 54, "v{version}");
+            assert_eq!(
+                body.results[0].error_message.as_ref().map(|s| s.as_str()),
+                Some(NO_AUTHORIZER),
+                "v{version}"
+            );
+
+            let mut buf = sent(dispatch(&mut f, delete_acls_request(version, 56)).await);
+            ResponseHeader::decode(
+                &mut buf,
+                ApiKey::DeleteAcls.response_header_version(version),
+            )
+            .unwrap();
+            let body = DeleteAclsResponse::decode(&mut buf, version).unwrap();
+            assert!(buf.is_empty(), "v{version}: {} trailing bytes", buf.len());
+            assert_eq!(body.filter_results.len(), 1, "v{version}");
+            assert_eq!(body.filter_results[0].error_code, 54, "v{version}");
+            assert_eq!(
+                body.filter_results[0]
+                    .error_message
+                    .as_ref()
+                    .map(|s| s.as_str()),
+                Some(NO_AUTHORIZER),
+                "v{version}"
+            );
+            assert!(
+                body.filter_results[0].matching_acls.is_empty(),
+                "v{version}"
+            );
+        }
+    }
+
+    // ------------------------------ M7 F4: the config write half (33, 44)
+
+    /// An AlterConfigs the way the deprecated `admin.alterConfigs` composes one:
+    /// a TOPIC resource and one config. `orders` is in the fixture's catalog and
+    /// has no config record, so the answer is the untracked refusal — which is a
+    /// RESPONSE, identical at every version, and leaves nothing behind for the
+    /// next version of the walk.
+    fn alter_configs_request(api_version: i16, correlation_id: i32) -> Bytes {
+        use kafka_protocol::messages::alter_configs_request::{
+            AlterConfigsResource, AlterableConfig,
+        };
+
+        let mut out = BytesMut::new();
+        RequestHeader::default()
+            .with_request_api_key(ApiKey::AlterConfigs as i16)
+            .with_request_api_version(api_version)
+            .with_correlation_id(correlation_id)
+            .with_client_id(Some(StrBytes::from_static_str("queen-kafka-test")))
+            .encode(
+                &mut out,
+                ApiKey::AlterConfigs.request_header_version(api_version),
+            )
+            .unwrap();
+        AlterConfigsRequest::default()
+            .with_resources(vec![AlterConfigsResource::default()
+                .with_resource_type(2)
+                .with_resource_name(StrBytes::from_static_str("orders"))
+                .with_configs(vec![AlterableConfig::default()
+                    .with_name(StrBytes::from_static_str("retention.ms"))
+                    .with_value(Some(StrBytes::from_static_str("604800000")))])])
+            .encode(&mut out, api_version)
+            .unwrap();
+        out.freeze()
+    }
+
+    /// An IncrementalAlterConfigs the way `kafka-configs.sh --alter --add-config
+    /// retention.ms=604800000` composes one: operation SET on a TOPIC resource.
+    fn incremental_alter_configs_request(api_version: i16, correlation_id: i32) -> Bytes {
+        use kafka_protocol::messages::incremental_alter_configs_request::{
+            AlterConfigsResource, AlterableConfig,
+        };
+
+        let mut out = BytesMut::new();
+        RequestHeader::default()
+            .with_request_api_key(ApiKey::IncrementalAlterConfigs as i16)
+            .with_request_api_version(api_version)
+            .with_correlation_id(correlation_id)
+            .with_client_id(Some(StrBytes::from_static_str("queen-kafka-test")))
+            .encode(
+                &mut out,
+                ApiKey::IncrementalAlterConfigs.request_header_version(api_version),
+            )
+            .unwrap();
+        IncrementalAlterConfigsRequest::default()
+            .with_resources(vec![AlterConfigsResource::default()
+                .with_resource_type(2)
+                .with_resource_name(StrBytes::from_static_str("orders"))
+                .with_configs(vec![AlterableConfig::default()
+                    .with_name(StrBytes::from_static_str("retention.ms"))
+                    .with_config_operation(0)
+                    .with_value(Some(StrBytes::from_static_str("604800000")))])])
+            .encode(&mut out, api_version)
+            .unwrap();
+        out.freeze()
+    }
+
+    /// End to end through the dispatcher at every advertised version, decoded
+    /// with the client half of `kafka-protocol`.
+    ///
+    /// The refusal is the untracked one, and that it DECODES is the whole point:
+    /// `kafka-configs.sh` prints the message out of an
+    /// `InvalidConfigurationException`, so a sentence nobody can decode is a
+    /// sentence nobody reads.
+    #[tokio::test]
+    async fn the_config_write_half_round_trips_through_dispatch() {
+        use kafka_protocol::error::ResponseError;
+        use kafka_protocol::messages::{AlterConfigsResponse, IncrementalAlterConfigsResponse};
+
+        let mut f = conn();
+        for version in 0i16..=2 {
+            let mut buf = sent(dispatch(&mut f, alter_configs_request(version, 33)).await);
+            let header = ResponseHeader::decode(
+                &mut buf,
+                ApiKey::AlterConfigs.response_header_version(version),
+            )
+            .unwrap();
+            let body = AlterConfigsResponse::decode(&mut buf, version).unwrap();
+            assert!(buf.is_empty(), "v{version}: {} trailing bytes", buf.len());
+            assert_eq!(header.correlation_id, 33);
+            assert_eq!(body.responses.len(), 1, "v{version}");
+            assert_eq!(
+                body.responses[0].error_code,
+                ResponseError::InvalidConfig.code(),
+                "v{version}"
+            );
+            assert!(
+                body.responses[0]
+                    .error_message
+                    .as_ref()
+                    .is_some_and(|m| m.as_str().contains("rewrites every config column")),
+                "v{version}: {:?}",
+                body.responses[0].error_message
+            );
+        }
+
+        for version in 0i16..=1 {
+            let mut buf =
+                sent(dispatch(&mut f, incremental_alter_configs_request(version, 44)).await);
+            let header = ResponseHeader::decode(
+                &mut buf,
+                ApiKey::IncrementalAlterConfigs.response_header_version(version),
+            )
+            .unwrap();
+            let body = IncrementalAlterConfigsResponse::decode(&mut buf, version).unwrap();
+            assert!(buf.is_empty(), "v{version}: {} trailing bytes", buf.len());
+            assert_eq!(header.correlation_id, 44);
+            assert_eq!(body.responses.len(), 1, "v{version}");
+            assert_eq!(
+                body.responses[0].error_code,
+                ResponseError::InvalidConfig.code(),
+                "v{version}"
+            );
+        }
+    }
+
+    // ------------------------- M7 F4: the remaining admin writes (37, 47)
+
+    /// A CreatePartitions the way `kafka-topics.sh --alter --topic orders
+    /// --partitions 2` composes one. `orders` is four lanes wide in the
+    /// fixture, so this is a DECREASE — the case whose answer is Apache
+    /// Kafka's own sentence, identical at every version, and one that writes
+    /// nothing for the next version of the walk to trip over.
+    fn create_partitions_request(api_version: i16, correlation_id: i32) -> Bytes {
+        use kafka_protocol::messages::create_partitions_request::CreatePartitionsTopic;
+        use kafka_protocol::messages::TopicName;
+
+        let mut out = BytesMut::new();
+        RequestHeader::default()
+            .with_request_api_key(ApiKey::CreatePartitions as i16)
+            .with_request_api_version(api_version)
+            .with_correlation_id(correlation_id)
+            .with_client_id(Some(StrBytes::from_static_str("queen-kafka-test")))
+            .encode(
+                &mut out,
+                ApiKey::CreatePartitions.request_header_version(api_version),
+            )
+            .unwrap();
+        CreatePartitionsRequest::default()
+            .with_topics(vec![CreatePartitionsTopic::default()
+                .with_name(TopicName(StrBytes::from_static_str("orders")))
+                .with_count(2)])
+            .encode(&mut out, api_version)
+            .unwrap();
+        out.freeze()
+    }
+
+    /// An OffsetDelete the way `kafka-consumer-groups.sh --group g --topic
+    /// orders --delete-offsets` composes one. The group is one nobody has
+    /// heard of, so the answer is GROUP_ID_NOT_FOUND — a RESPONSE, which is
+    /// what the dispatch walk is about.
+    fn offset_delete_request(api_version: i16, correlation_id: i32, group: &str) -> Bytes {
+        use kafka_protocol::messages::offset_delete_request::{
+            OffsetDeleteRequestPartition, OffsetDeleteRequestTopic,
+        };
+        use kafka_protocol::messages::{GroupId, TopicName};
+
+        let mut out = BytesMut::new();
+        RequestHeader::default()
+            .with_request_api_key(ApiKey::OffsetDelete as i16)
+            .with_request_api_version(api_version)
+            .with_correlation_id(correlation_id)
+            .with_client_id(Some(StrBytes::from_static_str("queen-kafka-test")))
+            .encode(
+                &mut out,
+                ApiKey::OffsetDelete.request_header_version(api_version),
+            )
+            .unwrap();
+        OffsetDeleteRequest::default()
+            .with_group_id(GroupId(StrBytes::from_string(group.to_string())))
+            .with_topics(vec![OffsetDeleteRequestTopic::default()
+                .with_name(TopicName(StrBytes::from_static_str("orders")))
+                .with_partitions(vec![
+                    OffsetDeleteRequestPartition::default().with_partition_index(0)
+                ])])
+            .encode(&mut out, api_version)
+            .unwrap();
+        out.freeze()
+    }
+
+    /// End to end through the dispatcher, decoded with the client half of
+    /// `kafka-protocol`. The two things worth asserting on the wire are the
+    /// two the tools print: CreatePartitions' `error_message`, which is where
+    /// `kafka-topics.sh` gets the sentence an operator reads, and
+    /// OffsetDelete's TOP-LEVEL code, which is the field the Java AdminClient
+    /// checks before it ever looks at a partition.
+    #[tokio::test]
+    async fn the_remaining_admin_writes_round_trip_through_dispatch() {
+        use kafka_protocol::error::ResponseError;
+        use kafka_protocol::messages::{CreatePartitionsResponse, OffsetDeleteResponse};
+
+        let mut f = conn();
+        for version in 0i16..=3 {
+            let mut buf = sent(dispatch(&mut f, create_partitions_request(version, 37)).await);
+            let header = ResponseHeader::decode(
+                &mut buf,
+                ApiKey::CreatePartitions.response_header_version(version),
+            )
+            .unwrap();
+            let body = CreatePartitionsResponse::decode(&mut buf, version).unwrap();
+            assert!(buf.is_empty(), "v{version}: {} trailing bytes", buf.len());
+            assert_eq!(header.correlation_id, 37);
+            assert_eq!(body.results.len(), 1, "v{version}");
+            assert_eq!(
+                body.results[0].error_code,
+                ResponseError::InvalidPartitions.code(),
+                "v{version}"
+            );
+            assert_eq!(
+                body.results[0]
+                    .error_message
+                    .as_ref()
+                    .map(|m| m.as_str().to_string()),
+                Some(
+                    "The topic orders currently has 4 partition(s); 2 would not be an increase."
+                        .to_string()
+                ),
+                "v{version}"
+            );
+        }
+
+        let mut buf = sent(dispatch(&mut f, offset_delete_request(0, 47, "dispatch-g")).await);
+        let header =
+            ResponseHeader::decode(&mut buf, ApiKey::OffsetDelete.response_header_version(0))
+                .unwrap();
+        let body = OffsetDeleteResponse::decode(&mut buf, 0).unwrap();
+        assert!(buf.is_empty(), "{} trailing bytes", buf.len());
+        assert_eq!(header.correlation_id, 47);
+        assert_eq!(body.error_code, ResponseError::GroupIdNotFound.code());
+        assert!(body.topics.is_empty());
     }
 }

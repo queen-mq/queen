@@ -368,16 +368,22 @@ var deliberate = []classification{
 			"durability setting it did not get. The mapping is topic_config.rs and it is deliberately short",
 	},
 	{regexp.MustCompile(`^describeconfigs/topic\.retention_ms$`),
-		"documented gap, recorded rather than papered over: Queen exposes NO HTTP read of a queue's configuration " +
-			"(get_queue_v2 answers no config at all; get_queue_detail_v2's config object has leaseTime, retryLimit, " +
-			"retryDelay, ttl, maxQueueSize and deadLetterQueue and NOT retentionEnabled/retentionSeconds). So " +
-			"retention is writable and not readable here: CreateTopics sets it, and the create's own v5+ echo is " +
-			"where a client reads it back — createtopics/create.retention.echo matches Kafka exactly. Reporting a " +
-			"plausible default instead of omitting the key would be a guess"},
-	{regexp.MustCompile(`^describeconfigs/topic\.\w+_read_only$`),
-		"deliberate: every config this facade reports is read_only=true because AlterConfigs is NOT advertised, so " +
-			"nothing here can be changed through it. Kafka reports its topic configs writable because it has " +
-			"AlterConfigs. A UI that greys out its edit button on this flag is being told the truth by both"},
+		"deliberate, and it is a DEFAULT difference rather than a missing key since M7 F4: retention now round-trips " +
+			"for a topic this facade created, read from the record of the options bag the facade itself posted " +
+			"(topic_record.rs), because Queen exposes NO HTTP read of those columns (get_queue_v2 answers no config " +
+			"at all; get_queue_detail_v2's config object has leaseTime, retryLimit, retryDelay, ttl, maxQueueSize and " +
+			"deadLetterQueue and NOT retentionEnabled/retentionSeconds). What still differs is the VALUE on a fresh " +
+			"topic: Queen's default is retention OFF, which is Kafka's -1, where Kafka's own default is 604800000. A " +
+			"topic this facade did not create still omits the key, since reporting a plausible default for a queue " +
+			"whose columns cannot be read would be a guess",
+	},
+	{regexp.MustCompile(`^describeconfigs/topic\.(cleanup_policy|min_insync_replicas)_read_only$`),
+		"deliberate: read_only is PER ROW since M7 F4, and these two are the rows that are genuinely fixed — the " +
+			"only value either of them accepts is the one already reported (delete; one logical broker, so 1), so " +
+			"nothing about them can be changed through this facade. Kafka reports them writable because its " +
+			"AlterConfigs can really change them. retention.ms is NOT in this pattern: it is reported writable here " +
+			"too, because AlterConfigs and IncrementalAlterConfigs land on it. A UI that greys out its edit button " +
+			"on this flag is being told the truth by both"},
 	{regexp.MustCompile(`^describeconfigs/broker_logger\.`),
 		"deliberate: BROKER_LOGGER (resource type 8) describes a log4j hierarchy. The facade runs none, so it " +
 			"answers INVALID_REQUEST rather than an empty config set, which would read as 'this resource exists " +
@@ -400,6 +406,32 @@ var deliberate = []classification{
 			"these names. The rule is applied by all six group-addressed APIs through ONE function, so a name " +
 			"JoinGroup refuses and DescribeGroups describes cannot exist, and 24 is on the closed set every " +
 			"client accepts on both APIs"},
+
+	// ------------------------------ M7 F4: the two remaining admin writes
+	{regexp.MustCompile(`^createpartitions/increase\.`),
+		"deliberate, and the ONE case of this API that is a capability gap rather than a copy of Kafka's own " +
+			"answer: the oracle widens the topic and answers 0, the facade refuses INVALID_PARTITIONS. Queen " +
+			"declares no width per queue at all — /configure has no `partitions` option and a lane exists once " +
+			"something has been pushed to it — so the number a client sees is max(live lanes, " +
+			"QUEEN_KAFKA_DEFAULT_PARTITIONS), whose second half is a broker START-UP setting rather than a " +
+			"per-topic one. There is no write that widens one topic, so the refusal names the knob that does " +
+			"(handlers::create_partitions). The decrease and equal cases are NOT in this pattern: those two are " +
+			"the oracle's own sentences, byte for byte, and must stay identical"},
+	{regexp.MustCompile(`^createpartitions/assignments\.message$`),
+		"deliberate: both brokers answer INVALID_REPLICA_ASSIGNMENT (39) — that key is identical and is the one " +
+			"a client branches on — but they are complaining about different things. The oracle is counting: two " +
+			"new partitions asked for, one assignment given. The facade refuses manual placement outright, " +
+			"because it is one logical broker and places no partition on any node, so an assignment is an " +
+			"operator instruction it would otherwise discard in silence. Same sentence CreateTopics gives the " +
+			"same field"},
+	{regexp.MustCompile(`^offsetdelete/after\.list_groups\.contains$`),
+		"deliberate, and measured on apache/kafka:3.9.1 rather than assumed: the oracle DROPS a group once the " +
+			"last of its offsets is deleted, so it stops listing and answers GROUP_ID_NOT_FOUND to the next " +
+			"request, while a PARTIAL delete leaves it listed. The facade leaves it listed either way, because " +
+			"OffsetDelete removes offsets and DeleteGroups removes groups — that split is what keeps one API the " +
+			"only thing that makes a group stop existing, and matching the oracle would mean a prefix walk on " +
+			"every OffsetDelete to find out whether anything was left. Every other key in this scenario, the " +
+			"subscription rule included, must stay identical (compat/ERRORS.md)"},
 }
 
 type classification struct {

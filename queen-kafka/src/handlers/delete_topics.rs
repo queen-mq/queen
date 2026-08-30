@@ -43,6 +43,7 @@ use kafka_protocol::protocol::StrBytes;
 
 use crate::handlers::create_topics::MAX_CREATES_PER_REQUEST;
 use crate::handlers::metadata;
+use crate::topic_record;
 use crate::{queen, throttle, Facade};
 
 /// One line per window when the per-request ceiling binds.
@@ -57,6 +58,9 @@ pub async fn handle(
     let mut deleted = 0usize;
     let mut deferred = 0usize;
     let mut results = Vec::with_capacity(req.topic_names.len());
+    // The names whose queue actually went, for the config records swept after
+    // the loop. See [`forget_the_records`].
+    let mut forgettable: Vec<String> = Vec::new();
 
     // In request order and in sequence: each delete is one upstream call under
     // a ten-second budget on a connection that is muted until the whole response
@@ -107,6 +111,7 @@ pub async fn handle(
                     topic = name.as_str(),
                     "deleted a Queen queue for a Kafka client (DeleteTopics)"
                 );
+                forgettable.push(name.to_string());
                 results.push(
                     DeletableTopicResult::default()
                         .with_name(Some(name.clone()))
@@ -145,9 +150,39 @@ pub async fn handle(
         }
     }
 
+    forget_the_records(facade, &forgettable, token).await;
+
     DeleteTopicsResponse::default()
         .with_throttle_time_ms(throttle_ms.unwrap_or(0))
         .with_responses(results)
+}
+
+/// Remove the config records of the queues this request actually deleted
+/// ([`crate::topic_record`]).
+///
+/// A record outliving its queue is the one way a stale retention could be
+/// reported: a topic recreated THROUGH this facade writes a fresh record, but a
+/// topic recreated outside it would otherwise be described from the dead one.
+/// The `qid` pin catches that too, and this is the cheaper half of the same
+/// guarantee — it also keeps the store from accumulating a row per topic ever
+/// created.
+///
+/// ONE KV call, after the loop, and never a reason to fail a delete that
+/// already happened: the queue is gone either way and the record's own staleness
+/// check is what stands behind a failure here.
+async fn forget_the_records(facade: &Facade, deleted: &[String], token: Option<&str>) {
+    if deleted.is_empty() {
+        return;
+    }
+    if let Err(e) = topic_record::remove_many(facade.queen.as_ref(), deleted, token).await {
+        tracing::warn!(
+            target: "kafka",
+            error = %e,
+            topics = deleted.len(),
+            "the queues were deleted but their config records were not; a topic recreated \
+             outside this facade would be caught by the record's queue-id pin instead"
+        );
+    }
 }
 
 /// `error_message` is v5+ and the encoder drops it below that, which is exactly
@@ -183,6 +218,7 @@ fn failed(e: &queen::Error) -> ResponseError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handlers::alter_configs::tests::track;
     use crate::handlers::testing::facade_and_queen;
     use crate::queen::Error;
 
@@ -203,6 +239,56 @@ mod tests {
             .find(|t| t.name.as_ref().map(|n| n.as_str()) == Some(name))
             .unwrap_or_else(|| panic!("{name} is not in the answer"))
             .error_code
+    }
+
+    /// The queue's config record goes with the queue. A record that outlived
+    /// its queue is the one way a stale retention could be reported, and this
+    /// is the cheap half of that guarantee — the `qid` pin is the other half,
+    /// for a queue dropped outside this facade.
+    #[tokio::test]
+    async fn a_delete_removes_the_record() {
+        let (f, api) = facade_and_queen(&[("orders", 2), ("keep", 1)]);
+        track(
+            &api,
+            "orders",
+            &[("retentionEnabled", serde_json::json!(true))],
+        );
+        track(&api, "keep", &[]);
+
+        let r = handle(&f, &request(&["orders"]), None).await;
+
+        assert_eq!(code(&r, "orders"), 0);
+        assert!(api
+            .kv_get(
+                crate::offsets::NAMESPACE,
+                &crate::topic_record::key("orders")
+            )
+            .is_none());
+        // ...and only that one.
+        assert!(api
+            .kv_get(crate::offsets::NAMESPACE, &crate::topic_record::key("keep"))
+            .is_some());
+    }
+
+    /// A delete that found no queue removes no record: the name may belong to
+    /// somebody's live topic that this request simply misspelled the case of,
+    /// and DeleteTopics is idempotent on the queue but not licensed to sweep
+    /// bookkeeping for a queue it did not delete.
+    #[tokio::test]
+    async fn a_delete_that_found_nothing_removes_no_record() {
+        let (f, api) = facade_and_queen(&[("orders", 2)]);
+        track(&api, "orders", &[]);
+        handle(&f, &request(&["never-existed"]), None).await;
+        assert!(api
+            .kv_get(
+                crate::offsets::NAMESPACE,
+                &crate::topic_record::key("orders")
+            )
+            .is_some());
+        assert!(
+            api.kv_calls.lock().unwrap().is_empty(),
+            "a delete that found nothing still called the record store"
+        );
     }
 
     #[tokio::test]

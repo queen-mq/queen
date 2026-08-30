@@ -38,7 +38,7 @@
 //      round-trip fine. That is librdkafka's feature gate, not a facade
 //      defect — see PLAN_QUEEN_KAFKA.md STATUS.
 //
-//   3. AdminClient. The facade advertises 21 API keys since M7: CreateTopics,
+//   3. AdminClient. The facade advertises 28 API keys since M7: CreateTopics,
 //      DeleteTopics, DescribeConfigs, ListGroups, DescribeGroups and
 //      DeleteGroups are on the table and Edges.cs asserts they ANSWER.
 //      DescribeCluster (key 60) is still absent, and librdkafka answers it from

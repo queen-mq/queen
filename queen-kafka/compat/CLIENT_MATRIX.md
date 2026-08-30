@@ -17,8 +17,10 @@ implementation.
 A third campaign, the same day, changed what the facade IS rather than which
 clients reach it: **M7** added the topics and groups admin APIs and the
 idempotent producer, and **cluster mode** made two or three facades address one
-group correctly. Both have their own sections below, and both changed rows in
-the table above. Which rows were re-measured afterwards and which were not is
+group correctly. A fourth, overnight into **2026-08-30**, finished the admin
+surface: M7 **F4** added the config WRITE half, CreatePartitions, OffsetDelete
+and the ACL family, taking the advertised table from 21 keys to 28. All have
+their own sections below, and all changed rows in the table above. Which rows were re-measured afterwards and which were not is
 stated explicitly, because "expected to work" and "measured" are different
 claims and this file has only ever made the second one.
 
@@ -58,15 +60,26 @@ silent degradation. **FAIL**, the client cannot complete the basic path.
 
 ### What was re-measured after M7, and what was not
 
-M7 changed the advertised table from 14 keys to 21 and added cluster mode. Not
-every row above was run again afterwards, and this table says which. A row that
-was not re-run keeps its M6 or 2026-08-29 result: nothing in M7 removed or
-narrowed an existing version window, so no client can have lost a lane, but
-"expected to work" is not the same claim as "measured".
+M7 F1 to F3 changed the advertised table from 14 keys to 21 and added cluster
+mode; **F4 took it to 28** on 2026-08-30. Not every row above was run again
+afterwards, and this table says which. A row that was not re-run keeps its M6 or
+2026-08-29 result: nothing in M7 removed or narrowed an existing version window,
+so no client can have lost a lane, but "expected to work" is not the same claim
+as "measured".
+
+The table below records the F1-to-F3 re-runs. **What was re-run for F4**, all
+green: the whole franz-go suite (91 top-level tests), `java-matrix` on
+kafka-clients 4.3.1 and 3.6.2 including a new `AdminClient.incrementalAlterConfigs`
+probe, sarama (45 checks, and it now asserts "exactly 28 APIs advertised"),
+`@platformatic/kafka`, apache/kafka 3.9.1's own tooling for all four affected
+CLIs, and kafka-ui against the facade and the oracle side by side. **What was
+not:** `confluent-dotnet`, because no .NET SDK was available on the machine that
+ran the verification and F4's only change to that suite was one string and one
+comment. Treat that row as F3's measurement plus an unverified edit.
 
 | Client | Re-run after M7? | With what | Outcome |
 | --- | --- | --- | --- |
-| franz-go | **yes**, heavily | 43 new tests in `go/` (21 topics admin, 11 groups admin, 11 idempotence) plus the whole pre-existing suite under `rig.sh` | PASS. `go/` now declares 69 top-level tests; the 4 that skip without `--m5` are the TLS and SASL lane |
+| franz-go | **yes**, heavily | 65 new tests in `go/` (21 topics admin, 11 groups admin, 11 idempotence, and F4's 7 configs, 9 offsets/partitions, 6 acls) plus the whole pre-existing suite under `rig.sh` | PASS. `go/` now declares **91** top-level tests; the 4 that skip without `--m5` are the TLS and SASL lane |
 | segmentio/kafka-go | **yes**, for cluster mode | `cluster/kafkago_test.go`: two members across two facades, on the OffsetCommit v2 / OffsetFetch v1 floors | PASS, 208 of 208 committed identically through all three nodes |
 | apache/kafka 3.9.1 own tooling | **yes**, newly | `kafka-topics.sh` create/list/describe/delete, `kafka-configs.sh --describe` for topics and brokers, `kafka-consumer-groups.sh` list/describe/delete | all pass. This is also the only measurement of the Java **AdminClient** against the new APIs: no dedicated AdminClient probe was written, and `kafka-topics.sh` and `kafka-consumer-groups.sh` ARE that client |
 | Java kafka-clients 4.3.1 / 3.6.2 | **yes** | the scored `java-matrix` suite on a DEFAULT (idempotent) producer, plaintext and SASL_SSL | PASS: 4.3.1 matrix 81 checks, 3.6.2 matrix 80 checks, `edges` rc=0 on both, SASL lane 81 checks on 4.3.1. Usable admin versions measured, not assumed: CreateTopics v6, DeleteTopics v5, DescribeConfigs v4, ListGroups v4, DescribeGroups v3, DeleteGroups v2 |
@@ -154,19 +167,58 @@ reached directly, so making the whole call fast means a fatal code on the
 FindCoordinator transaction path — outside F3's scope.
 
 **Both halves of the admin surface have landed: TOPICS in M7 F1, GROUPS in M7
-F2.** The advertised table is 21 keys (InitProducerId joined it in F3): CreateTopics (19), DeleteTopics (20),
-DescribeConfigs (32), ListGroups (16), DescribeGroups (15) and DeleteGroups (42)
-are now among them. DescribeCluster (60) is still absent and does not need to be
-— Java's `describeCluster()` and librdkafka's both ride Metadata and already
-work. What a client's admin object still cannot do is ALTER: AlterConfigs,
-AlterConsumerGroupOffsets and the ACL APIs stay absent.
+F2, and the WRITE half in M7 F4 (2026-08-30).** The advertised table is 28 keys.
+The thirteen admin keys are CreateTopics (19), DeleteTopics (20),
+DescribeConfigs (32), AlterConfigs (33), IncrementalAlterConfigs (44),
+CreatePartitions (37), ListGroups (16), DescribeGroups (15), DeleteGroups (42),
+OffsetDelete (47) and the ACL trio DescribeAcls (29), CreateAcls (30),
+DeleteAcls (31).
+
+**What a client's admin object can now do that it could not on 2026-08-29.**
+`incrementalAlterConfigs` and the deprecated `alterConfigs` land on
+`retention.ms`, and `describeConfigs` reads the value back, so the round trip
+that was open all through F1 is closed for every topic this facade created.
+`deleteConsumerGroupOffsets` works. `alterConsumerGroupOffsets` always worked
+and simply had never been claimed: it sends OffsetCommit at generation -1, which
+is the simple-consumer shape `offset_commit.rs` has served since M4, so it needs
+no key of its own. `describeAcls`, `createAcls` and `deleteAcls` answer
+`SecurityDisabledException` rather than `UnsupportedVersionException`, which is
+what a real Kafka with no authorizer answers. `createPartitions` is advertised
+and refuses, with the oracle's own sentence for a decrease and for an equal
+count.
+
+DescribeCluster (60) is still absent and does not need to be, because Java's
+`describeCluster()` and librdkafka's both ride Metadata and already work. **The
+trigger that would flip that decision, so nobody re-derives it:** the first
+client in this matrix whose `describeCluster()` stops falling back to Metadata.
+That is a Kafka-4.x-era client change, it shows up as a red in `java-matrix` or
+`confluent-dotnet`, and the answer that day is the handler, not a redesign:
+every field of it (`cluster_id`, the controller, the broker list, Kafka's
+"omitted" sentinel for authorized operations) is already computed by Metadata
+and DescribeGroups.
 
 Measured against a live facade, with apache/kafka:3.9.1's own tooling and with
 sarama:
 
 * `kafka-topics.sh --create/--list/--describe/--delete` all work, and so does
   `kafka-configs.sh --describe` for both `--entity-type topics` and
-  `--entity-type brokers --entity-name 0`.
+  `--entity-type brokers --entity-name 0`. Since F4, `kafka-configs.sh --alter`
+  works too: `--add-config retention.ms=60000` then `--describe` reports
+  `60000` sourced `DYNAMIC_TOPIC_CONFIG`, `--delete-config retention.ms` puts it
+  back to `-1` sourced `DEFAULT_CONFIG`, and the value survives a facade SIGKILL
+  because it lives in Queen KV rather than in the process.
+* `kafka-acls.sh --list`, `--add` and `--remove` print
+  `Error while executing ACL command: No Authorizer is configured…` and exit 1,
+  and the three outputs diff IDENTICAL against apache/kafka:3.9.1 run from the
+  same container.
+* `kafka-topics.sh --alter --partitions` refuses. A decrease and an equal count
+  diff clean against the oracle apart from the tool's own timestamp; an increase
+  is where the two part, and the facade's sentence names
+  `QUEEN_KAFKA_DEFAULT_PARTITIONS` where the oracle simply widens the topic.
+* `kafka-consumer-groups.sh --delete-offsets` deletes (8/8 `Successful`), leaves
+  the group in `--list`, refuses with `GroupSubscribedToTopicException` while a
+  member is live and deletes nothing, and answers an unknown group
+  byte-identically to the oracle.
 * sarama's `ClusterAdmin` works. `ListTopics` was the trap — it looks like pure
   Metadata and issues a DescribeConfigs per topic afterwards — and it now
   returns the topic map. `CreateTopic`, `DeleteTopic` and `DescribeConfig` work
@@ -213,13 +265,18 @@ rather than obeyed:
   accepting `min.insync.replicas=2` silently would be telling a client it got a
   durability setting it did not get.
 
-And one asymmetry worth knowing before you look for it: **`retention.ms` is
-writable and not readable.** CreateTopics can set it (it becomes Queen's
-`retentionEnabled`/`retentionSeconds`), and DescribeConfigs cannot report it
-back, because Queen exposes no HTTP read of a queue's configuration. The
-create's own response echoes what it applied, which is where a client reads it.
-A topic describe reports two keys, `cleanup.policy=delete` and
-`min.insync.replicas=1`, and both are true of every Queen queue by construction.
+**`retention.ms` round-trips, since M7 F4, and only for a topic this facade
+created.** CreateTopics can set it (it becomes Queen's
+`retentionEnabled`/`retentionSeconds`), IncrementalAlterConfigs can change it,
+and DescribeConfigs reports it back. Queen still exposes no HTTP read of a
+queue's configuration, so the value does not come from Queen's own record of it:
+the facade persists the options bag it posted to `POST /api/v1/configure` under
+`qk:topiccfg:<topic>` in Queen KV, pinned to the queue's `id`, and reports
+retention out of that. A topic the facade did not create has no such record, and
+for it a describe reports only two keys, `cleanup.policy=delete` and
+`min.insync.replicas=1`, both true of every Queen queue by construction. This is
+the asymmetry that used to read *"writable and not readable"* here; what remains
+of it is the staleness window described under the deviations above.
 
 **A Kafka client can now delete a Queen queue.** `kafka-topics.sh --delete`
 reaches `DELETE /api/v1/resources/queues/:queue` under the connection's own
@@ -420,25 +477,32 @@ routing refusal)`, 208 of 208.
    never converge across facades. Harmless: they stay two coordinator entries
    over two `queen.kv` rows, with separate fences.
 
-## The M7 admin APIs: acceptance and open decisions (2026-08-29)
+## The M7 admin APIs: acceptance and open decisions (2026-08-29, extended 2026-08-30)
 
 What each new key is and what it answers is in [ERRORS.md](ERRORS.md), and what
 a client can do with it is under [What every client meets](#what-every-client-meets)
-above. This section is the evidence and the decisions still open.
+above. This section is the evidence and the decisions still open. The last seven
+rows are F4's and were added on 2026-08-30.
 
 | API | Acceptance | The caveat a user meets |
 | --- | --- | --- |
 | CreateTopics (19) v2-v6 | 21 franz-go tests across the three topic APIs, 3 differential scenarios, `kafka-topics.sh --create`, sarama `ClusterAdmin.CreateTopic`, Spring `NewTopic` beans | `--partitions` and `--replication-factor` are accepted and NOT honoured; `cleanup.policy=compact` is refused, which is why this does not unlock Kafka Connect |
 | DeleteTopics (20) v1-v5 | the same suites, `kafka-topics.sh --delete` | deletes the underlying Queen queue, which native non-Kafka producers may share |
-| DescribeConfigs (32) v1-v4 | the same suites, `kafka-configs.sh --describe` for topics and for `--entity-type brokers --entity-name 0` | `retention.ms` is writable and not readable; a topic describe reports only `cleanup.policy=delete` and `min.insync.replicas=1` |
+| DescribeConfigs (32) v1-v4 | the same suites plus 6 new franz-go checks, `kafka-configs.sh --describe` for topics and for `--entity-type brokers --entity-name 0`, kafka-ui's topic Settings tab side by side with the oracle | a topic describe reports three keys: `cleanup.policy=delete`, `min.insync.replicas=1` and, **for a topic this facade created**, `retention.ms`. A topic created outside the facade still omits retention |
 | ListGroups (16) v0-v4 | 11 franz-go tests, `kafka-consumer-groups.sh --list` with and without `--state`, Confluent.Kafka `ListConsumerGroupsAsync` | truncates at 10 000 groups with a log line, because the wire has no truncation flag; can answer `Unknown` in cluster mode |
 | DescribeGroups (15) v0-v3 | the same suites, `kafka-consumer-groups.sh --describe --members --verbose --state --offsets` | none beyond the shared list |
 | DeleteGroups (42) v0-v2 | 11 franz-go tests across the three group APIs, `kafka-consumer-groups.sh --delete` | **irreversibly removes committed offsets**, which otherwise never expire on their own. Refuses a group with members (`GroupNotEmptyException`), so a merely STOPPED group is deletable and loses its position |
+| AlterConfigs (33) v0-v2 | 7 franz-go tests in `go/admin_configs_test.go`, Java `AdminClient.alterConfigs` on kafka-clients 3.6.2 and 4.3.1 | the deprecated FULL-REPLACEMENT form: a key the request does not name is reset to its default, so an alter naming only `cleanup.policy=delete` **turns retention off**. That is what a real broker does with key 33; prefer key 44 |
+| IncrementalAlterConfigs (44) v0-v1 | the same suite, `kafka-configs.sh --alter --add-config` / `--delete-config`, Java `incrementalAlterConfigs`, kafka-ui's Settings tab | **only on topics this facade created.** Everything else is `INVALID_CONFIG` naming the reason. The vocabulary is three keys: `retention.ms`, `cleanup.policy` (delete only) and `min.insync.replicas` (1 only); APPEND and SUBTRACT are refused on the two scalar keys |
+| CreatePartitions (37) v0-v3 | 6 franz-go tests, a differential scenario, `kafka-topics.sh --alter --partitions` diffed against the oracle | **an advertised refusal.** A decrease and an equal count answer Kafka's own sentences byte for byte; an increase answers the facade's own, naming `QUEEN_KAFKA_DEFAULT_PARTITIONS`. Queen declares no width per queue, so there is no write that widens one topic |
+| OffsetDelete (47) v0 | 9 franz-go tests, a differential scenario, `kafka-consumer-groups.sh --delete-offsets` with and without a live member | **irreversibly removes committed offsets**, like DeleteGroups. Keeps Kafka's subscription rule: a live consumer group's subscribed topics answer `GROUP_SUBSCRIBED_TO_TOPIC`, everything else is deletable. The group stays in `--list` afterwards |
+| DescribeAcls (29), CreateAcls (30), DeleteAcls (31) v1-v3 | 6 franz-go tests, a differential scenario at **zero divergence**, `kafka-acls.sh --list/--add/--remove` diffed IDENTICAL against the oracle | every call is `SECURITY_DISABLED`, at every version, for every filter. There is no ACL model to read or write: authorization is Queen's, over a bearer token |
 
-### Two protocol facts settled against the oracle before they were coded
+### The protocol facts settled against the oracle before they were coded
 
-Both were measured on `apache/kafka:3.9.1` first and implemented to match, and
-both are pinned in the differential:
+Each was measured on `apache/kafka:3.9.1` first and implemented to match, and
+each is pinned in the differential. The first two are F1's; the rest are F4's,
+and two of them refuted what the design had written down:
 
 - A topic name **repeated inside one CreateTopics request** is answered
   `INVALID_REQUEST` and **none of the request's topics are created**.
@@ -447,6 +511,28 @@ both are pinned in the differential:
   `kafka-protocol`'s `DescribeConfigsResource::default()` is `Some(vec![])`, so a
   hand-rolled client that never touches the field would otherwise be answered
   nothing at all.
+- **The ACL family uses TWO different sentences, not one.**
+  `AclApis.handleDescribeAcls` builds its response by hand and sets *"No
+  Authorizer is configured on the broker"* with no full stop, while CreateAcls
+  and DeleteAcls raise `SecurityDisabledException("No Authorizer is
+  configured.")`. The first implementation used one string for all three and it
+  cost seven unclassified differential keys against a zero-divergence bar. This
+  is the clearest case in the campaign for the rule that the sentence is
+  recorded off the wire and never typed in from a document.
+- **CreatePartitions' refusal sentences are KRaft's, not ZooKeeper's.** The
+  decrease reads *"The topic X currently has N partition(s); M would not be an
+  increase."*, and the ZK-era broker phrased the same case differently, so
+  recalling the wording would have produced a near-miss.
+- **There is no separate "below 1" case.** `--partitions 0` against a topic of
+  width 4 answers the DECREASE sentence on the oracle, because KRaft's
+  `count <= current` comparison catches every non-positive count before any
+  lower bound could. A dedicated branch would have answered a sentence the
+  oracle never sends. For the same reason the width comparison runs BEFORE the
+  replica-assignment check: a decrease carrying an assignment is
+  INVALID_PARTITIONS on a real broker, not INVALID_REPLICA_ASSIGNMENT.
+- **Deleting the last offsets of an already-empty group makes that group vanish
+  from `--list` on the oracle**, while a partial delete leaves it listed. The
+  facade keeps it listed either way; see the deviation below.
 
 ### Where the facade knowingly answers differently from apache/kafka:3.9.1
 
@@ -467,6 +553,49 @@ restarted", which is common, so accepting would leave the sequence window
 silently unenforced after every restart. The cost of refusing was measured
 rather than assumed: the producer recovers via KIP-360's epoch bump and nothing
 is lost. It is one line in `idempotent.rs::check()` to reverse.
+
+F4 adds five more, all of them classified `deliberate` in the differential and
+none of them a defect:
+
+- **CreatePartitions refuses an INCREASE**, where the oracle widens the topic.
+  This is the one genuine capability gap of the three cases: Queen declares no
+  width per queue, a lane exists once something has been written to it, and the
+  advertised width is `max(live lanes, QUEEN_KAFKA_DEFAULT_PARTITIONS)` whose
+  second half is a broker start-up knob. The refusal names the knob and the
+  alternative (produce to the higher lanes directly, which materialises them).
+- **A tracked topic with no retention set reports `retention.ms = -1`**, where
+  Kafka's own default is 604800000. Queen's default is retention OFF, and OFF
+  IS Kafka's `-1`, so the facade is reporting its own truth rather than Kafka's
+  number.
+- **`read_only` is per row**, where a Kafka broker computes it per resource.
+  `cleanup.policy` and `min.insync.replicas` are `true` because the only value
+  either accepts is the one already reported; `retention.ms` is `false` on a
+  tracked topic and `true` on an untracked one. A UI that greys out its edit
+  button on this flag is being told the truth, which is the property the flag
+  was reported for.
+- **An alter on a topic this facade did not create is refused**
+  `INVALID_CONFIG`, where a real broker would apply it. The reason is Queen's,
+  not Kafka's: `POST /api/v1/configure` is a whole-row upsert over nineteen
+  columns and thirteen of them have no HTTP read, so a partial alter would
+  silently reset a tenant's lease time, retry policy and dedup window. On a
+  deployment that predates F4 this is every topic. There is no safe alternative
+  short of a Queen-side read of the config columns.
+- **OffsetDelete leaves the group in `--list`** even after its last offset is
+  removed, where the oracle drops an already-empty group at that point. Removing
+  the index row would need a prefix walk on every OffsetDelete to find out
+  whether anything is left, and would make this API a second way to delete a
+  group. DeleteGroups stays the one and only thing that makes a group stop
+  existing.
+
+One more is not a divergence from the oracle but from the facade's own honesty
+rule, and it is named here because it is the residual risk of the whole config
+round trip. **A retention changed OUTSIDE this facade**, in the Queen console or
+by another SDK, between two facade writes **is invisible**, and the value
+`describeConfigs` reports is the one the facade last applied. The record is
+pinned to the queue's `id`, so a queue dropped and recreated under the same name
+IS caught and the key is omitted rather than answered stale. What is not caught
+is an in-place edit. It is the same last-writer-wins two admins have against a
+real Kafka, and the clean fix is a Queen-side read of the config columns.
 
 ### Open decisions, all of them Alice's
 
@@ -489,12 +618,37 @@ None of these is a defect; each is a shipped choice that nobody has ratified.
 4. **`num_partitions` and `replication_factor` are accepted and not honoured**,
    and the create's own answer reports the facade's real width and 1. Refusing
    would break every provisioner whose default is 3.
-5. **`retention.ms` is writable and not readable**, left asymmetric and
-   documented rather than half-fixed, because Queen exposes no HTTP read of a
-   queue's configuration.
+5. **`retention.ms` now round-trips, out of the facade's own record rather than
+   out of Queen.** F4 closed the asymmetry this entry used to describe, and the
+   way it closed it is the thing to ratify: the facade persists the options bag
+   it posted to `/configure` in Queen KV under `qk:topiccfg:<topic>` and reports
+   retention from there. That is bookkeeping the facade owns, not a read of the
+   source of truth. The clean fix is one field added to `get_queue_detail_v2` so
+   the config columns can be read back, and that is a `server/` change nobody in
+   this campaign could make. Alice's call whether to ask for it.
 6. **`cleanup.policy=compact` is refused**, which keeps Kafka Connect out. A
    facade that accepted the setting and compacted nothing would let Connect
    start and then lose its connector configuration on the first restart.
+7. **OffsetDelete is advertised, and it is the second irreversible delete of
+   committed offsets** reachable from an admin CLI (F4). No new privilege, since
+   the same bearer can remove the same KV keys over `POST /api/v1/kv`, but a group
+   that loses its position runs `auto.offset.reset` on its next start. Kafka's
+   subscription rule is kept exactly, so a live group's subscribed topics are
+   refused; a STOPPED group's are not. This is the same ratification DeleteGroups
+   is already waiting on, widened by one API.
+8. **The ACL family answers `SECURITY_DISABLED` rather than being absent**, and
+   the message says nothing about Queen's real authorization. It is the oracle's
+   own sentence, and diverging from it to say more would cost the zero-divergence
+   acceptance. The fuller explanation lives in [ERRORS.md](ERRORS.md) and in this
+   file. If Alice would rather the wire said something Queen-specific, the cost
+   is that differential scenario's bar.
+9. **`QUEEN_KAFKA_ALTER_UNTRACKED` does not exist, deliberately.** An escape
+   hatch that let an alter proceed on a topic the facade has no record of would
+   have to assume the other thirteen `/configure` columns are at their stored
+   procedure defaults, and on a live queue that assumption silently resets a
+   tenant's dedup window. If an escape hatch is wanted it should be explicit,
+   default-off and loudly logged, and it should be a decision rather than a
+   convenience.
 
 ## Fixed on 2026-08-29, in the working tree and NOT committed
 
@@ -962,9 +1116,10 @@ defaults and packaging.
 | Micronaut Kafka, Vert.x Kafka, Camel kafka | medium | not tested: annotation or route layers with no protocol code |
 | Pekko/Alpakka, fs2-kafka, zio-kafka, jackdaw, kinsky | medium to niche | not tested: streams and effect-system wrappers. Their transactional sources and sinks are out of scope |
 | kafka-console-producer.sh / kafka-console-consumer.sh | medium | not tested directly, but they ship inside kafka-clients and speak the tested wire. They should work |
-| kafka-topics.sh, kafka-configs.sh | medium | MEASURED WORKING since M7 F1 against apache/kafka:3.9.1's own tooling: `--create`, `--list`, `--describe`, `--delete`, and `kafka-configs.sh --describe` on topics and on broker 0. `--alter` does not: AlterConfigs is not advertised |
-| kafka-consumer-groups.sh | medium | MEASURED WORKING since M7 F2 against apache/kafka:3.9.1's own tooling: `--list` (with `--state` and `--state Stable`), `--describe` (`--members --verbose`, `--state`, `--offsets`) and `--delete`. `--reset-offsets` is untested. `--delete-offsets` needs OffsetDelete, which is not advertised |
-| kafka-acls.sh | medium | will NOT work: the ACL APIs are not advertised, and the facade has no ACL model to answer them from |
+| kafka-topics.sh, kafka-configs.sh | medium | MEASURED WORKING since M7 F1: `--create`, `--list`, `--describe`, `--delete`, and `kafka-configs.sh --describe` on topics and on broker 0. Since M7 F4 `kafka-configs.sh --alter` works too, on a topic this facade created: `--add-config retention.ms=…` and `--delete-config retention.ms` both land and both read back. `kafka-topics.sh --alter --partitions` REFUSES, with the oracle's own sentence for a decrease and for an equal count |
+| kafka-consumer-groups.sh | medium | MEASURED WORKING since M7 F2: `--list` (with `--state` and `--state Stable`), `--describe` (`--members --verbose`, `--state`, `--offsets`) and `--delete`. Since M7 F4, `--delete-offsets` too, with Kafka's subscription rule. `--reset-offsets --to-earliest/--to-latest --execute` works and always did (it rides OffsetCommit); `--to-datetime` and `--by-duration` do NOT, because they send ListOffsets with a concrete timestamp and this facade answers -1 for every one of those (no time index in Queen) |
+| kafka-acls.sh | medium | MEASURED since M7 F4: `--list`, `--add` and `--remove` all print `Error while executing ACL command: No Authorizer is configured…` and exit 1, and each output diffs IDENTICAL against apache/kafka:3.9.1 run from the same container. It degrades exactly as it does against a Kafka with no authorizer, which is the honest answer: there is no ACL model here to query |
+| kafka-delete-records.sh, kafka-log-dirs.sh, kafka-leader-election.sh, kafka-reassign-partitions.sh, kafka-delegation-tokens.sh, kafka-metadata-quorum.sh, kafka-transactions.sh | low to medium | will NOT work, each for a reason in the long-tail list below. Every one fails client-side with `UnsupportedVersionException` before a byte is sent, which is a named failure and not a hang |
 | KNet | niche | not tested: drives the real Java client over JNI, so its wire is byte-identical to a tested row |
 | faust-streaming | medium | wire covered by aiokafka; its stateful tables need compacted changelog topics, which are out of scope |
 
@@ -974,9 +1129,11 @@ None of these is a client row that failed. Each needs a facility the facade
 deliberately does not have, and each should be reported as known-unsupported
 rather than as untested.
 
-**Transactions and exactly-once, in any client.** `InitProducerId`,
-`AddPartitionsToTxn` and `EndTxn` are absent (M7 backlog). This is a
-cross-cutting mode, not a library: Java transactions, franz-go transaction
+**Transactions and exactly-once, in any client.** `AddPartitionsToTxn`,
+`AddOffsetsToTxn`, `EndTxn` and `TxnOffsetCommit` are absent (M7 backlog).
+`InitProducerId` IS advertised since M7 F3, for the idempotent producer alone: a
+non-transactional grant is answered and a `transactional.id` is refused. This is
+a cross-cutting mode, not a library: Java transactions, franz-go transaction
 sessions, librdkafka's transactional API and sarama's transactional producer are
 all the same answer.
 
@@ -996,16 +1153,57 @@ claimed.
 
 **Admin and monitoring UIs**: kafbat/kafka-ui, AKHQ, Conduktor, Redpanda
 Console, Cruise Control, Burrow, kafka-lag-exporter. These used to fail at
-connect; since M7 F1 and F2 the calls they open with — Metadata, DescribeConfigs,
-ListGroups, DescribeGroups, OffsetFetch, ListOffsets — are all advertised. **None
-of them is claimed working**, and the reason is that each fans out over a long
-tail this facade does not offer: `DescribeLogDirs` for topic size, `DescribeAcls`,
-`ListPartitionReassignments`, `DescribeProducers`. A tool that renders a tab per
-call will show broken tabs. The honest claim is the measured one — a client
-connects, lists topics, lists groups, and sees a group's members and its lag —
-and anything beyond that is unmeasured. Queen's own console remains the answer,
-and mirroring Kafka group offsets into Queen's native cursor (C3 in the plan) is
-what makes those groups visible in it.
+connect; since M7 F1, F2 and F4 the calls they open with (Metadata,
+DescribeConfigs, IncrementalAlterConfigs, ListGroups, DescribeGroups,
+OffsetFetch, ListOffsets, DescribeAcls) are all advertised. **None of them is
+claimed working**, and the reason is that each fans out over the long tail
+below: a tool that renders a tab per call will show broken tabs. Two of the
+seven were re-measured on 2026-08-30 and are worth stating individually:
+
+- **kafka-ui renders a topic's Settings tab identically against the facade and
+  against apache/kafka:3.9.1**, `retention.ms = 60000` sourced
+  `DYNAMIC_TOPIC_CONFIG` with `readOnly = false` on both. That tab was the hole
+  F4 set out to close, and it is closed. Its ACL tab is hidden on BOTH clusters
+  (neither reports `ACL_VIEW`), and its `/acls` route answers 500 on both, which
+  is kafka-ui's own guard and not a facade behaviour.
+- **kafka-lag-exporter works today**: `listConsumerGroups` (16),
+  `listConsumerGroupOffsets` (9) and a consumer's `endOffsets` (2) are all
+  advertised, and it needs nothing else.
+- **Burrow cannot work, for a reason no API addition changes**: it consumes
+  `__consumer_offsets` as a topic, and every `__` name is invisible here by rule.
+- **Cruise Control needs three absences closed, not one**: `DescribeLogDirs`,
+  `AlterPartitionReassignments`, and a metrics-reporter topic. Do not describe
+  any single one of them as the blocker.
+
+The honest claim is the measured one, that a client connects, lists topics,
+lists groups, sees a group's members and its lag, and now reads and writes a
+topic's retention. Anything beyond that is unmeasured. Queen's own console remains
+the answer, and mirroring Kafka group offsets into Queen's native cursor (C3 in
+the plan) is what makes those groups visible in it.
+
+### The long tail, key by key, with what each one costs a tool
+
+Nineteen API keys are deliberately not advertised. Each is a decision with a
+reason, and each is pinned by `classify_the_absent_admin_apis` in
+`src/versions.rs`, so advertising one of them by accident fails a test rather
+than shipping. A client that sends one anyway has its connection closed, which
+is Apache Kafka's answer to an unparseable request and is unreachable for any
+client that read the ApiVersions response.
+
+| Key | API | Why it is absent | What it costs |
+| --- | --- | --- | --- |
+| 21 | DeleteRecords | Queen has no truncate-to-offset primitive: `log_start` moves by retention and by dropping the queue. Answering would mean reporting a `low_watermark` that did not move | `kafka-delete-records.sh` fails; kafka-ui's and AKHQ's "Clear messages" button errors. The workaround is DeleteTopics then CreateTopics, which both work |
+| 23 | OffsetsForLeaderEpoch | Every leader epoch this facade reports is -1, so a consumer's `SubscriptionState` never holds one and `validateOffsetsAsync` short-circuits | Nothing measurable. **No client ever sends it** |
+| 35 | DescribeLogDirs | Queen's storage is Postgres segments; there are no log directories, and answering would mean inventing a path and per-partition byte sizes | kafka-ui's topic and broker "Size" columns read blank (it swallows the error and renders); `kafka-log-dirs.sh` fails. **The best future candidate of the three absences**: `retainedBytes` is real and already on `GET /api/v1/resources/queues`; what is missing is a per-partition breakdown |
+| 38-41 | Create/Renew/Expire/DescribeDelegationToken | A delegation token is derived from a SCRAM principal and signed by the broker. This facade mints no credentials; Queen does | `kafka-delegation-tokens.sh` fails. Nothing in this matrix uses it |
+| 43 | ElectLeaders | One logical broker and no replicas: every Metadata answer is `replicas=[0], isr=[0]`. In cluster mode a partition's leader is a rendezvous hash, deterministic and not movable | `kafka-leader-election.sh` fails; Cruise Control's self-healing cannot run |
+| 45, 46 | Alter/ListPartitionReassignments | There are no replicas to move; durability is Postgres's. A reassignment API over one logical broker would accept a plan and have nothing to do with it | `kafka-reassign-partitions.sh` fails; Cruise Control and Confluent's auto-balancer cannot run. No UI calls `listPartitionReassignments` on a render path |
+| 48, 49 | Describe/AlterClientQuotas | The facade DOES have quotas, namely Queen's 429 with `Retry-After`, but they are the Cloud proxy's, per TENANT, and not expressible in Kafka's `(user, client-id)` model. Altering must never work for a second and independent reason: it would let a tenant raise its own rate cap | `kafka-configs.sh --entity-type clients --describe` fails; kafka-ui's quotas tab is absent. The one absence with a real future story: a READ-ONLY 48 mapping the tenant onto a `user` entity, once the proxy exposes the cap |
+| 50, 51 | Describe/AlterUserScramCredentials | SASL here is PLAIN only and the credential is a Queen bearer verified by Queen. There is no local user store. Supporting SCRAM would make this facade a credential store with its own secrets at rest | `kafka-configs.sh --entity-type users --alter --add-config 'SCRAM-SHA-256=[…]'` fails; kafka-ui's user management tab is absent. This is a security posture change, not a protocol gap |
+| 55 | DescribeQuorum | No Raft log and no voters; every field would be invented. The one thing UIs actually render, a controller id, is already in every Metadata answer | `kafka-metadata-quorum.sh describe` fails; kafka-ui's KRaft panel feature-detects and hides |
+| 60 | DescribeCluster | Answerable, truthfully, and deliberately not answered: every client in this matrix already answers `describeCluster()` from a plain Metadata request, so advertising it moves five live suites onto a new code path for a measured gain of zero | Nothing today. See the trigger sentence above for the day that changes |
+| 61 | DescribeProducers | The idempotence window is PROCESS state, deliberately lost on restart. Answering from it would advertise durable producer state the facade does not have; answering empty would say "nothing is producing" while producers produce | `kafka-transactions.sh find-hanging` unavailable. No client path needs it |
+| 65, 66 | Describe/ListTransactions | The registry they would read does not exist, and after M9 it still would not be answerable well: transaction state is per process and transactions are refused in cluster mode, so a listing would be per node exactly where a listing matters | `kafka-transactions.sh list` / `describe` fail. Nothing else. M9's call if anyone's |
 
 **KIP-848 next-generation consumer groups** (`group.protocol=consumer`).
 `ConsumerGroupHeartbeat` is not advertised; the facade implements the classic

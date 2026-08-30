@@ -79,17 +79,38 @@ module outside itself.
 | `TestSaslRefusesAWrongPassword` (`--m5`) | a wrong password gets SASL_AUTHENTICATION_FAILED — the fatal code, not a retriable disconnect — and the listener still serves the right one |
 | `TestPlaintextClientAgainstTheTLSListener` (`--m5`) | a plaintext frame on the TLS port gets a TLS alert and a close, the facade survives it, and a TLS client works immediately after |
 
-### M7, added 2026-08-29
+### M7, added 2026-08-29 and 2026-08-30
 
-Three files, 43 further top-level tests, on the same stack and in the same run.
-They are grouped here rather than listed one by one; each file's header says
-what every test pins.
+Six files, 65 further top-level tests, on the same stack and in the same run,
+which is what takes a full `rig.sh --m5` from 26 top-level tests to **91**. They
+are grouped here rather than listed one by one; each file's header says what
+every test pins. The last three are F4's.
 
 | File | Tests | What it pins |
 | --- | --- | --- |
 | `go/admin_topics_test.go` | 21 | CreateTopics, DeleteTopics and DescribeConfigs at every advertised version: a created queue a second client can see, the refusals (an existing topic, `cleanup.policy=compact`, an unknown config, a reserved name, a manual replica assignment, a name repeated inside one request), `validate_only` writing nothing, `retention.ms` applied and echoed, the broker resource, and answers lining up index-for-index with the request |
 | `go/admin_groups_test.go` | 11 | ListGroups showing a STOPPED group beside a live one and honouring the state filter, DescribeGroups with host and assignment and telling a stopped group from an unknown one, DeleteGroups refusing a group with members and removing a stopped group's offsets, the advertised windows, and a listing that survives a facade restart |
 | `go/idempotent_test.go` | 11 | InitProducerId at every advertised version, an epoch bump, a transactional id refused immediately and an EMPTY one treated as absent, a default franz-go producer round-tripping, a duplicate batch answered with the ORIGINAL offsets, a sequence gap refused with nothing written, an unknown producer, a stale epoch fenced, and a default idempotent producer surviving a facade SIGKILL |
+| `go/admin_configs_test.go` | 7 | the whole `retention.ms` round trip over the wire (describe `-1`/`DEFAULT`/writable, IncrementalAlterConfigs SET, describe `604800000`/`DYNAMIC_TOPIC_CONFIG`/writable, DELETE, describe back to `-1`), plus the deprecated full-replacement key 33, `validate_only` writing nothing, an untracked topic refused by name, and the broker resource |
+| `go/admin_offsets_test.go` | 9 | OffsetDelete on an empty group and on a live one (subscribed topics refused 86, unsubscribed topics deleted), an offset never committed answered 0, an unknown group, the group still listed afterwards; and CreatePartitions refusing a decrease, an equal count and an increase |
+| `go/admin_acls_test.go` | 6 | DescribeAcls, CreateAcls and DeleteAcls at v1, v2 and v3: the code, both message literals, an empty `resources`, one result per creation and per filter, and an empty request list answering an empty result list with no error |
+
+The differential (`differential/rig-diff.sh run`, which diffs every answer
+against `apache/kafka:3.9.1` in KRaft) grew with it: **16 scenarios**, 84
+divergences, 62 classified `deliberate`, 22 `accepted`, **0 left to classify**.
+F4 added three: `acls` (`admin_acls.go`), `createpartitions` and `offsetdelete`
+(`admin_partitions.go`, `admin_offsets.go`). `acls` and `offsetdelete` are held
+to a **zero-divergence** bar rather than a classified one, because both APIs'
+rules are Kafka's own and the facade has the material for all of them; any
+divergence there is a semantics bug, not a deviation. `acls` earned that bar the
+hard way, catching a wrong message literal that seven observation keys had been
+reporting.
+
+There is no `admin_configs.go`: the config write half is covered over the wire
+by `go/admin_configs_test.go` and by `kafka-configs.sh` diffed against the
+oracle, and a differential scenario for it is the one piece of F4's design that
+was not built. It is worth adding, and it is the place a future retention or
+`read_only` drift would be caught automatically.
 
 ## The M5 surface: TLS, SASL and the throttle
 

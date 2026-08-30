@@ -783,6 +783,119 @@ pub async fn delete_group(
     Ok(removed)
 }
 
+/// Delete a NAMED list of offset keys, chunked against the broker's op ceiling
+/// and optionally behind a `fence`. One result per input key, in order.
+///
+/// The narrow sibling of [`delete_group`], and the difference is the whole
+/// reason it exists: that one sweeps a prefix and takes the index row with it,
+/// which is what makes a group stop existing. This one removes exactly the keys
+/// it is handed and touches nothing else — no prefix walk, no index row — which
+/// is what OffsetDelete is ([`crate::handlers::offset_delete`]).
+///
+/// ## `applied: false` is not a failure
+///
+/// A delete of a key that is not there answers `applied: false` with reason
+/// `absent` (024_kv.sql:1092-1120). For an offset that means "never committed",
+/// and Kafka answers 0 for deleting an offset that does not exist — so every
+/// answer the call returns is `Ok`, and only a call that FAILED is an error.
+/// Reading `applied` as a verdict here would turn `--delete-offsets` on a fresh
+/// group into a run of spurious failures.
+///
+/// ## The fence, and the one thing it protects
+///
+/// In cluster mode the caller passes the group's [`FenceOp`] and it rides at
+/// index 0 of every chunk with `required: true`, exactly as [`store`] does: a
+/// node that is stale about the live set — and therefore still believes the
+/// ownership guard in front of it passed — must remove NOTHING rather than
+/// remove the real owner's offsets. A lost precondition aborts the transaction,
+/// arrives as [`queen::Error::Precondition`], and every key from that chunk on
+/// is answered with it; [`kafka_error`] maps it to NOT_COORDINATOR, which is the
+/// redirect the client acts on.
+///
+/// There is no transaction across a chunk boundary and this does not pretend
+/// there is — the same sentence [`delete_group`] carries. A failure part way
+/// through leaves some offsets deleted, the affected keys answer the retriable
+/// code [`kafka_error`] gives, and re-running finishes the job because every
+/// delete is idempotent.
+pub async fn delete_offsets(
+    api: &dyn QueenApi,
+    group: &str,
+    keys: &[String],
+    fence: Option<&FenceOp>,
+    token: Option<&str>,
+) -> Vec<queen::Result<()>> {
+    // The same two numbers, for the same reason, as the commit path's: the
+    // broker refuses a batch of more than `MAX_KV_OPS_PER_CALL` operations
+    // outright, and the fence IS one of the operations.
+    let per_call = match fence {
+        Some(_) => FENCED_COMMITS_PER_CALL,
+        None => COMMITS_PER_CALL,
+    };
+    let mut out: Vec<queen::Result<()>> = Vec::with_capacity(keys.len());
+    // The version each chunk's fence expects, threaded exactly as `store`
+    // threads it: writing the fence gives it a NEW version and every chunk is
+    // its own transaction, so a second chunk still expecting the first one's
+    // version would fence itself off.
+    let mut expect = fence.map(|f| f.expect);
+    for (at, chunk) in keys.chunks(per_call).enumerate() {
+        let mut ops: Vec<KvOp> = Vec::with_capacity(chunk.len() + 1);
+        if let (Some(fence), Some(expect)) = (fence, expect) {
+            ops.push(fence.at(expect).kv_op());
+        }
+        ops.extend(chunk.iter().map(|key| KvOp::delete(NAMESPACE, key, None)));
+        match api.kv(&ops, token).await {
+            Ok(mut answers) => {
+                if fence.is_some() && !answers.is_empty() {
+                    let head = answers.remove(0);
+                    match head.applied {
+                        Some(true) => expect = Some(head.version),
+                        // Unreachable: `required: true` turns a lost
+                        // precondition into an aborted transaction, which
+                        // arrives below. Reported and never assumed, because a
+                        // fence that answered anything else is a broker that
+                        // changed under us.
+                        other => {
+                            let e = queen::Error::Body(format!(
+                                "kv fence answered applied={other:?} instead of aborting"
+                            ));
+                            out.extend(chunk.iter().map(|_| Err(e.clone())));
+                            continue;
+                        }
+                    }
+                }
+                // Aligned by POSITION, and padded rather than zipped short: the
+                // caller maps these back onto the (topic, partition) pairs a
+                // client asked about, so a call that answered fewer results
+                // than it was given operations must not silently shift every
+                // partition's verdict one to the left.
+                let mut answers = answers.into_iter();
+                out.extend(chunk.iter().map(|_| match answers.next() {
+                    Some(_) => Ok(()),
+                    None => Err(queen::Error::Body(
+                        "kv answered fewer results than the batch had operations".to_string(),
+                    )),
+                }));
+            }
+            Err(e @ queen::Error::Precondition { .. }) => {
+                tracing::debug!(
+                    target: "kafka",
+                    group,
+                    chunk = at,
+                    "an offset delete was fenced off; nothing was removed from this chunk on"
+                );
+                // Every key from here on, not just this chunk's: the fence is
+                // gone, so sending the rest would be a second attempt to write
+                // as a coordinator this node is not.
+                let unsent = keys.len() - at * per_call;
+                out.extend((0..unsent).map(|_| Err(e.clone())));
+                return out;
+            }
+            Err(e) => out.extend(chunk.iter().map(|_| Err(e.clone()))),
+        }
+    }
+    out
+}
+
 /// The Kafka error for a failed call to the offset store.
 ///
 /// Every code here is one a consumer RETRIES, because that is what the
@@ -1325,6 +1438,161 @@ mod tests {
             .collect();
         store(&*api, &pairs, None).await;
         assert_eq!(delete_group(&*api, "g", None).await.unwrap(), 300);
+        assert!(load_group(&*api, "g", None).await.unwrap().is_empty());
+    }
+
+    // ------------------------------------------ the NAMED delete (OffsetDelete)
+
+    /// The narrow delete removes exactly the keys it is handed: the group's
+    /// other partitions, its other topics and its index row all survive, which
+    /// is the whole difference between it and `delete_group`.
+    #[tokio::test]
+    async fn a_named_delete_removes_those_keys_and_nothing_else() {
+        let api = FakeQueen::with(&[]);
+        let mut pairs = Vec::new();
+        for topic in ["orders", "clicks"] {
+            for p in 0..3 {
+                pairs.push((key("g", topic, p).unwrap(), commit(i64::from(p))));
+            }
+        }
+        store(&*api, &pairs, None).await;
+        index(&*api, "g", "consumer", None).await.unwrap();
+
+        let named = [
+            key("g", "orders", 0).unwrap(),
+            key("g", "orders", 2).unwrap(),
+        ];
+        let results = delete_offsets(&*api, "g", &named, None, None).await;
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|r| r.is_ok()));
+
+        let left: Vec<(String, i32)> = load_group(&*api, "g", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(topic, partition, _)| (topic, partition))
+            .collect();
+        assert_eq!(
+            left,
+            [
+                ("clicks".to_string(), 0),
+                ("clicks".to_string(), 1),
+                ("clicks".to_string(), 2),
+                ("orders".to_string(), 1),
+            ]
+        );
+        // The EXISTENCE row is not this call's to remove: OffsetDelete removes
+        // offsets, DeleteGroups removes the group.
+        assert!(load_index(&*api, &["g".to_string()], None).await.unwrap()[0].is_some());
+    }
+
+    /// The `applied: false` trap. A key that was never committed is not a
+    /// failure — Kafka answers 0 for deleting an offset that does not exist,
+    /// and reading the flag as a verdict would turn `--delete-offsets` on a
+    /// fresh group into a run of spurious errors.
+    #[tokio::test]
+    async fn deleting_a_key_that_was_never_committed_is_not_an_error() {
+        let api = FakeQueen::with(&[]);
+        let never = [key("g", "orders", 7).unwrap()];
+        let results = delete_offsets(&*api, "g", &never, None, None).await;
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok(), "{:?}", results[0]);
+    }
+
+    /// Wide enough to be chunked, and every result still lines up with the key
+    /// that produced it.
+    #[tokio::test]
+    async fn a_wide_named_delete_is_chunked_under_the_op_ceiling() {
+        let api = FakeQueen::with(&[]);
+        let pairs: Vec<(String, Committed)> = (0..600)
+            .map(|p| (key("g", "orders", p).unwrap(), commit(i64::from(p))))
+            .collect();
+        store(&*api, &pairs, None).await;
+        api.kv_calls.lock().unwrap().clear();
+
+        let keys: Vec<String> = pairs.iter().map(|(k, _)| k.clone()).collect();
+        let results = delete_offsets(&*api, "g", &keys, None, None).await;
+        assert_eq!(results.len(), 600);
+        assert!(results.iter().all(|r| r.is_ok()));
+        for call in api.kv_calls.lock().unwrap().iter() {
+            assert!(call.len() <= queen::MAX_KV_OPS_PER_CALL);
+        }
+        assert!(load_group(&*api, "g", None).await.unwrap().is_empty());
+    }
+
+    /// A failed call fails exactly its own chunk's keys and never reports a
+    /// delete that did not happen — a client told an offset was removed when it
+    /// was not would stop retrying.
+    #[tokio::test]
+    async fn a_failed_named_delete_is_never_reported_as_removed() {
+        let api = FakeQueen::with(&[]);
+        store(&*api, &[(key("g", "orders", 0).unwrap(), commit(1))], None).await;
+        api.fail_kv(Error::Transport("reset".into()));
+        let results =
+            delete_offsets(&*api, "g", &[key("g", "orders", 0).unwrap()], None, None).await;
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0], Err(Error::Transport(_))));
+        assert_eq!(load_group(&*api, "g", None).await.unwrap().len(), 1);
+    }
+
+    /// The fence rides at index 0 of every chunk, `required`, exactly as the
+    /// commit path's does — and a LOST one removes nothing at all, which is the
+    /// whole reason it is there.
+    #[tokio::test]
+    async fn a_fenced_delete_carries_the_fence_and_a_lost_one_removes_nothing() {
+        let api = FakeQueen::with(&[]);
+        let pairs: Vec<(String, Committed)> = (0..300)
+            .map(|p| (key("g", "orders", p).unwrap(), commit(i64::from(p))))
+            .collect();
+        store(&*api, &pairs, None).await;
+        let keys: Vec<String> = pairs.iter().map(|(k, _)| k.clone()).collect();
+
+        // Somebody else holds the fence at a version this caller does not know.
+        api.kv_seed(
+            NAMESPACE,
+            &fence_key("g").unwrap(),
+            serde_json::json!({"node": 1, "incarnation": "elsewhere"}),
+        );
+        let stale = FenceOp {
+            key: fence_key("g").unwrap(),
+            value: serde_json::json!({"node": 2, "incarnation": "us"}),
+            expect: 0,
+        };
+        let results = delete_offsets(&*api, "g", &keys, Some(&stale), None).await;
+        assert_eq!(results.len(), 300);
+        assert!(results
+            .iter()
+            .all(|r| matches!(r, Err(Error::Precondition { .. }))));
+        assert_eq!(
+            kafka_error(results[0].as_ref().unwrap_err()),
+            ResponseError::NotCoordinator
+        );
+        assert_eq!(
+            load_group(&*api, "g", None).await.unwrap().len(),
+            300,
+            "a fenced-off delete removed offsets"
+        );
+
+        // ...and the fence this caller DOES hold: one operation at index 0 of
+        // every chunk, and the whole delete lands.
+        let held = FenceOp {
+            expect: api.kv_version_of(NAMESPACE, &fence_key("g").unwrap()),
+            ..stale
+        };
+        api.kv_calls.lock().unwrap().clear();
+        let results = delete_offsets(&*api, "g", &keys, Some(&held), None).await;
+        assert!(results.iter().all(|r| r.is_ok()));
+        let calls = api.kv_calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2, "300 deletes at 255 per fenced call");
+        for call in &calls {
+            match &call[0] {
+                KvOp::Put { key, required, .. } => {
+                    assert_eq!(key, &fence_key("g").unwrap());
+                    assert!(*required, "the fence must abort the transaction it loses");
+                }
+                other => panic!("a chunk went out without a fence: {other:?}"),
+            }
+        }
         assert!(load_group(&*api, "g", None).await.unwrap().is_empty());
     }
 

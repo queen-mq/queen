@@ -14,7 +14,10 @@
 //! recover. The rule that came out of the audit lives in
 //! [`metadata::not_a_topic_here`].
 
+pub mod acls;
+pub mod alter_configs;
 pub mod api_versions;
+pub mod create_partitions;
 pub mod create_topics;
 pub mod delete_groups;
 pub mod delete_topics;
@@ -23,6 +26,7 @@ pub mod describe_groups;
 pub mod fetch;
 pub mod find_coordinator;
 pub mod heartbeat;
+pub mod incremental_alter_configs;
 pub mod init_producer_id;
 pub mod join_group;
 pub mod leave_group;
@@ -30,6 +34,7 @@ pub mod list_groups;
 pub mod list_offsets;
 pub mod metadata;
 pub mod offset_commit;
+pub mod offset_delete;
 pub mod offset_fetch;
 pub mod produce;
 pub mod sasl_authenticate;

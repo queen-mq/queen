@@ -171,8 +171,10 @@ func apiName(k int16) string {
 		11: "JoinGroup", 12: "Heartbeat", 13: "LeaveGroup", 14: "SyncGroup",
 		15: "DescribeGroups", 16: "ListGroups", 17: "SaslHandshake",
 		18: "ApiVersions", 19: "CreateTopics", 20: "DeleteTopics",
-		22: "InitProducerId", 32: "DescribeConfigs", 36: "SaslAuthenticate",
-		42: "DeleteGroups", 47: "OffsetDelete", 60: "DescribeCluster",
+		22: "InitProducerId", 29: "DescribeAcls", 30: "CreateAcls",
+		31: "DeleteAcls", 32: "DescribeConfigs", 33: "AlterConfigs",
+		36: "SaslAuthenticate", 37: "CreatePartitions", 42: "DeleteGroups",
+		44: "IncrementalAlterConfigs", 47: "OffsetDelete", 60: "DescribeCluster",
 	}
 	if n, ok := names[k]; ok {
 		return n
