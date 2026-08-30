@@ -114,6 +114,42 @@ jobs:
             "$release_test/queen-supervisor-manifest.json"
           python3 -m unittest discover -s supervisor/scripts/tests -v
 
+  # `WithoutOverlapping` uses Laravel's cache rather than the Queen broker.
+  # Keep its real Redis + process-crash proof visible and isolated from both
+  # the offline unit lane and the performance fixtures.
+  php-client-redis-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      redis:
+        image: redis:7.4.2-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
+    defaults:
+      run:
+        working-directory: clients/client-laravel
+    env:
+      QUEEN_LARAVEL_TEST_REDIS_HOST: 127.0.0.1
+      QUEEN_LARAVEL_TEST_REDIS_PORT: 6379
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up PHP 8.3
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          extensions: mbstring, pcntl, posix, redis, dom, xml, xmlwriter
+          coverage: none
+          tools: composer:v2
+      - name: Resolve and install dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+      - name: Redis-backed Laravel overlap integration
+        run: vendor/bin/phpunit --testsuite RedisIntegration --testdox
+
   # Broker tests that do not require the live PostgreSQL stack. Native for fast
   # caching; live integration cases remain in the Docker-backed matrix above.
   rust-unit:
