@@ -28,6 +28,12 @@ their own sections below, and all changed rows in the table above. Which rows we
 stated explicitly, because "expected to work" and "measured" are different
 claims and this file has only ever made the second one.
 
+A fifth, on **2026-08-30**, changed what is BETWEEN the client and Queen rather
+than either end: the **Cloud** shape, where the facade's `QUEEN_URL` is a cell's
+proxy instead of a broker, so every Kafka request crosses authentication, tenant
+scoping, quotas and metering. It is measured in [`cloud/`](cloud) and has its own
+section, ["Reaching the facade in Queen Cloud"](#reaching-the-facade-in-queen-cloud).
+
 Read this file with [ERRORS.md](ERRORS.md) (what the facade puts on the wire and
 why) and with the deliberate-deviations list in `PLAN_QUEEN_KAFKA.md` STATUS. A
 divergence on that list is a decision, not a defect, and this file says so where
@@ -417,6 +423,66 @@ request to act as somebody else, which the facade cannot grant and refuses with
 error code 58 rather than ignoring. See the fixed-on-2026-08-29 section below
 for the wire bytes on both sides of that line.
 
+## Reaching the facade in Queen Cloud (2026-08-30)
+
+Every other row in this file was measured with the facade wired straight to a
+**broker**. In Cloud it is wired to the cell **proxy** instead, and that is the
+whole of the difference: one variable, `QUEEN_URL`. What it buys is that a Kafka
+client becomes a tenant of something. A facade pointed at the broker serves Kafka
+clients with no quota, no metering and no isolation.
+
+```text
+Kafka client --TCP--> queen-kafka --QUEEN_URL--> queen-proxy --> queen
+                       (facade)                  auth, tenant     (broker)
+                                                 scoping, quotas,
+                                                 metering
+```
+
+**Measured: franz-go, 16 of 16 scenarios green from a clean machine, 2026-08-30**
+([`cloud/`](cloud)). That is one client row, not fifteen. The proxy sits on the
+**HTTP** hop between the facade and Queen and never on the Kafka wire, so nothing
+it does is client-specific and no row in the matrix above is expected to change.
+But this file has only ever claimed what it measured, so: every other row's Cloud
+behaviour is inferred, and the inference is stated here rather than hidden in a
+PASS.
+
+### What a client meets in Cloud that it does not meet beside a broker
+
+- **The `read` scope is not optional.** The facade checks a credential with
+  `GET /api/v1/resources/queues`, which the proxy classifies as a read route, and
+  every Kafka client issues Metadata before anything else. A key scoped `consume`
+  alone is refused `403` at SASL, the connection never opens, and the client never
+  reaches Fetch. A consumer needs `consume` + `read`, a producer `produce` +
+  `read`, a transactional producer `produce` + `consume` + `read`.
+- **The tenant of a connection is the tenant of the SASL password, and nothing
+  else.** One facade advertises one address to every client whatever name it
+  dialled (`advertised_host` is per process), so the credential is the authority
+  and per-cluster SNI would need one facade process per cluster.
+- **Two credentials of one tenant are ONE consumer group.** The facade asks
+  `GET /auth/me` who a credential is and files the group under the answer, so a key
+  rotation or a per-service key does not fork a group's committed offsets.
+- **A `403` carries the proxy's own sentence**, bounded and stripped of control
+  bytes, in `error_message` wherever the response has that field. A `429` is not
+  an error at all: it becomes `throttle_time_ms` on Produce, Fetch and Metadata,
+  which every client obeys natively.
+
+### Two deployment requirements that are easy to miss
+
+Both of these cost real time before they were written down, and neither is
+visible from the Kafka side until every request fails.
+
+1. **The proxy must be told the listener's host is shared**
+   (`QUEEN_PROXY_SHARED_HOSTS`), or else be given a per-cluster hostname to route
+   on. On a shared host the proxy resolves the cluster from the credential; on an
+   unknown host it resolves nothing.
+2. **The BROKER has a second, independent KV gate.** With
+   `QUEEN_TENANCY_HEADER=true`, which every cell runs, the broker derives
+   `kv_require_grant`, and the **absence** of a `queen.kv_quota` row is a denial
+   rather than a permission (`server/src/config.rs`, `server/src/quota.rs`).
+   Without one row per broker tenant every offset commit is `403` at the broker,
+   past everything the proxy already allowed. `cloud/rig-cloud.sh` inserts them
+   and says why on the line.
+
 ## Deploying more than one facade: CLUSTER MODE (2026-08-29)
 
 Until this date this file and the webdoc gave one answer to "can I run two
@@ -734,6 +800,33 @@ None of these is a defect; each is a shipped choice that nobody has ratified.
    tenant's dedup window. If an escape hatch is wanted it should be explicit,
    default-off and loudly logged, and it should be a decision rather than a
    convenience.
+
+The Cloud shape (2026-08-30) added four more, and they are Alice's in the same
+sense: each one works, and each one is a choice nobody has ratified.
+
+10. **The two spellings of "commit an offset" go through different route
+    classes.** A plain offset commit is a `POST /api/v1/kv` batch under the
+    reserved `qk:` prefix, which the proxy reclassifies as `Consume` so it passes
+    on a plan with no `kv` feature. A TRANSACTIONAL offset commit rides
+    `POST /api/v1/transaction`, which the proxy classifies as `Produce`, so it is
+    authorized and metered as the push it is and never meets the `kv` gate its
+    non-transactional twin was excused from. Both halves work and both are
+    measured. The asymmetry is the thing to ratify, and it can be closed from
+    either end.
+11. **A Kafka Fetch is metered as a request and not as a delivery.** A tenant
+    consuming a million records through the Kafka wire is billed for the requests
+    that carried them, not for the records. That is a pricing decision, and it is
+    written down here so it is not discovered from an invoice.
+12. **The parked-pop gauge cannot see Kafka consumers.** A long-polling Fetch
+    takes no parked slot at the proxy, so the gauge an operator watches for
+    consumer pressure reads zero however many Kafka consumers are waiting. Either
+    the gauge grows a Kafka lane or the dashboard says the gauge is native-only;
+    today it does neither.
+13. **Routing is by credential rather than by SNI**, which is a consequence of
+    `advertised_host` being per process rather than per SNI lane. It is the shape
+    a shared Kafka listener actually has in Cloud, so it is the one proven; a
+    per-cluster SNI lane would mean one facade process per cluster and is not
+    ruled out, only unbuilt.
 
 ## Fixed on 2026-08-29, in the working tree and NOT committed
 

@@ -132,7 +132,10 @@ pub async fn handle(
                     "DeleteTopics could not delete the queue"
                 );
                 throttle_ms = throttle::longest(throttle_ms, throttle::for_error(&e));
-                results.push(errored(name.clone(), failed(&e), e.to_string()));
+                // `wire_reason`: bounded and scrubbed for the wire, so a 403's
+                // own sentence reaches the operator and nothing an upstream
+                // wrote can reprogram their terminal (queen.rs).
+                results.push(errored(name.clone(), failed(&e), e.wire_reason()));
             }
         }
     }

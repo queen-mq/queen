@@ -396,9 +396,14 @@ pub(crate) fn failed(e: &queen::Error) -> (ResponseError, String) {
             code: 401 | 403, ..
         } => (
             ResponseError::TopicAuthorizationFailed,
-            "Queen refused this credential for the call".to_string(),
+            // The refusal's OWN words, not a paraphrase of them. Queen and the
+            // proxy both say why ("operation not permitted for this
+            // credential", "not in your plan"), and a fixed sentence here threw
+            // that away — leaving an operator with a code and no idea which
+            // scope or which plan feature to go and change.
+            queen::wire_reason_of(&format!("Queen refused this credential for the call: {e}")),
         ),
-        _ => (ResponseError::RequestTimedOut, e.to_string()),
+        _ => (ResponseError::RequestTimedOut, e.wire_reason()),
     }
 }
 

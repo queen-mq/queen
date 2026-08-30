@@ -219,11 +219,14 @@ fn failed(e: &queen::Error) -> (ResponseError, String) {
             code: 401 | 403, ..
         } => (
             ResponseError::TopicAuthorizationFailed,
-            "Queen refused this credential".to_string(),
+            // The refusal's own words, bounded and scrubbed for the wire
+            // (queen.rs `wire_reason_of`): a fixed sentence here would name the
+            // problem without naming the scope that fixes it.
+            queen::wire_reason_of(&format!("Queen refused this credential: {e}")),
         ),
         other => (
             ResponseError::RequestTimedOut,
-            format!("the queue list could not be read: {other}"),
+            queen::wire_reason_of(&format!("the queue list could not be read: {other}")),
         ),
     }
 }

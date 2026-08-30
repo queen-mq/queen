@@ -29,7 +29,10 @@ their committed offsets, which live in Queen.
   boundary under [Transactions](#transactions-what-works-and-the-boundary)
   before you plan around it.
 - **Cloud fit**: TLS with SNI, SASL/PLAIN (the password is your Queen token),
-  429s mapped to `throttle_time_ms`.
+  429s mapped to `throttle_time_ms`. Point `QUEEN_URL` at a cell's proxy instead
+  of at a broker and every Kafka request crosses authentication, tenant scoping,
+  quotas and metering; a real client proves it end to end in
+  [`compat/cloud/`](compat/cloud).
 
 The advertised table is 32 API keys. The thirteen admin keys,
 `InitProducerId` and the four transaction keys landed on 2026-08-29 and
@@ -255,14 +258,23 @@ points the same suite at a stack you already have.
 ## Tests
 
 `cargo test`. Live end-to-end (Docker + Go): `compat/rig.sh --m5`, passing
-`-count=1`. Cluster mode: `compat/cluster/rig-cluster.sh`. Behaviour against a
-real broker: `compat/differential/rig-diff.sh` diffs every answer against
-`apache/kafka:3.9.1`. Full support matrix and config reference: the webdoc pages
-`/reference/kafka` and `/deploy/kafka`. Plan and status:
+`-count=1`. Cluster mode: `compat/cluster/rig-cluster.sh`. Queen Cloud, with a
+whole cell and the proxy on the path: `compat/cloud/rig-cloud.sh`. Behaviour
+against a real broker: `compat/differential/rig-diff.sh` diffs every answer
+against `apache/kafka:3.9.1`. Full support matrix and config reference: the
+webdoc pages `/reference/kafka` and `/deploy/kafka`. Plan and status:
 [../PLAN_QUEEN_KAFKA.md](../PLAN_QUEEN_KAFKA.md).
+
+Measured on 2026-08-30, all from a clean machine: `rig.sh --m5` **91/91**,
+`cluster` **11/11**, `cloud` **16/16**, the differential **0 divergences left to
+classify** (100 found: 74 deliberate, 26 accepted).
 
 Status: preview. Not in release CI, and no published image carries the facade
 yet, though the repository's `Dockerfile` builds it beside the broker binary for
-`QUEEN_KAFKA_EMBEDDED=true` (server/src/kafka_facade.rs). The Cloud consume path
-is routed: the proxy classifies `POST /api/v1/fetch` as `Consume`. See the
-plan's known-open list for what is still open.
+`QUEEN_KAFKA_EMBEDDED=true` (server/src/kafka_facade.rs). Queen Cloud is
+**reachable**: produce, consume, groups, committed offsets, admin and
+transactions all cross the cell proxy, and two tenants on one shared listener are
+isolated from each other. What is still open there is a short list of
+ratifications rather than a gap, and it is in
+[compat/CLIENT_MATRIX.md](compat/CLIENT_MATRIX.md) under "Open decisions". See
+the plan's known-open list for the rest.

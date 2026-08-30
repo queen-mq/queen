@@ -230,22 +230,39 @@ queues that Kafka clients share with native producers.
 **Committed offsets live in Queen's key/value store, not in a consumer group.** One key per
 (group, topic, partition) under the `queen-kafka` namespace, spelled
 `qk:group:<group>:<topic>:<partition>` with everything outside `[A-Za-z0-9._-]` percent-encoded.
-They survive a facade restart, and they are not yet the broker's native consumer-group cursor,
-so Kafka groups do not appear in the console's consumer-group lag views.
+They survive a facade restart, and they are still not the broker's native consumer-group cursor:
+KV is the single source of truth for a Kafka group's position and nothing outside the facade
+writes one.
+
+They are no longer invisible, though. The three consumer-group views read both stores and mark
+every row with an additive `kind` of `queen` or `kafka`, applying the same lag arithmetic to
+each, so a Kafka group's lag stands beside a native one and matches what Kafka's own admin API
+reports for it. That mirror is read only. One place it cannot show both is the single-group
+detail view, which is keyed by queue name: where a Queen group and a Kafka group share a name on
+one queue the native entry wins, and the `kind` field says which store the answer came from. The
+list view renders both.
 
 **A facade restart is a broker restart.** Group membership is in memory and nothing else in the
 facade is durable. A restarted process knows no members, answers `UNKNOWN_MEMBER_ID` to the
 first heartbeat of every survivor, and they rejoin and resume from their committed offsets.
 That is the sequence a real broker failover produces and every client already implements it.
 
-**Two credentials of one tenant are two groups.** The group registry is keyed by (credential,
-group id), because `orders-consumer` is a name two strangers pick and a registry keyed by the
-group id alone would put two tenants in one group. Queen scopes committed offsets by **tenant**
-instead. The two agree while a tenant has one credential and disagree the moment it has two, a
-key rotation or a per-service key: two consumers of one group id become the sole member of two
-groups, each assigned everything by its own leader, both writing the same offset keys. The
-facade cannot resolve this from the inside today, so it logs when one group id goes live under
-a second credential. Give one consumer group one credential.
+**Two credentials of one tenant are one group where the deployment can say so, and two where it
+cannot.** The group registry is keyed by (identity, group id), because `orders-consumer` is a name
+two strangers pick and a registry keyed by the group id alone would put two tenants in one group.
+The identity comes from asking Queen `GET /auth/me` once per credential, and everything turns on
+whether that answer names the tenant.
+
+In **Queen Cloud** it does. The proxy resolves an api-key bearer through its normal credential
+path, so a key rotation or a per-service key resolves to the same tenant and the two credentials
+are ONE group over one set of committed offsets, which is what a group of that name should be.
+
+Against a **broker with `JWT_ENABLED` set** it does not: the endpoint does not identify a bearer,
+so the identity falls back to the hashed credential and the old behaviour stands. Two consumers of
+one group id become the sole member of two groups, each assigned everything by its own leader, both
+writing the same offset keys. The facade cannot resolve that from the inside, so it logs when one
+group id goes live under a second credential. In that deployment, give one consumer group one
+credential.
 
 ## The payload envelope
 

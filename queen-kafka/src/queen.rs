@@ -135,6 +135,96 @@ impl Error {
             _ => None,
         }
     }
+
+    /// This failure as a sentence fit to put ON THE WIRE, in a Kafka
+    /// `error_message` field.
+    ///
+    /// [`Display`](std::fmt::Display) is for the LOG, and until now that is the
+    /// only place a refusal's reason went: an operator running
+    /// `kafka-topics --create` against a consume-scoped Cloud key read
+    /// `TOPIC_AUTHORIZATION_FAILED` and had to go and find the facade's log to
+    /// learn that the fix is a scope. The proxy already says exactly why
+    /// (proxy/src/errors.rs: `"operation not permitted for this credential"`,
+    /// `"not in your plan"`), so the reason exists — it just was not carried.
+    ///
+    /// Two properties this has that `to_string()` does not, and both are the
+    /// reason it is a separate method rather than a rename:
+    ///
+    /// * **bounded** at [`WIRE_REASON_MAX`] characters. `Display`'s body
+    ///   [`Snippet`] is already clamped, but the clamp is on the BODY and this
+    ///   is a bound on the whole field — a Kafka response is not a log line, and
+    ///   a client allocates what it is told to;
+    /// * **sanitised**. The body is written by whatever answered the HTTP call,
+    ///   which on a misroute is not Queen at all. `Display` renders it into a
+    ///   log stream where a `\r` hides the rest of the line and an ANSI escape
+    ///   reprograms the terminal of whoever is tailing; put on the wire it is
+    ///   the same bytes going into somebody else's `kafka-topics` output. The
+    ///   scrub is the same idea as `server/src/kafka_facade.rs`'s `sanitize`
+    ///   (which is the other direction of the same trust boundary), spelled
+    ///   again here because that function is in another crate.
+    pub fn wire_reason(&self) -> String {
+        wire_reason_of(&self.to_string())
+    }
+}
+
+/// [`Error::wire_reason`]'s rule, applied to a sentence a handler composed
+/// itself. Public so that a handler which puts its OWN words in front of the
+/// failure's still ends up with one bounded, scrubbed field rather than a bound
+/// on the half it did not write.
+pub fn wire_reason_of(text: &str) -> String {
+    clamp_chars(&scrub(text), WIRE_REASON_MAX)
+}
+
+/// Ceiling on a reason this facade puts in a Kafka `error_message`.
+///
+/// 256 is generous for the proxy's own sentences (the longest is under 60
+/// characters) and small enough that a hostile or merely broken upstream cannot
+/// make a client allocate for it.
+pub const WIRE_REASON_MAX: usize = 256;
+
+/// Strip ANSI escape sequences and replace control characters with one space.
+///
+/// Never the byte itself, and never nothing: words must not run together where a
+/// tab or a stray control byte used to be.
+fn scrub(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            match chars.next() {
+                // CSI (`ESC [ … final`): the colour codes, the cursor moves.
+                Some('[') => {
+                    for n in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&n) {
+                            break;
+                        }
+                    }
+                }
+                // OSC (`ESC ] … BEL|ESC`): window titles, hyperlinks.
+                Some(']') => {
+                    for n in chars.by_ref() {
+                        if n == '\u{7}' || n == '\u{1b}' {
+                            break;
+                        }
+                    }
+                }
+                // Any other two-character escape: the second char is consumed.
+                _ => {}
+            }
+            continue;
+        }
+        out.push(if c.is_control() { ' ' } else { c });
+    }
+    out
+}
+
+/// Clamp to `max` CHARACTERS, marking the cut. Characters and not bytes, so a
+/// multi-byte reason cannot panic the encoder on a mid-codepoint slice.
+fn clamp_chars(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        Some((cut, _)) => format!("{}…", &s[..cut]),
+        None => s.to_string(),
+    }
 }
 
 impl std::fmt::Display for Error {
@@ -3225,6 +3315,67 @@ mod tests {
       ],
       "kvBytes": 0, "timerBytes": 0
     }"#;
+
+    // ------------------------------------------------- the reason on the wire
+
+    /// The whole point of `wire_reason`: the proxy already says WHY, and until
+    /// now that sentence reached only the log.
+    #[test]
+    fn a_403_from_the_proxy_names_its_reason_in_the_error_message() {
+        for body in [
+            r#"{"error":"operation not permitted for this credential","code":"forbidden"}"#,
+            r#"{"error":"not in your plan","code":"feature_gated"}"#,
+        ] {
+            let reason = Error::status(403, body).wire_reason();
+            assert!(reason.contains("403"), "{reason}");
+            assert!(
+                reason.contains("not permitted") || reason.contains("not in your plan"),
+                "the proxy's own words must survive: {reason}"
+            );
+        }
+    }
+
+    /// The body is written by whatever answered the HTTP call — on a misroute,
+    /// not Queen at all — and it goes into somebody's `kafka-topics` output and
+    /// into this process's log. Neither may be forged.
+    #[test]
+    fn an_error_message_cannot_forge_a_log_line_or_a_response() {
+        let hostile = format!(
+            "\u{1b}[31mFAKE\u{1b}[0m\r\nlevel=info msg=\"all good\"\0\ttail{}",
+            "x".repeat(10_000)
+        );
+        let reason = Error::status(403, hostile).wire_reason();
+
+        assert!(!reason.contains('\u{1b}'), "{reason}");
+        assert!(!reason.chars().any(char::is_control), "{reason}");
+        assert!(
+            !reason.contains("[31m"),
+            "the CSI body goes with the escape: {reason}"
+        );
+        // Bounded on CHARACTERS, so the cut can never land mid-codepoint.
+        assert!(
+            reason.chars().count() <= WIRE_REASON_MAX + 1,
+            "{} chars",
+            reason.chars().count()
+        );
+        // ...and the bound holds for a multi-byte body too.
+        let wide = Error::status(500, "à".repeat(5_000)).wire_reason();
+        assert!(wide.chars().count() <= WIRE_REASON_MAX + 1);
+        assert!(wide.ends_with('…'), "a cut says it was cut: {wide}");
+        // A short reason is passed through whole, ellipsis and all absent.
+        let short = Error::status(403, "nope").wire_reason();
+        assert_eq!(short, "HTTP 403: nope");
+    }
+
+    /// A handler that puts its own words in front still ends up with ONE
+    /// bounded field, not a bound on the half it did not write.
+    #[test]
+    fn a_composed_reason_is_bounded_as_a_whole() {
+        let long = Error::status(403, "y".repeat(5_000));
+        let composed = wire_reason_of(&format!("Queen refused this credential: {long}"));
+        assert!(composed.chars().count() <= WIRE_REASON_MAX + 1);
+        assert!(composed.starts_with("Queen refused this credential: HTTP 403"));
+    }
 
     #[test]
     fn the_queue_list_body_parses_to_names_and_partition_counts() {

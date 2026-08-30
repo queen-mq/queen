@@ -147,14 +147,39 @@ pub async fn authenticate(facade: &Facade, bytes: &[u8], state: &mut SaslState) 
             Outcome::Admitted
         }
         // The auth layer's own answer, at the broker (server/src/auth.rs) or at
-        // the proxy (proxy/src/errors.rs `err_401`). Fatal and final.
+        // the proxy (proxy/src/errors.rs `err_401`). Fatal and final — but the
+        // two statuses are two DIFFERENT operator problems and saying one
+        // sentence for both sent people to check a password that was never
+        // wrong.
+        //
+        // 401 — the credential is not one: unknown, revoked, malformed.
+        Err(queen::Error::Status { code: 401, .. }) => Outcome::Rejected(
+            "Queen refused this credential (HTTP 401): it is unknown, revoked or malformed. The \
+             password must be the bearer token an SDK would send, and it must be valid for this \
+             cluster"
+                .to_string(),
+        ),
+        // 403 — the credential is REAL and is not allowed to list queues.
+        //
+        // The check is `GET /api/v1/resources/queues` (see the module header),
+        // which in Cloud is `RouteClass::Read` and therefore needs the `read`
+        // scope (proxy/src/auth.rs). A key scoped `{consume}` alone is refused
+        // HERE, at authenticate, and never reaches Fetch — so the connection
+        // never opens and the operator sees what looks exactly like a bad
+        // password. It is not one. Every Kafka client issues Metadata before
+        // anything else, and Metadata IS the queue listing, so `read` is part of
+        // the minimum viable Kafka credential and not an extra.
+        //
+        // Still SASL_AUTHENTICATION_FAILED: it is the only code this API has,
+        // and the connection really is over. What changes is that the sentence
+        // beside it names the fix.
         Err(queen::Error::Status {
-            code: code @ (401 | 403),
-            ..
-        }) => Outcome::Rejected(format!(
-            "Queen refused this credential (HTTP {code}). The password must be the bearer token \
-             an SDK would send, and it must be valid for this cluster"
-        )),
+            code: 403, body, ..
+        }) => Outcome::Rejected(queen::wire_reason_of(&format!(
+            "HTTP 403 on the queue listing every Kafka client needs for Metadata. This is a \
+             SCOPE and not a bad password: add `read` to this credential, beside \
+             `produce`/`consume`. Queen said: {body}"
+        ))),
         // Everything else: the token is unjudged. See the module header.
         Err(e) => Outcome::Unavailable(format!("the credential could not be verified: {e}")),
     }
@@ -261,6 +286,88 @@ mod tests {
         let message = resp.error_message.as_ref().unwrap().as_str();
         assert!(message.contains("401"), "{message}");
         assert!(!message.contains("wrong"), "the refusal echoed the token");
+    }
+
+    /// The regression guard on the 401/403 split: a 401 really IS an unknown
+    /// credential, and must keep saying so. If this ever starts talking about
+    /// scopes it is sending an operator to fix a grant on a key that does not
+    /// exist.
+    #[tokio::test]
+    async fn a_401_at_sasl_still_says_the_credential_is_unknown() {
+        let (f, api) = facade();
+        api.fail_list(queen::Error::status(401, r#"{"error":"unauthorized"}"#));
+        let mut state = SaslState::AwaitingAuthenticate;
+        let (resp, _) = handle(&f, &request(plain("acme", "wrong")), &mut state).await;
+
+        let message = resp.error_message.as_ref().unwrap().as_str();
+        assert!(message.contains("401"), "{message}");
+        assert!(
+            message.contains("unknown, revoked or malformed"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("scope") && !message.contains("`read`"),
+            "a 401 is not a scope problem: {message}"
+        );
+    }
+
+    /// THE Cloud headline (design §0.4). A key scoped `{consume}` alone is
+    /// refused 403 at the queue listing, which is the check this module makes —
+    /// so the connection never opens and it looks exactly like a bad password.
+    /// It is not one, and the message has to say which knob fixes it.
+    #[tokio::test]
+    async fn a_403_at_sasl_says_scopes_and_not_bad_password() {
+        let (f, api) = facade();
+        api.fail_list(queen::Error::status(
+            403,
+            r#"{"error":"operation not permitted for this credential","code":"forbidden"}"#,
+        ));
+        let mut state = SaslState::AwaitingAuthenticate;
+        let (resp, outcome) = handle(&f, &request(plain("acme", "consume-only")), &mut state).await;
+
+        // Still fatal, still the only code this API has.
+        assert_eq!(
+            resp.error_code,
+            ResponseError::SaslAuthenticationFailed.code()
+        );
+        assert!(matches!(outcome, Outcome::Rejected(_)), "{outcome:?}");
+        assert_eq!(state, SaslState::AwaitingAuthenticate);
+
+        let message = resp.error_message.as_ref().unwrap().as_str();
+        assert!(message.contains("403"), "{message}");
+        assert!(message.contains("SCOPE"), "{message}");
+        assert!(message.contains("read"), "{message}");
+        assert!(message.contains("Metadata"), "{message}");
+        assert!(message.contains("not a bad password"), "{message}");
+        // The proxy's own words are carried, so an operator can grep for them.
+        assert!(
+            message.contains("not permitted for this credential"),
+            "{message}"
+        );
+        // ...and never the secret the client presented.
+        assert!(!message.contains("consume-only"), "{message}");
+        // Bounded and scrubbed like every other reason on the wire.
+        assert!(message.chars().count() <= queen::WIRE_REASON_MAX + 1);
+        assert!(!message.chars().any(char::is_control), "{message}");
+    }
+
+    /// A hostile or merely broken upstream writes the body this message quotes.
+    /// It must not be able to reprogram the terminal of whoever ran the client,
+    /// nor to make it allocate for a megabyte.
+    #[tokio::test]
+    async fn a_403_body_cannot_forge_the_sasl_refusal() {
+        let (f, api) = facade();
+        api.fail_list(queen::Error::status(
+            403,
+            format!("\u{1b}[31mFAKE\u{1b}[0m\r\nok\0{}", "z".repeat(9_000)),
+        ));
+        let mut state = SaslState::AwaitingAuthenticate;
+        let (resp, _) = handle(&f, &request(plain("acme", "t")), &mut state).await;
+
+        let message = resp.error_message.as_ref().unwrap().as_str();
+        assert!(!message.contains('\u{1b}'), "{message}");
+        assert!(!message.chars().any(char::is_control), "{message}");
+        assert!(message.chars().count() <= queen::WIRE_REASON_MAX + 1);
     }
 
     /// The distinction the whole module exists for: an unreachable Queen must

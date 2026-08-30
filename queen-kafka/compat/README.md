@@ -7,12 +7,13 @@ rig has to fake, and only under `--m5` (see below). `js/`, `librdkafka/` and
 `java/` are M6's other client rows and run against the same stack — see
 [The rest of the M6 client matrix](#the-rest-of-the-m6-client-matrix).
 
-Three suites stand up their own stack instead, because the shape they measure is
+Four suites stand up their own stack instead, because the shape they measure is
 not one broker and one facade:
 
 | Suite | Shape | Ports and containers |
 | --- | --- | --- |
-| [`cluster/`](cluster) | **cluster mode**: one Postgres, two mesh-wired Queen brokers on it, three clustered facades, one facade with the cluster config absent, and two unclustered facades. Nine scenarios, run by `cluster/rig-cluster.sh` | 32400-32419, container `qkx-c2-pg` |
+| [`cloud/`](cloud) | **Queen Cloud**: a whole cell — proxy control-plane Postgres, cell Postgres, broker, proxy, facade — with the facade's `QUEEN_URL` pointing at the PROXY rather than at the broker, so every Kafka request crosses authentication, tenant scoping, quotas and metering. 16 scenarios over franz-go, run by `cloud/rig-cloud.sh` | 33040-33044, containers `qkc-t2-pxdb` and `qkc-t2-cellpg` |
+| [`cluster/`](cluster) | **cluster mode**: one Postgres, two mesh-wired Queen brokers on it, three clustered facades, one facade with the cluster config absent, and two unclustered facades. 11 scenarios, run by `cluster/rig-cluster.sh` | 32400-32419, container `qkx-c2-pg` |
 | [`transactions/`](transactions) | **M9 transactions**: one Postgres, one broker and THREE facades — the one under test, one with `QUEEN_KAFKA_NODE_ID` set so the cluster-mode refusal can be measured, and one with the transaction caps at their floor. Nine scenarios over Java kafka-clients 4.3.1 and franz-go, run by `transactions/run.sh` | 32910-32914, container `qkt-acc-pg` |
 | [`embedded/`](embedded) | **embedded mode** (`QUEEN_KAFKA_EMBEDDED=true` on the BROKER, which then supervises the facade as a child process), run by `embedded/rig-embedded.sh` | see its own README |
 
@@ -115,6 +116,48 @@ by `go/admin_configs_test.go` and by `kafka-configs.sh` diffed against the
 oracle, and a differential scenario for it is the one piece of F4's design that
 was not built. It is worth adding, and it is the place a future retention or
 `read_only` drift would be caught automatically.
+
+## The Cloud acceptance
+
+`cloud/` is the only suite in this directory that puts the **proxy** on the
+critical path of every Kafka request. `rig-cloud.sh` stands a whole cell up
+(control-plane Postgres, cell Postgres, broker, proxy, facade), issues the
+credentials it needs through the proxy's own control plane, and runs the
+franz-go suite in `cloud/` against it. `cloud/run.sh` is the same suite pointed
+at a cell that is already up, so it can be aimed at a real staging cell without
+editing a line of Go; every address and credential comes from the environment.
+
+**16 of 16 green from a clean machine, 2026-08-30** (`go test` 127 s, on top of
+the cell boot). What each group proves:
+
+| Group | Scenarios | What it pins |
+| --- | --- | --- |
+| Tenant isolation | 4 | two tenants on one shared-host listener do not see each other's topics or records, do not share a consumer group, and do not share committed offsets |
+| Scopes | 3 | a `consume` key reads but cannot create topics, a `produce` key cannot consume, and a key without `read` cannot even authenticate (Metadata **is** the queue listing, so the connection never opens) |
+| The KV gates | 3 | offsets commit for a tenant whose plan carries no `kv` feature, a plain KV batch is still gated, and the transaction route is still `Produce`-classified |
+| The proxy's edges | 3 | a 30 s long-poll Fetch is not cut by the proxy's 35 s upstream timeout, a rate-capped tenant is throttled rather than failed, and metering rows land in the control-plane database for Kafka traffic |
+| Identity, mirror, freeze | 3 | two credentials of one tenant resolve to ONE group through `/auth/me`, a Kafka group shows up in Queen's own consumer-group views with `kind=kafka`, and a blocked tenant can still commit and read offsets while its produce is refused |
+
+Two things the suite **measures and prints without asserting**, because both are
+decisions rather than defects and an operator should meet them here rather than
+in an invoice or a dashboard:
+
+- **A Kafka Fetch books a request and zero messages.** A tenant consuming a
+  million records through the Kafka wire is billed for the requests that carried
+  them, not for the records.
+- **A long-polling Fetch takes no parked slot at the proxy**, so the parked-pop
+  gauge an operator watches for consumer pressure reads zero however many Kafka
+  consumers are waiting. It cannot see them at all.
+
+**Routing is by credential, not by SNI, and that is deliberate.**
+`src/lib.rs` keeps `advertised_host` per PROCESS rather than per SNI lane, so one
+facade hands every client the same bootstrap address whatever name it dialled: a
+second tenant's connections would come back carrying the first tenant's SNI. Per-
+cluster SNI therefore needs one facade process per cluster, and one facade
+fronting many tenants needs the credential to be the authority. The rig runs the
+proxy's shared-host arm (`QUEEN_PROXY_SHARED_HOSTS`) for that reason. The
+consequence is the point: **the tenant of a Kafka connection is the tenant of the
+SASL password, and nothing else.**
 
 ## The M5 surface: TLS, SASL and the throttle
 

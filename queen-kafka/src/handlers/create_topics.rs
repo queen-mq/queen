@@ -476,7 +476,13 @@ fn failed(e: &queen::Error, version: i16) -> (ResponseError, String) {
             ResponseError::UnknownServerError
         }
     };
-    (code, e.to_string())
+    // `wire_reason` and not `to_string`: this string is going into a Kafka
+    // `error_message` and out to somebody's terminal, so it is bounded and
+    // scrubbed rather than merely clamped for a log line. It is what carries the
+    // proxy's own sentence ("operation not permitted for this credential", "not
+    // in your plan") to an operator whose CreateTopics was refused for a SCOPE
+    // they can go and fix.
+    (code, e.wire_reason())
 }
 
 /// One INFO line per window when a client asked for a width it did not get.

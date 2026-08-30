@@ -429,7 +429,10 @@ fn kafka_error(e: &queen::Error) -> ResponseError {
         queen::Error::Status { code, .. } => match code {
             401 | 403 => ResponseError::TopicAuthorizationFailed,
             404 => ResponseError::UnknownTopicOrPartition,
-            429 | 502..=504 => ResponseError::NotLeaderOrFollower,
+            // 408 with the rest of the "later, not never" family, for the reason
+            // spelled out in `fetch::kafka_error`: it can only come from an
+            // intermediary, and a timeout is never a permanent verdict.
+            408 | 429 | 502..=504 => ResponseError::NotLeaderOrFollower,
             _ => ResponseError::UnknownServerError,
         },
         queen::Error::Body(_) => ResponseError::UnknownServerError,
@@ -451,6 +454,32 @@ mod tests {
     use kafka_protocol::protocol::{Decodable, Encodable, Message};
     use serde_json::json;
     use std::sync::Arc;
+
+    /// The same sweep `fetch` runs, on the other pure read of a partition's
+    /// bounds. Both are consume-path codes and both must stay retriable where
+    /// the situation is.
+    #[test]
+    fn every_status_the_proxy_writes_has_a_named_kafka_code() {
+        for (code, want) in [
+            (401, ResponseError::TopicAuthorizationFailed),
+            (403, ResponseError::TopicAuthorizationFailed),
+            (404, ResponseError::UnknownTopicOrPartition),
+            (408, ResponseError::NotLeaderOrFollower),
+            (413, ResponseError::UnknownServerError),
+            (421, ResponseError::UnknownServerError),
+            (429, ResponseError::NotLeaderOrFollower),
+            (500, ResponseError::UnknownServerError),
+            (502, ResponseError::NotLeaderOrFollower),
+            (503, ResponseError::NotLeaderOrFollower),
+            (504, ResponseError::NotLeaderOrFollower),
+        ] {
+            assert_eq!(kafka_error(&Error::status(code, "")), want, "HTTP {code}");
+        }
+        assert_eq!(
+            kafka_error(&Error::Transport("reset".into())),
+            ResponseError::NotLeaderOrFollower
+        );
+    }
 
     // -------------------------------------------------------------- fixtures
 

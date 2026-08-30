@@ -22,6 +22,44 @@ from a DIFFERENT process, and that `EndTxn` reaches a facade holding no stage �
 and it does not bring Kafka Streams any closer, because Streams' dependency is
 compaction. "Transactions landed" must never be said without that last clause.
 
+## STATUS — Queen Cloud is reachable (2026-08-30)
+
+The three Cloud entries that stood at the top of "Known open" are closed, and
+each one is closed by a measurement rather than by a reading. **A real franz-go
+client produces, consumes, forms groups, commits offsets, runs admin and runs
+transactions through a whole cell — facade, proxy, broker — and two tenants on
+one shared listener cannot see each other.** 16 of 16 scenarios green from a
+clean machine, reproducible in about four minutes with
+`compat/cloud/rig-cloud.sh`.
+
+What made it reachable, in three pieces, none of which widened a permission:
+
+1. **The consume path is routed.** `POST /api/v1/fetch` is classified `Consume`,
+   which is exactly the authority of the pop it stands in for.
+2. **Offsets are no longer behind the `kv` feature gate.** A KV batch touching
+   only the reserved `qk:` prefix is reclassified `Consume` at the gateway
+   (`proxy/src/kafka_kv.rs`); anything else in the body, or a body that cannot be
+   read, fails closed. `classify()` is unchanged.
+3. **Identity is real.** `GET /auth/me` answers an api-key bearer through the
+   normal credential-resolution path, so one tenant's two keys are one group.
+
+Two facts an operator meets that are decisions rather than defects: a Kafka Fetch
+is metered as a **request and not as a delivery**, and a long-polling Fetch takes
+**no parked slot**, so the proxy's parked-pop gauge cannot see Kafka consumers at
+all. Both are printed by the suite and neither is asserted.
+
+The routing choice worth knowing: the tenant of a Kafka connection is the tenant
+of the **SASL password** and nothing else. `advertised_host` is per PROCESS, so
+one facade hands every client the same bootstrap address whatever name it
+dialled, and per-cluster SNI would need one facade process per cluster.
+
+What remains is a list of ratifications, not a gap; it is in
+`queen-kafka/compat/CLIENT_MATRIX.md` under "Open decisions". The sharpest is the
+**transaction asymmetry**: a plain offset commit rides the `qk:`-prefixed KV
+route and a transactional one rides `POST /api/v1/transaction`, classified
+`Produce`, so the two spellings of "commit an offset" pass through different
+route classes. Both work; the asymmetry is unratified.
+
 ## STATUS M9 — transactions (2026-08-30)
 
 The advertised table goes from 28 keys to **32**: AddPartitionsToTxn (24),
@@ -531,25 +569,46 @@ walk on every call and would make this API a second way to delete a group).
 
 Known open, in the order they matter:
 
-- **The proxy blocks C2, so the Cloud shape cannot consume.** `classify` in
-  `proxy/src/routes.rs` names no `/api/v1/fetch` arm, so it falls through to the
-  fail-closed `/api/` default and the route is `Blocked` (a 404). Confirmed
-  twice: by reading the fallthrough, and in the generated
-  `proxy-route-classes` table, which lists it under **blocked**. Produce, queue
-  admin and the queue listing are all reachable; only the consume path is not.
-  M5's rig proves TLS, SASL, SNI and credential forwarding against a bare broker
-  behind `compat/authgate`, never against the proxy, so nothing caught it. The
-  facade also reaches KV for offsets, which is `Gated(Feature::Kv)`: a Cloud
-  tenant without the KV feature cannot commit. Both need a proxy change before
-  M5 is true end to end.
-- **C3, the native cursor.** Offsets are KV, so Kafka groups do not appear in
-  the console's consumer-group lag views.
-- **Tenant identity resolves in almost no deployment.** `identity.rs` asks
-  `GET /auth/me` per credential and keys groups and the queue cache by the
-  answer, but the broker answers a bearer only with `JWT_ENABLED` unset and the
-  proxy's endpoint reads a cookie, so everywhere else the key falls back to the
-  hashed credential and one tenant's two credentials are still two groups over
-  one offset namespace. The facade logs it and cannot do better from inside.
+- ~~**The proxy blocks C2, so the Cloud shape cannot consume.**~~ **CLOSED
+  2026-08-30.** Both halves of this entry are gone and both are measured.
+  `classify` now names `POST /api/v1/fetch` and answers `Consume`, which is
+  exactly the authority of the pop it stands in for. The KV half was closed
+  differently and deliberately: rather than widen the `kv` feature gate, the
+  gateway reclassifies a KV batch that touches **only** the facade's reserved
+  `qk:` prefix as `Consume` (`proxy/src/kafka_kv.rs`), so a consumer commits and
+  reads its offsets on a plan carrying no `kv` feature at all, and a tenant over
+  its storage quota can still move its cursor. Refusing that read would strand a
+  consumer at an offset it can never move past while the backlog it would drain
+  keeps growing. The sniffer fails closed on an unreadable, empty, mixed,
+  foreign-namespace or unknown-op body, and `classify()` itself is unchanged.
+  Proven by `compat/cloud`: `TestOffsetsCommitForATenantWhosePlanHasNoKv` and
+  `TestAPlainKvBatchIsStillGated`, the second being the one that says the gate
+  was narrowed and not removed.
+- ~~**C3, the native cursor.**~~ **CLOSED 2026-08-30.** Kafka consumer groups now
+  appear beside native ones in all three consumer-group views. One `kafka_base`
+  CTE per function in `010_log_admin.sql` reads the `qk:group:` rows out of KV and
+  is `UNION ALL`'d ahead of the existing covering probe, so the probe, the lag
+  arithmetic and the JSON shape are literally the same code for both engines;
+  every row carries an additive `kind` of `queen` or `kafka`. Read only: KV stays
+  the single source of truth for a Kafka offset and nothing on this path writes
+  one. Proven at the SQL level by `server/tests/kafka_group_mirror.rs` (14 cases,
+  against a real Postgres) and over the wire by
+  `TestTheSmartMirrorShowsAKafkaGroupThroughTheProxy`, whose lag matches
+  franz-go's own `ListConsumerGroupOffsets` number for number.
+  **Still open, and it is documentation rather than code:** the
+  `/reference/http/consumer-groups` page does not yet describe the `kind` field
+  it now returns.
+- **Tenant identity: resolved in Cloud, still open beside a bare broker.** The
+  Cloud half is closed. `GET /auth/me` now answers an api-key bearer
+  (`proxy/src/kafka_identity.rs`), resolved through
+  `acting::resolve_route` -> `authenticate_for` / `resolve_from_credential` rather
+  than a bare key lookup, so one tenant's two credentials are ONE group rather
+  than two sharing one offset namespace. Proven by
+  `TestTheFacadeResolvesItsTenantFromAuthMe`, which drives a group from two keys.
+  What remains is the OSS shape: against a broker with `JWT_ENABLED` set,
+  `/auth/me` still does not identify a bearer, so the key falls back to the hashed
+  credential and the two-credentials-two-groups problem is unchanged there. The
+  facade logs which of the two happened and cannot do better from inside.
 - **Raw-bytes payload mode.** Values are always the base64 `k`/`v`/`h`/`t`
   envelope; a native consumer of a Kafka-written queue sees the envelope.
 - **The idempotent producer's sequence window is IN MEMORY and per facade**
@@ -792,11 +851,29 @@ M9 SHIPPED. Transactions, 28 keys to 32, with the boundary stated in the
   `compat/librdkafka/kcat.sh`, `compat/librdkafka/confluent_group.py`, and the
   two `compat/java/*.java` scripts with kafka-clients + slf4j on the classpath.
   See `compat/README.md`.
+- Cluster mode: `compat/cluster/rig-cluster.sh`, which stands up its own
+  Postgres, two mesh-wired brokers, three clustered facades and three unclustered
+  ones on 32400-32419 and runs 11 scenarios. Every port is overridable as a block.
+- Queen Cloud: `compat/cloud/rig-cloud.sh`, which stands up a whole cell
+  (control-plane Postgres, cell Postgres, broker, proxy, facade on 33040-33044),
+  issues the credentials through the proxy's own control plane, and runs 16
+  scenarios with the PROXY on the path of every Kafka request.
+  `compat/cloud/run.sh` is the same suite pointed at a cell that is already up,
+  so it can be aimed at a real staging cell without editing a line of Go.
 - Differential oracle: `compat/differential/rig-diff.sh run`, then `down` (it
   does not tear itself down). Own ports and own containers, so it can run beside
   the main rig.
 - The two DB-backed UTC pins are `#[ignore]`d: point
-  `QUEEN_EMBEDDED_TEST_PG` at a throwaway Postgres and run with `--ignored`.
+  `QUEEN_EMBEDDED_TEST_PG` at a throwaway Postgres and run with `--ignored`. So
+  is `server/tests/kafka_group_mirror.rs`, which boots a real `Broker` purely to
+  apply the `include_str!`-embedded schema, and is therefore also what proves a
+  `.sql` edit was actually rebuilt.
+
+**Full gate, 2026-08-30, all from a clean machine.** `rig.sh --m5` **91/91**;
+`cluster` **11/11**; `cloud` **16/16**; the differential **exit 0** with 100
+divergences (74 deliberate, 26 accepted, **0 left to classify**);
+`kafka_group_mirror` **14/14** against a real Postgres. Unit: queen-kafka 848,
+server 1160, proxy 367, no failures in any of them.
 
 ## Config surface (as shipped)
 

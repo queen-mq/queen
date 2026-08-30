@@ -880,7 +880,16 @@ fn render(
                     },
                     Some(Err(e)) => {
                         let mapped = kafka_error(e);
-                        rejected(p.index, mapped, &format!("push failed: {e}"))
+                        // Produce v8+ carries this to the application. Bounded
+                        // and scrubbed (queen.rs `wire_reason_of`), so a 403's
+                        // own sentence — the proxy's "operation not permitted
+                        // for this credential" — reaches the producer's
+                        // exception instead of only the facade's log.
+                        rejected(
+                            p.index,
+                            mapped,
+                            &queen::wire_reason_of(&format!("push failed: {e}")),
+                        )
                     }
                     // Unreachable: a Push slot exists only when items were
                     // staged, and staged items are always pushed.

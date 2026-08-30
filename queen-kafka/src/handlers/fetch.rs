@@ -981,8 +981,14 @@ fn kafka_error(e: &queen::Error) -> ResponseError {
             401 | 403 => ResponseError::TopicAuthorizationFailed,
             404 => ResponseError::UnknownTopicOrPartition,
             // Cloud: a frozen or rate-capped tenant, and a draining or
-            // unavailable broker. Both are "later, not never".
-            429 | 502..=504 => ResponseError::NotLeaderOrFollower,
+            // unavailable broker. Both are "later, not never". 408 joins them
+            // because it means the same thing and comes from the same place —
+            // an intermediary, never Queen itself, which writes 429/502/504 and
+            // no 408 anywhere (proxy/src/errors.rs). It was falling through to
+            // UNKNOWN_SERVER_ERROR here while `produce` and `offsets` already
+            // read it as retriable, which made one hop's timeout fatal on the
+            // consume path and merely slow on the produce path.
+            408 | 429 | 502..=504 => ResponseError::NotLeaderOrFollower,
             // Anything else, including a 400 — which would mean the facade
             // built a body the broker rejected, our bug, and it should be loud.
             _ => ResponseError::UnknownServerError,
@@ -1013,6 +1019,35 @@ mod tests {
     };
     use serde_json::json;
     use std::sync::Arc;
+
+    /// Every status an intermediary or Queen itself can write, mapped on
+    /// purpose. UNKNOWN_SERVER_ERROR appears here only where it is the
+    /// DELIBERATE answer — "this facade built a request the broker rejected, be
+    /// loud" — and never as the arm a code fell into for want of one.
+    #[test]
+    fn every_status_the_proxy_writes_has_a_named_kafka_code() {
+        for (code, want) in [
+            (401, ResponseError::TopicAuthorizationFailed),
+            (403, ResponseError::TopicAuthorizationFailed),
+            (404, ResponseError::UnknownTopicOrPartition),
+            (408, ResponseError::NotLeaderOrFollower),
+            // A body cap on a FETCH is this facade asking for too much, not the
+            // client sending too much: loud on purpose.
+            (413, ResponseError::UnknownServerError),
+            (421, ResponseError::UnknownServerError),
+            (429, ResponseError::NotLeaderOrFollower),
+            (500, ResponseError::UnknownServerError),
+            (502, ResponseError::NotLeaderOrFollower),
+            (503, ResponseError::NotLeaderOrFollower),
+            (504, ResponseError::NotLeaderOrFollower),
+        ] {
+            assert_eq!(kafka_error(&Error::status(code, "")), want, "HTTP {code}");
+        }
+        assert_eq!(
+            kafka_error(&Error::Transport("reset".into())),
+            ResponseError::NotLeaderOrFollower
+        );
+    }
 
     // -------------------------------------------------------------- fixtures
 
