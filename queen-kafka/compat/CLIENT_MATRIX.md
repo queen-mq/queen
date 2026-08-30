@@ -74,12 +74,23 @@ as "measured".
 The table below records the F1-to-F3 re-runs. **What was re-run for F4**, all
 green: the whole franz-go suite (91 top-level tests), `java-matrix` on
 kafka-clients 4.3.1 and 3.6.2 including a new `AdminClient.incrementalAlterConfigs`
-probe, sarama (45 checks, and it now asserts "exactly 28 APIs advertised"),
+probe, sarama (45 checks, and it asserts "exactly 28 APIs advertised" — see the
+M9 follow-up below),
 `@platformatic/kafka`, apache/kafka 3.9.1's own tooling for all four affected
 CLIs, and kafka-ui against the facade and the oracle side by side. **What was
 not:** `confluent-dotnet`, because no .NET SDK was available on the machine that
 ran the verification and F4's only change to that suite was one string and one
 comment. Treat that row as F3's measurement plus an unverified edit.
+
+**M9 follow-up (2026-08-30).** M9 landed the four transaction keys but left the
+sarama suite behind, so that assertion was measuring the wrong number for a day:
+it now says **32**, and `wantAPIs` in `sarama/scenarios.go` carries rows for
+AddPartitionsToTxn (24), AddOffsetsToTxn (25), EndTxn (26) and TxnOffsetCommit
+(28), each `v0..v3`. The `versions` scenario is **49** checks rather than 45 —
+the four new rows and nothing else. Re-measured against a live `rig.sh --keep`
+facade: the whole suite PASS, 139 checks. The loop below `wantAPIs` still names
+only the twelve keys M7 added, on purpose: it records an ABSENCE that M7
+inverted, and the transaction keys were never asserted absent there.
 
 | Client | Re-run after M7? | With what | Outcome |
 | --- | --- | --- | --- |
@@ -97,15 +108,18 @@ comment. Treat that row as F3's measurement plus an unverified edit.
 | kafkajs, kafka-python, brod | **no** | these never send `InitProducerId` unless asked for transactions | unchanged by M7 |
 | `apache/kafka:3.9.1` as a differential oracle | **yes** | `differential/rig-diff.sh`, 17 scenarios including `idempotent` and M9's new `transactions` | **0 to classify by hand** (2026-08-30, after M9): `100 divergence(s): 74 deliberate, 26 accepted` from a cold stack, `97: 72, 25` from a warm one. The three extra rows are the ORACLE warming up — its `__transaction_state` partitions are still loading for the first minute, so it answers NOT_COORDINATOR to the first transactional InitProducerId and NONE to the same question later |
 
-The differential total floats between 82 and 83 from run to run, and the reason
-is worth knowing before anyone reads a delta as a regression. The two counts
-that matter are stable: **61 deliberate and 0 to classify by hand**. The one
-entry that comes and goes is `[ACCEPTED] deletetopics / delete.results_line_up`.
-The facade answers DeleteTopics in REQUEST order, name for name; Kafka's
-controller answers in whatever order it finishes, which sometimes happens to
-match the request and sometimes does not. When it matches there is no divergence
-to report and the total is 82. Every per-name error code agrees either way, so
-nothing a client reads differs.
+The differential total floats from run to run, and the reason is worth knowing
+before anyone reads a delta as a regression. After M9 the measurement is **100
+divergences from a cold stack (74 deliberate, 26 accepted) and 97 from a warm
+one (72, 25)**, and the count that matters is stable at both: **0 to classify by
+hand**. The three-row difference between the two is the oracle warming up, as
+the row above says. One more entry comes and goes independently of that:
+`[ACCEPTED] deletetopics / delete.results_line_up`. The facade answers
+DeleteTopics in REQUEST order, name for name; Kafka's controller answers in
+whatever order it finishes, which sometimes happens to match the request and
+sometimes does not. When it matches there is no divergence to report and the
+total is one lower. Every per-name error code agrees either way, so nothing a
+client reads differs.
 
 The stale-FAIL counts this table used to carry are **gone**: the assertions that
 still claimed CreateTopics, DeleteTopics, DescribeConfigs, ListGroups,
@@ -524,15 +538,16 @@ routing refusal)`, 208 of 208.
 
 ### The caveats an operator meets, in the order they bite
 
-1. **A rolling restart on the same node id inside the TTL crash-loops.** There
-   is no SIGTERM deregistration: a registry row dies only by TTL expiry
-   (`QUEEN_KAFKA_CLUSTER_TTL_MS`, default 10 000). A replacement process on the
-   same node id loses its boot claim to the dead one's row and exits FATAL,
-   which is correct in itself (two processes on one node id would advertise one
-   address) but makes a StatefulSet ordinal, the most natural source of a node
-   id, the worst one. Until a SIGTERM path exists, wait the TTL out between pods
-   or restart onto a fresh id. Meanwhile the survivors keep advertising the dead
-   node and keep pointing FindCoordinator at its address until the row expires.
+1. **Rolling restarts are fixed and measured (2026-08-30).** A stopping node
+   now deregisters on SIGTERM (its registry row deleted, fenced on the version
+   it holds, measured 0.9 to 2.0 ms across four stops) and a replacement on the
+   same node id adopts a dead holder's row instead of exiting FATAL, watching
+   it for one TTL plus a heartbeat first; only a row whose version keeps moving
+   stays fatal, which is the true duplicate-id case. The rolling-restart
+   scenario in this suite moves every probe group in about 2.1 s at the
+   product cadence; a SIGKILLed node (nobody ran the stop path) rebinds in
+   about 10.3 s, the TTL backstop. The earlier text in this spot described the
+   pre-fix behaviour and was superseded by `rolling_test.go`.
 2. **The compare-and-set fence is proven at the KV layer, not from outside.**
    The acceptance shows the *ownership guard* refusing a non-owner. The deeper
    mechanism, a stale owner whose commit is refused by a compare-and-set on a
@@ -1194,7 +1209,7 @@ defaults and packaging.
 | Pekko/Alpakka, fs2-kafka, zio-kafka, jackdaw, kinsky | medium to niche | not tested: streams and effect-system wrappers. Their transactional sources and sinks are out of scope |
 | kafka-console-producer.sh / kafka-console-consumer.sh | medium | not tested directly, but they ship inside kafka-clients and speak the tested wire. They should work |
 | kafka-topics.sh, kafka-configs.sh | medium | MEASURED WORKING since M7 F1: `--create`, `--list`, `--describe`, `--delete`, and `kafka-configs.sh --describe` on topics and on broker 0. Since M7 F4 `kafka-configs.sh --alter` works too, on a topic this facade created: `--add-config retention.ms=…` and `--delete-config retention.ms` both land and both read back. `kafka-topics.sh --alter --partitions` REFUSES, with the oracle's own sentence for a decrease and for an equal count |
-| kafka-consumer-groups.sh | medium | MEASURED WORKING since M7 F2: `--list` (with `--state` and `--state Stable`), `--describe` (`--members --verbose`, `--state`, `--offsets`) and `--delete`. Since M7 F4, `--delete-offsets` too, with Kafka's subscription rule. `--reset-offsets --to-earliest/--to-latest --execute` works and always did (it rides OffsetCommit); `--to-datetime` and `--by-duration` do NOT, because they send ListOffsets with a concrete timestamp and this facade answers -1 for every one of those (no time index in Queen) |
+| kafka-consumer-groups.sh | medium | MEASURED WORKING since M7 F2: `--list` (with `--state` and `--state Stable`), `--describe` (`--members --verbose`, `--state`, `--offsets`) and `--delete`. Since M7 F4, `--delete-offsets` too, with Kafka's subscription rule. `--reset-offsets` rides OffsetCommit, which is advertised, but nothing has measured it and it is not claimed here; `--to-datetime` and `--by-duration` will NOT work regardless, because they send ListOffsets with a concrete timestamp and this facade answers -1 for every one of those (no time index in Queen) |
 | kafka-acls.sh | medium | MEASURED since M7 F4: `--list`, `--add` and `--remove` all print `Error while executing ACL command: No Authorizer is configured…` and exit 1, and each output diffs IDENTICAL against apache/kafka:3.9.1 run from the same container. It degrades exactly as it does against a Kafka with no authorizer, which is the honest answer: there is no ACL model here to query |
 | kafka-delete-records.sh, kafka-log-dirs.sh, kafka-leader-election.sh, kafka-reassign-partitions.sh, kafka-delegation-tokens.sh, kafka-metadata-quorum.sh, kafka-transactions.sh | low to medium | will NOT work, each for a reason in the long-tail list below. Every one fails client-side with `UnsupportedVersionException` before a byte is sent, which is a named failure and not a hang |
 | KNet | niche | not tested: drives the real Java client over JNI, so its wire is byte-identical to a tested row |

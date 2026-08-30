@@ -215,13 +215,21 @@ addresses is the Kubernetes shape that works.
   the committed offsets never rewound. On the product defaults that step is
   budgeted at 10 s, plus `QUEEN_KAFKA_GROUP_JOIN_DELAY_MS` for the group to
   re-form.
-- **A restart on the same node id inside the TTL exits FATAL.** The dead node's
-  registry row lives until it expires, the replacement loses its boot claim to
-  it, and two processes on one node id would advertise one address for two
-  facades. There is **no SIGTERM deregistration yet**, so a rolling restart must
-  either wait the TTL out between pods or move to a fresh node id. Budget for it
-  before you automate a deploy. Meanwhile the survivors still advertise the dead
-  node and still point FindCoordinator at its address until the row expires.
+- **A stop hands the node id back.** SIGTERM and Ctrl-C are handled: the
+  listener closes, the connections already being served drain, and this node's
+  registry row is deleted, fenced on the version this process holds it with,
+  inside a two second budget. Peers drop the node on their next registry read
+  instead of one TTL later, and a replacement claims the id at once. The TTL
+  stays as the backstop for the stop nobody got to run (SIGKILL, OOM kill, a
+  severed node), where the survivors do keep advertising the dead node and do
+  keep pointing FindCoordinator at its address until the row expires.
+- **A replacement that meets its predecessor's row waits it out rather than
+  exiting.** It watches that row's version for one TTL plus one heartbeat. If
+  the version MOVES somebody is refreshing it, which is a second live facade on
+  this node id: FATAL, with the observation that proved it in the message. If
+  the row expires or the version never moves, the replacement adopts the id. So
+  a pod restarting on the same StatefulSet ordinal inside the TTL costs a wait
+  and not a crash loop.
 - **A registry that cannot be reached is not fatal.** The facade logs an ERROR
   naming the consequence and serves produce and fetch; every group RPC is
   refused `COORDINATOR_NOT_AVAILABLE` (retriable) until a heartbeat succeeds.
@@ -253,5 +261,8 @@ real broker: `compat/differential/rig-diff.sh` diffs every answer against
 `/reference/kafka` and `/deploy/kafka`. Plan and status:
 [../PLAN_QUEEN_KAFKA.md](../PLAN_QUEEN_KAFKA.md).
 
-Status: preview. Not in release CI, no container image yet, and behind the
-Cloud proxy the consume path is not routed yet (see the plan's known-open list).
+Status: preview. Not in release CI, and no published image carries the facade
+yet, though the repository's `Dockerfile` builds it beside the broker binary for
+`QUEEN_KAFKA_EMBEDDED=true` (server/src/kafka_facade.rs). The Cloud consume path
+is routed: the proxy classifies `POST /api/v1/fetch` as `Consume`. See the
+plan's known-open list for what is still open.

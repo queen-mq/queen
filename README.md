@@ -304,6 +304,19 @@ the path, for request/reply, signalling, presence fan-out and cache invalidation
 should not pay for replay and retention. Contents survive nothing; that is the whole trade, and it
 is explicit.
 
+**Kafka wire protocol (preview).** [`queen-kafka`](queen-kafka/README.md) is a separate binary that
+speaks the Kafka protocol to clients and plain HTTP to a broker or the proxy, so an unmodified
+producer or consumer reaches Queen by changing `bootstrap.servers` and nothing else. Thirty-two API
+keys are advertised: produce, fetch, consumer groups, the topics and groups admin surface, the
+idempotent producer, and transactions that commit records and consumer offsets in one PostgreSQL
+transaction. The [client matrix](queen-kafka/compat/CLIENT_MATRIX.md) is nineteen measured rows over
+ten languages, fourteen PASS and five PARTIAL with none failing, and every answer is diffed against
+`apache/kafka:3.9.1` with nothing left to classify by hand. There is no log compaction, so Kafka
+Streams and Connect's exactly-once source stay out, and a transaction is held by one facade process,
+so Flink and Spark's two-phase writers do too. The protocol contract is
+[reference/kafka](https://queenmq.com/reference/kafka); running it is
+[deploy/kafka](https://queenmq.com/deploy/kafka).
+
 **Operations.** One stateless binary, HTTP on port 6632, curl is a first-class client · six SDKs
 (JavaScript, Python, Go, Rust, C++, PHP/Laravel) plus `queenctl` · a dashboard served by the same
 binary on the same port · Prometheus metrics · JWT/JWKS auth · payload encryption · disk spool for
@@ -344,8 +357,12 @@ Unix/`pcntl` requirements, deployment and secret handling.
 These systems made different tradeoffs, and some of those tradeoffs are better than Queen's for
 workloads that need them.
 
-- **Kafka ecosystem compatibility.** Queen speaks HTTP, not the Kafka protocol: no Connect, no
-  Streams, no Schema Registry, and none of that literature applies.
+- **The Kafka ecosystem, past the wire protocol.** The protocol itself is spoken by
+  [`queen-kafka`](queen-kafka/README.md) and unmodified clients work through it, but there is no log
+  compaction and a transaction lives in one facade process: Kafka Streams, Connect's exactly-once
+  source, the Schema Registry's compacted `_schemas` topic, and Flink and Spark's two-phase Kafka
+  writers all stay out, and the operational literature about brokers, replicas and log directories
+  does not apply.
 - **A single ordered stream that must itself scale horizontally.** One lane is sequential. If your
   ordering boundary is "everything", Queen's core idea does nothing for you.
 - **Storage that scales independently of the database**, or a system that replicates itself across

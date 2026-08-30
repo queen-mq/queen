@@ -17,6 +17,8 @@ sourceOfTruth:
   - queen-kafka/src/coordinator/group.rs
   - queen-kafka/src/offsets.rs
   - queen-kafka/src/records.rs
+  - queen-kafka/src/txn.rs
+  - queen-kafka/src/idempotent.rs
 ---
 
 `queen-kafka` is a separate binary that speaks the Kafka wire protocol to clients and plain
@@ -32,9 +34,12 @@ bottom of this page are the ones known today rather than a closed list.
 
 The mapping is small enough to state in four lines. A Kafka topic is a Queen queue. Kafka
 partition `n` is Queen partition `n`. One record is one Queen message, wrapped in the payload
-envelope below. There is exactly one broker, node 0, and it is the facade itself: it advertises
-itself as leader of every partition and answers `FindCoordinator` with its own address,
-whatever the Queen cluster behind it looks like.
+envelope below. In the default single-node mode there is exactly one broker, node 0, and it is the
+facade itself: it advertises itself as leader of every partition and answers `FindCoordinator` with
+its own address, whatever the Queen cluster behind it looks like. Two or three facades can instead
+present themselves to clients as one Kafka cluster, which is an operator decision described on
+[the operator page](/deploy/kafka#cluster-mode); the differences a client can read are named where
+they arise below.
 
 ## The support matrix
 
@@ -45,26 +50,63 @@ version that is handled.
 
 <Render file="generated/kafka-support-matrix" />
 
+## Transactions and the idempotent producer
+
+Both work, and neither asks a client for configuration. A producer at stock defaults negotiates
+`InitProducerId` and gets the idempotent path; a producer carrying a `transactional.id` gets a real
+transaction. `enable.idempotence=false` was mandatory against this facade until 2026-08-29 and is
+now only a way of asking for less than it offers.
+
+**Idempotent produce.** `InitProducerId` allocates a producer id, and the facade keeps the
+per-(producer, topic-partition) sequence window that turns a retried batch into a no-op. That window
+is in memory and per facade process: a restart, an eviction past the 65,536 tracked
+producer-partitions, or a connection that lands on another facade all leave no entry, and the next
+batch is answered `OUT_OF_ORDER_SEQUENCE_NUMBER`. The client recovers through KIP-360's epoch bump,
+and the cost is at-least-once for at most the five batches that were in flight. A real Kafka broker
+persists producer state in its log; this one holds nothing durable of its own, by design.
+
+**A transaction is a stage, held by the process the client opened it on.** The `transactional.id` is
+claimed in Queen's key/value store by a compare-and-set, and that claim is the fencing: a second
+producer taking the same id bumps the epoch, and the first is answered `PRODUCER_FENCED` from then
+on. A transactional `Produce` writes nothing, it stages the records in that process.
+`AddOffsetsToTxn` and `TxnOffsetCommit` stage the consumer offsets beside them. `EndTxn(commit)`
+sends the whole stage as one `POST /api/v1/transaction`, with the fence check as the first operation
+of the bundle, so the records and the offsets commit in one PostgreSQL transaction or neither of
+them does. `EndTxn(abort)` drops the stage and writes nothing at all.
+
+That covers the stock Java transactional producer, Spring's `KafkaTransactionManager`, franz-go's
+`GroupTransactSession` and librdkafka's transactional API: consume, transform, produce and commit,
+all in one process. It does not cover a two-phase commit finished somewhere else. Flink's
+`KafkaSink EXACTLY_ONCE` and Spark's structured-streaming writer commit after a failover from a
+different process, that `EndTxn` reaches a facade holding no stage, and the answer is
+`INVALID_TXN_STATE`, which is fatal.
+
+Because the stage is memory, it is capped in five places where Kafka has nothing to cap:
+`QUEEN_KAFKA_TXN_MAX_BYTES` (8 MiB for one transaction), `QUEEN_KAFKA_TXN_MAX_RECORDS` (50,000),
+`QUEEN_KAFKA_TXN_MAX_STAGED_BYTES` (128 MiB for the whole process), `QUEEN_KAFKA_TXN_MAX_OPEN`
+(1,024) and `QUEEN_KAFKA_TXN_MAX_TIMEOUT_MS` (900,000, which is Kafka's own default for
+`transaction.max.timeout.ms`). Two more are derived rather than chosen and cannot be set: at most
+200 partitions and at most 62 offsets in one transaction. Past a cap the transaction is answered
+`MESSAGE_TOO_LARGE` or `INVALID_COMMIT_OFFSET_SIZE` and has to be aborted rather than retried,
+because waiting does not make a 12 MiB transaction fit an 8 MiB stage.
+
+**Cluster mode refuses transactions outright.** With `QUEEN_KAFKA_NODE_ID` set, `FindCoordinator`
+for a transaction key and `InitProducerId`'s transactional branch both answer
+`TRANSACTIONAL_ID_AUTHORIZATION_FAILED`, which every client treats as fatal, so
+`initTransactions()` returns in milliseconds instead of looping for the whole of `max.block.ms`.
+It is a refusal by configuration and not a capability gap: a stage held in one process cannot be
+honoured by whichever node the client's next request is routed to.
+
 ## Non-goals
 
 These are not gaps waiting to be filled in a patch release. Each is excluded by design, and the
 exclusion is enforced rather than announced.
 
-**Transactions and exactly-once.** `InitProducerId`, `AddPartitionsToTxn`, `EndTxn` and
-`TxnOffsetCommit` are not advertised, and `Produce` refuses a transactional id, a transactional
-or control batch, and any batch carrying a producer id. The refusal is the point: a producer
-that believed its sequence numbers were being enforced would get at-least-once with duplicates
-on every retry and find out in production. A `transactional.id` producer is told
-`TRANSACTIONAL_ID_AUTHORIZATION_FAILED`, which every client treats as fatal, with a message
-naming the reason on Produce v8 and above. Kafka Streams needs exactly-once, so Kafka Streams
-applications do not run against the facade.
-
-**The idempotent producer.** Same refusal, same reason. Set `enable.idempotence=false`. What
-you get instead is the at-least-once every non-idempotent Kafka producer already has.
-
 **Log compaction.** There is no compaction and no tombstone semantics. A null value is stored
 and delivered as a null value, not as a delete. Queue [retention](/reference/queue-options) is
-Queen's, is time-based, and is off by default on a topic the facade auto-creates.
+Queen's, is time-based, and is off by default on a topic the facade auto-creates. This is what keeps
+Kafka Streams and Connect's exactly-once source out, and transactions did not change it: what those
+two depend on is the compacted changelog and offset topics, not the transaction protocol.
 
 **KIP-848.** `ConsumerGroupHeartbeat` is not advertised, so a client configured for the new
 broker-side rebalance protocol falls back to the classic `JoinGroup`/`SyncGroup` one, which is
@@ -83,12 +125,46 @@ to avoid them.
 that expired would be a consumer group silently resuming from `auto.offset.reset`, which is
 either a replay of the whole topic or a jump past everything it had not read. The cost is
 stated rather than hidden: a facade that has served a million throwaway group ids holds a
-million keys, and there is no `DeleteGroups` yet to remove them.
+million keys. `DeleteGroups` and `OffsetDelete` are both advertised and both remove them
+irreversibly, so removal here is an administrator's action rather than a timer nobody set.
 
 ## Deviations from a real broker
 
 Everything below is deliberate and is documented in the code that does it. None of it is a
-bug report.
+bug report. Three are marked *awaiting ratification*: they are shipped choices that have been
+measured against `apache/kafka:3.9.1` and not yet signed off, so they are the entries most likely
+to move.
+
+**A transactional produce answers `base_offset = -1`.** *Awaiting ratification.* Kafka appends the
+batch as it arrives and answers the offset it landed at. Here no offset exists until
+`EndTxn(commit)` allocates them all, and the client has to be answered before that. The Java
+client keeps the `-1` in `RecordMetadata` rather than adding a batch index to it, so no fabricated
+offset ever reaches an application: what an application loses is `RecordMetadata.offset()` inside a
+transaction, and what it gains is that nothing partial is ever in the log. Every non-transactional
+produce still answers a real offset.
+
+**`read_uncommitted` sees less here than it does on Kafka.** *Awaiting ratification.* An open
+transaction's records are invisible until the commit, and an aborted transaction's are never
+visible at all, so the two isolation levels return the same records and setting one costs nothing.
+`read_uncommitted` is the default, and an ordinary consumer sees the same records in the same
+order, later by the producer's own commit cadence; no client library exposes "records that may yet
+be rolled back" as a state an application can act on. The upside is measurable in lag: a
+`read_committed` consumer reaches 0 here, where against Kafka it stops at one per partition because
+of the commit marker.
+
+**A batch from a producer this facade has never seen is refused.** *Awaiting ratification.*
+Sequence 42 from an unknown producer id is answered `OUT_OF_ORDER_SEQUENCE_NUMBER`; Apache Kafka
+3.9.1 accepts it. In Kafka an absent producer entry means the state aged out, which is rare; here it
+means the facade restarted, which is not, so accepting would leave the sequence window silently
+unenforced after every restart. The cost of refusing was measured rather than assumed: the producer
+recovers through KIP-360's epoch bump and nothing is lost.
+
+**A committed transaction advances the log end offset by N and not by N+1.** Kafka writes a commit
+or abort marker into the data partition; this facade writes the records and nothing else. Nothing a
+client reads differs, which the differential runner measures on both brokers for the same
+transaction. An aborted transaction advances the offset by 0 here, where Kafka advances it by N+1
+and leaves the aborted records in the log for the client to filter out. There is nothing to filter
+here, because there is nothing there.
 
 **`acks=0` gets no response frame.** That is Kafka's own contract, and the consequence is worth
 saying out loud: the offsets such a producer reports are ones it invented by counting, because
