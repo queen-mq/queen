@@ -164,6 +164,152 @@ class LaravelSupervisorCommandTest extends TestCase
             ->assertFailed();
     }
 
+    public function testStatusCheckSeparatesLivenessFromServingReadiness(): void
+    {
+        $directory = $this->configureStateDirectory();
+        $state = new SupervisorState($directory);
+        $lock = $state->acquireLock();
+
+        try {
+            $state->writeStatus([
+                'engine' => 'rust',
+                'state' => 'running',
+                'pools' => [],
+                'pool_status' => [[
+                    'supervisor' => 'orders',
+                    'queue' => 'high',
+                    'desired' => 1,
+                    'running' => 0,
+                    'healthy' => true,
+                    'restart_state' => 'closed',
+                    'restart_failures' => 0,
+                    'depth' => 4,
+                    'depth_available' => true,
+                ]],
+            ]);
+
+            $this->artisan('queen:supervisor', [
+                'action' => 'status',
+                '--check-liveness' => true,
+            ])->assertSuccessful();
+            $this->artisan('queen:supervisor', [
+                'action' => 'status',
+                '--check' => true,
+            ])->assertFailed();
+            $this->artisan('queen:supervisor', [
+                'action' => 'status',
+                '--check-capacity' => true,
+            ])->assertFailed();
+
+            $output = new BufferedOutput();
+            $this->assertSame(0, $this->app->make(\Illuminate\Contracts\Console\Kernel::class)->call(
+                'queen:supervisor',
+                ['action' => 'status', '--json' => true],
+                $output,
+            ));
+            $document = json_decode(trim($output->fetch()), true, 512, JSON_THROW_ON_ERROR);
+            $this->assertTrue($document['live']);
+            $this->assertFalse($document['ready']);
+            $this->assertSame('pool_zero_capacity', $document['readiness_issues'][0]['code']);
+
+            $ready = $state->status();
+            $ready['pool_status'][0]['running'] = 1;
+            $ready['pool_status'][0]['desired'] = 2;
+            $state->writeStatus($ready);
+            $this->artisan('queen:supervisor', [
+                'action' => 'status',
+                '--check' => true,
+            ])->assertSuccessful();
+            $this->artisan('queen:supervisor', [
+                'action' => 'status',
+                '--check-capacity' => true,
+            ])->assertFailed();
+
+            $output = new BufferedOutput();
+            $this->assertSame(0, $this->app->make(\Illuminate\Contracts\Console\Kernel::class)->call(
+                'queen:supervisor',
+                ['action' => 'status', '--json' => true],
+                $output,
+            ));
+            $partial = json_decode(trim($output->fetch()), true, 512, JSON_THROW_ON_ERROR);
+            $this->assertTrue($partial['ready']);
+            $this->assertFalse($partial['processing_healthy']);
+            $this->assertSame(
+                'pool_below_desired_capacity',
+                $partial['processing_health_issues'][0]['code'],
+            );
+
+            $full = $state->status();
+            $full['pool_status'][0]['running'] = 2;
+            $state->writeStatus($full);
+            $this->artisan('queen:supervisor', [
+                'action' => 'status',
+                '--check-capacity' => true,
+            ])->assertSuccessful();
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
+    public function testReadinessRequiresDepthButDoesNotRestartAStillServingCircuit(): void
+    {
+        $directory = $this->configureStateDirectory();
+        $state = new SupervisorState($directory);
+        $lock = $state->acquireLock();
+
+        try {
+            $state->writeStatus([
+                'engine' => 'php',
+                'state' => 'running',
+                'pools' => [],
+                'pool_status' => [[
+                    'supervisor' => 'orders',
+                    'queue' => 'default',
+                    'desired' => 1,
+                    'running' => 1,
+                    'healthy' => false,
+                    'restart_state' => 'open',
+                    'restart_failures' => 5,
+                    'depth' => null,
+                    'depth_available' => false,
+                ]],
+            ]);
+
+            $readiness = $state->readiness($state->status());
+            $this->assertFalse($readiness['ready']);
+            $this->assertSame(
+                ['queue_depth_unavailable'],
+                array_column($readiness['issues'], 'code'),
+            );
+            $capacity = $state->capacityHealth($state->status());
+            $this->assertSame(
+                ['queue_depth_unavailable', 'worker_restart_circuit_unhealthy'],
+                array_column($capacity['issues'], 'code'),
+            );
+            $this->artisan('queen:supervisor', [
+                'action' => 'status',
+                '--check' => true,
+            ])->assertFailed();
+
+            $serving = $state->status();
+            $serving['pool_status'][0]['depth'] = 4;
+            $serving['pool_status'][0]['depth_available'] = true;
+            $state->writeStatus($serving);
+            $this->artisan('queen:supervisor', [
+                'action' => 'status',
+                '--check' => true,
+            ])->assertSuccessful();
+            $this->artisan('queen:supervisor', [
+                'action' => 'status',
+                '--check-capacity' => true,
+            ])->assertFailed();
+        } finally {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+
     public function testCliUsesRelativeStatePathAndActiveGenerationTiming(): void
     {
         $relative = 'queen-supervisor-command-' . bin2hex(random_bytes(8));

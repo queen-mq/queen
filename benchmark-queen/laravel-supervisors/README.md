@@ -133,8 +133,10 @@ scripts/run.sh --profile fixed --engines queen-php,queen-rust \
 | `--queen-partitions` | `QUEEN_PARTITIONS` | 1..64 | 64 |
 | `--queen-pop-fusion` | `QUEEN_POP_FUSION` | 0 or 1 | 0 |
 | `--worker-timeout` | `BENCH_TIMEOUT` | 1..86400 seconds | 120 |
-| `--retry-after` | `BENCH_RETRY_AFTER` | `> prefetch * worker-timeout` | `max(180, prefetch * worker-timeout + 1)` |
+| `--retry-after` | `BENCH_RETRY_AFTER` | `> worker-timeout` with renewal | `max(180, worker-timeout + 1)` |
 | `--dispatch-mode` | `BENCH_DISPATCH_MODE` | single, bulk | single |
+| `--redis-appendonly` | `BENCH_REDIS_APPENDONLY` | yes, no | yes |
+| `--redis-appendfsync` | `BENCH_REDIS_APPEND_FSYNC` | always, everysec, no | everysec |
 
 Every factor is validated before image or container work begins and is written
 to campaign `metadata.json`, each lane's `configuration.json`, the resolved
@@ -143,13 +145,16 @@ jobs per Laravel `bulk()` invocation in all lanes; the producer remains outside
 the measured cgroups.
 
 Prefetch greater than one automatically enables the production lease-renewal
-helper and records it in every artifact; prefetch one retains the no-helper
-baseline. Prefetch and deferred acknowledgement change the lease-risk envelope even
-though delivery remains at least once: a killed worker can cause more already
-claimed jobs to be redelivered. Treat `ack_batch > 1` as a separately labelled
-performance profile, preserve crash-injection tests, and size `retry_after` for
-the worst-case time to process a complete prefetched batch. Pop fusion affects
-only Queen's broker and must not be presented as a Horizon setting.
+helper and records its CPU, PSS and process count separately from both worker
+and orchestrator totals; prefetch one retains the no-helper baseline. With
+renewal, `retry_after` must cover the active job and renewal safety budget, not
+the complete prefetched tail. Without renewal, the conservative
+`prefetch * worker-timeout` bound still applies. Prefetch and deferred
+acknowledgement change the lease-risk envelope even though delivery remains at
+least once: a killed worker can cause claimed jobs to be redelivered. Treat
+`ack_batch > 1` as a separately labelled discovery profile and preserve
+crash-injection tests. Pop fusion affects only Queen's broker and must not be
+presented as a Horizon setting.
 
 ## Test profiles
 
@@ -256,9 +261,9 @@ The monotonic timestamps are comparable across processes and containers only
 when they share the same kernel. The supplied Compose environment has that
 property. They are not a distributed-clock protocol.
 
-### Worker crash/recovery diagnostic
+### Process crash/recovery diagnostic
 
-`fault-recovery.sh` targets exactly one non-master worker with `SIGKILL`, then
+`fault-recovery.sh` defaults to targeting exactly one worker with `SIGKILL`, then
 checks replacement of the process, redelivery of an in-flight job, the exact
 completed job set, container restart/OOM state, and a queue that remains empty
 for the final settle window. Every lane uses a fresh backend and retains its
@@ -268,6 +273,18 @@ The harness explicitly fixes `BENCH_QUEUES` to the single legacy queue,
 `BENCH_FAILED_DRIVER=null` and lease renewal off, and retains the resolved
 application configuration so inherited feature-test variables cannot change
 the protocol silently.
+
+For Queen p4/a1, the helper-death scenario kills the renewal child after its
+owning worker has proved workload activity. The gate requires the SIGCHLD
+watchdog to fence that worker, full-pool replacement, redelivery, ledger
+conservation and a quiescent queue:
+
+```console
+scripts/fault-recovery.sh \
+  --output results/helper-fault-$(date -u +%Y%m%dT%H%M%SZ) \
+  --scenario renewal-helper-sigkill \
+  --engines queen-php,queen-rust --queen-prefetch 4 --queen-ack-batch 1
+```
 
 ```console
 scripts/fault-recovery.sh \
@@ -283,13 +300,85 @@ fixed seeds and report every run; the ledger is not atomic with ACK or external
 systems, so a clean run is still not proof of exactly-once effects or backend
 crash durability.
 
+### Infrastructure fault qualification
+
+`infrastructure-faults.sh` is the isolated, non-performance harness for backend
+crashes, network partitions and Queen supervisor-master loss. Every
+engine/scenario lane receives a new Compose project, new durable named result
+and backend volumes, and dedicated networks. The harness refuses to reuse any
+of those resources. Queen lanes use separate `app-backend` and
+`broker-postgres` networks, so the database partition does not accidentally
+become an application-to-broker partition.
+
+| Scenario | Horizon | Queen PHP | Queen Rust | Injection and recovery |
+| --- | --- | --- | --- | --- |
+| `redis-restart` | yes | — | — | `SIGKILL` Redis, preserve AOF volume, start the same container |
+| `broker-restart` | — | yes | yes | `SIGKILL` broker, preserve buffer/PostgreSQL volumes, start the same container |
+| `postgres-restart` | — | yes | yes | `SIGKILL` PostgreSQL, preserve its data volume, start only PostgreSQL |
+| `app-backend-network-partition` | yes | yes | yes | disconnect/reconnect only the application endpoint |
+| `broker-postgres-network-partition` | — | yes | yes | disconnect/reconnect only the broker's database-network endpoint |
+| `master-sigkill` | yes | yes | yes | kill the engine master, prove the complete old PID tree is gone, restart the lane |
+
+The default workload uses the durable fixture ledger, a fixed worker pool,
+retry-enabled jobs, Queen prefetch/ACK `1/1`, and Redis AOF with
+`appendfsync=always`. A fault is injected only after a normalized queue snapshot
+proves a ready backlog and the durable ledger proves an execution attempt is
+currently open. Recovery must restore functional backend access and the full
+configured worker capacity, then produce the exact deterministic job-ID set and
+a queue that stays empty for the settle window. Container IDs, immutable app,
+broker, Redis and PostgreSQL image IDs, source hashes, network membership,
+process trees, logs, a UTC and monotonic timeline, raw ledger data and SHA-256
+artifact manifests are retained.
+
+Validate the complete matrix without contacting Docker:
+
+```console
+scripts/infrastructure-faults.sh \
+  --output results/infrastructure-plan-$(date -u +%Y%m%dT%H%M%SZ) \
+  --dry-run
+```
+
+Run the campaign after reviewing `plan.json`:
+
+```console
+scripts/infrastructure-faults.sh \
+  --output results/infrastructure-$(date -u +%Y%m%dT%H%M%SZ) \
+  --engines horizon,queen-php,queen-rust --no-build
+```
+
+For a bounded Queen canary, select individual fault classes explicitly:
+
+```console
+scripts/infrastructure-faults.sh \
+  --output results/queen-network-$(date -u +%Y%m%dT%H%M%SZ) \
+  --engines queen-php,queen-rust \
+  --scenarios app-backend-network-partition,broker-postgres-network-partition \
+  --no-build
+```
+
+Each lane reports three independent results. `at_least_once` requires fault and
+recovery evidence, the exact completion set, bounded attempts, ledger
+conservation, exact container lifecycle, and final quiescence.
+`idempotent_effect` additionally requires exactly one fixture-local effect per
+job. `strict_execution` requires a single execution/completion and is reported
+but is not part of the campaign exit gate because retries are legal under
+at-least-once delivery. The campaign passes only when both required gates pass
+for every lane. This remains a diagnostic on one Docker host, not a multi-node
+failover or external exactly-once proof.
+
+Disk-full injection is intentionally not implemented here. It remains a
+separate production gate because a safe test needs a disposable bounded
+filesystem plus an independently writable evidence destination; applying it to
+the developer or CI Docker storage pool would not be a controlled fault.
+
 ### Feature-parity diagnostic
 
 `feature-parity.sh` is the reusable, non-performance gate for the behaviours
 that a throughput campaign cannot prove. It creates a fresh Compose project,
-backend and result volume for every engine. All three lanes receive an equal,
-deterministic round-robin dispatch across every configured queue; the gate
-requires the exact job set and a settled empty state on each individual queue.
+backend and result volume for every engine. By default all three lanes receive
+the frozen `high/default/low` distribution of 60/30/10 jobs in deterministic
+weighted round-robin order; the gate requires the exact per-queue job set, no
+starved queue and a settled empty state on every queue.
 Queue names are limited to 118 ASCII bytes because the fixture appends a colon
 and nine-digit sequence while preserving its 128-byte job-ID ceiling.
 Queen PHP and Queen Rust also run the full Laravel failed-job lifecycle: one
@@ -299,8 +388,7 @@ must complete the fail-once probe, and both stores must then be empty.
 ```console
 scripts/feature-parity.sh \
   --output results/features-$(date -u +%Y%m%dT%H%M%SZ) \
-  --engines horizon,queen-php,queen-rust \
-  --queues critical,default --jobs-per-queue 12 --workers 2 --no-build
+  --engines horizon,queen-php,queen-rust --no-build
 ```
 
 The runner fails closed on timeouts, incomplete or duplicate results, residual
@@ -553,12 +641,12 @@ Before every local sample record `docker info`, the Docker Desktop CPU/memory
 allocation, host architecture and the list of other running containers. Stop
 unrelated containers and do not build images during the campaign.
 
-The supplied diagnostic stack deliberately uses Redis without RDB/AOF while
-PostgreSQL keeps `synchronous_commit=on` (both datasets are ephemeral for each
-lane). Therefore whole-stack throughput is a comparison of these explicit
-product-shaped configurations, not a claim of equal crash-durability. A
-durability study must run a separate cell with persistence, storage and fsync
-policy aligned and reported.
+The supplied stack creates fresh named volumes for every lane. Redis uses AOF
+`yes/everysec` by default; PostgreSQL retains `fsync`, `full_page_writes` and
+`synchronous_commit`. These are explicit production-shaped policies, not a
+claim of identical crash semantics. A publishable Horizon comparison requires
+Redis AOF `yes/always`; keep the `everysec` and strict cells separate and
+report both because the durability/throughput trade-off is itself relevant.
 
 ## Publishable Linux protocol
 
@@ -601,3 +689,13 @@ write runtime telemetry only for the `time` strategy, which consumes it;
 are product behaviours, not benchmark-only switches. If a second stripped
 microbenchmark is run, label it separately from the production-shaped
 comparison.
+
+Each timed lane captures backend counters after warm-up and again only after
+the final quiescence probe, so a slow last ACK cannot disappear from the
+interval. Horizon artifacts retain Redis `INFO commandstats` deltas; Queen
+artifacts retain broker push, pop and ACK request/message deltas. The counts
+therefore include the bounded queue-state observer, while CPU and memory samples
+exclude it. The report shows commands or requests per completed job and Queen's
+consumer batch shape. Redis commands and Queen API requests are deliberately
+not divided into a cross-engine ratio: they are useful causal evidence, but are
+not identical units of work.

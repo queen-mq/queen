@@ -116,7 +116,8 @@ The important inequalities are enforced at startup:
 - `retry_after` must be longer than `timeout`;
 - `shutdown_grace` must be longer than every pool's `timeout`;
 - `max_processes` must cover every queue in `auto` mode;
-- aggregate pool maxima must fit `process_limit`;
+- aggregate pool maxima must fit `process_limit`; a renewal-enabled worker reserves two child
+  process slots, one for Artisan and one for its lazy helper;
 - control TTL and heartbeat timeout must exceed the bounded reconciliation loop.
 
 Inspect the document that either engine will consume:
@@ -143,7 +144,8 @@ for `target_clear_seconds`. Before telemetry exists, the time strategy uses
 
 `balance_max_shift` and `balance_cooldown` limit how quickly the pool changes. A lower target must
 remain stable for `scale_down_delay` before Queen drains capacity. Draining workers continue to
-count against `process_limit`, so a reallocation cannot create a temporary process spike.
+count against `process_limit`, including their reserved renewal helper, so a reallocation cannot
+create a temporary process spike.
 
 ## Run the PHP engine
 
@@ -153,8 +155,9 @@ The PHP engine is available directly from the Composer package:
 php artisan queen:supervise
 ```
 
-It uses capped exponential restart backoff. After repeated crashes it continues retrying at
-`restart_backoff_max`; it does not have the Rust engine's open/probe circuit state.
+It uses the same capped exponential restart backoff as Rust. After five consecutive failures it
+opens the pool circuit and, after `restart_backoff_max`, admits one probe until that worker is
+stable.
 
 Use the PHP engine first when native artifacts are not published for the host, or as a reference
 during a Rust rollout.
@@ -214,14 +217,29 @@ The CLI uses the state directory, so the commands are identical for PHP and Rust
 php artisan queen:supervisor status
 php artisan queen:supervisor status --json
 php artisan queen:supervisor status --check
+php artisan queen:supervisor status --check-capacity
+php artisan queen:supervisor status --check-liveness
 php artisan queen:supervisor pause
 php artisan queen:supervisor continue
 php artisan queen:supervisor terminate
 ```
 
-`status --check` exits non-zero unless the current generation is live and healthy, which makes it
-suitable for a local health check. Controls are fenced to the exact `instance_id`; a stale command
-cannot apply to a replacement master.
+`status --check` exits non-zero unless the current generation is live and every pool is ready: its
+depth is current and it has non-zero capacity whenever capacity is desired. A pool with surviving
+workers stays ready while a replacement is in backoff or probe; that degraded circuit remains
+visible in pool health. `status --check-liveness` checks only the master owner and heartbeat, which
+keeps liveness separate from serving readiness. Per-pool `capacity_satisfied` exposes ordinary
+scale-up lag without making readiness flap during a healthy rebalance. Controls are fenced to the
+exact `instance_id`; a stale command cannot apply to a replacement master.
+
+Use `status --check-capacity` for a stricter processing-health gate that requires
+`running >= desired` and a healthy restart circuit for every pool. This check is intentionally
+separate because it may be false during a normal elastic scale-up or replacement while minimum
+serving readiness remains healthy.
+
+Readiness is not an application SLO. Monitor oldest-job age, completion rate, failures and DLQ
+growth separately. The child-process budget also excludes the master, container init and arbitrary
+subprocesses created by job code, so leave explicit headroom in the systemd/container PID limit.
 
 Pause drains current workers and starts no replacements until continue. It does not suspend a PHP
 process while that process retains a prefetched tail. Terminate drains for `shutdown_grace`, then

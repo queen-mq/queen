@@ -4,6 +4,7 @@ namespace Queen;
 
 use Queen\Http\HttpClient;
 use Queen\Http\LoadBalancer;
+use Queen\Http\Retry429Policy;
 use Queen\Buffer\BufferManager;
 use Queen\Builders\QueueBuilder;
 use Queen\Builders\TransactionBuilder;
@@ -498,6 +499,11 @@ class Queen
         }
         foreach ($config['retry429'] as $name => $value) {
             $config['retry429'][$name] = $this->normalizeInteger($value, "retry429.{$name}", 0);
+        }
+        if (($config['retry429']['capMs'] ?? 1) > Retry429Policy::MAX_CAP_MILLIS) {
+            throw new \InvalidArgumentException(
+                'retry429.capMs must not exceed ' . Retry429Policy::MAX_CAP_MILLIS,
+            );
         }
 
         return $config;

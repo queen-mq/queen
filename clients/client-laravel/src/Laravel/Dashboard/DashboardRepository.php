@@ -19,6 +19,8 @@ final class DashboardRepository
 
     private const MAX_PIDS_PER_POOL = 512;
 
+    private const MAX_PROCESS_LIMIT = 4096;
+
     /**
      * @param \Closure(int): mixed $failedJobs
      */
@@ -108,20 +110,48 @@ final class DashboardRepository
             $live = false;
         }
         $pools = $this->normalizePools($raw, $configuration);
+        $state = in_array($raw['state'] ?? null, ['starting', 'running', 'paused', 'terminating', 'stopped'], true)
+            ? $raw['state']
+            : 'unknown';
+        $draining = $this->strictBoundedInteger(
+            $raw['draining'] ?? null,
+            0,
+            $configuration['process_limit'],
+        );
+        $processBudget = $this->processBudget(
+            $raw['process_budget'] ?? null,
+            $configuration,
+            $pools,
+            $draining,
+        );
+        $allPoolsReady = $pools !== []
+            && !in_array(false, array_column($pools, 'ready'), true);
+        $allPoolsHealthy = $pools !== []
+            && !in_array(false, array_column($pools, 'healthy'), true);
+        $allCapacitySatisfied = $pools !== []
+            && !in_array(false, array_column($pools, 'capacity_satisfied'), true);
+        $ready = $live
+            && $state === 'running'
+            && ($raw['ready'] ?? null) === true
+            && $allPoolsReady;
+        $capacitySatisfied = ($raw['capacity_satisfied'] ?? null) === true
+            && $allCapacitySatisfied;
 
         return [
             'availability' => $live ? 'live' : 'stale',
             'engine' => in_array($raw['engine'] ?? null, ['php', 'rust'], true) ? $raw['engine'] : 'unknown',
-            'state' => in_array($raw['state'] ?? null, ['starting', 'running', 'paused', 'terminating', 'stopped'], true)
-                ? $raw['state']
-                : 'unknown',
+            'state' => $state,
             'instance_id' => $instanceId,
             'pid' => $this->positiveInteger($raw['pid'] ?? null),
             'updated_at' => gmdate(DATE_ATOM, $epoch),
             'updated_at_epoch' => $epoch,
             'age_seconds' => max(0, $age),
             'workers' => array_sum(array_column($pools, 'processes')),
-            'draining' => $this->nonNegativeInteger($raw['draining'] ?? null) ?? 0,
+            'draining' => $draining ?? 0,
+            'ready' => $ready,
+            'capacity_satisfied' => $capacitySatisfied,
+            'processing_healthy' => $ready && $capacitySatisfied && $allPoolsHealthy,
+            'process_budget' => $processBudget,
             'pools' => $pools,
         ];
     }
@@ -140,6 +170,10 @@ final class DashboardRepository
             'age_seconds' => null,
             'workers' => 0,
             'draining' => 0,
+            'ready' => false,
+            'capacity_satisfied' => false,
+            'processing_healthy' => false,
+            'process_budget' => $this->unavailableProcessBudget(),
             'pools' => [],
         ];
     }
@@ -171,13 +205,21 @@ final class DashboardRepository
         $result = [];
         $seen = [];
         $poolStatus = $raw['pool_status'] ?? null;
+        $processLimit = $configuration['process_limit'];
 
         if (is_array($poolStatus) && array_is_list($poolStatus)) {
             foreach ($poolStatus as $entry) {
                 if (!is_array($entry)) {
                     continue;
                 }
-                $this->appendPool($result, $seen, $entry['supervisor'] ?? $entry['name'] ?? null, $entry['queue'] ?? null, $entry);
+                $this->appendPool(
+                    $result,
+                    $seen,
+                    $entry['supervisor'] ?? $entry['name'] ?? null,
+                    $entry['queue'] ?? null,
+                    $entry,
+                    $processLimit,
+                );
             }
         } else {
             $legacy = $raw['pools'] ?? null;
@@ -188,12 +230,12 @@ final class DashboardRepository
                     }
                     if ($this->looksLikePool($queues)) {
                         [$name, $queue] = $this->splitLegacyPoolKey($supervisor, $configuration);
-                        $this->appendPool($result, $seen, $name, $queue, $queues);
+                        $this->appendPool($result, $seen, $name, $queue, $queues, $processLimit);
                         continue;
                     }
                     foreach ($queues as $queue => $entry) {
                         if (is_string($queue) && is_array($entry)) {
-                            $this->appendPool($result, $seen, $supervisor, $queue, $entry);
+                            $this->appendPool($result, $seen, $supervisor, $queue, $entry, $processLimit);
                         }
                     }
                 }
@@ -205,7 +247,7 @@ final class DashboardRepository
                 continue;
             }
             foreach ($supervisor['queues'] ?? [] as $queue) {
-                $this->appendPool($result, $seen, $supervisor['name'] ?? null, $queue, []);
+                $this->appendPool($result, $seen, $supervisor['name'] ?? null, $queue, [], $processLimit);
             }
         }
 
@@ -220,7 +262,14 @@ final class DashboardRepository
      * @param array<string, true> $seen
      * @param array<string, mixed> $entry
      */
-    private function appendPool(array &$result, array &$seen, mixed $supervisor, mixed $queue, array $entry): void
+    private function appendPool(
+        array &$result,
+        array &$seen,
+        mixed $supervisor,
+        mixed $queue,
+        array $entry,
+        int $processLimit,
+    ): void
     {
         if (count($result) >= self::MAX_POOLS) {
             return;
@@ -255,24 +304,170 @@ final class DashboardRepository
             }
         }
         $restartState = $entry['restart_state'] ?? null;
-        $processes = $this->nonNegativeInteger($entry['running'] ?? $entry['processes'] ?? null) ?? count($pids);
+        $reportedProcesses = $this->strictBoundedInteger(
+            $entry['running'] ?? $entry['processes'] ?? null,
+            0,
+            $processLimit,
+        );
+        $reportedDesired = $this->strictBoundedInteger($entry['desired'] ?? null, 0, $processLimit);
+        $reportedDraining = $this->strictBoundedInteger($entry['draining'] ?? null, 0, $processLimit);
+        $processes = $reportedProcesses ?? min(count($pids), $processLimit);
+        $desired = $reportedDesired ?? $processes;
+        $draining = $reportedDraining ?? 0;
+        $restartFailures = $this->strictBoundedInteger(
+            $entry['restart_failures'] ?? null,
+            0,
+            $processLimit,
+        );
+        $depth = $this->nonNegativeInteger($entry['depth'] ?? null);
+        $depthAvailable = ($entry['depth_available'] ?? null) === true && $depth !== null;
+        $healthy = ($entry['healthy'] ?? null) === true
+            && $restartState === 'closed'
+            && $restartFailures === 0;
+        $ready = ($entry['ready'] ?? null) === true
+            && $reportedProcesses !== null
+            && $reportedDesired !== null
+            && $reportedDraining !== null
+            && $depthAvailable
+            && ($reportedDesired === 0 || $reportedProcesses > 0);
+        $capacitySatisfied = ($entry['capacity_satisfied'] ?? null) === true
+            && $reportedProcesses !== null
+            && $reportedDesired !== null
+            && $reportedProcesses >= $reportedDesired;
+        $processCost = $this->strictBoundedInteger(
+            $entry['process_cost_per_worker'] ?? null,
+            1,
+            $processLimit,
+        );
+        $reservedProcesses = $this->strictBoundedInteger(
+            $entry['reserved_processes'] ?? null,
+            0,
+            $processLimit,
+        );
+        $renewalHelpers = $this->strictBoundedInteger(
+            $entry['renewal_helpers_reserved'] ?? null,
+            0,
+            $processLimit,
+        );
+        $workerSpan = $reportedProcesses !== null && $reportedDraining !== null
+            ? $reportedProcesses + $reportedDraining
+            : null;
+        if ($workerSpan === null
+            || $processCost === null
+            || $reservedProcesses !== $workerSpan * $processCost
+            || $renewalHelpers !== $workerSpan * ($processCost - 1)) {
+            $processCost = null;
+            $reservedProcesses = null;
+            $renewalHelpers = null;
+        }
 
         $result[] = [
             'supervisor' => $supervisor,
             'queue' => $queue,
             'processes' => $processes,
-            'desired' => $this->nonNegativeInteger($entry['desired'] ?? null) ?? $processes,
+            'desired' => $desired,
             'pids' => array_values(array_unique($pids)),
             'draining_pids' => array_values(array_unique($drainingPids)),
-            'draining' => $this->nonNegativeInteger($entry['draining'] ?? null) ?? 0,
-            'restart_failures' => $this->nonNegativeInteger($entry['restart_failures'] ?? null) ?? 0,
+            'draining' => $draining,
+            'healthy' => $healthy,
+            'ready' => $ready,
+            'capacity_satisfied' => $capacitySatisfied,
+            'restart_failures' => $restartFailures ?? 0,
             'restart_state' => in_array($restartState, ['closed', 'backoff', 'open', 'probe'], true)
                 ? $restartState
                 : 'closed',
             'restart_in_seconds' => $this->nonNegativeInteger($entry['restart_in_seconds'] ?? null),
-            'depth_available' => ($entry['depth_available'] ?? array_key_exists('depth', $entry)) === true
-                && $this->nonNegativeInteger($entry['depth'] ?? null) !== null,
-            'depth' => $this->nonNegativeInteger($entry['depth'] ?? null),
+            'depth_available' => $depthAvailable,
+            'depth' => $depth,
+            'process_cost_per_worker' => $processCost,
+            'reserved_processes' => $reservedProcesses,
+            'renewal_helpers_reserved' => $renewalHelpers,
+        ];
+    }
+
+    /**
+     * @param array<string, mixed> $configuration
+     * @param list<array<string, mixed>> $pools
+     * @return array<string, bool|int|null>
+     */
+    private function processBudget(
+        mixed $raw,
+        array $configuration,
+        array $pools,
+        ?int $reportedDraining,
+    ): array
+    {
+        $unavailable = $this->unavailableProcessBudget($configuration['process_limit'] ?? null);
+        if (!is_array($raw) || array_is_list($raw)) {
+            return $unavailable;
+        }
+
+        $limit = $this->strictBoundedInteger($raw['limit'] ?? null, 1, self::MAX_PROCESS_LIMIT);
+        $used = $this->strictBoundedInteger($raw['used'] ?? null, 0, self::MAX_PROCESS_LIMIT);
+        $available = $this->strictBoundedInteger($raw['available'] ?? null, 0, self::MAX_PROCESS_LIMIT);
+        $activeWorkers = $this->strictBoundedInteger(
+            $raw['active_worker_processes'] ?? null,
+            0,
+            self::MAX_PROCESS_LIMIT,
+        );
+        $drainingWorkers = $this->strictBoundedInteger(
+            $raw['draining_worker_processes'] ?? null,
+            0,
+            self::MAX_PROCESS_LIMIT,
+        );
+        $renewalHelpers = $this->strictBoundedInteger(
+            $raw['renewal_helpers_reserved'] ?? null,
+            0,
+            self::MAX_PROCESS_LIMIT,
+        );
+        $configuredLimit = $configuration['process_limit'] ?? null;
+        $poolHelpers = array_column($pools, 'renewal_helpers_reserved');
+        $poolBudgetKnown = !in_array(null, $poolHelpers, true);
+        $expectedActiveWorkers = array_sum(array_column($pools, 'processes'));
+        $expectedDrainingWorkers = array_sum(array_column($pools, 'draining'));
+        $expectedHelpers = $poolBudgetKnown ? array_sum($poolHelpers) : null;
+
+        if ($limit === null
+            || $used === null
+            || $available === null
+            || $activeWorkers === null
+            || $drainingWorkers === null
+            || $renewalHelpers === null
+            || $limit !== $configuredLimit
+            || $used > $limit
+            || $available !== $limit - $used
+            || $used !== $activeWorkers + $drainingWorkers + $renewalHelpers
+            || $reportedDraining === null
+            || $drainingWorkers !== $reportedDraining
+            || $activeWorkers !== $expectedActiveWorkers
+            || $drainingWorkers !== $expectedDrainingWorkers
+            || !$poolBudgetKnown
+            || $renewalHelpers !== $expectedHelpers) {
+            return $unavailable;
+        }
+
+        return [
+            'valid' => true,
+            'limit' => $limit,
+            'used' => $used,
+            'available' => $available,
+            'active_worker_processes' => $activeWorkers,
+            'draining_worker_processes' => $drainingWorkers,
+            'renewal_helpers_reserved' => $renewalHelpers,
+        ];
+    }
+
+    /** @return array<string, bool|int|null> */
+    private function unavailableProcessBudget(mixed $configuredLimit = null): array
+    {
+        return [
+            'valid' => false,
+            'limit' => $this->strictBoundedInteger($configuredLimit, 1, self::MAX_PROCESS_LIMIT),
+            'used' => null,
+            'available' => null,
+            'active_worker_processes' => null,
+            'draining_worker_processes' => null,
+            'renewal_helpers_reserved' => null,
         ];
     }
 
@@ -607,6 +802,13 @@ final class DashboardRepository
         }
 
         return null;
+    }
+
+    private function strictBoundedInteger(mixed $value, int $minimum, int $maximum): ?int
+    {
+        return is_int($value) && $value >= $minimum && $value <= $maximum
+            ? $value
+            : null;
     }
 
     private function boundedInteger(mixed $value, int $default, int $minimum, int $maximum): int

@@ -2,7 +2,7 @@
     <div class="card-header">
         <div>
             <h2 id="supervisors-title">Supervisor instance</h2>
-            <p>{{ ucfirst($supervisor['engine'] ?? 'unknown') }} master · {{ $stateLabel }}</p>
+            <p>{{ ucfirst($supervisor['engine'] ?? 'unknown') }} master · {{ $stateLabel }} · {{ $readinessLabel }}</p>
         </div>
         <div class="controls" aria-label="Supervisor controls">
             <form method="post" action="{{ route('queen.dashboard.control', ['command' => 'pause'], false) }}">
@@ -34,7 +34,7 @@
     @else
         <div class="table-wrap" role="region" aria-label="Worker pools table" tabindex="0">
             <table>
-                <thead><tr><th scope="col">Supervisor</th><th scope="col">Queue</th><th scope="col" class="number">Running / desired</th><th scope="col" class="number">Draining</th><th scope="col">Restart</th><th scope="col">PIDs</th></tr></thead>
+                <thead><tr><th scope="col">Supervisor</th><th scope="col">Queue</th><th scope="col" class="number">Running / desired</th><th scope="col">Readiness / capacity</th><th scope="col" class="number">Reserved / helpers</th><th scope="col" class="number">Draining</th><th scope="col">Restart</th><th scope="col">PIDs</th></tr></thead>
                 <tbody>
                 @foreach ($supervisor['pools'] as $pool)
                     @include('queen::dashboard.partials.supervisor-pool-row')

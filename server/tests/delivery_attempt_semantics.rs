@@ -190,6 +190,69 @@ async fn delivery_attempt_is_group_scoped_across_every_pop_path() {
     let discovered = parse(&discovered);
     assert_eq!(partition_attempt(&discovered), 1, "{discovered}");
 
+    // A completed prefix moves the cursor inside a still-live batch. If that
+    // worker then dies, the remaining tail is a redelivery even though its
+    // start offset is now one position beyond the batch's original start.
+    let partial_queue = unique("attempt-partial");
+    broker
+        .push(vec![
+            qp::PushItem::new(partial_queue.clone(), serde_json::json!({"job": 1})),
+            qp::PushItem::new(partial_queue.clone(), serde_json::json!({"job": 2})),
+        ])
+        .await
+        .expect("push partial-ack batch");
+    let partial_group = unique("attempt-partial-group");
+    let partial = broker
+        .pop_partition(
+            &partial_queue,
+            &partition,
+            &qp::PopParams {
+                batch: Some(2),
+                lease_seconds: Some(60),
+                consumer_group: Some(partial_group.clone()),
+                subscription_mode: Some(qp::SubscriptionMode::All),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("pop partial-ack batch");
+    assert_eq!(partial.messages.len(), 2, "{partial:?}");
+    let prefix_ack = broker
+        .ack(&qp::AckRequest {
+            transaction_id: partial.messages[0].transaction_id.clone(),
+            partition_id: partial.messages[0].partition_id.clone(),
+            status: qp::AckStatus::Completed,
+            consumer_group: Some(partial_group.clone()),
+            lease_id: Some(partial.messages[0].lease_id.clone()),
+            error: None,
+        })
+        .await
+        .expect("ack partial-lease prefix");
+    assert!(prefix_ack.success, "{prefix_ack:?}");
+
+    expire_group(&client, &partial_group).await;
+    let tail_worker = unique("worker");
+    let tail = client
+        .query_one(
+            "SELECT queen.log_pop_specific_v1(\
+                 $1,$2,$3,2,60,$4,false,'all','',$5::text::uuid,false)::text",
+            &[
+                &partial_queue,
+                &partition,
+                &partial_group,
+                &tail_worker,
+                &tenant,
+            ],
+        )
+        .await
+        .expect("redeliver partial-lease tail");
+    let tail = parse(&tail);
+    assert_eq!(tail["deliveryAttempt"], 2, "{tail}");
+
     broker.delete_queue(&queue).await.expect("cleanup queue");
+    broker
+        .delete_queue(&partial_queue)
+        .await
+        .expect("cleanup partial queue");
     assert_eq!(broker.shutdown().await, 0);
 }

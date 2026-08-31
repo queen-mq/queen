@@ -154,6 +154,189 @@ final class LaravelDashboardTest extends TestCase
         $this->assertDashboardButtonState($xpath, 'Terminate', false);
     }
 
+    public function testDashboardSeparatesLivenessReadinessAndDesiredCapacityAndShowsProcessBudget(): void
+    {
+        $state = $this->liveSupervisor([
+            'engine' => 'rust',
+            'state' => 'running',
+            'ready' => true,
+            'capacity_satisfied' => false,
+            'draining' => 1,
+            'process_budget' => [
+                'limit' => 256,
+                'used' => 9,
+                'available' => 247,
+                'active_worker_processes' => 4,
+                'draining_worker_processes' => 1,
+                'renewal_helpers_reserved' => 4,
+            ],
+            'pool_status' => [
+                [
+                    'supervisor' => 'default',
+                    'queue' => 'high',
+                    'running' => 3,
+                    'desired' => 4,
+                    'draining' => 1,
+                    'pids' => [101, 102, 103],
+                    'draining_pids' => [99],
+                    'healthy' => true,
+                    'ready' => true,
+                    'capacity_satisfied' => false,
+                    'restart_state' => 'closed',
+                    'restart_failures' => 0,
+                    'restart_in_seconds' => null,
+                    'depth' => 71,
+                    'depth_available' => true,
+                    'process_cost_per_worker' => 2,
+                    'reserved_processes' => 8,
+                    'renewal_helpers_reserved' => 4,
+                ],
+                [
+                    'supervisor' => 'default',
+                    'queue' => 'default',
+                    'running' => 1,
+                    'desired' => 1,
+                    'draining' => 0,
+                    'pids' => [104],
+                    'draining_pids' => [],
+                    'healthy' => true,
+                    'ready' => true,
+                    'capacity_satisfied' => true,
+                    'restart_state' => 'closed',
+                    'restart_failures' => 0,
+                    'restart_in_seconds' => null,
+                    'depth' => 2,
+                    'depth_available' => true,
+                    'process_cost_per_worker' => 1,
+                    'reserved_processes' => 1,
+                    'renewal_helpers_reserved' => 0,
+                ],
+            ],
+        ]);
+
+        $response = $this->getJson('/queen/api/status')->assertOk();
+        $response->assertJsonPath('supervisor.availability', 'live')
+            ->assertJsonPath('supervisor.ready', true)
+            ->assertJsonPath('supervisor.capacity_satisfied', false)
+            ->assertJsonPath('supervisor.processing_healthy', false)
+            ->assertJsonPath('supervisor.process_budget.valid', true)
+            ->assertJsonPath('supervisor.process_budget.limit', 256)
+            ->assertJsonPath('supervisor.process_budget.used', 9)
+            ->assertJsonPath('supervisor.process_budget.available', 247)
+            ->assertJsonPath('supervisor.process_budget.active_worker_processes', 4)
+            ->assertJsonPath('supervisor.process_budget.draining_worker_processes', 1)
+            ->assertJsonPath('supervisor.process_budget.renewal_helpers_reserved', 4);
+        $high = collect($response->json('supervisor.pools'))->firstWhere('queue', 'high');
+        $this->assertIsArray($high);
+        $this->assertTrue($high['ready']);
+        $this->assertFalse($high['capacity_satisfied']);
+        $this->assertSame(8, $high['reserved_processes']);
+        $this->assertSame(4, $high['renewal_helpers_reserved']);
+
+        $page = $this->get('/queen')->assertOk();
+        $page->assertSee('Live')
+            ->assertSee('Ready')
+            ->assertSee('Processing health is degraded')
+            ->assertSee('9 / 256')
+            ->assertSee('247 available')
+            ->assertSee('Reserved / helpers')
+            ->assertSee('8 / 4');
+        $this->assertStringNotContainsString(' style=', $page->getContent());
+
+        $status = $state->status();
+        $this->assertIsArray($status);
+        $status['capacity_satisfied'] = true;
+        $status['pool_status'][0]['desired'] = 3;
+        $status['pool_status'][0]['capacity_satisfied'] = true;
+        $state->writeStatus($status);
+        $this->getJson('/queen/api/status')->assertOk()
+            ->assertJsonPath('supervisor.ready', true)
+            ->assertJsonPath('supervisor.capacity_satisfied', true)
+            ->assertJsonPath('supervisor.processing_healthy', true);
+
+        $degraded = $state->status();
+        $this->assertIsArray($degraded);
+        $degraded['pool_status'][0]['healthy'] = false;
+        $degraded['pool_status'][0]['restart_state'] = 'probe';
+        $degraded['pool_status'][0]['restart_failures'] = 1;
+        $state->writeStatus($degraded);
+        $this->getJson('/queen/api/status')->assertOk()
+            ->assertJsonPath('supervisor.ready', true)
+            ->assertJsonPath('supervisor.capacity_satisfied', true)
+            ->assertJsonPath('supervisor.processing_healthy', false);
+    }
+
+    public function testDashboardHealthAndProcessBudgetFailClosedOnMalformedOrInconsistentStatus(): void
+    {
+        $this->liveSupervisor([
+            'engine' => 'php',
+            'state' => 'running',
+            'ready' => 'true',
+            'capacity_satisfied' => 1,
+            'draining' => 0,
+            'process_budget' => [
+                'limit' => 256,
+                'used' => PHP_INT_MAX,
+                'available' => 0,
+                'active_worker_processes' => 2,
+                'draining_worker_processes' => 0,
+                'renewal_helpers_reserved' => 0,
+            ],
+            'pool_status' => [
+                [
+                    'supervisor' => 'default',
+                    'queue' => 'high',
+                    'running' => 1,
+                    'desired' => 1,
+                    'draining' => 0,
+                    'healthy' => true,
+                    'ready' => true,
+                    'capacity_satisfied' => true,
+                    'restart_state' => 'closed',
+                    'restart_failures' => 0,
+                    'depth' => 1,
+                    'depth_available' => true,
+                    'process_cost_per_worker' => 1,
+                    'reserved_processes' => 1,
+                    'renewal_helpers_reserved' => 0,
+                ],
+                [
+                    'supervisor' => 'default',
+                    'queue' => 'default',
+                    'running' => 1,
+                    'desired' => 1,
+                    'draining' => 0,
+                    'healthy' => true,
+                    'ready' => true,
+                    'capacity_satisfied' => true,
+                    'restart_state' => 'closed',
+                    'restart_failures' => 0,
+                    'depth' => 1,
+                    'depth_available' => true,
+                    'process_cost_per_worker' => 1,
+                    'reserved_processes' => 1,
+                    'renewal_helpers_reserved' => 0,
+                ],
+            ],
+        ]);
+
+        $response = $this->getJson('/queen/api/status')->assertOk();
+        $response->assertJsonPath('supervisor.availability', 'live')
+            ->assertJsonPath('supervisor.ready', false)
+            ->assertJsonPath('supervisor.capacity_satisfied', false)
+            ->assertJsonPath('supervisor.processing_healthy', false)
+            ->assertJsonPath('supervisor.process_budget.valid', false)
+            ->assertJsonPath('supervisor.process_budget.limit', 256)
+            ->assertJsonPath('supervisor.process_budget.used', null)
+            ->assertJsonPath('supervisor.process_budget.available', null)
+            ->assertJsonPath('supervisor.process_budget.renewal_helpers_reserved', null);
+        $this->assertStringNotContainsString((string) PHP_INT_MAX, $response->getContent());
+
+        $this->get('/queen')->assertOk()
+            ->assertSee('Supervisor live, but not ready')
+            ->assertSee('Report unavailable');
+    }
+
     public function testVersionedStylesheetHasIntegrityImmutableCachingAndConditionalRequests(): void
     {
         $page = $this->get('/queen')->assertOk();

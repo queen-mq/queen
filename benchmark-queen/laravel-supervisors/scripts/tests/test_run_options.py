@@ -9,6 +9,15 @@ SCRIPT = Path(__file__).resolve().parents[1] / "run.sh"
 
 
 class RunOptionsTest(unittest.TestCase):
+    def run_before_docker(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["/bin/bash", str(SCRIPT), *arguments],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={"PATH": "/usr/bin:/bin"},
+        )
+
     def test_publishable_rejects_no_build_before_host_inspection(self) -> None:
         environment = {
             "PATH": "/usr/bin:/bin",
@@ -33,6 +42,69 @@ class RunOptionsTest(unittest.TestCase):
             result.stderr,
         )
         self.assertNotIn("Docker daemon", result.stderr)
+
+    def test_renewal_profile_does_not_require_the_entire_prefetch_tail_in_one_lease(self) -> None:
+        result = self.run_before_docker(
+            "--queen-prefetch",
+            "4",
+            "--worker-timeout",
+            "120",
+            "--retry-after",
+            "180",
+        )
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("required command not found: docker", result.stderr)
+        self.assertNotIn("prefetch multiplied", result.stderr)
+
+    def test_retry_after_must_still_exceed_worker_timeout_with_renewal(self) -> None:
+        result = self.run_before_docker(
+            "--queen-prefetch",
+            "4",
+            "--worker-timeout",
+            "120",
+            "--retry-after",
+            "120",
+        )
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn(
+            "--retry-after must exceed --worker-timeout when lease renewal is enabled",
+            result.stderr,
+        )
+        self.assertNotIn("Docker daemon", result.stderr)
+
+    def test_publishable_horizon_requires_strict_aof_durability(self) -> None:
+        result = self.run_before_docker("--qualification", "publishable")
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn(
+            "publishable requires Redis AOF yes with --redis-appendfsync always",
+            result.stderr,
+        )
+        self.assertNotIn("Docker daemon", result.stderr)
+
+    def test_strict_aof_setting_passes_the_durability_gate(self) -> None:
+        result = self.run_before_docker(
+            "--qualification",
+            "publishable",
+            "--redis-appendfsync",
+            "always",
+        )
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertTrue(
+            "required command not found: docker" in result.stderr
+            or "requires a clean Git worktree" in result.stderr,
+            result.stderr,
+        )
+        self.assertNotIn("Redis AOF", result.stderr)
+
+    def test_recorded_redis_durability_is_exported_to_compose(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn('export BENCH_REDIS_APPENDONLY="$REDIS_APPENDONLY"', source)
+        self.assertIn('export BENCH_REDIS_APPEND_FSYNC="$REDIS_APPEND_FSYNC"', source)
 
 
 if __name__ == "__main__":

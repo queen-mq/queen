@@ -100,6 +100,7 @@ The load-balancing keys are inert with a single URL: the `LoadBalancer` is only 
 `Queen\Http\Retry429Policy` (`UNBOUNDED` is `0`), separate from `retryAttempts`; the defaults,
 the `Retry-After` contract and the jitter are in
 [What the clients do with a 429](/reference/errors#what-the-clients-do-with-a-429).
+`capMs` has a hard 300,000ms ceiling so a single retry sleep remains operationally bounded.
 
 ## `Queen`
 
@@ -517,15 +518,22 @@ but retains the normal 30-second request budget; positive values become the
 broker timeout and the HTTP client adds five seconds of transport slack.
 
 The default `prefetch=1` and `ack_batch=1` keep the per-job synchronous ACK
-boundary. Short, idempotent workloads can opt into a larger prefetch and set
-`ack_batch` to the same value: one pop then feeds the standard sequential
-Laravel worker, and the final delete commits the complete lease through
-`/ack/batch`. This is still at-least-once delivery, but it deliberately widens
-the crash duplicate window and unprocessed prefetched jobs can remain leased
-until `retry_after`. The lease must cover the worst-case runtime of the entire
-prefetched batch. Leave both at `1` for long jobs, strict per-job confirmation,
-or comma-separated priority queues. A reentrant `pop()` before the active
-prefetched job is deleted or released fails explicitly.
+boundary. Short, idempotent workloads can opt into a larger prefetch; the
+connector then requires `lease_renewal=true` on every worker path. One pop feeds
+the standard sequential Laravel worker, while the helper keeps the active job,
+local tail and deferred acknowledgements leased. This remains at-least-once
+delivery and widens the crash duplicate window. An exact-PID `SIGCHLD` watchdog
+fences the worker if its helper disappears while a lease is active. The renewed
+profile requires Unix CLI PHP with PCNTL/POSIX support; application code must
+not replace Queen's signal handler. Leave prefetch at `1` for unsupported
+platforms, strict per-job confirmation or comma-separated priority queues. A
+reentrant `pop()` before the active prefetched job is deleted or released fails
+explicitly.
+
+Supervised workers validate `timeout < retry_after`; the driver also rejects an
+unsafe explicit per-job timeout when renewal is off. Laravel does not expose a
+direct `queue:work --timeout` value to the connection, so an external process
+manager must enforce that inequality itself.
 
 Laravel `Queue::bulk()` is overridden with bounded multi-partition Queen push
 requests. `bulk_batch` limits each request; ordinary `dispatch()` remains a

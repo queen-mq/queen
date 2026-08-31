@@ -108,4 +108,47 @@ class HttpClientTest extends TestCase
         $this->assertSame('Bearer read-secret', $handler->requests[0]->getHeaderLine('Authorization'));
         $this->assertSame(1, $handler->count());
     }
+
+    public function testMalformedSuccessfulJsonUsesTheNormalRetryBoundary(): void
+    {
+        $calls = 0;
+        $handler = static function () use (&$calls): \GuzzleHttp\Promise\PromiseInterface {
+            $calls++;
+
+            return new \GuzzleHttp\Promise\FulfilledPromise(new \GuzzleHttp\Psr7\Response(
+                200,
+                ['Content-Type' => 'application/json'],
+                $calls === 1 ? '{"messages":[' : '{"messages":[]}',
+            ));
+        };
+        $client = new HttpClient([
+            'baseUrl' => 'http://queen.test:6632',
+            'retryAttempts' => 2,
+            'retryDelayMillis' => 0,
+            'handler' => HandlerStack::create($handler),
+        ]);
+
+        $this->assertSame(['messages' => []], $client->get('/api/v1/pop/queue/default'));
+        $this->assertSame(2, $calls);
+    }
+
+    public function testMalformedSuccessfulJsonFailsClosedAfterRetriesAreExhausted(): void
+    {
+        $handler = static fn (): \GuzzleHttp\Promise\PromiseInterface =>
+            new \GuzzleHttp\Promise\FulfilledPromise(new \GuzzleHttp\Psr7\Response(
+                200,
+                ['Content-Type' => 'application/json'],
+                '{"messages":',
+            ));
+        $client = new HttpClient([
+            'baseUrl' => 'http://queen.test:6632',
+            'retryAttempts' => 1,
+            'handler' => HandlerStack::create($handler),
+        ]);
+
+        $this->expectException(\UnexpectedValueException::class);
+        $this->expectExceptionMessage('malformed JSON response');
+
+        $client->get('/api/v1/pop/queue/default');
+    }
 }

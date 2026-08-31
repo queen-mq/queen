@@ -104,6 +104,10 @@ class FeatureParityHarnessTest(unittest.TestCase):
             self.assertEqual(["horizon", "queen-rust"], document["settings"]["engines"])
             self.assertEqual(6, document["settings"]["total_jobs_per_lane"])
             self.assertEqual(
+                {"critical": 3, "default": 3},
+                document["settings"]["jobs_by_queue"],
+            )
+            self.assertEqual(
                 "critical,default", document["settings"]["bench_queues_csv"]
             )
             self.assertEqual(
@@ -153,6 +157,8 @@ class FeatureParityHarnessTest(unittest.TestCase):
                 "--dry-run",
                 "--queues",
                 f"{valid},default",
+                "--jobs-per-queue",
+                "1",
             )
             rejected = self.run_script(
                 "--output",
@@ -160,11 +166,32 @@ class FeatureParityHarnessTest(unittest.TestCase):
                 "--dry-run",
                 "--queues",
                 f"{valid}q,default",
+                "--jobs-per-queue",
+                "1",
             )
 
         self.assertEqual(0, accepted.returncode, accepted.stderr)
         self.assertNotEqual(0, rejected.returncode)
         self.assertIn("1..118", rejected.stderr)
+
+    def test_default_protocol_uses_the_frozen_three_queue_distribution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "artifacts"
+            result = self.run_script("--output", str(output), "--dry-run")
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            document = json.loads(
+                (output / "metadata.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                ["high", "default", "low"], document["settings"]["queues"]
+            )
+            self.assertEqual(
+                {"high": 60, "default": 30, "low": 10},
+                document["settings"]["jobs_by_queue"],
+            )
+            self.assertEqual(100, document["settings"]["total_jobs_per_lane"])
+            self.assertEqual(3, document["settings"]["workers"])
 
     def test_output_directory_must_be_empty(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

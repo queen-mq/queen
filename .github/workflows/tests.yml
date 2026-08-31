@@ -114,6 +114,67 @@ jobs:
             "$release_test/queen-supervisor-manifest.json"
           python3 -m unittest discover -s supervisor/scripts/tests -v
 
+  # `WithoutOverlapping` uses Laravel's cache rather than the Queen broker.
+  # Keep its real Redis + process-crash proof visible and isolated from both
+  # the offline unit lane and the performance fixtures.
+  php-client-redis-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      redis:
+        image: redis:7.4.2-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
+    defaults:
+      run:
+        working-directory: clients/client-laravel
+    env:
+      QUEEN_LARAVEL_TEST_REDIS_HOST: 127.0.0.1
+      QUEEN_LARAVEL_TEST_REDIS_PORT: 6379
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up PHP 8.3
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          extensions: mbstring, pcntl, posix, redis, dom, xml, xmlwriter
+          coverage: none
+          tools: composer:v2
+      - name: Resolve and install dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+      - name: Redis-backed Laravel overlap integration
+        run: vendor/bin/phpunit --testsuite RedisIntegration --testdox
+
+  # The qualification harness is executable test infrastructure: a parser or
+  # fault-gate regression can make a green product look safe or a fast lane
+  # look comparable when it is not. Keep its offline contract tests and static
+  # shell checks in CI independently of long-running Docker campaigns.
+  laravel-supervisor-harness-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: benchmark-queen/laravel-supervisors
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Python lint tooling
+        run: python3 -m pip install --disable-pip-version-check "ruff==0.15.4"
+      - name: Harness unit tests
+        run: python3 -m unittest discover -s scripts/tests -v
+      - name: Python lint contract
+        run: ruff check scripts
+      - name: Shell syntax and static analysis
+        run: |
+          bash -n scripts/*.sh
+          shellcheck scripts/*.sh
+      - name: PHP fixture syntax
+        run: find app/app app/config app/tests -name '*.php' -print0 | xargs -0 -n1 php -l
+
   # Broker tests that do not require the live PostgreSQL stack. Native for fast
   # caching; live integration cases remain in the Docker-backed matrix above.
   rust-unit:

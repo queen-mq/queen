@@ -27,6 +27,7 @@ final class BenchmarkConfigCommand extends Command
                 is_array($horizonDefaults) ? $horizonDefaults : [],
                 is_array($horizonEnvironment) ? $horizonEnvironment : [],
             ),
+            'queen_process_limit' => config('queen.supervisor.process_limit'),
             'queen_supervisor' => config('queen.supervisor.supervisors.bench'),
             'queen_connection' => config('queue.connections.queen'),
         ];

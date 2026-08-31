@@ -384,7 +384,7 @@ code {
 .table-wrap:focus-visible { outline-offset: -3px; }
 table {
     width: 100%;
-    min-width: 720px;
+    min-width: 940px;
     border-collapse: collapse;
 }
 th, td {
@@ -413,6 +413,13 @@ td strong { color: var(--text); font-weight: 600; }
 }
 .technical { white-space: nowrap; }
 .pid-list { white-space: nowrap; }
+.health-badges {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+}
+.budget-cell { color: var(--muted-strong); }
 .badge {
     display: inline-flex;
     align-items: center;

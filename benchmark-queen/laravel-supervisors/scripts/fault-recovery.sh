@@ -11,6 +11,7 @@ APP_IMAGE="queen-laravel-supervisor-bench:local"
 BROKER_IMAGE="queen-laravel-supervisor-broker:local"
 
 ENGINES_CSV="horizon,queen-php,queen-rust"
+FAULT_SCENARIO="worker-sigkill"
 JOBS=24
 WORKERS=2
 SLEEP_MS=2000
@@ -41,12 +42,13 @@ usage() {
     cat <<'EOF'
 Usage: scripts/fault-recovery.sh --output DIRECTORY [options]
 
-Inject one SIGKILL into an active fixed-pool queue worker, verify supervisor
-recovery and job-set integrity, and retain raw evidence for every lane.
+Inject one process fault into an active fixed-pool lane, verify fencing,
+supervisor recovery and job-set integrity, and retain raw evidence.
 
 Options:
   --output DIRECTORY           Required, new or empty artifact directory
   --engines CSV                Subset of horizon,queen-php,queen-rust
+  --scenario NAME              worker-sigkill (default) or renewal-helper-sigkill
   --jobs N                     Jobs per lane (default: 24)
   --workers N                  Fixed workers per lane (default: 2)
   --sleep-ms N                 Runtime of every job (default: 2000)
@@ -68,7 +70,10 @@ The test fixes BENCH_PROFILE=fixed. Use `--queen-prefetch` and
 `--queen-ack-batch` to test either the synchronous-ACK production profile or
 an explicitly labelled deferred-ACK candidate.
 Horizon's equivalent worker child is `artisan horizon:work`; Queen's child is
-`artisan queue:work`. The master/supervisor process is never targeted.
+`artisan queue:work`. The renewal-helper scenario requires Queen-only engines
+and prefetch greater than one. Master/backend/network/storage faults are kept
+as separate campaign classes because their recovery and durability gates are
+not equivalent to a child-process replacement.
 EOF
 }
 
@@ -96,6 +101,7 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --output) OUTPUT_DIRECTORY="${2:?--output requires a value}"; shift 2 ;;
         --engines) ENGINES_CSV="${2:?--engines requires a value}"; shift 2 ;;
+        --scenario) FAULT_SCENARIO="${2:?--scenario requires a value}"; shift 2 ;;
         --jobs) JOBS="${2:?--jobs requires a value}"; shift 2 ;;
         --workers) WORKERS="${2:?--workers requires a value}"; shift 2 ;;
         --sleep-ms) SLEEP_MS="${2:?--sleep-ms requires a value}"; shift 2 ;;
@@ -137,6 +143,10 @@ require_positive_int "--completion-timeout" "$COMPLETION_TIMEOUT"
 [ "$RETRY_AFTER" -gt "$WORKER_TIMEOUT" ] || die "--retry-after must exceed --worker-timeout"
 [ "$KILL_DELAY_MS" -lt "$SLEEP_MS" ] || die "--kill-delay-ms must be shorter than --sleep-ms"
 [ "$JOBS" -ge $(( WORKERS * 4 )) ] || die "--jobs must be at least four times --workers to preserve backlog"
+case "$FAULT_SCENARIO" in
+    worker-sigkill|renewal-helper-sigkill) ;;
+    *) die "--scenario must be worker-sigkill or renewal-helper-sigkill" ;;
+esac
 LEASE_RENEWAL=false
 if [ "$QUEEN_PREFETCH" -gt 1 ]; then
     LEASE_RENEWAL=true
@@ -156,6 +166,13 @@ for engine in "${ENGINES[@]}"; do
         *) die "unknown engine in --engines: $engine" ;;
     esac
 done
+if [ "$FAULT_SCENARIO" = renewal-helper-sigkill ]; then
+    [ "$contains_queen" -eq 1 ] || die "renewal-helper-sigkill requires at least one Queen engine"
+    [ "$QUEEN_PREFETCH" -gt 1 ] || die "renewal-helper-sigkill requires --queen-prefetch greater than one"
+    for engine in "${ENGINES[@]}"; do
+        [ "$engine" != horizon ] || die "renewal-helper-sigkill does not apply to Horizon"
+    done
+fi
 
 # Every prefetched job starts under the same checkout window, while Laravel
 # handles the local buffer serially. The configured sleep is therefore a hard
@@ -180,6 +197,7 @@ campaign_id="fault-${campaign_stamp}-${git_short}-${campaign_token}"
 
 write_protocol_metadata() {
     python3 - "$OUTPUT_DIRECTORY" "$campaign_id" "$REPOSITORY_ROOT" "$ENGINES_CSV" \
+        "$FAULT_SCENARIO" \
         "$JOBS" "$WORKERS" "$SLEEP_MS" "$CPU_ITERATIONS" "$JOB_TRIES" \
         "$QUEEN_PREFETCH" "$QUEEN_ACK_BATCH" "$WORKER_TIMEOUT" "$RETRY_AFTER" "$KILL_DELAY_MS" "$RESPAWN_TIMEOUT" \
         "$COMPLETION_TIMEOUT" "$BUILD_IMAGES" "$DRY_RUN" "$ALLOW_LEASE_RISK" <<'PY'
@@ -191,7 +209,7 @@ import sys
 from pathlib import Path
 
 (
-    output, campaign_id, repository, engines, jobs, workers, sleep_ms,
+    output, campaign_id, repository, engines, fault_scenario, jobs, workers, sleep_ms,
     cpu_iterations, job_tries, queen_prefetch, queen_ack_batch, worker_timeout, retry_after, kill_delay_ms,
     respawn_timeout, completion_timeout, build_images, dry_run, allow_lease_risk,
 ) = sys.argv[1:]
@@ -212,6 +230,7 @@ metadata = {
     "host": {"platform": platform.platform(), "machine": platform.machine()},
     "settings": {
         "profile": "fixed",
+        "fault_scenario": fault_scenario,
         "engines": engines.split(","),
         "jobs": int(jobs),
         "workers": int(workers),
@@ -236,13 +255,18 @@ metadata = {
         "dry_run": dry_run == "1",
     },
     "method": {
-        "fault": "SIGKILL exactly one non-master worker child",
+        "fault": (
+            "SIGKILL exactly one active queue worker"
+            if fault_scenario == "worker-sigkill"
+            else "SIGKILL one active lease-renewal helper and require its worker watchdog fence"
+        ),
         "target_qualification": (
             "worker PID must have written a completion for this run; injection follows "
             "after kill_delay_ms while a long-job backlog remains"
         ),
         "horizon_worker_command": "artisan horizon:work",
         "queen_worker_command": "artisan queue:work",
+        "renewal_helper_command": "LeaseRenewalWorker::main",
         "delivery_semantics": "at-least-once",
         "strict_duplicate_observation": "reported separately from at-least-once recovery",
         "effect_witness": (
@@ -582,27 +606,57 @@ select_active_target() {
     done
 }
 
+select_helper_target() {
+    helper_container="$1"
+    helper_worker_pid="$2"
+    helper_deadline=$(( $(date +%s) + TARGET_ACTIVITY_TIMEOUT ))
+    while :; do
+        helper_rows="$(docker exec "$helper_container" ps -eo pid=,ppid=,args= \
+            | awk -v parent="$helper_worker_pid" '
+                $1 ~ /^[0-9]+$/ && $2 == parent && index($0, "LeaseRenewalWorker::main") > 0 {
+                    pid = $1
+                    ppid = $2
+                    $1 = ""
+                    $2 = ""
+                    sub(/^[[:space:]]+/, "")
+                    printf "%s\t%s\t%s\n", pid, ppid, $0
+                }
+            ')"
+        helper_count="$(printf '%s\n' "$helper_rows" | awk 'NF { count += 1 } END { print count + 0 }')"
+        if [ "$helper_count" -eq 1 ]; then
+            printf '%s\n' "$helper_rows"
+            return 0
+        fi
+        [ "$helper_count" -le 1 ] || die "worker $helper_worker_pid owns more than one renewal helper"
+        [ "$(date +%s)" -lt "$helper_deadline" ] || return 1
+        sleep 0.1
+    done
+}
+
 write_lane_summary() {
     summary_lane="$1"
     summary_engine="$2"
     summary_run_id="$3"
     summary_app_id="$4"
-    summary_target_pid="$5"
-    summary_target_ppid="$6"
-    summary_target_args="$7"
-    summary_parent_args="$8"
-    summary_replacement_pid="$9"
+    summary_scenario="$5"
+    summary_fenced_worker_pid="$6"
+    summary_target_pid="$7"
+    summary_target_ppid="$8"
+    summary_target_args="$9"
     shift 9
-    summary_kill_host_before="$1"
-    summary_kill_host_after="$2"
-    summary_kill_container_before="$3"
-    summary_kill_container_after="$4"
-    summary_kill_wall="$5"
-    summary_respawn_host="$6"
-    summary_completion_status="$7"
-    summary_ledger_status="$8"
+    summary_parent_args="$1"
+    summary_replacement_pid="$2"
+    summary_kill_host_before="$3"
+    summary_kill_host_after="$4"
+    summary_kill_container_before="$5"
+    summary_kill_container_after="$6"
+    summary_kill_wall="$7"
+    summary_respawn_host="$8"
+    summary_completion_status="$9"
+    summary_ledger_status="${10}"
 
     python3 - "$summary_lane" "$summary_engine" "$summary_run_id" "$summary_app_id" \
+        "$summary_scenario" "$summary_fenced_worker_pid" \
         "$JOBS" "$JOB_TRIES" "$QUEEN_PREFETCH" "$QUEEN_ACK_BATCH" "$WORKERS" "$SLEEP_MS" "$KILL_DELAY_MS" \
         "$summary_target_pid" "$summary_target_ppid" "$summary_target_args" \
         "$summary_parent_args" "$summary_replacement_pid" "$summary_kill_host_before" \
@@ -615,7 +669,8 @@ import sys
 from pathlib import Path
 
 (
-    lane_raw, engine, run_id, app_id, jobs_raw, job_tries_raw, queen_prefetch_raw,
+    lane_raw, engine, run_id, app_id, scenario, fenced_worker_pid_raw,
+    jobs_raw, job_tries_raw, queen_prefetch_raw,
     queen_ack_batch_raw, workers_raw,
     sleep_ms_raw, kill_delay_ms_raw, target_pid_raw, target_ppid_raw, target_args,
     parent_args, replacement_pid_raw, kill_host_before_raw,
@@ -755,8 +810,13 @@ queue_reconciled = (
     and queue_state.get("probe_errors") == []
 )
 inflight_recovery_observed = bool(retry_completions)
+target_proved_work = (
+    (lane / "target-events-before-kill.jsonl").is_file()
+    and (lane / "target-events-before-kill.jsonl").stat().st_size > 0
+)
 at_least_once_pass = (
     respawned
+    and target_proved_work
     and inflight_recovery_observed
     and complete
     and exact_job_set
@@ -791,13 +851,16 @@ summary = {
         "queen_ack_batch": int(queen_ack_batch_raw),
     },
     "fault": {
+        "scenario": scenario,
         "signal": "SIGKILL",
+        "target_role": "worker" if scenario == "worker-sigkill" else "renewal-helper",
+        "fenced_worker_pid": int(fenced_worker_pid_raw),
         "target_pid": int(target_pid_raw),
         "target_ppid": int(target_ppid_raw),
         "target_args": target_args,
         "parent_args": parent_args,
         "target_is_container_init": int(target_pid_raw) == 1,
-        "target_proved_work_before_kill": (lane / "target-events-before-kill.jsonl").stat().st_size > 0,
+        "target_proved_work_before_kill": target_proved_work,
         "wall_time": kill_wall,
         "host_monotonic_interval_ns": [kill_host_before, kill_host_after],
         "container_monotonic_interval_ns": [kill_container_before, kill_container_after],
@@ -834,6 +897,8 @@ summary = {
     "containers": container_checks,
     "checks": {
         "worker_respawned": respawned,
+        "target_was_bound_to_active_work": target_proved_work,
+        "helper_death_fenced_worker": respawned if scenario == "renewal-helper-sigkill" else None,
         "inflight_job_retried_and_completed": inflight_recovery_observed,
         "all_unique_jobs_completed": complete,
         "no_missing_jobs": missing == 0,
@@ -973,8 +1038,22 @@ PY
         2>"${ACTIVE_LANE_DIRECTORY}/dispatch.stderr.log"
     append_timeline "$timeline" dispatch_complete "$JOBS jobs"
 
-    target_row="$(select_active_target "$app_id" "$run_id" "$initial_workers" || true)"
-    [ -n "$target_row" ] || die "no qualified worker wrote a completion before injection"
+    qualified_worker_row="$(select_active_target "$app_id" "$run_id" "$initial_workers" || true)"
+    [ -n "$qualified_worker_row" ] || die "no qualified worker wrote a completion before injection"
+    qualified_worker_pid="$(printf '%s\n' "$qualified_worker_row" | awk '{print $1}')"
+    if [ "$FAULT_SCENARIO" = renewal-helper-sigkill ]; then
+        target_row="$(select_helper_target "$app_id" "$qualified_worker_pid" || true)"
+        [ -n "$target_row" ] \
+            || die "qualified worker $qualified_worker_pid did not expose one renewal helper"
+        target_role=renewal-helper
+        target_needle='LeaseRenewalWorker::main'
+        fenced_worker_pid="$qualified_worker_pid"
+    else
+        target_row="$qualified_worker_row"
+        target_role=worker
+        target_needle="$worker_needle"
+        fenced_worker_pid="$qualified_worker_pid"
+    fi
     target_pid="$(printf '%s\n' "$target_row" | awk '{print $1}')"
     target_ppid="$(printf '%s\n' "$target_row" | awk '{print $2}')"
     target_args="$(printf '%s\n' "$target_row" | awk '{$1=""; $2=""; sub(/^  */, ""); print}')"
@@ -982,34 +1061,47 @@ PY
     [ "$target_ppid" -gt 1 ] || die "refusing worker with non-supervisor PPID $target_ppid"
     current_args="$(docker exec "$app_id" ps -p "$target_pid" -o args= | sed -e 's/^[[:space:]]*//')"
     case "$current_args" in
-        *"$worker_needle"*) ;;
-        *) die "target PID $target_pid no longer matches worker command" ;;
+        *"$target_needle"*) ;;
+        *) die "target PID $target_pid no longer matches $target_role command" ;;
     esac
     current_ppid="$(docker exec "$app_id" ps -p "$target_pid" -o ppid= | tr -d '[:space:]')"
     [ "$current_ppid" = "$target_ppid" ] || die "target PID $target_pid changed parent"
     parent_args="$(docker exec "$app_id" ps -p "$target_ppid" -o args= | sed -e 's/^[[:space:]]*//')"
-    case "$parent_args" in
-        *"$worker_needle"*) die "refusing nested worker target" ;;
-    esac
-    docker exec "$app_id" cat "/results/${run_id}/events/worker-${target_pid}.jsonl" \
+    if [ "$FAULT_SCENARIO" = renewal-helper-sigkill ]; then
+        case "$parent_args" in
+            *"$worker_needle"*) ;;
+            *) die "renewal helper parent $target_ppid no longer matches a queue worker" ;;
+        esac
+        [ "$target_ppid" = "$qualified_worker_pid" ] \
+            || die "renewal helper parent changed before injection"
+    else
+        case "$parent_args" in
+            *"$worker_needle"*) die "refusing nested worker target" ;;
+        esac
+    fi
+    docker exec "$app_id" cat "/results/${run_id}/events/worker-${qualified_worker_pid}.jsonl" \
         >"${ACTIVE_LANE_DIRECTORY}/target-events-before-kill.jsonl"
     target_start_ticks="$(docker exec "$app_id" awk '{print $22}' "/proc/${target_pid}/stat")"
     python3 - "${ACTIVE_LANE_DIRECTORY}/target-identity.json" "$target_pid" "$target_ppid" \
-        "$target_start_ticks" "$target_args" "$parent_args" <<'PY'
+        "$target_start_ticks" "$target_args" "$parent_args" "$target_role" \
+        "$fenced_worker_pid" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-path, pid, ppid, start_ticks, args, parent_args = sys.argv[1:]
+path, pid, ppid, start_ticks, args, parent_args, role, fenced_worker_pid = sys.argv[1:]
 Path(path).write_text(json.dumps({
     "pid": int(pid),
     "ppid": int(ppid),
     "proc_start_ticks": int(start_ticks),
     "args": args,
     "parent_args": parent_args,
+    "role": role,
+    "fenced_worker_pid": int(fenced_worker_pid),
 }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
-    append_timeline "$timeline" target_qualified "pid=${target_pid};ppid=${target_ppid}"
+    append_timeline "$timeline" target_qualified \
+        "scenario=${FAULT_SCENARIO};role=${target_role};pid=${target_pid};fenced_worker=${fenced_worker_pid}"
 
     kill_delay_seconds="$(python3 -c 'import sys; print(int(sys.argv[1]) / 1000)' "$KILL_DELAY_MS")"
     sleep "$kill_delay_seconds"
@@ -1021,7 +1113,7 @@ PY
     docker exec "$app_id" kill -KILL "$target_pid"
     kill_container_after="$(docker exec "$app_id" python3 -c 'import time; print(time.monotonic_ns())')"
     kill_host_after="$(monotonic_ns)"
-    append_timeline "$timeline" sigkill_sent "pid=${target_pid}"
+    append_timeline "$timeline" sigkill_sent "role=${target_role};pid=${target_pid}"
 
     respawn_deadline=$(( $(date +%s) + RESPAWN_TIMEOUT ))
     replacement_pid=""
@@ -1037,7 +1129,7 @@ PY
                     NR == FNR { seen[$1] = 1; next }
                     !seen[$1] { print $1; exit }
                 ' "$initial_workers" "${current_workers}.tmp")"
-                target_present="$(awk -v target="$target_pid" '$1 == target { print "1"; exit }' \
+                target_present="$(awk -v target="$fenced_worker_pid" '$1 == target { print "1"; exit }' \
                     "${current_workers}.tmp")"
                 if [ "$current_count" -eq "$WORKERS" ] \
                     && [ -n "$candidate_replacement" ] \
@@ -1100,6 +1192,7 @@ PY
     append_timeline "$timeline" effect_ledger_check "status=${ledger_status}"
 
     write_lane_summary "$ACTIVE_LANE_DIRECTORY" "$lane_engine" "$run_id" "$app_id" \
+        "$FAULT_SCENARIO" "$fenced_worker_pid" \
         "$target_pid" "$target_ppid" "$target_args" "$parent_args" "$replacement_pid" \
         "$kill_host_before" "$kill_host_after" "$kill_container_before" \
         "$kill_container_after" "$kill_wall" "$respawn_host" "$completion_status" "$ledger_status"
@@ -1157,8 +1250,8 @@ aggregate = {
 lines = [
     "# Fault/recovery smoke report",
     "",
-    "| Engine | Respawn ms | Unique | Missing | Completion duplicates | Idempotency dedup hits | Effects | Conservation | Retry observed | Queue zero | Restarts/OOM | At-least-once | Strict execution |",
-    "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- | --- | --- | --- |",
+    "| Engine | Scenario | Respawn ms | Unique | Missing | Completion duplicates | Idempotency dedup hits | Effects | Conservation | Retry observed | Queue zero | Restarts/OOM | At-least-once | Strict execution |",
+    "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- | --- | --- | --- |",
 ]
 for item in results:
     recovery = item["supervisor_recovery"]["kill_to_full_pool_ms"]
@@ -1167,7 +1260,7 @@ for item in results:
     ledger = job["effect_ledger"]
     checks = item["checks"]
     lines.append(
-        f"| {item['engine']} | {recovery_text} | {job['unique_completed']}/{job['expected']} "
+        f"| {item['engine']} | {item['fault']['scenario']} | {recovery_text} | {job['unique_completed']}/{job['expected']} "
         f"| {job['missing']} | {job['duplicates']} "
         f"| {ledger['attempts']['already_present']['count']} "
         f"| {ledger['effects']['records']} "

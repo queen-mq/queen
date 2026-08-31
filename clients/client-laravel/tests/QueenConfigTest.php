@@ -4,6 +4,7 @@ namespace Queen\Tests;
 
 use GuzzleHttp\HandlerStack;
 use PHPUnit\Framework\TestCase;
+use Queen\Http\Retry429Policy;
 use Queen\Queen;
 use Queen\Support\Defaults;
 use Queen\Tests\Support\PlanHandler;
@@ -88,6 +89,7 @@ class QueenConfigTest extends TestCase
             ['url' => 'http://queen.test:6632', 'retry429' => ['baseMillis' => 5]],
             ['url' => 'http://queen.test:6632', 'retry429' => ['maxAttempts' => -1]],
             ['url' => 'http://queen.test:6632', 'retry429' => ['capMs' => 1.5]],
+            ['url' => 'http://queen.test:6632', 'retry429' => ['capMs' => Retry429Policy::MAX_CAP_MILLIS + 1]],
             ['url' => 'http://queen.test:6632', 'timeoutMillis' => '999999999999999999999999'],
             ['url' => 'http://queen.test:6632', 'headers' => ['Bad,Header' => 'value']],
         ] as $config) {

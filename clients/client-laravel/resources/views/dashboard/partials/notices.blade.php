@@ -18,4 +18,20 @@
             </span>
         </div>
     </div>
+@elseif (!$supervisor['ready'])
+    <div class="availability-notice" role="status">
+        <span class="state-mark" aria-hidden="true"></span>
+        <div>
+            <strong>Supervisor live, but not ready</strong>
+            <span>The master heartbeat is current, but one or more worker pools cannot safely serve jobs yet.</span>
+        </div>
+    </div>
+@elseif (!$supervisor['processing_healthy'])
+    <div class="availability-notice" role="status">
+        <span class="state-mark" aria-hidden="true"></span>
+        <div>
+            <strong>Processing health is degraded</strong>
+            <span>Jobs can be processed, but desired capacity or a worker restart circuit has not recovered yet.</span>
+        </div>
+    </div>
 @endif

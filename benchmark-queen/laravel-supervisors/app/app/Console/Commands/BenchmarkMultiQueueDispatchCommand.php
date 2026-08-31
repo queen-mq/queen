@@ -14,14 +14,15 @@ final class BenchmarkMultiQueueDispatchCommand extends Command
 {
     protected $signature = 'bench:dispatch-multi
         {--run-id= : Stable run identifier; a UUID is generated when omitted}
-        {--jobs-per-queue=100 : Number of jobs enqueued on every queue}
+        {--jobs-per-queue= : Equal number of jobs enqueued on every queue; defaults to 100}
+        {--queue-counts= : Ordered per-queue job counts, mutually exclusive with --jobs-per-queue}
         {--queues= : Strict comma-separated queue list; defaults to BENCH_QUEUES}
         {--sleep-ms=10 : Sleep performed by every job}
         {--cpu-iterations=0 : SHA-256 rounds performed by every job}
         {--connection= : Queue connection; defaults to BENCH_CONNECTION}
         {--metadata= : Dispatch manifest path; defaults to <results>/<run-id>/dispatch.json}';
 
-    protected $description = 'Dispatch a deterministic round-robin burst across multiple queues';
+    protected $description = 'Dispatch a deterministic, optionally weighted round-robin burst across multiple queues';
 
     public function handle(JsonlResultSink $sink, BenchmarkEffectLedger $ledger): int
     {
@@ -29,7 +30,6 @@ final class BenchmarkMultiQueueDispatchCommand extends Command
         $runId = is_string($runId) && $runId !== '' ? $runId : (string) Str::uuid();
         $this->identifier($runId, 'run-id');
 
-        $jobsPerQueue = $this->integerOption('jobs-per-queue', 1, 1_000_000);
         $sleepMs = $this->integerOption('sleep-ms', 0, 60_000);
         $cpuIterations = $this->integerOption('cpu-iterations', 0, 10_000_000);
         $connection = $this->stringOption('connection', (string) config('benchmark.connection'));
@@ -52,15 +52,39 @@ final class BenchmarkMultiQueueDispatchCommand extends Command
                 '--queues must exactly match BENCH_QUEUES so the probe cannot publish unsupervised work.',
             );
         }
-        if ($jobsPerQueue > intdiv(1_000_000, count($queues))) {
+
+        $jobsOption = $this->option('jobs-per-queue');
+        $countsOption = $this->option('queue-counts');
+        if (is_string($jobsOption) && $jobsOption !== ''
+            && is_string($countsOption) && $countsOption !== '') {
+            throw new InvalidArgumentException(
+                '--jobs-per-queue and --queue-counts are mutually exclusive.',
+            );
+        }
+        if (is_string($countsOption) && $countsOption !== '') {
+            $queueCounts = $this->queueCounts($countsOption, count($queues));
+        } else {
+            $jobsPerQueue = $this->integerOption('jobs-per-queue', 1, 1_000_000, 100);
+            $queueCounts = array_fill(0, count($queues), $jobsPerQueue);
+        }
+        $totalJobs = array_sum($queueCounts);
+        if ($totalJobs > 1_000_000) {
             throw new InvalidArgumentException('The multi-queue dispatch may not exceed 1,000,000 total jobs.');
+        }
+        $jobsByQueue = array_combine($queues, $queueCounts);
+        if ($jobsByQueue === false) {
+            throw new InvalidArgumentException('Unable to bind queue counts to queues.');
         }
 
         $sink->reserveRun($runId);
         $ledger->reserveRun($runId);
         $startedAt = hrtime(true);
-        for ($index = 0; $index < $jobsPerQueue; ++$index) {
-            foreach ($queues as $queue) {
+        $maximumQueueCount = max($queueCounts);
+        for ($index = 0; $index < $maximumQueueCount; ++$index) {
+            foreach ($jobsByQueue as $queue => $queueCount) {
+                if ($index >= $queueCount) {
+                    continue;
+                }
                 BenchmarkJob::dispatch(
                     runId: $runId,
                     jobId: $queue.':'.sprintf('%09d', $index),
@@ -74,12 +98,13 @@ final class BenchmarkMultiQueueDispatchCommand extends Command
 
         $manifest = [
             'run_id' => $runId,
-            'jobs' => $jobsPerQueue * count($queues),
-            'jobs_per_queue' => $jobsPerQueue,
+            'jobs' => $totalJobs,
+            'jobs_per_queue' => count(array_unique($queueCounts)) === 1 ? $queueCounts[0] : null,
+            'jobs_by_queue' => $jobsByQueue,
             'connection' => $connection,
             'queue' => $queues[0],
             'queues_csv' => implode(',', $queues),
-            'dispatch_mode' => 'round-robin-single',
+            'dispatch_mode' => 'weighted-round-robin-single',
             'dispatch_batch_size' => 1,
             'sleep_ms' => $sleepMs,
             'cpu_iterations' => $cpuIterations,
@@ -136,9 +161,46 @@ final class BenchmarkMultiQueueDispatchCommand extends Command
         return array_values($queues);
     }
 
-    private function integerOption(string $name, int $minimum, int $maximum): int
+    /** @return list<int> */
+    private function queueCounts(string $value, int $expectedCount): array
+    {
+        $parts = explode(',', $value);
+        if (count($parts) !== $expectedCount) {
+            throw new InvalidArgumentException(
+                '--queue-counts must contain exactly one positive integer for every queue.',
+            );
+        }
+
+        $counts = [];
+        foreach ($parts as $part) {
+            if (preg_match('/^[1-9][0-9]*$/D', $part) !== 1) {
+                throw new InvalidArgumentException(
+                    '--queue-counts must contain positive integers without whitespace.',
+                );
+            }
+            $count = filter_var($part, FILTER_VALIDATE_INT);
+            if ($count === false || $count > 1_000_000) {
+                throw new InvalidArgumentException(
+                    '--queue-counts entries must be in 1..1,000,000.',
+                );
+            }
+            $counts[] = (int) $count;
+        }
+
+        return $counts;
+    }
+
+    private function integerOption(
+        string $name,
+        int $minimum,
+        int $maximum,
+        ?int $default = null,
+    ): int
     {
         $raw = $this->option($name);
+        if (($raw === null || $raw === '') && $default !== null) {
+            $raw = (string) $default;
+        }
         if (!is_string($raw) || preg_match('/^(0|[1-9][0-9]*)$/D', $raw) !== 1) {
             throw new InvalidArgumentException("--{$name} must be an integer in {$minimum}..{$maximum}.");
         }

@@ -5,8 +5,10 @@ namespace Queen\Http;
 use GuzzleHttp\Client;
 use GuzzleHttp\Promise\PromiseInterface;
 use GuzzleHttp\Promise\Utils as PromiseUtils;
+use JsonException;
 use Psr\Http\Message\ResponseInterface;
 use Queen\Exceptions\HttpException;
+use UnexpectedValueException;
 
 class HttpClient
 {
@@ -287,7 +289,17 @@ class HttpClient
             return null;
         }
 
-        return json_decode($responseBody, true);
+        try {
+            return json_decode($responseBody, true, 512, JSON_THROW_ON_ERROR);
+        } catch (JsonException $exception) {
+            // A malformed success body is never an empty pop or a successful
+            // acknowledgement. Surface it as a transport failure so the normal
+            // retry/failover boundary runs and queue consumers fail closed.
+            throw new UnexpectedValueException(
+                'Queen returned a malformed JSON response: ' . $exception->getMessage(),
+                previous: $exception,
+            );
+        }
     }
 
     /**
@@ -302,7 +314,7 @@ class HttpClient
 
         $seconds = (float) $value;
 
-        return $seconds >= 0 ? $seconds : null;
+        return is_finite($seconds) && $seconds >= 0 ? $seconds : null;
     }
 
     private function executeRequest(string $url, string $method, ?array $body = null, ?int $requestTimeoutMillis = null): mixed

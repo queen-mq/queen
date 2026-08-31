@@ -806,6 +806,13 @@ BEGIN
     ELSE
         UPDATE queen.log_consumers SET
             committed = v_new,
+            -- Keep the attempt marker aligned with the first uncommitted
+            -- frame of a live partial lease.  If the worker dies after
+            -- completing a prefix, the tail must still be recognised as a
+            -- redelivery instead of looking like fresh work merely because
+            -- its start offset moved forward.
+            attempt_offset = CASE WHEN v_has_lease THEN v_new + 1
+                                  ELSE attempt_offset END,
             total_consumed = total_consumed + v_delta
         WHERE partition_id = p_partition_id AND consumer_group = p_group;
     END IF;

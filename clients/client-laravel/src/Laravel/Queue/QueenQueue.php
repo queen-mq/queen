@@ -2,7 +2,9 @@
 
 namespace Queen\Laravel\Queue;
 
+use Illuminate\Container\Container;
 use Illuminate\Contracts\Queue\Queue as QueueContract;
+use Illuminate\Queue\Events\WorkerStopping;
 use Illuminate\Queue\InvalidPayloadException;
 use Illuminate\Queue\Queue as BaseQueue;
 use JsonException;
@@ -38,7 +40,14 @@ class QueenQueue extends BaseQueue implements QueueContract
 
     private int $nextBatchId = 0;
 
-    /** @param (\Closure(string, \Closure(): mixed): mixed)|null $failedJobRetryHandler */
+    private bool $workerStoppingListenerRegistered = false;
+
+    private bool $shutDown = false;
+
+    /**
+     * @param (\Closure(string, \Closure(): mixed): mixed)|null $failedJobRetryHandler
+     * @param (\Closure(list<array>, string, ?string): array)|null $shutdownTailReleaser
+     */
     public function __construct(
         private Queen $queen,
         private string $defaultQueue = 'default',
@@ -54,24 +63,84 @@ class QueenQueue extends BaseQueue implements QueueContract
         private bool $popAutopilot = false,
         private ?LeaseRenewer $leaseRenewer = null,
         private ?\Closure $failedJobRetryHandler = null,
+        private ?\Closure $shutdownTailReleaser = null,
     ) {
         $this->dispatchAfterCommit = $dispatchAfterCommit;
     }
 
     public function __destruct()
     {
+        $this->shutdown();
+    }
+
+    /**
+     * Laravel resolves a connection after WorkerStarting, so the queue itself
+     * registers the stop hook as soon as QueueManager injects the container.
+     */
+    public function setContainer(Container $container): void
+    {
+        parent::setContainer($container);
+
+        if ($this->workerStoppingListenerRegistered || !$container->bound('events')) {
+            return;
+        }
+
+        $container->make('events')->listen(
+            WorkerStopping::class,
+            function (WorkerStopping $event): void {
+                $this->shutdown();
+            },
+        );
+        $this->workerStoppingListenerRegistered = true;
+    }
+
+    /**
+     * Settle completed deferred ACKs and explicitly retry one representative
+     * from every unhandled prefetched partition. The connector supplies a
+     * single-attempt, two-second client for this final request. Any skipped,
+     * rejected, or ambiguous item falls back to durable lease expiry.
+     */
+    public function shutdown(): void
+    {
+        if ($this->shutDown) {
+            return;
+        }
+        $this->shutDown = true;
+
         try {
-            if ($this->pendingAcknowledgements !== []) {
-                $this->flushAcknowledgements();
+            $groups = $this->shutdownAcknowledgementGroups();
+            if ($groups !== []) {
+                // A synchronous Laravel worker can own a prefetched tail for
+                // only one queue. Limit this best-effort path to one HTTP call
+                // even if direct, re-entrant API use created several groups.
+                $entries = reset($groups);
+                $messages = array_column($entries, 'wire');
+                $group = $entries[0]['group'];
+                $affinityKey = $entries[0]['affinity_key'];
+                $result = $this->shutdownTailReleaser !== null
+                    ? ($this->shutdownTailReleaser)($messages, $group, $affinityKey)
+                    : $this->queen->ack($messages, true, array_filter([
+                        'group' => $group,
+                        'affinityKey' => $affinityKey,
+                    ], static fn (mixed $value): bool => $value !== null));
+                $this->assertBatchAcknowledged($result, count($messages));
+
+                foreach ($entries as $entry) {
+                    if ($entry['type'] === 'completed') {
+                        $this->settleLeaseMessage($entry['message']);
+                    } else {
+                        $this->discardPrefetchedSiblings($entry['message']);
+                    }
+                }
             }
         } catch (\Throwable $exception) {
-            // Destructors cannot safely surface an exception to Laravel's
-            // worker. The unacknowledged leases remain durable and will be
-            // redelivered; keep an operator-visible diagnostic for graceful
-            // shutdowns. SIGKILL has the same at-least-once outcome naturally.
-            error_log('Queen Laravel worker could not flush batched acknowledgements during shutdown: '
+            // A shutdown ACK is deliberately best effort. Its transaction may
+            // be ambiguous, so never retry it locally; expiry/redelivery is the
+            // only safe at-least-once fallback.
+            error_log('Queen Laravel worker could not release its prefetched tail during shutdown: '
                 . $exception->getMessage());
         } finally {
+            $this->abandonUnsettledLocalState();
             $this->leaseRenewer?->close();
         }
     }
@@ -396,6 +465,10 @@ class QueenQueue extends BaseQueue implements QueueContract
 
     public function pop($queue = null): ?QueenJob
     {
+        if ($this->shutDown) {
+            throw new RuntimeException('Queen Laravel queue connection cannot pop after worker shutdown began.');
+        }
+
         $queue = $this->getQueue($queue);
         if ($this->prefetch > 1 && isset($this->activeDeliveries[$queue])) {
             throw new RuntimeException(
@@ -480,7 +553,7 @@ class QueenQueue extends BaseQueue implements QueueContract
             $this->deliveryQueues[$key] = $queue;
         }
 
-        return new QueenJob(
+        $job = new QueenJob(
             $this->container,
             $this,
             $message,
@@ -488,6 +561,20 @@ class QueenQueue extends BaseQueue implements QueueContract
             $queue,
             $this->consumerGroup,
         );
+
+        try {
+            $this->assertJobTimeoutIsSafe($job);
+        } catch (\Throwable $timeoutFailure) {
+            if ($this->leaseRenewer !== null) {
+                $this->abandonLease($message);
+            } else {
+                $this->discardPrefetchedSiblings($message);
+                $this->markDeliveryHandled($message);
+            }
+            throw $timeoutFailure;
+        }
+
+        return $job;
     }
 
     public function deleteReserved(
@@ -905,6 +992,111 @@ class QueenQueue extends BaseQueue implements QueueContract
                     is_array($item) ? ($item['error'] ?? 'Queen rejected the operation') : 'malformed acknowledgement'
                 ));
             }
+        }
+    }
+
+    /**
+     * @return array<string, list<array{
+     *     type: 'completed'|'retry',
+     *     message: array,
+     *     wire: array,
+     *     group: string,
+     *     affinity_key: ?string
+     * }>>
+     */
+    private function shutdownAcknowledgementGroups(): array
+    {
+        $groups = [];
+
+        foreach ($this->pendingAcknowledgements as $entry) {
+            $wire = $entry['message'];
+            $wire['_status'] = 'completed';
+            $key = json_encode([$entry['group'], $entry['affinity_key']], JSON_THROW_ON_ERROR);
+            $groups[$key][] = [
+                'type' => 'completed',
+                'message' => $entry['message'],
+                'wire' => $wire,
+                'group' => $entry['group'],
+                'affinity_key' => $entry['affinity_key'],
+            ];
+        }
+
+        foreach ($this->prefetched as $queue => $state) {
+            $represented = [];
+            $count = count($state['messages']);
+            for ($index = $state['next']; $index < $count; ++$index) {
+                $message = $state['messages'][$index];
+                $leaseId = $this->leaseIdOrNull($message) ?? '';
+                $partitionId = (string) ($message['partitionId'] ?? $message['partition_id'] ?? '');
+                $partitionKey = $leaseId . "\0" . $partitionId;
+                if (isset($represented[$partitionKey])) {
+                    continue;
+                }
+                $represented[$partitionKey] = true;
+
+                $affinityKey = "{$queue}:Default:{$this->consumerGroup}";
+                $key = json_encode([$this->consumerGroup, $affinityKey], JSON_THROW_ON_ERROR);
+                $wire = $message;
+                $wire['_status'] = 'retry';
+                $wire['_error'] = 'Laravel worker stopped before processing this prefetched delivery.';
+                $groups[$key][] = [
+                    'type' => 'retry',
+                    'message' => $message,
+                    'wire' => $wire,
+                    'group' => $this->consumerGroup,
+                    'affinity_key' => $affinityKey,
+                ];
+            }
+        }
+
+        return $groups;
+    }
+
+    /**
+     * Forget every helper-side lease before closing it and erase local buffers.
+     *
+     * No network operation is attempted here. Anything not durably settled by
+     * the one shutdown request becomes visible through ordinary lease expiry.
+     */
+    private function abandonUnsettledLocalState(): void
+    {
+        foreach (array_keys($this->leaseOutstanding) as $leaseId) {
+            try {
+                $this->leaseRenewer?->forget($leaseId);
+            } catch (\Throwable) {
+                // close() below tears down the helper's private pipe.
+            }
+        }
+
+        $this->prefetched = [];
+        $this->deliveryBatches = [];
+        $this->activeDeliveries = [];
+        $this->deliveryQueues = [];
+        $this->batchOutstanding = [];
+        $this->pendingAcknowledgements = [];
+        $this->leaseOutstanding = [];
+    }
+
+    private function assertJobTimeoutIsSafe(QueenJob $job): void
+    {
+        $timeout = $job->timeout();
+        if ($timeout === null) {
+            // The worker CLI's --timeout is not part of Laravel's queue
+            // connection contract. Supervisors validate it at startup.
+            return;
+        }
+
+        if (!is_int($timeout) || $timeout < 0) {
+            throw new RuntimeException(
+                'Queen Laravel job timeout must be a non-negative integer or null.',
+            );
+        }
+
+        if ($this->leaseRenewer === null && ($timeout === 0 || $timeout >= $this->retryAfter)) {
+            throw new RuntimeException(
+                "Queen Laravel job timeout [{$timeout}] must be positive and shorter than retry_after "
+                . "[{$this->retryAfter}] when lease_renewal is disabled.",
+            );
         }
     }
 

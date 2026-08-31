@@ -26,6 +26,8 @@ QUEEN_BULK_BATCH="${QUEEN_BULK_BATCH:-100}"
 QUEEN_PARTITIONS="${QUEEN_PARTITIONS:-64}"
 QUEEN_POP_FUSION="${QUEEN_POP_FUSION:-0}"
 LEDGER_MODE="${BENCH_LEDGER_MODE:-off}"
+REDIS_APPENDONLY="${BENCH_REDIS_APPENDONLY:-yes}"
+REDIS_APPEND_FSYNC="${BENCH_REDIS_APPEND_FSYNC:-everysec}"
 TIMED_QUEUE="benchmark"
 WARMUP_JOBS=50
 SAMPLE_INTERVAL="0.50"
@@ -54,6 +56,7 @@ CURRENT_HOST_RUN=""
 CURRENT_ISOLATION_PID=""
 CURRENT_ISOLATION_STOP=""
 CURRENT_ISOLATION_READY=""
+CURRENT_PROJECT_OWNED=0
 
 usage() {
     cat <<'EOF'
@@ -78,12 +81,14 @@ Options:
   --queen-bulk-batch N          Jobs per bulk producer call/request (default: 100)
   --queen-partitions N          Queen partitions scanned per pop (default: 64)
   --queen-pop-fusion 0|1        Broker pop-transaction fusion (default: 0)
+  --redis-appendonly yes|no     Redis AOF durability (default: yes)
+  --redis-appendfsync MODE      Redis AOF fsync: always|everysec|no (default: everysec)
   --ledger                      Enable durable attempt/effect auditing; changes the workload
   --warmup-jobs N               Warm-up jobs before each sample (default: 50)
   --sample-interval SECONDS     cgroup/process sampling period (default: 0.50)
   --timeout SECONDS             Completion timeout per run (default: 300)
   --worker-timeout SECONDS      Laravel per-job timeout (default: 120)
-  --retry-after SECONDS         Lease/visibility timeout; default max(180, prefetch*worker-timeout+1)
+  --retry-after SECONDS         Lease timeout; default max(180, worker-timeout+1) with renewal
   --post-drain SECONDS          Observation after completion; default scales with auto
   --strategy size|time          Autoscaling pressure strategy (default: size)
   --target-jobs N               Queen size-strategy jobs per process (default: 10)
@@ -101,6 +106,11 @@ Optimization defaults may also be set with BENCH_DISPATCH_MODE,
 QUEEN_PREFETCH, QUEEN_ACK_BATCH, QUEEN_BULK_BATCH, QUEEN_PARTITIONS,
 QUEEN_POP_FUSION, BENCH_TIMEOUT and BENCH_RETRY_AFTER. Explicit CLI options
 take precedence.
+
+Backend data uses fresh named volumes. Redis AOF defaults to `yes/everysec`;
+use `--redis-appendfsync always` for the strict durability cell. Publishable
+qualification requires `yes/always`. Every resolved durability setting is
+recorded in campaign metadata.
 
 `--qualification publishable` fails closed unless the host is native Linux
 with Docker on cgroup v2. `--allow-foreign-containers` is incompatible with
@@ -180,6 +190,8 @@ while [ "$#" -gt 0 ]; do
         --queen-bulk-batch) QUEEN_BULK_BATCH="${2:?--queen-bulk-batch requires a value}"; shift 2 ;;
         --queen-partitions) QUEEN_PARTITIONS="${2:?--queen-partitions requires a value}"; shift 2 ;;
         --queen-pop-fusion) QUEEN_POP_FUSION="${2:?--queen-pop-fusion requires a value}"; shift 2 ;;
+        --redis-appendonly) REDIS_APPENDONLY="${2:?--redis-appendonly requires a value}"; shift 2 ;;
+        --redis-appendfsync) REDIS_APPEND_FSYNC="${2:?--redis-appendfsync requires a value}"; shift 2 ;;
         --ledger) LEDGER_MODE="durable"; shift ;;
         --warmup-jobs) WARMUP_JOBS="${2:?--warmup-jobs requires a value}"; shift 2 ;;
         --sample-interval) SAMPLE_INTERVAL="${2:?--sample-interval requires a value}"; shift 2 ;;
@@ -219,7 +231,6 @@ if [ "$QUALIFICATION_MODE" = publishable ] && [ "$BUILD_IMAGES" -eq 0 ]; then
     die "--qualification publishable cannot be combined with --no-build"
 fi
 
-require_command docker
 require_command git
 require_command python3
 require_positive_int "--jobs" "$JOBS"
@@ -237,8 +248,21 @@ require_uint "--queen-pop-fusion" "$QUEEN_POP_FUSION"
 require_uint "--warmup-jobs" "$WARMUP_JOBS"
 require_positive_int "--timeout" "$WAIT_TIMEOUT"
 require_positive_int "--worker-timeout" "$WORKER_TIMEOUT"
+LEASE_RENEWAL=false
+if [ "$QUEEN_PREFETCH" -gt 1 ]; then
+    LEASE_RENEWAL=true
+fi
 if [ "$RETRY_AFTER" = "0" ]; then
-    RETRY_AFTER=$(( QUEEN_PREFETCH * WORKER_TIMEOUT + 1 ))
+    # Renewal keeps a multi-message lease alive while the prefetched tail is
+    # resident, so its crash-recovery window must not be inflated by the old
+    # no-renewal `prefetch * timeout` bound. The worker timeout plus headroom is
+    # the production-relevant floor; the connector separately validates the
+    # renewal request/fencing budget.
+    if [ "$LEASE_RENEWAL" = true ]; then
+        RETRY_AFTER=$(( WORKER_TIMEOUT + 1 ))
+    else
+        RETRY_AFTER=$(( QUEEN_PREFETCH * WORKER_TIMEOUT + 1 ))
+    fi
     if [ "$RETRY_AFTER" -lt 180 ]; then
         RETRY_AFTER=180
     fi
@@ -255,14 +279,24 @@ require_decimal "--target-clear" "$TARGET_CLEAR_SECONDS"
 [ "$QUEEN_POP_FUSION" -le 1 ] || die "--queen-pop-fusion must be 0 or 1"
 [ "$WORKER_TIMEOUT" -le 86400 ] || die "--worker-timeout must not exceed 86400"
 [ "$RETRY_AFTER" -le 86401 ] || die "--retry-after must not exceed 86401"
-[ "$RETRY_AFTER" -gt $(( QUEEN_PREFETCH * WORKER_TIMEOUT )) ] || die "--retry-after must exceed --queen-prefetch multiplied by --worker-timeout"
-LEASE_RENEWAL=false
-if [ "$QUEEN_PREFETCH" -gt 1 ]; then
-    LEASE_RENEWAL=true
+if [ "$LEASE_RENEWAL" = true ]; then
+    [ "$RETRY_AFTER" -gt "$WORKER_TIMEOUT" ] || die "--retry-after must exceed --worker-timeout when lease renewal is enabled"
+else
+    [ "$RETRY_AFTER" -gt $(( QUEEN_PREFETCH * WORKER_TIMEOUT )) ] || die "--retry-after must exceed --queen-prefetch multiplied by --worker-timeout without lease renewal"
 fi
 case "$DISPATCH_MODE" in single|bulk) ;; *) die "--dispatch-mode must be single or bulk" ;; esac
 case "$SCALING_STRATEGY" in size|time) ;; *) die "--strategy must be size or time" ;; esac
 case "$LEDGER_MODE" in off|durable) ;; *) die "BENCH_LEDGER_MODE must be off or durable" ;; esac
+case "$REDIS_APPENDONLY" in yes|no) ;; *) die "BENCH_REDIS_APPENDONLY must be yes or no" ;; esac
+case "$REDIS_APPEND_FSYNC" in always|everysec|no) ;; *) die "BENCH_REDIS_APPEND_FSYNC must be always, everysec or no" ;; esac
+case ",${ENGINES_CSV}," in
+    *,horizon,*)
+        if [ "$QUALIFICATION_MODE" = publishable ] \
+            && { [ "$REDIS_APPENDONLY" != yes ] || [ "$REDIS_APPEND_FSYNC" != always ]; }; then
+            die "--qualification publishable requires Redis AOF yes with --redis-appendfsync always"
+        fi
+        ;;
+esac
 case "$QUALIFICATION_MODE" in
     auto|diagnostic|publishable) ;;
     *) die "--qualification must be auto, diagnostic or publishable" ;;
@@ -297,6 +331,7 @@ for profile in "${PROFILES[@]}"; do
     case "$profile" in fixed|auto) ;; *) die "unknown profile: $profile" ;; esac
 done
 
+require_command docker
 docker info >/dev/null 2>&1 || die "Docker daemon is unavailable"
 cgroup_version="$(docker info --format '{{.CgroupVersion}}')"
 [ "$cgroup_version" = "2" ] || die "this benchmark requires cgroup v2; Docker reported ${cgroup_version}"
@@ -329,6 +364,159 @@ compose_current() {
 
 container_exists() {
     docker container inspect "$1" >/dev/null 2>&1
+}
+
+preflight_current_resources_absent() {
+    local project_containers
+    local project_networks
+    local project_volumes
+    local result_volumes
+    local stats_volumes
+    local sampler_containers
+
+    project_containers="$(docker ps --all --quiet --filter "label=com.docker.compose.project=${CURRENT_PROJECT}" 2>/dev/null)" \
+        || die "unable to inspect project containers for $CURRENT_PROJECT"
+    project_networks="$(docker network ls --quiet --filter "label=com.docker.compose.project=${CURRENT_PROJECT}" 2>/dev/null)" \
+        || die "unable to inspect project networks for $CURRENT_PROJECT"
+    project_volumes="$(docker volume ls --quiet --filter "label=com.docker.compose.project=${CURRENT_PROJECT}" 2>/dev/null)" \
+        || die "unable to inspect project volumes for $CURRENT_PROJECT"
+    result_volumes="$(docker volume ls --quiet --filter "name=^${CURRENT_VOLUME}$" 2>/dev/null)" \
+        || die "unable to inspect result volume $CURRENT_VOLUME"
+    stats_volumes="$(docker volume ls --quiet --filter "name=^${CURRENT_STATS_VOLUME}$" 2>/dev/null)" \
+        || die "unable to inspect stats volume $CURRENT_STATS_VOLUME"
+    sampler_containers="$(docker ps --all --quiet --filter "name=^/${CURRENT_MONITOR}$" 2>/dev/null)" \
+        || die "unable to inspect sampler container $CURRENT_MONITOR"
+
+    [ -z "$project_containers" ] || die "refusing pre-existing project containers for $CURRENT_PROJECT"
+    [ -z "$project_networks" ] || die "refusing pre-existing project networks for $CURRENT_PROJECT"
+    [ -z "$project_volumes" ] || die "refusing pre-existing project volumes for $CURRENT_PROJECT"
+    [ -z "$result_volumes" ] || die "refusing pre-existing result volume: $CURRENT_VOLUME"
+    [ -z "$stats_volumes" ] || die "refusing pre-existing stats volume: $CURRENT_STATS_VOLUME"
+    [ -z "$sampler_containers" ] || die "refusing pre-existing sampler container: $CURRENT_MONITOR"
+    CURRENT_PROJECT_OWNED=1
+}
+
+verify_current_resources_owned() {
+    [ "$CURRENT_PROJECT_OWNED" -eq 1 ] || return 1
+
+    local resource_id
+    local labels
+    local service
+    local logical_name
+    local campaign
+    local project
+    local run
+    local resource_ids
+    local sampler_identity
+    local sampler_name
+
+    resource_ids="$(docker ps --all --quiet --filter "label=com.docker.compose.project=${CURRENT_PROJECT}" 2>/dev/null)" \
+        || return 1
+    while IFS= read -r resource_id; do
+        [ -n "$resource_id" ] || continue
+        labels="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}' "$resource_id" 2>/dev/null)" \
+            || return 1
+        project="${labels%%|*}"
+        service="${labels#*|}"
+        [ "$project" = "$CURRENT_PROJECT" ] || return 1
+        if [ -z "$service" ]; then
+            sampler_identity="$(docker inspect --format '{{.Name}}|{{index .Config.Labels "queen.benchmark.campaign"}}' "$resource_id" 2>/dev/null)" \
+                || return 1
+            sampler_name="${sampler_identity%%|*}"
+            campaign="${sampler_identity#*|}"
+            [ "$sampler_name" = "/${CURRENT_MONITOR}" ] && [ "$campaign" = "$campaign_id" ] \
+                || return 1
+            continue
+        fi
+        case "${CURRENT_ENGINE}:${service}" in
+            horizon:horizon|horizon:producer|horizon:redis) ;;
+            queen-php:queen-php|queen-php:producer|queen-php:broker|queen-php:postgres) ;;
+            queen-rust:queen-rust|queen-rust:producer|queen-rust:broker|queen-rust:postgres) ;;
+            *) return 1 ;;
+        esac
+    done <<EOF
+${resource_ids}
+EOF
+
+    resource_ids="$(docker network ls --quiet --filter "label=com.docker.compose.project=${CURRENT_PROJECT}" 2>/dev/null)" \
+        || return 1
+    while IFS= read -r resource_id; do
+        [ -n "$resource_id" ] || continue
+        labels="$(docker network inspect --format '{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.network"}}' "$resource_id" 2>/dev/null)" \
+            || return 1
+        project="${labels%%|*}"
+        logical_name="${labels#*|}"
+        [ "$project" = "$CURRENT_PROJECT" ] && [ "$logical_name" = default ] || return 1
+    done <<EOF
+${resource_ids}
+EOF
+
+    resource_ids="$(docker volume ls --quiet --filter "label=com.docker.compose.project=${CURRENT_PROJECT}" 2>/dev/null)" \
+        || return 1
+    while IFS= read -r resource_id; do
+        [ -n "$resource_id" ] || continue
+        labels="$(docker volume inspect --format '{{index .Labels "com.docker.compose.project"}}|{{index .Labels "com.docker.compose.volume"}}|{{index .Labels "queen.benchmark.campaign"}}' "$resource_id" 2>/dev/null)" \
+            || return 1
+        project="${labels%%|*}"
+        labels="${labels#*|}"
+        logical_name="${labels%%|*}"
+        campaign="${labels#*|}"
+        [ "$project" = "$CURRENT_PROJECT" ] || return 1
+        case "${CURRENT_ENGINE}:${logical_name}" in
+            horizon:results) [ "$campaign" = "$campaign_id" ] || return 1 ;;
+            horizon:redis-data) ;;
+            queen-php:results|queen-rust:results) [ "$campaign" = "$campaign_id" ] || return 1 ;;
+            queen-php:postgres-data|queen-php:broker-buffers|queen-rust:postgres-data|queen-rust:broker-buffers) ;;
+            *) return 1 ;;
+        esac
+    done <<EOF
+${resource_ids}
+EOF
+
+    if docker volume inspect "$CURRENT_STATS_VOLUME" >/dev/null 2>&1; then
+        labels="$(docker volume inspect --format '{{index .Labels "queen.benchmark.campaign"}}|{{index .Labels "queen.benchmark.run"}}' "$CURRENT_STATS_VOLUME" 2>/dev/null)" \
+            || return 1
+        campaign="${labels%%|*}"
+        run="${labels#*|}"
+        [ "$campaign" = "$campaign_id" ] && [ "$run" = "$run_id" ] || return 1
+    fi
+    if container_exists "$CURRENT_MONITOR"; then
+        labels="$(docker inspect --format '{{index .Config.Labels "queen.benchmark.campaign"}}|{{index .Config.Labels "com.docker.compose.project"}}' "$CURRENT_MONITOR" 2>/dev/null)" \
+            || return 1
+        campaign="${labels%%|*}"
+        project="${labels#*|}"
+        [ "$campaign" = "$campaign_id" ] && [ "$project" = "$CURRENT_PROJECT" ] || return 1
+    fi
+    return 0
+}
+
+current_resources_absent() {
+    local project_containers
+    local project_networks
+    local project_volumes
+    local result_volumes
+    local stats_volumes
+    local sampler_containers
+
+    project_containers="$(docker ps --all --quiet --filter "label=com.docker.compose.project=${CURRENT_PROJECT}" 2>/dev/null)" \
+        || return 1
+    project_networks="$(docker network ls --quiet --filter "label=com.docker.compose.project=${CURRENT_PROJECT}" 2>/dev/null)" \
+        || return 1
+    project_volumes="$(docker volume ls --quiet --filter "label=com.docker.compose.project=${CURRENT_PROJECT}" 2>/dev/null)" \
+        || return 1
+    result_volumes="$(docker volume ls --quiet --filter "name=^${CURRENT_VOLUME}$" 2>/dev/null)" \
+        || return 1
+    stats_volumes="$(docker volume ls --quiet --filter "name=^${CURRENT_STATS_VOLUME}$" 2>/dev/null)" \
+        || return 1
+    sampler_containers="$(docker ps --all --quiet --filter "name=^/${CURRENT_MONITOR}$" 2>/dev/null)" \
+        || return 1
+
+    [ -z "$project_containers" ] \
+        && [ -z "$project_networks" ] \
+        && [ -z "$project_volumes" ] \
+        && [ -z "$result_volumes" ] \
+        && [ -z "$stats_volumes" ] \
+        && [ -z "$sampler_containers" ]
 }
 
 capture_container_isolation() {
@@ -453,18 +641,26 @@ capture_lane_diagnostics() {
 
 cleanup_lane() {
     stop_continuous_isolation >/dev/null 2>&1 || true
-    if [ -n "$CURRENT_MONITOR" ] && container_exists "$CURRENT_MONITOR"; then
-        docker stop --time 10 "$CURRENT_MONITOR" >/dev/null 2>&1 || true
-        docker rm --force "$CURRENT_MONITOR" >/dev/null 2>&1 || true
-    fi
-    if [ -n "$CURRENT_PROJECT" ]; then
-        compose_current down --volumes --remove-orphans --timeout 20 >/dev/null 2>&1 || true
-    fi
-    if [ -n "$CURRENT_VOLUME" ] && docker volume inspect "$CURRENT_VOLUME" >/dev/null 2>&1; then
-        docker volume rm "$CURRENT_VOLUME" >/dev/null 2>&1 || true
-    fi
-    if [ -n "$CURRENT_STATS_VOLUME" ] && docker volume inspect "$CURRENT_STATS_VOLUME" >/dev/null 2>&1; then
-        docker volume rm "$CURRENT_STATS_VOLUME" >/dev/null 2>&1 || true
+    if [ -n "$CURRENT_PROJECT" ] && [ "$CURRENT_PROJECT_OWNED" -eq 1 ]; then
+        if ! verify_current_resources_owned; then
+            printf 'warning: retained unverified benchmark project %s\n' "$CURRENT_PROJECT" >&2
+            return 1
+        fi
+        if [ -n "$CURRENT_MONITOR" ] && container_exists "$CURRENT_MONITOR"; then
+            docker stop --time 10 "$CURRENT_MONITOR" >/dev/null 2>&1 || return 1
+            docker rm --force "$CURRENT_MONITOR" >/dev/null 2>&1 || return 1
+        fi
+        compose_current down --volumes --timeout 20 >/dev/null 2>&1 || return 1
+        if docker volume inspect "$CURRENT_VOLUME" >/dev/null 2>&1; then
+            docker volume rm "$CURRENT_VOLUME" >/dev/null 2>&1 || return 1
+        fi
+        if docker volume inspect "$CURRENT_STATS_VOLUME" >/dev/null 2>&1; then
+            docker volume rm "$CURRENT_STATS_VOLUME" >/dev/null 2>&1 || return 1
+        fi
+        if ! current_resources_absent; then
+            printf 'warning: benchmark resources remain after cleanup for %s\n' "$CURRENT_PROJECT" >&2
+            return 1
+        fi
     fi
     CURRENT_PROJECT=""
     CURRENT_ENGINE=""
@@ -472,22 +668,12 @@ cleanup_lane() {
     CURRENT_VOLUME=""
     CURRENT_STATS_VOLUME=""
     CURRENT_HOST_RUN=""
+    CURRENT_PROJECT_OWNED=0
+    return 0
 }
 
 finish_lane() {
-    compose_current down --volumes --remove-orphans --timeout 20 >/dev/null
-    if docker volume inspect "$CURRENT_VOLUME" >/dev/null 2>&1; then
-        docker volume rm "$CURRENT_VOLUME" >/dev/null
-    fi
-    if docker volume inspect "$CURRENT_STATS_VOLUME" >/dev/null 2>&1; then
-        docker volume rm "$CURRENT_STATS_VOLUME" >/dev/null
-    fi
-    CURRENT_PROJECT=""
-    CURRENT_ENGINE=""
-    CURRENT_MONITOR=""
-    CURRENT_VOLUME=""
-    CURRENT_STATS_VOLUME=""
-    CURRENT_HOST_RUN=""
+    cleanup_lane || die "failed to remove owned resources for $CURRENT_PROJECT"
 }
 
 on_exit() {
@@ -496,7 +682,10 @@ on_exit() {
     if [ "$status" -ne 0 ]; then
         capture_lane_diagnostics
     fi
-    cleanup_lane
+    if ! cleanup_lane; then
+        printf 'warning: benchmark cleanup failed; owned resources were retained for inspection\n' >&2
+        [ "$status" -ne 0 ] || status=1
+    fi
     exit "$status"
 }
 trap on_exit EXIT INT TERM
@@ -543,14 +732,53 @@ producer() {
     compose_current exec --no-TTY producer "$@"
 }
 
+capture_backend_metrics() {
+    phase="$1"
+    case "$phase" in
+        before|after) ;;
+        *) die "invalid backend metrics phase: $phase" ;;
+    esac
+
+    if [ "$CURRENT_ENGINE" = "horizon" ]; then
+        # One INFO ALL call supplies both the global command counter and the
+        # per-command counters. The analyzer removes INFO's own delta from the
+        # operational total, so the observer is not reported as queue work.
+        compose_current exec --no-TTY redis redis-cli --raw INFO all \
+            >"${CURRENT_HOST_RUN}/backend-metrics.${phase}.redis-info.txt"
+    else
+        # The Prometheus endpoint exposes per-process push/pop/ack request and
+        # message counters. Scraping it does not increment those data-path
+        # counters, which makes the before/after delta observer-neutral.
+        # The PHP source is intentionally literal.
+        # shellcheck disable=SC2016
+        producer php -r \
+            '$body = @file_get_contents("http://broker:6632/metrics/prometheus"); if ($body === false) { fwrite(STDERR, "broker metrics unavailable\n"); exit(1); } echo $body;' \
+            >"${CURRENT_HOST_RUN}/backend-metrics.${phase}.prom"
+    fi
+}
+
 image_id() {
     docker image inspect "$1" --format '{{.Id}}' 2>/dev/null || true
 }
 
 contains_queen_engine=0
+contains_horizon_engine=0
 for engine in "${ENGINES[@]}"; do
-    case "$engine" in queen-php|queen-rust) contains_queen_engine=1 ;; esac
+    case "$engine" in
+        horizon) contains_horizon_engine=1 ;;
+        queen-php|queen-rust) contains_queen_engine=1 ;;
+    esac
 done
+
+# Resolve mutable upstream tags before provenance is captured. Every timed lane
+# then runs the exact local image IDs recorded in metadata instead of pulling a
+# different Redis or PostgreSQL image halfway through a campaign.
+if [ "$contains_horizon_engine" -eq 1 ]; then
+    docker compose --file "$COMPOSE_FILE" pull redis
+fi
+if [ "$contains_queen_engine" -eq 1 ]; then
+    docker compose --file "$COMPOSE_FILE" pull postgres
+fi
 
 if [ "$BUILD_IMAGES" -eq 1 ]; then
     printf 'Building benchmark application image...\n'
@@ -566,7 +794,24 @@ else
     fi
 fi
 
-campaign_id="$(date -u +%Y%m%dT%H%M%SZ)-$(git -C "$REPOSITORY_ROOT" rev-parse --short=10 HEAD)"
+EXPECTED_APP_IMAGE_ID="$(image_id "$APP_IMAGE")"
+EXPECTED_BROKER_IMAGE_ID=""
+EXPECTED_REDIS_IMAGE_ID=""
+EXPECTED_POSTGRES_IMAGE_ID=""
+[ -n "$EXPECTED_APP_IMAGE_ID" ] || die "unable to resolve immutable application image ID"
+if [ "$contains_horizon_engine" -eq 1 ]; then
+    EXPECTED_REDIS_IMAGE_ID="$(image_id 'redis:7.4.2-alpine')"
+    [ -n "$EXPECTED_REDIS_IMAGE_ID" ] || die "unable to resolve immutable Redis image ID"
+fi
+if [ "$contains_queen_engine" -eq 1 ]; then
+    EXPECTED_BROKER_IMAGE_ID="$(image_id "$BROKER_IMAGE")"
+    EXPECTED_POSTGRES_IMAGE_ID="$(image_id 'postgres:16.10-bookworm')"
+    [ -n "$EXPECTED_BROKER_IMAGE_ID" ] || die "unable to resolve immutable broker image ID"
+    [ -n "$EXPECTED_POSTGRES_IMAGE_ID" ] || die "unable to resolve immutable PostgreSQL image ID"
+fi
+
+campaign_nonce="$(python3 -c 'import secrets; print(secrets.token_hex(12))')"
+campaign_id="$(date -u +%Y%m%dT%H%M%SZ)-$(git -C "$REPOSITORY_ROOT" rev-parse --short=10 HEAD)-${campaign_nonce}"
 mkdir -p "$OUTPUT_ROOT"
 OUTPUT_ROOT="$(CDPATH='' cd -- "$OUTPUT_ROOT" && pwd)"
 campaign_dir="${OUTPUT_ROOT%/}/${campaign_id}"
@@ -574,6 +819,7 @@ campaign_dir="${OUTPUT_ROOT%/}/${campaign_id}"
 mkdir -p "$campaign_dir"
 
 export CAMPAIGN_ID="$campaign_id"
+export CAMPAIGN_NONCE="$campaign_nonce"
 export CAMPAIGN_DIRECTORY="$campaign_dir"
 export BENCHMARK_REPOSITORY_ROOT="$REPOSITORY_ROOT"
 export BENCHMARK_APP_IMAGE="$APP_IMAGE"
@@ -610,6 +856,12 @@ export BENCHMARK_BALANCE_MAX_SHIFT="$BALANCE_MAX_SHIFT"
 export BENCHMARK_TARGET_JOBS="$TARGET_JOBS_PER_PROCESS"
 export BENCHMARK_TARGET_CLEAR="$TARGET_CLEAR_SECONDS"
 export BENCHMARK_LEDGER_MODE="$LEDGER_MODE"
+export BENCHMARK_REDIS_APPENDONLY="$REDIS_APPENDONLY"
+export BENCHMARK_REDIS_APPEND_FSYNC="$REDIS_APPEND_FSYNC"
+# Compose reads the BENCH_* names; keep the runtime configuration identical
+# to the values recorded in campaign metadata.
+export BENCH_REDIS_APPENDONLY="$REDIS_APPENDONLY"
+export BENCH_REDIS_APPEND_FSYNC="$REDIS_APPEND_FSYNC"
 export BENCHMARK_ALLOW_FOREIGN_CONTAINERS="$ALLOW_FOREIGN_CONTAINERS"
 export BENCHMARK_QUALIFICATION_MODE="$QUALIFICATION_MODE"
 export BENCHMARK_NATIVE_LINUX="$native_linux"
@@ -633,17 +885,83 @@ export BENCH_LEASE_RENEWAL="$LEASE_RENEWAL"
 
 python3 - <<'PY'
 import datetime as dt
+import hashlib
 import json
 import os
 import platform
+import shutil
 import subprocess
 from pathlib import Path
 
 def output(*command: str) -> str:
     return subprocess.check_output(command, text=True, stderr=subprocess.DEVNULL).strip()
 
+def optional_output(*command: str) -> str | None:
+    try:
+        value = output(*command)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return value or None
+
+def first_value(path: Path, key: str) -> str | None:
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            name, separator, value = line.partition(":")
+            if separator and name.strip() == key:
+                return value.strip() or None
+    except OSError:
+        return None
+    return None
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+def image_details(name: str) -> dict[str, object] | None:
+    raw = optional_output("docker", "image", "inspect", name, "--format", "{{json .}}")
+    if raw is None:
+        return None
+    document = json.loads(raw)
+    return {
+        "reference": name,
+        "id": document.get("Id"),
+        "repo_digests": document.get("RepoDigests") or [],
+        "created": document.get("Created"),
+        "architecture": document.get("Architecture"),
+        "os": document.get("Os"),
+    }
+
+def governors() -> list[str]:
+    values: set[str] = set()
+    for path in Path("/sys/devices/system/cpu").glob("cpu*/cpufreq/scaling_governor"):
+        try:
+            value = path.read_text(encoding="ascii").strip()
+        except OSError:
+            continue
+        if value:
+            values.add(value)
+    return sorted(values)
+
+def thermal_zones() -> list[dict[str, object]]:
+    zones: list[dict[str, object]] = []
+    for directory in sorted(Path("/sys/class/thermal").glob("thermal_zone*"))[:128]:
+        try:
+            zone_type = (directory / "type").read_text(encoding="ascii").strip()
+            temperature = int((directory / "temp").read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            continue
+        zones.append({"type": zone_type[:128], "millidegrees_celsius": temperature})
+    return zones
+
 repository = os.environ["BENCHMARK_REPOSITORY_ROOT"]
+repository_path = Path(repository)
+bench_path = repository_path / "benchmark-queen" / "laravel-supervisors"
+campaign_path = Path(os.environ["CAMPAIGN_DIRECTORY"])
 docker_info = json.loads(output("docker", "info", "--format", "{{json .}}"))
+disk = shutil.disk_usage(campaign_path)
 settings = {
     "profiles": os.environ["BENCHMARK_PROFILES"].split(","),
     "engines": os.environ["BENCHMARK_ENGINES"].split(","),
@@ -689,6 +1007,15 @@ settings = {
     "target_jobs_per_process": int(os.environ["BENCHMARK_TARGET_JOBS"]),
     "target_clear_seconds": float(os.environ["BENCHMARK_TARGET_CLEAR"]),
     "ledger_mode": os.environ["BENCHMARK_LEDGER_MODE"],
+    "durability": {
+        "storage": "fresh_named_volumes",
+        "redis_appendonly": os.environ["BENCHMARK_REDIS_APPENDONLY"],
+        "redis_appendfsync": os.environ["BENCHMARK_REDIS_APPEND_FSYNC"],
+        "postgres_fsync": "on",
+        "postgres_synchronous_commit": "on",
+        "postgres_full_page_writes": "on",
+        "broker_file_buffer": "named_volume",
+    },
     "allow_foreign_containers": os.environ["BENCHMARK_ALLOW_FOREIGN_CONTAINERS"] == "1",
 }
 native_linux = os.environ["BENCHMARK_NATIVE_LINUX"] == "1"
@@ -705,6 +1032,7 @@ else:
 metadata = {
     "schema": "queen.laravel-supervisors.campaign/v1",
     "campaign_id": os.environ["CAMPAIGN_ID"],
+    "campaign_nonce": os.environ["CAMPAIGN_NONCE"],
     "created_at": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
     "git": {
         "commit": output("git", "-C", repository, "rev-parse", "HEAD"),
@@ -715,6 +1043,19 @@ metadata = {
         "platform": platform.platform(),
         "machine": platform.machine(),
         "python": platform.python_version(),
+        "logical_cpus": os.cpu_count(),
+        "cpu_model": first_value(Path("/proc/cpuinfo"), "model name")
+            or first_value(Path("/proc/cpuinfo"), "Hardware")
+            or optional_output("sysctl", "-n", "machdep.cpu.brand_string")
+            or platform.processor(),
+        "microcode": first_value(Path("/proc/cpuinfo"), "microcode"),
+        "cpu_governors": governors(),
+        "thermal_zones": thermal_zones(),
+        "storage_initial": {
+            "path": str(campaign_path),
+            "total_bytes": disk.total,
+            "free_bytes": disk.free,
+        },
     },
     "host_qualification": {
         "requested": qualification_mode,
@@ -732,10 +1073,20 @@ metadata = {
             "ServerVersion", "OperatingSystem", "OSType", "Architecture",
             "NCPU", "MemTotal", "CgroupVersion", "KernelVersion",
         )
+    } | {"compose_version": optional_output("docker", "compose", "version", "--short")},
+    "protocol": {
+        "ga_protocol_sha256": sha256(bench_path / "GA_PROTOCOL.md"),
+        "compose_sha256": sha256(bench_path / "compose.yml"),
+        "runner_sha256": sha256(bench_path / "scripts" / "run.sh"),
+        "analyzer_sha256": sha256(bench_path / "scripts" / "analyze.py"),
+        "sampler_sha256": sha256(bench_path / "scripts" / "sample.py"),
     },
     "images": {
-        "app": output("docker", "image", "inspect", os.environ["BENCHMARK_APP_IMAGE"], "--format", "{{.Id}}"),
-        "broker": output("docker", "image", "inspect", os.environ["BENCHMARK_BROKER_IMAGE"], "--format", "{{.Id}}")
+        "app": image_details(os.environ["BENCHMARK_APP_IMAGE"]),
+        "broker": image_details(os.environ["BENCHMARK_BROKER_IMAGE"])
+            if any(name.startswith("queen-") for name in settings["engines"]) else None,
+        "redis": image_details("redis:7.4.2-alpine") if "horizon" in settings["engines"] else None,
+        "postgres": image_details("postgres:16.10-bookworm")
             if any(name.startswith("queen-") for name in settings["engines"]) else None,
     },
     "settings": settings,
@@ -764,6 +1115,19 @@ run_lane() {
     CURRENT_STATS_VOLUME="qlb-stats-${project_suffix}"
     CURRENT_HOST_RUN="${campaign_dir}/${engine}/${profile}/${repetition_label}"
     mkdir -p "$CURRENT_HOST_RUN"
+
+    [ "$(image_id "$APP_IMAGE")" = "$EXPECTED_APP_IMAGE_ID" ] \
+        || die "application image tag changed after provenance capture"
+    if [ "$engine" = horizon ]; then
+        [ "$(image_id 'redis:7.4.2-alpine')" = "$EXPECTED_REDIS_IMAGE_ID" ] \
+            || die "Redis image tag changed after provenance capture"
+    else
+        [ "$(image_id "$BROKER_IMAGE")" = "$EXPECTED_BROKER_IMAGE_ID" ] \
+            || die "broker image tag changed after provenance capture"
+        [ "$(image_id 'postgres:16.10-bookworm')" = "$EXPECTED_POSTGRES_IMAGE_ID" ] \
+            || die "PostgreSQL image tag changed after provenance capture"
+    fi
+    preflight_current_resources_absent
 
     # No unrelated running container may share the Docker daemon with a timed
     # lane. The explicit override preserves evidence but makes the campaign
@@ -848,6 +1212,8 @@ run_lane() {
 
     docker run --detach --rm \
         --name "$CURRENT_MONITOR" \
+        --label "queen.benchmark.campaign=${campaign_id}" \
+        --label "com.docker.compose.project=${CURRENT_PROJECT}" \
         --pid host \
         --cgroupns host \
         --user 1000:1000 \
@@ -886,6 +1252,10 @@ run_lane() {
             fi
         fi
     fi
+
+    # Establish counter baselines after warm-up. This happens before the
+    # dispatch timestamp used by the resource and latency windows.
+    capture_backend_metrics before
 
     # Snapshot again immediately before the measured dispatch. Compose lane
     # containers and the named sampler are the only permitted workloads.
@@ -956,6 +1326,12 @@ run_lane() {
         >"${CURRENT_HOST_RUN}/queue-state.final.json"
     quiescence_status=$?
     set -e
+
+    # Capture operation counters only after the final quiescence gate. This
+    # prevents a slow final ACK from being omitted. The counters include the
+    # bounded queue-state observer above; CPU/resource samples do not, because
+    # sampling was already stopped. Reports label these counts accordingly.
+    capture_backend_metrics after
 
     if [ "$LEDGER_MODE" = durable ]; then
         producer php artisan bench:ledger-checkpoint --no-ansi "$run_id" \
@@ -1031,6 +1407,36 @@ done
 python3 "${SCRIPT_DIR}/analyze.py" report "${REPORT_INPUTS[@]}" --no-comparisons \
     --output "${campaign_dir}/report.md" \
     --json-output "${campaign_dir}/report.json"
+
+python3 - "$campaign_dir" <<'PY'
+import datetime as dt
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+
+campaign = Path(sys.argv[1])
+path = campaign / "metadata.json"
+metadata = json.loads(path.read_text(encoding="utf-8"))
+disk = shutil.disk_usage(campaign)
+metadata["completed_at"] = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+metadata.setdefault("host", {})["storage_final"] = {
+    "path": str(campaign),
+    "total_bytes": disk.total,
+    "free_bytes": disk.free,
+}
+temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+with temporary.open("x", encoding="utf-8") as stream:
+    stream.write(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
+    stream.flush()
+    os.fsync(stream.fileno())
+os.replace(temporary, path)
+PY
+
+python3 "${SCRIPT_DIR}/artifact-manifest.py" \
+    --root "$campaign_dir" \
+    --output "${campaign_dir}/artifact-manifest.json"
 
 trap - EXIT INT TERM
 printf '\nBenchmark complete: %s\n' "$campaign_dir"

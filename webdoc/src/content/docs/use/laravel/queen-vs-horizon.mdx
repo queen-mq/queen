@@ -59,7 +59,7 @@ implementation and tests named in this page's frontmatter.
 | Fixed allocation | `simple` | `simple` |
 | Ordered queue priority | `balance=false` | `balance=off` |
 | Master runtime | PHP with Laravel/Horizon loaded | PHP reference engine or optimized Rust engine |
-| Crash-loop control | Process restart behavior managed by Horizon and the outer monitor | Capped restart backoff in both engines; Rust adds an open/probe circuit breaker |
+| Crash-loop control | Process restart behavior managed by Horizon and the outer monitor | Capped restart backoff plus an open/one-probe circuit breaker in both engines |
 | Multiple master hosts | Master records and supervisor state are shared through Horizon's Redis repository | Not safe yet; one master per application and consumer group |
 | Dashboard | Mature Horizon dashboard over its Redis state | Local supervisor panel plus a separate global Queen broker dashboard |
 | Retained job and queue metrics | Snapshot command and retained graphs | Live bounded supervisor state; broker analytics are separate |

@@ -2,6 +2,7 @@
 
 $benchmark = config('benchmark');
 $fixed = $benchmark['profile'] === 'fixed';
+$leaseRenewal = (bool) env('QUEEN_LEASE_RENEWAL', false);
 
 return [
     'url' => env('QUEEN_URL', 'http://queen:6632'),
@@ -23,7 +24,7 @@ return [
     'block_for' => $benchmark['block_for'],
     'prefetch' => $benchmark['queen_prefetch'],
     'ack_batch' => $benchmark['queen_ack_batch'],
-    'lease_renewal' => env('QUEEN_LEASE_RENEWAL', false),
+    'lease_renewal' => $leaseRenewal,
     'lease_renewal_interval' => env('QUEEN_LEASE_RENEWAL_INTERVAL'),
     'lease_renewal_timeout' => env('QUEEN_LEASE_RENEWAL_TIMEOUT', 5),
     'lease_renewal_kill_grace' => env('QUEEN_LEASE_RENEWAL_KILL_GRACE', 2),
@@ -35,7 +36,10 @@ return [
         'poll_interval' => $benchmark['poll_interval'],
         'http_timeout' => (int) env('QUEEN_SUPERVISOR_HTTP_TIMEOUT', 5),
         'shutdown_grace' => $benchmark['timeout'] + 15,
-        'process_limit' => $benchmark['max_workers'],
+        // Renewal uses one lazy helper per worker. Match the supervisor's hard
+        // child-process accounting so performance profiles do not fail config
+        // validation or silently compare different worker concurrency.
+        'process_limit' => $benchmark['max_workers'] * ($leaseRenewal ? 2 : 1),
         'state_directory' => (string) env(
             'QUEEN_SUPERVISOR_STATE_DIRECTORY',
             storage_path('queen-supervisor'),

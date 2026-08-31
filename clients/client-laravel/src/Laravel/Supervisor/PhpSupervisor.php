@@ -13,6 +13,8 @@ final class PhpSupervisor
 {
     private const DEPTH_POLL_CONCURRENCY = 16;
 
+    private const CRASH_CIRCUIT_THRESHOLD = 5;
+
     /** @var array<string, array<string, list<Process>>> */
     private array $processes = [];
     /** @var list<array{process:Process,deadline:float,label:string,supervisor:string,queue:string}> */
@@ -33,6 +35,10 @@ final class PhpSupervisor
     private array $restartAfter = [];
     /** @var array<string, int> */
     private array $crashCount = [];
+    /** @var array<string, 'backoff'|'open'|'probe'> */
+    private array $restartPhase = [];
+    /** @var array<int, string> process object ID to pool key */
+    private array $restartProbes = [];
     /** @var array<string, float> */
     private array $lastCrashAt = [];
     /** @var array<string, array{target:int,since:float}> */
@@ -77,6 +83,7 @@ final class PhpSupervisor
                     $this->reap($name, $this->config['supervisors'][$name]);
                 }
                 $this->reapDraining();
+                $this->observeStableWorkers();
 
                 if (microtime(true) - $lastPoll < $this->config['poll_interval']) {
                     usleep(200_000);
@@ -338,14 +345,22 @@ final class PhpSupervisor
                 // it has actually exited. This prevents a slow graceful drain
                 // from temporarily oversubscribing process_limit while a
                 // replacement is started in another pool.
-                if ($this->remainingProcessSlots() <= 0) {
+                $processCost = $this->processCost($options);
+                if ($this->remainingProcessSlots() < $processCost) {
                     break;
                 }
-                if (!$this->canRestart($name, $queue)) {
+                $permission = $this->restartPermission($name, $queue);
+                if ($permission === null) {
                     break;
                 }
                 try {
-                    $pool[] = $this->startWorker($name, $queue, $options);
+                    $process = $this->startWorker($name, $queue, $options);
+                    if ($permission === 'probe') {
+                        $key = $this->poolKey($name, $queue);
+                        $this->restartPhase[$key] = 'probe';
+                        $this->restartProbes[spl_object_id($process)] = $key;
+                    }
+                    $pool[] = $process;
                     $budget--;
                 } catch (\Throwable $error) {
                     $this->registerCrash($name, $queue, $options, $error->getMessage());
@@ -357,14 +372,26 @@ final class PhpSupervisor
 
     private function remainingProcessSlots(): int
     {
-        $active = 0;
-        foreach ($this->processes as $pools) {
+        $used = 0;
+        foreach ($this->processes as $supervisor => $pools) {
+            $cost = $this->processCost($this->config['supervisors'][$supervisor] ?? []);
             foreach ($pools as $pool) {
-                $active += count($pool);
+                $used += count($pool) * $cost;
             }
         }
+        foreach ($this->draining as $entry) {
+            $used += $this->processCost($this->config['supervisors'][$entry['supervisor']] ?? []);
+        }
 
-        return max(0, (int) ($this->config['process_limit'] ?? 256) - $active - count($this->draining));
+        return max(0, (int) ($this->config['process_limit'] ?? 256) - $used);
+    }
+
+    private function processCost(array $options): int
+    {
+        // A renewal-enabled worker lazily owns one additional PHP helper.
+        // Reserve it before the first pop so process_limit remains a hard
+        // child-process budget rather than an optimistic worker count.
+        return ($options['lease_renewal'] ?? false) ? 2 : 1;
     }
 
     private function reconcileBudget(array $options, int $active): int
@@ -381,7 +408,7 @@ final class PhpSupervisor
 
     private function startWorker(string $name, string $queue, array $options): Process
     {
-        $command = [
+        $workerCommand = [
             $this->config['php_binary'], $this->config['artisan'], 'queue:work',
             $options['connection'],
             '--queue=' . ($options['balance'] === 'off' ? implode(',', $options['queues']) : $queue),
@@ -395,11 +422,16 @@ final class PhpSupervisor
             '--rest=' . $options['rest'],
         ];
         if ($options['force']) {
-            $command[] = '--force';
+            $workerCommand[] = '--force';
         }
         if ($options['quiet'] ?? false) {
-            $command[] = '--quiet';
+            $workerCommand[] = '--quiet';
         }
+        $command = [
+            $this->config['php_binary'],
+            __DIR__ . DIRECTORY_SEPARATOR . 'worker_launcher.php',
+            ...$workerCommand,
+        ];
 
         $environment = [
             // `false` also removes a value inherited by the supervisor.
@@ -434,6 +466,11 @@ final class PhpSupervisor
     {
         foreach ($this->processes[$name] ?? [] as $queue => $pool) {
             $running = [];
+            $restartKey = $this->poolKey($name, (string) $queue);
+            // Snapshot the half-open owner before processing exits. If the
+            // probe and a sibling exit in the same reap pass, iteration order
+            // must not let the sibling close or replace the probe's verdict.
+            $poolHadProbe = in_array($restartKey, $this->restartProbes, true);
             foreach ($pool as $process) {
                 if ($process->isRunning()) {
                     $this->discardOutput($process);
@@ -444,51 +481,114 @@ final class PhpSupervisor
                 $objectId = spl_object_id($process);
                 $runtime = microtime(true) - ($this->startedAt[$objectId] ?? microtime(true));
                 unset($this->startedAt[$objectId]);
+                $wasProbe = ($this->restartProbes[$objectId] ?? null) === $restartKey;
+                unset($this->restartProbes[$objectId]);
                 $pid = $this->trackedPid($process);
                 unset($this->workerPids[$objectId]);
                 $this->scheduleTelemetryCleanup($name, $options, $pid);
                 $exitCode = $process->getExitCode();
                 $this->emit("exited {$name}:{$queue} pid=" . ($pid ?? 'unknown') . " code=" . ($exitCode ?? 'unknown') . "\n", $exitCode === 0 ? 'out' : 'err');
+                if ($poolHadProbe && !$wasProbe) {
+                    continue;
+                }
                 if ($exitCode === 0) {
                     $this->resetCrashes($name, $queue);
                 } else {
-                    $this->registerCrash($name, $queue, $options, "exit code " . ($exitCode ?? 'unknown'), $runtime);
+                    $this->registerCrash(
+                        $name,
+                        $queue,
+                        $options,
+                        "exit code " . ($exitCode ?? 'unknown'),
+                        $runtime,
+                        $wasProbe,
+                    );
                 }
             }
             $this->processes[$name][$queue] = $running;
         }
     }
 
-    private function registerCrash(string $name, string $queue, array $options, string $reason, float $runtime = 0.0): void
-    {
+    private function registerCrash(
+        string $name,
+        string $queue,
+        array $options,
+        string $reason,
+        float $runtime = 0.0,
+        bool $wasProbe = false,
+    ): void {
         $key = $this->poolKey($name, $queue);
         $now = microtime(true);
         $stableAfter = (float) $options['stable_after'];
-        if ($runtime >= $stableAfter || $now - ($this->lastCrashAt[$key] ?? 0.0) >= $stableAfter) {
+        if (!$wasProbe
+            && ($runtime >= $stableAfter || $now - ($this->lastCrashAt[$key] ?? 0.0) >= $stableAfter)) {
             $this->crashCount[$key] = 0;
         }
         $count = ($this->crashCount[$key] ?? 0) + 1;
         $this->crashCount[$key] = $count;
         $this->lastCrashAt[$key] = $now;
-        $delay = $count >= 5
+        $circuitOpen = $count >= self::CRASH_CIRCUIT_THRESHOLD;
+        $delay = $circuitOpen
             ? (int) $options['restart_backoff_max']
             : min(
                 (int) $options['restart_backoff_max'],
                 (int) $options['restart_backoff'] * (2 ** min(20, $count - 1)),
             );
         $this->restartAfter[$key] = $now + $delay;
-        $this->emit("[{$name}:{$queue}] worker crash ({$reason}); restart in {$delay}s (failure {$count})\n", 'err');
+        $this->restartPhase[$key] = $circuitOpen ? 'open' : 'backoff';
+        $state = $circuitOpen ? 'circuit open' : 'backoff';
+        $this->emit("[{$name}:{$queue}] worker crash ({$reason}); {$state} for {$delay}s (failure {$count})\n", 'err');
     }
 
     private function resetCrashes(string $name, string $queue): void
     {
         $key = $this->poolKey($name, $queue);
-        unset($this->crashCount[$key], $this->lastCrashAt[$key], $this->restartAfter[$key]);
+        unset(
+            $this->crashCount[$key],
+            $this->lastCrashAt[$key],
+            $this->restartAfter[$key],
+            $this->restartPhase[$key],
+        );
     }
 
-    private function canRestart(string $name, string $queue): bool
+    /** @return 'normal'|'probe'|null */
+    private function restartPermission(string $name, string $queue): ?string
     {
-        return microtime(true) >= ($this->restartAfter[$this->poolKey($name, $queue)] ?? 0.0);
+        $key = $this->poolKey($name, $queue);
+        $phase = $this->restartPhase[$key] ?? null;
+        if ($phase === null) {
+            return 'normal';
+        }
+        if ($phase === 'probe') {
+            return null;
+        }
+        if (microtime(true) < ($this->restartAfter[$key] ?? PHP_FLOAT_MAX)) {
+            return null;
+        }
+
+        return 'probe';
+    }
+
+    private function observeStableWorkers(): void
+    {
+        $now = microtime(true);
+        foreach ($this->processes as $supervisor => $pools) {
+            $stableAfter = (float) ($this->config['supervisors'][$supervisor]['stable_after'] ?? 60);
+            foreach ($pools as $queue => $pool) {
+                $key = $this->poolKey((string) $supervisor, (string) $queue);
+                if (($this->restartPhase[$key] ?? null) !== 'probe') {
+                    continue;
+                }
+                foreach ($pool as $process) {
+                    $objectId = spl_object_id($process);
+                    if (($this->restartProbes[$objectId] ?? null) === $key
+                        && $now - ($this->startedAt[$objectId] ?? $now) >= $stableAfter) {
+                        unset($this->restartProbes[$objectId]);
+                        $this->resetCrashes((string) $supervisor, (string) $queue);
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     private function poolKey(string $name, string $queue): string
@@ -532,6 +632,7 @@ final class PhpSupervisor
 
     private function beginTermination(Process $process, string $supervisor, string $queue): void
     {
+        $this->cancelRestartProbe($process, $supervisor, $queue);
         if (!$process->isRunning()) {
             $objectId = spl_object_id($process);
             unset($this->startedAt[$objectId]);
@@ -576,7 +677,7 @@ final class PhpSupervisor
             $this->discardOutput($process);
             if (microtime(true) >= $entry['deadline']) {
                 try {
-                    $process->signal(SIGKILL);
+                    $this->signalProcessGroup($process, SIGKILL);
                 } catch (\Throwable $error) {
                     $this->emit("[{$entry['label']}] SIGKILL failed: {$error->getMessage()}\n", 'err');
                 }
@@ -648,7 +749,7 @@ final class PhpSupervisor
 
         foreach ($running as $process) {
             try {
-                $process->signal(SIGKILL);
+                $this->signalProcessGroup($process, SIGKILL);
             } catch (\Throwable) {
                 // Retry below while retaining ownership of the generation.
             }
@@ -676,7 +777,7 @@ final class PhpSupervisor
             if (microtime(true) >= $nextKillAttempt) {
                 foreach ($running as $process) {
                     try {
-                        $process->signal(SIGKILL);
+                        $this->signalProcessGroup($process, SIGKILL);
                     } catch (\Throwable) {
                         // The lock remains held; retry without allowing takeover.
                     }
@@ -689,6 +790,7 @@ final class PhpSupervisor
         $this->draining = [];
         $this->startedAt = [];
         $this->workerPids = [];
+        $this->restartProbes = [];
         foreach (array_keys($this->pendingTelemetryCleanup) as $supervisor) {
             $this->flushTelemetryCleanup($supervisor);
         }
@@ -738,6 +840,28 @@ final class PhpSupervisor
         return $this->workerPids[spl_object_id($process)] ?? null;
     }
 
+    private function cancelRestartProbe(Process $process, string $supervisor, string $queue): void
+    {
+        $objectId = spl_object_id($process);
+        $key = $this->poolKey($supervisor, $queue);
+        if (($this->restartProbes[$objectId] ?? null) !== $key) {
+            return;
+        }
+        unset($this->restartProbes[$objectId]);
+        $this->resetCrashes($supervisor, $queue);
+    }
+
+    private function signalProcessGroup(Process $process, int $signal): void
+    {
+        $pid = $this->trackedPid($process);
+        if (is_int($pid) && $pid > 0 && function_exists('posix_kill')) {
+            // The launcher makes the worker its process-group leader. Signal
+            // both the group and leader in case user code changed groups.
+            @posix_kill(-$pid, $signal);
+        }
+        $process->signal($signal);
+    }
+
     private function assertSupportedRuntime(): void
     {
         if (
@@ -745,11 +869,14 @@ final class PhpSupervisor
             || !class_exists(Process::class)
             || !extension_loaded('pcntl')
             || !function_exists('pcntl_async_signals')
+            || !function_exists('pcntl_exec')
+            || !function_exists('posix_kill')
+            || !function_exists('posix_setsid')
             || !defined('SIGTERM')
             || !defined('SIGKILL')
         ) {
             throw new \RuntimeException(
-                'The Queen PHP supervisor requires a Unix-like OS, ext-pcntl and symfony/process. '
+                'The Queen PHP supervisor requires a Unix-like OS, ext-pcntl, ext-posix and symfony/process. '
                 . 'The Rust engine is the optimized alternative on supported Unix platforms.',
             );
         }
@@ -814,6 +941,9 @@ final class PhpSupervisor
     {
         $pools = [];
         $poolStatus = [];
+        $activeWorkers = 0;
+        $drainingWorkers = count($this->draining);
+        $renewalHelpersReserved = 0;
         $drainingCounts = [];
         $drainingPids = [];
         foreach ($this->draining as $entry) {
@@ -841,28 +971,43 @@ final class PhpSupervisor
                 $retryIn = isset($this->restartAfter[$restartKey])
                     ? max(0, (int) ceil($this->restartAfter[$restartKey] - microtime(true)))
                     : null;
-                $restartState = $retryIn !== null && $retryIn > 0
-                    ? 'backoff'
-                    : ($failures > 0 ? 'probe' : 'closed');
+                $restartState = $this->restartPhase[$restartKey] ?? 'closed';
                 $desired = in_array($status, ['terminating', 'stopped'], true)
                     ? 0
                     : ($this->lastDesired[$name][$queue] ?? count($processes));
+                $running = count($processes);
+                $draining = $drainingCounts[$key] ?? 0;
+                $processCost = $this->processCost($options);
+                $activeWorkers += $running;
+                if ($processCost > 1) {
+                    $renewalHelpersReserved += $running + $draining;
+                }
+                $depthAvailable = $this->depthsAvailable[$name] ?? false;
+                $depth = $depthAvailable ? ($this->lastDepths[$name][$queue] ?? null) : null;
+                $healthy = $restartState === 'closed' && $failures === 0;
+                $ready = $status === 'running'
+                    && $depthAvailable
+                    && is_int($depth)
+                    && ($desired === 0 || $running > 0);
                 $entry = [
                     'supervisor' => $name,
                     'queue' => $queue,
                     'desired' => $desired,
-                    'running' => count($processes),
-                    'draining' => $drainingCounts[$key] ?? 0,
+                    'running' => $running,
+                    'draining' => $draining,
                     'pids' => $pids,
                     'draining_pids' => $drainingPids[$key] ?? [],
                     'restart_state' => $restartState,
                     'restart_failures' => $failures,
-                    'restart_in_seconds' => $retryIn !== null && $retryIn > 0 ? $retryIn : null,
-                    'healthy' => $restartState === 'closed' && $failures === 0,
-                    'depth' => ($this->depthsAvailable[$name] ?? false)
-                        ? ($this->lastDepths[$name][$queue] ?? null)
-                        : null,
-                    'depth_available' => $this->depthsAvailable[$name] ?? false,
+                    'restart_in_seconds' => $retryIn,
+                    'healthy' => $healthy,
+                    'ready' => $ready,
+                    'capacity_satisfied' => $running >= $desired,
+                    'depth' => $depth,
+                    'depth_available' => $depthAvailable,
+                    'process_cost_per_worker' => $processCost,
+                    'reserved_processes' => ($running + $draining) * $processCost,
+                    'renewal_helpers_reserved' => ($running + $draining) * ($processCost - 1),
                 ];
                 $poolStatus[] = $entry;
                 // Keep the original nested map and field names for consumers
@@ -875,15 +1020,36 @@ final class PhpSupervisor
                     'restart_state' => $entry['restart_state'],
                     'restart_failures' => $entry['restart_failures'],
                     'restart_in_seconds' => $entry['restart_in_seconds'],
+                    'ready' => $entry['ready'],
+                    'capacity_satisfied' => $entry['capacity_satisfied'],
                     'depth' => $entry['depth'],
                     'depth_available' => $entry['depth_available'],
+                    'process_cost_per_worker' => $entry['process_cost_per_worker'],
+                    'reserved_processes' => $entry['reserved_processes'],
                 ];
             }
         }
+        $processLimit = (int) ($this->config['process_limit'] ?? 256);
+        $usedProcessBudget = $activeWorkers + $drainingWorkers + $renewalHelpersReserved;
+        $ready = $status === 'running'
+            && $poolStatus !== []
+            && !in_array(false, array_column($poolStatus, 'ready'), true);
+        $capacitySatisfied = $poolStatus !== []
+            && !in_array(false, array_column($poolStatus, 'capacity_satisfied'), true);
         $this->state->writeStatus([
             'engine' => 'php',
             'state' => $status,
+            'ready' => $ready,
+            'capacity_satisfied' => $capacitySatisfied,
             'draining' => count($this->draining),
+            'process_budget' => [
+                'limit' => $processLimit,
+                'used' => $usedProcessBudget,
+                'available' => max(0, $processLimit - $usedProcessBudget),
+                'active_worker_processes' => $activeWorkers,
+                'draining_worker_processes' => $drainingWorkers,
+                'renewal_helpers_reserved' => $renewalHelpersReserved,
+            ],
             'pools' => $pools,
             'pool_status' => $poolStatus,
             'configuration' => $this->statusConfiguration(),
@@ -909,6 +1075,8 @@ final class PhpSupervisor
                 'max_processes' => (int) ($options['max_processes'] ?? 10),
                 'timeout' => (int) ($options['timeout'] ?? 60),
                 'retry_after' => (int) ($options['retry_after'] ?? 90),
+                'lease_renewal' => (bool) ($options['lease_renewal'] ?? false),
+                'process_cost_per_worker' => $this->processCost($options),
                 'tries' => (int) ($options['tries'] ?? 3),
                 'memory' => (int) ($options['memory'] ?? 128),
             ];

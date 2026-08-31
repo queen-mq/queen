@@ -8,6 +8,12 @@ use Queen\Queen;
 
 class QueenConnector implements ConnectorInterface
 {
+    /** PostgreSQL and the broker wire encode lease horizons as signed int32 seconds. */
+    private const MAX_RETRY_AFTER_SECONDS = 2_147_483_647;
+
+    /** A stopping worker must never spend its whole shutdown grace on a tail release. */
+    private const SHUTDOWN_RELEASE_TIMEOUT_MILLIS = 2_000;
+
     /** @param (\Closure(string, \Closure(): mixed): mixed)|null $failedJobRetryHandler */
     public function __construct(
         private array $defaults = [],
@@ -43,7 +49,7 @@ class QueenConnector implements ConnectorInterface
                 : ($config['retry_after'] ?? 90),
             'retry_after',
             1,
-            PHP_INT_MAX,
+            self::MAX_RETRY_AFTER_SECONDS,
         );
         $blockFor = self::boundedInteger(
             is_string($workerBlockFor) && $workerBlockFor !== ''
@@ -59,6 +65,11 @@ class QueenConnector implements ConnectorInterface
         $dispatchAfterCommit = self::boolean($config['after_commit'] ?? false, 'after_commit');
         $popAutopilot = self::boolean($config['autopilot'] ?? false, 'autopilot');
         $leaseRenewal = self::boolean($config['lease_renewal'] ?? false, 'lease_renewal');
+        if ($prefetch > 1 && !$leaseRenewal) {
+            throw new InvalidArgumentException(
+                "Queen Laravel prefetch [{$prefetch}] requires lease_renewal so every prefetched lease remains fenced while Laravel executes synchronous job code.",
+            );
+        }
         $leaseRenewalIntervalOption = $config['lease_renewal_interval'] ?? null;
         $leaseRenewalInterval = self::boundedInteger(
             $leaseRenewalIntervalOption === null || $leaseRenewalIntervalOption === ''
@@ -121,6 +132,31 @@ class QueenConnector implements ConnectorInterface
             $clientConfig['handler'] = $config['handler'];
         }
 
+        // Graceful shutdown is a best-effort optimization: correctness falls
+        // back to lease expiry when it fails. Give that final retry ACK one
+        // bounded attempt on the affinity-selected backend, independently of
+        // the ordinary client's retry/failover policy, so WorkerStopping can
+        // never consume the supervisor's entire shutdown grace.
+        $shutdownClientConfig = $clientConfig;
+        $shutdownClientConfig['timeoutMillis'] = self::SHUTDOWN_RELEASE_TIMEOUT_MILLIS;
+        $shutdownClientConfig['retryAttempts'] = 1;
+        $shutdownClientConfig['retryDelayMillis'] = 0;
+        $shutdownClientConfig['enableFailover'] = false;
+        $shutdownClientConfig['retry429'] = ['maxAttempts' => 1, 'baseMs' => 1, 'capMs' => 1];
+        $shutdownQueen = null;
+        $shutdownTailReleaser = static function (
+            array $messages,
+            string $group,
+            ?string $affinityKey,
+        ) use (&$shutdownQueen, $shutdownClientConfig): array {
+            $shutdownQueen ??= new Queen($shutdownClientConfig);
+
+            return $shutdownQueen->ack($messages, true, array_filter([
+                'group' => $group,
+                'affinityKey' => $affinityKey,
+            ], static fn (mixed $value): bool => $value !== null));
+        };
+
         $leaseRenewer = null;
         if ($leaseRenewal) {
             if (array_key_exists('handler', $clientConfig)) {
@@ -181,6 +217,7 @@ class QueenConnector implements ConnectorInterface
             popAutopilot: $popAutopilot,
             leaseRenewer: $leaseRenewer,
             failedJobRetryHandler: $this->failedJobRetryHandler,
+            shutdownTailReleaser: $shutdownTailReleaser,
         );
     }
 

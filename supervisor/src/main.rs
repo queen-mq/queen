@@ -129,8 +129,8 @@ struct SupervisorConfig {
     // contract. The Rust supervisor does not renew leases itself, but it must
     // accept and preserve compatibility with the resolved v2 supervisor
     // document consumed by both engines.
-    #[serde(default, rename = "lease_renewal")]
-    _lease_renewal: bool,
+    #[serde(default)]
+    lease_renewal: bool,
     #[serde(default = "default_scale_down_delay")]
     scale_down_delay: u64,
     #[serde(default = "default_restart_backoff")]
@@ -908,6 +908,7 @@ fn validate_config(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         validate_connection(name, connection)?;
     }
     let mut total_max = 0usize;
+    let mut total_process_budget = 0usize;
     let mut total_pools = 0usize;
     for (name, options) in &config.supervisors {
         validate_identifier(name, "supervisor name")?;
@@ -1000,9 +1001,30 @@ fn validate_config(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         total_max = total_max
             .checked_add(options.max_processes)
             .ok_or("sum of supervisor max_processes overflowed")?;
+        let reserved = options
+            .max_processes
+            .checked_mul(process_cost(options))
+            .ok_or("supervisor child-process reservation overflowed")?;
+        if reserved > config.process_limit {
+            return Err(format!(
+                "supervisor [{name}] reserves {reserved} child processes and exceeds process_limit [{}]",
+                config.process_limit
+            )
+            .into());
+        }
+        total_process_budget = total_process_budget
+            .checked_add(reserved)
+            .ok_or("sum of supervisor child-process reservations overflowed")?;
     }
     if total_max > config.process_limit {
         return Err("sum of supervisor max_processes exceeds process_limit".into());
+    }
+    if total_process_budget > config.process_limit {
+        return Err(format!(
+            "supervisors reserve {total_process_budget} child processes and exceed process_limit [{}]",
+            config.process_limit
+        )
+        .into());
     }
     if total_pools > MAX_STATUS_POOLS {
         return Err(format!(
@@ -1148,6 +1170,8 @@ fn status_configuration(config: &Config) -> serde_json::Value {
                 "max_processes": options.max_processes,
                 "timeout": options.timeout,
                 "retry_after": options.retry_after,
+                "lease_renewal": options.lease_renewal,
+                "process_cost_per_worker": process_cost(options),
                 "tries": options.tries,
                 "memory": options.memory,
             })
@@ -1624,6 +1648,12 @@ impl State {
         }
 
         let mut entries = serde_json::Map::new();
+        let mut active_workers = 0usize;
+        let draining_workers = draining.len();
+        let mut renewal_helpers_reserved = 0usize;
+        let mut all_pools_ready = true;
+        let mut all_capacity_satisfied = true;
+        let mut pool_count = 0usize;
         let mut names: Vec<_> = config.supervisors.keys().collect();
         names.sort_unstable();
         let mut pool_status = Vec::new();
@@ -1656,6 +1686,21 @@ impl State {
                         .copied()
                         .unwrap_or(running)
                 };
+                let worker_process_cost = process_cost(options);
+                let draining_count = draining_entry.map(|entry| entry.0).unwrap_or(0);
+                active_workers = active_workers.saturating_add(running);
+                if worker_process_cost > 1 {
+                    renewal_helpers_reserved = renewal_helpers_reserved
+                        .saturating_add(running.saturating_add(draining_count));
+                }
+                let healthy = restart_state == "closed" && restart_failures == 0;
+                let ready = state == "running"
+                    && depth_available
+                    && depth.is_some()
+                    && (desired == 0 || running > 0);
+                all_pools_ready &= ready;
+                all_capacity_satisfied &= running >= desired;
+                pool_count += 1;
                 let pids = children
                     .map(|workers| {
                         workers
@@ -1669,15 +1714,20 @@ impl State {
                     "queue": queue,
                     "desired": desired,
                     "running": running,
-                    "draining": draining_entry.map(|entry| entry.0).unwrap_or(0),
+                    "draining": draining_count,
                     "pids": &pids,
                     "draining_pids": draining_entry.map(|entry| entry.1.clone()).unwrap_or_default(),
                     "restart_state": restart_state,
                     "restart_failures": restart_failures,
                     "restart_in_seconds": restart.and_then(|guard| guard.retry_in_seconds(now)),
-                    "healthy": restart_state == "closed" && restart_failures == 0,
+                    "healthy": healthy,
+                    "ready": ready,
+                    "capacity_satisfied": running >= desired,
                     "depth": depth,
                     "depth_available": depth_available,
+                    "process_cost_per_worker": worker_process_cost,
+                    "reserved_processes": running.saturating_add(draining_count).saturating_mul(worker_process_cost),
+                    "renewal_helpers_reserved": running.saturating_add(draining_count).saturating_mul(worker_process_cost.saturating_sub(1)),
                 }));
                 supervisor_entries.insert(
                     queue.clone(),
@@ -1685,12 +1735,16 @@ impl State {
                         "processes": running,
                         "pids": pids,
                         "desired": desired,
-                        "draining": draining_entry.map(|entry| entry.0).unwrap_or(0),
+                        "draining": draining_count,
                         "restart_state": restart_state,
                         "restart_failures": restart_failures,
                         "restart_in_seconds": restart.and_then(|guard| guard.retry_in_seconds(now)),
+                        "ready": ready,
+                        "capacity_satisfied": running >= desired,
                         "depth": depth,
                         "depth_available": depth_available,
+                        "process_cost_per_worker": worker_process_cost,
+                        "reserved_processes": running.saturating_add(draining_count).saturating_mul(worker_process_cost),
                     }),
                 );
             }
@@ -1699,6 +1753,12 @@ impl State {
                 serde_json::Value::Object(supervisor_entries),
             );
         }
+        let process_limit = config.process_limit;
+        let used_process_budget = active_workers
+            .saturating_add(draining_workers)
+            .saturating_add(renewal_helpers_reserved);
+        let ready = state == "running" && pool_count > 0 && all_pools_ready;
+        let capacity_satisfied = pool_count > 0 && all_capacity_satisfied;
         let updated_at_epoch = now_epoch();
         let status = serde_json::json!({
             "schema": STATUS_SCHEMA,
@@ -1710,7 +1770,17 @@ impl State {
             "updated_at_epoch": updated_at_epoch,
             "paused": state == "paused",
             "stopping": state == "terminating",
+            "ready": ready,
+            "capacity_satisfied": capacity_satisfied,
             "draining": draining.len(),
+            "process_budget": {
+                "limit": process_limit,
+                "used": used_process_budget,
+                "available": process_limit.saturating_sub(used_process_budget),
+                "active_worker_processes": active_workers,
+                "draining_worker_processes": draining_workers,
+                "renewal_helpers_reserved": renewal_helpers_reserved,
+            },
             "pools": entries,
             "pool_status": pool_status,
             "configuration": status_configuration(config),
@@ -2555,11 +2625,9 @@ fn reconcile(
         )
     });
     let mut budget = reconcile_budget(options, supervised_processes);
-    let active_processes = pools
-        .values()
-        .fold(0usize, |total, pool| total.saturating_add(pool.len()));
-    let mut process_slots =
-        remaining_process_slots(config.process_limit, active_processes, draining.len());
+    let used_process_budget = process_budget_used(config, pools, draining);
+    let mut process_slots = remaining_process_slots(config.process_limit, used_process_budget);
+    let worker_process_cost = process_cost(options);
     for queue in &options.queues {
         let target = desired.get(queue).copied().unwrap_or(0);
         let key = (name.to_owned(), queue.clone());
@@ -2586,7 +2654,7 @@ fn reconcile(
         let target = desired.get(queue).copied().unwrap_or(0);
         let key = (name.to_owned(), queue.clone());
         let pool = pools.entry(key).or_default();
-        while budget > 0 && process_slots > 0 && target > pool.len() {
+        while budget > 0 && process_slots >= worker_process_cost && target > pool.len() {
             let restart = restarts
                 .entry((name.to_owned(), queue.clone()))
                 .or_default();
@@ -2605,7 +2673,7 @@ fn reconcile(
                     restart.mark_spawned(permission);
                     pool.push(worker);
                     budget -= 1;
-                    process_slots -= 1;
+                    process_slots -= worker_process_cost;
                 }
                 Err(error) => {
                     let (delay, circuit_open) = restart.record_failure(options, Instant::now());
@@ -2639,8 +2707,35 @@ fn reconcile_budget(options: &SupervisorConfig, active: usize) -> usize {
         .max(baseline.saturating_sub(active))
 }
 
-fn remaining_process_slots(limit: usize, active: usize, draining: usize) -> usize {
-    limit.saturating_sub(active.saturating_add(draining))
+fn process_cost(options: &SupervisorConfig) -> usize {
+    if options.lease_renewal {
+        2
+    } else {
+        1
+    }
+}
+
+fn process_budget_used(config: &Config, pools: &Pools, draining: &Draining) -> usize {
+    let active = pools.iter().fold(0usize, |total, ((supervisor, _), pool)| {
+        let cost = config
+            .supervisors
+            .get(supervisor)
+            .map(process_cost)
+            .unwrap_or(1);
+        total.saturating_add(pool.len().saturating_mul(cost))
+    });
+    draining.iter().fold(active, |total, entry| {
+        let cost = config
+            .supervisors
+            .get(&entry.pool.0)
+            .map(process_cost)
+            .unwrap_or(1);
+        total.saturating_add(cost)
+    })
+}
+
+fn remaining_process_slots(limit: usize, used: usize) -> usize {
+    limit.saturating_sub(used)
 }
 
 fn spawn_worker(
@@ -2661,7 +2756,10 @@ fn spawn_worker(
             }
             #[cfg(target_os = "linux")]
             {
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                // A master crash is not a graceful drain. Hard-fence the PHP
+                // handler before a replacement generation can start; normal
+                // supervisor shutdown still sends TERM and honors its grace.
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
                 if libc::getppid() != supervisor_pid {
@@ -2767,6 +2865,16 @@ fn record_worker_exit(
     restart: &mut RestartGuard,
 ) {
     let uptime = worker.started_at.elapsed();
+    if matches!(restart.phase, RestartPhase::Probe) && !worker.restart_probe {
+        eprintln!(
+            "[{}:{}] pid={} exited with {status} after {:.3}s while restart probe is active; circuit unchanged",
+            key.0,
+            key.1,
+            worker.child.id(),
+            uptime.as_secs_f64(),
+        );
+        return;
+    }
     if status.success() {
         restart.record_healthy();
         eprintln!(
@@ -2778,7 +2886,7 @@ fn record_worker_exit(
         );
         return;
     }
-    if uptime >= Duration::from_secs(options.stable_after) {
+    if !worker.restart_probe && uptime >= Duration::from_secs(options.stable_after) {
         restart.record_healthy();
     }
     let (delay, circuit_open) = restart.record_failure(options, Instant::now());
@@ -2802,13 +2910,18 @@ fn observe_stable_workers(config: &Config, pools: &mut Pools, restarts: &mut Res
         let Some(options) = config.supervisors.get(&key.0) else {
             continue;
         };
+        let restart = restarts.entry(key.clone()).or_default();
         for worker in pool {
             if !worker.stability_reported
                 && worker.started_at.elapsed() >= Duration::from_secs(options.stable_after)
             {
                 worker.stability_reported = true;
+                let authoritative =
+                    !matches!(restart.phase, RestartPhase::Probe) || worker.restart_probe;
                 worker.restart_probe = false;
-                restarts.entry(key.clone()).or_default().record_healthy();
+                if authoritative {
+                    restart.record_healthy();
+                }
             }
         }
     }
@@ -3024,7 +3137,7 @@ mod tests {
             balance_cooldown: 3,
             balance_max_shift: 1,
             retry_after: 90,
-            _lease_renewal: false,
+            lease_renewal: false,
             scale_down_delay: 10,
             restart_backoff: 1,
             restart_backoff_max: 8,
@@ -3065,6 +3178,25 @@ mod tests {
             connections: HashMap::new(),
             supervisors: HashMap::from([("default".into(), options)]),
         }
+    }
+
+    #[cfg(unix)]
+    fn exited_worker(exit_code: i32, restart_probe: bool) -> (Worker, ExitStatus) {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", &format!("exit {exit_code}")])
+            .spawn()
+            .unwrap();
+        let status = child.wait().unwrap();
+        (Worker::new(child, restart_probe), status)
+    }
+
+    #[cfg(unix)]
+    fn sleeping_worker(restart_probe: bool) -> Worker {
+        let child = Command::new("/bin/sh")
+            .args(["-c", "exec sleep 30"])
+            .spawn()
+            .unwrap();
+        Worker::new(child, restart_probe)
     }
 
     fn temporary_directory(label: &str) -> PathBuf {
@@ -3171,9 +3303,9 @@ mod tests {
 
     #[test]
     fn draining_workers_consume_the_global_process_limit() {
-        assert_eq!(remaining_process_slots(10, 7, 2), 1);
-        assert_eq!(remaining_process_slots(10, 8, 2), 0);
-        assert_eq!(remaining_process_slots(10, 8, 4), 0);
+        assert_eq!(remaining_process_slots(10, 9), 1);
+        assert_eq!(remaining_process_slots(10, 10), 0);
+        assert_eq!(remaining_process_slots(10, 12), 0);
     }
 
     #[test]
@@ -3709,6 +3841,103 @@ mod tests {
         assert_eq!(guard.consecutive_failures, 0);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn active_restart_probe_ignores_non_probe_sibling_exits() {
+        let options = options("auto");
+        let key = ("default".to_owned(), "high".to_owned());
+        let mut guard = RestartGuard {
+            consecutive_failures: CRASH_CIRCUIT_THRESHOLD,
+            phase: RestartPhase::Probe,
+        };
+
+        let (successful_sibling, success) = exited_worker(0, false);
+        record_worker_exit(&key, &successful_sibling, success, &options, &mut guard);
+        assert_eq!(guard.state_name(), "probe");
+        assert_eq!(guard.consecutive_failures, CRASH_CIRCUIT_THRESHOLD);
+
+        let (failed_sibling, failure) = exited_worker(1, false);
+        record_worker_exit(&key, &failed_sibling, failure, &options, &mut guard);
+        assert_eq!(guard.state_name(), "probe");
+        assert_eq!(guard.consecutive_failures, CRASH_CIRCUIT_THRESHOLD);
+        assert_eq!(
+            guard.spawn_permission(Instant::now() + Duration::from_secs(3_600)),
+            SpawnPermission::Blocked
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_restart_probe_exit_controls_the_circuit() {
+        let options = options("auto");
+        let key = ("default".to_owned(), "high".to_owned());
+        let mut failed_guard = RestartGuard {
+            consecutive_failures: CRASH_CIRCUIT_THRESHOLD,
+            phase: RestartPhase::Probe,
+        };
+        let (mut failed_probe, failure) = exited_worker(1, true);
+        failed_probe.started_at = Instant::now() - Duration::from_secs(options.stable_after + 1);
+
+        record_worker_exit(&key, &failed_probe, failure, &options, &mut failed_guard);
+        assert_eq!(failed_guard.state_name(), "open");
+        assert_eq!(
+            failed_guard.consecutive_failures,
+            CRASH_CIRCUIT_THRESHOLD + 1
+        );
+
+        let mut successful_guard = RestartGuard {
+            consecutive_failures: CRASH_CIRCUIT_THRESHOLD,
+            phase: RestartPhase::Probe,
+        };
+        let (successful_probe, success) = exited_worker(0, true);
+        record_worker_exit(
+            &key,
+            &successful_probe,
+            success,
+            &options,
+            &mut successful_guard,
+        );
+        assert_eq!(successful_guard.state_name(), "closed");
+        assert_eq!(successful_guard.consecutive_failures, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_stable_exact_probe_closes_an_active_probe() {
+        let resolved = config(options("auto"));
+        let key = ("default".to_owned(), "high".to_owned());
+        let stable_at = Instant::now() - Duration::from_secs(61);
+        let mut sibling = sleeping_worker(false);
+        sibling.started_at = stable_at;
+        let probe = sleeping_worker(true);
+        let mut pools = Pools::from([(key.clone(), vec![sibling, probe])]);
+        let mut restarts = RestartStates::from([(
+            key.clone(),
+            RestartGuard {
+                consecutive_failures: CRASH_CIRCUIT_THRESHOLD,
+                phase: RestartPhase::Probe,
+            },
+        )]);
+
+        observe_stable_workers(&resolved, &mut pools, &mut restarts);
+        assert!(pools[&key][0].stability_reported);
+        assert!(!pools[&key][1].stability_reported);
+        assert_eq!(restarts[&key].state_name(), "probe");
+        assert_eq!(restarts[&key].consecutive_failures, CRASH_CIRCUIT_THRESHOLD);
+
+        pools.get_mut(&key).unwrap()[1].started_at = stable_at;
+        observe_stable_workers(&resolved, &mut pools, &mut restarts);
+        assert!(pools[&key][1].stability_reported);
+        assert!(!pools[&key][1].restart_probe);
+        assert_eq!(restarts[&key].state_name(), "closed");
+        assert_eq!(restarts[&key].consecutive_failures, 0);
+
+        for mut worker in pools.remove(&key).unwrap() {
+            let _ = worker.child.kill();
+            let _ = worker.child.wait();
+        }
+    }
+
     #[test]
     fn legacy_v2_documents_receive_safe_policy_defaults() {
         let document = serde_json::json!({
@@ -3762,7 +3991,7 @@ mod tests {
         assert_eq!(config.control_ttl, 3_600);
         assert_eq!(config.heartbeat_timeout, 3_600);
         assert_eq!(supervisor.retry_after, 90);
-        assert!(supervisor._lease_renewal);
+        assert!(supervisor.lease_renewal);
         assert_eq!(supervisor.scale_down_delay, 10);
         assert_eq!(supervisor.restart_backoff, 1);
         assert_eq!(supervisor.restart_backoff_max, 30);
@@ -3810,6 +4039,15 @@ mod tests {
         let mut excessive_limit = config(options("auto"));
         excessive_limit.process_limit = MAX_PROCESS_LIMIT + 1;
         assert!(validate_config(&excessive_limit).is_err());
+
+        let mut renewal_budget = config(options("auto"));
+        renewal_budget.process_limit = 10;
+        renewal_budget
+            .supervisors
+            .get_mut("default")
+            .unwrap()
+            .lease_renewal = true;
+        assert!(validate_config(&renewal_budget).is_err());
 
         let mut uncovered_queue = config(options("auto"));
         uncovered_queue
@@ -4125,6 +4363,12 @@ mod tests {
         assert_eq!(status["pool_status"][0]["desired"], 3);
         assert_eq!(status["pool_status"][0]["depth"], 9);
         assert_eq!(status["pool_status"][0]["depth_available"], true);
+        assert_eq!(status["pool_status"][0]["ready"], false);
+        assert_eq!(status["pool_status"][0]["capacity_satisfied"], false);
+        assert_eq!(status["pool_status"][0]["process_cost_per_worker"], 1);
+        assert_eq!(status["ready"], false);
+        assert_eq!(status["capacity_satisfied"], false);
+        assert_eq!(status["process_budget"]["used"], 0);
         assert_eq!(status["configuration"]["control_ttl"], 3_600);
         assert_eq!(status["configuration"]["heartbeat_timeout"], 3_600);
         assert_eq!(
@@ -4191,10 +4435,12 @@ mod tests {
                 "balance",
                 "connection",
                 "consumer_group",
+                "lease_renewal",
                 "max_processes",
                 "memory",
                 "min_processes",
                 "name",
+                "process_cost_per_worker",
                 "processes",
                 "queues",
                 "retry_after",
@@ -4674,6 +4920,76 @@ while kill -0 "$worker" 2>/dev/null; do wait "$worker"; done"#,
 
         signal_process_group(&mut child, libc::SIGKILL);
         let _ = child.wait();
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "subprocess helper for linux_master_death_hard_fences_worker"]
+    fn linux_pdeathsig_helper() {
+        let Some(pid_file) = std::env::var_os("QUEEN_PDEATHSIG_PID_FILE") else {
+            return;
+        };
+        let supervisor_pid = unsafe { libc::getpid() };
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30");
+        unsafe {
+            command.pre_exec(move || {
+                if libc::setpgid(0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::getppid() != supervisor_pid {
+                    return Err(std::io::Error::other("test parent exited during spawn"));
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn().unwrap();
+        fs::write(pid_file, child.id().to_string()).unwrap();
+        // Intentionally do not wait: exiting this test-process is the fault
+        // being exercised by the parent test.
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_master_death_hard_fences_worker() {
+        let directory = temporary_directory("pdeathsig");
+        let pid_file = directory.join("pid");
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::linux_pdeathsig_helper",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("QUEEN_PDEATHSIG_PID_FILE", &pid_file)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let pid: u32 = fs::read_to_string(&pid_file).unwrap().parse().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let state = fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|stat| stat.rsplit_once(") ").map(|(_, tail)| tail.to_owned()))
+                .and_then(|tail| tail.chars().next());
+            if state.is_none() || matches!(state, Some('Z' | 'X')) {
+                break;
+            }
+            if Instant::now() >= deadline {
+                unsafe {
+                    libc::kill(-(pid as i32), libc::SIGKILL);
+                    libc::kill(pid as i32, libc::SIGKILL);
+                }
+                panic!("worker {pid} survived its Rust master");
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+
         fs::remove_dir_all(directory).unwrap();
     }
 
