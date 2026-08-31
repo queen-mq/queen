@@ -4926,6 +4926,7 @@ while kill -0 "$worker" 2>/dev/null; do wait "$worker"; done"#,
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "subprocess helper for linux_master_death_hard_fences_worker"]
+    #[allow(clippy::zombie_processes)] // The child must outlive this fault-injection helper.
     fn linux_pdeathsig_helper() {
         let Some(pid_file) = std::env::var_os("QUEEN_PDEATHSIG_PID_FILE") else {
             return;

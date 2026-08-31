@@ -233,6 +233,7 @@ fi
 
 require_command git
 require_command python3
+require_command tar
 require_positive_int "--jobs" "$JOBS"
 require_positive_int "--workers" "$WORKERS"
 require_positive_int "--min-workers" "$MIN_WORKERS"
@@ -1338,16 +1339,19 @@ run_lane() {
             >"${CURRENT_HOST_RUN}/ledger-checkpoint.json"
     fi
 
+    # Stream artifacts to the host process instead of preserving the volume
+    # owner's UID/GID onto the bind mount. The latter made a successful lane
+    # unreadable by the CI runner (and by some local Docker Desktop users).
     docker run --rm --user 0:0 \
         --mount "type=volume,src=${CURRENT_STATS_VOLUME},dst=/from,readonly" \
-        --mount "type=bind,src=${CURRENT_HOST_RUN},dst=/to" \
-        "$APP_IMAGE" sh -ceu 'cp "/from/$1" /to/stats.jsonl' sh "${run_id}.jsonl"
+        "$APP_IMAGE" sh -ceu 'cat "/from/$1"' sh "${run_id}.jsonl" \
+        >"${CURRENT_HOST_RUN}/stats.jsonl"
 
     capture_lane_diagnostics
     docker run --rm --user 0:0 \
         --mount "type=volume,src=${CURRENT_VOLUME},dst=/from,readonly" \
-        --mount "type=bind,src=${CURRENT_HOST_RUN},dst=/to" \
-        "$APP_IMAGE" sh -ceu 'cp -a "/from/$1/." /to/' sh "$run_id"
+        "$APP_IMAGE" sh -ceu 'cd "/from/$1" && tar -cf - .' sh "$run_id" \
+        | tar -xf - -C "$CURRENT_HOST_RUN"
 
     # Detect a workload that appeared while the lane was running. This is
     # outside resource sampling, but still a validity gate for the sample.

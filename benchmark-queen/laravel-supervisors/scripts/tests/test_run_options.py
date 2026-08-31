@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -10,13 +12,21 @@ SCRIPT = Path(__file__).resolve().parents[1] / "run.sh"
 
 class RunOptionsTest(unittest.TestCase):
     def run_before_docker(self, *arguments: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["/bin/bash", str(SCRIPT), *arguments],
-            check=False,
-            capture_output=True,
-            text=True,
-            env={"PATH": "/usr/bin:/bin"},
-        )
+        # Do not assume where a host installs Docker. GitHub runners expose it
+        # from /usr/bin, while macOS normally does not. A controlled client
+        # makes this an offline preflight test on both hosts.
+        with tempfile.TemporaryDirectory() as directory:
+            docker = Path(directory) / "docker"
+            docker.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            docker.chmod(0o755)
+
+            return subprocess.run(
+                ["/bin/bash", str(SCRIPT), *arguments],
+                check=False,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "PATH": f"{directory}:{os.defpath}"},
+            )
 
     def test_publishable_rejects_no_build_before_host_inspection(self) -> None:
         environment = {
@@ -54,7 +64,7 @@ class RunOptionsTest(unittest.TestCase):
         )
 
         self.assertNotEqual(0, result.returncode)
-        self.assertIn("required command not found: docker", result.stderr)
+        self.assertIn("Docker daemon is unavailable", result.stderr)
         self.assertNotIn("prefetch multiplied", result.stderr)
 
     def test_retry_after_must_still_exceed_worker_timeout_with_renewal(self) -> None:
@@ -94,7 +104,7 @@ class RunOptionsTest(unittest.TestCase):
 
         self.assertNotEqual(0, result.returncode)
         self.assertTrue(
-            "required command not found: docker" in result.stderr
+            "Docker daemon is unavailable" in result.stderr
             or "requires a clean Git worktree" in result.stderr,
             result.stderr,
         )
