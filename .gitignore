@@ -45,3 +45,7 @@ server/webapp/dist
 proxy/.devcell/
 
 my-docs
+
+# Local GHCR publish button (wraps the tracked build.sh). Untracked so the
+# credential flow and the flag defaults stay a personal choice.
+.build-images-ghcr.sh
