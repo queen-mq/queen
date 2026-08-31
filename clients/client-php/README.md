@@ -200,6 +200,12 @@ unflushed batch, and a paused worker can sit on prefetched jobs until the lease 
 connector **rejects `QUEEN_PREFETCH > 1` unless `QUEEN_LEASE_RENEWAL=true`**, however the worker was
 started.
 
+`QUEEN_AUTOPILOT` is off here even though the SDK client enables pop autopilot by default: the
+queue driver keeps sending the fixed `QUEEN_PARTITIONS` width, so an upgrade changes nothing on its
+own. Turn it on to let the broker size the sweep width per `(queue, group)` from ready-partition
+pressure and ready age. The pop batch stays pinned to `QUEEN_PREFETCH`. It needs a broker on 1.2 or
+later; an older one ignores the parameter and applies its own default width.
+
 ```dotenv
 QUEEN_PREFETCH=16
 QUEEN_ACK_BATCH=16
@@ -256,6 +262,24 @@ vendor/bin/queen-supervisor --php php --artisan artisan
 `strategy=size` sizes the pool from queue depth and `target_jobs_per_process`. `strategy=time`
 multiplies depth by observed job runtime to hit `target_clear_seconds`. Both engines cap restart
 backoff, open a circuit after five consecutive crashes, and allow one probe after the cooldown.
+
+Each pool reads these; the defaults are the ones shipped in `config/queen.php`.
+
+| Variable | Default | |
+| --- | --- | --- |
+| `QUEEN_SUPERVISOR_BALANCE` | `auto` | `auto`, `simple` or `off` |
+| `QUEEN_SUPERVISOR_STRATEGY` | `size` | `size` reads depth; `time` multiplies depth by observed runtime |
+| `QUEEN_SUPERVISOR_MIN_PROCESSES` | `1` | floor per pool |
+| `QUEEN_SUPERVISOR_MAX_PROCESSES` | `10` | ceiling per pool |
+| `QUEEN_SUPERVISOR_TARGET_JOBS` | `10` | jobs per process, `size` strategy |
+| `QUEEN_SUPERVISOR_TARGET_CLEAR_SECONDS` | `60` | drain target, `time` strategy |
+| `QUEEN_SUPERVISOR_DEFAULT_RUNTIME_SECONDS` | `1` | assumed runtime until samples exist |
+| `QUEEN_SUPERVISOR_BALANCE_COOLDOWN` | `3` | seconds between scaling decisions |
+| `QUEEN_SUPERVISOR_BALANCE_MAX_SHIFT` | `1` | processes added or removed per decision |
+| `QUEEN_SUPERVISOR_SCALE_DOWN_DELAY` | `10` | idle seconds before shrinking |
+| `QUEEN_SUPERVISOR_RESTART_BACKOFF` | `1` | first restart delay |
+| `QUEEN_SUPERVISOR_RESTART_BACKOFF_MAX` | `30` | backoff ceiling |
+| `QUEEN_SUPERVISOR_STABLE_AFTER` | `60` | seconds before a restarted worker counts as stable |
 
 Control is engine-independent, through the local state directory:
 
