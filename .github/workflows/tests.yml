@@ -206,7 +206,16 @@ jobs:
           # See rust-unit: name the manifest, or rust-cache probes the root.
           cache-workspaces: protocols/queen-kafka
       - name: cargo test
-        run: cargo test --manifest-path protocols/queen-kafka/Cargo.toml --locked
+        # Built first, then run with the address space capped. A decoder that
+        # preallocates on a length a client chose is invisible wherever the
+        # kernel overcommits -- a developer's macOS, Docker's VM -- and shows up
+        # only as a SIGABRT on a host that refuses the reservation. The cap
+        # makes that failure deterministic here rather than a function of how
+        # much memory this runner happens to have.
+        run: |
+          cargo test --manifest-path protocols/queen-kafka/Cargo.toml --locked --no-run
+          ( ulimit -v 8388608
+            cargo test --manifest-path protocols/queen-kafka/Cargo.toml --locked )
       - name: rustfmt
         run: cargo fmt --manifest-path protocols/queen-kafka/Cargo.toml --check
       - name: clippy

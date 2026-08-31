@@ -83,7 +83,7 @@ use kafka_protocol::messages::offset_delete_response::{
 use kafka_protocol::messages::{
     ConsumerProtocolSubscription, OffsetDeleteRequest, OffsetDeleteResponse, TopicName,
 };
-use kafka_protocol::protocol::{Decodable, Message, StrBytes};
+use kafka_protocol::protocol::{Decodable, StrBytes};
 
 use crate::cluster::fence::FenceOp;
 use crate::coordinator::{self, GroupDescription};
@@ -275,23 +275,58 @@ fn subscription_of(described: Option<&GroupDescription>, group: &str) -> Subscri
 /// not a subscription this facade can read.
 ///
 /// The wire shape is Kafka's `ConsumerProtocol`: a two-byte version, then the
-/// `ConsumerProtocolSubscription` body at that version. The version is CLAMPED
-/// upwards exactly as `ConsumerProtocol.checkVersionCompatibility` clamps it, so
-/// a member from a newer client is read at the newest schema this build has
-/// rather than refused — the fields this cares about are `0-3` and have never
-/// moved. Trailing bytes are left alone for the same reason Kafka leaves them:
-/// they are a later version's fields, not a corruption.
+/// `ConsumerProtocolSubscription` body at that version. Trailing bytes are left
+/// alone for the same reason Kafka leaves them: they are a later version's
+/// fields, not a corruption.
+///
+/// The body is read at v0 whatever version the member declared, which is what
+/// makes that last sentence load-bearing rather than incidental. `topics` and
+/// `user_data` are the first two fields at EVERY version of this schema and a
+/// later version only appends, so a v3 member's topics are the same bytes in
+/// the same place and its extra fields land in the trailing bytes above. Read
+/// at the member's own version instead, the decoder would also walk
+/// `owned_partitions`, and that is a second unbounded array with the same
+/// abort in it as the one guarded below.
+/// Whether the topic count at the front of a subscription body could be honest.
+/// `body` starts AT that count, which is to say after the two-byte version.
+///
+/// `Array::decode` calls `Vec::with_capacity` on this count before it reads a
+/// single topic, and the bytes are a member's, which is to say a client's. A
+/// count that does not fit in the bytes carrying it is refused here because
+/// letting it through is not a decode error that a caller's `.ok()?` absorbs:
+/// the allocation fails, and a failed allocation ABORTS the process and takes
+/// every other connection on this facade with it.
+///
+/// Nothing downstream can observe the difference — the decoder refuses these
+/// bytes either way, one of the two routes just does it by dying — so this is
+/// split out to be asserted on directly.
+fn topic_count_is_possible(body: &Bytes) -> bool {
+    /// Every element of a non-compact `Array<String>` carries at least its own
+    /// two-byte length prefix.
+    const MIN_BYTES_PER_TOPIC: usize = 2;
+
+    let Ok(count) = <[u8; 4]>::try_from(&body[..body.len().min(4)]) else {
+        return false;
+    };
+    let declared = i32::from_be_bytes(count);
+    // A negative count is the null-array sentinel, or a lie. The decoder
+    // refuses both without allocating, and reports them better than this can.
+    declared <= 0 || declared as usize <= (body.len() - 4) / MIN_BYTES_PER_TOPIC
+}
+
 fn subscribed_topics(metadata: &Bytes) -> Option<Vec<String>> {
     let mut buf = metadata.clone();
     if buf.remaining() < 2 {
         return None;
     }
-    let version = buf.get_i16();
-    if version < 0 {
+    let declared_version = buf.get_i16();
+    if declared_version < 0 {
         return None;
     }
-    let version = version.min(ConsumerProtocolSubscription::VERSIONS.max);
-    let subscription = ConsumerProtocolSubscription::decode(&mut buf, version).ok()?;
+    if !topic_count_is_possible(&buf) {
+        return None;
+    }
+    let subscription = ConsumerProtocolSubscription::decode(&mut buf, 0).ok()?;
     Some(
         subscription
             .topics
@@ -454,6 +489,7 @@ mod tests {
         GroupId, JoinGroupRequest, ListGroupsRequest, OffsetCommitRequest,
     };
     use kafka_protocol::protocol::Encodable;
+    use kafka_protocol::protocol::Message;
 
     const THREE: [(i32, &str, u16); 3] = [
         (1, "kafka-1.example.com", 9092),
@@ -1086,6 +1122,65 @@ mod tests {
         assert_eq!(
             subscribed_topics(&Bytes::from_static(&[0xff, 0xff, 0x00, 0x00])),
             None
+        );
+    }
+
+    /// These bytes are a member's, which is to say a client's, and the decoder
+    /// preallocates on the topic count it finds in them before it reads a
+    /// single topic. A count that cannot fit is refused HERE, because the
+    /// allocation it would otherwise ask for is not a decode error anything
+    /// upstream can absorb: it aborts the process and takes every other
+    /// connection on this facade down with it.
+    #[test]
+    fn a_subscription_that_declares_more_topics_than_it_carries_is_refused() {
+        // The guard itself, because the abort it prevents is not a value any
+        // assertion downstream can catch: both routes end in `None`, and only
+        // one of them allocates 52 GB on the way there.
+        let body = |b: &[u8]| Bytes::copy_from_slice(b);
+
+        // The exact bytes that aborted the facade, past the version: "bscr"
+        // reads as a topic count of 1,651,729,266, or 52 GB of `Vec<StrBytes>`.
+        assert!(!topic_count_is_possible(&body(b"bscription")));
+        // The count at its ceiling with nothing behind it.
+        assert!(!topic_count_is_possible(&body(&i32::MAX.to_be_bytes())));
+        // Two topics declared, one empty topic's worth of bytes carried.
+        assert!(!topic_count_is_possible(&body(&[0, 0, 0, 2, 0, 0])));
+        // Shorter than the count field itself.
+        assert!(!topic_count_is_possible(&body(&[0, 0])));
+        // Two declared and two carried is honest, and is let by: the guard
+        // refuses the lie, not the edge.
+        assert!(topic_count_is_possible(&body(&[0, 0, 0, 2, 0, 0, 0, 0])));
+
+        assert_eq!(
+            subscribed_topics(&Bytes::from_static(b"subscription")),
+            None
+        );
+
+        // The count field at its ceiling with nothing behind it at all.
+        let mut hostile = BytesMut::new();
+        hostile.extend_from_slice(&0i16.to_be_bytes());
+        hostile.extend_from_slice(&i32::MAX.to_be_bytes());
+        assert_eq!(subscribed_topics(&hostile.freeze()), None);
+
+        // One past the boundary the guard draws: two topics declared, one
+        // empty topic's worth of bytes carried.
+        let mut over = BytesMut::new();
+        over.extend_from_slice(&0i16.to_be_bytes());
+        over.extend_from_slice(&2i32.to_be_bytes());
+        over.extend_from_slice(&0i16.to_be_bytes());
+        assert_eq!(subscribed_topics(&over.freeze()), None);
+
+        // And the honest shape at that same boundary is still read, so the
+        // guard is refusing the lie and not the edge.
+        let mut exact = BytesMut::new();
+        exact.extend_from_slice(&0i16.to_be_bytes());
+        exact.extend_from_slice(&2i32.to_be_bytes());
+        exact.extend_from_slice(&0i16.to_be_bytes());
+        exact.extend_from_slice(&0i16.to_be_bytes());
+        exact.extend_from_slice(&(-1i32).to_be_bytes());
+        assert_eq!(
+            subscribed_topics(&exact.freeze()),
+            Some(vec![String::new(), String::new()])
         );
     }
 

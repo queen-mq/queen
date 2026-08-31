@@ -9,20 +9,16 @@
 
 **High-performance transactional messaging for applications that need an ordered stream per entity.**
 
-Queen is a message broker written in Rust that keeps every byte of its state in PostgreSQL. Its
+Queen is a message broker written in **Rust** that keeps every byte of its state in **PostgreSQL**. Its
 defining abstraction is one logical ordered partition per application entity (a customer, an
 account, a conversation, a device, a workflow, a session, a job), created by the first push that
 names it, never provisioned in advance.
 
 [Documentation](https://queenmq.com) · [Benchmarks](https://queenmq.com/benchmarks) · [Quickstart](https://queenmq.com/start/quickstart) · Apache-2.0 · v1.4.0
 
-</div>
-
-```text
-  ~1M msg/s              1M partitions
-```
 
 Queen speaks HTTP, but is also protocol-compatible with Kafka and SQS clients.
+</div>
 
 ---
 
