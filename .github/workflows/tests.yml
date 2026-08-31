@@ -246,6 +246,44 @@ jobs:
             --all-targets -- -D warnings || rc=1
           exit $rc
 
+  # The Kafka wire-protocol facade (PLAN_QUEEN_KAFKA.md). Its own workspace root,
+  # excluded from every other manifest by construction — which is exactly why it
+  # needs a cell of its own: named nowhere, its tests, rustfmt and clippy would
+  # run nowhere, and every correctness claim in the crate would rest on a suite
+  # CI never executes.
+  #
+  # Unit tests only. The `protocols/queen-kafka/compat/` lane (kcat/kafkajs/franz-go
+  # against a live stack) joins test/run.sh at M6 and stays OUT of this workflow
+  # until it is boring — the proxyimpr lesson: a flaky new lane in the release-day
+  # matrix is discovered on release day.
+  kafka-facade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy, rustfmt
+          # See rust-unit: name the manifest, or rust-cache probes the root.
+          cache-workspaces: protocols/queen-kafka
+      - name: cargo test
+        # Built first, then run with the address space capped. A decoder that
+        # preallocates on a length a client chose is invisible wherever the
+        # kernel overcommits -- a developer's macOS, Docker's VM -- and shows up
+        # only as a SIGABRT on a host that refuses the reservation. The cap
+        # makes that failure deterministic here rather than a function of how
+        # much memory this runner happens to have.
+        run: |
+          cargo test --manifest-path protocols/queen-kafka/Cargo.toml --locked --no-run
+          ( ulimit -v 8388608
+            cargo test --manifest-path protocols/queen-kafka/Cargo.toml --locked )
+      - name: rustfmt
+        run: cargo fmt --manifest-path protocols/queen-kafka/Cargo.toml --check
+      - name: clippy
+        run: |
+          cargo clippy --manifest-path protocols/queen-kafka/Cargo.toml --locked \
+            --all-targets -- -D warnings
+
   # `rust-version` in the client's Cargo.toml is a promise to anyone on an older
   # toolchain. Every other job runs current stable, so without this the promise
   # is never checked — which is how it came to say 1.75 while the crate had not

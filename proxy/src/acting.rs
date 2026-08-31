@@ -206,7 +206,8 @@ async fn route(st: &St, headers: &HeaderMap, act_policy: ActPolicy) -> Result<Ro
 /// could be. What it must NOT be is a way for an anonymous caller to tell
 /// `acme.queenmq.cloud` (401 — exists) from `nosuch.queenmq.cloud` (421).
 pub async fn unknown_host_refusal(st: &St, headers: &HeaderMap) -> Response {
-    let live = match auth::read_credential(&st.cfg.cookie_name, headers) {
+    let secure = crate::oauth::cookie_is_secure(st, headers);
+    let live = match auth::read_credential(&st.cfg.cookie_name, secure, headers) {
         Credential::None => {
             return shared_refusal(SharedRoute::Unauthenticated);
         }
@@ -273,7 +274,8 @@ pub async fn resolve_from_credential(
     }
 
     let act = requested(headers);
-    match auth::read_credential(&st.cfg.cookie_name, headers) {
+    let secure = crate::oauth::cookie_is_secure(st, headers);
+    match auth::read_credential(&st.cfg.cookie_name, secure, headers) {
         // Answered through the same `decide_shared` the arms below go through,
         // so the matrix its tests pin is the one that runs.
         Credential::None => Err(shared_refusal(decide_shared(CredKind::None, act.as_deref(), None))),
@@ -350,7 +352,8 @@ pub async fn authenticate_for(
         ));
     }
 
-    let cred = auth::read_credential(&st.cfg.cookie_name, headers);
+    let secure = crate::oauth::cookie_is_secure(st, headers);
+    let cred = auth::read_credential(&st.cfg.cookie_name, secure, headers);
     let kind = match &cred {
         Credential::ApiKey(_) => CredKind::ApiKey,
         Credential::Session(_) => CredKind::Session,

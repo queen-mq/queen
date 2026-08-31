@@ -22,6 +22,19 @@ mod handlers;
 mod hotlist;
 mod httpget;
 mod internal;
+// EMBEDDED MODE for the Kafka wire facade: `QUEEN_KAFKA_EMBEDDED=true` makes this
+// process spawn and supervise the queen-kafka binary as a child. In BOTH crate
+// roots (the twin-list rule of lib.rs) because `handlers::status` reads the child's
+// state from it — in the library target it is never STARTED (the embedded
+// `queen::Broker` has no HTTP listener to point a facade at), so the read is `None`
+// and /status renders exactly as it always did.
+mod kafka_facade;
+// EMBEDDED MODE for the SQS/SNS wire facade (PLAN_QUEEN_SQS.md, Architecture):
+// the twin of `kafka_facade` above, spawning and supervising the queen-sqs
+// binary under `QUEEN_SQS_EMBEDDED=true`. Listed here rather than in alphabetical
+// order because the two are read together. In BOTH crate roots for the same
+// reason as its twin, and never STARTED in the library target.
+mod sqs_facade;
 mod lease;
 mod mesh;
 mod metrics;
@@ -95,6 +108,62 @@ async fn main() {
         migrate::run(cfg, args).await;
         return;
     }
+
+    // EMBEDDED MODE (kafka_facade.rs) is resolved HERE, before the pool and before
+    // the schema apply, because both of its failure modes are unfixable by
+    // retrying: a binary that is not there, and the one facade knob that has no
+    // default. Boot dies on them the way it dies on unusable JWT key material or a
+    // bind address carrying a port — loudly, naming the fix, before doing work.
+    let kafka_bin = if cfg.kafka_facade.enabled {
+        let bin = kafka_facade::resolve_bin(
+            &cfg.kafka_facade.bin,
+            std::env::current_exe().ok().as_deref(),
+        );
+        if let Err(e) = kafka_facade::preflight(&bin, std::env::var("QUEEN_KAFKA_ADVERTISED_ADDR").ok().as_deref()) {
+            obs::fatal(e);
+        }
+        // ...and the posture that is legal but almost certainly a mistake: auth on
+        // and no credential for the child. A WARN, not a fatal — the facade is not
+        // load-bearing for the broker, and an operator mid-rollout is a real case.
+        if let Some(msg) = kafka_facade::auth_advisory(
+            cfg.auth.enabled,
+            std::env::var("QUEEN_TOKEN").ok().as_deref(),
+            std::env::var("QUEEN_KAFKA_SASL").ok().as_deref(),
+        ) {
+            tracing::warn!(target: "kafka", "{msg}");
+        }
+        Some(bin)
+    } else {
+        None
+    };
+
+    // EMBEDDED MODE for the SQS facade (sqs_facade.rs), resolved on exactly the
+    // same terms and in the same place as its Kafka twin above. Its second
+    // unfixable-by-retry case is not an advertised address but the credential
+    // pair SigV4 — the default mode — has no default for.
+    let sqs_bin = if cfg.sqs_facade.enabled {
+        let bin = sqs_facade::resolve_bin(
+            &cfg.sqs_facade.bin,
+            std::env::current_exe().ok().as_deref(),
+        );
+        if let Err(e) = sqs_facade::preflight(
+            &bin,
+            std::env::var("QUEEN_SQS_AUTH").ok().as_deref(),
+            std::env::var("QUEEN_SQS_CREDENTIALS").ok().as_deref(),
+        ) {
+            obs::fatal(e);
+        }
+        if let Some(msg) = sqs_facade::auth_advisory(
+            cfg.auth.enabled,
+            std::env::var("QUEEN_TOKEN").ok().as_deref(),
+            std::env::var("QUEEN_SQS_CREDENTIALS").ok().as_deref(),
+        ) {
+            tracing::warn!(target: "sqs", "{msg}");
+        }
+        Some(bin)
+    } else {
+        None
+    };
 
     let pool = db::create_pool(&cfg);
 
@@ -975,6 +1044,12 @@ async fn main() {
             "/api/v1/pop/queue/:queue/partition/:partition",
             get(handlers::handle_pop_partition),
         )
+        // PLAN_QUEEN_KAFKA.md C2 — batched read-from-offset with long poll. It
+        // sits beside the pop routes because it is the other way to consume,
+        // and it is POST because the request is a batch of up to 1024
+        // (queue, partition, offset) triples that does not fit a query string.
+        // Nothing about it is destructive: no lease, no cursor, no claim.
+        .route("/api/v1/fetch", post(handlers::handle_fetch))
         .route("/api/v1/ack", post(handlers::handle_ack))
         .route("/api/v1/ack/batch", post(handlers::handle_ack_batch))
         .route("/api/v1/transaction", post(handlers::handle_transaction))
@@ -1292,6 +1367,35 @@ async fn main() {
         pool = cfg.pool_size,
         "listening"
     );
+
+    // EMBEDDED MODE (kafka_facade.rs). Spawned HERE and not earlier: the URL the
+    // child is handed is derived from the address the listener ACTUALLY bound
+    // (`local_addr`, so PORT=0 and a wildcard bind both come out dialable), and the
+    // socket is already in the accept backlog by the time the child can reach it.
+    // `local_addr` cannot realistically fail on a bound listener; the configured
+    // pair is the fallback so a spawn is never skipped over a diagnostic call.
+    let kafka = kafka_bin.map(|bin| {
+        let url = match listener.local_addr() {
+            Ok(a) => kafka_facade::loopback_url(&a),
+            Err(e) => {
+                tracing::warn!(target: "kafka", error = %e, "listener local_addr failed; using the configured address for QUEEN_URL");
+                format!("http://{}", config::host_port(&cfg.bind_addr, &cfg.port))
+            }
+        };
+        kafka_facade::spawn(&cfg.kafka_facade, bin, url)
+    });
+    // The SQS facade (sqs_facade.rs), spawned HERE for the same reason and from
+    // the same bound address. The two are independent: either, both or neither.
+    let sqs = sqs_bin.map(|bin| {
+        let url = match listener.local_addr() {
+            Ok(a) => sqs_facade::loopback_url(&a),
+            Err(e) => {
+                tracing::warn!(target: "sqs", error = %e, "listener local_addr failed; using the configured address for QUEEN_URL");
+                format!("http://{}", config::host_port(&cfg.bind_addr, &cfg.port))
+            }
+        };
+        sqs_facade::spawn(&cfg.sqs_facade, bin, url)
+    });
     // TCP_NODELAY on every accepted connection (doc 18 §10): the broker's
     // responses are small latency-sensitive JSON frames; Nagle would add up to
     // one delayed-ACK RTT per response. axum 0.7.9's Serve builder exposes this
@@ -1304,6 +1408,18 @@ async fn main() {
         .await
     {
         tracing::error!(target: "boot", error = %e, "serve loop ended with error");
+    }
+    // The child goes down with the broker, and this AWAITS it: an exit that only
+    // sent the signal would race the process teardown and leave the Kafka port held
+    // by a facade nobody is supervising. Bounded inside `shutdown`.
+    if let Some(k) = kafka {
+        k.shutdown().await;
+    }
+    // ...and the SQS facade, on the same terms. Sequential and not joined: each
+    // wait is bounded by its own grace window, and a broker that is exiting has
+    // nothing better to do with the second one.
+    if let Some(s) = sqs {
+        s.shutdown().await;
     }
     let pending = file_buffer.pending_count();
     if pending > 0 {

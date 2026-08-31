@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The Confluent.Kafka row of the M6 client matrix.
+
+    Deliberately minimal: one console exe, one package, no test framework. The
+    suite IS the program and it reports in the same shape as every other
+    compat/ suite ("  ok  " / "  FAIL " lines, a final RESULT: line, a non-zero
+    exit on failure) so a rig run can grep it uniformly.
+
+    CONFLUENT_KAFKA_VERSION lets run.sh pin a different release without editing
+    this file; it defaults to the latest stable at the time of writing.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>QueenKafkaCompat</AssemblyName>
+    <RootNamespace>QueenKafkaCompat</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <ConfluentKafkaVersion Condition="'$(CONFLUENT_KAFKA_VERSION)' != ''">$(CONFLUENT_KAFKA_VERSION)</ConfluentKafkaVersion>
+    <ConfluentKafkaVersion Condition="'$(ConfluentKafkaVersion)' == ''">2.15.0</ConfluentKafkaVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Confluent.Kafka" Version="$(ConfluentKafkaVersion)" />
+  </ItemGroup>
+
+</Project>

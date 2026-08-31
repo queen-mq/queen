@@ -1,0 +1,1239 @@
+//! THE advertised-versions table — the compatibility contract in one place.
+//!
+//! Every Kafka client starts a connection with ApiVersions and then speaks only
+//! what the broker answered with, so this table is simultaneously:
+//!
+//!   * the body of the ApiVersions response (`handlers::api_versions`), and
+//!   * the gate every incoming request passes through (`conn::dispatch`).
+//!
+//! Those two must never drift: a version advertised but not handled answers
+//! garbage, and a version handled but not advertised is dead code no client will
+//! ever reach. They cannot drift here because there is one table and both read
+//! it. Each later milestone of PLAN_QUEEN_KAFKA.md adds its rows to `ADVERTISED`
+//! and its arm to the dispatch match — nothing else changes.
+
+use kafka_protocol::messages::ApiKey;
+
+/// One advertised API: the key and the inclusive version window we implement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Api {
+    pub key: ApiKey,
+    pub min: i16,
+    pub max: i16,
+}
+
+/// The table. M0 and M1: negotiate, then describe the cluster. M2 adds the
+/// write path, M3 the read path. A client can bootstrap, list topics, produce,
+/// find where a topic begins and ends, and consume it — everything short of
+/// doing it as a GROUP, which is M4.
+///
+/// `max = 3` for ApiVersions, not the 4 the `kafka-protocol` schema knows: 3 is
+/// what every client in the M6 matrix (franz-go, librdkafka, kafkajs, Java)
+/// negotiates against a 3.x broker, and it is also what keeps the v0-fallback
+/// quirk in `handlers::api_versions` on a path a real client can reach — a
+/// client that asks for 4 exercises it.
+///
+/// `max = 9` for Metadata, where the schema goes to 13. v9 is the last version a
+/// topic can only be named by NAME; v10 adds topic ids, and from there a client
+/// may address a topic by a UUID this facade has no registry to resolve — it
+/// would have to answer every such request "unknown" while the topic sits right
+/// there. Stopping at 9 is not a downgrade for anyone: v9 is already the
+/// flexible encoding, it carries every field a client needs (cluster id,
+/// controller, leader epoch, offline replicas), and ApiVersions makes every
+/// client negotiate down to it without noticing.
+///
+/// `3..=9` for Produce, where the schema goes to 13. The floor is not a choice:
+/// v3 is the first version whose records are RecordBatch v2, and v0-v2 carry the
+/// legacy message sets `kafka-protocol` does not decode and no client from the
+/// last decade sends. The ceiling is v9, the flexible encoding, and it stops
+/// exactly where the semantics stop being ones this facade can honour — v10
+/// adds the `current_leader` / `node_endpoints` pair that hands a client a
+/// different broker to retry against after a leader change, which is a
+/// conversation with no meaning here (one broker, no elections), and v13
+/// addresses topics by UUID, which the facade has no registry to resolve. Every
+/// field of v3..=v9 is either answered or deliberately -1; nothing in the window
+/// is ignored silently.
+///
+/// `4..=6` for Fetch, where the schema goes to 18 and its own floor is 4. The
+/// ceiling is the load-bearing one and it is PLAN_QUEEN_KAFKA.md's: v7
+/// introduces fetch SESSIONS (KIP-227), where a client registers an incremental
+/// session and thereafter sends only the partitions that CHANGED, with the
+/// broker holding the rest of the assignment as per-connection state. This
+/// facade keeps no durable state by design and is explicitly allowed to restart
+/// like a broker, so capping at v6 is what makes that whole class of state — and
+/// the session-epoch bookkeeping around it — not exist: `session_id`,
+/// `session_epoch` and `forgotten_topics_data` are v7 fields, and a client that
+/// cannot ask for a session cannot be handed a broken one.
+///
+/// THE GROUP APIS (M4) share one ceiling and it is a deliberate one: every row
+/// below stops ONE VERSION BELOW where `group_instance_id` appears, because that
+/// field is STATIC MEMBERSHIP (KIP-345) and static membership is out of scope
+/// (`crate::coordinator`). A static member is one that survives a restart
+/// WITHOUT triggering a rebalance, which means the coordinator must hold its
+/// identity across the session timeout and fence a second instance claiming it —
+/// a second liveness model layered on the one this facade implements. Ignoring
+/// the field instead of capping the version would be the worst of both: a client
+/// configured for static membership would negotiate a version that carries it,
+/// send it, and get ordinary dynamic behaviour back, which shows up as
+/// unexplained rebalances on exactly the deployments that configured static
+/// membership to avoid them. So:
+///
+///   * `0..=4` for JoinGroup, where `group_instance_id` is v5. v4 is also where
+///     MEMBER_ID_REQUIRED lands (KIP-394), and that IS implemented — it is the
+///     round trip that stops a client which gives up between join and sync from
+///     leaving a member behind on every retry.
+///   * `0..=2` for SyncGroup, Heartbeat and LeaveGroup, where it is v3. For
+///     LeaveGroup v3 is also where one request may remove SEVERAL members at
+///     once; below it the request is one member, which is the shape the
+///     coordinator has.
+///   * `2..=6` for OffsetCommit, where it is v7. The floor is the schema's own:
+///     v0 and v1 are the ZooKeeper-era offset store and no client from the last
+///     decade sends them.
+///   * `1..=7` for OffsetFetch, which has no `group_instance_id` at all — its
+///     ceiling is the OTHER boundary, v8, where one request fetches offsets for
+///     SEVERAL GROUPS and the response changes shape to match. v7's
+///     `require_stable` is answered honestly rather than ignored: it asks the
+///     broker to withhold offsets belonging to an open transaction, and an
+///     offset belonging to an open transaction is not in the store at all —
+///     since M9 the store write happens at COMMIT, inside the same Postgres
+///     transaction as the records ([`crate::txn`]). So every offset this facade
+///     returns is stable by construction, this row keeps its v7 ceiling, and
+///     UNSTABLE_OFFSET_COMMIT (88) is a code it never needs. The sentence was
+///     true before M9 because transactions were refused; it is true after M9
+///     for a stronger reason.
+///
+/// THE SASL APIS (M5) are advertised whether or not `QUEEN_KAFKA_SASL` is on,
+/// and that is deliberate rather than an oversight. Apache Kafka advertises
+/// them on every listener too, and the reason is diagnostic: a client
+/// configured for `SASL_PLAINTEXT` against a listener with no SASL sends a
+/// SaslHandshake, and a broker that did not advertise the API would close the
+/// connection with no explanation, while one that does answers
+/// ILLEGAL_SASL_STATE and says which side is misconfigured
+/// (`handlers::sasl_handshake`). The gate that matters is not the table, it is
+/// `conn::dispatch`, which refuses everything ELSE until a connection has
+/// authenticated.
+///
+///   * `0..=1` for SaslHandshake. The two versions are the two SASL FLOWS, and
+///     both are implemented: after v0 the tokens are raw bytes in the ordinary
+///     frames, after v1 they are SaslAuthenticate requests.
+///   * `0..=1` for SaslAuthenticate, where the schema goes to 2. v1 is where
+///     `session_lifetime_ms` appears (KIP-368, re-authentication) and it is
+///     answered honestly — 0, "this credential does not expire on me" — which
+///     is what keeps every client from re-authenticating on a timer this facade
+///     does not run. v2 is the flexible encoding and adds no field; a client
+///     negotiates down to v1 without noticing.
+///
+/// `0..=3` for FindCoordinator, where the schema goes to 6. v4 is the batched
+/// form — a list of coordinator keys, answered with a list — which exists so a
+/// client can resolve many groups in one call against a cluster where they live
+/// on different brokers. Here they never do: the answer is this process, for
+/// every key, always (`handlers::find_coordinator`). v3 is the flexible encoding
+/// and the last of the single-key form, so it is exactly the surface that is
+/// true.
+///
+/// `1..=5` for ListOffsets, where the schema goes to 10 and its own floor is 1.
+/// v6 is the flexible encoding and v7 adds the MAX_TIMESTAMP sentinel (-3),
+/// which asks for the offset of the record with the highest timestamp — a
+/// time-index question this facade answers for no version (see
+/// `handlers::list_offsets`), so advertising the version that makes it askable
+/// would be advertising a refusal. v5 is the last version whose whole surface is
+/// the two watermark sentinels, which is exactly the surface Queen answers
+/// exactly.
+///
+/// THE TOPICS-ADMIN APIS (M7 F1) are the three an AdminClient object needs
+/// before any of it works, and their ceilings are all the same boundary the
+/// Metadata row already stops at: a TOPIC ID. This facade mints none and has no
+/// registry to resolve one, so every window below ends one version below where
+/// a UUID becomes the way to name a topic.
+///
+///   * `2..=6` for CreateTopics, where the schema goes to 7 and its own floor
+///     is 2 (KIP-896 dropped v0 and v1). v4 is KIP-464, where `num_partitions`
+///     and `replication_factor` may be -1 — the shape Spring's `TopicBuilder`
+///     and every modern AdminClient send, and the one that lets a client say "I
+///     do not care" to two numbers this facade does not declare
+///     (`handlers::create_topics`). v5 carries the created topic's real configs
+///     back, which is the ONE place `retention.ms` can be answered at all
+///     ([`crate::topic_config`]). v6 is KIP-599: the version at which a client
+///     understands THROTTLING_QUOTA_EXCEEDED, which is how a Cloud rate cap has
+///     to reach an AdminClient. Ceiling: v7 answers a `topic_id` UUID.
+///   * `1..=5` for DeleteTopics, where the schema goes to 6 and its own floor
+///     is 1. v5 adds `error_message`, which is where "there is no such queue"
+///     gets to say so in words as well as in a code. Ceiling: v6 replaces the
+///     name list with `topics[]` carrying a name OR a topic id, and an id is a
+///     name this facade cannot resolve.
+///   * `1..=4` for DescribeConfigs — the whole schema, and the only row here
+///     with no ceiling argument to make, because nothing in the window asks for
+///     something the facade cannot answer. v1 is the schema's own floor, v3's
+///     `config_type` and `documentation` are answered truthfully for the
+///     handful of keys reported, and v4 is the flexible encoding. The short
+///     answer is a property of the HANDLER, not of the version: a key is
+///     reported only where the facade can name what enforces it
+///     ([`crate::topic_config`]).
+///
+/// THE GROUPS-ADMIN APIS (M7 F2) are what an operator's tools ask about a
+/// consumer group, and they answer from the two halves the facade has always
+/// been split into: EXISTENCE and offsets are Queen's (the durable index in
+/// [`crate::offsets`]), LIVENESS is this process's ([`crate::coordinator`]).
+/// Their ceilings are three different boundaries and none of them is the topic
+/// id this time:
+///
+///   * `0..=4` for ListGroups. v4 is KIP-518 — `states_filter` and
+///     `group_state` — which is what `kafka-consumer-groups.sh --list --state`
+///     and every UI's group filter send, and it is HONOURED rather than
+///     ignored. Ceiling: v5 adds `group_type`, the KIP-848 discriminator
+///     between a classic group and a consumer-protocol one, and KIP-848 is
+///     excluded by plan — a facade that answered a group TYPE question would be
+///     claiming a taxonomy it does not implement.
+///   * `0..=3` for DescribeGroups, where the schema goes to 6. Ceiling: v4
+///     carries `group_instance_id`, which is the SAME static-membership rule
+///     that caps JoinGroup at 4 and Sync/Heartbeat/Leave at 2 — a member this
+///     facade cannot hold an identity for must not be describable as if it
+///     had one. v3 adds `include_authorized_operations`, answered with Kafka's
+///     own "omitted" sentinel because the facade has no ACL model
+///     (`handlers::describe_groups`).
+///   * `0..=2` for DeleteGroups — the whole schema, and the only row here with
+///     no ceiling to argue. v2 is the flexible encoding and adds no field;
+///     there is no version of this API that asks for something the facade
+///     cannot answer.
+///
+/// THE IDEMPOTENT PRODUCER (M7 F3) is one row, and it is the row that removes
+/// the largest onboarding papercut this facade had: `enable.idempotence` has
+/// defaulted to true in the Java client since 3.0 and Spring Boot inherits it,
+/// so before this row a producer with NO configuration at all could not send a
+/// single record ([`crate::handlers::init_producer_id`], and the enforcement in
+/// [`crate::idempotent`]).
+///
+/// `0..=4` for InitProducerId, where the REQUEST schema goes to 5 and the enum's
+/// `valid_versions()` answers `0..=6` because it takes the wider of request and
+/// response. Read the request's own `VERSIONS` and not the enum's: a `max` of 6
+/// would pass the guard below and then fail to decode.
+///
+///   * **v3 is load-bearing and not optional.** It is KIP-360's epoch bump,
+///     where the request carries the producer's current `(producer_id, epoch)`
+///     so a producer can ask for a new epoch and reset its own sequences. Every
+///     way this facade can lose a sequence window — a restart, an eviction, a
+///     connection landing on another facade — reaches the client as
+///     OUT_OF_ORDER_SEQUENCE_NUMBER, and OUT_OF_ORDER is FATAL in the Java
+///     producer unless it can bump. Without v3 in this window, a lost window is
+///     a dead producer; with it, it is a bump and a reset.
+///   * v4 adds PRODUCER_FENCED to the error taxonomy the client will accept on
+///     this API, which costs nothing and is true.
+///   * Ceiling: v5 exists for KIP-890's transaction protocol 2, and transactions
+///     are refused here — advertising the version that exists only for them
+///     would be advertising a refusal.
+///
+/// THE ACL FAMILY (M7 F4) — DescribeAcls, CreateAcls, DeleteAcls, all `1..=3` —
+/// is the one block in this table whose rows are the SCHEMA'S WHOLE WINDOW, and
+/// that is an argument rather than an omission. Read the generated per-field doc
+/// comments: every field of all three request and response schemas is marked
+/// `1-3`, so nothing varies anywhere inside the window except the encoding
+/// (flexible from v2). There is no version at which one of these APIs starts
+/// asking for something the facade would have to invent, which is the ceiling
+/// rule this table applies everywhere else — so capping lower would only make a
+/// modern client fall back for no reason at all. The floor is the schema's own,
+/// which is KIP-896's: v0 was dropped from each, exactly as it was from Produce,
+/// CreateTopics and DescribeConfigs.
+///
+/// What is advertised is a REFUSAL, and the reason that is right here is that
+/// the refusal is Apache Kafka's own: a broker with no `authorizer.class.name`
+/// answers all three `SECURITY_DISABLED (54)`, describe with "No Authorizer is
+/// configured on the broker" and the two writes with "No Authorizer is
+/// configured." ([`crate::handlers::acls`]), and Queen has no ACL model to
+/// answer anything else from. The alternative — no row at all — is also a
+/// refusal, since `conn::dispatch` closes on an un-advertised key, but it
+/// reaches an operator as "this broker is too old" instead of as the truth.
+///
+/// THE WRITE HALF OF THE CONFIG SURFACE (M7 F4) — AlterConfigs `0..=2` and
+/// IncrementalAlterConfigs `0..=1` — takes each schema's whole window for the
+/// same reason the ACL family does, and it is worth checking rather than
+/// assuming: every field of both request and response schemas is marked `0-2`
+/// and `0-1` respectively, so nothing varies anywhere inside either window
+/// except the flexible encoding (v2 and v1). There is no version at which
+/// either API starts asking for something the facade would have to invent, so
+/// there is nothing to cap. The floors are the schema's own and they are 0:
+/// KIP-896 dropped nothing from either of these, unlike the ACL trio, so
+/// inventing a floor above 0 would refuse a version a real broker serves.
+///
+/// Key 44 is the one that matters. `kafka-configs.sh --alter` has sent
+/// IncrementalAlterConfigs since Kafka 2.3 and 3.9's `ConfigCommand` has no
+/// fallback to the deprecated key 33, so 44 is what an operator's command
+/// actually lands on; 33 is advertised so that the old shape still decodes, and
+/// it is honoured as the FULL REPLACEMENT it is
+/// ([`crate::handlers::alter_configs`]).
+///
+/// What they write is bounded by what the facade can write LOSSLESSLY.
+/// `POST /api/v1/configure` is a whole-row upsert over nineteen columns and
+/// thirteen of them cannot be read back, so an alter is only possible on a topic
+/// the facade has its own record of ([`crate::topic_record`]) — every other
+/// topic is refused INVALID_CONFIG with the reason. That refusal is a property
+/// of Queen's admin API, not of these two rows, and capping the window would not
+/// change it by a byte.
+///
+/// THE TWO REMAINING ADMIN WRITES (M7 F4) — CreatePartitions `0..=3` and
+/// OffsetDelete `0..=0` — are the last two keys a Kafka operator's tools reach
+/// for and do not find here, and they are advertised for two different reasons.
+///
+/// CreatePartitions is the whole schema window, checked the same way: every
+/// field of both request and response is marked `0-3`, so nothing varies inside
+/// it but the flexible encoding (v2), and there is nothing to cap. What it
+/// advertises is a REFUSAL, which bends this table's own rule, and the
+/// justification is that two of its three answers are Apache Kafka's own
+/// sentences byte for byte — a DECREASE and an EQUAL count are refused by a real
+/// broker too ([`crate::handlers::create_partitions`], where both strings are
+/// recorded off `apache/kafka:3.9.1` rather than recalled). Only an INCREASE is
+/// a capability gap, because Queen declares no width per queue at all. The
+/// alternative, no row, would answer `kafka-topics.sh --alter --partitions` with
+/// an UnsupportedVersionException — "upgrade your broker" — which is the wrong
+/// diagnosis in all three cases and wrong for the commonest one of them: a
+/// provisioner declaring 12 partitions against a facade whose default is 1024 is
+/// a decrease.
+///
+/// THE TRANSACTION APIS (M9) are four rows and one shared ceiling argument, and
+/// the argument is NOT the usual one: KIP-896 dropped no version of any of
+/// them, so every floor is the schema's own 0 and the whole question is where
+/// each one stops.
+///
+///   * `0..=3` for AddPartitionsToTxn, where the schema goes to 5. **v4 is a
+///     DIFFERENT REQUEST.** The flat `(transactional_id, producer_id,
+///     producer_epoch, topics)` of v0-v3 is replaced at v4 by a
+///     `transactions[]` array carrying a per-transaction `verify_only` flag —
+///     KIP-890's coordinator-to-partition-leader VERIFICATION request, which a
+///     client never sends. Advertising v4 would advertise a request shape this
+///     facade could only ever receive from another broker, and it is the same
+///     class of boundary that stops OffsetFetch at v7 and FindCoordinator at
+///     v3: the version where the API stops being one question and becomes a
+///     batch.
+///   * `0..=3` for AddOffsetsToTxn, where the schema goes to 4. Every field of
+///     the whole schema is marked `0-4` and v3 is the flexible encoding, so v3
+///     answers everything v4 does. v4 exists for KIP-890's transaction protocol
+///     2, in which the client **stops sending this API at all** and the
+///     coordinator infers the offsets partition — so this is the ListOffsets-v7
+///     rule ("advertising the version that makes it askable would be
+///     advertising a refusal") applied to a SEMANTIC instead of to a field.
+///   * `0..=3` for EndTxn, where the schema goes to 5. v5's RESPONSE carries
+///     `producer_id` and `producer_epoch` — the TV2 epoch bump performed inside
+///     EndTxn, which this facade does not perform — and v4 is the version pair
+///     that exists only on the way to it. v3 is the flexible encoding and asks
+///     for nothing that cannot be answered.
+///   * `0..=3` for TxnOffsetCommit, where the schema goes to 5. **v3 is
+///     MANDATORY and that is measured, not preferred**:
+///     `TxnOffsetCommitRequest$Builder.build(short)` in kafka-clients 3.9.2
+///     throws `UnsupportedVersionException` for any version below 3 whenever
+///     group metadata is set, and every KIP-447 consume-transform-produce loop
+///     sets it — so advertising this API below v3 would make the flagship use
+///     case throw before any wire traffic. The ceiling is the same TV2 bump as
+///     the others, which adds no field.
+///
+/// v3 carries `group_instance_id`, and it is deliberately NOT the
+/// DescribeGroups case. The rule that caps five group APIs is that a field this
+/// facade does not model must not be negotiable; here the field can only ever
+/// be null, because `group.instance.id` is expressible only at JoinGroup v5,
+/// which is outside the advertised window — a consumer configured with one
+/// fails at join and never reaches a transactional offset commit. A non-null
+/// one is still answered rather than ignored
+/// ([`crate::handlers::txn_offset_commit`]).
+///
+/// InitProducerId keeps its `0..=4` unchanged: M9 changes what the
+/// transactional branch of that handler DOES, not what is advertised.
+/// FindCoordinator keeps its `0..=3`, and what changes there is the answer to
+/// `key_type == 1` ([`crate::handlers::find_coordinator`]).
+///
+/// OffsetDelete has exactly one version, so there is no window to argue: `0..=0`
+/// is the schema. It is advertised now, and the reason recorded here for leaving
+/// it out — *a partial reset with no membership guard in front of it* — is
+/// answered rather than fatal. Kafka's own guard for this API is not membership,
+/// it is SUBSCRIPTION: a live consumer group's subscribed topics are refused
+/// GROUP_SUBSCRIBED_TO_TOPIC and everything else is deletable. The facade has
+/// the material for that rule exactly — the coordinator keeps each member's
+/// JoinGroup metadata verbatim, and those bytes are a
+/// `ConsumerProtocolSubscription` — so the rule is kept rather than approximated
+/// ([`crate::handlers::offset_delete`]).
+pub const ADVERTISED: &[Api] = &[
+    Api {
+        key: ApiKey::Produce,
+        min: 3,
+        max: 9,
+    },
+    Api {
+        key: ApiKey::Fetch,
+        min: 4,
+        max: 6,
+    },
+    Api {
+        key: ApiKey::ListOffsets,
+        min: 1,
+        max: 5,
+    },
+    Api {
+        key: ApiKey::ApiVersions,
+        min: 0,
+        max: 3,
+    },
+    Api {
+        key: ApiKey::Metadata,
+        min: 0,
+        max: 9,
+    },
+    Api {
+        key: ApiKey::OffsetCommit,
+        min: 2,
+        max: 6,
+    },
+    Api {
+        key: ApiKey::OffsetFetch,
+        min: 1,
+        max: 7,
+    },
+    Api {
+        key: ApiKey::FindCoordinator,
+        min: 0,
+        max: 3,
+    },
+    Api {
+        key: ApiKey::JoinGroup,
+        min: 0,
+        max: 4,
+    },
+    Api {
+        key: ApiKey::Heartbeat,
+        min: 0,
+        max: 2,
+    },
+    Api {
+        key: ApiKey::LeaveGroup,
+        min: 0,
+        max: 2,
+    },
+    Api {
+        key: ApiKey::SyncGroup,
+        min: 0,
+        max: 2,
+    },
+    Api {
+        key: ApiKey::SaslHandshake,
+        min: 0,
+        max: 1,
+    },
+    Api {
+        key: ApiKey::SaslAuthenticate,
+        min: 0,
+        max: 1,
+    },
+    Api {
+        key: ApiKey::CreateTopics,
+        min: 2,
+        max: 6,
+    },
+    Api {
+        key: ApiKey::DeleteTopics,
+        min: 1,
+        max: 5,
+    },
+    Api {
+        key: ApiKey::DescribeConfigs,
+        min: 1,
+        max: 4,
+    },
+    Api {
+        key: ApiKey::ListGroups,
+        min: 0,
+        max: 4,
+    },
+    Api {
+        key: ApiKey::DescribeGroups,
+        min: 0,
+        max: 3,
+    },
+    Api {
+        key: ApiKey::DeleteGroups,
+        min: 0,
+        max: 2,
+    },
+    Api {
+        key: ApiKey::InitProducerId,
+        min: 0,
+        max: 4,
+    },
+    // ---- M7 F4: the ACL family, answered the way an authorizer-less broker
+    // answers it. The whole schema window each time; see the paragraph above.
+    Api {
+        key: ApiKey::DescribeAcls,
+        min: 1,
+        max: 3,
+    },
+    Api {
+        key: ApiKey::CreateAcls,
+        min: 1,
+        max: 3,
+    },
+    Api {
+        key: ApiKey::DeleteAcls,
+        min: 1,
+        max: 3,
+    },
+    // ---- M7 F4: the write half of the config surface. The whole schema window
+    // each time, and the floors are 0 because KIP-896 dropped nothing from
+    // either; see the paragraph above.
+    Api {
+        key: ApiKey::AlterConfigs,
+        min: 0,
+        max: 2,
+    },
+    Api {
+        key: ApiKey::IncrementalAlterConfigs,
+        min: 0,
+        max: 1,
+    },
+    // ---- M7 F4: the two remaining admin writes. CreatePartitions is the whole
+    // schema window and answers a refusal two thirds of which is Apache Kafka's
+    // own; OffsetDelete has exactly one version. See the paragraph above.
+    Api {
+        key: ApiKey::CreatePartitions,
+        min: 0,
+        max: 3,
+    },
+    Api {
+        key: ApiKey::OffsetDelete,
+        min: 0,
+        max: 0,
+    },
+    // ---- M9: transactions. Four rows, appended in key order, each stopping
+    // one version below KIP-890's transaction protocol 2 — except
+    // AddPartitionsToTxn, which stops one version below a request only another
+    // broker sends. See the paragraph above.
+    Api {
+        key: ApiKey::AddPartitionsToTxn,
+        min: 0,
+        max: 3,
+    },
+    Api {
+        key: ApiKey::AddOffsetsToTxn,
+        min: 0,
+        max: 3,
+    },
+    Api {
+        key: ApiKey::EndTxn,
+        min: 0,
+        max: 3,
+    },
+    Api {
+        key: ApiKey::TxnOffsetCommit,
+        min: 0,
+        max: 3,
+    },
+];
+
+/// Where an incoming `(api_key, api_version)` pair lands against the table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Support {
+    /// Advertised, and the version is inside the window: dispatch it.
+    Advertised(ApiKey),
+    /// Advertised key, version outside the window. The client either ignored
+    /// the ApiVersions answer or is bootstrapping and has not asked yet.
+    UnsupportedVersion(ApiKey),
+    /// Not in the table — an API this build does not offer, or not a Kafka API
+    /// key at all.
+    UnknownApi,
+}
+
+/// The advertised row for `api_key`, if there is one.
+pub fn lookup(api_key: i16) -> Option<&'static Api> {
+    ADVERTISED.iter().find(|a| a.key as i16 == api_key)
+}
+
+/// Classify one request's key and version against the table.
+pub fn classify(api_key: i16, api_version: i16) -> Support {
+    match lookup(api_key) {
+        Some(a) if api_version >= a.min && api_version <= a.max => Support::Advertised(a.key),
+        Some(a) => Support::UnsupportedVersion(a.key),
+        None => Support::UnknownApi,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kafka_protocol::protocol::Message;
+
+    #[test]
+    fn table_has_no_duplicate_keys_and_no_empty_windows() {
+        for (i, a) in ADVERTISED.iter().enumerate() {
+            assert!(a.min <= a.max, "{:?} advertises an empty window", a.key);
+            assert!(a.min >= 0, "{:?} advertises a negative min", a.key);
+            assert!(
+                !ADVERTISED[..i].iter().any(|b| b.key == a.key),
+                "{:?} appears twice in the table",
+                a.key
+            );
+        }
+    }
+
+    /// The window we advertise has to be a window `kafka-protocol` can actually
+    /// encode and decode, or we promise a client a version that panics or bails
+    /// the moment it is used. Checked for the whole table, against the crate's
+    /// own schema range for each key, so a row added later cannot skip it.
+    #[test]
+    fn advertised_windows_are_inside_the_schema() {
+        for a in ADVERTISED {
+            let schema = a.key.valid_versions();
+            assert!(
+                a.min >= schema.min && a.max <= schema.max,
+                "{:?} advertises {}..={} but the schema is {}..={}",
+                a.key,
+                a.min,
+                a.max,
+                schema.min,
+                schema.max
+            );
+        }
+        // The pin the loop above cannot make: ApiVersions stops one below the
+        // schema on purpose (see ADVERTISED), and that is what keeps the
+        // v0-fallback quirk reachable.
+        let api_versions = lookup(ApiKey::ApiVersions as i16).unwrap();
+        assert!(api_versions.max < kafka_protocol::messages::ApiVersionsRequest::VERSIONS.max);
+    }
+
+    #[test]
+    fn classify_api_versions() {
+        let k = ApiKey::ApiVersions as i16;
+        assert_eq!(classify(k, 0), Support::Advertised(ApiKey::ApiVersions));
+        assert_eq!(classify(k, 3), Support::Advertised(ApiKey::ApiVersions));
+        assert_eq!(
+            classify(k, 4),
+            Support::UnsupportedVersion(ApiKey::ApiVersions)
+        );
+        assert_eq!(
+            classify(k, -1),
+            Support::UnsupportedVersion(ApiKey::ApiVersions)
+        );
+    }
+
+    #[test]
+    fn classify_metadata() {
+        let k = ApiKey::Metadata as i16;
+        assert_eq!(classify(k, 0), Support::Advertised(ApiKey::Metadata));
+        assert_eq!(classify(k, 9), Support::Advertised(ApiKey::Metadata));
+        // Above the window: a client that ignored ApiVersions, or one built
+        // against a broker that speaks topic ids.
+        assert_eq!(
+            classify(k, 10),
+            Support::UnsupportedVersion(ApiKey::Metadata)
+        );
+    }
+
+    #[test]
+    fn classify_produce() {
+        let k = ApiKey::Produce as i16;
+        assert_eq!(classify(k, 3), Support::Advertised(ApiKey::Produce));
+        assert_eq!(classify(k, 9), Support::Advertised(ApiKey::Produce));
+        // Below the floor: the legacy message sets, which v3 replaced.
+        assert_eq!(classify(k, 2), Support::UnsupportedVersion(ApiKey::Produce));
+        assert_eq!(classify(k, 0), Support::UnsupportedVersion(ApiKey::Produce));
+        // Above it: leader-change hints and topic ids.
+        assert_eq!(
+            classify(k, 10),
+            Support::UnsupportedVersion(ApiKey::Produce)
+        );
+    }
+
+    #[test]
+    fn classify_fetch() {
+        let k = ApiKey::Fetch as i16;
+        assert_eq!(classify(k, 4), Support::Advertised(ApiKey::Fetch));
+        assert_eq!(classify(k, 6), Support::Advertised(ApiKey::Fetch));
+        // Below the schema's own floor.
+        assert_eq!(classify(k, 3), Support::UnsupportedVersion(ApiKey::Fetch));
+        // v7 is fetch sessions, and the whole point of the ceiling is that a
+        // client can never negotiate one.
+        assert_eq!(classify(k, 7), Support::UnsupportedVersion(ApiKey::Fetch));
+        assert_eq!(classify(k, 13), Support::UnsupportedVersion(ApiKey::Fetch));
+    }
+
+    #[test]
+    fn classify_list_offsets() {
+        let k = ApiKey::ListOffsets as i16;
+        assert_eq!(classify(k, 1), Support::Advertised(ApiKey::ListOffsets));
+        assert_eq!(classify(k, 5), Support::Advertised(ApiKey::ListOffsets));
+        assert_eq!(
+            classify(k, 0),
+            Support::UnsupportedVersion(ApiKey::ListOffsets)
+        );
+        // v7 is where MAX_TIMESTAMP becomes askable.
+        assert_eq!(
+            classify(k, 7),
+            Support::UnsupportedVersion(ApiKey::ListOffsets)
+        );
+    }
+
+    /// The group APIs, and the one property their whole window exists for:
+    /// the version that introduces `group_instance_id` — static membership —
+    /// is outside it, for every one of them. A row raised past that line is a
+    /// client silently getting dynamic behaviour for a static configuration.
+    #[test]
+    fn classify_the_group_apis() {
+        for (key, min, max, static_membership) in [
+            (ApiKey::JoinGroup, 0, 4, 5),
+            (ApiKey::SyncGroup, 0, 2, 3),
+            (ApiKey::Heartbeat, 0, 2, 3),
+            (ApiKey::LeaveGroup, 0, 2, 3),
+            (ApiKey::OffsetCommit, 2, 6, 7),
+        ] {
+            let k = key as i16;
+            assert_eq!(classify(k, min), Support::Advertised(key), "{key:?} v{min}");
+            assert_eq!(classify(k, max), Support::Advertised(key), "{key:?} v{max}");
+            assert_eq!(
+                classify(k, static_membership),
+                Support::UnsupportedVersion(key),
+                "{key:?} v{static_membership} carries group_instance_id"
+            );
+            if min > 0 {
+                assert_eq!(classify(k, min - 1), Support::UnsupportedVersion(key));
+            }
+        }
+
+        // OffsetFetch has no group_instance_id; v8 is where one request asks
+        // for SEVERAL groups and the response changes shape.
+        let k = ApiKey::OffsetFetch as i16;
+        assert_eq!(classify(k, 1), Support::Advertised(ApiKey::OffsetFetch));
+        assert_eq!(classify(k, 7), Support::Advertised(ApiKey::OffsetFetch));
+        assert_eq!(
+            classify(k, 8),
+            Support::UnsupportedVersion(ApiKey::OffsetFetch)
+        );
+
+        // FindCoordinator stops below the batched form.
+        let k = ApiKey::FindCoordinator as i16;
+        assert_eq!(classify(k, 0), Support::Advertised(ApiKey::FindCoordinator));
+        assert_eq!(classify(k, 3), Support::Advertised(ApiKey::FindCoordinator));
+        assert_eq!(
+            classify(k, 4),
+            Support::UnsupportedVersion(ApiKey::FindCoordinator)
+        );
+    }
+
+    /// The SASL pair, and the one version boundary that carries meaning:
+    /// SaslHandshake v0 and v1 are two different flows, so BOTH have to be in
+    /// the window or a client that negotiates the older one is answered a
+    /// protocol it is not speaking.
+    #[test]
+    fn classify_the_sasl_apis() {
+        let k = ApiKey::SaslHandshake as i16;
+        assert_eq!(classify(k, 0), Support::Advertised(ApiKey::SaslHandshake));
+        assert_eq!(classify(k, 1), Support::Advertised(ApiKey::SaslHandshake));
+        assert_eq!(
+            classify(k, 2),
+            Support::UnsupportedVersion(ApiKey::SaslHandshake)
+        );
+
+        let k = ApiKey::SaslAuthenticate as i16;
+        assert_eq!(
+            classify(k, 0),
+            Support::Advertised(ApiKey::SaslAuthenticate)
+        );
+        assert_eq!(
+            classify(k, 1),
+            Support::Advertised(ApiKey::SaslAuthenticate)
+        );
+        // v2 is the flexible encoding; nothing in it is a field this facade
+        // would answer differently.
+        assert_eq!(
+            classify(k, 2),
+            Support::UnsupportedVersion(ApiKey::SaslAuthenticate)
+        );
+    }
+
+    /// The topics-admin trio, and the property their ceilings share: the
+    /// version at which a topic can be named by a UUID is outside every one of
+    /// them, for the same reason Metadata stops at v9 — this facade has no
+    /// registry to resolve a topic id, so a client that could ask by id would
+    /// be answered "unknown" for a topic sitting right there.
+    #[test]
+    fn classify_the_topic_admin_apis() {
+        for (key, min, max, topic_ids) in [
+            (ApiKey::CreateTopics, 2, 6, 7),
+            (ApiKey::DeleteTopics, 1, 5, 6),
+        ] {
+            let k = key as i16;
+            assert_eq!(classify(k, min), Support::Advertised(key), "{key:?} v{min}");
+            assert_eq!(classify(k, max), Support::Advertised(key), "{key:?} v{max}");
+            assert_eq!(
+                classify(k, topic_ids),
+                Support::UnsupportedVersion(key),
+                "{key:?} v{topic_ids} names a topic by UUID"
+            );
+            assert_eq!(
+                classify(k, min - 1),
+                Support::UnsupportedVersion(key),
+                "{key:?} v{} is below the schema's own floor",
+                min - 1
+            );
+        }
+
+        // DescribeConfigs is the whole schema: there is no version of it that
+        // asks for something this facade cannot answer, so the only boundary
+        // is the schema's own.
+        let k = ApiKey::DescribeConfigs as i16;
+        assert_eq!(classify(k, 1), Support::Advertised(ApiKey::DescribeConfigs));
+        assert_eq!(classify(k, 4), Support::Advertised(ApiKey::DescribeConfigs));
+        assert_eq!(
+            classify(k, 0),
+            Support::UnsupportedVersion(ApiKey::DescribeConfigs)
+        );
+        assert_eq!(
+            classify(k, 5),
+            Support::UnsupportedVersion(ApiKey::DescribeConfigs)
+        );
+
+        // The write half of the config surface (M7 F4). Each row is its
+        // schema's whole window, so the only boundaries are the schema's own —
+        // and both floors are 0, because KIP-896 dropped nothing from either.
+        //
+        // The ceiling is asserted against the REQUEST schema's own `VERSIONS`
+        // and not against `valid_versions()`, which takes the wider of request
+        // and response: that is the InitProducerId trap, generalised, so a row
+        // raised on the strength of the enum alone fails here rather than on a
+        // client's wire.
+        use kafka_protocol::messages::{AlterConfigsRequest, IncrementalAlterConfigsRequest};
+
+        for (key, min, max, request_max) in [
+            (
+                ApiKey::AlterConfigs,
+                0,
+                2,
+                <AlterConfigsRequest as Message>::VERSIONS.max,
+            ),
+            (
+                ApiKey::IncrementalAlterConfigs,
+                0,
+                1,
+                <IncrementalAlterConfigsRequest as Message>::VERSIONS.max,
+            ),
+        ] {
+            let k = key as i16;
+            assert_eq!(classify(k, min), Support::Advertised(key), "{key:?} v{min}");
+            assert_eq!(classify(k, max), Support::Advertised(key), "{key:?} v{max}");
+            assert_eq!(
+                classify(k, max + 1),
+                Support::UnsupportedVersion(key),
+                "{key:?} v{} is past the schema",
+                max + 1
+            );
+            assert!(
+                max <= request_max,
+                "{key:?} is advertised to v{max} but the REQUEST schema stops at v{request_max}"
+            );
+        }
+    }
+
+    /// The groups-admin trio. Their three ceilings are three different
+    /// boundaries, so unlike the topics trio there is no shared rule to assert
+    /// — what IS shared is that each one stops where the version starts asking
+    /// about something this facade does not model.
+    #[test]
+    fn classify_the_group_admin_apis() {
+        use kafka_protocol::messages::OffsetDeleteRequest;
+
+        // ListGroups: v4 is KIP-518's state filter, which is honoured. v5 adds
+        // `group_type`, the KIP-848 discriminator, and KIP-848 is excluded by
+        // plan.
+        let k = ApiKey::ListGroups as i16;
+        assert_eq!(classify(k, 0), Support::Advertised(ApiKey::ListGroups));
+        assert_eq!(classify(k, 4), Support::Advertised(ApiKey::ListGroups));
+        assert_eq!(
+            classify(k, 5),
+            Support::UnsupportedVersion(ApiKey::ListGroups),
+            "v5 asks a group TYPE question this facade has no taxonomy for"
+        );
+
+        // DescribeGroups stops one below `group_instance_id`, which is the same
+        // static-membership rule the five M4 group APIs share — asserted here
+        // as a NUMBER so that raising this row past it fails rather than
+        // silently describing a static member as a dynamic one.
+        let k = ApiKey::DescribeGroups as i16;
+        assert_eq!(classify(k, 0), Support::Advertised(ApiKey::DescribeGroups));
+        assert_eq!(classify(k, 3), Support::Advertised(ApiKey::DescribeGroups));
+        assert_eq!(
+            classify(k, 4),
+            Support::UnsupportedVersion(ApiKey::DescribeGroups),
+            "v4 carries group_instance_id"
+        );
+
+        // DeleteGroups is the whole schema.
+        let k = ApiKey::DeleteGroups as i16;
+        assert_eq!(classify(k, 0), Support::Advertised(ApiKey::DeleteGroups));
+        assert_eq!(classify(k, 2), Support::Advertised(ApiKey::DeleteGroups));
+        assert_eq!(
+            classify(k, 3),
+            Support::UnsupportedVersion(ApiKey::DeleteGroups)
+        );
+
+        // OffsetDelete, which M7 F4 advertises. It used to be asserted absent
+        // right here, and the reason recorded for that — a partial reset with
+        // no membership guard in front of it — turned out to be answerable:
+        // Kafka's guard for this API is the SUBSCRIPTION rule, not membership,
+        // and the facade has the material to apply it exactly
+        // (`handlers::offset_delete`).
+        //
+        // One version, so there is no window to argue and no ceiling to defend:
+        // v0 is the whole schema.
+        let k = ApiKey::OffsetDelete as i16;
+        assert_eq!(classify(k, 0), Support::Advertised(ApiKey::OffsetDelete));
+        assert_eq!(
+            classify(k, 1),
+            Support::UnsupportedVersion(ApiKey::OffsetDelete),
+            "v1 of OffsetDelete does not exist"
+        );
+        let advertised = lookup(k).expect("OffsetDelete is advertised");
+        assert!(
+            advertised.max <= <OffsetDeleteRequest as Message>::VERSIONS.max,
+            "OffsetDelete is advertised at v{} and its request decoder stops at v{}",
+            advertised.max,
+            <OffsetDeleteRequest as Message>::VERSIONS.max
+        );
+    }
+
+    /// CreatePartitions, and the one thing worth pinning about its window:
+    /// it is the schema's whole `0..=3` and the only boundaries are the
+    /// schema's own, because no field varies anywhere inside it. What the
+    /// window carries is a refusal, and the argument for advertising a refusal
+    /// is in the doc comment above `ADVERTISED` and in the handler.
+    #[test]
+    fn classify_the_partitions_api() {
+        use kafka_protocol::messages::CreatePartitionsRequest;
+
+        let k = ApiKey::CreatePartitions as i16;
+        assert_eq!(
+            classify(k, 0),
+            Support::Advertised(ApiKey::CreatePartitions),
+            "the floor is the schema's own: KIP-896 dropped nothing from this one"
+        );
+        assert_eq!(
+            classify(k, 3),
+            Support::Advertised(ApiKey::CreatePartitions)
+        );
+        assert_eq!(
+            classify(k, 4),
+            Support::UnsupportedVersion(ApiKey::CreatePartitions),
+            "v4 does not exist"
+        );
+
+        // The InitProducerId trap, generalised: `valid_versions()` takes the
+        // WIDER of request and response, so a row raised on the strength of the
+        // enum alone must fail here rather than on a client's wire.
+        let advertised = lookup(k).expect("CreatePartitions is advertised");
+        let request_max = <CreatePartitionsRequest as Message>::VERSIONS.max;
+        assert!(
+            advertised.max <= request_max,
+            "CreatePartitions is advertised at v{} and its request decoder stops at v{request_max}",
+            advertised.max
+        );
+    }
+
+    /// The idempotent producer's one row, and the trap the whole table has:
+    /// `ApiKey::valid_versions()` takes the WIDER of request and response, so
+    /// InitProducerId answers `0..=6` there while its request decoder stops at
+    /// 5. The guard above compares against the enum, so it would pass a `max` of
+    /// 6 that no client could ever get a body decoded at.
+    #[test]
+    fn classify_the_idempotent_producer_api() {
+        use kafka_protocol::messages::InitProducerIdRequest;
+        use kafka_protocol::protocol::Message;
+
+        let k = ApiKey::InitProducerId as i16;
+        assert_eq!(classify(k, 0), Support::Advertised(ApiKey::InitProducerId));
+        // v3 is KIP-360's epoch bump, and the reason the window reaches this
+        // far: without it, a sequence window this facade lost is a FATAL
+        // OutOfOrderSequenceException instead of a bump and a reset.
+        assert_eq!(classify(k, 3), Support::Advertised(ApiKey::InitProducerId));
+        assert_eq!(classify(k, 4), Support::Advertised(ApiKey::InitProducerId));
+        // v5 exists for KIP-890's transaction protocol 2, and transactions are
+        // refused. Advertising it would be advertising a refusal.
+        assert_eq!(
+            classify(k, 5),
+            Support::UnsupportedVersion(ApiKey::InitProducerId)
+        );
+
+        // The trap itself, pinned so that raising the row on the strength of the
+        // enum alone fails here rather than on a client's wire.
+        let request_max = <InitProducerIdRequest as Message>::VERSIONS.max;
+        assert_eq!(request_max, 5);
+        assert!(
+            ApiKey::InitProducerId.valid_versions().max > request_max,
+            "the enum no longer answers wider than the request; the comment above needs revisiting"
+        );
+        let advertised = lookup(k).expect("InitProducerId is advertised");
+        assert!(
+            advertised.max <= request_max,
+            "InitProducerId is advertised at v{} and the request decoder stops at v{request_max}",
+            advertised.max
+        );
+
+        // The four produce-side transaction APIs used to be asserted ABSENT
+        // right here. M9 advertises them, and their own windows are pinned in
+        // `classify_the_transaction_apis` below.
+    }
+
+    /// The four transaction APIs (M9), and the two different reasons their
+    /// ceilings are all v3.
+    ///
+    /// Three of them stop one version below KIP-890's transaction protocol 2,
+    /// which is a SEMANTIC this facade does not implement rather than a field
+    /// it cannot answer. AddPartitionsToTxn stops for a stronger reason: v4 is
+    /// a different request altogether, the coordinator-to-leader verification
+    /// shape, which no client ever sends.
+    ///
+    /// The floors are all 0 and that is worth pinning too: unlike Produce,
+    /// CreateTopics and the ACL family, KIP-896 dropped no version of any
+    /// transaction API, so a floor above 0 would refuse a version a real broker
+    /// serves.
+    #[test]
+    fn classify_the_transaction_apis() {
+        use kafka_protocol::messages::{
+            AddOffsetsToTxnRequest, AddPartitionsToTxnRequest, EndTxnRequest,
+            TxnOffsetCommitRequest,
+        };
+
+        for (key, request_max) in [
+            (
+                ApiKey::AddPartitionsToTxn,
+                <AddPartitionsToTxnRequest as Message>::VERSIONS.max,
+            ),
+            (
+                ApiKey::AddOffsetsToTxn,
+                <AddOffsetsToTxnRequest as Message>::VERSIONS.max,
+            ),
+            (ApiKey::EndTxn, <EndTxnRequest as Message>::VERSIONS.max),
+            (
+                ApiKey::TxnOffsetCommit,
+                <TxnOffsetCommitRequest as Message>::VERSIONS.max,
+            ),
+        ] {
+            let k = key as i16;
+            assert_eq!(
+                classify(k, 0),
+                Support::Advertised(key),
+                "{key:?} v0: KIP-896 dropped no version of any transaction API"
+            );
+            assert_eq!(classify(k, 3), Support::Advertised(key), "{key:?} v3");
+            assert_eq!(
+                classify(k, 4),
+                Support::UnsupportedVersion(key),
+                "{key:?} v4 is KIP-890's transaction protocol 2"
+            );
+            // The InitProducerId trap, generalised, per key.
+            let advertised = lookup(k).expect("the transaction APIs are advertised");
+            assert!(
+                advertised.max <= request_max,
+                "{key:?} is advertised at v{} and its request decoder stops at v{request_max}",
+                advertised.max
+            );
+        }
+
+        // v3 is MANDATORY for TxnOffsetCommit and not merely available:
+        // `TxnOffsetCommitRequest$Builder.build(short)` throws below it whenever
+        // group metadata is set, which every KIP-447 loop does. A row that
+        // capped this API lower would make Spring's transactional listener
+        // throw before any wire traffic, so the floor of the CEILING is pinned
+        // as a number.
+        let txn_offsets = lookup(ApiKey::TxnOffsetCommit as i16).expect("advertised");
+        assert!(
+            txn_offsets.max >= 3,
+            "TxnOffsetCommit must reach v3 or every consume-transform-produce loop throws"
+        );
+    }
+
+    /// The ACL family, and the two boundaries that are the whole of its window.
+    ///
+    /// The floor is KIP-896's: v0 was dropped from all three schemas, so a v0
+    /// request is not a version this facade declined, it is a version that no
+    /// longer exists. The ceiling is the schema's own for the opposite reason to
+    /// every other ceiling in this file: nothing varies inside `1..=3`, so there
+    /// is no version that starts asking for something the facade would have to
+    /// invent, and stopping short would only cost a modern client a fallback.
+    #[test]
+    fn classify_the_acl_apis() {
+        use kafka_protocol::messages::{CreateAclsRequest, DeleteAclsRequest, DescribeAclsRequest};
+
+        for (key, request_max) in [
+            (
+                ApiKey::DescribeAcls,
+                <DescribeAclsRequest as Message>::VERSIONS.max,
+            ),
+            (
+                ApiKey::CreateAcls,
+                <CreateAclsRequest as Message>::VERSIONS.max,
+            ),
+            (
+                ApiKey::DeleteAcls,
+                <DeleteAclsRequest as Message>::VERSIONS.max,
+            ),
+        ] {
+            let k = key as i16;
+            assert_eq!(classify(k, 1), Support::Advertised(key), "{key:?} v1");
+            assert_eq!(classify(k, 3), Support::Advertised(key), "{key:?} v3");
+            assert_eq!(
+                classify(k, 0),
+                Support::UnsupportedVersion(key),
+                "{key:?} v0 was dropped by KIP-896 and is below the schema's own floor"
+            );
+            assert_eq!(
+                classify(k, 4),
+                Support::UnsupportedVersion(key),
+                "{key:?} v4 does not exist"
+            );
+
+            // The InitProducerId trap, generalised: `valid_versions()` takes the
+            // WIDER of request and response, so the table-wide guard above can
+            // pass a `max` at which no client could get a BODY decoded. Compare
+            // against the request's own schema, per key, so a row raised on the
+            // strength of the enum alone fails here and not on a wire.
+            let advertised = lookup(k).expect("the ACL family is advertised");
+            assert!(
+                advertised.max <= request_max,
+                "{key:?} is advertised at v{} and its request decoder stops at v{request_max}",
+                advertised.max
+            );
+        }
+    }
+
+    /// The rest of the admin surface, and the reason this test exists at all:
+    /// before M7 F4 the three documented absences (DescribeCluster, DescribeAcls,
+    /// DescribeLogDirs) were prose in `CLIENT_MATRIX.md` and nothing else, so an
+    /// absence was a HABIT rather than a decision. Every key below is a decision
+    /// with a named reason, and advertising one of them by accident now fails
+    /// here instead of shipping.
+    ///
+    /// Deliberately NOT named: 24/25/26/28 (the transaction APIs, asserted in
+    /// `classify_the_idempotent_producer_api`) and 33/37/44/47, which M7 F4's
+    /// other stages advertise.
+    #[test]
+    fn classify_the_absent_admin_apis() {
+        for (key, why) in [
+            // Queen has no truncate-to-offset primitive: `log_start` moves by
+            // retention and by dropping the queue, so this would report a
+            // low_watermark that did not move.
+            (ApiKey::DeleteRecords, "no truncate-to-offset in Queen"),
+            // Every leader epoch this facade reports is -1, so a consumer's
+            // SubscriptionState never holds one and never sends this.
+            (
+                ApiKey::OffsetForLeaderEpoch,
+                "no leader epochs to compare, so no client ever sends it",
+            ),
+            // Queen's storage is Postgres segments. Answering would mean
+            // inventing a log directory and per-partition byte sizes.
+            (
+                ApiKey::DescribeLogDirs,
+                "no log directories; retainedBytes is per queue, not per partition",
+            ),
+            // A delegation token is minted by the broker from a
+            // SCRAM-authenticated principal. This facade mints no credentials;
+            // Queen does.
+            (
+                ApiKey::CreateDelegationToken,
+                "the facade mints no credentials",
+            ),
+            (
+                ApiKey::RenewDelegationToken,
+                "the facade mints no credentials",
+            ),
+            (
+                ApiKey::ExpireDelegationToken,
+                "the facade mints no credentials",
+            ),
+            (
+                ApiKey::DescribeDelegationToken,
+                "the facade mints no credentials",
+            ),
+            // One logical broker, no replicas: every Metadata answer is
+            // replicas=[0], isr=[0]. There is no preferred replica to elect.
+            (ApiKey::ElectLeaders, "one logical broker, nothing to elect"),
+            (
+                ApiKey::AlterPartitionReassignments,
+                "no replicas to move; durability is Postgres's",
+            ),
+            (
+                ApiKey::ListPartitionReassignments,
+                "no replicas to move; durability is Postgres's",
+            ),
+            // The facade does have quotas — Queen's 429 with Retry-After — but
+            // they are the Cloud proxy's, per TENANT, and not expressible in
+            // Kafka's (user, client-id) entity model. Altering them must never
+            // work for a second reason: it would let a tenant raise its own cap.
+            (
+                ApiKey::DescribeClientQuotas,
+                "the quota is per tenant, not per (user, client-id)",
+            ),
+            (
+                ApiKey::AlterClientQuotas,
+                "altering would let a tenant raise its own rate cap",
+            ),
+            // SASL here is PLAIN only and the credential is a Queen bearer
+            // verified by Queen. There is no local user store to describe, and
+            // holding salted verifiers would make this a credential store.
+            (
+                ApiKey::DescribeUserScramCredentials,
+                "no local user store; the credential is a Queen bearer",
+            ),
+            (
+                ApiKey::AlterUserScramCredentials,
+                "no local user store; the credential is a Queen bearer",
+            ),
+            // KRaft's metadata quorum: voters, observers, log end offsets. Every
+            // field would be invented. The one thing UIs render — a controller
+            // id — is already in every Metadata answer.
+            (ApiKey::DescribeQuorum, "no Raft log and no voters"),
+            // Answerable, truthfully, and deliberately not answered: every
+            // client in the matrix already answers describeCluster() from a
+            // plain Metadata request, so advertising it moves five live suites
+            // onto a new code path for a measured gain of zero. The trigger that
+            // flips this is the first client whose describeCluster() stops
+            // falling back.
+            (
+                ApiKey::DescribeCluster,
+                "every client answers describeCluster() from Metadata today",
+            ),
+            // The idempotence window is PROCESS state and is deliberately lost
+            // on restart, so answering from it would advertise durable producer
+            // state this facade does not have.
+            (
+                ApiKey::DescribeProducers,
+                "the idempotence window is process state, not durable",
+            ),
+            // M9's, if anyone's: the registry these would read does not exist,
+            // and transactions are refused in cluster mode, so a listing would
+            // be per node exactly where a listing matters.
+            (
+                ApiKey::DescribeTransactions,
+                "no transaction registry (M9's call)",
+            ),
+            (
+                ApiKey::ListTransactions,
+                "no transaction registry (M9's call)",
+            ),
+        ] {
+            assert_eq!(
+                classify(key as i16, 0),
+                Support::UnknownApi,
+                "{key:?} is advertised, but it is absent by decision: {why}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_rejects_everything_else() {
+        // A real Kafka API this build does not offer: the KIP-848 group
+        // protocol, which PLAN_QUEEN_KAFKA.md excludes by name.
+        assert_eq!(
+            classify(ApiKey::ConsumerGroupHeartbeat as i16, 0),
+            Support::UnknownApi
+        );
+        // TxnOffsetCommit used to be asserted here beside it and is not any
+        // more: M9 advertises the four transaction APIs, and what is refused is
+        // now a transaction this facade cannot serve — a cluster-mode
+        // deployment, or a stage it does not hold — rather than the API itself.
+        //
+        // ...and something that is not a Kafka API key at all.
+        assert_eq!(classify(31_000, 0), Support::UnknownApi);
+        assert_eq!(classify(-7, 0), Support::UnknownApi);
+    }
+}

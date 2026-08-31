@@ -87,7 +87,15 @@ per-message ack, nack and dead-letter exchanges. Queues are live server-side obj
 
 ## Amazon SQS
 
-A fully managed queue. FIFO queues order messages within a message group id and consume a group
+SQS is two things at once here, and they are worth separating. It is a fully managed service you
+could choose instead, and it is **an interface Queen speaks**: `queen-sqs` is a facade that answers
+the SQS and SNS wire protocols, so an unmodified AWS SDK, and every driver built on one, reaches
+Queen by changing `endpoint_url`. The comparison below is about the service. The facade is
+[the protocol reference](/reference/sqs), it ships in the broker image, and it changes what the
+first bullet means: the choice stops being SQS or Queen and becomes which of them is behind the SDK
+your code already uses.
+
+As a service, then. FIFO queues order messages within a message group id and consume a group
 serially, which is structurally the same idea as a Queen partition.
 
 - **There is no server, and that is the whole point.** Queen is a binary plus a PostgreSQL you
@@ -95,7 +103,8 @@ serially, which is structurally the same idea as a Queen partition.
 - **No consumer groups and no replay.** Fan-out is a topology you assemble, each subscriber
   storing its own copy; a deleted message is gone.
 - **The deduplication window is the service's, not yours.** Queen's is a per-queue setting, keyed
-  on the `transactionId` you supply.
+  on the `transactionId` you supply, and the facade exposes it as an attribute that widens AWS's
+  fixed five minutes to anything up to a year.
 - **You cannot query the backlog.** Queen's queues, partitions, cursors, dead letters and lag are
   tables.
 

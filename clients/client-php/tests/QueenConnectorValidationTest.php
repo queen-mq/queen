@@ -61,6 +61,7 @@ class QueenConnectorValidationTest extends TestCase
             [['bulk_batch' => 0], 'Queen Laravel bulk_batch'],
             [['bulk_batch' => 1001], 'Queen Laravel bulk_batch'],
             [['after_commit' => 'false'], 'Queen Laravel after_commit'],
+            [['autopilot' => 'true'], 'Queen Laravel autopilot'],
             [['lease_renewal' => 'true'], 'Queen Laravel lease_renewal'],
             [['lease_renewal_interval' => 0], 'Queen Laravel lease_renewal_interval'],
             [['lease_renewal_timeout' => 0], 'Queen Laravel lease_renewal_timeout'],

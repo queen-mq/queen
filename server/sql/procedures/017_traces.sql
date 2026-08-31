@@ -28,7 +28,7 @@ BEGIN
             'data', mt.data,
             'consumer_group', mt.consumer_group,
             'worker_id', mt.worker_id,
-            'created_at', to_char(mt.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+            'created_at', to_char(mt.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
             'trace_names', COALESCE(
                 (SELECT jsonb_agg(mtn.trace_name ORDER BY mtn.trace_name) 
                  FROM queen.message_trace_names mtn WHERE mtn.trace_id = mt.id),
@@ -102,7 +102,7 @@ BEGIN
             'data', s.data,
             'consumer_group', s.consumer_group,
             'worker_id', s.worker_id,
-            'created_at', to_char(s.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+            'created_at', to_char(s.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
             'queue_name', s.queue_name,
             'partition_name', s.partition_name,
             'message_payload', s.message_payload,
@@ -185,7 +185,7 @@ BEGIN
             mtn.trace_name,
             COUNT(DISTINCT mtn.trace_id) as trace_count,
             COUNT(DISTINCT mt.transaction_id) as message_count,
-            to_char(MAX(mt.created_at), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as last_seen
+            to_char(MAX(mt.created_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as last_seen
         FROM queen.message_trace_names mtn
         JOIN queen.message_traces mt ON mtn.trace_id = mt.id
         WHERE EXISTS (SELECT 1 FROM queen.log_partitions lp

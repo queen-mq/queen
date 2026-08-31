@@ -190,6 +190,7 @@ starting point for a migration.
 | --- | --- | --- |
 | `QUEEN_PREFETCH` | `1` | jobs claimed per broker request |
 | `QUEEN_ACK_BATCH` | `1` | successful jobs committed together |
+| `QUEEN_AUTOPILOT` | `false` | lets the broker size the pop sweep width instead of `QUEEN_PARTITIONS` |
 | `QUEEN_BLOCK_FOR` | `0` | long-poll seconds; `0` polls without blocking |
 | `QUEEN_BULK_BATCH` | `100` | bound for `Queue::bulk()`, not for `dispatch()` |
 | `QUEEN_LEASE_RENEWAL` | `false` | keeps the lease alive under a running job |

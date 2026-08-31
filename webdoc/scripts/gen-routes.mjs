@@ -70,7 +70,12 @@ function parseRoutes(text) {
 // ephemeral push is write-only like the durable push, and the rest of the family
 // — pop, ack, configure, reset, the queue delete — is read-write by an explicit
 // arm rather than by the fallthrough.
-const ACCESS_FINGERPRINT = "e7d992a4b1d8b5b6";
+// 2026-08-28: re-read for PLAN_QUEEN_KAFKA.md C2. One new rule, mirrored below
+// in the position the Rust evaluates it: `POST /api/v1/fetch` is read-only, and
+// it sits AFTER the `m === "GET"` block rather than inside it, because a batch
+// fetch carries its request in a body. Without the arm it reaches the
+// read-write fallthrough and the table claims a log read needs write access.
+const ACCESS_FINGERPRINT = "8a02b3abba911b6a";
 
 function accessLevel(method, path) {
   const m = method;
@@ -102,6 +107,10 @@ function accessLevel(method, path) {
     // it mutates, so it is read-write further down.
     if (path.startsWith("/api/v1/ephemeral/queues")) return "read-only";
   }
+
+  // PLAN_QUEEN_KAFKA.md C2: a pure read that takes no lease and moves no
+  // cursor. Outside the GET block because the batch request is a body.
+  if (m === "POST" && path === "/api/v1/fetch") return "read-only";
 
   if (path === "/streams/v1/state/get") return "read-only";
   if (path.startsWith("/streams/")) return "read-write";

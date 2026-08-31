@@ -446,6 +446,17 @@ pub fn route_access_level(method: &Method, path: &str) -> AccessLevel {
         }
     }
 
+    // PLAN_QUEEN_KAFKA.md C2 — `POST /api/v1/fetch` is a pure READ (no lease,
+    // no cursor movement, no claim), so it takes the same level as the other
+    // message reads and NOT the ReadWrite fallthrough, which would demand write
+    // access to read a log. It cannot ride the `m == "GET"` block above only
+    // because its request is a batch body. Spelled with the method for the same
+    // reason `/api/v1/ephemeral/push` is: the route is POST-only today and a
+    // future verb on it must not inherit this level by accident.
+    if m == "POST" && path == "/api/v1/fetch" {
+        return ReadOnly;
+    }
+
     // -------- Streams --------
     if path == "/streams/v1/state/get" {
         return ReadOnly;
@@ -753,5 +764,36 @@ mod tests {
         let mut off = cfg_with_alg("ES256");
         off.enabled = false;
         assert!(off.validate().is_ok());
+    }
+
+    /// PLAN_QUEEN_KAFKA.md C2. `POST /api/v1/fetch` reads a log and writes
+    /// nothing, so it must sit with the other message reads and NOT on the
+    /// ReadWrite fallthrough — a read-only token that takes 403 on a read is
+    /// the failure this arm exists to prevent. Its neighbours are pinned in
+    /// the same test because the value of stating the level is that the
+    /// STATEMENT is what is checked, not the fallthrough.
+    #[test]
+    fn a_fetch_is_a_read_and_a_push_is_still_a_write() {
+        let post = Method::POST;
+        assert_eq!(
+            route_access_level(&post, "/api/v1/fetch"),
+            AccessLevel::ReadOnly
+        );
+        // The method is part of the decision: a future verb on the same path
+        // must not inherit this level by accident.
+        assert_eq!(
+            route_access_level(&Method::GET, "/api/v1/fetch"),
+            AccessLevel::ReadWrite
+        );
+        // Unchanged neighbours: produce stays write-only, consume stays
+        // read-write (a pop takes a lease and moves a cursor).
+        assert_eq!(
+            route_access_level(&post, "/api/v1/push"),
+            AccessLevel::WriteOnly
+        );
+        assert_eq!(
+            route_access_level(&Method::GET, "/api/v1/pop/queue/orders"),
+            AccessLevel::ReadWrite
+        );
     }
 }

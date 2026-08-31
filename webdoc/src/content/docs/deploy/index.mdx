@@ -40,7 +40,9 @@ Four parts, of which two are required:
 Nothing is installed into either required part. The DDL and the 31 stored-procedure files are
 compiled into the binary and re-applied idempotently at every boot under an advisory lock, so
 there is no migration step and no extension. The dashboard, `queenctl` and the PostgreSQL client
-tools travel inside the same image.
+tools travel inside the same image, and so do the two wire-protocol facades: `queen-kafka` and
+`queen-sqs` sit beside the broker binary and stay inert until `QUEEN_KAFKA_EMBEDDED` or
+`QUEEN_SQS_EMBEDDED` says otherwise.
 
 A complete deployment, ready to verify:
 
@@ -117,6 +119,16 @@ Every variable the broker reads, with the default the code applies, is in
     href="/deploy/dashboard"
     title="Dashboard"
     description="The operator UI the binary already serves on the port you opened."
+  />
+  <LinkCard
+    href="/deploy/kafka"
+    title="Kafka facade"
+    description="queen-kafka in the same image: the advertised-address footgun, TLS and SASL, and cluster mode."
+  />
+  <LinkCard
+    href="/deploy/sqs"
+    title="SQS facade"
+    description="queen-sqs in the same image: SigV4 credentials, and the one variable a second replica needs."
   />
 </CardGrid>
 

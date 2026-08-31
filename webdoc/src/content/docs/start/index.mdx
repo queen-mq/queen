@@ -241,14 +241,23 @@ why the proxy's quota accounting is exact in-process state with nothing to coord
   [`queenctl`](/reference/queenctl), a [dashboard](/deploy/dashboard) in the same binary on the
   same port, [Prometheus metrics](/reference/prometheus), [JWT auth](/reference/security/jwt) and
   a disk spool for database outages.
+- **Other brokers' wire protocols**, in the same image as the broker and off until you switch
+  them on. `queen-kafka` advertises 32 Kafka API keys, so an unmodified Kafka producer or consumer
+  reaches Queen by changing `bootstrap.servers` and nothing else; `queen-sqs` answers the SQS and
+  SNS protocols, so an unmodified AWS SDK reaches it by changing `endpoint_url`. The contracts are
+  [reference/kafka](/reference/kafka) and [reference/sqs](/reference/sqs), running them is
+  [deploy/kafka](/deploy/kafka) and [deploy/sqs](/deploy/sqs).
 
 ## When something else is the better tool
 
 These systems made different tradeoffs, and some of those tradeoffs are better than Queen's for
 workloads that need them.
 
-- **Kafka ecosystem compatibility.** Queen speaks HTTP, not the Kafka protocol, so no Connect, no
-  Streams, no Schema Registry, and none of that literature applies.
+- **The Kafka ecosystem, past the wire protocol.** The protocol itself is spoken by the
+  [facade](/reference/kafka), but there is no log compaction and a transaction lives in one facade
+  process, so Kafka Streams, Connect's exactly-once source, the Schema Registry's compacted topic,
+  and Flink and Spark's two-phase writers all stay out, and the literature about brokers, replicas
+  and log directories does not apply.
 - **A single ordered stream that must itself scale horizontally.** One lane is sequential. If your
   ordering boundary is everything, Queen's core idea does nothing for you.
 - **Storage that scales independently of the database**, or a system that replicates itself across

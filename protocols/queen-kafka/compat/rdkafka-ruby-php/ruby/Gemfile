@@ -1,0 +1,7 @@
+source "https://rubygems.org"
+
+# The karafka core. Deliberately unpinned: this suite is about what a user gets
+# from a plain `gem install rdkafka` today, and the run PRINTS the version it
+# resolved plus the librdkafka the gem compiled underneath it. Pin here if you
+# ever need a specific pair.
+gem "rdkafka"

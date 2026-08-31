@@ -87,7 +87,11 @@ async fn serve(st: &St, headers: &HeaderMap, uri: &Uri) -> Response {
 /// pull down a dashboard bundle, so it is treated exactly like no session.
 async fn has_live_session(st: &St, headers: &HeaderMap) -> bool {
     let Credential::Session(token) =
-        auth::read_credential_for_document(&st.cfg.cookie_name, headers)
+        auth::read_credential_for_document(
+            &st.cfg.cookie_name,
+            crate::oauth::cookie_is_secure(st, headers),
+            headers,
+        )
     else {
         return false;
     };

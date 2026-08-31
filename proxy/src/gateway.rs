@@ -192,6 +192,50 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
         // on is the only thing that makes the class reachable at all.
         return errors::err_404(errors::CODE_ROUTE_BLOCKED, "not available");
     }
+
+    // ----- 3b. the Kafka facade's own bookkeeping -----
+    // A `POST /api/v1/kv` batch that addresses NOTHING but the facade's
+    // reserved key space (`queen-kafka` / `qk:`) is reclassified `Consume` —
+    // the authority of the fetch it serves. See `kafka_kv.rs` for the rule and
+    // the fail-closed direction; `classify()` is unchanged, because this is a
+    // property of the BODY and that function has none.
+    //
+    // Here, and not later, because the gates whose answer it changes run below:
+    // `plan_gates` (the `kv` plan flag) on the next line, `auth::authorize` at
+    // step 3, and the `mixed_block` verdict at step 4. The body does not
+    // otherwise exist until step 4's `into_parts`, so the decision that feeds
+    // an AUTHORIZATION and FEATURE question cannot be deferred to the point
+    // where reading it is free.
+    //
+    // TWO COSTS, both accepted and neither hidden:
+    //
+    //  - every `POST /api/v1/kv` now buffers and parses once, against §9.6's
+    //    "on an unblocked cluster the body is never buffered". A KV batch is
+    //    small by construction (the facade bounds itself to 256 ops per call)
+    //    and `max_body_bytes` is the same ceiling `enforce_produce` and
+    //    `enforce_configure` already buffer under, so nothing new is unbounded.
+    //  - on a NON-shielded listener the gates below run before authentication,
+    //    so this buffer is taken before the caller has proven anything. That is
+    //    one route, under one existing cap. The alternative — deferring the kv
+    //    plan gate past authentication for everyone — would move when a plain
+    //    KV tenant gets its 403, which is a change to a surface this track was
+    //    not asked to move.
+    //
+    // Metering is deliberately NOT touched: `bytes_in` stays 0 for a batch that
+    // travels on, exactly as it did when this route was never buffered, so no
+    // tenant's bill changes because of a classification.
+    let (class, req) = if crate::kafka_kv::is_kv_batch(class) {
+        let (parts, body) = req.into_parts();
+        let buffered = match axum::body::to_bytes(body, st.cfg.max_body_bytes).await {
+            Ok(b) => b,
+            Err(_) => return errors::err_413("request body exceeds cap"),
+        };
+        let class = crate::kafka_kv::effective_class(class, &buffered);
+        (class, Request::from_parts(parts, Body::from(buffered)))
+    } else {
+        (class, req)
+    };
+
     if !shielded {
         if let Some(ctx) = &fixed {
             if let Some(resp) = plan_gates(&st, ctx, class) {
@@ -2557,6 +2601,13 @@ mod tests {
             op_for("/api/v1/lease/abc/extend", RouteClass::Consume),
             OpClass::Read
         );
+        // PLAN_QUEEN_KAFKA.md C2. The batched fetch is `Consume` for its
+        // authorization (routes.rs) but is NOT an `is_pop_path`, so it books
+        // reqs-only like ack and lease. Deliberate: `Delivery` would debit the
+        // delivery bucket off a count `count_pop_messages` cannot read from the
+        // fetch response shape, and a wrong debit 429s the next request.
+        assert_eq!(op_for("/api/v1/fetch", RouteClass::Consume), OpClass::Read);
+        assert!(!is_pop_path("/api/v1/fetch"));
         assert_eq!(
             op_for("/api/v1/configure", RouteClass::QueueAdmin),
             OpClass::Configure
@@ -2678,6 +2729,168 @@ mod tests {
         // ...and no other flag turns it on
         let kv_only = crate::state::Features { kv: true, ..Default::default() };
         assert!(!feature_enabled(Feature::Ephemeral, &kv_only));
+    }
+
+    // ---- the Kafka facade's kv override (kafka_kv.rs), at the five gates ----
+    //
+    // The sniffer's own behaviour is pinned in `kafka_kv.rs`. These tests are
+    // about what the RECLASSIFICATION does once it has happened, which is a
+    // property of this file: the gates are `plan_gates` (feature + push block),
+    // `auth::authorize`, the `mixed_block` verdict, and `op_for`. Each is
+    // exercised through the same function `handle` calls, with the class the
+    // same `effective_class` would have produced.
+
+    /// A committed offset is the facade's internal bookkeeping, not the KV
+    /// PRODUCT, so a tenant whose plan never mentions `kv` must still be able
+    /// to run a Kafka consumer. Before the override the feature gate answered
+    /// 403 `feature_gated` and the client could not commit at all.
+    #[test]
+    fn a_qk_batch_reaches_a_tenant_whose_plan_has_no_kv() {
+        use crate::routes::{classify, Feature};
+        let kv_batch = classify(&Method::POST, "/api/v1/kv");
+        let qk = br#"{"operations":[{"op":"put","ns":"queen-kafka","key":"qk:group:g:orders:0","value":{"offset":7},"forever":true}]}"#;
+        let class = crate::kafka_kv::effective_class(kv_batch, qk);
+        assert_eq!(class, RouteClass::Consume);
+
+        // The feature gate only ever fires on a `Gated` class, and this is no
+        // longer one — so a plan with `kv` false is not consulted.
+        let no_kv = crate::state::Features::default();
+        assert!(!feature_enabled(Feature::Kv, &no_kv));
+        assert!(
+            !matches!(class, RouteClass::Gated(_, _)),
+            "a Gated class would still meet the plan flag"
+        );
+        // and a consume-scoped key — the credential a Kafka consumer holds —
+        // may now call it, where `Gated(_,_)` demanded produce-or-consume and
+        // the plan flag on top
+        let consumer = crate::state::Principal::ApiKey {
+            key_id: uuid::Uuid::nil(),
+            scopes: crate::state::Scopes {
+                consume: true,
+                read: true,
+                produce: false,
+                admin: false,
+            },
+        };
+        assert!(crate::auth::authorize(&consumer, class).is_ok());
+    }
+
+    /// THE read-strands-consumers trap, on the offsets. A tenant over its
+    /// storage quota is push-blocked on purpose; refusing its OffsetFetch and
+    /// its OffsetCommit as well would pin every consumer at an offset it can
+    /// never move past, while the backlog it would drain keeps growing — the
+    /// opposite of what the block is for. `mixed_block` is computed for the
+    /// CLASS, and `Consume` is not a class it is computed for.
+    #[test]
+    fn a_blocked_tenant_can_still_read_and_commit_offsets() {
+        use crate::routes::classify;
+        let kv_batch = classify(&Method::POST, "/api/v1/kv");
+        // an OffsetFetch (getMany) and an OffsetCommit (put), the two halves
+        for body in [
+            br#"{"operations":[{"op":"getMany","ns":"queen-kafka","keys":["qk:group:g:orders:0"]}]}"#.as_slice(),
+            br#"{"operations":[{"op":"put","ns":"queen-kafka","key":"qk:group:g:orders:0","value":{"offset":7}}]}"#,
+        ] {
+            let class = crate::kafka_kv::effective_class(kv_batch, body);
+            assert_eq!(class, RouteClass::Consume);
+            // `handle` computes `mixed_block` with exactly this match; a class
+            // outside it is never offered the push block at all, blocked
+            // cluster or not.
+            let would_block = matches!(class, RouteClass::Gated(_, crate::routes::GatedOp::Mixed));
+            assert!(!would_block, "{}", String::from_utf8_lossy(body));
+        }
+    }
+
+    /// The regression guard. A non-`qk:` batch is the KV product and keeps
+    /// `Gated(Kv, Mixed)` in every one of the five gates — same feature flag,
+    /// same authorize arm, same `mixed_block` computation, same metering.
+    #[test]
+    fn a_plain_kv_batch_is_still_gated_exactly_as_before() {
+        use crate::routes::{classify, Feature, GatedOp};
+        let kv_batch = classify(&Method::POST, "/api/v1/kv");
+        for body in [
+            br#"{"operations":[{"op":"put","ns":"app","key":"cache:x","value":1}]}"#.as_slice(),
+            br#"{"operations":[{"op":"getMany","ns":"app","keys":["cache:x"]}]}"#,
+            // ...including one that only LOOKS like the facade's
+            br#"{"operations":[{"op":"put","ns":"app","key":"qk:group:g:orders:0","value":1}]}"#,
+            // ...and a mixed batch, which must fail closed onto the old class
+            br#"{"operations":[{"op":"put","ns":"queen-kafka","key":"qk:group:g:orders:0","value":1},{"op":"put","ns":"app","key":"cache:x","value":1}]}"#,
+        ] {
+            let class = crate::kafka_kv::effective_class(kv_batch, body);
+            let why = String::from_utf8_lossy(body);
+            // 1. same class
+            assert_eq!(class, RouteClass::Gated(Feature::Kv, GatedOp::Mixed), "{why}");
+            // 2. the plan flag is consulted, and a plan without kv denies
+            assert!(!feature_enabled(Feature::Kv, &crate::state::Features::default()), "{why}");
+            // 3. authorize keeps the produce-or-consume arm: a read-only key is
+            //    still refused, where `Consume` would have been asked for
+            //    `scopes.consume` alone
+            let read_only = crate::state::Principal::ApiKey {
+                key_id: uuid::Uuid::nil(),
+                scopes: crate::state::Scopes {
+                    read: true,
+                    produce: false,
+                    consume: false,
+                    admin: false,
+                },
+            };
+            assert!(crate::auth::authorize(&read_only, class).is_err(), "{why}");
+            // 4. `mixed_block` is still computed for it, so a blocked cluster
+            //    still refuses the growing half
+            assert!(
+                matches!(class, RouteClass::Gated(_, GatedOp::Mixed)),
+                "{why}"
+            );
+            // 5. metering unchanged
+            assert_eq!(op_for("/api/v1/kv", class), OpClass::Read, "{why}");
+        }
+    }
+
+    /// No bill moves because of a classification. `Gated(_,_)` meters reqs-only
+    /// `Read`, and a `Consume` that is not a pop path meters reqs-only `Read`
+    /// too — the same bucket, the same zero messages.
+    #[test]
+    fn a_qk_batch_meters_the_same_as_before() {
+        use crate::routes::classify;
+        let before = classify(&Method::POST, "/api/v1/kv");
+        let after = crate::kafka_kv::effective_class(
+            before,
+            br#"{"operations":[{"op":"getPrefix","ns":"queen-kafka","prefix":"qk:groups:","limit":500}]}"#,
+        );
+        assert_ne!(before, after, "the class really did change");
+        assert_eq!(op_for("/api/v1/kv", before), OpClass::Read);
+        assert_eq!(op_for("/api/v1/kv", after), OpClass::Read);
+        // the batch route is not a pop path, so the reclassified `Consume`
+        // cannot fall into the delivery bucket `debit_deliveries` drives
+        assert!(!is_pop_path("/api/v1/kv"));
+        // ...and it takes no parked slot either: the long-poll gauge reads the
+        // query, and this route has none of it
+        assert!(!is_wait_pop("/api/v1/kv", Some("wait=true&timeout=30000")));
+    }
+
+    /// The override is scoped to the one class that asks its body. Nothing
+    /// else in the file may be moved by a body that happens to look like the
+    /// facade's — a push, a timer batch, a streams cycle.
+    #[test]
+    fn the_override_touches_no_other_route() {
+        use crate::routes::classify;
+        let qk = br#"{"operations":[{"op":"put","ns":"queen-kafka","key":"qk:group:g:orders:0","value":{"offset":1}}]}"#;
+        for (m, p) in [
+            (Method::POST, "/api/v1/push"),
+            (Method::POST, "/api/v1/transaction"),
+            (Method::POST, "/api/v1/timers"),
+            (Method::POST, "/streams/v1/cycle"),
+            (Method::GET, "/api/v1/kv/queen-kafka/qk:group:g:orders:0"),
+            (Method::PUT, "/api/v1/kv/queen-kafka/qk:group:g:orders:0"),
+            (Method::DELETE, "/api/v1/kv/queen-kafka/qk:group:g:orders:0"),
+            (Method::POST, "/api/v1/fetch"),
+        ] {
+            let before = classify(&m, p);
+            assert_eq!(
+                crate::kafka_kv::effective_class(before, qk),
+                before,
+                "{m} {p}"
+            );
+        }
     }
 
     #[test]

@@ -1,0 +1,20 @@
+{
+  "name": "queen-sqs-compat-js",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "@aws-sdk/client-sqs + @aws-sdk/client-sns + sqs-consumer against the queen-sqs compat rig",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node run.mjs all",
+    "offline": "node run.mjs vectors probe",
+    "sqs": "node run.mjs sqs",
+    "sns": "node run.mjs sns",
+    "consumer": "node run.mjs consumer"
+  },
+  "dependencies": {
+    "@aws-sdk/client-sns": "^3",
+    "@aws-sdk/client-sqs": "^3",
+    "sqs-consumer": "^11"
+  }
+}

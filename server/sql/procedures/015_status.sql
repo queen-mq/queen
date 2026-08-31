@@ -217,7 +217,7 @@ BEGIN
                 worker_id,
                 jsonb_agg(
                     jsonb_build_object(
-                        'timestamp', to_char(bucket_timestamp, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                        'timestamp', to_char(bucket_timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
                         'sampleCount', sample_count,
                         'metrics', metrics
                     ) ORDER BY bucket_timestamp ASC
@@ -238,8 +238,8 @@ BEGIN
         )
         SELECT jsonb_build_object(
             'timeRange', jsonb_build_object(
-                'from', to_char(v_from_ts, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-                'to', to_char(v_to_ts, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                'from', to_char(v_from_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                'to', to_char(v_to_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
             ),
             'replicas', COALESCE((SELECT replicas FROM replicas_array), '[]'::jsonb),
             'replicaCount', COALESCE((SELECT jsonb_array_length(replicas) FROM replicas_array), 0),

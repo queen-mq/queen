@@ -3,6 +3,81 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## 1.4.0 — 2026-08-31
+
+**Kafka and SQS clients connect directly.** Two wire-protocol facades now ship inside
+`ghcr.io/queen-mq/queen`, beside the broker binary. `queen-kafka` advertises 32 Kafka API keys,
+transactions included, so an unmodified producer or consumer moves over by changing
+`bootstrap.servers`; `queen-sqs` answers the SQS and SNS protocols, so an unmodified AWS SDK moves
+over by changing `endpoint_url`. Both are inert until `QUEEN_KAFKA_EMBEDDED=true` or
+`QUEEN_SQS_EMBEDDED=true`, where the broker spawns and supervises the facade as a child process on a
+backoff — neither holds a database connection or stores anything durable of its own, so they are
+Queen clients like any SDK. Kafka adds a two or three node cluster mode with its node registry in
+Queen's key/value store; SQS is stateless behind an ordinary load balancer given a shared
+`QUEEN_SQS_HANDLE_SECRET`. What each protocol covers, and every place it deviates, is
+[reference/kafka](https://queenmq.com/reference/kafka) and
+[reference/sqs](https://queenmq.com/reference/sqs); running them is
+[deploy/kafka](https://queenmq.com/deploy/kafka) and [deploy/sqs](https://queenmq.com/deploy/sqs).
+
+**Laravel queue driver, worker supervisors and a dashboard.** A native queue driver, supervisors
+with prefetch and lease renewal, and a supervisor dashboard, hardened for production supervision and
+qualified against a benchmark harness. The PHP client is packaged for Packagist as
+`queen-mq/php-client` (registered; no version tagged yet) and mirrored to its own repository by CI.
+Guides are under [use/laravel](https://queenmq.com/use/laravel).
+
+**Proxy: `kv`, `timers` and `ephemeral` are base surfaces, not upsells.** The plan seed predated all
+three families, and a plan row that does not name a feature is a plan that does not have it, so every
+plan answered `403 feature_gated` on those routes from the day each shipped. Migration
+`009_default_families` grants them on every existing plan and defaults new plans the same way.
+`streams` and `traces` stay per-plan.
+
+**Fixes.** A partial ack no longer erases the redelivery marker: `attempt_offset` follows the first
+uncommitted frame of a live lease, so when a worker dies after acking a prefix, the tail is
+recognised as a redelivery rather than as fresh work, and retry budgets and DLQ routing see the true
+`deliveryAttempt`. A DLQ replay now provably mints a transaction id different from the original, so
+a replay can never be mistaken for the frame it was quarantined from; it is still not idempotent, on
+the terms 1.3.0 spells out. The JavaScript stream runner fails closed on a bootstrap error instead of
+running a partially initialised chain.
+
+## 1.3.0 — 2026-08-28
+
+**Streams are tenant-scoped.** `queen_streams` was the last name- and pid-addressed surface without
+tenant scoping, and on a shared cell it was unsafe: a query name was globally unique, so `reset:true`
+could take over another tenant's query and hand back their uuid; the cycle resolved sink queues by
+bare name, which can multi-match on `(tenant_id, name)`; and state operations ran with no ownership
+check at all. `queen_streams.queries` now carries `tenant_id` with uniqueness on `(tenant_id, name)`,
+the cycle gates the source partition and the query before taking the advisory lock, and all four sink
+resolves are scoped. The new `queen_streams.quota` is the grant: for a non-default tenant, absence is
+a denial (`403`, distinct from the `config_hash` `409`), checked on the fresh-insert path only, so
+revoking a grant stops new queries without stranding a Runner that is still draining. Tenant purge
+covers `queries` and `quota`, and empties `state` through the query FK in a bounded phase before any
+query row is deleted.
+
+**Cloud must-builds (proxy).** `QUEEN_PROXY_SHARED_HOSTS`: on a shared host the cluster resolves from
+the credential rather than the hostname, and the whole listener answers `401` instead of `421` when
+any shared host exists; host canonicalisation closes trailing-dot, case and port bypasses. Tenant
+wipe lands as `queen_proxy.delete_tenant` (requires `status=deleting`, redacts the outbox) plus
+`queen.delete_tenant_data_v1`, which walks every tenant-carrying table under per-table row budgets.
+Proxy boot now fails fast when JWT material is supplied but unusable, and answers a precise `503` at
+login when there is none at all. `PG_SSL_ROOT_CERT` and `PXDB_SSL_ROOT_CERT` take PEM content, not a
+path, so a private CA can be verified without turning authentication off.
+
+**DLQ retry reaches the SDKs.** `queenctl dlq retry <partitionId> <transactionId>` replays one
+dead-lettered message, and Go's `RetryMessage` went from a stub that refused to a working call. The
+route is **not idempotent** — the replay is minted with a fresh transaction id, so two replays are two
+distinct messages that nothing collapses — so it is sent with the new `WithoutFailoverRetry` option
+and must not be retried on failure without re-reading the DLQ first.
+
+**`JWT_ALGORITHM` accepts the whole HMAC family.** HS384 and HS512 were implemented by the
+request-time verifier but refused at boot, which made pinning either impossible and pushed operators
+onto `auto`, the strictly wider posture. One `SUPPORTED_JWT_ALGORITHMS` constant now drives the boot
+check and the error message it prints, with a test that fails if boot and verifier ever disagree
+again.
+
+**Version-line alignment.** Every client and SDK moves to 1.3.0 with the broker and proxy, which a
+MINOR requires. Only two changed content since 1.2.0: `client-go` and `queenctl`, both above. The
+rest move because a client version says which broker line it was released against.
+
 ## 1.2.0 — 2026-08-25
 
 **Pop autopilot (server-advised pop sizing).** New SDKs omit `partitions`/`batch` and send

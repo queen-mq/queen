@@ -12,6 +12,7 @@ use Queen\Laravel\Commands\SupervisorInstallCommand;
 use Queen\Laravel\Queue\QueenQueue;
 use Queen\Laravel\Queue\SyncedFailedJobProvider;
 use Queen\Tests\Support\PlanHandler;
+use ReflectionMethod;
 
 class LaravelServiceProviderTest extends TestCase
 {
@@ -27,11 +28,32 @@ class LaravelServiceProviderTest extends TestCase
         $this->assertSame('queen', $config['driver']);
         $this->assertSame('default', $config['queue']);
         $this->assertSame('laravel', $config['consumer_group']);
+        $this->assertArrayHasKey('autopilot', $config);
+        $this->assertFalse($config['autopilot']);
 
         $connection = $this->app->make(QueueManager::class)->connection('queen');
 
         $this->assertInstanceOf(QueenQueue::class, $connection);
         $this->assertSame('laravel', $connection->getConsumerGroup());
+    }
+
+    public function testAutoRegisteredConnectionCarriesTheAutopilotSettingFromPackageConfig(): void
+    {
+        // The auto-registered connection is built once, while the provider is
+        // registering, so re-run that step against a queen.autopilot the test
+        // controls: a knob missing from the defaults list is silently inert for
+        // every app that never spells the connection out itself.
+        $this->app['config']->set('queen.autopilot', true);
+        $this->app['config']->set('queue.connections.queen', []);
+
+        (new ReflectionMethod(QueenServiceProvider::class, 'registerDefaultQueueConnection'))
+            ->invoke(new QueenServiceProvider($this->app));
+
+        $this->assertTrue($this->app['config']->get('queue.connections.queen.autopilot'));
+
+        $connection = $this->app->make(QueueManager::class)->connection('queen');
+
+        $this->assertInstanceOf(QueenQueue::class, $connection);
     }
 
     public function testExplicitConnectionOptionsOverridePackageDefaults(): void

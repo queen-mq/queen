@@ -214,6 +214,84 @@ pub fn jwt_ed25519_pub_pem() -> Option<String> {
     env::var("QUEEN_PROXY_JWT_ED25519_PUB_PEM").ok().filter(|s| !s.trim().is_empty())
 }
 
+/// The host of an absolute URL: scheme dropped, userinfo dropped, path/query/
+/// fragment cut. What is left still goes through `canonical_host` for the
+/// `:port` and root-label stripping, so a configured audience and a Host header
+/// are normalized by exactly one implementation.
+fn host_from_url(url: &str) -> &str {
+    let url = url.trim();
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    authority.rsplit_once('@').map(|(_, host)| host).unwrap_or(authority)
+}
+
+/// The audience this proxy accepts on a session token, or `None` for "accept
+/// whatever audience a token names".
+///
+/// A verify-only cell holds the fleet's public key, so it accepts every token
+/// the control plane minted for ANY of its siblings: one leaked token replays
+/// across the whole fleet. `aud` is what closes that, and the rule is
+/// deliberately one-sided (see `auth::audience_ok`): a token that names an
+/// audience must name OURS, a token that names none is accepted exactly as it
+/// is today. That asymmetry is what lets this ship before any minter sets the
+/// claim, which is the only way to roll it out without a flag day.
+///
+/// `QUEEN_PROXY_JWT_AUD` when set, else the host of `QUEEN_PROXY_PUBLIC_URL`,
+/// which is the name this proxy already answers to: the fleet-wide default
+/// needs no per-cell variable at all. Both sides are lowercased here and compared
+/// case-insensitively at verify time, because the value is a hostname and
+/// `Cell-A.example.com` refusing `cell-a.example.com` would be a fail-CLOSED
+/// typo: every session on the cell, 401, with the data plane green.
+///
+/// Pure, and read through this one function for the same reason
+/// `jwt_ed25519_pub_pem` is: the boot log names the audience the verifier
+/// actually enforces.
+pub fn resolve_jwt_audience(explicit: Option<String>, public_url: Option<&str>) -> Option<String> {
+    let explicit = explicit.map(|v| v.trim().to_ascii_lowercase()).filter(|v| !v.is_empty());
+    if explicit.is_some() {
+        return explicit;
+    }
+    let derived = canonical_host(host_from_url(public_url?)).to_ascii_lowercase();
+    (!derived.is_empty()).then_some(derived)
+}
+
+/// Default link text for `auth_portal_url`, in the cadence the sign-in page
+/// already uses for its provider buttons ("Continue with Google").
+pub const AUTH_PORTAL_LABEL: &str = "Continue to the control plane";
+
+/// Validate `QUEEN_PROXY_AUTH_PORTAL_URL`: where a VERIFY-ONLY host points
+/// someone who lands on `/auth/login`, since sign-in happens on the control
+/// plane that mints the sessions this host only verifies (oauth.rs's
+/// `render_login`).
+///
+/// http(s) only, and no whitespace or control characters. The value is rendered
+/// into an `href` on a page served unauthenticated to anyone who can reach the
+/// proxy, so a `javascript:` or `data:` value would be operator-supplied script
+/// on the one page that exists before any session does.
+///
+/// Deliberately NOT fatal, unlike the bind address and the JWT gate: this is one
+/// link on one page, and stopping the data plane over it would be out of all
+/// proportion. A refused value renders the same notice an operator who never set
+/// the variable gets, an explanation with no link, and the warning is what makes
+/// it findable.
+pub fn resolve_auth_portal_url(raw: Option<String>) -> Option<String> {
+    let v = raw?.trim().to_string();
+    let scheme_ok = {
+        let lower = v.to_ascii_lowercase();
+        lower.starts_with("https://") || lower.starts_with("http://")
+    };
+    if scheme_ok && !v.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Some(v);
+    }
+    tracing::warn!(
+        target: "config",
+        value = %v,
+        "QUEEN_PROXY_AUTH_PORTAL_URL is not a plain http(s) URL and is IGNORED: the verify-only \
+         sign-in notice will explain without linking anywhere."
+    );
+    None
+}
+
 /// What this proxy is expected to DO with session tokens, decided from the
 /// environment alone.
 ///
@@ -553,6 +631,10 @@ pub struct Config {
     pub longpoll_max_ms: u64,
     // identity / tokens
     pub jwt_issuer: String,
+    /// The `aud` a session token may name, resolved by `resolve_jwt_audience`.
+    /// `None` means no audience is enforced, which is what every proxy that
+    /// sets neither `QUEEN_PROXY_JWT_AUD` nor `QUEEN_PROXY_PUBLIC_URL` gets.
+    pub jwt_audience: Option<String>,
     pub jwt_hs_secret: Option<String>,
     pub jwt_ed25519_pem: Option<String>,
     pub jwt_ttl_s: u64,
@@ -560,6 +642,15 @@ pub struct Config {
     pub cookie_domain: Option<String>,
     pub auth_host_mode: bool,
     pub public_base_url: Option<String>,
+    /// `QUEEN_PROXY_AUTH_PORTAL_URL`, validated by `resolve_auth_portal_url`:
+    /// the control plane a VERIFY-ONLY host sends people to, because it mints
+    /// the sessions this host only verifies. `None` (the default, and every
+    /// proxy that mints its own) leaves the notice without a link.
+    pub auth_portal_url: Option<String>,
+    /// Link text for `auth_portal_url` (`QUEEN_PROXY_AUTH_PORTAL_LABEL`), so an
+    /// operator whose control plane has a name of its own can use it. Ignored
+    /// when there is no URL to label.
+    pub auth_portal_label: String,
     /// PER-CELL gate for the operator (super-admin) capability. Default FALSE,
     /// and meant to stay false forever on customer/shared cells.
     ///
@@ -703,6 +794,10 @@ impl Config {
             );
             std::process::exit(1);
         }
+        // Read before the literal because the JWT audience defaults to this
+        // URL's host: one read, so the value the verifier enforces cannot drift
+        // from the one the OAuth callbacks are built on.
+        let public_base_url = env_opt("QUEEN_PROXY_PUBLIC_URL");
         Config {
             port: env_u64("QUEEN_PROXY_PORT", 6711) as u16,
             bind_addr: checked_bind_addr(
@@ -723,13 +818,22 @@ impl Config {
             longpoll_margin_ms: env_u64("QUEEN_PROXY_LONGPOLL_MARGIN_MS", 10_000),
             longpoll_max_ms: env_u64("QUEEN_PROXY_LONGPOLL_MAX_MS", 90_000),
             jwt_issuer: env_str("QUEEN_PROXY_JWT_ISS", "queen-proxy"),
+            jwt_audience: resolve_jwt_audience(
+                env_opt("QUEEN_PROXY_JWT_AUD"),
+                public_base_url.as_deref(),
+            ),
             jwt_hs_secret: env_opt("QUEEN_PROXY_JWT_SECRET"),
             jwt_ed25519_pem: env_opt("QUEEN_PROXY_JWT_ED25519_PEM"),
             jwt_ttl_s: env_u64("QUEEN_PROXY_JWT_TTL_S", 86_400),
             cookie_name: env_str("QUEEN_PROXY_COOKIE_NAME", "queen_session"),
             cookie_domain: env_opt("QUEEN_PROXY_COOKIE_DOMAIN"),
             auth_host_mode: env_bool("QUEEN_PROXY_AUTH_HOST", false),
-            public_base_url: env_opt("QUEEN_PROXY_PUBLIC_URL"),
+            public_base_url,
+            auth_portal_url: resolve_auth_portal_url(env_opt("QUEEN_PROXY_AUTH_PORTAL_URL")),
+            auth_portal_label: env_opt("QUEEN_PROXY_AUTH_PORTAL_LABEL")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| AUTH_PORTAL_LABEL.to_string()),
             operator_enabled: env_bool("QUEEN_PROXY_OPERATOR_ENABLED", false),
             google_client_id: env_opt("GOOGLE_CLIENT_ID"),
             google_client_secret: env_opt("GOOGLE_CLIENT_SECRET"),
@@ -768,6 +872,7 @@ pub(crate) fn test_config(hosts: &[&str]) -> Config {
         longpoll_margin_ms: 1000,
         longpoll_max_ms: 1000,
         jwt_issuer: "test".to_string(),
+        jwt_audience: None,
         jwt_hs_secret: None,
         jwt_ed25519_pem: None,
         jwt_ttl_s: 60,
@@ -775,6 +880,8 @@ pub(crate) fn test_config(hosts: &[&str]) -> Config {
         cookie_domain: None,
         auth_host_mode: false,
         public_base_url: None,
+        auth_portal_url: None,
+        auth_portal_label: AUTH_PORTAL_LABEL.to_string(),
         operator_enabled: false,
         google_client_id: None,
         google_client_secret: None,
@@ -815,6 +922,41 @@ mod tests {
         assert_eq!(resolve_default_role(Some("member".to_string())), "viewer");
         assert_eq!(resolve_default_role(Some("".to_string())), "viewer");
         assert_eq!(resolve_default_role(Some("root".to_string())), "viewer");
+    }
+
+    // ---- the verify-only sign-in portal -------------------------------------
+
+    fn portal(v: &str) -> Option<String> {
+        resolve_auth_portal_url(Some(v.to_string()))
+    }
+
+    #[test]
+    fn auth_portal_url_takes_http_and_https_and_trims() {
+        assert_eq!(portal("https://auth.queenmq.cloud/login").as_deref(), Some("https://auth.queenmq.cloud/login"));
+        // Plain http is a real deployment (a control plane on a private
+        // network), so it is not refused here.
+        assert_eq!(portal("http://control.internal:8080/").as_deref(), Some("http://control.internal:8080/"));
+        assert_eq!(portal("  https://auth.test/login\n").as_deref(), Some("https://auth.test/login"));
+        assert_eq!(portal("HTTPS://Auth.Test/Login").as_deref(), Some("HTTPS://Auth.Test/Login"));
+        assert_eq!(resolve_auth_portal_url(None), None, "unset is the default shape");
+    }
+
+    #[test]
+    fn auth_portal_url_refuses_anything_that_is_not_a_plain_http_url() {
+        // The value lands in an href on the ONE page served with no session at
+        // all. A script URL there would be operator-supplied script in front of
+        // every unauthenticated visitor.
+        assert_eq!(portal("javascript:alert(1)"), None);
+        assert_eq!(portal("data:text/html,<script>alert(1)</script>"), None);
+        assert_eq!(portal("  javascript:alert(1)"), None, "trimming does not launder a scheme");
+        // Relative and scheme-less values would resolve against this host, which
+        // is exactly the host that cannot sign anyone in.
+        assert_eq!(portal("/auth/login"), None);
+        assert_eq!(portal("auth.example.test"), None);
+        assert_eq!(portal(""), None);
+        // A header-splitting or attribute-breaking value never reaches the page.
+        assert_eq!(portal("https://ok.test/a b"), None);
+        assert_eq!(portal("https://ok.test/\nX"), None);
     }
 
     #[test]
@@ -940,6 +1082,70 @@ mod tests {
         assert!(cfg.is_shared_host("try.queenmq.cloud"));
         assert!(cfg.is_shared_host("shared.local:6711"));
         assert!(!cfg.is_shared_host("acme.queenmq.cloud"));
+    }
+
+    // ---- jwt audience ------------------------------------------------------
+
+    #[test]
+    fn an_unconfigured_audience_stays_unset() {
+        // Neither variable set: nothing to enforce, and every proxy that never
+        // heard of this claim keeps verifying exactly as it did.
+        assert_eq!(resolve_jwt_audience(None, None), None);
+        // A blank or whitespace value is "not configured", not "configured with
+        // nothing" (which would refuse every stamped token on a cell that
+        // templates the variable in unconditionally).
+        assert_eq!(resolve_jwt_audience(Some("".into()), None), None);
+        assert_eq!(resolve_jwt_audience(Some("   ".into()), None), None);
+        assert_eq!(resolve_jwt_audience(None, Some("")), None);
+        assert_eq!(resolve_jwt_audience(None, Some("https://")), None);
+    }
+
+    #[test]
+    fn an_explicit_audience_wins_over_the_public_url() {
+        assert_eq!(
+            resolve_jwt_audience(Some("fleet-a".into()), Some("https://cell-a.queenmq.cloud")),
+            Some("fleet-a".to_string())
+        );
+        // Trimmed and lowercased, like every other host-shaped value here.
+        assert_eq!(
+            resolve_jwt_audience(Some("  Cell-A.QueenMQ.Cloud \n".into()), None),
+            Some("cell-a.queenmq.cloud".to_string())
+        );
+    }
+
+    #[test]
+    fn the_default_audience_is_the_public_url_host() {
+        for url in [
+            "https://cell-a.queenmq.cloud",
+            "https://cell-a.queenmq.cloud/",
+            "https://cell-a.queenmq.cloud/console?next=/x",
+            "http://Cell-A.QueenMQ.Cloud",
+            // A port, a trailing root label and userinfo are all stripped: the
+            // audience is a name, and it is the same name a Host header
+            // canonicalizes to.
+            "https://cell-a.queenmq.cloud:8443",
+            "https://cell-a.queenmq.cloud./",
+            "https://user:pw@cell-a.queenmq.cloud",
+            // No scheme at all, which is what an operator who pasted a bare
+            // hostname into QUEEN_PROXY_PUBLIC_URL leaves behind.
+            "cell-a.queenmq.cloud",
+        ] {
+            assert_eq!(
+                resolve_jwt_audience(None, Some(url)),
+                Some("cell-a.queenmq.cloud".to_string()),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_derived_audience_matches_what_a_host_header_canonicalizes_to() {
+        // The default only works as a default because the two sides agree: the
+        // audience the control plane stamps is the hostname it routes to.
+        let aud = resolve_jwt_audience(None, Some("https://cell-a.queenmq.cloud")).unwrap();
+        for host in ["cell-a.queenmq.cloud", "cell-a.queenmq.cloud:443", "cell-a.queenmq.cloud."] {
+            assert_eq!(canonical_host(host).to_ascii_lowercase(), aud, "{host}");
+        }
     }
 
     // ---- jwt boot gate (spec §9b) ------------------------------------------

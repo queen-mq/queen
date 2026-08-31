@@ -610,7 +610,7 @@ BEGIN
                'startOff', r_start_idx,
                'take', r_take,
                'msgCount', r_msg_count,
-               'createdAt', to_char(r_created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+               'createdAt', to_char(r_created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
                'blob', encode(r_blob, 'base64')
            ) ORDER BY r_base), '[]'::jsonb)
     INTO v_segments
@@ -907,7 +907,7 @@ BEGIN
                    'startOff', r_start_idx,
                    'take', r_take,
                    'msgCount', r_msg_count,
-                   'createdAt', to_char(r_created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+                   'createdAt', to_char(r_created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
                    'blob', encode(r_blob, 'base64')
                ) ORDER BY r_base), '[]'::jsonb),
                COALESCE(SUM(r_take), 0)
@@ -1183,7 +1183,7 @@ BEGIN
                    'seq', r_base,
                    'startOff', r_start_idx,
                    'take', r_take,
-                   'createdAt', to_char(r_created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+                   'createdAt', to_char(r_created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
                ) ORDER BY r_base), '[]'::jsonb),
                COALESCE(SUM(r_take), 0),
                COALESCE(array_agg(r_blob ORDER BY r_base), '{}'::bytea[])
@@ -1518,7 +1518,7 @@ BEGIN
                    'startOff', r_start_idx,
                    'take', r_take,
                    'msgCount', r_msg_count,
-                   'createdAt', to_char(r_created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+                   'createdAt', to_char(r_created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
                    'blob', encode(r_blob, 'base64')
                ) ORDER BY r_base), '[]'::jsonb),
                COALESCE(SUM(r_take), 0)
@@ -2159,7 +2159,7 @@ BEGIN
                AND a_newest[v_ord] > v_now - make_interval(secs => v_win_buf) THEN
                 v_states := v_states || jsonb_build_object(
                     'p', v_name, 's', 'leased',
-                    'until', to_char(v_now + interval '250 milliseconds',
+                    'until', to_char((v_now + interval '250 milliseconds') AT TIME ZONE 'UTC',
                                      'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
                 WHILE m_i <= m_len AND m_ord[m_i] = v_ord LOOP
                     m_i := m_i + 1;   -- skip this partition's metadata block
@@ -2190,7 +2190,7 @@ BEGIN
                             'seq', m_base[m_i],
                             'startOff', (m_end[m_i] - m_base[m_i])::int,
                             'take', 1,
-                            'createdAt', to_char(m_cre[m_i], 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
+                            'createdAt', to_char(m_cre[m_i] AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
                         sel_pid := sel_pid || a_pid[v_ord];
                         sel_base := sel_base || m_base[m_i];
                         v_taken := 1;
@@ -2213,7 +2213,7 @@ BEGIN
                                 'seq', m_base[m_i],
                                 'startOff', (v_wanted - m_base[m_i])::int,
                                 'take', v_take,
-                                'createdAt', to_char(m_cre[m_i], 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
+                                'createdAt', to_char(m_cre[m_i] AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
                             sel_pid := sel_pid || a_pid[v_ord];
                             sel_base := sel_base || m_base[m_i];
                             v_taken := v_taken + v_take;
@@ -2228,7 +2228,7 @@ BEGIN
                             'seq', m_base[m_i],
                             'startOff', 0,
                             'take', v_take,
-                            'createdAt', to_char(m_cre[m_i], 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
+                            'createdAt', to_char(m_cre[m_i] AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
                         sel_pid := sel_pid || a_pid[v_ord];
                         sel_base := sel_base || m_base[m_i];
                         v_taken := v_taken + v_take;
@@ -2276,7 +2276,7 @@ BEGIN
                        'seq', r_base,
                        'startOff', r_start_idx,
                        'take', r_take,
-                       'createdAt', to_char(r_created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+                       'createdAt', to_char(r_created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
                    ) ORDER BY r_base), '[]'::jsonb),
                    COALESCE(SUM(r_take), 0),
                    COALESCE(array_agg(r_blob ORDER BY r_base), '{}'::bytea[])
@@ -2332,11 +2332,11 @@ BEGIN
                    AND v_flexp IS NOT NULL AND v_flexp > v_now THEN
                     v_states := v_states || jsonb_build_object(
                         'p', v_name, 's', 'leased',
-                        'until', to_char(v_flexp, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
+                        'until', to_char(v_flexp AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
                 ELSIF COALESCE(v_fpend, FALSE) THEN
                     v_states := v_states || jsonb_build_object(
                         'p', v_name, 's', 'leased',
-                        'until', to_char(v_now + interval '250 milliseconds',
+                        'until', to_char((v_now + interval '250 milliseconds') AT TIME ZONE 'UTC',
                                          'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
                 ELSE
                     v_states := v_states || jsonb_build_object('p', v_name, 's', 'empty');
@@ -2350,11 +2350,11 @@ BEGIN
                AND a_lexp[v_ord] IS NOT NULL AND a_lexp[v_ord] > v_now THEN
                 v_states := v_states || jsonb_build_object(
                     'p', v_name, 's', 'leased',
-                    'until', to_char(a_lexp[v_ord], 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
+                    'until', to_char(a_lexp[v_ord] AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
             ELSIF a_lastoff[v_ord] > COALESCE(a_comm[v_ord], -1) THEN
                 v_states := v_states || jsonb_build_object(
                     'p', v_name, 's', 'leased',
-                    'until', to_char(v_now + interval '250 milliseconds',
+                    'until', to_char((v_now + interval '250 milliseconds') AT TIME ZONE 'UTC',
                                      'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
             ELSE
                 v_states := v_states || jsonb_build_object('p', v_name, 's', 'empty');
@@ -2397,7 +2397,7 @@ BEGIN
             IF z_pending[i] THEN
                 v_states := v_states || jsonb_build_object(
                     'p', v_parts[z_ord[i]], 's', 'leased',
-                    'until', to_char(v_now + interval '250 milliseconds',
+                    'until', to_char((v_now + interval '250 milliseconds') AT TIME ZONE 'UTC',
                                      'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
             ELSE
                 v_states := v_states || jsonb_build_object(
