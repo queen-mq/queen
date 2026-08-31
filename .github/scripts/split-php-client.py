@@ -53,13 +53,21 @@ def split(prefix, source):
 
 
 def legacy_tip(source):
-    """Last commit that still carried the package at its pre-rename path."""
-    move = git("rev-list", "-1", source, "--", LEGACY_PREFIX).decode().strip()
-    if not move:
-        return None
-    parent = git("rev-parse", move + "^").decode().strip()
-    git("rev-parse", "--verify", parent + ":" + LEGACY_PREFIX)
-    return parent
+    """Newest ancestor of `source` whose tree still carries the pre-rename path.
+
+    Not the rename commit's first parent: that is the branch point. Anything
+    that touched the legacy path on master after the branch was cut arrives
+    through the merge's *second* parent, and taking the first one drops those
+    commits from the graft, so the mirror diverges from history it already has.
+    """
+    for revision in git("rev-list", "--topo-order", source).decode().split():
+        probe = subprocess.run(
+            ("git", "rev-parse", "--verify", "-q", revision + ":" + LEGACY_PREFIX),
+            capture_output=True,
+        )
+        if probe.returncode == 0:
+            return revision
+    return None
 
 
 def rewrite(split_commit, graft=None, rewritten=None):
