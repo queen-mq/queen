@@ -9,6 +9,8 @@ sourceOfTruth:
   - benchmark-queen/2026-07-29-vm-campaign/results.md
   - benchmark-queen/2026-07-30-1h-soak/soak1h.json
   - benchmark-queen/2026-07-29-vm-campaign/goload/main.go
+  - benchmark-queen/laravel-supervisors/QUALIFICATION_SUMMARY_20260829.md
+  - benchmark-queen/laravel-supervisors/QUALIFICATION_REPORT_20260829.md
 digest: >-
   The two headline figures, each with the conditions that make it true. Sustained throughput:
   86,369,975,300 messages in 24 hours, about 1,000,000 msg/s per side, 0 restarts and broker
@@ -34,6 +36,7 @@ build.
 | [A million ordered partitions](/benchmarks/cardinality-1m) | 1,000,000 ordered partitions in one queue, created during the run at 1,000/s, serving 200,000 msg/s with 0 push, pop or ack errors | **Explicit acks** (leased pops), retention on with `RETENTION_PARALLELISM=16`, **deduplication off**, 1,000 partitions active per second rotating through the space, 300 consumers, 32 vCPU / 62 GiB, Queen 1.0.0. One hour, of which 43 minutes on the completed space |
 | [Ordered pipeline](/benchmarks/ordered-pipeline) | 88,503,408 messages verified across 4 stages and 1000 partitions with 0 duplicates, 0 gaps and 0 order violations | 25,000 events/s for 600 s, deduplication window 300 s, explicit bulk acks, per-stage verifier over per-property logs |
 | [Multi-tenant cell](/benchmarks/multitenant-cell) | A 2-core cell behind the proxy holding above 2400 msg/s with zero loss; 12 tenants for 1 hour with zero cross-tenant deliveries | **Deduplication off**, **429 retry disabled**, enforcement on, all tenants sharing one queue and one consumer group |
+| [Laravel supervisors](/benchmarks/laravel-supervisors) | Queen Rust master PSS 2.9 MiB against Horizon's 65.0 MiB; 307.67 against 294.30 completed jobs/s | **Diagnostic only:** Docker Desktop arm64, four workers, 2,000 jobs with 10 ms work, three runs per engine, prefetch 4 without the renewal helper now required for production |
 
 Also: [cross-broker comparison](/benchmarks/comparison) and
 [method, rig and archive](/benchmarks/method/).

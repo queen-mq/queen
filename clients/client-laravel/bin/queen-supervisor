@@ -1,0 +1,70 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use Queen\Laravel\Supervisor\Binary\SupervisorBinary;
+
+$autoload = $GLOBALS['_composer_autoload_path'] ?? dirname(__DIR__) . '/vendor/autoload.php';
+if (!is_string($autoload) || !is_file($autoload)) {
+    fwrite(STDERR, "queen-supervisor: cannot locate the Composer autoloader.\n");
+    exit(70);
+}
+require_once $autoload;
+
+try {
+    $platform = SupervisorBinary::platform();
+    $launchDirectory = getcwd();
+    if (!is_string($launchDirectory) || $launchDirectory === '') {
+        throw new RuntimeException('cannot determine the Laravel application directory');
+    }
+    $installBase = getenv('QUEEN_SUPERVISOR_INSTALL_PATH');
+    if (!is_string($installBase) || trim($installBase) === '') {
+        $storage = getenv('LARAVEL_STORAGE_PATH');
+        if (!is_string($storage) || trim($storage) === '') {
+            $storage = $launchDirectory . DIRECTORY_SEPARATOR . 'storage';
+        }
+        $installBase = rtrim($storage, DIRECTORY_SEPARATOR)
+            . DIRECTORY_SEPARATOR . 'queen-supervisor-bin';
+    }
+    if (!function_exists('pcntl_exec')) {
+        throw new RuntimeException('ext-pcntl is required so the Composer launcher can replace itself');
+    }
+
+    $arguments = array_slice($argv, 1);
+    $hasConfig = false;
+    $hasArtisan = false;
+    for ($index = 0, $count = count($arguments); $index < $count; $index++) {
+        $flag = $arguments[$index];
+        if ($flag === '--config') {
+            $hasConfig = true;
+        } elseif ($flag === '--artisan') {
+            $hasArtisan = true;
+        }
+        if (!in_array($flag, ['--config', '--artisan', '--php'], true) || !isset($arguments[$index + 1])) {
+            continue;
+        }
+
+        $value = $arguments[$index + 1];
+        $isAbsolute = str_starts_with($value, DIRECTORY_SEPARATOR);
+        $isRelativePath = $flag !== '--php' || str_contains($value, DIRECTORY_SEPARATOR);
+        if (!$isAbsolute && $isRelativePath && !str_starts_with($value, '-')) {
+            $arguments[$index + 1] = $launchDirectory . DIRECTORY_SEPARATOR . $value;
+        }
+        $index++;
+    }
+    if (!$hasConfig && !$hasArtisan) {
+        $arguments[] = '--artisan';
+        $arguments[] = $launchDirectory . DIRECTORY_SEPARATOR . 'artisan';
+    }
+
+    $binary = SupervisorBinary::pinInstalledForExecution($installBase, $platform);
+    pcntl_exec($binary, $arguments);
+    $error = error_get_last();
+    throw new RuntimeException(
+        'cannot execute the installed binary' . (isset($error['message']) ? ': ' . $error['message'] : ''),
+    );
+} catch (Throwable $exception) {
+    fwrite(STDERR, 'queen-supervisor: ' . $exception->getMessage() . "\n");
+    exit(70);
+}

@@ -96,6 +96,24 @@ class Retry429Test extends TestCase
         $this->assertLessThanOrEqual(2400, $delay);
     }
 
+    public function testRetryAfterIsCappedBeforeJitterToProtectWorkerSleep(): void
+    {
+        $policy = new Retry429Policy(10, 500, 30000);
+
+        $delay = $policy->delayMillis(0, PHP_FLOAT_MAX);
+
+        $this->assertGreaterThanOrEqual(24000, $delay);
+        $this->assertLessThanOrEqual(36000, $delay);
+    }
+
+    public function testConfiguredDelayCapHasAProductionSafetyCeiling(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('retry429.capMs must be between 1 and 300000');
+
+        Retry429Policy::forKind(['capMs' => Retry429Policy::MAX_CAP_MILLIS + 1]);
+    }
+
     public function testNegativeRetryAfterFallsBackToBackoff(): void
     {
         $policy = new Retry429Policy(10, 500, 30000);
@@ -200,6 +218,19 @@ class Retry429Test extends TestCase
             $client->get('/api/v1/pop/queue/orders', null, null, Retry429Policy::KIND_POP);
         } finally {
             $this->assertSame(2, $handler->count());
+        }
+    }
+
+    public function testNonFiniteRetryAfterIsNotExposedAsAValidDelay(): void
+    {
+        $handler = new PlanHandler([], self::rateLimited('1e309'));
+        $client = $this->clientFor($handler, ['maxAttempts' => 1, 'baseMs' => 1, 'capMs' => 5]);
+
+        try {
+            $client->get('/api/v1/status');
+            $this->fail('expected an exhausted 429 response');
+        } catch (HttpException $error) {
+            $this->assertNull($error->retryAfterSeconds);
         }
     }
 

@@ -5,8 +5,10 @@ namespace Queen\Http;
 use GuzzleHttp\Client;
 use GuzzleHttp\Promise\PromiseInterface;
 use GuzzleHttp\Promise\Utils as PromiseUtils;
+use JsonException;
 use Psr\Http\Message\ResponseInterface;
 use Queen\Exceptions\HttpException;
+use UnexpectedValueException;
 
 class HttpClient
 {
@@ -87,6 +89,28 @@ class HttpClient
         return $this->executeRequestAsync($this->resolveUrl($affinityKey) . $path, 'GET', null, $requestTimeoutMillis);
     }
 
+    /**
+     * Async GET with the same network/5xx retry and backend failover boundary
+     * as get(). HTTP 4xx responses, including 429, are terminal here: unlike
+     * the synchronous API an async batch must not sleep the shared event loop.
+     */
+    public function getAsyncWithFailover(string $path, ?int $requestTimeoutMillis = null, ?string $affinityKey = null): PromiseInterface
+    {
+        if ($this->loadBalancer === null || !$this->enableFailover) {
+            return $this->requestAsyncWithRetry('GET', $path, null, $requestTimeoutMillis, $affinityKey);
+        }
+
+        $firstUrl = $this->loadBalancer->getNextUrl($affinityKey);
+        $urls = [$firstUrl];
+        foreach ($this->loadBalancer->getAllUrls() as $url) {
+            if ($url !== $firstUrl) {
+                $urls[] = $url;
+            }
+        }
+
+        return $this->requestAsyncAcrossUrls($urls, 0, 'GET', $path, null, $requestTimeoutMillis);
+    }
+
     public function postAsync(string $path, ?array $body = null, ?int $requestTimeoutMillis = null, ?string $affinityKey = null): PromiseInterface
     {
         return $this->executeRequestAsync($this->resolveUrl($affinityKey) . $path, 'POST', $body, $requestTimeoutMillis);
@@ -160,16 +184,27 @@ class HttpClient
         $effectiveTimeout = $requestTimeoutMillis ?? $this->timeoutMillis;
 
         $headers = ['Content-Type' => 'application/json'];
+        foreach ($this->headers as $name => $value) {
+            // An explicitly configured bearer token is authoritative. This is
+            // especially important for the supervisor's read-only token: a
+            // stale worker Authorization header must not silently override it.
+            if ($this->bearerToken !== null && strcasecmp((string) $name, 'Authorization') === 0) {
+                continue;
+            }
+            $headers[$name] = $value;
+        }
         if ($this->bearerToken !== null) {
             $headers['Authorization'] = "Bearer {$this->bearerToken}";
         }
-        $headers = array_merge($headers, $this->headers);
 
         $options = [
             'headers' => $headers,
             'timeout' => $effectiveTimeout / 1000,
             'connect_timeout' => 5,
             'http_errors' => false,
+            // A broker endpoint is authoritative. Following redirects could
+            // forward bearer credentials or custom headers to another host.
+            'allow_redirects' => false,
         ];
 
         if ($body !== null) {
@@ -191,13 +226,15 @@ class HttpClient
 
         if ($statusCode >= 400) {
             $error = "HTTP {$statusCode}";
+            $serverError = null;
             $errorCode = null;
             $reason = null;
             $detail = null;
             if ($responseBody) {
                 $decoded = json_decode($responseBody, true);
-                if (isset($decoded['error'])) {
-                    $error = $decoded['error'];
+                if (isset($decoded['error']) && is_string($decoded['error'])) {
+                    $serverError = $decoded['error'];
+                    $error = $serverError;
                 }
                 // Proxy error contract: 429 {error, code: 'rate_limited' |
                 // 'quota_exceeded'} with Retry-After (seconds); 403 {error,
@@ -235,14 +272,34 @@ class HttpClient
                 $message .= " ({$detail})";
             }
 
-            throw new HttpException($message, $statusCode, 0, null, $errorCode, $retryAfterSeconds, $reason, $detail);
+            throw new HttpException(
+                $message,
+                $statusCode,
+                0,
+                null,
+                $errorCode,
+                $retryAfterSeconds,
+                $reason,
+                $detail,
+                $serverError,
+            );
         }
 
         if (empty($responseBody)) {
             return null;
         }
 
-        return json_decode($responseBody, true);
+        try {
+            return json_decode($responseBody, true, 512, JSON_THROW_ON_ERROR);
+        } catch (JsonException $exception) {
+            // A malformed success body is never an empty pop or a successful
+            // acknowledgement. Surface it as a transport failure so the normal
+            // retry/failover boundary runs and queue consumers fail closed.
+            throw new UnexpectedValueException(
+                'Queen returned a malformed JSON response: ' . $exception->getMessage(),
+                previous: $exception,
+            );
+        }
     }
 
     /**
@@ -257,7 +314,7 @@ class HttpClient
 
         $seconds = (float) $value;
 
-        return $seconds >= 0 ? $seconds : null;
+        return is_finite($seconds) && $seconds >= 0 ? $seconds : null;
     }
 
     private function executeRequest(string $url, string $method, ?array $body = null, ?int $requestTimeoutMillis = null): mixed
@@ -295,12 +352,100 @@ class HttpClient
         }
     }
 
-    private function executeRequestAsync(string $url, string $method, ?array $body = null, ?int $requestTimeoutMillis = null): PromiseInterface
+    private function executeRequestAsync(
+        string $url,
+        string $method,
+        ?array $body = null,
+        ?int $requestTimeoutMillis = null,
+        int $delayMillis = 0,
+    ): PromiseInterface
     {
         $options = $this->buildRequestOptions($method, $body, $requestTimeoutMillis);
+        if ($delayMillis > 0) {
+            // Guzzle schedules this delay on its multi handler. It does not
+            // block unrelated promises in the supervisor's polling batch.
+            $options['delay'] = $delayMillis;
+        }
 
         return $this->guzzle->requestAsync($method, $url, $options)->then(
             fn(ResponseInterface $response) => $this->parseResponse($response)
+        );
+    }
+
+    private function requestAsyncWithRetry(
+        string $method,
+        string $path,
+        ?array $body,
+        ?int $requestTimeoutMillis,
+        ?string $affinityKey,
+        int $attempt = 0,
+    ): PromiseInterface
+    {
+        $url = $this->resolveUrl($affinityKey);
+        $delayMillis = $attempt === 0 ? 0 : $this->retryDelayMillis * (2 ** ($attempt - 1));
+
+        return $this->executeRequestAsync($url . $path, $method, $body, $requestTimeoutMillis, $delayMillis)->then(
+            null,
+            function (mixed $reason) use ($method, $path, $body, $requestTimeoutMillis, $affinityKey, $attempt): PromiseInterface {
+                $error = $reason instanceof \Throwable
+                    ? $reason
+                    : new \RuntimeException('Queen async request failed with a non-exception rejection.');
+                $statusCode = $this->getStatusCode($error);
+                $nextAttempt = $attempt + 1;
+                if (($statusCode >= 400 && $statusCode < 500) || $nextAttempt >= $this->retryAttempts) {
+                    throw $error;
+                }
+
+                return $this->requestAsyncWithRetry(
+                    $method,
+                    $path,
+                    $body,
+                    $requestTimeoutMillis,
+                    $affinityKey,
+                    $nextAttempt,
+                );
+            },
+        );
+    }
+
+    /** @param list<string> $urls */
+    private function requestAsyncAcrossUrls(
+        array $urls,
+        int $index,
+        string $method,
+        string $path,
+        ?array $body,
+        ?int $requestTimeoutMillis,
+    ): PromiseInterface
+    {
+        $url = $urls[$index];
+
+        return $this->executeRequestAsync($url . $path, $method, $body, $requestTimeoutMillis)->then(
+            function (mixed $result) use ($url): mixed {
+                $this->loadBalancer?->markHealthy($url);
+                return $result;
+            },
+            function (mixed $reason) use ($urls, $index, $method, $path, $body, $requestTimeoutMillis, $url): PromiseInterface {
+                $error = $reason instanceof \Throwable
+                    ? $reason
+                    : new \RuntimeException('Queen async request failed with a non-exception rejection.');
+                $statusCode = $this->getStatusCode($error);
+                if ($statusCode === 0 || $statusCode >= 500) {
+                    $this->loadBalancer?->markUnhealthy($url);
+                }
+                if (($statusCode >= 400 && $statusCode < 500) || !isset($urls[$index + 1])) {
+                    throw $error;
+                }
+
+                return $this->requestAsyncAcrossUrls(
+                    $urls,
+                    $index + 1,
+                    $method,
+                    $path,
+                    $body,
+                    $requestTimeoutMillis,
+                );
+            },
         );
     }
 

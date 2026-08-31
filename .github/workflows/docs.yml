@@ -24,6 +24,9 @@ on:
       - "clients/client-js/test-v2/**"
       - "clients/client-py/tests/**"
       - "clients/client-go/tests/**"
+      - "clients/client-laravel/**"
+      - "supervisor/**"
+      - "README.md"
       - "examples/**"
       - ".github/workflows/docs.yml"
   pull_request:
@@ -40,6 +43,9 @@ on:
       - "clients/client-js/test-v2/**"
       - "clients/client-py/tests/**"
       - "clients/client-go/tests/**"
+      - "clients/client-laravel/**"
+      - "supervisor/**"
+      - "README.md"
       - "examples/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:

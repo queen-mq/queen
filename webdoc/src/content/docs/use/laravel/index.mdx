@@ -1,0 +1,174 @@
+---
+title: Laravel queues
+description: "Install the Queen queue connection, dispatch an existing Laravel job, run a worker, and choose how to supervise it."
+type: quickstart
+tier: use
+status: preview
+sidebar:
+  order: 8
+  label: Laravel
+sourceOfTruth:
+  - clients/client-laravel/composer.json
+  - clients/client-laravel/config/queen.php
+  - clients/client-laravel/src/Laravel/QueenServiceProvider.php
+  - clients/client-laravel/src/Laravel/Queue/QueenConnector.php
+  - clients/client-laravel/src/Laravel/Queue/QueenQueue.php
+  - clients/client-laravel/src/Laravel/Queue/QueenJob.php
+  - clients/client-laravel/src/Laravel/Queue/ProcessLeaseRenewer.php
+verifiedBy:
+  - clients/client-laravel/tests/LaravelServiceProviderTest.php
+  - clients/client-laravel/tests/LaravelQueueDriverTest.php
+  - clients/client-laravel/tests/ProcessLeaseRenewerTest.php
+---
+
+Queen can play two separate roles in a Laravel application:
+
+1. The `queen` queue connection stores Laravel jobs in Queen instead of Redis or a database table.
+2. The optional Queen supervisor starts, stops and balances ordinary `queue:work queen` processes.
+
+You can use the queue connection with your existing process manager and add the supervisor later.
+Your jobs still implement Laravel's normal `ShouldQueue` contract and keep their middleware, retry,
+backoff and failed-job events.
+
+<Aside type="caution">
+The Laravel supervisor and dashboard are currently preview features. The queue driver is usable on
+its own, but the production supervisor qualification is not complete on every target. Start with the
+safe settings on this page and read [Production checks](/use/laravel/supervisors#production-checks)
+before replacing Horizon.
+</Aside>
+
+## Before you start
+
+You need PHP 8.3 or newer, a Laravel application and a reachable Queen broker. If Queen is not
+running yet, [start the local Compose stack](/deploy/compose) first.
+
+The queue driver itself does not require the process-control extensions. The Queen supervisors are
+Unix-only today and add `pcntl` and `posix` requirements.
+
+## Install the queue connection
+
+<Steps>
+
+1. **Install the Composer package.**
+
+   ```bash
+   composer require queen-mq/php-client
+   ```
+
+2. **Publish the configuration.**
+
+   ```bash
+   php artisan vendor:publish --tag=queen-config
+   ```
+
+   Package discovery registers the service provider, the `Queen` facade and a `queen` queue
+   connection. You do not need to add that connection to `config/queue.php` unless you want to
+   override it explicitly.
+
+3. **Point Laravel at Queen.**
+
+   ```dotenv
+   QUEUE_CONNECTION=queen
+   QUEEN_URL=http://127.0.0.1:6632
+   QUEEN_QUEUE=default
+   QUEEN_CONSUMER_GROUP=laravel
+   QUEEN_RETRY_AFTER=90
+   QUEEN_PREFETCH=1
+   QUEEN_ACK_BATCH=1
+   ```
+
+   Add `QUEEN_BEARER_TOKEN` when the broker requires authentication. Keep secrets outside source
+   control. Give each logical application and environment a stable consumer-group name: two
+   applications sharing one group intentionally share one cursor and split the work.
+
+4. **Dispatch an existing job.** Nothing changes at the call site.
+
+   ```php
+   use App\Jobs\GenerateInvoice;
+
+   GenerateInvoice::dispatch($invoiceId);
+   ```
+
+5. **Run one worker.**
+
+   ```bash
+   php artisan queue:work queen --queue=default --timeout=60 --tries=3
+   ```
+
+   `QUEEN_RETRY_AFTER` is the lease duration. It must be longer than the worker timeout and the
+   longest job runtime. Stop this first worker with the same signal you use for any Laravel worker.
+
+</Steps>
+
+At this point the integration works without either Queen supervisor. Keep your current systemd,
+Kubernetes, Supervisor or platform process definition if all you need is a fixed worker count.
+
+## Start with the safe delivery profile
+
+The default `prefetch=1` and `ack_batch=1` preserve one synchronous acknowledgement boundary per
+job. Use this profile while validating a migration and whenever every job, including safety margin,
+fits inside `retry_after`.
+
+Values above one reduce broker round trips, but they widen the at-least-once redelivery window. A
+Laravel worker may also pause while it still owns a prefetched tail. The Queen connector therefore
+rejects `prefetch > 1` unless lease renewal is enabled, whether workers are started by Queen or by
+another process manager.
+
+```dotenv
+QUEEN_PREFETCH=4
+QUEEN_ACK_BATCH=1
+QUEEN_LEASE_RENEWAL=true
+```
+
+Enable lease renewal even with `prefetch=1` when the longest runtime cannot be bounded safely. Lease
+renewal starts a small PHP helper beside each worker. It extends the active lease and fences the
+worker if renewal can no longer finish safely. An exact-PID `SIGCHLD` watchdog also kills the
+owning worker if that helper disappears while a lease is active. This Unix CLI path requires
+PCNTL/POSIX support, and application code must not replace Queen's signal handler. Renewal cannot
+make external side effects exactly once, so jobs must remain idempotent.
+
+## What changes from another Laravel connection
+
+| Area | What stays the same | What changes with Queen |
+| --- | --- | --- |
+| Job code | `ShouldQueue`, `dispatch()`, middleware, timeout, tries and backoff | Storage and delivery use Queen leases and consumer groups |
+| Delays | Laravel delayed dispatch and positive backoff | Queen timers store the delay |
+| Failures | Laravel's failed-job commands remain the command index | Queen also retains a synchronized DLQ snapshot by default |
+| Ordering | Laravel queue names | Implement `QueenPartitionable` when one entity needs its own FIFO lane |
+| Delivery | At-least-once | A lease expiry or worker crash can redeliver a job |
+| Clearing | Connection-specific | Queen does not yet provide one atomic clear across ready jobs, live leases and Laravel timers |
+
+## Choose how workers are managed
+
+| Choice | Use it when | Master process |
+| --- | --- | --- |
+| Existing process manager | You want a fixed number of `queue:work` processes | Whatever you already operate |
+| Queen PHP | You want Horizon-like local pools with no native artifact | Laravel remains loaded in one PHP master |
+| Queen Rust | You want the smallest control plane and crash-loop circuit breaking | Rust, after one temporary Artisan configuration load |
+
+The PHP and Rust engines read the same configuration and publish the same state protocol. Begin
+with [Worker supervisors](/use/laravel/supervisors), then enable the
+[Laravel dashboard](/use/laravel/dashboard) only after authentication is in place.
+
+<CardGrid>
+  <LinkCard
+    href="/use/laravel/supervisors"
+    title="Worker supervisors"
+    description="Configure pools, autoscaling, the PHP fallback and the optimized Rust engine."
+  />
+  <LinkCard
+    href="/use/laravel/dashboard"
+    title="Supervisor dashboard"
+    description="Enable the local panel, authorize it and understand what it deliberately does not expose."
+  />
+  <LinkCard
+    href="/use/laravel/migrate-from-horizon"
+    title="Migrate from Horizon"
+    description="Map the configuration, canary Queen, drain Redis and keep a rollback boundary."
+  />
+  <LinkCard
+    href="/use/laravel/queen-vs-horizon"
+    title="Queen or Horizon"
+    description="A direct comparison, including the places where Horizon remains the better choice."
+  />
+</CardGrid>

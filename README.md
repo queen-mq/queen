@@ -309,6 +309,27 @@ is explicit.
 binary on the same port · Prometheus metrics · JWT/JWKS auth · payload encryption · disk spool for
 database outages · HA replicas.
 
+## Laravel queues and lightweight supervision
+
+The PHP package is a native Laravel queue driver and includes a portable PHP
+supervisor. The separate [`queen-supervisor`](supervisor/README.md) binary
+provides the same process orchestration with a low-memory Rust control plane.
+Both start ordinary `php artisan queue:work` children; the broker remains
+responsible only for messages, leases, timers, the DLQ and queue metrics.
+
+Pools can scale from group-specific `effectivePending` depth (`size`) or from
+backlog multiplied by observed Laravel job duration (`time`). The two engines
+share resolved configuration plus local status, pause, continue and terminate
+commands. Multiple `QUEEN_URLS` provide broker-endpoint failover.
+
+The current supervisor topology is deliberately single-active: run exactly one
+supervisor replica per application/consumer group. Its filesystem lock excludes
+a second local process, but Queen does not yet provide a distributed fenced
+leader lease. Many worker processes are supported; two autonomous supervisor
+masters on different hosts are not. See the [PHP/Laravel client
+guide](clients/client-laravel/README.md#worker-supervisor) for configuration,
+Unix/`pcntl` requirements, deployment and secret handling.
+
 ## Where Queen fits
 
 - **Per-customer or per-account workflows**: `customer-123` is a lane; a slow customer delays only itself.

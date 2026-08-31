@@ -4,6 +4,7 @@ namespace Queen;
 
 use Queen\Http\HttpClient;
 use Queen\Http\LoadBalancer;
+use Queen\Http\Retry429Policy;
 use Queen\Buffer\BufferManager;
 use Queen\Builders\QueueBuilder;
 use Queen\Builders\TransactionBuilder;
@@ -153,6 +154,10 @@ class Queen
      */
     public function ack(array|string $message, bool|string $status = true, array $context = []): array
     {
+        $affinityKey = is_string($context['affinityKey'] ?? null) && $context['affinityKey'] !== ''
+            ? $context['affinityKey']
+            : null;
+
         // Batch ack
         $isBatch = is_array($message) && (isset($message[0]) || empty($message));
 
@@ -177,7 +182,7 @@ class Queen
                 $result = $this->httpClient->post('/api/v1/ack/batch', [
                     'acknowledgments' => $acknowledgments,
                     'consumerGroup' => $context['group'] ?? null,
-                ]);
+                ], affinityKey: $affinityKey);
 
                 if (is_array($result) && isset($result['error'])) {
                     return ['success' => false, 'error' => $result['error']];
@@ -218,7 +223,7 @@ class Queen
         }
 
         try {
-            $result = $this->httpClient->post('/api/v1/ack', $body);
+            $result = $this->httpClient->post('/api/v1/ack', $body, affinityKey: $affinityKey);
 
             if (is_array($result) && isset($result['error'])) {
                 return ['success' => false, 'error' => $result['error']];
@@ -236,9 +241,15 @@ class Queen
 
     /**
      * @param string|array $messageOrLeaseId Lease ID string, message array, or array of messages
+     * @param int|null $seconds New lease horizon. Null retains the broker's
+     *                          backwards-compatible 60 second default.
      */
-    public function renew(string|array $messageOrLeaseId): array
+    public function renew(string|array $messageOrLeaseId, ?int $seconds = null): array
     {
+        if ($seconds !== null && ($seconds < 1 || $seconds > 2_147_483_647)) {
+            throw new \InvalidArgumentException('Lease renewal seconds must be in the range 1..2147483647');
+        }
+
         $leaseIds = [];
 
         if (is_string($messageOrLeaseId)) {
@@ -268,11 +279,38 @@ class Queen
         $results = [];
         foreach ($leaseIds as $leaseId) {
             try {
-                $result = $this->httpClient->post("/api/v1/lease/{$leaseId}/extend", []);
+                $result = $this->httpClient->post(
+                    '/api/v1/lease/' . rawurlencode((string) $leaseId) . '/extend',
+                    $seconds === null ? [] : ['seconds' => $seconds],
+                );
+                $renewed = is_array($result) ? ($result['renewed'] ?? null) : null;
+                $expires = is_array($result)
+                    ? ($result['newExpiresAt'] ?? $result['expiresAt'] ?? $result['lease_expires_at'] ?? null)
+                    : null;
+                // Only the affected-row count proves that the broker still
+                // owned and extended this lease. An expiry string is useful
+                // scheduling metadata, but must never turn renewed:0 (or a
+                // legacy/ambiguous response without renewed) into success.
+                $hasRenewalEvidence = is_int($renewed) && $renewed > 0;
+                $hasValidExpiry = $expires === null
+                    || is_string($expires) && self::isRfc3339Timestamp($expires);
+                if (!is_array($result)
+                    || ($result['success'] ?? null) !== true
+                    || !$hasRenewalEvidence
+                    || !$hasValidExpiry) {
+                    $results[] = [
+                        'leaseId' => $leaseId,
+                        'success' => false,
+                        'error' => is_array($result) && is_string($result['error'] ?? null)
+                            ? $result['error']
+                            : 'Queen rejected or could not verify the lease renewal',
+                    ];
+                    continue;
+                }
                 $results[] = [
                     'leaseId' => $leaseId,
                     'success' => true,
-                    'newExpiresAt' => $result['newExpiresAt'] ?? $result['lease_expires_at'] ?? null,
+                    'newExpiresAt' => $expires,
                 ];
             } catch (\Throwable $error) {
                 $results[] = ['leaseId' => $leaseId, 'success' => false, 'error' => $error->getMessage()];
@@ -283,6 +321,26 @@ class Queen
         return is_string($messageOrLeaseId) || !isset($messageOrLeaseId[0])
             ? $results[0]
             : $results;
+    }
+
+    private static function isRfc3339Timestamp(string $value): bool
+    {
+        if (preg_match(
+            '/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/D',
+            $value,
+        ) !== 1) {
+            return false;
+        }
+
+        try {
+            new \DateTimeImmutable($value);
+        } catch (\Exception) {
+            return false;
+        }
+
+        $errors = \DateTimeImmutable::getLastErrors();
+        return $errors === false
+            || $errors['warning_count'] === 0 && $errors['error_count'] === 0;
     }
 
     // ===========================
@@ -306,12 +364,12 @@ class Queen
     public function deleteConsumerGroup(string $consumerGroup, bool $deleteMetadata = true): mixed
     {
         $dm = $deleteMetadata ? 'true' : 'false';
-        return $this->httpClient->delete("/api/v1/consumer-groups/" . urlencode($consumerGroup) . "?deleteMetadata={$dm}");
+        return $this->httpClient->delete('/api/v1/consumer-groups/' . rawurlencode($consumerGroup) . "?deleteMetadata={$dm}");
     }
 
     public function updateConsumerGroupTimestamp(string $consumerGroup, string $timestamp): mixed
     {
-        return $this->httpClient->post("/api/v1/consumer-groups/" . urlencode($consumerGroup) . "/subscription", [
+        return $this->httpClient->post('/api/v1/consumer-groups/' . rawurlencode($consumerGroup) . '/subscription', [
             'subscriptionTimestamp' => $timestamp,
         ]);
     }
@@ -337,12 +395,14 @@ class Queen
     private function normalizeConfig(string|array $config): array
     {
         if (is_string($config)) {
-            return array_merge(Defaults::CLIENT_DEFAULTS, ['urls' => [$config]]);
+            $normalized = array_merge(Defaults::CLIENT_DEFAULTS, ['urls' => [$config]]);
+            return $this->validateConfig($normalized);
         }
 
         // Array of URLs (sequential numeric keys)
         if (isset($config[0])) {
-            return array_merge(Defaults::CLIENT_DEFAULTS, ['urls' => $config]);
+            $normalized = array_merge(Defaults::CLIENT_DEFAULTS, ['urls' => $config]);
+            return $this->validateConfig($normalized);
         }
 
         // Config array
@@ -356,7 +416,120 @@ class Queen
             throw new \InvalidArgumentException('Must provide urls or url in configuration');
         }
 
-        return $normalized;
+        return $this->validateConfig($normalized);
+    }
+
+    private function validateConfig(array $config): array
+    {
+        if (!is_array($config['urls']) || $config['urls'] === []) {
+            throw new \InvalidArgumentException('urls must be a non-empty array');
+        }
+
+        $config['urls'] = array_values(array_map(function (mixed $url): string {
+            if (!is_string($url) || trim($url) === '') {
+                throw new \InvalidArgumentException('Every Queen URL must be a non-empty string');
+            }
+            $url = rtrim(trim($url), '/');
+            $parts = parse_url($url);
+            if (!is_array($parts)
+                || !in_array(strtolower((string) ($parts['scheme'] ?? '')), ['http', 'https'], true)
+                || !is_string($parts['host'] ?? null)
+                || $parts['host'] === ''
+                || preg_match('/[\x00-\x20\x7F]/', $parts['host']) === 1
+                || isset($parts['user'])
+                || isset($parts['pass'])
+                || isset($parts['query'])
+                || isset($parts['fragment'])) {
+                throw new \InvalidArgumentException("Invalid Queen URL [{$url}]; expected http:// or https://");
+            }
+            return $url;
+        }, $config['urls']));
+
+        foreach ([
+            'timeoutMillis' => 1,
+            'retryAttempts' => 1,
+            'retryDelayMillis' => 0,
+            'affinityHashRing' => 1,
+            'healthRetryAfterMillis' => 0,
+        ] as $name => $minimum) {
+            $config[$name] = $this->normalizeInteger($config[$name] ?? null, $name, $minimum);
+        }
+
+        if (!in_array($config['loadBalancingStrategy'], ['affinity', 'round-robin', 'session'], true)) {
+            throw new \InvalidArgumentException('loadBalancingStrategy must be affinity, round-robin, or session');
+        }
+        if (!is_bool($config['enableFailover'])) {
+            throw new \InvalidArgumentException('enableFailover must be a boolean');
+        }
+        if ($config['bearerToken'] !== null && (
+            !is_string($config['bearerToken'])
+            || $config['bearerToken'] === ''
+            || preg_match('/[\x00-\x20\x7F]/', $config['bearerToken']) === 1
+        )) {
+            throw new \InvalidArgumentException('bearerToken must be a non-empty header-safe string or null');
+        }
+        if (!is_array($config['headers'])) {
+            throw new \InvalidArgumentException('headers must be an array');
+        }
+        foreach ($config['headers'] as $name => $value) {
+            if (!is_string($name)
+                || preg_match('/^[!#$%&\'*+\-.^_`|~0-9A-Za-z]+$/D', $name) !== 1) {
+                throw new \InvalidArgumentException('Header names must be non-empty HTTP token strings');
+            }
+
+            $values = is_array($value) ? $value : [$value];
+            if ($values === []) {
+                throw new \InvalidArgumentException("Header [{$name}] must contain at least one value");
+            }
+            foreach ($values as $headerValue) {
+                if (!is_scalar($headerValue) || preg_match('/[\r\n]/', (string) $headerValue) === 1) {
+                    throw new \InvalidArgumentException("Header [{$name}] contains an invalid value");
+                }
+            }
+            $config['headers'][$name] = is_array($value)
+                ? array_map(static fn (mixed $item): string => (string) $item, $values)
+                : (string) $value;
+        }
+        if (!is_array($config['retry429'])) {
+            throw new \InvalidArgumentException('retry429 must be an array');
+        }
+        $unknownRetryKeys = array_diff(array_keys($config['retry429']), ['maxAttempts', 'baseMs', 'capMs']);
+        if ($unknownRetryKeys !== []) {
+            throw new \InvalidArgumentException('retry429 contains unknown option [' . reset($unknownRetryKeys) . ']');
+        }
+        foreach ($config['retry429'] as $name => $value) {
+            $config['retry429'][$name] = $this->normalizeInteger($value, "retry429.{$name}", 0);
+        }
+        if (($config['retry429']['capMs'] ?? 1) > Retry429Policy::MAX_CAP_MILLIS) {
+            throw new \InvalidArgumentException(
+                'retry429.capMs must not exceed ' . Retry429Policy::MAX_CAP_MILLIS,
+            );
+        }
+
+        return $config;
+    }
+
+    private function normalizeInteger(mixed $value, string $name, int $minimum): int
+    {
+        $integer = false;
+        if (is_int($value)) {
+            $integer = $value;
+        } elseif (is_string($value) && preg_match('/^-?\d+$/D', $value) === 1) {
+            $negative = str_starts_with($value, '-');
+            $digits = ltrim($value, '-0');
+            $digits = $digits === '' ? '0' : $digits;
+            $canonical = $negative && $digits !== '0' ? '-' . $digits : $digits;
+            $integer = filter_var($canonical, FILTER_VALIDATE_INT);
+        }
+
+        if ($integer === false) {
+            throw new \InvalidArgumentException("{$name} must be an integer");
+        }
+        if ($integer < $minimum) {
+            throw new \InvalidArgumentException("{$name} must be at least {$minimum}");
+        }
+
+        return $integer;
     }
 
     private function createHttpClient(): HttpClient

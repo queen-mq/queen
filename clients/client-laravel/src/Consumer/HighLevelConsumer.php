@@ -44,7 +44,7 @@ class HighLevelConsumer
      * the broker to decide nothing.
      */
     private array $popArgs = [];
-    private ?string $affinityKey;
+    private ?string $affinityKey = null;
     /** [requested, queue, group, namespace, task] — see ConflationGuard. */
     private array $conflationScope = [false, null, null, null, null];
 
@@ -71,6 +71,7 @@ class HighLevelConsumer
         $batch = $this->options['batch'] ?? null;
         $wait = $this->options['wait'] ?? true;
         $timeoutMillis = $this->options['timeoutMillis'] ?? 30000;
+        $leaseSeconds = $this->options['leaseSeconds'] ?? null;
         $subscriptionMode = $this->options['subscriptionMode'] ?? null;
         $subscriptionFrom = $this->options['subscriptionFrom'] ?? null;
         $maxPartitions = $this->options['maxPartitions'] ?? null;
@@ -86,6 +87,7 @@ class HighLevelConsumer
             'task' => $task,
             'maxPartitions' => $maxPartitions,
             'conflation' => $conflation,
+            'leaseSeconds' => $leaseSeconds,
             'autopilot' => $autopilot,
         ];
         $this->affinityKey = $this->getAffinityKey($queue, $partition, $namespace, $task, $group);
@@ -254,6 +256,9 @@ class HighLevelConsumer
         if ($group !== null) {
             $context['group'] = $group;
         }
+        if ($this->affinityKey !== null) {
+            $context['affinityKey'] = $this->affinityKey;
+        }
 
         return $this->queen->ack($message, $success, $context);
     }
@@ -269,9 +274,9 @@ class HighLevelConsumer
     /**
      * Renew lease for a message (or array of messages).
      */
-    public function renewLease(array|string $messageOrLeaseId): array
+    public function renewLease(array|string $messageOrLeaseId, ?int $seconds = null): array
     {
-        return $this->queen->renew($messageOrLeaseId);
+        return $this->queen->renew($messageOrLeaseId, $seconds);
     }
 
     /**
@@ -356,9 +361,10 @@ class HighLevelConsumer
     {
         if ($queue !== null) {
             if ($partition !== null) {
-                return "/api/v1/pop/queue/{$queue}/partition/{$partition}";
+                return '/api/v1/pop/queue/' . rawurlencode($queue)
+                    . '/partition/' . rawurlencode($partition);
             }
-            return "/api/v1/pop/queue/{$queue}";
+            return '/api/v1/pop/queue/' . rawurlencode($queue);
         }
         if ($namespace !== null || $task !== null) {
             return '/api/v1/pop';
@@ -386,7 +392,8 @@ class HighLevelConsumer
             $a['task'] ?? null,
             $a['maxPartitions'] ?? null,
             $a['conflation'] ?? false,
-            $a['autopilot'] ?? true
+            $a['leaseSeconds'] ?? null,
+            $a['autopilot'] ?? true,
         );
     }
 
@@ -401,6 +408,7 @@ class HighLevelConsumer
         ?string $task,
         ?int $maxPartitions = null,
         bool $conflation = false,
+        ?int $leaseSeconds = null,
         bool $autopilot = true,
     ): string {
         // Batch, partitions and with them the autopilot flag. null/0 means the
@@ -424,6 +432,9 @@ class HighLevelConsumer
 
         if ($group !== null) {
             $params['consumerGroup'] = $group;
+        }
+        if ($leaseSeconds !== null) {
+            $params['leaseSeconds'] = (string) $leaseSeconds;
         }
         if ($subscriptionMode !== null) {
             $params['subscriptionMode'] = $subscriptionMode;

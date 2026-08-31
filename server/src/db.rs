@@ -2813,6 +2813,30 @@ pub async fn timers_list(
     Ok(row.get(0))
 }
 
+// GET /api/v1/timers/:queue?mode=count&prefix=... — exact number of pending
+// timer rows in one literal key namespace. This is NOT implemented by paging
+// `log_timers_list_v1`: the stored procedure uses the existing composite
+// primary key `(tenant_id, queue, timer_key)` as a prefix range and returns one
+// scalar JSON object, with no row/payload materialisation.
+//
+// `prefix` is validated again in the SP (non-empty, at most 128 UTF-8 bytes),
+// because deployments may call the SQL API directly. `%` and `_` are literal;
+// the SQL predicate is starts_with(), never LIKE.
+pub async fn timers_count(
+    client: &deadpool_postgres::Client,
+    tenant: &str,
+    queue: &str,
+    prefix: &str,
+) -> Result<String, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached(
+            "SELECT (queen.log_timers_count_v1($1::text::uuid, $2, $3::text))::text",
+        )
+        .await?;
+    let row = client.query_one(&stmt, &[&tenant, &queue, &prefix]).await?;
+    Ok(row.get(0))
+}
+
 /// The per-tenant KV/timer usage measurement, as the sweeper's slow rollup last
 /// stored it: `(kv_rows, kv_bytes, timer_rows, timer_bytes)`. `None` = this
 /// tenant has never been measured, which is the honest answer "zero" for a cell
@@ -2857,4 +2881,3 @@ mod classify_sql_tests;
 #[cfg(test)]
 #[path = "tests_unit/fire_sql_pin.rs"]
 mod fire_sql_pin_tests;
-

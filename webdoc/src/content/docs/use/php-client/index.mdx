@@ -11,13 +11,19 @@ sourceOfTruth:
   - clients/client-laravel/src/Builders/QueueBuilder.php
   - clients/client-laravel/src/Builders/PushBuilder.php
   - clients/client-laravel/src/Consumer/ConsumerManager.php
+  - clients/client-laravel/src/Timers.php
   - clients/client-laravel/src/Laravel/QueenServiceProvider.php
+  - clients/client-laravel/src/Laravel/Queue/QueenQueue.php
+  - clients/client-laravel/src/Laravel/Queue/QueenJob.php
   - clients/client-laravel/src/Laravel/Commands/ConsumeCommand.php
+  - clients/client-laravel/config/queen.php
 verifiedBy:
   - clients/client-laravel/tests/QueueBuilderTest.php
   - clients/client-laravel/tests/HighLevelConsumerTest.php
   - clients/client-laravel/tests/HttpClientTest.php
-# sourceOfTruth re-read 2026-08-27 (through a6cbac22 + working tree): page matches the code.
+  - clients/client-laravel/tests/TimersTest.php
+  - clients/client-laravel/tests/LaravelQueueDriverTest.php
+  - clients/client-laravel/tests/LaravelServiceProviderTest.php
 ---
 
 The PHP client is a plain PSR-4 library, `Queen\` mapped onto `src/`, with an optional Laravel
@@ -25,7 +31,7 @@ layer on top. It needs PHP 8.3 and it is synchronous: every builder chain ends i
 `execute()`, `pop()`, `get()` or `commit()`.
 
 ```bash
-composer require smartpricing/queen-mq
+composer require queen-mq/php-client
 ```
 
 ```php
@@ -91,13 +97,35 @@ and everything after it in that batch comes back. A rejected ack still arrives a
 
 ## Laravel
 
-- Auto-discovery binds `Queen\Queen` as a singleton and aliases the `Queen` facade, so inject
-  the class or call `Queen::queue('orders')->push(...)->execute();`.
-- `php artisan vendor:publish --tag=queen-config` publishes `config/queen.php`, which reads
-  `QUEEN_URL`, `QUEEN_BEARER_TOKEN` and the retry and load-balancing variables.
-- `php artisan queen:consume orders "App\\Queen\\OrderHandler" --group=processors --auto-ack`
-  runs a handler class as a worker; without `--auto-ack` it acknowledges nothing and every
-  message is redelivered.
+Package discovery registers the Laravel service provider, facade and `queen` queue connection.
+Set `QUEUE_CONNECTION=queen`, then run Laravel's ordinary worker:
+
+```bash
+php artisan queue:work queen --queue=default --timeout=60 --tries=3
+```
+
+Existing jobs keep `dispatch()`, middleware, delay, backoff and failed-job events. Queen adds an
+optional PHP or Rust supervisor when you need dynamic worker pools, plus a protected local panel.
+Those operational features have their own requirements and preview limits, so they now live in a
+dedicated Laravel path instead of being hidden in this SDK quickstart.
+
+<CardGrid>
+  <LinkCard
+    href="/use/laravel"
+    title="Laravel quickstart"
+    description="Connect an application, dispatch its first job and begin with a safe delivery profile."
+  />
+  <LinkCard
+    href="/use/laravel/supervisors"
+    title="Worker supervisors"
+    description="Configure fixed or automatic pools with the PHP and Rust engines."
+  />
+  <LinkCard
+    href="/use/laravel/queen-vs-horizon"
+    title="Queen vs Horizon"
+    description="Compare the complete stacks, including where Horizon remains ahead."
+  />
+</CardGrid>
 
 ## What differs here
 

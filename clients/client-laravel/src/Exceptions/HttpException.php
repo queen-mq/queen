@@ -19,6 +19,10 @@ class HttpException extends \RuntimeException
      *                                       on the prose — string matching on a message is forbidden throughout
      *                                       this product.
      * @param string|null $detail            See $reason.
+     * @param string|null $serverError       The JSON body's top-level `error`
+     *                                       field, kept separate from `code` so
+     *                                       broker-native error taxonomies stay
+     *                                       branchable without inspecting prose.
      */
     public function __construct(
         string $message,
@@ -29,6 +33,7 @@ class HttpException extends \RuntimeException
         public readonly ?float $retryAfterSeconds = null,
         public readonly ?string $reason = null,
         public readonly ?string $detail = null,
+        public readonly ?string $serverError = null,
     ) {
         parent::__construct($message, $code, $previous);
     }

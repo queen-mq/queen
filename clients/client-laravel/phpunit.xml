@@ -12,12 +12,19 @@
         <testsuite name="Unit">
             <directory>tests</directory>
             <exclude>tests/Integration</exclude>
+            <exclude>tests/RedisIntegration</exclude>
         </testsuite>
         <!-- Needs a live broker, and nothing else: KV and timers are part of
              every broker, so there is no flag to set first. Run by
              test/runners/laravel; skips without QUEEN_HTTP_URL. -->
         <testsuite name="Integration">
             <directory>tests/Integration</directory>
+        </testsuite>
+        <!-- Real cross-process Laravel cache locks. This is separate from the
+             broker integration tree so the normal laptop run remains offline.
+             CI supplies Redis and QUEEN_LARAVEL_TEST_REDIS_HOST. -->
+        <testsuite name="RedisIntegration">
+            <directory>tests/RedisIntegration</directory>
         </testsuite>
     </testsuites>
     <source>

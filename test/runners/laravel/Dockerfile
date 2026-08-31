@@ -1,24 +1,24 @@
 # PHP/Laravel client integration runner. Build context = repo root.
 #   docker build -f test/runners/laravel/Dockerfile -t queen-test-runner-laravel .
-# 8.4 and not 8.3, which is the library's declared minimum: the committed
-# composer.lock pins dev dependencies (orchestra/testbench pulls symfony 8) that
-# require php >= 8.4, so 8.3 cannot install the lock at all. The library itself
-# still declares ^8.3 and uses nothing newer; closing that gap means relaxing
-# the dev dependencies, which is a composer.json change and not this suite's.
-FROM php:8.4-cli-bookworm
+# Exercise the package's declared minimum, including its Laravel queue driver
+# and supervisor configuration contract. composer.json pins dependency
+# resolution to PHP 8.3 even when the build runs from a newer maintainer
+# workstation. This is a library package, so composer.lock is intentionally
+# not versioned.
+FROM php:8.3-cli-bookworm
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends curl ca-certificates git unzip \
+ && apt-get install -y --no-install-recommends curl ca-certificates git unzip libonig-dev libxml2-dev \
+ && docker-php-ext-install -j"$(nproc)" mbstring pcntl dom xml xmlwriter \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
 WORKDIR /src
 
-# Manifests first for layer caching. The client needs no PHP extension beyond
-# the base image's (guzzle rides on the bundled curl/json), so there is no
-# pecl/docker-php-ext step and nothing to compile.
-COPY clients/client-laravel/composer.json clients/client-laravel/composer.lock ./
+# Manifests first for layer caching. mbstring is required by Laravel,
+# dom/xmlwriter by PHPUnit, and pcntl exercises the Unix supervisor path.
+COPY clients/client-laravel/composer.json ./
 RUN composer install --no-interaction --no-progress --no-scripts
 
 COPY clients/client-laravel/ ./

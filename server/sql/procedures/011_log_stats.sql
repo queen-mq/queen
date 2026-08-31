@@ -13,7 +13,7 @@
 --                                    (former db.rs::seg_queue_message_stats)
 --   queen.log_queue_stats_all_v1     broker-wide per-queue counters (former
 --                                    db.rs::seg_queue_stats_all)
---   queen.log_queue_depth_v1         minimal (partition, pending) depth read
+--   queen.log_queue_depth_v1         minimal pending/lease/ready depth read
 --                                    for relays/schedulers (…/:queue/depth)
 --
 -- THE O(partitions) CONTRACT (§9): pending per (queue, group) is pure
@@ -824,11 +824,13 @@ GRANT EXECUTE ON FUNCTION queen.log_queue_stats_all_v1(UUID) TO PUBLIC;
 -- log_queue_depth_v1: minimal per-partition backlog read for relays and
 -- schedulers (GET /api/v1/resources/queues/:queue/depth). The console-grade
 -- get_queue_detail_v2 above pays for timestamps, DLQ counts and a LATERAL over
--- log_segments per pending partition; a depth poller reads exactly one number
--- per partition, so this is the §9 watermark arithmetic and NOTHING else:
+-- log_segments per pending partition; a depth poller reads only watermark and
+-- lease arithmetic per partition, so this is §9 coordination state and nothing else:
 --     pending = GREATEST(last_offset - GREATEST(committed, log_start-1), 0)
--- touching only log_partitions ⋈ log_consumers (index-only on the consumer
--- PK), no segments, no timestamps.
+--     processing = live leased span (committed, batch_end], clamped to pending
+--     ready = pending - processing
+-- touching only log_partitions ⋈ log_consumers (the named-group form is a
+-- consumer-PK lookup), no segments, no message timestamps.
 --
 -- p_group NULL = queue-level pending under the same worst-cursor precedence
 -- as the stats refresh (`cons` above — named groups win, '__QUEUE_MODE__'
@@ -836,8 +838,8 @@ GRANT EXECUTE ON FUNCTION queen.log_queue_stats_all_v1(UUID) TO PUBLIC;
 -- get_queue_v2 and the dashboard publish. A named p_group = that group's own
 -- backlog per partition (a group with no cursor row on a partition owes the
 -- whole retained range, committed -1 — same convention as everywhere else).
--- The per-group form is also the ETA ingredient: (partition, pending) against
--- a consumer's own cursor.
+-- The per-group form is also the scaling/ETA input: pending, processing and
+-- ready against that consumer's own cursor and lease.
 -- ----------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION queen.log_queue_depth_v1(
     p_queue  TEXT,
@@ -852,6 +854,8 @@ AS $$
         'queue', q.name,
         'group', p_group,
         'pending', COALESCE(d.total, 0),
+        'processing', COALESCE(d.processing, 0),
+        'ready', COALESCE(d.ready, 0),
         -- PLAN_CONFLATION §2.5/§5.3. `pending` stays LOG depth (positions to
         -- retire). partitionsPending is the count of partitions that owe work —
         -- useful for every group (queenctl computed it client-side and called it
@@ -861,10 +865,14 @@ AS $$
         -- pending: 4 000 000, effectivePending: 12 is healthy; the same numbers
         -- on a non-conflating group are an incident.
         'partitionsPending', COALESCE(d.nonempty, 0),
+        'partitionsReady', COALESCE(d.ready_parts, 0),
         'conflation', COALESCE(g.conflation, false),
         'effectivePending', CASE WHEN COALESCE(g.conflation, false)
                                  THEN COALESCE(d.nonempty, 0)
                                  ELSE COALESCE(d.total, 0) END,
+        'effectiveReady', CASE WHEN COALESCE(g.conflation, false)
+                               THEN COALESCE(d.ready_parts, 0)
+                               ELSE COALESCE(d.ready, 0) END,
         'partitions', COALESCE(d.parts, '[]'::jsonb))
     FROM queen.queues q
     -- One indexed cgm_identity_uk lookup; NULL (⇒ conflation false) when the
@@ -876,33 +884,65 @@ AS $$
      AND g.partition_name = ''
     LEFT JOIN LATERAL (
         SELECT SUM(t.pending)::bigint AS total,
+               SUM(t.processing)::bigint AS processing,
+               SUM(t.ready)::bigint AS ready,
                SUM(CASE WHEN t.pending > 0 THEN 1 ELSE 0 END)::bigint AS nonempty,
+               SUM(CASE WHEN t.ready > 0 THEN 1 ELSE 0 END)::bigint AS ready_parts,
                jsonb_agg(jsonb_build_object('partition', t.pname,
-                                            'pending', t.pending)
+                                            'pending', t.pending,
+                                            'processing', t.processing,
+                                            'ready', t.ready)
                          ORDER BY t.pname) AS parts
         FROM (
-            SELECT p.name AS pname,
-                   GREATEST(p.last_offset
-                            - GREATEST(COALESCE(c.committed, -1), p.log_start - 1),
-                            0)::bigint AS pending
-            FROM queen.log_partitions p
-            LEFT JOIN LATERAL (
-                SELECT CASE
-                           WHEN p_group IS NOT NULL THEN
-                               (SELECT lc.committed FROM queen.log_consumers lc
-                                WHERE lc.partition_id = p.id
-                                  AND lc.consumer_group = p_group)
-                           ELSE
-                               (SELECT COALESCE(
-                                    MIN(lc.committed) FILTER
-                                        (WHERE lc.consumer_group <> '__QUEUE_MODE__'),
-                                    MIN(lc.committed) FILTER
-                                        (WHERE lc.consumer_group = '__QUEUE_MODE__'))
-                                FROM queen.log_consumers lc
-                                WHERE lc.partition_id = p.id)
-                       END AS committed
-            ) c ON true
-            WHERE p.queue_id = q.id
+            SELECT b.pname,
+                   b.pending,
+                   LEAST(b.pending, b.leased)::bigint AS processing,
+                   GREATEST(b.pending - LEAST(b.pending, b.leased), 0)::bigint AS ready
+            FROM (
+                SELECT p.name AS pname,
+                       GREATEST(p.last_offset
+                                - GREATEST(COALESCE(c.committed, -1), p.log_start - 1),
+                                0)::bigint AS pending,
+                       COALESCE(c.processing, 0)::bigint AS leased
+                FROM queen.log_partitions p
+                LEFT JOIN LATERAL (
+                    -- Named depth is strictly group-scoped: the same PK row
+                    -- supplies both its cursor and its live leased span.
+                    SELECT lc.committed,
+                           CASE WHEN lc.lease_expires_at > NOW()
+                                THEN GREATEST(0, COALESCE(lc.batch_end, lc.committed)
+                                                   - lc.committed)
+                                ELSE 0 END::bigint AS processing
+                    FROM queen.log_consumers lc
+                    WHERE p_group IS NOT NULL
+                      AND lc.partition_id = p.id
+                      AND lc.consumer_group = p_group
+
+                    UNION ALL
+
+                    -- Queue-level depth keeps the existing cursor precedence:
+                    -- named groups win as a class; queue mode is considered
+                    -- only if no named cursor exists. Processing follows the
+                    -- queue stats contract and sums every live lease; the
+                    -- outer LEAST caps overlapping group work at pending.
+                    SELECT COALESCE(
+                               MIN(lc.committed) FILTER
+                                   (WHERE lc.consumer_group <> '__QUEUE_MODE__'),
+                               MIN(lc.committed) FILTER
+                                   (WHERE lc.consumer_group = '__QUEUE_MODE__')) AS committed,
+                           COALESCE(SUM(GREATEST(0,
+                                      COALESCE(lc.batch_end, lc.committed) - lc.committed))
+                                    FILTER (WHERE lc.lease_expires_at > NOW()), 0)::bigint
+                               AS processing
+                    FROM queen.log_consumers lc
+                    WHERE lc.partition_id = p.id
+                    -- An aggregate without GROUP BY emits one row even over
+                    -- an empty/false WHERE. HAVING is the branch gate that
+                    -- keeps this UNION arm absent for a named p_group.
+                    HAVING p_group IS NULL
+                ) c ON true
+                WHERE p.queue_id = q.id
+            ) b
         ) t
     ) d ON true
     WHERE q.name = p_queue AND q.tenant_id = p_tenant

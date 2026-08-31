@@ -96,7 +96,7 @@ function indexHandlers(files) {
 function indexStructs(files) {
   const out = new Map();
   for (const { text } of files) {
-    const re = /#\[derive\([^)]*Deserialize[^)]*\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub )?struct (\w+)(?:<[^>]*>)?\s*\{([\s\S]*?)\n\}/g;
+    const re = /#\[derive\([^)]*Deserialize[^)]*\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?struct (\w+)(?:<[^>]*>)?\s*\{([\s\S]*?)\n\}/g;
     let m;
     while ((m = re.exec(text))) {
       const [, name, block] = m;
@@ -112,7 +112,7 @@ function indexStructs(files) {
           if (/\bdefault\b/.test(line)) pendingDefault = true;
           continue;
         }
-        const f = line.match(/^(?:pub )?(\w+)\s*:\s*(.+?),?$/);
+        const f = line.match(/^(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:\s*(.+?),?$/);
         if (!f) continue;
         const [, rustName, rustType] = f;
         fields.push({

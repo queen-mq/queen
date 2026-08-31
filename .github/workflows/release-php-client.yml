@@ -1,0 +1,248 @@
+name: Mirror and release PHP client
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'clients/client-laravel/**'
+    tags:
+      - 'clients/client-laravel/v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing clients/client-laravel/vX.Y.Z tag to publish'
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: php-client-mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror-main:
+    # Do not make ordinary merges red while the GitHub App is being installed.
+    # A stable release always fails closed if that credential is absent.
+    if: >-
+      github.event_name == 'push'
+      && github.ref == 'refs/heads/master'
+      && vars.PHP_CLIENT_MIRROR_APP_ID != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare the source subtree
+        run: |
+          set -Eeuo pipefail
+          split_commit=$(git subtree split --prefix=clients/client-laravel HEAD)
+          expected_tree=$(git rev-parse HEAD:clients/client-laravel)
+          test "$expected_tree" = "$(git rev-parse "${split_commit}^{tree}")" || {
+            echo 'subtree split tree does not match the source package' >&2
+            exit 1
+          }
+          echo "SPLIT_COMMIT=$split_commit" >> "$GITHUB_ENV"
+      - name: Create target-repository token
+        id: mirror-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          app-id: ${{ vars.PHP_CLIENT_MIRROR_APP_ID }}
+          private-key: ${{ secrets.PHP_CLIENT_MIRROR_APP_PRIVATE_KEY }}
+          owner: queen-mq
+          repositories: php-client
+          permission-contents: write
+      - name: Fast-forward the development mirror
+        env:
+          MIRROR_TOKEN: ${{ steps.mirror-token.outputs.token }}
+        run: |
+          set -Eeuo pipefail
+          git remote add mirror "https://x-access-token:${MIRROR_TOKEN}@github.com/queen-mq/php-client.git"
+          if git ls-remote --exit-code mirror refs/heads/master >/dev/null 2>&1; then
+            git fetch mirror refs/heads/master:refs/remotes/mirror/master
+            git merge-base --is-ancestor refs/remotes/mirror/master "$SPLIT_COMMIT" || {
+              echo 'php-client mirror master diverged from its source subtree' >&2
+              exit 1
+            }
+          fi
+          git push mirror "${SPLIT_COMMIT}:refs/heads/master"
+
+  verify-release:
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/clients/client-laravel/v'))
+      || github.event_name == 'workflow_dispatch'
+    name: Verify release on PHP ${{ matrix.php-version }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        php-version: ['8.3', '8.4']
+    services:
+      redis:
+        image: redis:7.4.2-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - name: Verify source tag
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$RELEASE_TAG" =~ ^clients/client-laravel/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+            echo "invalid PHP client tag: $RELEASE_TAG" >&2
+            exit 1
+          }
+          git fetch origin master --no-tags
+          tag_commit=$(git rev-parse "${RELEASE_TAG}^{commit}")
+          test "$tag_commit" = "$(git rev-parse HEAD)" || {
+            echo "checkout is not at $RELEASE_TAG" >&2
+            exit 1
+          }
+          git merge-base --is-ancestor "$tag_commit" origin/master || {
+            echo "$RELEASE_TAG is not reachable from master" >&2
+            exit 1
+          }
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php-version }}
+          extensions: mbstring, pcntl, posix, redis, dom, xml, xmlwriter
+          coverage: none
+          tools: composer:v2
+      - name: Validate and install package
+        working-directory: clients/client-laravel
+        run: |
+          composer validate --strict
+          composer install --no-interaction --no-progress --prefer-dist
+          composer audit --locked --no-interaction
+      - name: Run package unit suite
+        working-directory: clients/client-laravel
+        run: vendor/bin/phpunit --testsuite Unit
+      - name: Verify Redis overlap integration
+        if: matrix.php-version == '8.3'
+        working-directory: clients/client-laravel
+        env:
+          QUEEN_LARAVEL_TEST_REDIS_HOST: 127.0.0.1
+          QUEEN_LARAVEL_TEST_REDIS_PORT: 6379
+        run: vendor/bin/phpunit --testsuite RedisIntegration --testdox
+      - name: Verify the pinned supervisor release
+        if: matrix.php-version == '8.3'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          version=$(python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          source = Path('clients/client-laravel/src/Laravel/Supervisor/Binary/SupervisorBinary.php').read_text()
+          match = re.search(r"const VERSION = '([^']+)'", source)
+          if match is None:
+              raise SystemExit('cannot determine the pinned supervisor version')
+          print(match.group(1))
+          PY
+          )
+          release_dir=$(mktemp -d)
+          trap 'rm -rf "$release_dir"' EXIT
+          gh release download "supervisor/v$version" --repo queen-mq/queen \
+            --pattern 'queen-supervisor-manifest.json' \
+            --pattern 'queen-supervisor-*.tar.gz' \
+            --dir "$release_dir"
+          test "$(find "$release_dir" -name 'queen-supervisor-*.tar.gz' -type f | wc -l | tr -d ' ')" = 4
+          php supervisor/scripts/verify_client_manifest.php \
+            "$release_dir/queen-supervisor-manifest.json"
+
+  publish-release:
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/clients/client-laravel/v'))
+      || github.event_name == 'workflow_dispatch'
+    name: Publish the verified Packagist tag
+    needs: verify-release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - name: Prepare the verified subtree
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$RELEASE_TAG" =~ ^clients/client-laravel/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+            echo "invalid PHP client tag: $RELEASE_TAG" >&2
+            exit 1
+          }
+          git fetch origin master --no-tags
+          source_commit=$(git rev-parse "${RELEASE_TAG}^{commit}")
+          test "$source_commit" = "$(git rev-parse HEAD)" || {
+            echo "checkout is not at $RELEASE_TAG" >&2
+            exit 1
+          }
+          git merge-base --is-ancestor "$source_commit" origin/master || {
+            echo "$RELEASE_TAG is not reachable from master" >&2
+            exit 1
+          }
+          split_commit=$(git subtree split --prefix=clients/client-laravel "$source_commit")
+          expected_tree=$(git rev-parse "$source_commit:clients/client-laravel")
+          test "$expected_tree" = "$(git rev-parse "${split_commit}^{tree}")" || {
+            echo 'subtree split tree does not match the source package' >&2
+            exit 1
+          }
+          echo "SPLIT_COMMIT=$split_commit" >> "$GITHUB_ENV"
+          echo "PACKAGE_VERSION=${RELEASE_TAG#clients/client-laravel/}" >> "$GITHUB_ENV"
+      - name: Create target-repository token
+        id: mirror-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          app-id: ${{ vars.PHP_CLIENT_MIRROR_APP_ID }}
+          private-key: ${{ secrets.PHP_CLIENT_MIRROR_APP_PRIVATE_KEY }}
+          owner: queen-mq
+          repositories: php-client
+          permission-contents: write
+      - name: Publish the immutable split tag
+        env:
+          MIRROR_TOKEN: ${{ steps.mirror-token.outputs.token }}
+        run: |
+          set -Eeuo pipefail
+          git remote add mirror "https://x-access-token:${MIRROR_TOKEN}@github.com/queen-mq/php-client.git"
+          if git ls-remote --exit-code mirror refs/heads/master >/dev/null 2>&1; then
+            git fetch mirror refs/heads/master:refs/remotes/mirror/master
+            git merge-base --is-ancestor "$SPLIT_COMMIT" refs/remotes/mirror/master || {
+              echo 'php-client mirror is missing a release ancestor' >&2
+              exit 1
+            }
+          else
+            branch_ref="${SPLIT_COMMIT}:refs/heads/master"
+          fi
+          if git ls-remote --exit-code mirror "refs/tags/$PACKAGE_VERSION" >/dev/null 2>&1; then
+            git fetch mirror "refs/tags/$PACKAGE_VERSION:refs/tags/mirror-$PACKAGE_VERSION"
+            test "$(git rev-parse "mirror-$PACKAGE_VERSION^{commit}")" = "$SPLIT_COMMIT" || {
+              echo "php-client tag $PACKAGE_VERSION already exists with a different commit" >&2
+              exit 1
+            }
+          else
+            tag_ref="${SPLIT_COMMIT}:refs/tags/$PACKAGE_VERSION"
+          fi
+          refs=()
+          [ -z "${branch_ref:-}" ] || refs+=("$branch_ref")
+          [ -z "${tag_ref:-}" ] || refs+=("$tag_ref")
+          [ "${#refs[@]}" -eq 0 ] || git push --atomic mirror "${refs[@]}"
