@@ -1,0 +1,4 @@
+# `go build ./...` in a main package writes the executable beside the sources,
+# named after the directory. It is a build artifact of a suite that is normally
+# run with `go run`, and it is 11 MB.
+/gosdk

@@ -358,7 +358,7 @@ BEGIN
         'namespaces', v_ns,
         'tasks', v_task,
         'system', v_sys,
-        'refreshedAt', to_char(v_now, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+        'refreshedAt', to_char(v_now AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
     );
 END;
 $$;
@@ -411,7 +411,7 @@ BEGIN
         'queue', jsonb_build_object(
             'id', q.id, 'name', q.name, 'namespace', q.namespace, 'task', q.task,
             'priority', q.priority,
-            'createdAt', to_char(q.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+            'createdAt', to_char(q.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
             'config', jsonb_build_object(
                 'leaseTime', q.lease_time, 'retryLimit', q.retry_limit,
                 'retryDelay', q.retry_delay, 'ttl', q.ttl,
@@ -494,7 +494,7 @@ BEGIN
     )
     SELECT COALESCE(jsonb_agg(jsonb_build_object(
                 'id', id, 'name', name,
-                'createdAt', to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                'createdAt', to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
                 -- 'failed' is NULL, not 0: the log engine keeps no per-partition
                 -- failure counter (ack failures are per (queue, minute) in
                 -- queue_lag_metrics), and a literal 0 next to a live ack-failure
@@ -504,9 +504,9 @@ BEGIN
                 'stats', jsonb_build_object('total', total, 'pending', pending,
                     'processing', processing, 'completed', completed, 'failed', NULL, 'deadLetter', dead_letter),
                 'cursor', jsonb_build_object('totalConsumed', total_consumed, 'batchesConsumed', 0),
-                'lastActivity', CASE WHEN last_activity IS NOT NULL THEN to_char(last_activity, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END,
-                'oldestMessage', CASE WHEN oldest_message IS NOT NULL THEN to_char(oldest_message, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END,
-                'newestMessage', CASE WHEN newest_message IS NOT NULL THEN to_char(newest_message, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END
+                'lastActivity', CASE WHEN last_activity IS NOT NULL THEN to_char(last_activity AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END,
+                'oldestMessage', CASE WHEN oldest_message IS NOT NULL THEN to_char(oldest_message AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END,
+                'newestMessage', CASE WHEN newest_message IS NOT NULL THEN to_char(newest_message AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END
             ) ORDER BY name), '[]'::jsonb),
            jsonb_build_object('messages', jsonb_build_object(
                 'total', COALESCE(SUM(total),0), 'pending', COALESCE(SUM(pending),0),
@@ -561,7 +561,7 @@ BEGIN
 
     SELECT jsonb_build_object(
         'id', q.id, 'name', q.name, 'namespace', q.namespace, 'task', q.task,
-        'createdAt', to_char(q.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+        'createdAt', to_char(q.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
     INTO v_queue_info
     FROM queen.queues q WHERE q.id = v_queue_id;
 
@@ -633,14 +633,14 @@ BEGIN
     )
     SELECT COALESCE(jsonb_agg(jsonb_build_object(
                 'id', id, 'name', name,
-                'createdAt', to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                'createdAt', to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
                 'stats', jsonb_build_object(
                     'total', total, 'pending', pending, 'processing', processing,
                     'completed', completed, 'failed', NULL, 'deadLetter', dead_letter),
                 'oldestMessage', CASE WHEN oldest_message IS NOT NULL
-                    THEN to_char(oldest_message, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END,
+                    THEN to_char(oldest_message AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END,
                 'newestMessage', CASE WHEN newest_message IS NOT NULL
-                    THEN to_char(newest_message, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END
+                    THEN to_char(newest_message AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') ELSE NULL END
             ) ORDER BY name), '[]'::jsonb),
            jsonb_build_object(
                 'total', COALESCE(SUM(total), 0), 'pending', COALESCE(SUM(pending), 0),
@@ -721,15 +721,15 @@ BEGIN
     SELECT jsonb_build_object(
         'dataPoints', COALESCE((
             SELECT jsonb_agg(jsonb_build_object(
-                       'timestamp', to_char(tb.bucket, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                       'timestamp', to_char(tb.bucket AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
                        'messages', COALESCE(mb.message_count, 0)
                    ) ORDER BY tb.bucket)
             FROM time_buckets tb
             LEFT JOIN message_buckets mb ON mb.bucket = tb.bucket
         ), '[]'::jsonb),
         'interval', v_interval,
-        'from', to_char(v_from, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-        'to', to_char(v_to, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+        'from', to_char(v_from AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+        'to', to_char(v_to AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
     ) INTO v_result;
 
     RETURN v_result;

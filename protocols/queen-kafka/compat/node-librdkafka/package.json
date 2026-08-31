@@ -1,0 +1,14 @@
+{
+  "name": "queen-kafka-compat-node-librdkafka",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "node-rdkafka and @confluentinc/kafka-javascript against the queen-kafka compat rig (M6 client matrix)",
+  "scripts": {
+    "test": "./run.sh"
+  },
+  "dependencies": {
+    "@confluentinc/kafka-javascript": "^1.10.0",
+    "node-rdkafka": "^3.6.1"
+  }
+}

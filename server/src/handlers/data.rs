@@ -168,6 +168,11 @@ fn resolve_push_followers(results: &mut [ItemResult]) {
             let leader_mid = results[l].message_id.clone();
             let leader_status = results[l].status;
             results[i].message_id = leader_mid;
+            // C1: a layer-1 follower never produced a frame — it IS the
+            // leader's message — so it reports the leader's offset too. Without
+            // this the second copy of a (queue, partition, txn) in one batch
+            // would come back with a message id but no position.
+            results[i].offset = results[l].offset;
             if leader_status == "error" {
                 results[i].status = "error";
             }
@@ -177,7 +182,8 @@ fn resolve_push_followers(results: &mut [ItemResult]) {
 
 fn render_push_results(results: &[ItemResult]) -> String {
     // ~150B/item with two 36-char ids + queue name; undersizing costs a full
-    // realloc+copy of the response on every push.
+    // realloc+copy of the response on every push. The C1 offset adds at most
+    // ~30B on the items that have one, which the existing 176 already covers.
     let mut out = String::with_capacity(results.len() * 176 + 2);
     out.push('[');
     for (i, item) in results.iter().enumerate() {
@@ -194,7 +200,18 @@ fn render_push_results(results: &[ItemResult]) -> String {
         json_escape_into(&mut out, &item.queue);
         out.push_str("\",\"status\":\"");
         out.push_str(item.status);
-        out.push_str("\"}");
+        out.push('"');
+        // C1 (PLAN_QUEEN_KAFKA.md): the assigned ABSOLUTE offset, ADDITIVE — the
+        // key is emitted only when the broker actually allocated one, so a
+        // buffered/failed/errored item's bytes are unchanged and every client
+        // that predates this key is unaffected (queen-protocol's PushResult
+        // models it as an Option that skips serializing when absent, and its
+        // wire tests pin that an unknown key never breaks a decode).
+        if let Some(off) = item.offset {
+            out.push_str(",\"offset\":");
+            out.push_str(&off.to_string());
+        }
+        out.push('}');
     }
     out.push(']');
     out
@@ -287,6 +304,9 @@ pub async fn handle_push(
                     txn,
                     queue,
                     status: "duplicate",
+                    // Provisional like the id above: `resolve_push_followers`
+                    // copies the leader's final offset once the flush lands.
+                    offset: None,
                     dup_of: Some(leader),
                 });
                 continue;
@@ -300,6 +320,9 @@ pub async fn handle_push(
             txn: txn.clone(),
             queue: queue.clone(),
             status: "queued",
+            // Filled by the flush that allocates it (fusion.rs); an item whose
+            // bundle never commits keeps None and renders no `offset` key.
+            offset: None,
             dup_of: None,
         });
 
@@ -577,6 +600,10 @@ async fn buffer_all(
             txn,
             queue: it.queue.as_str().to_string(),
             status: if ok { "buffered" } else { "failed" },
+            // A spooled message has no offset and must not pretend to: nothing
+            // was allocated, and the replay assigns one only when maintenance
+            // ends. The key is simply absent from the response.
+            offset: None,
             dup_of: None,
         });
     }
@@ -2922,6 +2949,10 @@ fn render_pop_parts(
     // true, so every existing deployment keeps byte-identical response bytes.
     cfl: Conflation,
 ) -> (String, usize, PopMeta) {
+    // C-SQS-3's `offset` is the one integer rendered per message; `write!` puts
+    // its digits straight into the response buffer, with no per-message String.
+    use std::fmt::Write as _;
+
     let mut count = 0usize;
     let mut meta = PopMeta::default();
     let now_ms = crate::util::now_epoch_ms();
@@ -3056,7 +3087,7 @@ fn render_pop_parts(
             // Refine capacity with the real decompressed size: payload bytes are
             // spliced verbatim, plus ~192B of fixed JSON fields per message.
             out.reserve(raw.len() + (end.saturating_sub(start)) * 192);
-            for f in frames.iter().take(end).skip(start) {
+            for (idx, f) in frames.iter().enumerate().take(end).skip(start) {
                 if count > 0 {
                     out.push(',');
                 }
@@ -3107,6 +3138,28 @@ fn render_pop_parts(
                 json_escape_into(&mut out, group);
                 out.push_str("\",\"deliveryAttempt\":");
                 out.push_str(&delivery_attempt);
+                // C-SQS-3 (PLAN_QUEEN_SQS.md): the ABSOLUTE offset this message
+                // occupies in its partition's log — the segment's base `seq` plus
+                // the frame's index within it, which is the same arithmetic C1
+                // already reports on the PUSH side (`fusion::ItemResult::offset`)
+                // and the same one `batch_end` is computed with a few lines above.
+                // A popped message now names its own position in the log, so a
+                // facade that must mint a stable per-message identity out of a
+                // delivery (SQS's `SequenceNumber` is why this exists) does not
+                // have to reconstruct it from segment metadata the wire does not
+                // carry.
+                //
+                // Additive, and ALWAYS emitted rather than conditional like the
+                // conflation keys: it is not an opt-in signal but a value that is
+                // always known on this path — every rendered frame came out of a
+                // segment whose `seq` was read from the claim — and a field that
+                // appeared only sometimes would be the harder contract to consume.
+                // Safe by the C1 discipline: nothing in this repository parses a
+                // popped message strictly (`deny_unknown_fields` appears nowhere
+                // on this shape, `crates/queen-protocol` included) and an unknown
+                // JSON key is ignored by every SDK on the wire.
+                out.push_str(",\"offset\":");
+                let _ = write!(out, "{}", seg.seq + idx as i64);
                 out.push('}');
                 count += 1;
                 // ACK REGISTRY: fingerprint the delivered txn (~50ns) while it is
@@ -3158,7 +3211,9 @@ fn render_pop_parts(
 // Append raw bytes that are expected to be valid UTF-8 (payloads stored from
 // client JSON). std's from_utf8 validation is markedly cheaper than the lossy
 // chunk iterator; invalid bytes fall back to lossy replacement.
-fn push_utf8(out: &mut String, bytes: &[u8]) {
+// pub(crate) so the fetch renderer (handlers/fetch.rs) splices payloads through
+// the SAME function the pop renderer does — one lossy-UTF8 policy, not two.
+pub(crate) fn push_utf8(out: &mut String, bytes: &[u8]) {
     match std::str::from_utf8(bytes) {
         Ok(s) => out.push_str(s),
         Err(_) => out.push_str(&String::from_utf8_lossy(bytes)),
@@ -6001,6 +6056,7 @@ mod protocol_conformance {
                 txn: "txn-1".into(),
                 queue: "orders".into(),
                 status: "queued",
+                offset: Some(41),
                 dup_of: None,
             },
             ItemResult {
@@ -6010,6 +6066,8 @@ mod protocol_conformance {
                 txn: r#"weird"txn\2"#.into(),
                 queue: "orders".into(),
                 status: "duplicate",
+                // C1: a duplicate reports the PRE-EXISTING message's offset.
+                offset: Some(7),
                 dup_of: None,
             },
         ];
@@ -6023,10 +6081,100 @@ mod protocol_conformance {
         assert_eq!(parsed[0].transaction_id, "txn-1");
         assert_eq!(parsed[0].queue_name, "orders");
         assert_eq!(parsed[0].status, qp::PushStatus::Queued);
+        assert_eq!(parsed[0].offset, Some(41));
 
         assert_eq!(parsed[1].index, 1);
         assert_eq!(parsed[1].transaction_id, r#"weird"txn\2"#);
         assert_eq!(parsed[1].status, qp::PushStatus::Duplicate);
+        assert_eq!(parsed[1].offset, Some(7));
+    }
+
+    /// C1 (PLAN_QUEEN_KAFKA.md) is additive or it is a breaking change: an item
+    /// the broker allocated no offset for must render EXACTLY the bytes it
+    /// rendered before the field existed, key for key.
+    #[test]
+    fn an_item_without_an_offset_renders_the_pre_c1_bytes() {
+        let rendered = render_push_results(&[ItemResult {
+            message_id: "0190aaaa-0000-7000-8000-000000000001".into(),
+            txn: "txn-1".into(),
+            queue: "orders".into(),
+            status: "buffered",
+            offset: None,
+            dup_of: None,
+        }]);
+        assert_eq!(
+            rendered,
+            r#"[{"index":0,"message_id":"0190aaaa-0000-7000-8000-000000000001","transaction_id":"txn-1","queueName":"orders","status":"buffered"}]"#
+        );
+        // ...and the key is APPENDED when there is one, so nothing before it
+        // moves.
+        let rendered = render_push_results(&[ItemResult {
+            message_id: "0190aaaa-0000-7000-8000-000000000001".into(),
+            txn: "txn-1".into(),
+            queue: "orders".into(),
+            status: "queued",
+            offset: Some(0),
+            dup_of: None,
+        }]);
+        assert_eq!(
+            rendered,
+            r#"[{"index":0,"message_id":"0190aaaa-0000-7000-8000-000000000001","transaction_id":"txn-1","queueName":"orders","status":"queued","offset":0}]"#,
+            "offset 0 is a real offset — the first message of a partition — and \
+             must not be confused with an absent one"
+        );
+    }
+
+    /// The intra-request duplicate (layer 1) never produced a frame, so its
+    /// offset can only come from its leader. Without the copy it would come
+    /// back with a message id and no position — the one combination a client
+    /// cannot act on.
+    #[test]
+    fn a_layer_one_follower_inherits_the_leaders_offset() {
+        let mut results = vec![
+            ItemResult {
+                message_id: "leader-mid".into(),
+                txn: "same-txn".into(),
+                queue: "orders".into(),
+                status: "queued",
+                offset: Some(41),
+                dup_of: None,
+            },
+            ItemResult {
+                message_id: "provisional".into(),
+                txn: "same-txn".into(),
+                queue: "orders".into(),
+                status: "duplicate",
+                offset: None,
+                dup_of: Some(0),
+            },
+        ];
+        resolve_push_followers(&mut results);
+        assert_eq!(results[1].message_id, "leader-mid");
+        assert_eq!(results[1].offset, Some(41));
+
+        // A leader whose bundle failed has no offset to give, and the follower
+        // must inherit that too rather than keeping a stale one.
+        let mut results = vec![
+            ItemResult {
+                message_id: "leader-mid".into(),
+                txn: "same-txn".into(),
+                queue: "orders".into(),
+                status: "error",
+                offset: None,
+                dup_of: None,
+            },
+            ItemResult {
+                message_id: "provisional".into(),
+                txn: "same-txn".into(),
+                queue: "orders".into(),
+                status: "duplicate",
+                offset: Some(999),
+                dup_of: Some(0),
+            },
+        ];
+        resolve_push_followers(&mut results);
+        assert_eq!(results[1].status, "error");
+        assert_eq!(results[1].offset, None);
     }
 
     /// Every status the broker can stamp must be a variant the client can
@@ -6039,6 +6187,7 @@ mod protocol_conformance {
                 txn: "t".into(),
                 queue: "q".into(),
                 status,
+                offset: None,
                 dup_of: None,
             }]);
             let parsed: Vec<qp::PushResult> = serde_json::from_str(&rendered)
@@ -6423,6 +6572,108 @@ mod protocol_conformance {
         );
     }
 
+    /// C-SQS-3 (PLAN_QUEEN_SQS.md): every popped message carries the ABSOLUTE
+    /// offset it occupies in its partition's log — `seq + the frame's index
+    /// within the segment` — and the arithmetic has to survive the two things
+    /// that make it non-trivial: a partial claim (`startOff > 0`, where the
+    /// first DELIVERED frame is not the segment's first frame) and a second
+    /// segment whose base is somewhere else entirely.
+    #[test]
+    fn every_popped_message_carries_its_absolute_offset() {
+        let frame = |n: u8| FrameIn {
+            message_id: [n; 16],
+            txn: "t",
+            trace_id: None,
+            producer_sub: None,
+            payload: br#"{"n":1}"#,
+            encrypted: false,
+        };
+        let blob = |frames: &[FrameIn]| {
+            base64::engine::general_purpose::STANDARD.encode(zstd_compress(&pack_frames(frames), 1))
+        };
+        let four = [frame(1), frame(2), frame(3), frame(4)];
+        let two = [frame(5), frame(6)];
+        let meta = serde_json::json!({
+            "partitions": [{
+                "partition": "0",
+                "partitionId": "p0",
+                "segments": [
+                    // A partial claim of a segment based at 100: frames 2 and 3
+                    // of four, so offsets 102 and 103 — NOT 100 and 101.
+                    {
+                        "seq": 100,
+                        "startOff": 2,
+                        "take": 2,
+                        "createdAt": "2026-08-30T10:00:00.000000Z",
+                        "blob": blob(&four)
+                    },
+                    // ...and the next segment starts a long way further on.
+                    {
+                        "seq": 512,
+                        "startOff": 0,
+                        "take": 2,
+                        "createdAt": "2026-08-30T10:00:01.000000Z",
+                        "blob": blob(&two)
+                    }
+                ]
+            }]
+        });
+        let (body, count, _) = build_pop_response(
+            &meta.to_string(),
+            None,
+            "orders",
+            "workers",
+            "lease-1",
+            &crate::encryption::Encryption::from_env(),
+            Conflation::OFF,
+        );
+        assert_eq!(count, 4, "{body}");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let offsets: Vec<i64> = parsed["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["offset"].as_i64().expect("offset is always rendered"))
+            .collect();
+        assert_eq!(offsets, [102, 103, 512, 513], "{body}");
+
+        // The pinned/targeted route renders through the other adapter; it must
+        // carry the same value rather than restarting from zero.
+        let specific = serde_json::json!({
+            "partitionId": "p0",
+            "segments": [meta["partitions"][0]["segments"][0].clone()]
+        });
+        let (body, count, _) = build_pop_specific_response(
+            &specific.to_string(),
+            "orders",
+            "0",
+            "workers",
+            "lease-2",
+            &crate::encryption::Encryption::from_env(),
+            Conflation::OFF,
+        );
+        assert_eq!(count, 2, "{body}");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let offsets: Vec<i64> = parsed["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["offset"].as_i64().unwrap())
+            .collect();
+        assert_eq!(offsets, [102, 103], "{body}");
+
+        // The last delivered offset must be the batch_end the ack path computes
+        // from the same segment metadata (`seq + startOff + take - 1`): one
+        // arithmetic, two readers, and a lease that would otherwise be acked at
+        // a position no message ever reported.
+        let segment = &meta["partitions"][0]["segments"][1];
+        let batch_end = segment["seq"].as_i64().unwrap()
+            + segment["startOff"].as_i64().unwrap()
+            + segment["take"].as_i64().unwrap()
+            - 1;
+        assert_eq!(batch_end, 513);
+    }
+
     /// All five SQL assembly paths must carry the group-scoped count into the
     /// metadata consumed above. This source pin complements the live Postgres
     /// test: it runs in every ordinary `cargo test`, even without a database.
@@ -6448,6 +6699,14 @@ mod protocol_conformance {
             assert!(
                 sql[start..end].contains("'deliveryAttempt'"),
                 "{procedure} dropped deliveryAttempt"
+            );
+            // C-SQS-3 rides on the same metadata: `offset` is rendered as
+            // `seq + the frame's index`, and a path that stopped emitting the
+            // segment's base would silently report frame indexes instead of
+            // offsets — a wrong number, not a missing key.
+            assert!(
+                sql[start..end].contains("'seq'"),
+                "{procedure} dropped seq, which the rendered offset is derived from"
             );
         }
         assert!(
@@ -6713,6 +6972,7 @@ mod push_body_charset {
             txn: "a\"b\\c&d<e>f".into(),
             queue: "q\"1".into(),
             status: "queued",
+            offset: Some(3),
             dup_of: None,
         }];
         let rendered = render_push_results(&results);

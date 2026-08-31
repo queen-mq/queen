@@ -1,0 +1,6 @@
+# The rig's runtime state: logs, pid files, and the env.sh it writes for the
+# suites. All of it belongs to one `rig.sh up` and none of it to the repository.
+# (queen-kafka's rig uses a mktemp directory instead and so needs no rule; this
+# one keeps its logs in the tree on purpose, because `rig.sh up` leaves the
+# stack running and a person then wants `rig.sh logs` to find them.)
+.rig/

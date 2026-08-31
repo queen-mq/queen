@@ -1,0 +1,393 @@
+---
+title: SQS and SNS protocol support
+description: "Which Amazon SQS and SNS actions the queen-sqs facade answers, how a queue, a message group and a visibility timeout map onto Queen, and every place its behaviour differs from the real service."
+type: reference
+tier: use
+status: preview
+sidebar:
+  order: 31
+  label: SQS protocol
+sourceOfTruth:
+  - protocols/queen-sqs/src/actions/mod.rs
+  - protocols/queen-sqs/src/actions/queues.rs
+  - protocols/queen-sqs/src/actions/messages.rs
+  - protocols/queen-sqs/src/actions/fifo.rs
+  - protocols/queen-sqs/src/actions/dlq.rs
+  - protocols/queen-sqs/src/registry.rs
+  - protocols/queen-sqs/src/envelope.rs
+  - protocols/queen-sqs/src/handle.rs
+  - protocols/queen-sqs/src/proto/mod.rs
+  - protocols/queen-sqs/src/error.rs
+  - protocols/queen-sqs/src/sigv4.rs
+  - protocols/queen-sqs/src/sns/mod.rs
+  - protocols/queen-sqs/src/sns/admin.rs
+  - protocols/queen-sqs/src/sns/publish.rs
+---
+
+`queen-sqs` is a separate binary that speaks the two Amazon SQS wire protocols to clients and
+plain HTTP to a Queen broker or proxy as an ordinary client. An unmodified AWS SDK reaches Queen
+by changing `endpoint_url`, and nothing else. Running it is
+[the operator page](/deploy/sqs); this page is the contract a client gets.
+
+<Aside type="caution">
+The facade is a **preview**. It is not part of a Queen release, and what has been run end to end
+against a real broker is narrower than what is implemented: boto3 and the `aws` CLI over the JSON
+protocol, and boto3's SNS client over the Query one. The client matrix and the differential run
+against real AWS are not done, so the divergences at the bottom of this page are the ones known
+today rather than a closed list.
+</Aside>
+
+The design has one sentence to protect, and it is the opposite of
+[the Kafka facade's](/deploy/kafka#cluster-mode): **it is stateless, any instance answers any
+request, and a plain Service or load balancer in front is supported.** Everything durable lives in
+Queen, either as messages or under a `qs:` prefix in its key/value store, and every in-memory
+structure in the process is a cache with a time to live. A restart is free and a second replica
+needs no coordination, [with one variable to set first](/deploy/sqs#the-one-variable-a-second-replica-needs).
+
+## What speaks to it
+
+The distinction worth keeping is between what has been run and what follows from the protocol,
+so both are listed and neither is dressed as the other.
+
+**Run against a real broker**, in `protocols/queen-sqs/compat`: boto3 and botocore 1.43 (AWS JSON 1.0, 99 of
+100 assertions, the one failure being [the concurrency divergence](#the-divergence-to-read-first-a-standard-queues-concurrency-is-its-width)),
+the `aws` CLI 1.46 (AWS JSON 1.0, 12 of 12), and boto3's SNS client (Query and XML, 92 of 92, on
+the same listener and the same signature verifier as the JSON half at the same moment).
+
+**Expected to work and not yet measured**, which is the M5 client matrix's job: aws-sdk-go-v2,
+`@aws-sdk/client-sqs` and `client-sns`, aws-sdk-java v2, aws-sdk-php, aws-sdk-net, aws-sdk-rust,
+and the drivers built on them, which are the reason the facade exists at all. Celery, Laravel's
+stock `sqs` queue driver, Symfony Messenger through async-aws, Spring Cloud AWS, MassTransit,
+sqs-consumer, Shoryuken, Terraform's `aws_sqs_queue` and `aws_sns_topic_subscription`, and KEDA's
+SQS scaler all reach a custom endpoint the same way: one setting, no library change.
+
+## Both protocols, on one listener
+
+Two wire protocols are live in the field, so both are live here, sniffed per request.
+
+| Protocol | How a request is recognised | Who speaks it |
+| --- | --- | --- |
+| **AWS JSON 1.0** | `X-Amz-Target: AmazonSQS.<Action>` | every SDK major since late 2023 |
+| **Query and XML** | a form-encoded body carrying `Action=…&Version=…` | older SDK majors, async-aws, and **all of SNS**, which never moved to JSON |
+
+`X-Amz-Target` is read first and the form's `Action=` second. `Content-Type` is read by nothing:
+it is the header clients get wrong, and both protocols are unambiguous without it. A Query request
+is decoded into the JSON protocol's shape rather than the other way round, so one action
+implementation serves both and neither codec knows what an action means.
+
+Requests are authenticated with SigV4, verified in house, in both the header and the presigned
+query variants, with AWS's own fifteen minute clock skew window and a constant-time comparison.
+The credential scope must name `sqs` or `sns`, which is how one listener serves both services, and
+any region the client chose is accepted, because the region here is a label rather than a place.
+
+## The action matrix
+
+<Render file="generated/sqs-action-matrix" />
+
+## The mapping
+
+Six lines carry most of it. A queue is a Queen queue plus a registry record. A **standard queue is
+M synthesized lanes**, decimal named `0` to `M-1`, M fixed at create. A **FIFO queue's lane is its
+`MessageGroupId`**, so a group is a partition and nothing is synthesized. One message is one Queen
+message wrapped in [the envelope below](#the-payload-envelope). The consumer group is the
+queue-mode default, because SQS has no groups. And the visibility timeout is a real durable lease
+held by the broker, not a timer in the facade.
+
+| SQS | Queen |
+| --- | --- |
+| Queue | A queue created through `/configure`, plus a `qs:q:<name>` record holding the attributes, the tags and the ARN |
+| Standard queue's parallelism | `queen.partitions` synthesized lanes, default 64, chosen at `CreateQueue` and never changed afterwards |
+| `MessageGroupId` (FIFO) | The partition name. Group blocked while in flight is the partition claim, which is where the ordering comes from |
+| `MessageId` | The broker's message uuid |
+| `ReceiptHandle` | A signed, self-contained token naming the queue, partition, transaction, lease and message ([below](#the-receipt-handle)) |
+| `VisibilityTimeout` | The lease, per message, because a receive claims one message per pop |
+| `ChangeMessageVisibility` | A lease extension. At zero it is ack `retry`, which releases the message and charges nothing against the retry budget |
+| `DeleteMessage` | Ack `completed`. The ack is a cursor, so there is never a gap to swallow at claim width one |
+| `MessageDeduplicationId` | The push's `transactionId`, inside the queue's own deduplication window |
+| `SequenceNumber` (FIFO) | The message's absolute offset in its partition |
+| Per-message `DelaySeconds` | A timer, keyed by the send's own deduplication key, with the envelope as its payload |
+| Queue `DelaySeconds` | `delayedProcessing` |
+| `MessageRetentionPeriod` | `retentionSeconds` |
+| `RedrivePolicy` | A facade-driven move: push to the dead-letter queue and ack the original, in one `POST /api/v1/transaction` |
+| `ApproximateNumberOfMessages`, `…NotVisible` | The queue's depth and its in-flight count |
+| `ApproximateNumberOfMessagesDelayed` | The timer count for that queue |
+| SNS topic, subscription | `qs:t:` and `qs:s:` records in the key/value store. Nothing about SNS reaches the broker |
+| SNS `Publish` | One `POST /api/v1/transaction` carrying one push per matched subscription |
+
+The model has exactly one real mismatch and it is worth stating rather than hiding. Queen's lease
+is a claim over a contiguous span of offsets in one partition for one consumer group, with a
+monotonic ack cursor; SQS's visibility is per message. **The two coincide at claim width one**, so
+a `ReceiveMessage` is up to `MaxNumberOfMessages` pops of one message each, and every later verb
+is exact rather than approximate. The cost is one write transaction per message received, which is
+honest: SQS is a chatty protocol whose own clients poll in batches of at most ten. The consequence
+is the divergence below.
+
+## The divergence to read first: a standard queue's concurrency is its width
+
+**A standard queue can have no more messages in flight at once than it has lanes**, and a consumer
+holding a message blocks the messages behind it in that lane for a full visibility timeout. This is
+not what SQS does: there a standard queue has no head-of-line blocking at all, which is most of
+what distinguishes it from a FIFO one.
+
+It is a property of the mapping and not a bug. A pop takes a durable claim on one lane, and a lane
+with a live claim serves no second pop, so N concurrent pops collect at most one message per free
+lane. Nothing is lost and nothing is duplicated: every message is still eventually receivable, and
+the depth attributes account for all of them, so KEDA and every other autoscaler still see the
+blocked messages as work waiting.
+
+Measured on a rig at ten messages sent and read without deleting:
+
+| `queen.partitions` | Sent | In flight at once |
+| ---: | ---: | ---: |
+| 1 | 3 | 1 |
+| 1 | 10 | 1 |
+| 8 | 10 | 7 |
+| 64 | 10 | 10 |
+| 256 | 10 | 10 |
+
+**The dial is `queen.partitions`, it is set at `CreateQueue`, and it cannot be changed afterwards.**
+Partition counts never shrink in Queen, and a width that changed would strand messages on lanes
+nothing pops. So the guidance is a create-time decision:
+
+- the default of 64 is invisible at ten messages in flight and starts to bite in the hundreds;
+- **set it to a few times the number of messages you expect in flight at once**, which is the
+  consumer count times the batch size times the prefetch depth, not the send rate;
+- a queue that will hold long visibility timeouts (a job that takes minutes) wants more, because
+  the lane is unavailable for the whole of that timeout;
+- the ceiling is 100,000 and the cost of width is the partition rows, which are cheap but not free;
+- `QUEEN_SQS_DEFAULT_PARTITIONS` moves the default for queues created afterwards and never for
+  queues that already exist, which is exactly why the width is stamped into each record.
+
+On a **FIFO** queue there is no dial, and that is SQS's own semantics rather than this facade's: a
+group is consumed serially, so a subscriber's concurrency for one group is one message at a time.
+`MessageGroupId` is where a publisher buys concurrency back. What is new here is that the number of
+groups is therefore a capacity decision on the producer's side, which nothing in the SQS API hints
+at.
+
+## Divergences from the real service
+
+Everything below is deliberate and is documented in the code that does it. None of it is a bug
+report. Two are marked *unsettled*: they are shipped choices that a run against real AWS will
+either ratify or overturn, and they are the entries most likely to move.
+
+**`PurgeQueue` is synchronous.** AWS answers immediately and empties the queue in the background,
+documenting that the deletion takes up to sixty seconds. Here the whole delete and recreate happens
+inside the request, so the call is as slow as the work, and a queue holding a backlog of delayed
+sends is where that is felt. The alternative is worse in this direction: a purge that returned
+early would leave the queue answering receives for messages a client has been told are gone, with
+no task handle for anyone to poll. The sixty second cooldown is emulated, because SDK retry
+behaviour depends on it, and **every receipt handle minted before a purge stops addressing
+anything**, which AWS also says in its own words.
+
+**Inside a FIFO batch, the entries of one claim are one gesture.** A FIFO claim covers a run of one
+group, so `DeleteMessageBatch` and `ChangeMessageVisibilityBatch` group their entries by claim
+before acting. Ten independent calls would make the first release end the claim and the other nine
+answer `MessageNotInflight`, which is a batch of nine failures for the one gesture every SQS
+consumer library makes on an error path: `ChangeMessageVisibility(0)` over everything it just
+received. Deletes that arrive out of order are handled the same way: the contiguous prefix is
+acked and the rest is recorded in the key/value store, keyed by partition and lease, so a later
+delivery of a message already deleted is acked on the way through and any instance can serve it.
+
+**`ApproximateReceiveCount` is per claim inside a FIFO batch, and exact everywhere else.** On a
+standard queue a claim holds one message and the count is the message's own. Inside a FIFO batch it
+is the claim's attempt count, shared by the run. The field's own name buys the slack, and it is
+classified `accepted` rather than hidden.
+
+**A dead-lettered copy carries its receive count forward and cannot carry its MessageId.** The
+count continuing is AWS's behaviour, and the number carried is the deliveries a consumer actually
+saw, since the delivery that triggered the move is never handed to anybody. The id is where this
+facade cannot match AWS: the copy is a new row in a different queue and the broker mints ids, so
+the original travels in the envelope and is surfaced as `queen.originalMessageId`, beside
+`queen.sourceQueue`. Without those two a dead-letter consumer has no correlation back to the
+message it is holding the remains of. One consequence is AWS's own rule made visible: a dead-letter
+queue with a `RedrivePolicy` of its own moves a copy on its first receive, because the carried
+count already exceeds any threshold. A queue naming **itself** as its dead-letter target is not a
+chain but a live-lock, and it is refused.
+
+**A FIFO `SequenceNumber` is unique within its message group and not across the queue.** It is the
+absolute offset the push allocated, and on a FIFO queue the partition is the `MessageGroupId`, so
+the numbering starts at 0 in every group and the same number appears in each. AWS's is unique
+queue-wide. It orders a group's own messages exactly, which is what a FIFO consumer reads it for; an
+application that keys across groups by it collides, and there is no queue-wide counter to answer
+with instead. The number is also the one field on this page that depends on the broker: it is
+present because a pop carries the offset it was pushed at, and it is absent against an older broker
+that does not.
+
+**SNS v0 subscribes SQS queues and nothing else.** `Protocol=sqs` is the only value `Subscribe`
+accepts, refused by name rather than as a malformed endpoint. HTTP and HTTPS subscriptions are a
+later milestone, delegated to a delivery service that already has the retry ladder, the circuit
+breaker and the outbound request guard; what that milestone adds on top is the
+`SubscriptionConfirmation` handshake as a lifecycle state. Two consequences a client can read
+today: `ConfirmSubscription` can never succeed and says so, because every subscription this facade
+can create is same-account SQS, which AWS itself confirms at `Subscribe`; and a **standard topic
+refuses to subscribe a FIFO queue**, where
+AWS permits it and invents a group id. Refusing at `Subscribe`, where a client can read the reason,
+is the better half of that trade: inventing a group id per message would put a FIFO consumer's
+ordering guarantee in the facade's hands without saying so.
+
+**A notification carries no `Signature`, `SigningCertURL` or `UnsubscribeURL`.** AWS writes all
+three. A signature nothing can verify, a certificate URL whose host AWS's own validator libraries
+pin to `sns.*.amazonaws.com`, and an unsubscribe URL that would need a signature to work are three
+fields that are worse present than absent. `SignatureVersion` stays, because it names the version a
+signature would carry and clients compare it as a string. A queue subscriber reads none of the
+three.
+
+**An SNS publish to a FIFO topic answers no `SequenceNumber` at all.** AWS answers one per message
+group, on `Publish` and per entry on `PublishBatch`. A transaction's push echoes carry no offset by
+construction, and the route that does answer one is not a transaction and would forfeit the atomic
+fan-out, so the number is omitted rather than invented. It matters only for a client that orders or
+deduplicates on the sequence number rather than on delivery order. A message delivered from that
+publish still carries a `SequenceNumber` when the subscriber reads it off its own FIFO queue.
+
+**A repeated `MessageDeduplicationId` on an SNS publish answers a new MessageId.** *Unsettled.*
+Delivery is right: the duplicate is suppressed by the broker's own deduplication index and only the
+first message is ever delivered. It is the answer that is in question. SQS documents returning the
+original message's id for a repeated deduplication id and SNS's page is not explicit, so either
+this is wrong or the module comment asserting it is. A publisher that retries after a timeout gets
+an id that correlates with nothing, which is the whole reason SQS returns the original, so one run
+against real AWS settles it.
+
+**A repeat `Subscribe` returns the existing ARN and ignores the attributes it carries.**
+*Unsettled.* AWS's sentence covers the case where the attributes match and is silent about the case
+where they differ. This matters to every provisioner that manages subscriptions declaratively:
+Terraform, MassTransit and JustSaying all re-subscribe with the attribute set they want, so a
+filter policy edited in a provisioner's source never reaches the facade and nothing reports drift.
+The counter-argument is the one in the source: a `Subscribe` that silently replaced a live filter
+policy is a change nobody asked for.
+
+**A queue Queen already has is not adopted.** `CreateQueue` over a queue this facade's registry
+does not know is refused `QueueAlreadyExists`, because `/configure` is a whole-row upsert: adopting
+would rewrite a live native queue's lease time and retry budget, and turn retention on at four
+days, which deletes data nobody asked to delete.
+
+**Quotas are not emulated.** There is no 120,000 in-flight ceiling, no FIFO per-group throughput
+quota, no 64 KB billing chunk. Where Queen is a superset the superset is the point, and the two
+that matter are below.
+
+**Two message attributes AWS always returns are absent, and one Queen attribute AWS does not have is
+present.** `SenderId` is absent because the sending principal is not stored: this facade knows who is
+receiving, and writing the sender's identity into the payload would mean a fifth envelope key.
+`ApproximateFirstReceiveTimestamp` is absent because nothing records the first delivery of a message:
+the delivery attempt is counted, but no clock remembers when it happened. Both are absent under
+`All` as well, and every SDK models the attribute map as an open one, so an absence reads as an
+absence rather than as a failure. In the other direction, `GetQueueAttributes` with `All` includes
+`queen.partitions`, which is not an AWS attribute at all, and every client tested ignored it
+cleanly.
+
+## Where Queen is a superset
+
+**The deduplication window.** SQS fixes the FIFO deduplication window at five minutes and offers
+nothing on a standard queue. Here a `.fifo` queue is created at 300 seconds, so it behaves exactly
+like SQS's with no attribute set, and `queen.dedupWindowSeconds` widens it to anything up to a
+year. The key is the one the client already sends: `MessageDeduplicationId`, or the SHA-256 of the
+body under `ContentBasedDeduplication`, becomes the push's `transactionId`, which is Queen's own
+deduplication key. A standard queue's window is zero, because SQS standard queues deduplicate
+nothing and a window there would silently swallow a legitimate retry.
+
+**The payload ceiling.** `MaximumMessageSize` is per queue, defaults to 262,144 bytes and may be
+set to 1,048,576, which is AWS's own ceiling since August 2025. The listener reads at most 2 MiB
+per request, before the body is in memory: the doubling covers form encoding, the base64 of binary
+attributes and the headers around them, and it is a cap on bytes read rather than a cap applied
+after buffering, because the signature that would have refused the request is computed over the
+body it is still reading.
+
+Retention is a third: `MessageRetentionPeriod` accepts AWS's full 60 second to 14 day range and
+maps onto Queen's own retention, which is time based and applies to the queue rather than to
+individual messages.
+
+## The payload envelope
+
+An SQS body is a string and a Queen payload is JSON, so the facade defines exactly one shape and
+both directions read it from one module.
+
+```json
+{
+  "b": "the body, verbatim",
+  "a": { "event": { "t": "String", "v": "order.created" } },
+  "s": { "AWSTraceHeader": "Root=1-…" },
+  "m": "the original MessageId, on a redriven copy only"
+}
+```
+
+`b` is always present and is the body as the sender wrote it, byte for byte, including its
+whitespace: bodies are strings in SQS, so nothing is base64 encoded that does not have to be.
+Binary attribute values are base64 on the wire and stay base64 here, so a value never changes
+representation between the client and the store, which matters because the MD5 a client checks is
+computed over the decoded bytes. `a` and `s` are omitted when empty.
+
+A payload that is not this shape is served as itself: a body equal to the stored JSON, with no
+attributes. That is what makes mixed consumption work in both directions, an SQS consumer reading
+what native Queen producers write and the reverse. Recognition is strict, an object whose keys are
+a subset of the four with `b` a string and every base64 field decodable, so anything the facade did
+not write falls out to the native path rather than being half read. The one acknowledged collision
+is a native payload that happens to be `{"b": …}` shaped.
+
+The MD5 fields are computed exactly per AWS's algorithm, including the attribute digest's own
+length-prefixed encoding of name, type, transport byte and value. The Java, JavaScript and .NET
+SDKs validate them client side, so they are correctness rather than decoration.
+
+## The receipt handle
+
+A handle is base64url of `{queue, partition, transactionId, leaseId, messageId, expiry}` with a
+truncated HMAC-SHA256 tag, and it is self-contained on purpose: a handle that referred to
+server-side state would make a delete stick to the instance that served the receive, and a plain
+load balancer in front of two replicas would start losing deletes.
+
+Three properties follow, and each is client-visible:
+
+- **A handle from a previous delivery of the same message is refused.** It names a lease that is
+  gone, so it fails on mismatch instead of deleting whatever is in flight now, which is AWS's own
+  contract.
+- **A handle cannot be minted by a client.** The tag is a MAC and not a hash, because whoever can
+  forge one can delete any message in any queue this facade serves. The key is
+  `QUEEN_SQS_HANDLE_SECRET`, and [it must be set before a second replica exists](/deploy/sqs#the-one-variable-a-second-replica-needs).
+- **A handle outlives its own first visibility window.** `ChangeMessageVisibility` extends a lease
+  without reissuing the handle a client holds, so the expiry is SQS's twelve hour in-flight ceiling
+  and the lease is what actually decides whether a delete lands.
+
+## Errors
+
+The catalog is closed, in the same discipline and for the same reason as the Kafka facade's: SDK
+retry behaviour is keyed off these strings, so inventing one at a call site invents a client
+behaviour. Every code is a real AWS code with AWS's own status.
+
+SQS names most errors twice and the two names are usually different words. Both are answered, which
+is what makes boto3 raise the exception class an application catches:
+
+| Shape name (`QueryErrorCode`, and the JSON `__type`) | Legacy code (`Code`) |
+| --- | --- |
+| `QueueDoesNotExist` | `AWS.SimpleQueueService.NonExistentQueue` |
+| `QueueNameExists` | `QueueAlreadyExists` |
+| `QueueDeletedRecently` | `AWS.SimpleQueueService.QueueDeletedRecently` |
+| `BatchEntryIdsNotDistinct` | `AWS.SimpleQueueService.BatchEntryIdsNotDistinct` |
+| `EmptyBatchRequest` | `AWS.SimpleQueueService.EmptyBatchRequest` |
+| `TooManyEntriesInBatchRequest` | `AWS.SimpleQueueService.TooManyEntriesInBatchRequest` |
+| `ReceiptHandleIsInvalid` | `ReceiptHandleIsInvalid` |
+| `InvalidAttributeName` | `InvalidAttributeName` |
+
+The pair is even inverted between `QueueDoesNotExist` and `QueueAlreadyExists`, which is why this
+is a table in the source rather than a rule.
+
+SNS spells its errors differently and the difference is not cosmetic: a missing topic is `NotFound`
+with HTTP **404** where every SQS "does not exist" is a 400, a bad parameter is `InvalidParameter`
+and not `InvalidParameterValue`, and the JSON type prefix is `com.amazonaws.sns#`. A client's catch
+block is written against one string or the other.
+
+One mapping is a decision rather than a translation. **A `429` from Queen is answered
+`RequestThrottled`**, not `OverLimit`, because SDK retry is driven by the code and not by the
+status: every SDK carries a list of throttling code strings, `RequestThrottled` is on it and
+`OverLimit` is not. Answering `OverLimit` to a rate cap would tell a client its request was wrong
+when the request was right, and every SDK would stop instead of backing off.
+
+## What an unsupported request gets
+
+An action name outside the closed set is `InvalidAction`, and the name is not echoed back: it is
+unbounded client-controlled input that would land in this facade's log and in the answer's body,
+and the client already knows what it asked for. The comparison is case sensitive, as AWS's is, so
+`sendmessage` is not an action either. Accepting it would make this the only SQS endpoint on which
+that client works, until the day it is pointed at the real one.
+
+A request whose signature does not verify is `SignatureDoesNotMatch`, and one naming an access key
+this deployment does not know is `InvalidClientTokenId`. A queue URL bearing another account's
+segment, or a path traversal, is `QueueDoesNotExist` rather than a malformed-request error: the URL
+is client-supplied input on every message action and is parsed as such.

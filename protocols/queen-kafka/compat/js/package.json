@@ -1,0 +1,13 @@
+{
+  "name": "queen-kafka-compat-js",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "kafkajs against the queen-kafka compat rig (M6 client matrix)",
+  "scripts": {
+    "test": "node run.mjs all"
+  },
+  "dependencies": {
+    "kafkajs": "^2.2.4"
+  }
+}

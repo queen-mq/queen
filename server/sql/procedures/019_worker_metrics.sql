@@ -205,7 +205,7 @@ BEGIN
     RETURN (
         SELECT COALESCE(jsonb_agg(
             jsonb_build_object(
-                'timestamp', to_char(bucket, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+                'timestamp', to_char(bucket AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
                 -- Request rates
                 'pushRequestsPerSecond', ROUND(push_request_count::numeric / 60, 2),
                 'popRequestsPerSecond', ROUND(pop_request_count::numeric / 60, 2),
@@ -291,7 +291,7 @@ BEGIN
                 -- is a bare array, so there is no envelope to carry it in) —
                 -- a client must not assume 1-minute points.
                 'bucketMinutes', v_bucket_minutes,
-                'bucketTime', to_char(bucket_time, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+                'bucketTime', to_char(bucket_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
             ) ORDER BY bucket_time DESC, queue_name
         ), '[]'::jsonb)
         FROM (
@@ -346,7 +346,7 @@ BEGIN
                 'avgJobQueueSize', avg_jq,
                 'maxJobQueueSize', max_jq,
                 'dbErrors', db_errors,
-                'lastSeen', to_char(last_seen, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+                'lastSeen', to_char(last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
             ) ORDER BY hostname, worker_id
         ), '[]'::jsonb)
         FROM (
@@ -448,7 +448,7 @@ BEGIN
             'dbErrors', total_db_errors,
             'dlqCount', total_dlq,
             'pendingMessages', total_push_messages - total_pop_messages,
-            'lastUpdatedAt', to_char(last_updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+            'lastUpdatedAt', to_char(last_updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
         )
         FROM queen.worker_metrics_summary
         WHERE id = 1
@@ -608,7 +608,7 @@ BEGIN
             'ingestedPerSecond', ROUND(COALESCE(v_recent_throughput.push_per_min, 0)::numeric / 300, 2),
             'processedPerSecond', ROUND(COALESCE(v_recent_throughput.ack_per_min, 0)::numeric / 300, 2)
         ),
-        'timestamp', to_char(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+        'timestamp', to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
         'statsAge', CASE
             WHEN v_summary.last_updated_at IS NOT NULL
             THEN EXTRACT(EPOCH FROM (NOW() - v_summary.last_updated_at))::integer
@@ -694,7 +694,7 @@ BEGIN
             'ingestedPerSecond', ROUND(v_push_5m::numeric / 300, 2),
             'processedPerSecond', ROUND(v_ack_5m::numeric / 300, 2)
         ),
-        'timestamp', to_char(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+        'timestamp', to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
         'statsAge', CASE
             WHEN v_agg.last_at IS NOT NULL
             THEN EXTRACT(EPOCH FROM (NOW() - v_agg.last_at))::integer
@@ -816,7 +816,7 @@ BEGIN
         SELECT
             COALESCE(jsonb_agg(
                 jsonb_build_object(
-                    'timestamp', to_char(qlm.bucket, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+                    'timestamp', to_char(qlm.bucket AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
                     'ingested', COALESCE(qlm.push_msg, 0),
                     'processed', COALESCE(qlm.ack_msg, qlm.pop_msg, 0),
                     'popMessages', COALESCE(qlm.pop_msg, 0),
@@ -891,7 +891,7 @@ BEGIN
         SELECT
             COALESCE(jsonb_agg(
                 jsonb_build_object(
-                    'timestamp', to_char(wm.bucket, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+                    'timestamp', to_char(wm.bucket AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
                     'ingested', wm.push_msg,
                     'processed', wm.ack_msg,
                     'popMessages', wm.pop_msg,
@@ -1064,8 +1064,8 @@ BEGIN
 
     RETURN jsonb_build_object(
         'timeRange', jsonb_build_object(
-            'from', to_char(v_from_ts, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-            'to', to_char(v_to_ts, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+            'from', to_char(v_from_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+            'to', to_char(v_to_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
         ),
         'bucketMinutes', v_bucket_minutes,
         'pointCount', COALESCE(v_point_count, 0),
@@ -1128,7 +1128,7 @@ BEGIN
     SELECT 
         COALESCE(jsonb_agg(
             jsonb_build_object(
-                'timestamp', to_char(bucket, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+                'timestamp', to_char(bucket AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
                 -- Throughput
                 'pushMessages', push_msg,
                 'popMessages', pop_msg,
@@ -1230,7 +1230,7 @@ BEGIN
             NULLIF(MAX(max_job_queue_size), 0) as job_queue,
             NULLIF(MAX(backoff_size), 0) as backoff,
             SUM(push_message_count + ack_message_count) as msgs,
-            to_char(MAX(bucket_time), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as last_seen
+            to_char(MAX(bucket_time) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') as last_seen
         FROM queen.worker_metrics
         WHERE bucket_time >= NOW() - INTERVAL '5 minutes'
         GROUP BY hostname, worker_id
@@ -1280,8 +1280,8 @@ BEGIN
     
     RETURN jsonb_build_object(
         'timeRange', jsonb_build_object(
-            'from', to_char(v_from_ts, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-            'to', to_char(v_to_ts, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+            'from', to_char(v_from_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+            'to', to_char(v_to_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
         ),
         'bucketMinutes', v_bucket_minutes,
         'pointCount', COALESCE(v_point_count, 0),
@@ -1468,7 +1468,7 @@ BEGIN
     SELECT
         COALESCE(jsonb_agg(
             jsonb_build_object(
-                'bucket', to_char(bucket, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+                'bucket', to_char(bucket AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
                 'queueName', queue_name,
                 'pushRequests',       push_req,
                 'pushMessages',       push_msg,
@@ -1510,8 +1510,8 @@ BEGIN
 
     RETURN jsonb_build_object(
         'timeRange', jsonb_build_object(
-            'from', to_char(v_from_ts, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-            'to',   to_char(v_to_ts,   'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+            'from', to_char(v_from_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+            'to',   to_char(v_to_ts AT TIME ZONE 'UTC',   'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
         ),
         'bucketMinutes', v_bucket_minutes,
         'series',  v_series,
@@ -1579,7 +1579,7 @@ BEGIN
     SELECT
         COALESCE(jsonb_agg(
             jsonb_build_object(
-                'bucket',      to_char(bucket, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+                'bucket',      to_char(bucket AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
                 'queueName',   queue_name,
                 'hostname',    hostname,
                 'workerId',    worker_id,
@@ -1607,8 +1607,8 @@ BEGIN
 
     RETURN jsonb_build_object(
         'timeRange', jsonb_build_object(
-            'from', to_char(v_from_ts, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-            'to',   to_char(v_to_ts,   'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+            'from', to_char(v_from_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+            'to',   to_char(v_to_ts AT TIME ZONE 'UTC',   'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
         ),
         'bucketMinutes', v_bucket_minutes,
         'series',   v_series,

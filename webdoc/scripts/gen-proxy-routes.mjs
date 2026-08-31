@@ -37,7 +37,16 @@ const MAIN = "server/src/main.rs";
 // family, so the storage/monthly blocks refuse a cycle only when the body
 // actually grows. The op half never names a class here (same as kv/timers), so
 // the mirror below is unchanged and only the class meaning grew. Re-read.
-const CLASSIFY_FINGERPRINT = "00c5c6fc166ac877";
+// 2026-08-30: `classify` grew ONE arm, for `POST /api/v1/fetch`
+// (PLAN_QUEEN_KAFKA.md C2) — the batched read-from-offset the Kafka facade
+// consumes through, and the only consume path it has. It answers `Consume`
+// rather than the `Read` its read-only semantics suggest, because the class is
+// an authorization decision and the route hands out message payloads. POST on
+// the exact path only: every other method, and the trailing-slash spelling,
+// are `Blocked` rather than left to travel to a 405, the same fail-closed rule
+// the kv/timer/ephemeral families state. Re-read in full: nothing else in the
+// function moved, and `is_operator_route` is untouched.
+const CLASSIFY_FINGERPRINT = "854404d1da627198";
 const OPERATOR_FINGERPRINT = "04d6dea7366b466d";
 
 // --- mirror of `is_operator_route` -----------------------------------------
@@ -77,6 +86,13 @@ function classify(m, p) {
   if (p.startsWith("/api/v1/pop/queue/")) return "consume";
   if (p === "/api/v1/ack" || p === "/api/v1/ack/batch") return "consume";
   if (p.startsWith("/api/v1/lease/")) return "consume";
+  // The C2 fetch. Method-exact on the exact path, like the gated families
+  // below: the broker registers one method here and axum redirects no trailing
+  // slash, so every other spelling is `Blocked` in the Rust rather than left to
+  // travel to a 405.
+  if (p === "/api/v1/fetch") {
+    return m === "POST" ? "consume" : "blocked";
+  }
 
   if (p === "/api/v1/configure") return "queue admin";
   if (p.startsWith("/api/v1/resources/queues/") && m === "DELETE") return "queue admin";
@@ -149,7 +165,10 @@ function classify(m, p) {
 
 const CLASS_MEANING = [
   ["produce", "Counted against the message quota. May create queues and partitions implicitly."],
-  ["consume", "Pop, ack and lease extension. A `wait=true` pop also holds a parked-consumer slot."],
+  [
+    "consume",
+    "Pop, ack, lease extension, and the batched read-from-offset the Kafka facade consumes through. A `wait=true` pop also holds a parked-consumer slot; the fetch does not, since its long poll is a body field rather than a query flag. The fetch is classified for the authority it needs rather than for what it writes: it is non-destructive and never quota-blocked, but it hands out message payloads, so it carries the authority of the pop it stands in for instead of the read level every user role already has.",
+  ],
   ["queue admin", "Configuration, deletions, seeks and subscription changes."],
   ["read", "Listings, status, analytics, DLQ and message reads, all tenant-scoped."],
   [

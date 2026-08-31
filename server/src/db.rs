@@ -1062,12 +1062,19 @@ pub async fn seg_message_detail(
 // longer exists (retention deleted). Signature kept from the seg engine: `seq`
 // now carries the segment's base_offset (the log_segments PK). For "which
 // segment covers offset X" use log_segment_covering instead.
+//
+// AT TIME ZONE 'UTC' before to_char is load-bearing, for the reason spelled out
+// at the top of 032_log_fetch.sql: `created_at` is TIMESTAMPTZ, so to_char alone
+// renders it in the SESSION's TimeZone under a format string that ends in a
+// literal "Z" — local time wearing a UTC label on any Postgres that is not UTC.
+// This string is the `createdAt` of GET /api/v1/messages/:id, verbatim.
 pub async fn seg_fetch_segment(
     client: &deadpool_postgres::Client,
     partition_id: &str,
     seq: i64,
 ) -> Result<Option<(String, String, Vec<u8>)>, tokio_postgres::Error> {
-    let stmt = "SELECT to_char(s.created_at, 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), \
+    let stmt =
+        "SELECT to_char(s.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'), \
                        lp.name, s.blob \
                 FROM queen.log_segments s \
                 JOIN queen.log_partitions lp ON lp.id = s.partition_id \
@@ -1771,6 +1778,77 @@ pub async fn pop_wildcard_bin(
     Ok((row.get(0), row.get(1)))
 }
 
+// ------------------------------------------------------------------- fetch
+// PLAN_QUEEN_KAFKA.md C2 — batched multi-partition read-from-offset behind
+// `POST /api/v1/fetch` (queen.log_fetch_bin_v1, 032_log_fetch). NOT a pop: it
+// takes no lease, reads no consumer row and advances no cursor, so two callers
+// asking for the same offsets get the same records and neither disturbs a
+// concurrent consumer group.
+//
+// Shape mirrors `pop_wildcard_bin` deliberately: the meta JSON carries the
+// slicing bounds and the blobs come back as a NATIVE bytea[] flattened in the
+// meta's own traversal order (entries in input order, segments in base_offset
+// order), so the broker walks both with one shared index and pays no base64 on
+// either side.
+//
+// The three bounds are the CALLER's: the handler clamps them at the HTTP
+// boundary (handlers/fetch.rs) and passes them down, so an unbounded read is
+// not expressible here.
+#[allow(clippy::too_many_arguments)]
+pub async fn log_fetch_bin(
+    client: &deadpool_postgres::Client,
+    queues: &[String],
+    partitions: &[String],
+    offsets: &[i64],
+    max_bytes: &[i32],
+    budget: i64,
+    max_records: i32,
+    // Track B (§5): scopes the partition resolve, so a queue of another tenant
+    // answers the same 'UNKNOWN_TOPIC_OR_PARTITION' as one that does not exist.
+    tenant: &str,
+) -> Result<(String, Vec<Vec<u8>>), tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached(
+            "SELECT (t.meta)::text, t.blobs \
+             FROM queen.log_fetch_bin_v1($1,$2,$3,$4,$5::int8,$6::int,$7::text::uuid) t",
+        )
+        .await?;
+    let row = client
+        .query_one(
+            &stmt,
+            &[&queues, &partitions, &offsets, &max_bytes, &budget, &max_records, &tenant],
+        )
+        .await?;
+    Ok((row.get(0), row.get(1)))
+}
+
+// The parked fetch's re-probe gate (queen.log_fetch_changed_v1, 032_log_fetch).
+// `false` means every named lane still has the (high, logStart) pair the caller
+// already holds, and segments are immutable — so the body it already rendered is
+// still the answer and there is nothing to re-read.
+//
+// This is `has_pending`'s role on the fetch path, and for the same reason: the
+// broker runs it WITHOUT a pop admission permit and only spends one when it
+// answers `true`, so the O(#parked consumers) storm of empty re-probes can never
+// saturate the shared limiter (the discovery-latency regression of 2026-07-24).
+// One indexed row read per entry, nothing against queen.log_segments.
+pub async fn log_fetch_changed(
+    client: &deadpool_postgres::Client,
+    queues: &[String],
+    partitions: &[String],
+    highs: &[i64],
+    starts: &[i64],
+    tenant: &str,
+) -> Result<bool, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached("SELECT queen.log_fetch_changed_v1($1,$2,$3,$4,$5::text::uuid)")
+        .await?;
+    let row = client
+        .query_one(&stmt, &[&queues, &partitions, &highs, &starts, &tenant])
+        .await?;
+    Ok(row.get(0))
+}
+
 // Namespace/task discovery pop — GET /api/v1/pop (no queue in path). Wildcard-pops
 // across every log queue whose queen.queues row matches the namespace/task
 // filter, returning the SAME {"partitions":[...]} shape as pop_wildcard. Empty
@@ -1822,8 +1900,9 @@ pub async fn pop_discover(
 
 // ------------------------------------------------------ consumer groups
 // GET /api/v1/consumer-groups -> queen.get_consumer_groups_v4()
-// (010_log_admin; reads queen.log_consumers). Returns the SP
-// result JSON array as text.
+// (010_log_admin; reads queen.log_consumers AND the Kafka facade's committed
+// offsets in queen.kv — every row carries `kind`: "queen" or "kafka").
+// Returns the SP result JSON array as text.
 pub async fn get_consumer_groups(
     client: &deadpool_postgres::Client,
     tenant: &str,
@@ -1836,7 +1915,9 @@ pub async fn get_consumer_groups(
 }
 
 // GET /api/v1/consumer-groups/lagging -> queen.get_lagging_partitions_v1($1)
-// (010_log_admin).
+// (010_log_admin; both engines since the Kafka mirror — each entry carries
+// `kind`, and a Kafka entry has a null worker_id because a KV commit names no
+// member).
 pub async fn get_lagging_partitions(
     client: &deadpool_postgres::Client,
     min_lag_seconds: i32,
@@ -1852,7 +1933,10 @@ pub async fn get_lagging_partitions(
 }
 
 // GET /api/v1/consumer-groups/:group -> queen.get_consumer_group_details_v1($1)
-// (010_log_admin).
+// (010_log_admin). Keyed BY QUEUE NAME, so this is the one view where a Queen
+// group and a Kafka group of the same name on the same queue cannot both be
+// shown: the native entry wins and the per-queue object's `kind` says which
+// store it came from. The list endpoint above renders both.
 pub async fn get_consumer_group_details(
     client: &deadpool_postgres::Client,
     group: &str,

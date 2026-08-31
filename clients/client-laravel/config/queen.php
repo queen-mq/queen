@@ -35,6 +35,12 @@ return [
     // tail, so Queen supervisors require lease_renewal whenever prefetch > 1.
     'prefetch' => env('QUEEN_PREFETCH', 1),
     'ack_batch' => env('QUEEN_ACK_BATCH', 1),
+    // Let the broker choose the pop sweep width instead of the fixed
+    // `partitions` stripe count above. Only that one dimension is delegated:
+    // `batch` stays pinned to prefetch because the local prefetch buffer, the
+    // ack_batch <= prefetch bound and the lease budget all key off it, and
+    // `partitions` still stripes pushes. Off keeps the wire bytes unchanged.
+    'autopilot' => env('QUEEN_AUTOPILOT', false),
     // Opt-in data-plane helper for jobs whose runtime cannot be bounded by the
     // original pop lease. One small PHP subprocess per Laravel worker renews
     // the single lease shared by its active and prefetched jobs. If renewal can

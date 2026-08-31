@@ -9,28 +9,58 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "run.sh"
 
+#: The directories the harness is allowed to find its tools in, in PATH order.
+TOOL_DIRECTORIES = ("/usr/bin", "/bin")
+
 
 class RunOptionsTest(unittest.TestCase):
-    def run_before_docker(self, *arguments: str) -> subprocess.CompletedProcess[str]:
-        # Do not assume where a host installs Docker. GitHub runners expose it
-        # from /usr/bin, while macOS normally does not. A controlled client
-        # makes this an offline preflight test on both hosts.
-        with tempfile.TemporaryDirectory() as directory:
-            docker = Path(directory) / "docker"
-            docker.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
-            docker.chmod(0o755)
+    """Option handling, driven to the point where run.sh demands docker.
 
-            return subprocess.run(
-                ["/bin/bash", str(SCRIPT), *arguments],
-                check=False,
-                capture_output=True,
-                text=True,
-                env={**os.environ, "PATH": f"{directory}:{os.defpath}"},
-            )
+    These tests use "required command not found: docker" as the sentinel for
+    "no earlier validation fired", so docker has to be genuinely absent from
+    the PATH they hand the script. Pinning that PATH to /usr/bin:/bin hid
+    docker only where docker is installed elsewhere -- true for Docker Desktop
+    on macOS, which lands in /usr/local/bin, and false on Linux, where docker
+    IS /usr/bin/docker. There the sentinel never fired, the script sailed past
+    the check, and the "unit" tests ran a real benchmark lane.
+
+    So the PATH is built instead: every tool those directories carry, minus
+    docker. Same command set as before on every platform, docker excluded by
+    construction rather than by where it happens to be installed.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._path_directory = tempfile.TemporaryDirectory()
+        mirror = Path(cls._path_directory.name)
+        linked: set[str] = set()
+        for source in TOOL_DIRECTORIES:
+            directory = Path(source)
+            if not directory.is_dir():
+                continue
+            for entry in sorted(directory.iterdir()):
+                if entry.name == "docker" or entry.name in linked:
+                    continue
+                linked.add(entry.name)
+                os.symlink(entry, mirror / entry.name)
+        cls.docker_free_path = str(mirror)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._path_directory.cleanup()
+
+    def run_before_docker(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["/bin/bash", str(SCRIPT), *arguments],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={"PATH": self.docker_free_path},
+        )
 
     def test_publishable_rejects_no_build_before_host_inspection(self) -> None:
         environment = {
-            "PATH": "/usr/bin:/bin",
+            "PATH": self.docker_free_path,
         }
         result = subprocess.run(
             [
@@ -64,7 +94,7 @@ class RunOptionsTest(unittest.TestCase):
         )
 
         self.assertNotEqual(0, result.returncode)
-        self.assertIn("Docker daemon is unavailable", result.stderr)
+        self.assertIn("required command not found: docker", result.stderr)
         self.assertNotIn("prefetch multiplied", result.stderr)
 
     def test_retry_after_must_still_exceed_worker_timeout_with_renewal(self) -> None:
@@ -104,7 +134,7 @@ class RunOptionsTest(unittest.TestCase):
 
         self.assertNotEqual(0, result.returncode)
         self.assertTrue(
-            "Docker daemon is unavailable" in result.stderr
+            "required command not found: docker" in result.stderr
             or "requires a clean Git worktree" in result.stderr,
             result.stderr,
         )

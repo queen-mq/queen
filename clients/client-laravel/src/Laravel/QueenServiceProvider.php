@@ -173,6 +173,7 @@ class QueenServiceProvider extends ServiceProvider
             'block_for' => $queen['block_for'] ?? 0,
             'prefetch' => $queen['prefetch'] ?? 1,
             'ack_batch' => $queen['ack_batch'] ?? 1,
+            'autopilot' => $queen['autopilot'] ?? false,
             'lease_renewal' => $queen['lease_renewal'] ?? false,
             'lease_renewal_interval' => $queen['lease_renewal_interval'] ?? null,
             'lease_renewal_timeout' => $queen['lease_renewal_timeout'] ?? 5,

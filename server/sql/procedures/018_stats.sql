@@ -250,7 +250,7 @@ BEGIN
                     'name', q.name,
                     'namespace', q.namespace,
                     'task', q.task,
-                    'createdAt', to_char(q.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                    'createdAt', to_char(q.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
                     'partitions', COALESCE(s.child_count, 0),
                     -- Storage quota (§6.1): retained payload bytes for this queue,
                     -- refreshed at the stats cadence (log_refresh_all_stats_v1).
@@ -421,7 +421,7 @@ BEGIN
                 'name', q.name,
                 'namespace', q.namespace,
                 'task', q.task,
-                'createdAt', to_char(q.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                'createdAt', to_char(q.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
                 'partitions', COALESCE(s.child_count, 0),
                 'messages', jsonb_build_object(
                     'total', COALESCE(s.total_messages, 0),

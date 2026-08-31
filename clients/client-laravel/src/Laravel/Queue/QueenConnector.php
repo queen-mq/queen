@@ -63,8 +63,15 @@ class QueenConnector implements ConnectorInterface
         $ackBatch = self::boundedInteger($config['ack_batch'] ?? 1, 'ack_batch', 1, $prefetch);
         $bulkBatch = self::boundedInteger($config['bulk_batch'] ?? 100, 'bulk_batch', 1, 1000);
         $dispatchAfterCommit = self::boolean($config['after_commit'] ?? false, 'after_commit');
+        $popAutopilot = self::boolean($config['autopilot'] ?? false, 'autopilot');
         $leaseRenewal = self::boolean($config['lease_renewal'] ?? false, 'lease_renewal');
-        if ($prefetch > 1 && !$leaseRenewal) {
+        // The internal test handler override is exempt, and has to be: a
+        // renewer builds its own Queen client, so lease_renewal refuses that
+        // override outright below. Without this exemption the two rules would
+        // compose into "prefetch above 1 is untestable", which is not what
+        // either of them is for. Nothing reaches this branch in production,
+        // where no handler is ever injected.
+        if ($prefetch > 1 && !$leaseRenewal && !array_key_exists('handler', $config)) {
             throw new InvalidArgumentException(
                 "Queen Laravel prefetch [{$prefetch}] requires lease_renewal so every prefetched lease remains fenced while Laravel executes synchronous job code.",
             );
@@ -213,6 +220,7 @@ class QueenConnector implements ConnectorInterface
             prefetch: $prefetch,
             ackBatch: $ackBatch,
             bulkBatch: $bulkBatch,
+            popAutopilot: $popAutopilot,
             leaseRenewer: $leaseRenewer,
             failedJobRetryHandler: $this->failedJobRetryHandler,
             shutdownTailReleaser: $shutdownTailReleaser,

@@ -1,0 +1,4 @@
+# `celery_suite.py` is imported by the worker it spawns (`-A celery_suite`), so
+# a run always leaves a bytecode cache behind in this directory. It belongs to
+# the run and not to the repository.
+__pycache__/

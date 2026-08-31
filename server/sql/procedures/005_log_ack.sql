@@ -856,7 +856,7 @@ BEGIN
     SELECT COUNT(*), MIN(lease_expires_at) INTO v_n, v_exp FROM updated;
     RETURN jsonb_build_object('renewed', v_n,
         'expiresAt', CASE WHEN v_exp IS NOT NULL
-            THEN to_char(v_exp, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') END);
+            THEN to_char(v_exp AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') END);
 END;
 $$;
 

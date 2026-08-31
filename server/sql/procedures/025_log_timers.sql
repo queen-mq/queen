@@ -537,7 +537,7 @@ BEGIN
                     'queue', v_rec.op->>'queue', 'timerKey', v_rec.op->>'timerKey',
                     'txn', v_rec.op->>'txn',
                     'messageId', v_mid::text,
-                    'deliverAt', to_char(v_deliver, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
+                    'deliverAt', to_char(v_deliver AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
             ELSE
                 v_results[v_rec.ord] := jsonb_build_object(
                     'ok', false, 'status', 'too_late',
@@ -599,7 +599,7 @@ DECLARE
 BEGIN
     IF COALESCE(array_length(v_shards, 1), 0) = 0 THEN
         RETURN jsonb_build_object(
-            'now', to_char(p_now, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+            'now', to_char(p_now AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
             'nextInMs', NULL, 'due', 0, 'dueCapped', false, 'lateMs', 0);
     END IF;
 
@@ -630,7 +630,7 @@ BEGIN
     ) z;
 
     RETURN jsonb_build_object(
-        'now',      to_char(p_now, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+        'now',      to_char(p_now AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
         'nextInMs', CASE WHEN v_next IS NULL THEN NULL
                          ELSE (EXTRACT(EPOCH FROM (v_next - p_now)) * 1000)::bigint END,
         'due',       LEAST(v_cnt, v_cap::bigint),
@@ -1438,7 +1438,7 @@ BEGIN
                'queue', t.queue,
                'timerKey', t.timer_key,
                'partition', t."partition",
-               'deliverAt', to_char(t.deliver_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+               'deliverAt', to_char(t.deliver_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
                'txn', t.txn,
                'messageId', t.message_id::text,
                'payload', encode(t.payload, 'base64'),
@@ -1451,8 +1451,8 @@ BEGIN
                -- has claimed_until in the future and claim_token NULL, and is
                -- still cancellable — so it reads claimed:false, deliberately.
                'claimed', (t.claim_token IS NOT NULL AND t.claimed_until > now()),
-               'createdAt', to_char(t.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
-               'updatedAt', to_char(t.updated_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'))
+               'createdAt', to_char(t.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+               'updatedAt', to_char(t.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'))
     INTO v
     FROM queen.log_timers t
     WHERE t.tenant_id = p_tenant AND t.queue = p_queue AND t.timer_key = p_timer_key;
@@ -1508,7 +1508,7 @@ BEGIN
                    'queue', t.queue,
                    'timerKey', t.timer_key,
                    'partition', t."partition",
-                   'deliverAt', to_char(t.deliver_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+                   'deliverAt', to_char(t.deliver_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
                    'txn', t.txn,
                    'messageId', t.message_id::text,
                    'payloadZstd', t.payload_zstd,
@@ -1517,8 +1517,8 @@ BEGIN
                    'attempts', t.attempts,
                    'lastError', t.last_error,
                    'claimed', (t.claim_token IS NOT NULL AND t.claimed_until > now()),
-                   'createdAt', to_char(t.created_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
-                   'updatedAt', to_char(t.updated_at, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')) AS row
+                   'createdAt', to_char(t.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+                   'updatedAt', to_char(t.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')) AS row
         FROM queen.log_timers t
         WHERE t.tenant_id = p_tenant
           AND t.queue = p_queue

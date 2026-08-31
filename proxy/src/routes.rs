@@ -66,7 +66,7 @@ pub enum GatedOp {
 pub enum RouteClass {
     /// push, transaction — counts messages, may implicitly create queues/partitions
     Produce,
-    /// pop/ack/lease — parked gauge applies on wait=true pops
+    /// pop/ack/lease and the C2 fetch — parked gauge applies on wait=true pops
     Consume,
     /// configure, deletes, seeks, subscription changes
     QueueAdmin,
@@ -169,6 +169,48 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
     if p.starts_with("/api/v1/lease/") {
         return RouteClass::Consume;
     }
+    // PLAN_QUEEN_KAFKA.md C2 — `POST /api/v1/fetch`, the batched
+    // read-from-offset the Kafka facade consumes through, and the ONLY consume
+    // path it has. It is non-destructive: no lease, no cursor read or write, no
+    // claim (server/src/handlers/fetch.rs), so two callers asking for the same
+    // offsets get the same records and nothing has to be acked. Without an arm
+    // here it fell through to the fail-closed `/api/` default and every Cloud
+    // Kafka consumer got a 404.
+    //
+    // `Consume` rather than the `Read` its read-only semantics suggest, because
+    // this class is an AUTHORIZATION decision and the route hands out message
+    // payloads. `Read` for an api key is `scopes.read || scopes.admin`
+    // (auth.rs), which the consume-scoped key a Kafka consumer holds does not
+    // carry — it would be 403'd on the one route it exists to call — and `Read`
+    // for a user principal is true for EVERY role, so a Viewer who may not pop
+    // could read every message of every queue by offset instead. `Consume` is
+    // exactly the authority of the pop it stands in for: `scopes.consume`, or
+    // Admin/Consumer.
+    //
+    // It is never quota-blocked, which is both the §9.6 posture and what the
+    // route needs: a fetch grows nothing the storage quota bounds, and a read a
+    // block can refuse strands a consumer at an offset it can never move past
+    // while the backlog it would drain keeps growing.
+    //
+    // Metering needs no new `op_for` arm: a fetch is not an `is_pop_path`, so
+    // it books reqs-only `Read` like ack and lease. Deliberate and conservative
+    // — `OpClass::Delivery` would debit the delivery bucket (`debit_deliveries`
+    // drives it NEGATIVE, and the next `check_msgs` then 429s) off a count
+    // `count_pop_messages` cannot read from the fetch body shape. Billing Kafka
+    // deliveries is a decision, not a default.
+    //
+    // POST only, and the exact path only. The broker registers one method here
+    // (`main.rs`, `.route("/api/v1/fetch", post(handle_fetch))`) and axum
+    // redirects no trailing slash, so every other spelling fails closed instead
+    // of travelling to a 405 or the broker's own 404 — the same rule the kv,
+    // timer and ephemeral families state below.
+    if p == "/api/v1/fetch" {
+        return if *m == Method::POST {
+            RouteClass::Consume
+        } else {
+            RouteClass::Blocked
+        };
+    }
 
     // --- queue admin ---
     if p == "/api/v1/configure" {
@@ -205,6 +247,34 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
     }
 
     // --- kv (PLAN_KV_TIMERS.md §8.1 routes, §9.5 quota rule) ---
+    //
+    // ONE OVERRIDE LIVES OUTSIDE THIS FILE. `POST /api/v1/kv` is also the only
+    // route the Kafka facade has for a consumer group's bookkeeping — committed
+    // offsets, the group index, the fence, transaction markers, the node
+    // registry, the topic-config records — all under namespace `queen-kafka`
+    // and the key prefix `qk:`. `gateway.rs` reclassifies a batch that
+    // addresses NOTHING ELSE to `Consume`, using `kafka_kv::is_kafka_only_batch`
+    // (which is where the rule, the fail-closed direction and its tests live).
+    //
+    // It is not expressed here because it cannot be: this function takes
+    // `(method, path)` and the rule is a property of the BODY. Nor could the
+    // webdoc route table carry it — that table is keyed by (path, method), so
+    // stating a body-conditional rule there would publish a falsehood.
+    //
+    // What the override changes: the `kv` plan flag stops gating Kafka consumer
+    // groups (a group's offsets are the facade's internal bookkeeping, not the
+    // KV product), and the storage/monthly block stops refusing an OffsetFetch.
+    // That second half is the §9.6 trap this file already argues in the
+    // `/api/v1/fetch` arm above — a read a block can refuse strands a consumer
+    // at an offset it can never move past while the backlog it would drain
+    // keeps growing. Metering is unchanged: `Gated(_,_)` and a non-pop
+    // `Consume` both book reqs-only `OpClass::Read`.
+    //
+    // What it does NOT change: a batch carrying one foreign key, one foreign
+    // namespace, one op this proxy has not been told about, or no ops at all
+    // keeps `Gated(Kv, Mixed)` in every one of its five gates. The classes
+    // below are therefore still the whole truth for every non-Kafka caller.
+    //
     // The batch endpoint is the COMPLETE surface and the only one that accepts
     // `getPrefix` and `incr`. Any other method on it is a shape the broker does
     // not register, so it stays fail-closed here rather than travelling to a
@@ -400,6 +470,58 @@ mod tests {
             RouteClass::Gated(Feature::Streams, GatedOp::Open)
         );
         assert_eq!(classify(&Method::GET, "/"), RouteClass::Read);
+    }
+
+    // ---- PLAN_QUEEN_KAFKA.md C2: the batched read-from-offset ----
+
+    /// The whole Cloud consume path of the Kafka facade is this one route, and
+    /// before it had an arm it fell through to the fail-closed `/api/` default
+    /// and answered 404. `Consume`, not `Read`: see the arm's comment — `Read`
+    /// is `scopes.read || scopes.admin` for an api key (auth.rs), which the
+    /// consume-scoped key a Kafka consumer holds does not carry, and it is open
+    /// to every user role including `Viewer`.
+    #[test]
+    fn fetch_is_consume_and_post_only() {
+        let post = Method::POST;
+        assert_eq!(classify(&post, "/api/v1/fetch"), RouteClass::Consume);
+        assert_ne!(classify(&post, "/api/v1/fetch"), RouteClass::Read);
+        // One method on one exact path at the broker, so every other shape
+        // fails closed here instead of travelling to a 405.
+        for m in [Method::GET, Method::PUT, Method::DELETE, Method::PATCH] {
+            let c = classify(&m, "/api/v1/fetch");
+            assert_eq!(c, RouteClass::Blocked, "{m} /api/v1/fetch");
+        }
+        // Axum redirects no trailing slash, so the spelling the broker 404s is
+        // the spelling the proxy blocks — the treatment `/api/v1/push/` gets.
+        assert_eq!(classify(&post, "/api/v1/fetch/"), RouteClass::Blocked);
+        // and the arm does not swallow a neighbour that does not exist yet
+        assert_eq!(classify(&post, "/api/v1/fetchall"), RouteClass::Blocked);
+    }
+
+    /// A fetch grows nothing and must never come back as a class a storage or
+    /// monthly block can refuse: a consumer refused a READ is a consumer stuck
+    /// at an offset it can never move past, with the backlog still growing.
+    /// The §9.6 trap, on the read side.
+    #[test]
+    fn fetch_is_never_on_a_quota_blockable_class() {
+        let c = classify(&Method::POST, "/api/v1/fetch");
+        assert_ne!(c, RouteClass::Produce);
+        let gated = matches!(c, RouteClass::Gated(_, _));
+        assert!(!gated, "{c:?} would put a plan gate on the consume path");
+    }
+
+    /// The fetch long poll is `maxWaitMs` in the BODY (server's C2 handler),
+    /// not `wait=true` in the query, so this predicate cannot see it: a fetch
+    /// takes no parked slot and forwards on the plain
+    /// `upstream_request_timeout_ms`, not the long-poll one. Pinned because
+    /// that timeout (35s default) is what has to cover the server's 30s
+    /// `MAX_WAIT_MS`, and because a parked-gauge decision should be made, not
+    /// inherited.
+    #[test]
+    fn fetch_is_not_a_wait_pop() {
+        let q = Some("wait=true&timeout=30000");
+        assert!(!is_wait_pop("/api/v1/fetch", q));
+        assert!(!is_wait_pop("/api/v1/fetch", None));
     }
 
     // ---- PLAN_KV_TIMERS.md §9.8 P1: the kv + timers gate ----

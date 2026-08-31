@@ -78,7 +78,7 @@ to A is the worse failure.
 ## User sessions
 
 A session is a JWT the proxy itself mints and verifies. Claims are
-`{sub, iss, iat, exp, jti, role, cluster?}`, where `sub` is the user id.
+`{sub, iss, iat, exp, jti, role, cluster?, aud?}`, where `sub` is the user id.
 
 | Aspect | Behaviour |
 | --- | --- |
@@ -87,6 +87,7 @@ A session is a JWT the proxy itself mints and verifies. Claims are
 | Lifetime | `QUEEN_PROXY_JWT_TTL_S`, default 86400 |
 | `cluster` claim | **Absent** on a session cookie |
 | `role` claim | A placeholder (`viewer`) on a session cookie |
+| `aud` claim | **Never minted here.** Verified when present, see [Audience](#audience) |
 | Revocation | The `jti` goes on the `revoked_tokens` deny-list at logout, checked on every verify |
 
 Key material also decides what a host can do at all. `QUEEN_PROXY_JWT_ED25519_PUB_PEM` alone
@@ -94,6 +95,16 @@ makes a verify-only host: it accepts sessions the auth host minted and mints non
 at all is the API-key-only proxy, which boots with a warning and answers every login with
 `503 {"code":"not_configured"}` naming the variables to set. Material that is supplied but
 unusable to its mode is refused at boot.
+
+A verify-only host says so on its own sign-in page. `/auth/login` is served unauthenticated
+as everywhere else, but instead of an email/password form it renders a short notice: this host
+verifies sessions and does not issue them, so sign-in happens on the control plane that
+operates it. The OAuth buttons are withheld for the same reason, since both callbacks end in
+the mint this host cannot perform. Set `QUEEN_PROXY_AUTH_PORTAL_URL` to an `http(s)` URL to
+give the notice a link to that control plane, and `QUEEN_PROXY_AUTH_PORTAL_LABEL` to change
+its text from the default *Continue to the control plane*; leave the URL unset and the notice
+explains without linking anywhere. Neither variable affects a host that mints its own
+sessions, which keeps the form.
 
 The two blanks are the point. A session token grants nothing on its own: because it
 carries no `cluster` and its `role` is a placeholder, the effective role is looked up
@@ -110,6 +121,39 @@ lookup itself errors (a pool or query failure, not a clean miss), the default is
 **fail open**: a transient pxdb blip must not `401` every session, and the token still
 passed signature and expiry. `QUEEN_PROXY_REVOCATION_STRICT=true` inverts that for
 deployments that would rather lose availability.
+
+### Audience
+
+Every verify-only cell in a fleet holds the same public key, so a token minted by the
+auth host verifies on all of them: signature and issuer say who signed it, not which
+cell it was for. The optional `aud` claim is what binds a token to one cell.
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `QUEEN_PROXY_JWT_AUD` | The host of `QUEEN_PROXY_PUBLIC_URL` | The audience this proxy accepts. Unset, with no public URL either, means no audience is enforced. |
+
+The rule is deliberately one-sided:
+
+- A token carrying **no** `aud` is accepted, exactly as before this claim existed.
+- A token carrying an `aud` is accepted only if one of the audiences it names is this
+  proxy's, compared case-insensitively. Otherwise it is `401 {"code":"unauthorized"}`,
+  logged as an audience mismatch.
+- A proxy with no audience configured accepts any token, whatever it names.
+
+Both JSON shapes RFC 7519 allows are read, one string or an array of them, and an `aud`
+that is present but empty (`""` or `[]`) names nobody and counts as absent.
+
+That asymmetry is what makes this safe to turn on. Nothing mints an `aud` today, so
+configuring one changes no outcome until a minter starts stamping it, and there is no
+ordering requirement between upgrading the cells and upgrading the minter. It is also
+the limit of what the claim buys you: until every token is stamped, an unstamped one
+still replays across the fleet, and the boundary is only real once the mint side sets
+the claim for every cell.
+
+The default is the host of `QUEEN_PROXY_PUBLIC_URL` because that is the name the cell
+already answers to, which is the same name a minter routes to. It is normalized the way
+a `Host` header is, so a port, a trailing dot and letter case never decide the outcome.
+The audience a proxy ended up with is on its `jwt identity` boot line, next to the mode.
 
 ### The session cookie
 

@@ -73,7 +73,7 @@ BEGIN
     IF cardinality(v_queue_ids) = 0 THEN
         RETURN jsonb_build_object(
             'queuesUpdated', 0,
-            'refreshedAt', to_char(v_now, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'));
+            'refreshedAt', to_char(v_now AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'));
     END IF;
 
     -- Phase 2 — canonical-order pre-lock, then the narrow write. A stat row
@@ -99,7 +99,7 @@ BEGIN
         'queuesUpdated', v_updated,
         'bytesTotal', (SELECT COALESCE(SUM(b), 0) FROM unnest(v_bytes) AS b),
         'segmentsTotal', (SELECT COALESCE(SUM(s), 0) FROM unnest(v_segs) AS s),
-        'refreshedAt', to_char(v_now, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'));
+        'refreshedAt', to_char(v_now AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'));
 END;
 $$;
 

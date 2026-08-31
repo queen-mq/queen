@@ -374,10 +374,11 @@ function parseRouterChain(block) {
  * script derives `security` for every operation from it, so a rule that lands in
  * one mirror and not the other publishes a spec whose auth requirements disagree
  * with the route table on the same site. 2026-08-21: the three EPHEMERAL_QUEUES
- * §3.9 rules added below. The kv/timer GET arms are still absent here and are
- * still a KNOWN gap of this mirror (they only widen `read-only` to `read-write`
- * in the spec, never the reverse), left untouched by this change so that its
- * diff says exactly one thing.
+ * §3.9 rules added below. 2026-08-28: the PLAN_QUEEN_KAFKA.md C2 fetch arm,
+ * placed after the GET block exactly as the Rust places it. The kv/timer GET
+ * arms are still absent here and are still a KNOWN gap of this mirror (they only
+ * widen `read-only` to `read-write` in the spec, never the reverse), left
+ * untouched by this change so that its diff says exactly one thing.
  */
 function accessLevel(method, path) {
   const m = method.toUpperCase();
@@ -400,6 +401,9 @@ function accessLevel(method, path) {
     // EPHEMERAL_QUEUES.md §3.9: the two status reads, inside the GET block.
     if (path.startsWith("/api/v1/ephemeral/queues")) return "read-only";
   }
+  // PLAN_QUEEN_KAFKA.md C2: a pure read, outside the GET block because the
+  // batch request is a body.
+  if (m === "POST" && path === "/api/v1/fetch") return "read-only";
   if (path === "/streams/v1/state/get") return "read-only";
   if (path.startsWith("/streams/")) return "read-write";
   if (path === "/api/v1/push") return "write-only";

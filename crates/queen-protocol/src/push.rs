@@ -128,6 +128,33 @@ pub struct PushResult {
     pub queue_name: String,
 
     pub status: PushStatus,
+
+    /// The message's **absolute offset** in its partition's log, when the
+    /// broker allocated one.
+    ///
+    /// Offsets are per (queue, partition) and monotone in commit order: a
+    /// segment covers the inclusive range `[base_offset, end_offset]` and a
+    /// message's offset is `base_offset + its frame index`. This is the same
+    /// coordinate `POST /api/v1/fetch` reads from, so a producer can hand a
+    /// consumer the exact position of what it just wrote.
+    ///
+    /// `Some` for [`PushStatus::Queued`], and for [`PushStatus::Duplicate`] —
+    /// where it is the **pre-existing** message's offset, not a new one, which
+    /// is what makes a retried push report the same position as the original.
+    ///
+    /// `None` in three cases, and in all three there is genuinely no offset to
+    /// report rather than one being withheld: [`PushStatus::Error`] (the
+    /// transaction that would have stored the message failed),
+    /// [`PushStatus::Buffered`] and [`PushStatus::Failed`] (maintenance mode
+    /// diverted the message to the broker's spool; the replay allocates its
+    /// offset later), and any response from a broker older than the one that
+    /// added the field — the key is simply absent there.
+    ///
+    /// Absent on the wire rather than `null` when unknown, and skipped on
+    /// serialization for the same reason: the addition is strictly additive and
+    /// a client that never reads it sees byte-identical bodies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<i64>,
 }
 
 #[cfg(test)]
@@ -167,8 +194,62 @@ mod tests {
         assert_eq!(got[0].message_id, "m1");
         assert_eq!(got[0].queue_name, "orders");
         assert_eq!(got[0].status, PushStatus::Queued);
+        assert_eq!(
+            got[0].offset, None,
+            "a broker that predates the offset key sends none, and none is not zero"
+        );
         // and round-trips byte-identically
         assert_eq!(serde_json::to_string(&got).unwrap(), wire);
+    }
+
+    /// The C1 body, byte for byte as `render_push_results` builds it
+    /// (`server/src/handlers/data.rs`): `offset` is appended AFTER `status`,
+    /// and only on the items that have one.
+    ///
+    /// Three items covering the three cases in one response, which is what a
+    /// real batch looks like: a fresh message, the same `transactionId` sent
+    /// twice (the second reports the FIRST one's offset, not a new one), and an
+    /// item whose bundle never committed and therefore carries no key at all.
+    const PUSH_BODY_FROM_THE_RENDERER: &str = concat!(
+        r#"[{"index":0,"message_id":"0190aaaa-0000-7000-8000-000000000001","#,
+        r#""transaction_id":"order-1","queueName":"orders","status":"queued","offset":41},"#,
+        r#"{"index":1,"message_id":"0190aaaa-0000-7000-8000-000000000001","#,
+        r#""transaction_id":"order-1","queueName":"orders","status":"duplicate","offset":41},"#,
+        r#"{"index":2,"message_id":"0190aaaa-0000-7000-8000-000000000003","#,
+        r#""transaction_id":"order-3","queueName":"orders","status":"error"}]"#,
+    );
+
+    #[test]
+    fn a_rendered_push_body_carries_the_assigned_offsets() {
+        let got: Vec<PushResult> = serde_json::from_str(PUSH_BODY_FROM_THE_RENDERER)
+            .expect("the body the broker renders for every push must deserialize");
+        assert_eq!(got[0].offset, Some(41));
+        assert_eq!(
+            got[1].offset,
+            Some(41),
+            "a duplicate reports the PRE-EXISTING message's offset, so a retried \
+             push resolves to the same position"
+        );
+        assert_eq!(
+            got[2].offset, None,
+            "nothing was allocated for an errored item, so there is no key to read"
+        );
+        // Round-trips byte-identically: the absent key stays absent, which is
+        // what makes the addition invisible to a client that never reads it.
+        assert_eq!(
+            serde_json::to_string(&got).unwrap(),
+            PUSH_BODY_FROM_THE_RENDERER
+        );
+    }
+
+    #[test]
+    fn an_offset_is_read_as_a_number_not_a_string() {
+        // The renderer writes it unquoted (`out.push_str(&off.to_string())`
+        // after a bare `:`), and an offset large enough to matter must survive
+        // as an i64 rather than losing precision through a float.
+        let wire = r#"[{"index":0,"message_id":"m","transaction_id":"t","queueName":"q","status":"queued","offset":9007199254740993}]"#;
+        let got: Vec<PushResult> = serde_json::from_str(wire).unwrap();
+        assert_eq!(got[0].offset, Some(9_007_199_254_740_993));
     }
 
     #[test]

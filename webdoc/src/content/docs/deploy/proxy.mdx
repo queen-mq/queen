@@ -8,6 +8,7 @@ sidebar:
 sourceOfTruth:
   - proxy/src/main.rs
   - proxy/src/config.rs
+  - proxy/src/acting.rs
   - proxy/src/cache.rs
   - proxy/src/oauth.rs
   - proxy/src/db.rs
@@ -63,7 +64,7 @@ curl -s http://127.0.0.1:6711/healthz
 ```
 
 ```json
-{"enforce":false,"status":"ok","tenant_header":true}
+{"enforce":false,"shared_hosts":0,"status":"ok","tenant_header":true}
 ```
 
 ## Kubernetes
@@ -129,6 +130,9 @@ A port-forward therefore needs the header spelled out, or the request has no clu
 curl -H "Host: queen-prod.example.com" http://127.0.0.1:6711/api/v1/queues
 ```
 
+One hostname can be made to front several clusters instead, with the credential doing the
+routing rather than the label: [shared hosts](#shared-hosts) below.
+
 ## Configuration
 
 Every setting is an environment variable, parsed the way the broker parses its own: only the
@@ -187,6 +191,59 @@ the proxy takes a connection and runs `SELECT 1` before it serves anything, and 
 in the migrations that follow, logs and exits 1. Leaving `PXDB_HOST` unset is the other, unless
 `QUEEN_PROXY_DEV_CELL_URL` is set instead; with neither, the process logs `nothing to serve` and
 exits 1 rather than starting an empty proxy.
+
+### Shared hosts
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `QUEEN_PROXY_SHARED_HOSTS` | unset | Comma-separated hostnames that front many clusters. On one of these the cluster is resolved from the credential instead of from the `Host` label. |
+
+Entries are **full hostnames**, not first labels: `queen.example.com`, not `queen`. Each is
+lowercased, and a `:port` or a trailing root dot is stripped, so a value pasted out of a browser
+bar or a zone file still matches the header a client sends. The comparison is against the whole
+name on purpose: matching a first label would quietly make every `queen.*` domain this proxy
+answers on shared too, so a bare `queen` matches nothing rather than widening the feature.
+
+On a listed host the label names nothing, so the credential does the routing. An API key acts on
+the cluster it was issued on, with no header needed: `queen_proxy.api_keys` already joins straight
+through to the cluster, so the key was always the authority and the label was only ever routing.
+Sending `x-queen-act-cluster` beside a key is still refused with `403`, not ignored, exactly as on
+a per-cluster hostname. A human session names its cluster with that header, or with a `cluster`
+claim, and is then checked against `cluster_roles` by the same matrix used everywhere else
+([credentials](/reference/multi-tenant/auth#shared-hosts)); a session naming none gets `403 this
+host serves several clusters; name one with x-queen-act-cluster`, which is the question the
+dashboard's cluster selector exists to answer ([console](/reference/multi-tenant/console)).
+
+That is the shape a self-hosted cell usually wants: one URL, several teams, each landing in its own
+cluster carrying nothing but its own key. The walkthrough is
+[one hostname for several tenants](/deploy/multi-tenant). `/healthz` reports how many hosts are
+listed, a count and not the list, since that endpoint is unauthenticated.
+
+<Aside type="caution">
+Configuring **any** shared host changes what the **whole listener** tells strangers. The `421` for
+a hostname that resolves to no cluster is withheld until the caller presents a live credential, and
+the pre-auth status gates wait for authentication too, so an anonymous caller gets `401` where it
+previously got `421`. A shared host normally sits behind a wildcard record, so every other
+`*.example.com` arrives on the same socket, and a `401` for a slug that exists beside a `421` for
+one that does not is an unauthenticated way to read off every tenant's cluster slug, and through
+the status gate each one's suspended or deleting state. Leave the variable unset and none of this
+moves.
+</Aside>
+
+Two more things to know before setting it.
+
+Boot is **fatal** when `QUEEN_PROXY_SHARED_HOSTS` is set and `PXDB_HOST` is not. A shared host
+resolves its cluster out of `queen_proxy.api_keys` and `cluster_roles`, and without a pxdb neither
+table exists, so every request to a listed host would answer `401` forever. The proxy names the
+hosts and exits 1 rather than serving that, on the same reasoning as the half-configured TLS
+listener above: a half-configured feature is a misconfiguration, not a degraded mode.
+
+`QUEEN_PROXY_DEFAULT_CLUSTER` is a different feature and is **not** the way to serve several
+tenants. It maps every unresolvable `Host` to one cluster, where this maps a named host to
+whichever cluster the credential belongs to. The two cannot interact, because the shared-host check
+runs first and never reaches the default; see [the single-tenant front
+door](#the-single-tenant-front-door) for why the default is the wrong tool as soon as a second
+cluster exists.
 
 ### Timeouts
 

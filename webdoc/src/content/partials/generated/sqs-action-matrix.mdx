@@ -1,0 +1,78 @@
+---
+params: []
+description: "Every SQS and SNS action the queen-sqs facade answers, which of them are accepted without being enforced, and the SNS families it deliberately does not implement."
+---
+
+{/* GENERATED FILE. Do not edit by hand.
+    Regenerate with: pnpm --dir webdoc gen
+    Source of truth:
+      - protocols/queen-sqs/src/actions/mod.rs (Action::ALL, Action::is_sns)
+*/}
+
+The facade answers **40 actions**: 23 of SQS's and 17 of SNS's. Every row is read out of `protocols/queen-sqs/src/actions/mod.rs` at build time, which is the same table `Action::from_name` scans, so an action that is listed is an action that is dispatched. The set is CLOSED: a name outside it is `InvalidAction` rather than something plausible, because "plausible" for a client that asked to purge a queue means it believes the queue is empty.
+
+**Every action Amazon SQS defines is one of these.** That is checked rather than claimed: the table below is derived from the dispatch table, SQS's own published action set is subtracted from it, and the build fails if anything is left over. SNS is the opposite shape and deliberately so, and what it leaves out is [below](#what-sns-publishes-and-this-does-not).
+
+### SQS
+
+| Action | Status | What it is here |
+| --- | --- | --- |
+| `CreateQueue` | answered | Creates the Queen queue and the registry record together, registry first, so two instances racing for one name produce one queue and one loser. A standard queue synthesizes `queen.partitions` lanes and that width is fixed for the life of the queue; a `.fifo` suffix declares a FIFO queue instead, where a lane is a `MessageGroupId` and no width is synthesized at all. Idempotent unless an attribute the request SUPPLIES differs from the queue's current value. |
+| `DeleteQueue` | answered | Removes the Queen queue first and the registry record second, then holds a 60 second `QueueDeletedRecently` tombstone, which is emulated because SDK retry behaviour depends on it. |
+| `GetQueueUrl` | answered | Answers `<scheme>://<the host the client reached>/<account>/<name>`. The host is the request's, not the one this process bound, so a queue URL is usable from where it was asked for. |
+| `ListQueues` | answered | A prefix walk of the registry, paged, capped at 10,000 records. It lists queues this facade created: a native Queen queue nobody created through SQS is not in the registry and is not in the answer. |
+| `GetQueueAttributes` | answered | Answers what the record stores plus what is computed on read. `ApproximateNumberOfMessages` and `ApproximateNumberOfMessagesNotVisible` are the broker's depth and in-flight counts, and `ApproximateNumberOfMessagesDelayed` is the timer count; those three are what KEDA and every autoscaler read, so they are load-bearing rather than decoration. |
+| `SetQueueAttributes` | answered | Merges onto the stored record under a compare-and-set, never a replacement. `FifoQueue` and `queen.partitions` are fixed at create and are answered `InvalidAttributeName`, which is what AWS answers for an attribute that exists and cannot be set. |
+| `SendMessage` | answered | One push. The lane is chosen by hashing the send's own deduplication key across the queue's width, because the MessageId is the broker's message uuid and does not exist until the push has landed. On a FIFO queue that key is the `MessageDeduplicationId` (or the SHA-256 of the body under `ContentBasedDeduplication`) and the lane is the `MessageGroupId`. |
+| `SendMessageBatch` | answered | Up to ten entries, with a per-entry result. An empty batch and an eleventh entry are DIFFERENT errors, as they are at AWS, because an SDK's batching helper branches on which. |
+| `ReceiveMessage` | answered | Up to `MaxNumberOfMessages` pops of one message each. Claim width one is what makes every later verb exact, and it is also the ceiling in [the divergence about concurrency](/reference/sqs#the-divergence-to-read-first-a-standard-queues-concurrency-is-its-width). `WaitTimeSeconds` is the broker's own long poll rather than a facade timer. |
+| `DeleteMessage` | answered | Ack `completed`, under the lease the receipt handle names. A stale handle answers success, which is AWS's own documented contract; only a handle this facade did not mint, or minted for another queue, is `ReceiptHandleIsInvalid`. |
+| `DeleteMessageBatch` | answered | Per-entry deletes with per-entry failures. On a FIFO queue the entries of one claim are grouped and the contiguous prefix is acked, with the remainder recorded in Queen's key/value store so that any instance can complete the job. |
+| `ChangeMessageVisibility` | answered | A lease extension, or at zero a terminate: ack `retry`, which releases the message and charges nothing against the retry budget. Exact because the lease being extended holds exactly one message. |
+| `ChangeMessageVisibilityBatch` | answered | The same, per entry, and answered concurrently. On a FIFO queue the entries are grouped by CLAIM first: ten entries of one claim are one release, and ten independent calls would answer the first and refuse the other nine `MessageNotInflight`. |
+| `PurgeQueue` | answered | Delete and recreate, re-applying the record's attributes, with AWS's 60 second cooldown emulated. It is synchronous where AWS answers immediately, and every receipt handle minted before it stops addressing anything. |
+| `ListQueueTags` | answered | Tags live in the registry record. They are not attributes and never travel to the Queen queue. |
+| `TagQueue` | answered | The only action that changes a queue's tags: a `CreateQueue` naming an existing queue neither compares them nor applies them. |
+| `UntagQueue` | answered | The inverse of `TagQueue`, on the same record. |
+| `ListDeadLetterSourceQueues` | answered | Reads the registry for the queues whose `RedrivePolicy` names this one. Redrive itself is not an action: it happens on receive, as an atomic push-to-dead-letter plus ack-original in one `POST /api/v1/transaction`. |
+| `StartMessageMoveTask` | answered | The redrive move run backwards, as a facade loop whose progress is in Queen's key/value store and whose rate is capped by `MaxNumberOfMessagesPerSecond`. With no `DestinationArn` a message goes back to the queue named in the copy's own envelope, which is AWS's documented default. |
+| `CancelMessageMoveTask` | answered | Stops that loop. The progress record is in the store rather than in a process, so the instance that cancels need not be the one that started it. |
+| `ListMessageMoveTasks` | answered | Reads those progress records, newest first. |
+| `AddPermission` | accepted, not enforced | Validated as far as SQS validates it, the queue must exist and the label is required, and then it does nothing. Authorization here is Queen's, over the SigV4 keypair; there is no principal model for an SQS policy to apply to, and a client told its policy is in force when nothing reads it is the worst answer available. The `Policy` queue attribute is stored on the same terms. |
+| `RemovePermission` | accepted, not enforced | The same, and the same sentence. |
+
+### SNS
+
+SNS here is a facade-level construct and the broker needs nothing for it: a topic is a key in Queen's key/value store, a subscription is another, and a publish is one transaction. v0 subscribes SQS queues and nothing else.
+
+| Action | Status | What it is here |
+| --- | --- | --- |
+| `CreateTopic` | answered | A key in Queen's key/value store. There is no Queen object called a topic and nothing is configured on the broker. Idempotent in all three shapes a provisioner uses, and `FifoTopic` must agree with the `.fifo` suffix in both directions. |
+| `DeleteTopic` | answered | Removes the topic and cascades to its subscriptions. Idempotent, as AWS documents it. |
+| `ListTopics` | answered | A prefix walk of the same store, paged. |
+| `GetTopicAttributes` | answered | `SubscriptionsPending` is structurally `0`: no subscription this facade can create is ever unconfirmed. |
+| `SetTopicAttributes` | answered | A compare-and-set onto the topic record. |
+| `Subscribe` | answered | `Protocol=sqs` is the only protocol v0 accepts, and anything else is refused BY NAME rather than as a malformed endpoint. Idempotent per (topic, protocol, endpoint), and a repeat answers the existing ARN without applying the attributes it carries, which is the one thing a declarative provisioner should know about this action. |
+| `Unsubscribe` | answered | Removes the subscription record. The queue itself is untouched. |
+| `ConfirmSubscription` | answered | Can never succeed here, and says so. Every subscription this facade can create is same-account SQS, which AWS itself confirms at `Subscribe`, so no confirmation token is ever minted; the answer is `InvalidParameter` naming the token rather than a plausible success. |
+| `ListSubscriptions` | answered | The account-wide listing, paged. |
+| `ListSubscriptionsByTopic` | answered | An unknown topic ARN is `NotFound` rather than an empty list: a client reads an empty list as "nothing is subscribed" rather than as "you asked about the wrong topic". |
+| `GetSubscriptionAttributes` | answered | A subscription with no filter policy reports no `FilterPolicyScope`, which is AWS's behaviour and the one that does not make a provisioner reconcile for ever. |
+| `SetSubscriptionAttributes` | answered | Where a `FilterPolicy` is written, validated at write time rather than at publish. Setting an empty one removes it. |
+| `TagResource` | answered | SNS's own tag actions are not the queue ones under another name: the resource is an ARN rather than a URL, the answer is a list of pairs rather than a map, and a missing resource is `ResourceNotFound`. |
+| `UntagResource` | answered | The inverse, on the same records. |
+| `ListTagsForResource` | answered | Reads them back. |
+| `Publish` | answered | One `POST /api/v1/transaction` bundling one push per matched subscription, so a fan-out commits whole or not at all, which is stronger than SNS promises. Filter policies are evaluated here, at publish, against the registry another instance may also be writing. |
+| `PublishBatch` | answered | The same transaction per entry, with per-entry failures. A batch's entries are independent: one refused entry does not stop the others. |
+
+### What SNS publishes and this does not
+
+23 actions, in three families, and none of them is a gap waiting for a patch release: each is refused `InvalidAction` by the closed set above, and each is excluded because it is AWS the platform rather than SNS the API. A client that sends one gets the same answer it would get for a typo, which is the honest one.
+
+| Family | Actions | Why it is not here |
+| --- | --- | --- |
+| Mobile push | `CreatePlatformApplication`, `CreatePlatformEndpoint`, `DeleteEndpoint`, `DeletePlatformApplication`, `GetEndpointAttributes`, `GetPlatformApplicationAttributes`, `ListEndpointsByPlatformApplication`, `ListPlatformApplications`, `SetEndpointAttributes`, `SetPlatformApplicationAttributes` | A platform endpoint is a device token registered with APNs, FCM or ADM, and a publish to one is a push notification delivered by Apple or Google. There is no queue anywhere in it and no part of it a message broker can stand in for. This is the largest single family of SNS and the least related to what the facade is. |
+| SMS and the SMS sandbox | `CheckIfPhoneNumberIsOptedOut`, `CreateSMSSandboxPhoneNumber`, `DeleteSMSSandboxPhoneNumber`, `GetSMSAttributes`, `GetSMSSandboxAccountStatus`, `ListOriginationNumbers`, `ListPhoneNumbersOptedOut`, `ListSMSSandboxPhoneNumbers`, `OptInPhoneNumber`, `SetSMSAttributes`, `VerifySMSSandboxPhoneNumber` | Sending an SMS needs a carrier, an origination number and an opt-out register, all of them AWS the service rather than SNS the API. A facade that accepted these would accept a message it has no way to deliver and no way to report undeliverable. |
+| Data protection policies | `GetDataProtectionPolicy`, `PutDataProtectionPolicy` | The policy inspects message bodies for sensitive data and masks or blocks them in flight. Storing one and not applying it would be the `Policy` attribute's mistake made twice, and applying one would be a content classifier written from scratch inside a wire facade. Neither is a thing this milestone gets to decide. |
+
+`AddPermission` and `RemovePermission` are the two names AWS publishes under BOTH services. They are answered, filed as SQS's, and enforced by nothing, which is the row they carry in the first table.

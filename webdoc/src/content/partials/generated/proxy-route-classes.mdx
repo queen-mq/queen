@@ -15,7 +15,7 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | Class | What it means |
 | --- | --- |
 | produce | Counted against the message quota. May create queues and partitions implicitly. |
-| consume | Pop, ack and lease extension. A `wait=true` pop also holds a parked-consumer slot. |
+| consume | Pop, ack, lease extension, and the batched read-from-offset the Kafka facade consumes through. A `wait=true` pop also holds a parked-consumer slot; the fetch does not, since its long poll is a body field rather than a query flag. The fetch is classified for the authority it needs rather than for what it writes: it is non-destructive and never quota-blocked, but it hands out message payloads, so it carries the authority of the pop it stands in for instead of the read level every user role already has. |
 | queue admin | Configuration, deletions, seeks and subscription changes. |
 | read | Listings, status, analytics, DLQ and message reads, all tenant-scoped. |
 | gated (streams) | Available when the plan enables the streams feature. Registration and the state read are never quota-blocked. The cycle is the produce half of the family: a cycle whose body carries sink `push_items` answers the storage and monthly blocks (refused whole, with the same code the equivalent push would get), its sink queues and partitions pass registry admission, its items answer the per-item payload cap, and its accepted sink messages are billed as push. An ack-only or state-only cycle always passes, so a blocked tenant can keep draining its source. |
@@ -39,6 +39,7 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | --- | --- |
 | `POST` | `/api/v1/ack` |
 | `POST` | `/api/v1/ack/batch` |
+| `POST` | `/api/v1/fetch` |
 | `POST` | `/api/v1/lease/:leaseId/extend` |
 | `GET` | `/api/v1/pop/queue/:queue` |
 | `GET` | `/api/v1/pop/queue/:queue/partition/:partition` |
@@ -165,4 +166,4 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | `GET` | `/metrics` |
 | `GET` | `/status` |
 
-62 of the broker's 84 method + path pairs are reachable with a tenant credential; the rest are operator or blocked surfaces.
+63 of the broker's 85 method + path pairs are reachable with a tenant credential; the rest are operator or blocked surfaces.
