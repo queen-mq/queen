@@ -129,10 +129,10 @@ if wanted php; then
   echo
   echo "PHP"
   if command -v php >/dev/null && [ -d "$HERE/php" ]; then
-    if [ ! -d "$ROOT/clients/client-laravel/vendor" ]; then
-      command -v composer >/dev/null && (cd "$ROOT/clients/client-laravel" && composer install --quiet --no-interaction)
+    if [ ! -d "$ROOT/clients/client-php/vendor" ]; then
+      command -v composer >/dev/null && (cd "$ROOT/clients/client-php" && composer install --quiet --no-interaction)
     fi
-    [ -e "$HERE/php/vendor" ] || ln -sfn ../../../clients/client-laravel/vendor "$HERE/php/vendor"
+    [ -e "$HERE/php/vendor" ] || ln -sfn ../../../clients/client-php/vendor "$HERE/php/vendor"
     for f in chat webhooks; do
       [ -f "$HERE/php/$f.php" ] && run "$f" env -C "$HERE/php" php "$f.php"
     done

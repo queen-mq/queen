@@ -7,18 +7,18 @@ status: preview
 sidebar:
   order: 4
 sourceOfTruth:
-  - clients/client-laravel/config/queen.php
-  - clients/client-laravel/src/Laravel/QueenServiceProvider.php
-  - clients/client-laravel/src/Laravel/Queue/QueenQueue.php
-  - clients/client-laravel/src/Laravel/Queue/SyncedFailedJobProvider.php
-  - clients/client-laravel/src/Laravel/Supervisor/SupervisorConfiguration.php
-  - clients/client-laravel/src/Laravel/Supervisor/AutoScaler.php
+  - clients/client-php/config/queen.php
+  - clients/client-php/src/Laravel/QueenServiceProvider.php
+  - clients/client-php/src/Laravel/Queue/QueenQueue.php
+  - clients/client-php/src/Laravel/Queue/SyncedFailedJobProvider.php
+  - clients/client-php/src/Laravel/Supervisor/SupervisorConfiguration.php
+  - clients/client-php/src/Laravel/Supervisor/AutoScaler.php
   - supervisor/src/main.rs
 verifiedBy:
-  - clients/client-laravel/tests/LaravelQueueDriverTest.php
-  - clients/client-laravel/tests/LaravelSupervisorTest.php
-  - clients/client-laravel/tests/LaravelSupervisorProductionTest.php
-  - clients/client-laravel/tests/SyncedFailedJobProviderLifecycleTest.php
+  - clients/client-php/tests/LaravelQueueDriverTest.php
+  - clients/client-php/tests/LaravelSupervisorTest.php
+  - clients/client-php/tests/LaravelSupervisorProductionTest.php
+  - clients/client-php/tests/SyncedFailedJobProviderLifecycleTest.php
 ---
 
 Moving from Horizon changes two things, not one:

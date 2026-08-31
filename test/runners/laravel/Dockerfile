@@ -18,10 +18,10 @@ WORKDIR /src
 
 # Manifests first for layer caching. mbstring is required by Laravel,
 # dom/xmlwriter by PHPUnit, and pcntl exercises the Unix supervisor path.
-COPY clients/client-laravel/composer.json ./
+COPY clients/client-php/composer.json ./
 RUN composer install --no-interaction --no-progress --no-scripts
 
-COPY clients/client-laravel/ ./
+COPY clients/client-php/ ./
 
 COPY test/runners/common/wait-for-broker.sh /usr/local/bin/wait-for-broker
 COPY test/runners/laravel/entrypoint.sh /entrypoint.sh

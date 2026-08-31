@@ -60,9 +60,9 @@ COPY --from=composer:2.8.10 /usr/bin/composer /usr/local/bin/composer
 COPY --from=rust-supervisor /out/queen-supervisor /usr/local/bin/queen-supervisor
 
 # Preserve this layout: the fixture's Composer path repository deliberately
-# resolves ../../../clients/client-laravel to the client from this checkout.
+# resolves ../../../clients/client-php to the client from this checkout.
 WORKDIR /workspace/benchmark-queen/laravel-supervisors/app
-COPY --chown=${APP_UID}:${APP_GID} clients/client-laravel /workspace/clients/client-laravel
+COPY --chown=${APP_UID}:${APP_GID} clients/client-php /workspace/clients/client-php
 COPY --chown=${APP_UID}:${APP_GID} benchmark-queen/laravel-supervisors/app ./
 
 RUN install -d -o "${APP_UID}" -g "${APP_GID}" -m 0770 \

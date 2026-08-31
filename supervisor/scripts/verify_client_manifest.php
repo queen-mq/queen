@@ -5,7 +5,7 @@ declare(strict_types=1);
 use Queen\Laravel\Supervisor\Binary\SupervisorBinary;
 use Queen\Laravel\Supervisor\Binary\SupervisorReleaseManifest;
 
-require __DIR__ . '/../../clients/client-laravel/vendor/autoload.php';
+require __DIR__ . '/../../clients/client-php/vendor/autoload.php';
 
 if ($argc !== 2) {
     fwrite(STDERR, "usage: php verify_client_manifest.php MANIFEST\n");

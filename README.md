@@ -327,7 +327,7 @@ supervisor replica per application/consumer group. Its filesystem lock excludes
 a second local process, but Queen does not yet provide a distributed fenced
 leader lease. Many worker processes are supported; two autonomous supervisor
 masters on different hosts are not. See the [PHP/Laravel client
-guide](clients/client-laravel/README.md#worker-supervisor) for configuration,
+guide](clients/client-php/README.md#supervisor) for configuration,
 Unix/`pcntl` requirements, deployment and secret handling.
 
 ## Where Queen fits
