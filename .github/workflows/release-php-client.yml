@@ -40,7 +40,7 @@ jobs:
       - name: Prepare the source subtree
         run: |
           set -Eeuo pipefail
-          split_commit=$(git subtree split --prefix=clients/client-laravel HEAD)
+          split_commit=$(python3 .github/scripts/split-php-client.py HEAD)
           expected_tree=$(git rev-parse HEAD:clients/client-laravel)
           test "$expected_tree" = "$(git rev-parse "${split_commit}^{tree}")" || {
             echo 'subtree split tree does not match the source package' >&2
@@ -201,7 +201,7 @@ jobs:
             echo "$RELEASE_TAG is not reachable from master" >&2
             exit 1
           }
-          split_commit=$(git subtree split --prefix=clients/client-laravel "$source_commit")
+          split_commit=$(python3 .github/scripts/split-php-client.py "$source_commit")
           expected_tree=$(git rev-parse "$source_commit:clients/client-laravel")
           test "$expected_tree" = "$(git rev-parse "${split_commit}^{tree}")" || {
             echo 'subtree split tree does not match the source package' >&2
