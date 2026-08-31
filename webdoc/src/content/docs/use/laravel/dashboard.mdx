@@ -7,31 +7,31 @@ status: preview
 sidebar:
   order: 3
 sourceOfTruth:
-  - clients/client-laravel/config/queen.php
-  - clients/client-laravel/routes/dashboard.php
-  - clients/client-laravel/resources/css/dashboard.css
-  - clients/client-laravel/resources/views/dashboard.blade.php
-  - clients/client-laravel/resources/views/dashboard/partials/configuration.blade.php
-  - clients/client-laravel/resources/views/dashboard/partials/failed-jobs.blade.php
-  - clients/client-laravel/resources/views/dashboard/partials/header.blade.php
-  - clients/client-laravel/resources/views/dashboard/partials/notices.blade.php
-  - clients/client-laravel/resources/views/dashboard/partials/overview.blade.php
-  - clients/client-laravel/resources/views/dashboard/partials/sidebar.blade.php
-  - clients/client-laravel/resources/views/dashboard/partials/supervisor-pool-row.blade.php
-  - clients/client-laravel/resources/views/dashboard/partials/supervisor.blade.php
-  - clients/client-laravel/resources/views/dashboard/partials/workload.blade.php
-  - clients/client-laravel/src/Laravel/QueenServiceProvider.php
-  - clients/client-laravel/src/Laravel/Dashboard/DashboardRepository.php
-  - clients/client-laravel/src/Laravel/Dashboard/DashboardStylesheet.php
-  - clients/client-laravel/src/Laravel/Dashboard/FailedJobsReadModel.php
-  - clients/client-laravel/src/Laravel/Http/Controllers/DashboardController.php
-  - clients/client-laravel/src/Laravel/Http/Controllers/DashboardStylesheetController.php
-  - clients/client-laravel/src/Laravel/Http/Middleware/AuthorizeDashboard.php
-  - clients/client-laravel/src/Laravel/Http/Middleware/SecureDashboardResponse.php
-  - clients/client-laravel/src/Laravel/Http/Controllers/SupervisorControlController.php
+  - clients/client-php/config/queen.php
+  - clients/client-php/routes/dashboard.php
+  - clients/client-php/resources/css/dashboard.css
+  - clients/client-php/resources/views/dashboard.blade.php
+  - clients/client-php/resources/views/dashboard/partials/configuration.blade.php
+  - clients/client-php/resources/views/dashboard/partials/failed-jobs.blade.php
+  - clients/client-php/resources/views/dashboard/partials/header.blade.php
+  - clients/client-php/resources/views/dashboard/partials/notices.blade.php
+  - clients/client-php/resources/views/dashboard/partials/overview.blade.php
+  - clients/client-php/resources/views/dashboard/partials/sidebar.blade.php
+  - clients/client-php/resources/views/dashboard/partials/supervisor-pool-row.blade.php
+  - clients/client-php/resources/views/dashboard/partials/supervisor.blade.php
+  - clients/client-php/resources/views/dashboard/partials/workload.blade.php
+  - clients/client-php/src/Laravel/QueenServiceProvider.php
+  - clients/client-php/src/Laravel/Dashboard/DashboardRepository.php
+  - clients/client-php/src/Laravel/Dashboard/DashboardStylesheet.php
+  - clients/client-php/src/Laravel/Dashboard/FailedJobsReadModel.php
+  - clients/client-php/src/Laravel/Http/Controllers/DashboardController.php
+  - clients/client-php/src/Laravel/Http/Controllers/DashboardStylesheetController.php
+  - clients/client-php/src/Laravel/Http/Middleware/AuthorizeDashboard.php
+  - clients/client-php/src/Laravel/Http/Middleware/SecureDashboardResponse.php
+  - clients/client-php/src/Laravel/Http/Controllers/SupervisorControlController.php
 verifiedBy:
-  - clients/client-laravel/tests/LaravelDashboardDisabledTest.php
-  - clients/client-laravel/tests/LaravelDashboardTest.php
+  - clients/client-php/tests/LaravelDashboardDisabledTest.php
+  - clients/client-php/tests/LaravelDashboardTest.php
 ---
 
 The Laravel panel answers one local question: **what is this application's Queen supervisor doing

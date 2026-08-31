@@ -269,7 +269,7 @@ jobs:
           coverage: none
           tools: composer:v2
       - name: Install Laravel client test dependencies
-        working-directory: clients/client-laravel
+        working-directory: clients/client-php
         run: |
           composer validate --strict --no-check-publish
           composer install --no-interaction --no-progress --prefer-dist
@@ -286,7 +286,7 @@ jobs:
             "dist/queen-supervisor-$VERSION-linux-amd64.tar.gz" \
             "$install_directory"
       - name: Test complete Laravel client, installer and platform gates
-        working-directory: clients/client-laravel
+        working-directory: clients/client-php
         run: vendor/bin/phpunit
 
       - name: Install cosign

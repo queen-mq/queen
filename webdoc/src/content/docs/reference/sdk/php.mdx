@@ -6,53 +6,53 @@ sidebar:
   order: 26
   label: PHP
 sourceOfTruth:
-  - clients/client-laravel/composer.json
-  - clients/client-laravel/src/Queen.php
-  - clients/client-laravel/src/Admin.php
-  - clients/client-laravel/src/Support/Defaults.php
-  - clients/client-laravel/src/Support/Uuid.php
-  - clients/client-laravel/src/Builders/QueueBuilder.php
-  - clients/client-laravel/src/Builders/PushBuilder.php
-  - clients/client-laravel/src/Builders/ConsumeBuilder.php
-  - clients/client-laravel/src/Builders/TransactionBuilder.php
-  - clients/client-laravel/src/Builders/DLQBuilder.php
-  - clients/client-laravel/src/Builders/OperationBuilder.php
-  - clients/client-laravel/src/Consumer/HighLevelConsumer.php
-  - clients/client-laravel/src/Http/Retry429Policy.php
-  - clients/client-laravel/src/Exceptions/HttpException.php
-  - clients/client-laravel/src/Exceptions/ErrorCode.php
-  - clients/client-laravel/src/Laravel/QueenServiceProvider.php
-  - clients/client-laravel/src/Laravel/QueenFacade.php
-  - clients/client-laravel/src/Laravel/Queue/QueenConnector.php
-  - clients/client-laravel/src/Laravel/Queue/QueenQueue.php
-  - clients/client-laravel/src/Laravel/Queue/QueenJob.php
-  - clients/client-laravel/src/Laravel/Queue/ProcessLeaseRenewer.php
-  - clients/client-laravel/src/Laravel/Queue/SyncedFailedJobProvider.php
-  - clients/client-laravel/src/Laravel/Contracts/QueenPartitionable.php
-  - clients/client-laravel/src/Laravel/Commands/ConsumeCommand.php
-  - clients/client-laravel/src/Laravel/Commands/SuperviseCommand.php
-  - clients/client-laravel/src/Laravel/Commands/SupervisorConfigCommand.php
-  - clients/client-laravel/src/Laravel/Commands/SupervisorControlCommand.php
-  - clients/client-laravel/src/Laravel/Commands/SupervisorInstallCommand.php
-  - clients/client-laravel/src/Laravel/Supervisor/Binary/SupervisorBinary.php
-  - clients/client-laravel/src/Laravel/Supervisor/Binary/SupervisorBinaryInstaller.php
-  - clients/client-laravel/src/Laravel/Supervisor/SupervisorConfiguration.php
-  - clients/client-laravel/src/Laravel/Supervisor/AutoScaler.php
-  - clients/client-laravel/src/Laravel/Supervisor/PhpSupervisor.php
-  - clients/client-laravel/src/Laravel/Supervisor/SupervisorState.php
-  - clients/client-laravel/src/Laravel/Supervisor/WorkerTelemetry.php
-  - clients/client-laravel/src/Laravel/Dashboard/DashboardRepository.php
-  - clients/client-laravel/src/Laravel/Dashboard/FailedJobsReadModel.php
-  - clients/client-laravel/src/Laravel/Http/Middleware/AuthorizeDashboard.php
-  - clients/client-laravel/src/Laravel/Http/Middleware/SecureDashboardResponse.php
-  - clients/client-laravel/routes/dashboard.php
-  - clients/client-laravel/config/queen.php
+  - clients/client-php/composer.json
+  - clients/client-php/src/Queen.php
+  - clients/client-php/src/Admin.php
+  - clients/client-php/src/Support/Defaults.php
+  - clients/client-php/src/Support/Uuid.php
+  - clients/client-php/src/Builders/QueueBuilder.php
+  - clients/client-php/src/Builders/PushBuilder.php
+  - clients/client-php/src/Builders/ConsumeBuilder.php
+  - clients/client-php/src/Builders/TransactionBuilder.php
+  - clients/client-php/src/Builders/DLQBuilder.php
+  - clients/client-php/src/Builders/OperationBuilder.php
+  - clients/client-php/src/Consumer/HighLevelConsumer.php
+  - clients/client-php/src/Http/Retry429Policy.php
+  - clients/client-php/src/Exceptions/HttpException.php
+  - clients/client-php/src/Exceptions/ErrorCode.php
+  - clients/client-php/src/Laravel/QueenServiceProvider.php
+  - clients/client-php/src/Laravel/QueenFacade.php
+  - clients/client-php/src/Laravel/Queue/QueenConnector.php
+  - clients/client-php/src/Laravel/Queue/QueenQueue.php
+  - clients/client-php/src/Laravel/Queue/QueenJob.php
+  - clients/client-php/src/Laravel/Queue/ProcessLeaseRenewer.php
+  - clients/client-php/src/Laravel/Queue/SyncedFailedJobProvider.php
+  - clients/client-php/src/Laravel/Contracts/QueenPartitionable.php
+  - clients/client-php/src/Laravel/Commands/ConsumeCommand.php
+  - clients/client-php/src/Laravel/Commands/SuperviseCommand.php
+  - clients/client-php/src/Laravel/Commands/SupervisorConfigCommand.php
+  - clients/client-php/src/Laravel/Commands/SupervisorControlCommand.php
+  - clients/client-php/src/Laravel/Commands/SupervisorInstallCommand.php
+  - clients/client-php/src/Laravel/Supervisor/Binary/SupervisorBinary.php
+  - clients/client-php/src/Laravel/Supervisor/Binary/SupervisorBinaryInstaller.php
+  - clients/client-php/src/Laravel/Supervisor/SupervisorConfiguration.php
+  - clients/client-php/src/Laravel/Supervisor/AutoScaler.php
+  - clients/client-php/src/Laravel/Supervisor/PhpSupervisor.php
+  - clients/client-php/src/Laravel/Supervisor/SupervisorState.php
+  - clients/client-php/src/Laravel/Supervisor/WorkerTelemetry.php
+  - clients/client-php/src/Laravel/Dashboard/DashboardRepository.php
+  - clients/client-php/src/Laravel/Dashboard/FailedJobsReadModel.php
+  - clients/client-php/src/Laravel/Http/Middleware/AuthorizeDashboard.php
+  - clients/client-php/src/Laravel/Http/Middleware/SecureDashboardResponse.php
+  - clients/client-php/routes/dashboard.php
+  - clients/client-php/config/queen.php
   - supervisor/src/main.rs
   - server/src/main.rs
 verifiedBy:
-  - clients/client-laravel/tests/ProcessLeaseRenewerTest.php
-  - clients/client-laravel/tests/SyncedFailedJobProviderLifecycleTest.php
-  - clients/client-laravel/tests/LaravelDashboardTest.php
+  - clients/client-php/tests/ProcessLeaseRenewerTest.php
+  - clients/client-php/tests/SyncedFailedJobProviderLifecycleTest.php
+  - clients/client-php/tests/LaravelDashboardTest.php
 ---
 
 The Composer package is `queen-mq/php-client`, PSR-4 namespace `Queen\`. It requires PHP 8.3 or
@@ -722,7 +722,7 @@ There is no streaming SDK for PHP. The `Stream` builder, windows, gates and the
 <Render file="sdk-capability-matrix" />
 
 PHP is the one client with no suite in the [test matrix](/internals/contributing/testing): nothing
-in `test/run.sh` executes it. The rows above are read off `clients/client-laravel/src`, not off a
+in `test/run.sh` executes it. The rows above are read off `clients/client-php/src`, not off a
 run, and the package's own `tests/` directory is the only thing that exercises it.
 
 <CardGrid>

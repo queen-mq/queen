@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
-"""Split clients/client-laravel into a standalone history for the php-client mirror.
+"""Split clients/client-php into a standalone history for the php-client mirror.
 
 The split keeps every source commit, but drops assistant co-author trailers from
 the messages so the public mirror credits only the humans who wrote the package.
 The rewrite is deterministic: the same source commit always produces the same
 mirror commit, so the mirror stays fast-forwardable across runs.
+
+The package used to live at clients/client-laravel. `git subtree split` follows a
+path and not a rename, so splitting only the current prefix would drop every
+commit made before the move and diverge from the published mirror. This script
+therefore splits both prefixes and grafts the current history onto the legacy
+one. Commits before the move rewrite to exactly the same mirror commits as
+before, so the mirror still fast-forwards.
 """
 
 import os
@@ -12,7 +19,8 @@ import re
 import subprocess
 import sys
 
-PREFIX = "clients/client-laravel"
+PREFIX = "clients/client-php"
+LEGACY_PREFIX = "clients/client-laravel"
 ASSISTANT_TRAILER = re.compile(
     r"^\s*Co-Authored-By:\s*Claude\b", re.IGNORECASE
 )
@@ -34,9 +42,9 @@ def strip_assistant_trailers(message):
     return (collapsed.rstrip("\n") + "\n").encode()
 
 
-def split(source):
+def split(prefix, source):
     output = subprocess.run(
-        ("git", "subtree", "split", "--prefix=" + PREFIX, source),
+        ("git", "subtree", "split", "--prefix=" + prefix, source),
         check=True,
         stdout=subprocess.PIPE,
         stderr=sys.stderr,
@@ -44,8 +52,18 @@ def split(source):
     return output.decode().split()[-1]
 
 
-def rewrite(split_commit):
-    rewritten = {}
+def legacy_tip(source):
+    """Last commit that still carried the package at its pre-rename path."""
+    move = git("rev-list", "-1", source, "--", LEGACY_PREFIX).decode().strip()
+    if not move:
+        return None
+    parent = git("rev-parse", move + "^").decode().strip()
+    git("rev-parse", "--verify", parent + ":" + LEGACY_PREFIX)
+    return parent
+
+
+def rewrite(split_commit, graft=None, rewritten=None):
+    rewritten = {} if rewritten is None else rewritten
     revisions = git(
         "rev-list", "--reverse", "--topo-order", split_commit
     ).decode().split()
@@ -66,6 +84,8 @@ def rewrite(split_commit):
         arguments = ["commit-tree", tree]
         for parent in parents:
             arguments += ["-p", rewritten[parent]]
+        if not parents and graft is not None:
+            arguments += ["-p", graft]
         message = strip_assistant_trailers(git("show", "--no-patch", "--format=%B", revision))
         rewritten[revision] = subprocess.run(
             ("git",) + tuple(arguments),
@@ -82,7 +102,9 @@ def main():
         print("usage: split-php-client.py <source-commit>", file=sys.stderr)
         return 2
     source = sys.argv[1]
-    mirror_commit = rewrite(split(source))
+    legacy = legacy_tip(source)
+    graft = rewrite(split(LEGACY_PREFIX, legacy)) if legacy else None
+    mirror_commit = rewrite(split(PREFIX, source), graft=graft)
     expected_tree = git("rev-parse", source + ":" + PREFIX).decode().strip()
     actual_tree = git("rev-parse", mirror_commit + "^{tree}").decode().strip()
     if expected_tree != actual_tree:

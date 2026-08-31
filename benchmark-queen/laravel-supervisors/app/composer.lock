@@ -3040,7 +3040,7 @@
             "version": "dev-main",
             "dist": {
                 "type": "path",
-                "url": "../../../clients/client-laravel",
+                "url": "../../../clients/client-php",
                 "reference": "ebc5a24e577d0692b907211ef61d045fb6b67bfe"
             },
             "require": {

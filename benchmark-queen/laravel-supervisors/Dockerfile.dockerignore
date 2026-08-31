@@ -4,8 +4,8 @@
 !supervisor/
 !supervisor/**
 !clients/
-!clients/client-laravel/
-!clients/client-laravel/**
+!clients/client-php/
+!clients/client-php/**
 !benchmark-queen/
 !benchmark-queen/laravel-supervisors/
 !benchmark-queen/laravel-supervisors/Dockerfile

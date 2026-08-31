@@ -221,7 +221,7 @@ depth or from backlog multiplied by observed job duration. The topology is delib
 single-active, one supervisor replica per consumer group: a filesystem lock excludes a second local
 process, but there is no distributed fenced leader lease yet. Configuration, `pcntl` requirements
 and secret handling are in the [PHP/Laravel client
-guide](clients/client-laravel/README.md#worker-supervisor).
+guide](clients/client-php/README.md#supervisor).
 
 ## Quick start
 

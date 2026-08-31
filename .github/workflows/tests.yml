@@ -75,7 +75,7 @@ jobs:
         php-version: ["8.3", "8.4"]
     defaults:
       run:
-        working-directory: clients/client-laravel
+        working-directory: clients/client-php
     steps:
       - uses: actions/checkout@v4
       - name: Set up PHP ${{ matrix.php-version }}
@@ -132,7 +132,7 @@ jobs:
           --health-retries 20
     defaults:
       run:
-        working-directory: clients/client-laravel
+        working-directory: clients/client-php
     env:
       QUEEN_LARAVEL_TEST_REDIS_HOST: 127.0.0.1
       QUEEN_LARAVEL_TEST_REDIS_PORT: 6379
