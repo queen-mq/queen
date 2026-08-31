@@ -762,7 +762,7 @@ func tail(s string, lines int) string {
 }
 
 // clusterIDOf pulls `acting_cluster.id` out of an /auth/me body — the ONE field
-// `queen-kafka/src/identity.rs::tenant_of` reads. Done by hand rather than with
+// `protocols/queen-kafka/src/identity.rs::tenant_of` reads. Done by hand rather than with
 // a JSON decode so the assertion is about the exact bytes on the wire.
 func clusterIDOf(body string) string {
 	i := strings.Index(body, `"acting_cluster"`)

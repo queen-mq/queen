@@ -45,7 +45,7 @@ BOOTSTRAP = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1:19092"
 RUN = sys.argv[2] if len(sys.argv) > 2 else str(int(time.time()))
 WORK = tempfile.mkdtemp(prefix="kafka-python-probe.")
 
-# The facade's Fetch window, from queen-kafka/src/versions.rs. Not a guess: if
+# The facade's Fetch window, from protocols/queen-kafka/src/versions.rs. Not a guess: if
 # this file ever disagrees with versions.rs, the disagreement is the finding.
 FETCH_MIN, FETCH_MAX = 4, 6
 

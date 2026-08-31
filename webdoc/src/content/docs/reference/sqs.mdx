@@ -8,20 +8,20 @@ sidebar:
   order: 31
   label: SQS protocol
 sourceOfTruth:
-  - queen-sqs/src/actions/mod.rs
-  - queen-sqs/src/actions/queues.rs
-  - queen-sqs/src/actions/messages.rs
-  - queen-sqs/src/actions/fifo.rs
-  - queen-sqs/src/actions/dlq.rs
-  - queen-sqs/src/registry.rs
-  - queen-sqs/src/envelope.rs
-  - queen-sqs/src/handle.rs
-  - queen-sqs/src/proto/mod.rs
-  - queen-sqs/src/error.rs
-  - queen-sqs/src/sigv4.rs
-  - queen-sqs/src/sns/mod.rs
-  - queen-sqs/src/sns/admin.rs
-  - queen-sqs/src/sns/publish.rs
+  - protocols/queen-sqs/src/actions/mod.rs
+  - protocols/queen-sqs/src/actions/queues.rs
+  - protocols/queen-sqs/src/actions/messages.rs
+  - protocols/queen-sqs/src/actions/fifo.rs
+  - protocols/queen-sqs/src/actions/dlq.rs
+  - protocols/queen-sqs/src/registry.rs
+  - protocols/queen-sqs/src/envelope.rs
+  - protocols/queen-sqs/src/handle.rs
+  - protocols/queen-sqs/src/proto/mod.rs
+  - protocols/queen-sqs/src/error.rs
+  - protocols/queen-sqs/src/sigv4.rs
+  - protocols/queen-sqs/src/sns/mod.rs
+  - protocols/queen-sqs/src/sns/admin.rs
+  - protocols/queen-sqs/src/sns/publish.rs
 ---
 
 `queen-sqs` is a separate binary that speaks the two Amazon SQS wire protocols to clients and
@@ -49,7 +49,7 @@ needs no coordination, [with one variable to set first](/deploy/sqs#the-one-vari
 The distinction worth keeping is between what has been run and what follows from the protocol,
 so both are listed and neither is dressed as the other.
 
-**Run against a real broker**, in `queen-sqs/compat`: boto3 and botocore 1.43 (AWS JSON 1.0, 99 of
+**Run against a real broker**, in `protocols/queen-sqs/compat`: boto3 and botocore 1.43 (AWS JSON 1.0, 99 of
 100 assertions, the one failure being [the concurrency divergence](#the-divergence-to-read-first-a-standard-queues-concurrency-is-its-width)),
 the `aws` CLI 1.46 (AWS JSON 1.0, 12 of 12), and boto3's SNS client (Query and XML, 92 of 92, on
 the same listener and the same signature verifier as the JSON half at the same moment).

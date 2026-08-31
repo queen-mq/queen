@@ -23,7 +23,7 @@ path = "src/main.rs"
 # the module that consumes it.
 [dependencies]
 # Same pin and feature set as server/Cargo.toml, proxy/Cargo.toml and
-# queen-kafka/Cargo.toml, so the four binaries share one tokio build in a CI
+# protocols/queen-kafka/Cargo.toml, so the four binaries share one tokio build in a CI
 # cache.
 tokio = { version = "1", features = ["full"] }
 # The listener. queen-sqs is plain HTTP — no framing loop, no per-connection

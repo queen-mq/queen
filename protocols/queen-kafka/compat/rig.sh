@@ -5,10 +5,10 @@
 # starts outlives it — the container, the broker and the facade are torn down on
 # every exit path, including a failure or a Ctrl-C.
 #
-#   queen-kafka/compat/rig.sh                 # the whole suite
-#   queen-kafka/compat/rig.sh -run TestLongPoll -v
-#   queen-kafka/compat/rig.sh --keep          # leave the stack up afterwards
-#   queen-kafka/compat/rig.sh --m5            # ...plus a TLS + SASL/PLAIN listener
+#   protocols/queen-kafka/compat/rig.sh                 # the whole suite
+#   protocols/queen-kafka/compat/rig.sh -run TestLongPoll -v
+#   protocols/queen-kafka/compat/rig.sh --keep          # leave the stack up afterwards
+#   protocols/queen-kafka/compat/rig.sh --m5            # ...plus a TLS + SASL/PLAIN listener
 #                                             #    and the credential gate it needs
 #
 # Every argument that is not --keep is passed through to `go test`, so the whole
@@ -26,7 +26,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 PG_HOST_PORT="${PG_HOST_PORT:-55432}"
 BROKER_PORT="${BROKER_PORT:-6699}"
@@ -139,7 +139,7 @@ docker exec "$CONTAINER" pg_isready -U postgres >/dev/null 2>&1 || {
 # ----------------------------------------------------------------------- builds
 say "building the broker and the facade (debug)"
 ( cd "$REPO_ROOT/server" && cargo build ) || exit 1
-( cd "$REPO_ROOT/queen-kafka" && cargo build ) || exit 1
+( cd "$REPO_ROOT/protocols/queen-kafka" && cargo build ) || exit 1
 
 # ----------------------------------------------------------------------- broker
 say "broker on 127.0.0.1:$BROKER_PORT"
@@ -183,7 +183,7 @@ QUEEN_KAFKA_ADDR="127.0.0.1:$KAFKA_PORT" \\
 QUEEN_KAFKA_ADVERTISED_ADDR="127.0.0.1:$KAFKA_PORT" \\
 QUEEN_KAFKA_DEFAULT_PARTITIONS="$PARTITIONS" \\
 LOG_LEVEL="${FACADE_LOG_LEVEL:-debug}" \\
-  "$REPO_ROOT/queen-kafka/target/debug/queen-kafka" >> "$FACADE_LOG" 2>&1 &
+  "$REPO_ROOT/protocols/queen-kafka/target/debug/queen-kafka" >> "$FACADE_LOG" 2>&1 &
 echo \$! > "$FACADE_PIDFILE"
 # Printed so the caller can prove a restart HAPPENED: a script that quietly
 # failed to kill anything would otherwise look exactly like a successful one.
@@ -205,7 +205,7 @@ say "queen-kafka on 127.0.0.1:$KAFKA_PORT (advertising itself, $PARTITIONS parti
 if [ "$M5" = 1 ]; then
   say "queen-kafka on $KAFKA_TLS_HOST:$KAFKA_TLS_PORT (TLS + SASL/PLAIN + SNI forwarding)"
   # The same self-signed certificate the crate's own TLS tests use
-  # (queen-kafka/src/tls.rs, `tls::testing`): a P-256 key, SANs for localhost
+  # (protocols/queen-kafka/src/tls.rs, `tls::testing`): a P-256 key, SANs for localhost
   # and the two example names, valid until 2126. It has never protected
   # anything and is written into a throwaway directory that goes with the rig.
   cat > "$LOGDIR/tls.crt" <<'CERT'
@@ -259,7 +259,7 @@ KEY
   QUEEN_KAFKA_SASL=plain \
   QUEEN_KAFKA_FORWARD_SNI_HOST=true \
   LOG_LEVEL="${FACADE_LOG_LEVEL:-debug}" \
-    "$REPO_ROOT/queen-kafka/target/debug/queen-kafka" > "$FACADE_TLS_LOG" 2>&1 &
+    "$REPO_ROOT/protocols/queen-kafka/target/debug/queen-kafka" > "$FACADE_TLS_LOG" 2>&1 &
   FACADE_TLS_PID=$!
 
   for _ in $(seq 1 30); do

@@ -1,7 +1,7 @@
 # The rdkafka (Rust) row of the queen-kafka client matrix.
 #
 # Standalone on purpose: there is no cargo workspace in this repository (server/
-# and queen-kafka/ each build on their own manifest), and this suite must never
+# and protocols/queen-kafka/ each build on their own manifest), and this suite must never
 # be pulled into either. The empty [workspace] table below makes that explicit
 # rather than relying on cargo's ancestor walk.
 [package]

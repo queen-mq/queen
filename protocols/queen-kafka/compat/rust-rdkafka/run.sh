@@ -2,7 +2,7 @@
 #
 # queen-kafka compat: rdkafka (Rust), over a vendored librdkafka.
 #
-#   queen-kafka/compat/rust-rdkafka/run.sh [scenario]
+#   protocols/queen-kafka/compat/rust-rdkafka/run.sh [scenario]
 #
 # It assumes a stack is ALREADY RUNNING and starts nothing: the stack is
 # rig.sh's job, or yours. Everything it needs comes from the environment.

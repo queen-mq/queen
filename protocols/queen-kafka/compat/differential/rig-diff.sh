@@ -4,9 +4,9 @@
 # Apache Kafka, side by side, so the same scenarios can be run against both and
 # the answers diffed.
 #
-#   queen-kafka/compat/differential/rig-diff.sh up      # stand both stacks up
-#   queen-kafka/compat/differential/rig-diff.sh run     # up (if needed) + runner
-#   queen-kafka/compat/differential/rig-diff.sh down    # tear everything down
+#   protocols/queen-kafka/compat/differential/rig-diff.sh up      # stand both stacks up
+#   protocols/queen-kafka/compat/differential/rig-diff.sh run     # up (if needed) + runner
+#   protocols/queen-kafka/compat/differential/rig-diff.sh down    # tear everything down
 #
 # Deliberately NOT rig.sh's ports and NOT rig.sh's container names: that rig may
 # be running at the same time and is owned by someone else. Postgres 25543,
@@ -35,7 +35,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 
 PG_HOST_PORT="${PG_HOST_PORT:-25543}"
 BROKER_PORT="${BROKER_PORT:-26699}"
@@ -117,7 +117,7 @@ up() {
 
   say "building the broker and the facade (debug)"
   ( cd "$REPO_ROOT/server" && cargo build ) || return 1
-  ( cd "$REPO_ROOT/queen-kafka" && cargo build ) || return 1
+  ( cd "$REPO_ROOT/protocols/queen-kafka" && cargo build ) || return 1
 
   say "broker on 127.0.0.1:$BROKER_PORT"
   PG_HOST=127.0.0.1 PG_PORT="$PG_HOST_PORT" PG_USER=postgres PG_PASSWORD=postgres \
@@ -141,7 +141,7 @@ up() {
   QUEEN_KAFKA_ADVERTISED_ADDR="127.0.0.1:$FACADE_PORT" \
   QUEEN_KAFKA_DEFAULT_PARTITIONS="$PARTITIONS" \
   LOG_LEVEL="${FACADE_LOG_LEVEL:-debug}" \
-    "$REPO_ROOT/queen-kafka/target/debug/queen-kafka" > "$FACADE_LOG" 2>&1 &
+    "$REPO_ROOT/protocols/queen-kafka/target/debug/queen-kafka" > "$FACADE_LOG" 2>&1 &
   echo $! > "$FACADE_PIDFILE"
 
   for _ in $(seq 1 100); do

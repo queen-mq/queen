@@ -36,7 +36,7 @@
 // WHAT IS THE CLIENT'S FAULT, NOT THE FACADE'S:
 //   * enable.idempotence defaults to TRUE since 3.0 and is LEFT ALONE here
 //     since M7 F3: InitProducerId (key 22) is advertised and the per-partition
-//     sequence window is enforced (queen-kafka/src/idempotent.rs). Before F3
+//     sequence window is enforced (protocols/queen-kafka/src/idempotent.rs). Before F3
 //     every producer in this file had to set it false or die on its first send
 //     inside TransactionManager.
 //   * 4.x enables KIP-714 client telemetry by default. GetTelemetrySubscriptions

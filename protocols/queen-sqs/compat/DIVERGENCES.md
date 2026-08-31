@@ -26,7 +26,7 @@ platform is not emulated** — Lambda triggers, EventBridge pipes, CloudWatch
 metrics, KMS, none of which any facade can provide — and **quota theater is not
 emulated** (QS-27).
 
-Line numbers are deliberately absent: `queen-sqs/src` is under active edit, so
+Line numbers are deliberately absent: `protocols/queen-sqs/src` is under active edit, so
 every pointer is a function or test NAME.
 
 ---

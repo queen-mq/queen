@@ -23,9 +23,9 @@ This is the operating manual.
 The rig stands the whole shape up, runs the suite and tears it down:
 
 ```sh
-queen-kafka/compat/cluster/rig-cluster.sh
-queen-kafka/compat/cluster/rig-cluster.sh -run TestAcceptance -v
-queen-kafka/compat/cluster/rig-cluster.sh --keep      # leave the stack up
+protocols/queen-kafka/compat/cluster/rig-cluster.sh
+protocols/queen-kafka/compat/cluster/rig-cluster.sh -run TestAcceptance -v
+protocols/queen-kafka/compat/cluster/rig-cluster.sh --keep      # leave the stack up
 ```
 
 It starts **one throwaway Postgres**, **two mesh-wired Queen brokers on that one

@@ -28,7 +28,7 @@ use crate::util::uuidv7_bytes;
 // get_consumer_groups_v4 JSON array verbatim (the Admin client reads it as-is).
 //
 // "Both engines" now includes the KAFKA FACADE. A Kafka consumer group commits
-// its offsets to the KV store, not to log_consumers (queen-kafka/src/offsets.rs),
+// its offsets to the KV store, not to log_consumers (protocols/queen-kafka/src/offsets.rs),
 // so until 010_log_admin grew its kafka_base CTE a group a real Kafka client was
 // actively draining did not appear here at all. Every row carries an additive
 // `kind` of "queen" or "kafka"; nothing else about a native row changed, and a
@@ -38,7 +38,7 @@ use crate::util::uuidv7_bytes;
 // KNOWN, and reported rather than fixed here: DELETE /api/v1/consumer-groups/
 // :group removes log_consumers rows only, so a kind="kafka" group deleted from
 // the console reappears on the next read. Kafka's own DeleteGroups
-// (queen-kafka/src/handlers/delete_groups.rs) is the supported path.
+// (protocols/queen-kafka/src/handlers/delete_groups.rs) is the supported path.
 pub async fn handle_consumer_groups(
     State(st): State<Arc<AppState>>,
     Extension(tenant): Extension<crate::tenant::Tenant>,

@@ -93,7 +93,7 @@ SaslAuthenticateRequest_v1(sasl_auth_bytes=b'aiok\x00aiok\x00<token>')
 
 RFC 4616 allows it, and Apache Kafka's own `PlainSaslServer` allows it — the
 only authzid it refuses is one that *differs* from the username.
-`queen-kafka/src/sasl.rs:217` refuses **any** non-empty authzid, so the facade
+`protocols/queen-kafka/src/sasl.rs:217` refuses **any** non-empty authzid, so the facade
 answers:
 
 ```

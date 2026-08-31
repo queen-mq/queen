@@ -27,7 +27,7 @@ the whole point, because a hand-rolled client is exactly what async-aws, the
 older SDK majors, Terraform's SQS provider on its old path, and every curl
 script in an operator's runbook are, from the facade's side of the socket.
 
-THE CONTRACT (`queen-kafka/CLIENT_MATRIX.md`, and `smoke_m0.py` before this):
+THE CONTRACT (`protocols/queen-kafka/compat/CLIENT_MATRIX.md`, and `smoke_m0.py` before this):
 
   * the stack comes from the environment, never from a hardcoded address;
   * ONE `ok NAME` or `FAIL NAME: detail` line per assertion;
@@ -42,9 +42,9 @@ THE CONTRACT (`queen-kafka/CLIENT_MATRIX.md`, and `smoke_m0.py` before this):
     "Query/XML" would mean this suite had silently stopped testing the thing it
     exists to test.
 
-  $ queen-sqs/compat/rig.sh up
-  $ source queen-sqs/compat/.rig/env.sh
-  $ python queen-sqs/compat/python/query_conformance.py
+  $ protocols/queen-sqs/compat/rig.sh up
+  $ source protocols/queen-sqs/compat/.rig/env.sh
+  $ python protocols/queen-sqs/compat/python/query_conformance.py
 
 THE SIGNER IS OURS. `sigv4.rs` reconstructs the canonical request a client
 built; this file builds one. The two were written from AWS's specification

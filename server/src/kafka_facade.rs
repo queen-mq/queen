@@ -183,7 +183,7 @@ pub fn loopback_url(local: &std::net::SocketAddr) -> String {
 ///
 /// Empty is not "set": `QUEEN_URL=` is an unset variable spelled by a Helm
 /// template that resolved to nothing, and inheriting it would send the child to
-/// its own boot-time refusal (queen-kafka/src/queen.rs, `normalize_base_url`).
+/// its own boot-time refusal (protocols/queen-kafka/src/queen.rs, `normalize_base_url`).
 /// So the same trim-and-reject-empty rule every other knob here follows.
 pub fn child_queen_url(inherited: Option<&str>, loopback: &str) -> String {
     match inherited.map(str::trim).filter(|v| !v.is_empty()) {

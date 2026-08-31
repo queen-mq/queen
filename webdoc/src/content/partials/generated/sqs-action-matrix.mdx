@@ -6,10 +6,10 @@ description: "Every SQS and SNS action the queen-sqs facade answers, which of th
 {/* GENERATED FILE. Do not edit by hand.
     Regenerate with: pnpm --dir webdoc gen
     Source of truth:
-      - queen-sqs/src/actions/mod.rs (Action::ALL, Action::is_sns)
+      - protocols/queen-sqs/src/actions/mod.rs (Action::ALL, Action::is_sns)
 */}
 
-The facade answers **40 actions**: 23 of SQS's and 17 of SNS's. Every row is read out of `queen-sqs/src/actions/mod.rs` at build time, which is the same table `Action::from_name` scans, so an action that is listed is an action that is dispatched. The set is CLOSED: a name outside it is `InvalidAction` rather than something plausible, because "plausible" for a client that asked to purge a queue means it believes the queue is empty.
+The facade answers **40 actions**: 23 of SQS's and 17 of SNS's. Every row is read out of `protocols/queen-sqs/src/actions/mod.rs` at build time, which is the same table `Action::from_name` scans, so an action that is listed is an action that is dispatched. The set is CLOSED: a name outside it is `InvalidAction` rather than something plausible, because "plausible" for a client that asked to purge a queue means it believes the queue is empty.
 
 **Every action Amazon SQS defines is one of these.** That is checked rather than claimed: the table below is derived from the dispatch table, SQS's own published action set is subtracted from it, and the build fails if anything is left over. SNS is the opposite shape and deliberately so, and what it leaves out is [below](#what-sns-publishes-and-this-does-not).
 

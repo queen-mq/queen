@@ -15,10 +15,10 @@ one.
 **2026-08-31**, one rig instance for every row: `compat/rig.sh up`, all suites in
 sequence against it, `compat/rig.sh down`. Throwaway Postgres 16 on
 `127.0.0.1:55440`, `server/target/debug/queen` on `:26632`,
-`queen-sqs/target/debug/queen-sqs` on `:19324`, SigV4 on, region `queen-1`,
+`protocols/queen-sqs/target/debug/queen-sqs` on `:19324`, SigV4 on, region `queen-1`,
 account `000000000000`, `QUEEN_SQS_DEFAULT_PARTITIONS=8`,
 `QUEEN_SQS_RECEIVE_MODE=exact`. `queen-sqs` was rebuilt from the working tree
-immediately before the run (`cargo build --manifest-path queen-sqs/Cargo.toml`,
+immediately before the run (`cargo build --manifest-path protocols/queen-sqs/Cargo.toml`,
 which `rig.sh up` then does again unconditionally); the broker binary is the one
 already carrying **C-SQS-3** — `offset` on the pop render — and `rig.sh`
 deliberately does not rebuild `server/`, because it does not own it. C-SQS-3 is
@@ -45,7 +45,7 @@ Neither log recorded a panic, a 5xx or an `InternalError` for the whole run.
 | sqs-consumer | 11.6.0 (on @aws-sdk/client-sqs 3.1121.0) | AWS JSON 1.0 — 98 requests | **PASS** | 21 passed, 0 failed (lane run on its own) | none beyond the client's | a real worker loop: nacks by `ChangeMessageVisibility`, deletes in MessageId-keyed batches, long-polls back to back | [`js/`](js) `node run.mjs consumer` |
 | boto3, against a facade the BROKER spawned | boto3 1.43.83; `QUEEN_SQS_EMBEDDED=true` | AWS JSON 1.0 — 6 requests | **PASS** | 9 passed, 0 failed | `QUEEN_SQS_BIN` + `QUEEN_SQS_CREDENTIALS` (SigV4 has no default keypair, by design) | nobody started the facade; one SIGTERM stopped both and left no orphan | the embedded one-shot, below |
 
-Result meanings, copied from `queen-kafka/compat/CLIENT_MATRIX.md`: **PASS**, the
+Result meanings, copied from `protocols/queen-kafka/compat/CLIENT_MATRIX.md`: **PASS**, the
 client works and every divergence it meets is on the register. **PARTIAL**, the
 client works but a real user meets something sharp. **FAIL**, the client cannot
 complete the basic path. No row is FAIL.
@@ -98,7 +98,7 @@ Not a rig: a throwaway Postgres and ONE process. The broker was started with
 
 ```
 QUEEN_SQS_EMBEDDED=true
-QUEEN_SQS_BIN=queen-sqs/target/debug/queen-sqs
+QUEEN_SQS_BIN=protocols/queen-sqs/target/debug/queen-sqs
 QUEEN_SQS_LISTEN=127.0.0.1:9324   QUEEN_SQS_AUTH=sigv4
 QUEEN_SQS_CREDENTIALS=QSQSTEST:qsqssecret:devtoken
 QUEEN_SQS_REGION=queen-1   QUEEN_SQS_ACCOUNT=000000000000
@@ -136,8 +136,8 @@ the ceiling is the queue's partition count and a slow consumer blocks its lane.
 Repro, verbatim from the run:
 
 ```
-$ queen-sqs/compat/rig.sh up && source queen-sqs/compat/.rig/env.sh
-$ python queen-sqs/compat/smoke_m0.py
+$ protocols/queen-sqs/compat/rig.sh up && source protocols/queen-sqs/compat/.rig/env.sh
+$ python protocols/queen-sqs/compat/smoke_m0.py
 #   partitions=1, 3 sent, 1 in flight at once
 FAIL InFlight.three_messages_are_all_receivable_at_once: got 1, want 3
 #   depth: visible=2 not-visible=1
@@ -345,19 +345,19 @@ The matrix is only worth running if the rows disagree about something. They do:
 ## Re-running it
 
 ```sh
-cargo build --manifest-path queen-sqs/Cargo.toml
-queen-sqs/compat/rig.sh up
-source queen-sqs/compat/.rig/env.sh
+cargo build --manifest-path protocols/queen-sqs/Cargo.toml
+protocols/queen-sqs/compat/rig.sh up
+source protocols/queen-sqs/compat/.rig/env.sh
 
-python  queen-sqs/compat/smoke_m0.py                    # 1 expected FAIL: QS-01
-python  queen-sqs/compat/smoke_m4_sns.py
-AWS_CLI=…/bin/aws queen-sqs/compat/smoke_m0_cli.sh
-python  queen-sqs/compat/python/query_conformance.py
-python  queen-sqs/compat/python/celery_suite.py         # needs celery, kombu
-GOWORK=off go -C queen-sqs/compat/go-sdk run .          # GOWORK=off is not optional
-( cd queen-sqs/compat/js && npm install && node run.mjs all )
+python  protocols/queen-sqs/compat/smoke_m0.py                    # 1 expected FAIL: QS-01
+python  protocols/queen-sqs/compat/smoke_m4_sns.py
+AWS_CLI=…/bin/aws protocols/queen-sqs/compat/smoke_m0_cli.sh
+python  protocols/queen-sqs/compat/python/query_conformance.py
+python  protocols/queen-sqs/compat/python/celery_suite.py         # needs celery, kombu
+GOWORK=off go -C protocols/queen-sqs/compat/go-sdk run .          # GOWORK=off is not optional
+( cd protocols/queen-sqs/compat/js && npm install && node run.mjs all )
 
-queen-sqs/compat/rig.sh down
+protocols/queen-sqs/compat/rig.sh down
 ```
 
 The python rows want a venv holding `boto3 celery kombu` (`pycurl` optional — it

@@ -2,19 +2,19 @@
 #
 # The queen-sqs live rig: a throwaway Postgres, a debug broker and a debug
 # facade, on ports nothing else on a developer machine uses. It is the same
-# discipline as queen-kafka/compat/rig.sh, with one deliberate difference — that
+# discipline as protocols/queen-kafka/compat/rig.sh, with one deliberate difference — that
 # rig owns the whole run (stack up, suite, stack down, one exit code), while
 # this one is a STACK MANAGER, because the SQS suites are a python file and a
 # shell file that a person also wants to run one at a time against a stack that
 # stays up between them.
 #
-#   queen-sqs/compat/rig.sh up       # stand it up (idempotent: an up on a
+#   protocols/queen-sqs/compat/rig.sh up       # stand it up (idempotent: an up on a
 #                                    #   running stack re-checks health and says so)
-#   queen-sqs/compat/rig.sh down     # tear it down (idempotent: a down on
+#   protocols/queen-sqs/compat/rig.sh down     # tear it down (idempotent: a down on
 #                                    #   nothing succeeds quietly)
-#   queen-sqs/compat/rig.sh status   # what is running, and is it answering
-#   queen-sqs/compat/rig.sh logs     # tail the broker's and the facade's logs
-#   queen-sqs/compat/rig.sh logs -f  # ...following
+#   protocols/queen-sqs/compat/rig.sh status   # what is running, and is it answering
+#   protocols/queen-sqs/compat/rig.sh logs     # tail the broker's and the facade's logs
+#   protocols/queen-sqs/compat/rig.sh logs -f  # ...following
 #
 # Ports are deliberately not the defaults: 55440 for Postgres (never 5432 —
 # that is a live stack on this machine), 26632 for the broker (never 6632),
@@ -34,7 +34,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 PG_HOST_PORT="${PG_HOST_PORT:-55440}"
 BROKER_PORT="${BROKER_PORT:-26632}"
@@ -70,7 +70,7 @@ BROKER_URL="http://127.0.0.1:$BROKER_PORT"
 SQS_ENDPOINT="http://127.0.0.1:$SQS_PORT"
 
 # How long `up` will wait for a queen-sqs that does not compile. The rule is the
-# campaign's: another workflow is editing queen-sqs/src and keeps it green
+# campaign's: another workflow is editing protocols/queen-sqs/src and keeps it green
 # BETWEEN its steps, so a build failure here is far more likely to be a
 # half-written edit than a real break. Wait it out; never patch src from this
 # side.
@@ -190,12 +190,12 @@ do_up() {
   fi
 
   # The facade: ALWAYS rebuilt, because the point of this rig is to exercise
-  # whatever queen-sqs/src says right now. A failure is waited out rather than
+  # whatever protocols/queen-sqs/src says right now. A failure is waited out rather than
   # diagnosed — see BUILD_ATTEMPTS.
   say "building queen-sqs (debug)"
   local attempt=1
   while true; do
-    if cargo build --manifest-path "$REPO_ROOT/queen-sqs/Cargo.toml"; then
+    if cargo build --manifest-path "$REPO_ROOT/protocols/queen-sqs/Cargo.toml"; then
       break
     fi
     if [ "$attempt" -ge "$BUILD_ATTEMPTS" ]; then
@@ -251,7 +251,7 @@ $PARTITIONS partitions per queue)"
   QUEEN_SQS_DEFAULT_PARTITIONS="$PARTITIONS" \
   QUEEN_SQS_HANDLE_SECRET="$SQS_HANDLE_SECRET" \
   LOG_LEVEL="${FACADE_LOG_LEVEL:-debug}" \
-    "$REPO_ROOT/queen-sqs/target/debug/queen-sqs" >> "$FACADE_LOG" 2>&1 &
+    "$REPO_ROOT/protocols/queen-sqs/target/debug/queen-sqs" >> "$FACADE_LOG" 2>&1 &
   echo $! > "$FACADE_PIDFILE"
   local fpid; fpid="$(cat "$FACADE_PIDFILE")"
 
@@ -325,7 +325,7 @@ do_status() {
   info "           $FACADE_LOG"
   if [ -f "$ENVFILE" ]; then
     info "env      : source $ENVFILE"
-    info "suites   : \"\$SCRIPT_DIR\"/../..  ->  compat/smoke_m0.py, compat/smoke_m0_cli.sh"
+    info "suites   : \"\$SCRIPT_DIR\"/../../..  ->  compat/smoke_m0.py, compat/smoke_m0_cli.sh"
   fi
   return $rc
 }

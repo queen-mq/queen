@@ -139,7 +139,7 @@ These hold for all of them, and none is a client-specific defect.
 
 **Idempotent produce works, since M7 F3 (2026-08-29).** `InitProducerId` (API
 key 22) is advertised v0-v4 and the per-`(producer, topic-partition)` sequence
-window is enforced in `queen-kafka/src/idempotent.rs`. **No producer needs any
+window is enforced in `protocols/queen-kafka/src/idempotent.rs`. **No producer needs any
 configuration at all any more** — this was the single largest onboarding
 papercut the facade had, because `enable.idempotence` has defaulted to true in
 the Java client since 3.0 and Spring Boot inherits it.
@@ -832,7 +832,7 @@ sense: each one works, and each one is a choice nobody has ratified.
 
 The campaign above found two facade defects. Both were fixed the same day, both
 were re-proved by real clients against a running facade, and neither is
-committed yet: the changes live in `queen-kafka/src/` in Alice's working tree.
+committed yet: the changes live in `protocols/queen-kafka/src/` in Alice's working tree.
 Anyone reading this from a fresh checkout will still see the old behaviour.
 
 ### brod could not produce at all (`produce.rs`): FIXED
@@ -1434,7 +1434,7 @@ Every suite takes its stack from the environment and starts nothing of its own,
 so it can be pointed at `rig.sh --keep` or at any facade:
 
 ```sh
-queen-kafka/compat/rig.sh --keep -run TestNothing    # stack on 19092, no suite
+protocols/queen-kafka/compat/rig.sh --keep -run TestNothing    # stack on 19092, no suite
 ```
 
 Each one prints one `ok` or `FAIL` line per assertion, ends with a `RESULT:`

@@ -11,14 +11,14 @@
 # and not this has still failed the "change endpoint_url only" promise, because
 # `aws sqs` is the first thing anybody tries.
 #
-#   queen-sqs/compat/rig.sh up
-#   source queen-sqs/compat/.rig/env.sh
-#   queen-sqs/compat/smoke_m0_cli.sh
+#   protocols/queen-sqs/compat/rig.sh up
+#   source protocols/queen-sqs/compat/.rig/env.sh
+#   protocols/queen-sqs/compat/smoke_m0_cli.sh
 #
 # The CLI is taken from $AWS_CLI, else from PATH. The rig's own environment is a
 # python venv, so:
 #
-#   AWS_CLI=/path/to/venv/bin/aws queen-sqs/compat/smoke_m0_cli.sh
+#   AWS_CLI=/path/to/venv/bin/aws protocols/queen-sqs/compat/smoke_m0_cli.sh
 #
 # Contract, as everywhere in compat/: one `ok NAME` or `FAIL NAME: detail` per
 # assertion, a `RESULT:` line last, nonzero exit when anything failed.

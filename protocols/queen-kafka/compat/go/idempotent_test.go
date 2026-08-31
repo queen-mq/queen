@@ -3,7 +3,7 @@
 // Everything in this file is about the ONE promise a client makes when
 // `enable.idempotence` is on: a batch it sends twice appears in the log once,
 // and a batch that would leave a hole is refused rather than written. The unit
-// tests in `queen-kafka/src/idempotent.rs` prove the state machine; these prove
+// tests in `protocols/queen-kafka/src/idempotent.rs` prove the state machine; these prove
 // the wire, which is the only place the promise is actually made.
 //
 // Two of them build the record batch BY HAND — producer id, epoch and base
@@ -376,7 +376,7 @@ func TestATransactionCoordinatorIsThisFacade(t *testing.T) {
 // ------------------------------------------------------ the lost-window proof
 
 // The acceptance check for the caveat at the top of
-// `queen-kafka/src/idempotent.rs`, and the one that decides whether advertising
+// `protocols/queen-kafka/src/idempotent.rs`, and the one that decides whether advertising
 // InitProducerId v3 was worth it: a facade restart LOSES the sequence window,
 // which a real Kafka broker does not, and the producer has to keep running
 // anyway.
@@ -388,7 +388,7 @@ func TestATransactionCoordinatorIsThisFacade(t *testing.T) {
 func TestAnIdempotentProducerSurvivesAFacadeRestart(t *testing.T) {
 	restart := os.Getenv("QUEEN_KAFKA_RESTART_CMD")
 	if restart == "" {
-		t.Skip("no QUEEN_KAFKA_RESTART_CMD: run queen-kafka/compat/rig.sh, which sets it")
+		t.Skip("no QUEEN_KAFKA_RESTART_CMD: run protocols/queen-kafka/compat/rig.sh, which sets it")
 	}
 	topic := newTopic(t)
 	ensureTopic(t, newClient(t), topic)

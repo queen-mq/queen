@@ -319,7 +319,7 @@ func TestGroupRebalancesWhenAMemberDiesWithoutLeaving(t *testing.T) {
 func TestGroupOffsetsSurviveAFacadeRestart(t *testing.T) {
 	restart := os.Getenv("QUEEN_KAFKA_RESTART_CMD")
 	if restart == "" {
-		t.Skip("no QUEEN_KAFKA_RESTART_CMD: run queen-kafka/compat/rig.sh, which sets it")
+		t.Skip("no QUEEN_KAFKA_RESTART_CMD: run protocols/queen-kafka/compat/rig.sh, which sets it")
 	}
 
 	topic, total := seedAcrossPartitions(t, 5)

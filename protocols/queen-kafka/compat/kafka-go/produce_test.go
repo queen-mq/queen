@@ -107,7 +107,7 @@ func TestProduceUncompressed(t *testing.T) {
 
 // TestProduceEveryCodec runs the same corpus through all four codecs kafka-go
 // ships. The facade decodes RecordBatch v2 with all four on a decompression
-// budget (queen-kafka/src/decompress.rs), so all four must round-trip.
+// budget (protocols/queen-kafka/src/decompress.rs), so all four must round-trip.
 //
 // Note for anyone comparing with the librdkafka row of the matrix: librdkafka
 // gates zstd on Fetch v10 and the facade caps Fetch at v6, so librdkafka sends

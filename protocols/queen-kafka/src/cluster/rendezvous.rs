@@ -20,7 +20,7 @@
 //! and splitmix64's finalizer gives it the avalanche FNV lacks (FNV alone
 //! leaves the low bits of short, similar inputs correlated, which is exactly
 //! what a partition index is). Neither needs a dependency, and
-//! `queen-kafka/Cargo.toml` gains none for this.
+//! `protocols/queen-kafka/Cargo.toml` gains none for this.
 //!
 //! The scheme is pinned by a test-vector table below. It is not there to check
 //! the arithmetic — it is there so that CHANGING the arithmetic fails a test

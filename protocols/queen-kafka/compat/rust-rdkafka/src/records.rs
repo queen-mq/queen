@@ -7,7 +7,7 @@
 //! consumer, a seek, or a second run verifiable at all.
 //!
 //! Three things in here are deliberate and each one is testing the envelope
-//! (`queen-kafka/src/records.rs`) rather than the transport:
+//! (`protocols/queen-kafka/src/records.rs`) rather than the transport:
 //!
 //! * **The value is not UTF-8.** It carries a NUL, a 0xFF, a 0xFE and a lone
 //!   0x80 — a byte sequence that no JSON string can hold. Queen payloads are

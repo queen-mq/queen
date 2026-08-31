@@ -297,7 +297,7 @@ func TestSeek(t *testing.T) {
 }
 
 // TestOffsetOutOfRange proves the facade answers OFFSET_OUT_OF_RANGE for an
-// offset past the high watermark (queen-kafka/src/handlers/fetch.rs:452, the
+// offset past the high watermark (protocols/queen-kafka/src/handlers/fetch.rs:452, the
 // `bounds_only` probe), and that kafka-go both surfaces and recovers from it.
 //
 // Two readers, because kafka-go has two behaviours and only one of them shows

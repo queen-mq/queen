@@ -3,9 +3,9 @@
 # The queen-kafka CLOUD acceptance rig: a whole Queen Cloud cell in one script,
 # and the franz-go suite in compat/cloud run against it.
 #
-#   queen-kafka/compat/cloud/rig-cloud.sh              # the whole suite
-#   queen-kafka/compat/cloud/rig-cloud.sh -run TestMetering -v
-#   queen-kafka/compat/cloud/rig-cloud.sh --keep       # leave the stack up
+#   protocols/queen-kafka/compat/cloud/rig-cloud.sh              # the whole suite
+#   protocols/queen-kafka/compat/cloud/rig-cloud.sh -run TestMetering -v
+#   protocols/queen-kafka/compat/cloud/rig-cloud.sh --keep       # leave the stack up
 #
 # Every argument that is not --keep goes through to `go test`.
 #
@@ -33,7 +33,7 @@
 # CREDENTIAL (decision z). This rig uses the shared-host arm, and that is a
 # deliberate call rather than a shortcut:
 #
-#   `queen-kafka/src/lib.rs` keeps `advertised_host` per PROCESS, not per SNI
+#   `protocols/queen-kafka/src/lib.rs` keeps `advertised_host` per PROCESS, not per SNI
 #   lane. One facade therefore hands every client the SAME bootstrap address
 #   whatever name they dialled, so a second tenant's connections would come
 #   back carrying the first tenant's SNI and be routed to the first tenant's
@@ -66,7 +66,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 
 PXDB_PORT="${PXDB_PORT:-33040}"
 CELLPG_PORT="${CELLPG_PORT:-33041}"
@@ -175,7 +175,7 @@ wait_pg "$CELLPG" queen || exit 1
 say "building broker, proxy and facade (debug)"
 ( cd "$REPO_ROOT/server" && cargo build ) || exit 1
 ( cd "$REPO_ROOT/proxy" && cargo build ) || exit 1
-( cd "$REPO_ROOT/queen-kafka" && cargo build ) || exit 1
+( cd "$REPO_ROOT/protocols/queen-kafka" && cargo build ) || exit 1
 
 # --------------------------------------------------------------------- broker
 # QUEEN_TENANCY_HEADER=true is what makes the broker honour the X-Queen-Tenant
@@ -331,7 +331,7 @@ QUEEN_KAFKA_ADVERTISED_ADDR="127.0.0.1:$KAFKA_PORT" \
 QUEEN_KAFKA_DEFAULT_PARTITIONS="$PARTITIONS" \
 QUEEN_KAFKA_SASL=plain \
 LOG_LEVEL="${FACADE_LOG_LEVEL:-debug}" \
-  "$REPO_ROOT/queen-kafka/target/debug/queen-kafka" > "$FACADE_LOG" 2>&1 &
+  "$REPO_ROOT/protocols/queen-kafka/target/debug/queen-kafka" > "$FACADE_LOG" 2>&1 &
 FACADE_PID=$!
 for _ in $(seq 1 60); do
   nc -z 127.0.0.1 "$KAFKA_PORT" >/dev/null 2>&1 && break

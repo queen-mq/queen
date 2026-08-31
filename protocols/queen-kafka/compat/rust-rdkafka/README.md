@@ -54,7 +54,7 @@ which is a different surface with different defaults:
 
 Every record is a pure function of its sequence number, so the consumer side
 recomputes what it expects rather than remembering what was sent. Three details
-in the corpus are aimed at the payload envelope (`queen-kafka/src/records.rs`)
+in the corpus are aimed at the payload envelope (`protocols/queen-kafka/src/records.rs`)
 rather than at the transport:
 
 * the **value is not UTF-8** — it carries `00 ff fe 80 7f`, which no JSON string
@@ -150,5 +150,5 @@ src/harness.rs   ok/FAIL/RESULT, and the deadlines
 
 There is no build system beyond cargo, nothing is published, and the crate
 declares an empty `[workspace]` so it is never absorbed into `server/` or
-`queen-kafka/` — this repository has no cargo workspace and this row must not
+`protocols/queen-kafka/` — this repository has no cargo workspace and this row must not
 become the first one.

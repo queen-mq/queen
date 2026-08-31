@@ -20,9 +20,9 @@
 # 003_log_push.sql:131-213 allocates the offset under a row lock in the database
 # rather than in a broker).
 #
-#   queen-kafka/compat/cluster/rig-cluster.sh            # stand up, run, tear down
-#   queen-kafka/compat/cluster/rig-cluster.sh -run TestAcceptance -v
-#   queen-kafka/compat/cluster/rig-cluster.sh --keep     # leave the stack up
+#   protocols/queen-kafka/compat/cluster/rig-cluster.sh            # stand up, run, tear down
+#   protocols/queen-kafka/compat/cluster/rig-cluster.sh -run TestAcceptance -v
+#   protocols/queen-kafka/compat/cluster/rig-cluster.sh --keep     # leave the stack up
 #
 # Every argument that is not --keep is passed through to `go test`.
 #
@@ -36,7 +36,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 
 PG_PORT="${PG_PORT:-32400}"
 BROKER_A_PORT="${BROKER_A_PORT:-32401}"
@@ -150,7 +150,7 @@ docker exec "$CONTAINER" pg_isready -U postgres >/dev/null 2>&1 || {
 # ----------------------------------------------------------------------- builds
 say "building the broker and the facade (debug, each from its own manifest)"
 ( cd "$REPO_ROOT/server" && cargo build ) || exit 1
-( cd "$REPO_ROOT/queen-kafka" && cargo build ) || exit 1
+( cd "$REPO_ROOT/protocols/queen-kafka" && cargo build ) || exit 1
 
 # ---------------------------------------------------------------------- brokers
 # The HA recipe: ONE Postgres, two brokers with distinct QUEEN_SERVER_IDs, a
@@ -221,7 +221,7 @@ env QUEEN_URL="http://127.0.0.1:$broker_port" \\
     QUEEN_KAFKA_GROUP_JOIN_DELAY_MS="$JOIN_DELAY_MS" \\
     NO_COLOR=1 LOG_LEVEL="${FACADE_LOG_LEVEL:-info}" \\
     $cluster_env \\
-    "$REPO_ROOT/queen-kafka/target/debug/queen-kafka" >> "$LOGDIR/$name.log" 2>&1 &
+    "$REPO_ROOT/protocols/queen-kafka/target/debug/queen-kafka" >> "$LOGDIR/$name.log" 2>&1 &
 echo \$! > "$LOGDIR/pids/$name.pid"
 for _ in \$(seq 1 150); do
   nc -z 127.0.0.1 "$port" >/dev/null 2>&1 && { echo "$name up, pid \$(cat "$LOGDIR/pids/$name.pid")"; exit 0; }

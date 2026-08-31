@@ -18,7 +18,7 @@ so the username is sent in the AUTHZID field as well as the authcid field.
 RFC 4616 allows that, and Apache Kafka's own PlainSaslServer allows it -- the
 only authzid it refuses is one that DIFFERS from the username.
 
-queen-kafka/src/sasl.rs:217 refuses ANY non-empty authzid:
+protocols/queen-kafka/src/sasl.rs:217 refuses ANY non-empty authzid:
 
     if !authzid.is_empty() {
         return Err(PlainError::Impersonation);

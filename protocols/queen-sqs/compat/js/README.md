@@ -28,21 +28,21 @@ The stack comes from the environment. `rig.sh up` writes the file that supplies
 it; nothing here has a hardcoded address.
 
 ```sh
-queen-sqs/compat/rig.sh up                 # throwaway PG + debug broker + facade
-source queen-sqs/compat/.rig/env.sh        # QUEEN_SQS_ENDPOINT, AWS_*, ...
+protocols/queen-sqs/compat/rig.sh up                 # throwaway PG + debug broker + facade
+source protocols/queen-sqs/compat/.rig/env.sh        # QUEEN_SQS_ENDPOINT, AWS_*, ...
 
-cd queen-sqs/compat/js
+cd protocols/queen-sqs/compat/js
 npm install                                # once; node 22+
 node run.mjs all                           # every lane
 
-queen-sqs/compat/rig.sh down
+protocols/queen-sqs/compat/rig.sh down
 ```
 
 `npm test` is `node run.mjs all`. Lanes can be named individually and combined:
 
 | lane | needs the rig | what it is |
 |---|---|---|
-| `vectors` | no | the MD5 algorithms against the goldens in `queen-sqs/src/md5.rs` |
+| `vectors` | no | the MD5 algorithms against the goldens in `protocols/queen-sqs/src/md5.rs` |
 | `probe` | no | what the installed SDK does about protocols, MD5s and errors, proved against an in-process stub |
 | `sqs` | yes | the SQS inventory, mirroring `compat/smoke_m0.py` |
 | `sns` | yes | the SNS inventory, mirroring `compat/smoke_m4_sns.py` — the Query/XML codec |
@@ -71,7 +71,7 @@ reader has to guess which stack a number came from.
 
 ## The output contract
 
-Copied from `queen-kafka/compat/CLIENT_MATRIX.md`, verbatim in what matters:
+Copied from `protocols/queen-kafka/compat/CLIENT_MATRIX.md`, verbatim in what matters:
 
 * one `ok NAME` or `FAIL NAME: detail` line per assertion;
 * every non-assertion line is `#`-prefixed;
@@ -123,7 +123,7 @@ So `lib/md5.mjs` implements AWS's attribute encoding — length-prefixed name,
 length-prefixed type (the full label, custom suffix included), transport byte
 (`Number` uses the STRING byte), length-prefixed value (`Binary`: the DECODED
 bytes), fed in ascending name order — and the assertions are ours. The `vectors`
-lane pins that implementation against the goldens in `queen-sqs/src/md5.rs`
+lane pins that implementation against the goldens in `protocols/queen-sqs/src/md5.rs`
 BEFORE anything is compared to a live answer, so a red MD5 assertion in the `sqs`
 lane is the facade and never the suite. Three implementations in three languages
 agreeing is what those goldens are worth.

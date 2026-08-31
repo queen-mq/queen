@@ -29,7 +29,7 @@ import (
 //     compat/go/m5_test.go does for franz-go.
 //
 // The password is the Queen bearer token; the username is a free label the
-// facade only logs (queen-kafka/src/sasl.rs).
+// facade only logs (protocols/queen-kafka/src/sasl.rs).
 func tlsDialer(t *testing.T, serverName string) *kafka.Dialer {
 	t.Helper()
 	return &kafka.Dialer{

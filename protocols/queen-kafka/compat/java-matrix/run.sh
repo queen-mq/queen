@@ -3,7 +3,7 @@
 #
 # compat/java already answers "does the official Java client work" for one
 # version. This directory answers a different question: does the facade's
-# advertised window (queen-kafka/src/versions.rs) still satisfy kafka-clients as
+# advertised window (protocols/queen-kafka/src/versions.rs) still satisfy kafka-clients as
 # kafka-clients moves? Kafka 4.0 shipped KIP-896, which RAISED the minimum
 # protocol versions a client will speak, and the facade deliberately caps Fetch
 # at v6, Metadata at v9 and the group APIs one below group_instance_id. Those two

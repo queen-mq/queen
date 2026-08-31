@@ -7,7 +7,7 @@ kafka-clients moves?**
 
 That question got sharp with Kafka 4.0. KIP-896 raised the minimum protocol
 versions a client is willing to speak — 4.x clients refuse brokers older than
-2.1 — while `queen-kafka/src/versions.rs` deliberately caps several APIs well
+2.1 — while `protocols/queen-kafka/src/versions.rs` deliberately caps several APIs well
 below their newest schema version (Fetch at v6 because v7 is fetch sessions,
 Metadata at v9 because v10 is topic ids, the group APIs one below
 `group_instance_id`). Those two facts point at each other, and only a real client

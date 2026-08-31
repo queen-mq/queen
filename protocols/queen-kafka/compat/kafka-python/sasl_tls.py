@@ -14,7 +14,7 @@ only authzid it refuses is one that DIFFERS from the username
 ("Authentication failed: Client requested an authorization id that is different
 from username", verified in kafka-clients-3.9.1.jar).
 
-queen-kafka refuses ANY non-empty authzid — `queen-kafka/src/sasl.rs:218`:
+queen-kafka refuses ANY non-empty authzid — `protocols/queen-kafka/src/sasl.rs:218`:
 
     if !authzid.is_empty() { return Err(PlainError::Impersonation); }
 
@@ -142,7 +142,7 @@ def main():
     else:
         bad("kafka-python cannot authenticate to a SASL listener at all: it sends "
             "username\\0username\\0password (kafka/sasl/plain.py:26, kafka/conn.py:628 "
-            "on 2.0.x) and queen-kafka/src/sasl.rs:218 refuses any non-empty authzid. "
+            "on 2.0.x) and protocols/queen-kafka/src/sasl.rs:218 refuses any non-empty authzid. "
             "Apache Kafka's PlainSaslServer refuses only an authzid DIFFERENT from the "
             "username, so this rejects a response a real broker accepts")
         info(f"the client saw: {err}")

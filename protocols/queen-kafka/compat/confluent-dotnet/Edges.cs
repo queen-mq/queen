@@ -24,7 +24,7 @@
 //   * SessionTimeoutMs outside 6s..300s  -> INVALID_SESSION_TIMEOUT (26)
 //   * a "__"-prefixed topic              -> UNKNOWN_TOPIC_OR_PARTITION
 //
-// The advertised surface is queen-kafka/src/versions.rs.
+// The advertised surface is protocols/queen-kafka/src/versions.rs.
 // =============================================================================
 
 using Confluent.Kafka;
@@ -299,7 +299,7 @@ public static class Edges
                 return $"{entries.Count} broker config entrie(s)";
             });
 
-        Program.Note("The advertised surface is queen-kafka/src/versions.rs. Since M7 the topics-admin");
+        Program.Note("The advertised surface is protocols/queen-kafka/src/versions.rs. Since M7 the topics-admin");
         Program.Note("trio and the groups-admin trio are on it; DescribeCluster is not, and rides Metadata.");
     }
 

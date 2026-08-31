@@ -10,7 +10,7 @@ reason this rig exists rather than a third copy of the same assertions.
 One command, everything from the environment:
 
 ```sh
-GOWORK=off go -C queen-sqs/compat/go-sdk run .
+GOWORK=off go -C protocols/queen-sqs/compat/go-sdk run .
 ```
 
 It works from any directory (`go -C` changes into the module first), needs no
@@ -18,9 +18,9 @@ build step of its own, and exits nonzero when anything failed. The stack must be
 up and its environment exported:
 
 ```sh
-queen-sqs/compat/rig.sh up
-source queen-sqs/compat/.rig/env.sh
-GOWORK=off go -C queen-sqs/compat/go-sdk run .
+protocols/queen-sqs/compat/rig.sh up
+source protocols/queen-sqs/compat/.rig/env.sh
+GOWORK=off go -C protocols/queen-sqs/compat/go-sdk run .
 ```
 
 **`GOWORK=off` is not optional.** The repository root carries a `go.work` that
@@ -158,15 +158,15 @@ the comparison.
 No rig needed, and all three are clean:
 
 ```sh
-GOWORK=off go -C queen-sqs/compat/go-sdk build ./...
-GOWORK=off go -C queen-sqs/compat/go-sdk vet ./...
-GOWORK=off go -C queen-sqs/compat/go-sdk test ./...
+GOWORK=off go -C protocols/queen-sqs/compat/go-sdk build ./...
+GOWORK=off go -C protocols/queen-sqs/compat/go-sdk vet ./...
+GOWORK=off go -C protocols/queen-sqs/compat/go-sdk test ./...
 ```
 
 `go test` runs three files that need no stack:
 
 - `awsmd5_test.go` checks this suite's MD5 implementation against
-  `queen-sqs/src/md5.rs`'s own golden vectors — two independent implementations
+  `protocols/queen-sqs/src/md5.rs`'s own golden vectors — two independent implementations
   against the same published values, where a vector invented here would only
   prove the file agrees with itself.
 - `protocol_test.go` checks the request-dump parser against realistic

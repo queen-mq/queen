@@ -1,7 +1,8 @@
 /**
  * Generate the Kafka facade's support matrix from its advertised-versions table.
  *
- * `queen-kafka/src/versions.rs` is the compatibility contract in one place: the
+ * `protocols/queen-kafka/src/versions.rs` is the compatibility contract in one
+ * place: the
  * ApiVersions response is built from it and every incoming request is gated on
  * it, so the table is simultaneously what the facade promises and what it
  * accepts. A hand-written matrix beside it would be a third copy, and the only
@@ -29,7 +30,7 @@ import {
   sliceBlock,
 } from "./lib/source.mjs";
 
-const VERSIONS = "queen-kafka/src/versions.rs";
+const VERSIONS = "protocols/queen-kafka/src/versions.rs";
 
 // ---------------------------------------------------------------------------
 // 1. The table, straight out of the const

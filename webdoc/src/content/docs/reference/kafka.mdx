@@ -8,17 +8,17 @@ sidebar:
   order: 30
   label: Kafka protocol
 sourceOfTruth:
-  - queen-kafka/src/versions.rs
-  - queen-kafka/src/handlers/metadata.rs
-  - queen-kafka/src/handlers/produce.rs
-  - queen-kafka/src/handlers/fetch.rs
-  - queen-kafka/src/handlers/list_offsets.rs
-  - queen-kafka/src/coordinator/mod.rs
-  - queen-kafka/src/coordinator/group.rs
-  - queen-kafka/src/offsets.rs
-  - queen-kafka/src/records.rs
-  - queen-kafka/src/txn.rs
-  - queen-kafka/src/idempotent.rs
+  - protocols/queen-kafka/src/versions.rs
+  - protocols/queen-kafka/src/handlers/metadata.rs
+  - protocols/queen-kafka/src/handlers/produce.rs
+  - protocols/queen-kafka/src/handlers/fetch.rs
+  - protocols/queen-kafka/src/handlers/list_offsets.rs
+  - protocols/queen-kafka/src/coordinator/mod.rs
+  - protocols/queen-kafka/src/coordinator/group.rs
+  - protocols/queen-kafka/src/offsets.rs
+  - protocols/queen-kafka/src/records.rs
+  - protocols/queen-kafka/src/txn.rs
+  - protocols/queen-kafka/src/idempotent.rs
 ---
 
 `queen-kafka` is a separate binary that speaks the Kafka wire protocol to clients and plain
@@ -44,7 +44,7 @@ they arise below.
 ## The support matrix
 
 Every Kafka client opens a connection with `ApiVersions` and then speaks only what the answer
-allowed. That answer is built from one table in `queen-kafka/src/versions.rs`, which is also
+allowed. That answer is built from one table in `protocols/queen-kafka/src/versions.rs`, which is also
 the gate every incoming request is checked against, so a version that is advertised is a
 version that is handled.
 

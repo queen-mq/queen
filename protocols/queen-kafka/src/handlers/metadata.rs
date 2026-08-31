@@ -1610,7 +1610,7 @@ mod golden {
     //! every advertised version.
     //!
     //! The buffers below were captured from the pre-cluster code
-    //! (`git show HEAD:queen-kafka/src/handlers/metadata.rs`, node 0 everywhere
+    //! (`git show HEAD:protocols/queen-kafka/src/handlers/metadata.rs`, node 0 everywhere
     //! and a hard-coded broker list) and are asserted against the code as it is
     //! now. A change that moves a byte of the single-node answer fails here,
     //! which is the only way an operator who set nothing could ever notice.

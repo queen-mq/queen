@@ -7,7 +7,7 @@
 // anything the broker generates freely (member ids, coordinator identity). A
 // facade that answered those identically would be lying about being itself.
 //
-//	queen-kafka/compat/differential/rig-diff.sh run          # stack + runner
+//	protocols/queen-kafka/compat/differential/rig-diff.sh run          # stack + runner
 //	QK_FACADE=host:port QK_KAFKA=host:port go run .          # against a live pair
 //	... -run group                                           # one scenario
 //

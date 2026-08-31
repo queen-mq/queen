@@ -2,7 +2,7 @@
 """The queen-sqs M4 smoke: SNS over boto3, against a live facade, a live broker
 and a live Postgres.
 
-WHAT THIS IS FOR. `queen-sqs/src/sns/*` and `src/http_tests.rs` drive the same
+WHAT THIS IS FOR. `protocols/queen-sqs/src/sns/*` and `src/http_tests.rs` drive the same
 seventeen SNS actions against `FakeQueen`, where a transaction always commits, a
 dedup key is a map entry and a fan-out is a list append. This file is the other
 half: the same surface where a publish is a real `POST /api/v1/transaction`, a
@@ -17,9 +17,9 @@ CLIENT_MATRIX.md, verbatim in what matters):
   * `RESULT: PASS` or `RESULT: FAIL` as the last line;
   * a nonzero exit status when anything failed.
 
-  $ queen-sqs/compat/rig.sh up
-  $ source queen-sqs/compat/.rig/env.sh
-  $ python queen-sqs/compat/smoke_m4_sns.py
+  $ protocols/queen-sqs/compat/rig.sh up
+  $ source protocols/queen-sqs/compat/.rig/env.sh
+  $ python protocols/queen-sqs/compat/smoke_m4_sns.py
 
 TWO CLIENTS, ONE LISTENER, TWO PROTOCOLS. `boto3.client("sns")` speaks the Query
 protocol (form-encoded in, XML out; `apiVersion` 2010-03-31) and

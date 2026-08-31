@@ -67,7 +67,7 @@ authzid it refuses is one that *differs* from the username ("Authentication
 failed: Client requested an authorization id that is different from username",
 in `kafka-clients-3.9.1.jar`).
 
-`queen-kafka/src/sasl.rs:218` refuses **any** non-empty authzid, so every
+`protocols/queen-kafka/src/sasl.rs:218` refuses **any** non-empty authzid, so every
 kafka-python release is locked out of a SASL listener, and there is no
 client-side workaround: the username *is* the authzid, so emptying one empties
 the other and the facade then answers `NoUsername`. `sasl_tls.py` case 2

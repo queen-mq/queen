@@ -8,13 +8,13 @@ sidebar:
   order: 13
   label: SQS facade
 sourceOfTruth:
-  - queen-sqs/src/main.rs
-  - queen-sqs/src/lib.rs
-  - queen-sqs/src/config.rs
-  - queen-sqs/src/credentials.rs
-  - queen-sqs/src/handle.rs
-  - queen-sqs/src/sigv4.rs
-  - queen-sqs/src/registry.rs
+  - protocols/queen-sqs/src/main.rs
+  - protocols/queen-sqs/src/lib.rs
+  - protocols/queen-sqs/src/config.rs
+  - protocols/queen-sqs/src/credentials.rs
+  - protocols/queen-sqs/src/handle.rs
+  - protocols/queen-sqs/src/sigv4.rs
+  - protocols/queen-sqs/src/registry.rs
   - server/src/sqs_facade.rs
   - server/src/config.rs
   - Dockerfile
@@ -84,7 +84,7 @@ parked-connection gauge counts, so SQS consumers are visible on it where Kafka c
 
 <Aside type="note">
 The Cloud shape is a design property here and not yet a measured one. There is no equivalent of the
-Kafka facade's `queen-kafka/compat/cloud` suite for SQS, so nothing on this page should be read as
+Kafka facade's `protocols/queen-kafka/compat/cloud` suite for SQS, so nothing on this page should be read as
 evidence that a whole cell has been driven end to end through it. The self-hosted shape is what the
 rig runs.
 </Aside>
@@ -95,11 +95,11 @@ The crate is standalone, so it builds on its own manifest and produces one binar
 the broker's own process tree instead is [embedded mode](#embedded-in-the-broker).
 
 ```bash
-cargo build --release --manifest-path queen-sqs/Cargo.toml
+cargo build --release --manifest-path protocols/queen-sqs/Cargo.toml
 QUEEN_URL=http://localhost:6632 \
 QUEEN_SQS_CREDENTIALS=AKIAEXAMPLE:a-secret-of-your-own:the-queen-token \
 QUEEN_SQS_HANDLE_SECRET=a-shared-key-of-at-least-16-bytes \
-  ./queen-sqs/target/release/queen-sqs
+  ./protocols/queen-sqs/target/release/queen-sqs
 ```
 
 The listener defaults to `0.0.0.0:9324`. That port is not arbitrary: it is the de-facto self-hosted

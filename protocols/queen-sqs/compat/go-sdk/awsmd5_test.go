@@ -10,7 +10,7 @@ import (
 // The digests this suite computes for itself have to agree with the facade's,
 // or every MD5 assertion in the run is two implementations of one bug.
 //
-// The vectors are `queen-sqs/src/md5.rs`'s own goldens, copied deliberately: two
+// The vectors are `protocols/queen-sqs/src/md5.rs`'s own goldens, copied deliberately: two
 // independent implementations checked against the SAME published values is the
 // point, and a value invented here would only prove this file agrees with
 // itself. They run offline — `go test ./...` needs no rig — which makes them the

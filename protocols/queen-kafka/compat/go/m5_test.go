@@ -26,7 +26,7 @@ import (
 // with, and a shared misreading of the protocol would pass both sides.
 //
 // It runs only when the rig stands up the second listener
-// (`queen-kafka/compat/rig.sh --m5`), because it needs a facade configured with
+// (`protocols/queen-kafka/compat/rig.sh --m5`), because it needs a facade configured with
 // TLS and SASL and the default rig deliberately has neither.
 //
 // The credential CHECK is real here, but the checker is not the broker: the
@@ -42,7 +42,7 @@ import (
 func TestTLSAndSaslPlainOnboarding(t *testing.T) {
 	bootstrap := os.Getenv("QUEEN_KAFKA_TLS_BOOTSTRAP")
 	if bootstrap == "" {
-		t.Skip("no TLS+SASL listener: run queen-kafka/compat/rig.sh --m5")
+		t.Skip("no TLS+SASL listener: run protocols/queen-kafka/compat/rig.sh --m5")
 	}
 	// The name matters and an address would not do: Go sends no SNI for an IP
 	// literal (RFC 6066 forbids it), so a rig that dialled 127.0.0.1 would be
@@ -134,7 +134,7 @@ func TestTLSAndSaslPlainOnboarding(t *testing.T) {
 func TestSaslListenerRefusesAnUnauthenticatedClient(t *testing.T) {
 	bootstrap := os.Getenv("QUEEN_KAFKA_TLS_BOOTSTRAP")
 	if bootstrap == "" {
-		t.Skip("no TLS+SASL listener: run queen-kafka/compat/rig.sh --m5")
+		t.Skip("no TLS+SASL listener: run protocols/queen-kafka/compat/rig.sh --m5")
 	}
 	host := bootstrap[:strings.LastIndex(bootstrap, ":")]
 
@@ -175,7 +175,7 @@ func TestSaslListenerRefusesAnUnauthenticatedClient(t *testing.T) {
 func TestSaslRefusesAWrongPassword(t *testing.T) {
 	bootstrap := os.Getenv("QUEEN_KAFKA_TLS_BOOTSTRAP")
 	if bootstrap == "" {
-		t.Skip("no TLS+SASL listener: run queen-kafka/compat/rig.sh --m5")
+		t.Skip("no TLS+SASL listener: run protocols/queen-kafka/compat/rig.sh --m5")
 	}
 	if os.Getenv("QUEEN_KAFKA_SASL_TOKEN") == "" {
 		t.Skip("no QUEEN_KAFKA_SASL_TOKEN: without the credential gate every password is accepted")
@@ -238,7 +238,7 @@ func TestSaslRefusesAWrongPassword(t *testing.T) {
 func TestPlaintextClientAgainstTheTLSListener(t *testing.T) {
 	bootstrap := os.Getenv("QUEEN_KAFKA_TLS_BOOTSTRAP")
 	if bootstrap == "" {
-		t.Skip("no TLS+SASL listener: run queen-kafka/compat/rig.sh --m5")
+		t.Skip("no TLS+SASL listener: run protocols/queen-kafka/compat/rig.sh --m5")
 	}
 	host := bootstrap[:strings.LastIndex(bootstrap, ":")]
 

@@ -325,12 +325,12 @@ redrive loops, and both codec renderings of every error.
 Live, against a real Postgres and a real broker:
 
 ```
-queen-sqs/compat/rig.sh up            # throwaway PG + debug broker + facade
-source queen-sqs/compat/.rig/env.sh   # QUEEN_SQS_ENDPOINT, AWS_*, …
-python queen-sqs/compat/smoke_m0.py                     # the SQS surface, boto3
-python queen-sqs/compat/smoke_m4_sns.py                 # SNS, boto3
-AWS_CLI=…/bin/aws queen-sqs/compat/smoke_m0_cli.sh      # the aws CLI
-queen-sqs/compat/rig.sh down
+protocols/queen-sqs/compat/rig.sh up            # throwaway PG + debug broker + facade
+source protocols/queen-sqs/compat/.rig/env.sh   # QUEEN_SQS_ENDPOINT, AWS_*, …
+python protocols/queen-sqs/compat/smoke_m0.py                     # the SQS surface, boto3
+python protocols/queen-sqs/compat/smoke_m4_sns.py                 # SNS, boto3
+AWS_CLI=…/bin/aws protocols/queen-sqs/compat/smoke_m0_cli.sh      # the aws CLI
+protocols/queen-sqs/compat/rig.sh down
 ```
 
 `rig.sh` is a stack MANAGER rather than a one-shot runner — `up`, `down`,

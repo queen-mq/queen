@@ -1,7 +1,8 @@
 /**
  * Generate the SQS/SNS facade's action coverage from its dispatch table.
  *
- * `queen-sqs/src/actions/mod.rs` is the compatibility contract in one place.
+ * `protocols/queen-sqs/src/actions/mod.rs` is the compatibility contract in one
+ * place.
  * The `Action` set is CLOSED: `Action::from_name` scans `Action::ALL` and a name
  * that is not in it is `InvalidAction`, never a plausible empty success. So the
  * const is simultaneously what the facade answers and what it refuses, and a
@@ -36,7 +37,7 @@ import {
   sliceBlock,
 } from "./lib/source.mjs";
 
-const ACTIONS = "queen-sqs/src/actions/mod.rs";
+const ACTIONS = "protocols/queen-sqs/src/actions/mod.rs";
 
 // ---------------------------------------------------------------------------
 // 1. The set, straight out of the const and the classifier

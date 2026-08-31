@@ -5,7 +5,7 @@
 // If the two implementations of AWS's attribute encoding disagreed, that
 // comparison would report the facade as wrong for a bug in the suite — the most
 // expensive kind of red there is. So the JS implementation is pinned FIRST,
-// against the goldens in `queen-sqs/src/md5.rs`, which were themselves derived
+// against the goldens in `protocols/queen-sqs/src/md5.rs`, which were themselves derived
 // from a second implementation written straight from the specification. A third
 // implementation, in a third language, agreeing with both is what makes the
 // goldens worth having.

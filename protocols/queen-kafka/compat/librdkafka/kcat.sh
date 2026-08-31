@@ -4,7 +4,7 @@
 # librdkafka, which is also the engine under Confluent's Python, .NET, Go and
 # (via node-rdkafka) JS clients: whatever this proves holds for all of them.
 #
-#   queen-kafka/compat/librdkafka/kcat.sh [bootstrap] [runid]
+#   protocols/queen-kafka/compat/librdkafka/kcat.sh [bootstrap] [runid]
 #
 # Nothing here is a framework: every step prints what it sent and what came
 # back, and the negotiated request versions are read out of librdkafka's own

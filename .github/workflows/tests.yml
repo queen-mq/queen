@@ -191,7 +191,7 @@ jobs:
   # run nowhere, and every correctness claim in the crate would rest on a suite
   # CI never executes.
   #
-  # Unit tests only. The `queen-kafka/compat/` lane (kcat/kafkajs/franz-go
+  # Unit tests only. The `protocols/queen-kafka/compat/` lane (kcat/kafkajs/franz-go
   # against a live stack) joins test/run.sh at M6 and stays OUT of this workflow
   # until it is boring — the proxyimpr lesson: a flaky new lane in the release-day
   # matrix is discovered on release day.
@@ -204,14 +204,14 @@ jobs:
         with:
           components: clippy, rustfmt
           # See rust-unit: name the manifest, or rust-cache probes the root.
-          cache-workspaces: queen-kafka
+          cache-workspaces: protocols/queen-kafka
       - name: cargo test
-        run: cargo test --manifest-path queen-kafka/Cargo.toml --locked
+        run: cargo test --manifest-path protocols/queen-kafka/Cargo.toml --locked
       - name: rustfmt
-        run: cargo fmt --manifest-path queen-kafka/Cargo.toml --check
+        run: cargo fmt --manifest-path protocols/queen-kafka/Cargo.toml --check
       - name: clippy
         run: |
-          cargo clippy --manifest-path queen-kafka/Cargo.toml --locked \
+          cargo clippy --manifest-path protocols/queen-kafka/Cargo.toml --locked \
             --all-targets -- -D warnings
 
   # `rust-version` in the client's Cargo.toml is a promise to anyone on an older

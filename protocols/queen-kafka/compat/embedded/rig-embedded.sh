@@ -6,8 +6,8 @@
 # run.sh against the first, asserts the other two itself, and tears everything
 # down on every exit path including a failure or a Ctrl-C.
 #
-#   queen-kafka/compat/embedded/rig-embedded.sh
-#   queen-kafka/compat/embedded/rig-embedded.sh --keep      # leave the stack up
+#   protocols/queen-kafka/compat/embedded/rig-embedded.sh
+#   protocols/queen-kafka/compat/embedded/rig-embedded.sh --keep      # leave the stack up
 #
 # Ports are deliberately not the defaults and never 5432 (a live stack on a
 # developer machine): 32600 Postgres, 32601/32602 the embedded broker and its
@@ -17,7 +17,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 
 PG_HOST_PORT="${PG_HOST_PORT:-32600}"
 BROKER_PORT="${BROKER_PORT:-32601}"
@@ -99,9 +99,9 @@ docker exec "$CONTAINER" pg_isready -U postgres >/dev/null 2>&1 || {
 # ----------------------------------------------------------------------- builds
 say "building the broker and the facade (debug)"
 ( cd "$REPO_ROOT/server" && cargo build ) || exit 1
-( cd "$REPO_ROOT/queen-kafka" && cargo build ) || exit 1
+( cd "$REPO_ROOT/protocols/queen-kafka" && cargo build ) || exit 1
 BROKER_BIN="$REPO_ROOT/server/target/debug/queen"
-FACADE_BIN="$REPO_ROOT/queen-kafka/target/debug/queen-kafka"
+FACADE_BIN="$REPO_ROOT/protocols/queen-kafka/target/debug/queen-kafka"
 
 # QUEEN_KAFKA_BIN is set EXPLICITLY here because the two debug binaries live in
 # two target directories. The zero-configuration path -- the child resolved from

@@ -24,7 +24,7 @@
 // transport byte, and a custom label (`Number.float`) is hashed whole. Both are
 // places where a plausible-looking implementation produces a digest that
 // differs from every SDK's — which is why `scenarios/vectors.mjs` pins this
-// implementation against the goldens in `queen-sqs/src/md5.rs` BEFORE the suite
+// implementation against the goldens in `protocols/queen-sqs/src/md5.rs` BEFORE the suite
 // is allowed to compare anything to a live answer. Two implementations in two
 // languages agreeing is the only thing that makes a golden worth having.
 

@@ -8,16 +8,16 @@ sidebar:
   order: 12
   label: Kafka facade
 sourceOfTruth:
-  - queen-kafka/src/main.rs
-  - queen-kafka/src/lib.rs
-  - queen-kafka/src/conn.rs
-  - queen-kafka/src/tls.rs
-  - queen-kafka/src/sasl.rs
-  - queen-kafka/src/queen.rs
-  - queen-kafka/src/identity.rs
-  - queen-kafka/src/coordinator/mod.rs
-  - queen-kafka/src/cluster/registry.rs
-  - queen-kafka/src/txn.rs
+  - protocols/queen-kafka/src/main.rs
+  - protocols/queen-kafka/src/lib.rs
+  - protocols/queen-kafka/src/conn.rs
+  - protocols/queen-kafka/src/tls.rs
+  - protocols/queen-kafka/src/sasl.rs
+  - protocols/queen-kafka/src/queen.rs
+  - protocols/queen-kafka/src/identity.rs
+  - protocols/queen-kafka/src/coordinator/mod.rs
+  - protocols/queen-kafka/src/cluster/registry.rs
+  - protocols/queen-kafka/src/txn.rs
   - server/src/kafka_facade.rs
   - proxy/src/routes.rs
   - proxy/src/kafka_kv.rs
@@ -85,10 +85,10 @@ The crate is standalone, so it builds on its own manifest and produces one binar
 inside the broker's own process tree instead is [embedded mode](#embedded-in-the-broker).
 
 ```bash
-cargo build --release --manifest-path queen-kafka/Cargo.toml
+cargo build --release --manifest-path protocols/queen-kafka/Cargo.toml
 QUEEN_URL=http://localhost:6632 \
 QUEEN_KAFKA_ADVERTISED_ADDR=kafka.internal.example.com:9092 \
-  ./queen-kafka/target/release/queen-kafka
+  ./protocols/queen-kafka/target/release/queen-kafka
 ```
 
 Every value is validated before the listener binds, and a bad one is a fatal boot with a message
@@ -349,7 +349,7 @@ needs a NetworkPolicy that permits it.
 This shape is **measured, not designed**. A real franz-go client produces, consumes, forms groups,
 commits offsets, runs admin and runs transactions through a whole cell, and two tenants on one shared
 listener cannot see each other's topics, records, groups or committed offsets. The suite is
-`queen-kafka/compat/cloud`, its rig stands the entire cell up from nothing, and it was 16 of 16 green
+`protocols/queen-kafka/compat/cloud`, its rig stands the entire cell up from nothing, and it was 16 of 16 green
 on 2026-08-30.
 
 A Kafka consumer group is also no longer invisible to the people operating the cell. Its committed

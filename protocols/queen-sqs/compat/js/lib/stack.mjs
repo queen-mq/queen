@@ -1,7 +1,7 @@
 // The stack, from the environment — never from a hardcoded address — and the
 // two clients pointed at it.
 //
-// `queen-sqs/compat/rig.sh up` writes `.rig/env.sh`; a person sources it and
+// `protocols/queen-sqs/compat/rig.sh up` writes `.rig/env.sh`; a person sources it and
 // runs this suite. The defaults below are the rig's own so that a bare
 // `node run.mjs all` after an `up` does the obvious thing, and the endpoint is
 // printed on the run's first line so no reader has to guess which stack the

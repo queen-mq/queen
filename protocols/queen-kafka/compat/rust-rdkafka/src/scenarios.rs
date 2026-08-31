@@ -903,7 +903,7 @@ pub async fn offsets(env: &Env, rec: &Rec) {
 /// enforced.
 ///
 /// F3 advertises key 22 v0-4 and enforces the per-(producer, topic-partition)
-/// sequence window (`queen-kafka/src/idempotent.rs`), so the assertion is
+/// sequence window (`protocols/queen-kafka/src/idempotent.rs`), so the assertion is
 /// inverted. It is a MEASUREMENT and not just an inversion, because
 /// `compat/CLIENT_MATRIX.md` carried this whole client family as "expected to
 /// work, not re-measured": what is asserted here is the wire, from librdkafka's

@@ -8,9 +8,9 @@ The design it settles is `scratchpad/design-transactions/DESIGN.md`; the check
 letters below are its section 8.2.
 
 ```
-queen-kafka/compat/transactions/run.sh            # the whole suite
-queen-kafka/compat/transactions/run.sh s1 s3      # only those scenarios
-queen-kafka/compat/transactions/run.sh --keep     # leave the stack up
+protocols/queen-kafka/compat/transactions/run.sh            # the whole suite
+protocols/queen-kafka/compat/transactions/run.sh s1 s3      # only those scenarios
+protocols/queen-kafka/compat/transactions/run.sh --keep     # leave the stack up
 ```
 
 It brings up its **own** stack and tears it down on every exit path, including a

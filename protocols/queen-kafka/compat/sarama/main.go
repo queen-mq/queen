@@ -14,7 +14,7 @@
 // `Config.Version`, a Kafka RELEASE number: `Config.Version = V3_6_0_0` means
 // "send every request at the version Kafka 3.6 speaks", which for Fetch is v12
 // and for Produce is v10 — both outside this facade's advertised windows
-// (Fetch 4..=6, Produce 3..=9; see queen-kafka/src/versions.rs), and an
+// (Fetch 4..=6, Produce 3..=9; see protocols/queen-kafka/src/versions.rs), and an
 // out-of-window version on an advertised key is answered by CLOSING the
 // connection, not by an error code.
 //
@@ -64,7 +64,7 @@
 //
 //   - `Config.Producer.Idempotent = true` WORKS since M7 F3: InitProducerId
 //     (key 22) is advertised 0..=4 and the per-partition sequence window is
-//     enforced (queen-kafka/src/idempotent.rs). Before F3 the connection closed
+//     enforced (protocols/queen-kafka/src/idempotent.rs). Before F3 the connection closed
 //     on the unadvertised key and sarama retried it Producer.Transaction.Retry.Max
 //     (50) times, one fresh connection each. Measured by `edges`.
 //   - sarama's `ClusterAdmin` WORKS since M7 F1/F2: it is built on ListGroups

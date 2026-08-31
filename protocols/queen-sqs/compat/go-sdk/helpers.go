@@ -229,7 +229,7 @@ func (r *rig) attributes(ctx context.Context, who, url string, names ...types.Qu
 // `error.code` the 2012-11-05 Query model carried
 // (`AWS.SimpleQueueService.NonExistentQueue`). The facade sends both — the shape
 // in the JSON `__type`, the legacy code in the `x-amzn-query-error` header —
-// which is what `queen-sqs/src/error.rs`'s catalog is a table of, and what
+// which is what `protocols/queen-sqs/src/error.rs`'s catalog is a table of, and what
 // `smoke_m0.py`'s ERROR_CODES pins from the python side.
 //
 // This map is the same pairing seen from Go, and it is here because

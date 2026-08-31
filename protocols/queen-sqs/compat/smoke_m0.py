@@ -2,7 +2,7 @@
 """The queen-sqs M0 smoke: boto3 against a live facade, a live broker and a live
 Postgres.
 
-WHAT THIS IS FOR. The crate's own suite (`queen-sqs/src/http_tests.rs`) drives the
+WHAT THIS IS FOR. The crate's own suite (`protocols/queen-sqs/src/http_tests.rs`) drives the
 same actions against `FakeQueen`, so everything here has already passed once
 against a broker that always answers the way the facade expects. This file is the
 other half: the same surface against the REAL broker, where a pop can return
@@ -18,9 +18,9 @@ matters):
   * `RESULT: PASS` or `RESULT: FAIL` as the last line;
   * a nonzero exit status when anything failed.
 
-  $ queen-sqs/compat/rig.sh up
-  $ source queen-sqs/compat/.rig/env.sh
-  $ python queen-sqs/compat/smoke_m0.py
+  $ protocols/queen-sqs/compat/rig.sh up
+  $ source protocols/queen-sqs/compat/.rig/env.sh
+  $ python protocols/queen-sqs/compat/smoke_m0.py
 
 MD5s ARE CHECKED HERE, NOT BY THE SDK. It is widely believed that boto3 verifies
 `MD5OfMessageBody` and `MD5OfMessageAttributes` client-side — the Java, JS and

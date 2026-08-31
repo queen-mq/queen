@@ -21,9 +21,9 @@ here crosses the proxy.
 ## Run it
 
 ```bash
-queen-kafka/compat/cloud/rig-cloud.sh                    # the whole suite
-queen-kafka/compat/cloud/rig-cloud.sh -run TestMetering -v
-queen-kafka/compat/cloud/rig-cloud.sh --keep             # leave the stack up
+protocols/queen-kafka/compat/cloud/rig-cloud.sh                    # the whole suite
+protocols/queen-kafka/compat/cloud/rig-cloud.sh -run TestMetering -v
+protocols/queen-kafka/compat/cloud/rig-cloud.sh --keep             # leave the stack up
 ```
 
 `--keep` prints a `rig.env`; source it and run `./run.sh` for as many iterations
@@ -60,7 +60,7 @@ hostname) or, on a host listed in `QUEEN_PROXY_SHARED_HOSTS`, **from the
 credential**. This rig uses the second, and that is a design call rather than a
 shortcut.
 
-`queen-kafka/src/lib.rs` keeps `advertised_host` per **process**, not per SNI
+`protocols/queen-kafka/src/lib.rs` keeps `advertised_host` per **process**, not per SNI
 lane. One facade therefore hands every client the same bootstrap address
 whatever name they dialled, so a second tenant's connections would come back
 carrying the first tenant's SNI and route to the first tenant's cluster.

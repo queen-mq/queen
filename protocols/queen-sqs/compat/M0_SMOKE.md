@@ -1,7 +1,7 @@
 # queen-sqs M0 — first live run
 
 The M0 surface driven by boto3 and by the aws CLI against a REAL broker and a
-REAL Postgres, which is the half `queen-sqs/src/http_tests.rs` cannot do: those
+REAL Postgres, which is the half `protocols/queen-sqs/src/http_tests.rs` cannot do: those
 tests drive `FakeQueen`, so a pop always answers, a lease never lapses and the
 KV registry is a map in the same process. Everything below is what changed when
 those three stopped being true.
@@ -12,11 +12,11 @@ morning, broker `server/target/debug/queen`, Postgres 16 in the rig's container.
 ## How it was run
 
 ```
-queen-sqs/compat/rig.sh up
-source queen-sqs/compat/.rig/env.sh
-python queen-sqs/compat/smoke_m0.py
-AWS_CLI=/path/to/venv/bin/aws queen-sqs/compat/smoke_m0_cli.sh
-queen-sqs/compat/rig.sh down
+protocols/queen-sqs/compat/rig.sh up
+source protocols/queen-sqs/compat/.rig/env.sh
+python protocols/queen-sqs/compat/smoke_m0.py
+AWS_CLI=/path/to/venv/bin/aws protocols/queen-sqs/compat/smoke_m0_cli.sh
+protocols/queen-sqs/compat/rig.sh down
 ```
 
 Stack: throwaway Postgres on 55440 (container `qsqs-rig-pg`), debug broker on
@@ -48,7 +48,7 @@ be read as evidence about it.
 
 ## Discrepancies — facade vs. real SQS
 
-Line numbers are from the working tree of the run and `queen-sqs/src` is under
+Line numbers are from the working tree of the run and `protocols/queen-sqs/src` is under
 active edit, so trust the function names over the numbers.
 
 ### D1. `CreateQueue` on an existing queue, naming no attributes, is refused
@@ -69,7 +69,7 @@ PLAN_QUEEN_SQS.md says the same thing in its error catalog —
 already exists with the same name and a different value for attribute
 DelaySeconds".
 
-**Suspected.** `queen-sqs/src/registry.rs:687`, in `Registry::create`:
+**Suspected.** `protocols/queen-sqs/src/registry.rs:687`, in `Registry::create`:
 
 ```rust
 Err(winner) => match first_difference(&winner.attributes, &record.attributes) {
@@ -146,7 +146,7 @@ few hundred; at the rig's 8 it bites at ten. (The 8-lane row reads 7 rather than
 the ~5.9 lanes ten random ids are expected to occupy — the count is a sample,
 and the mechanism is the deterministic `partitions=1` rows.)
 
-**Suspected.** `queen-sqs/src/actions/messages.rs:625`, `pop_exact`: N
+**Suspected.** `protocols/queen-sqs/src/actions/messages.rs:625`, `pop_exact`: N
 concurrent `pop_queue` calls, each `batch=1`. Each pop takes a durable claim on
 one (partition, group) for `lease_seconds`, and a lane with a live claim serves
 no second pop, so N concurrent pops collect at most one message per free lane.

@@ -1,7 +1,7 @@
 # queen-sqs M4 — SNS, first live run
 
 The SNS half driven by boto3 against a REAL broker and a REAL Postgres, which is
-the half `queen-sqs/src/sns/*` and `src/http_tests.rs` cannot do: those tests
+the half `protocols/queen-sqs/src/sns/*` and `src/http_tests.rs` cannot do: those tests
 drive `FakeQueen`, so a fan-out transaction always commits, a repeated
 `MessageDeduplicationId` is a map lookup, and the subscription registry is in the
 same process as the publisher. Everything below is what changed when those three
@@ -14,11 +14,11 @@ morning, broker `server/target/debug/queen`, Postgres 16 in the rig's container.
 ## How it was run
 
 ```
-queen-sqs/compat/rig.sh down && queen-sqs/compat/rig.sh up   # a fresh stack
-source queen-sqs/compat/.rig/env.sh
-python queen-sqs/compat/smoke_m0.py        # the M0 regression
-python queen-sqs/compat/smoke_m4_sns.py    # this milestone
-queen-sqs/compat/rig.sh down
+protocols/queen-sqs/compat/rig.sh down && protocols/queen-sqs/compat/rig.sh up   # a fresh stack
+source protocols/queen-sqs/compat/.rig/env.sh
+python protocols/queen-sqs/compat/smoke_m0.py        # the M0 regression
+python protocols/queen-sqs/compat/smoke_m4_sns.py    # this milestone
+protocols/queen-sqs/compat/rig.sh down
 ```
 
 Stack: throwaway Postgres on 55440 (container `qsqs-rig-pg`), debug broker on
@@ -68,7 +68,7 @@ exercised end to end for the first time and needed nothing.
 
 ## Discrepancies — facade vs. real SNS
 
-Line numbers are from the working tree of the run and `queen-sqs/src` is under
+Line numbers are from the working tree of the run and `protocols/queen-sqs/src` is under
 active edit, so trust the function names over the numbers.
 
 ### D1. A deduplicated FIFO publish answers a NEW MessageId, not the original's

@@ -2,7 +2,7 @@
 #
 # The Confluent.Kafka (.NET) row of the M6 client matrix.
 #
-#   queen-kafka/compat/confluent-dotnet/run.sh [scenario]
+#   protocols/queen-kafka/compat/confluent-dotnet/run.sh [scenario]
 #
 # It assumes a stack is ALREADY RUNNING and starts nothing: the stack is
 # rig.sh's job, or yours. Everything it needs comes from the environment.

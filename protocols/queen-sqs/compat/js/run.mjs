@@ -3,13 +3,13 @@
 // The queen-sqs Node matrix suite: `@aws-sdk/client-sqs`, `@aws-sdk/client-sns`
 // and sqs-consumer against a live facade, a live broker and a live Postgres.
 //
-//   queen-sqs/compat/rig.sh up
-//   source queen-sqs/compat/.rig/env.sh
-//   node queen-sqs/compat/js/run.mjs all
+//   protocols/queen-sqs/compat/rig.sh up
+//   source protocols/queen-sqs/compat/.rig/env.sh
+//   node protocols/queen-sqs/compat/js/run.mjs all
 //
 // Lanes (any combination; `all` is the default):
 //
-//   vectors    the MD5 algorithms against the goldens in queen-sqs/src/md5.rs
+//   vectors    the MD5 algorithms against the goldens in protocols/queen-sqs/src/md5.rs
 //   probe      what the installed SDK does about protocols, MD5s and errors,
 //              proved against an in-process stub
 //   sqs        the SQS inventory, mirroring compat/smoke_m0.py
@@ -86,7 +86,7 @@ async function main() {
     try {
       await sqs.send(new ListQueuesCommand({}));
     } catch (err) {
-      fail("rig.reachable", `${err?.name}: ${err?.message} (is queen-sqs/compat/rig.sh up?)`);
+      fail("rig.reachable", `${err?.name}: ${err?.message} (is protocols/queen-sqs/compat/rig.sh up?)`);
       console.log("RESULT: FAIL");
       return 1;
     }

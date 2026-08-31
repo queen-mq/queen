@@ -46,9 +46,9 @@
 // How a person runs it (the README has the runner's one-liner, and why GOWORK
 // has to be off):
 //
-//	$ queen-sqs/compat/rig.sh up
-//	$ source queen-sqs/compat/.rig/env.sh
-//	$ GOWORK=off go run ./queen-sqs/compat/go-sdk
+//	$ protocols/queen-sqs/compat/rig.sh up
+//	$ source protocols/queen-sqs/compat/.rig/env.sh
+//	$ GOWORK=off go run ./protocols/queen-sqs/compat/go-sdk
 //
 // NAMES ARE UNIQUE PER RUN, for `smoke_m0.py`'s reason: `DeleteQueue` arms a
 // 60-second `QueueDeletedRecently` tombstone, so a suite on fixed names could

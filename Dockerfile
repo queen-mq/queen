@@ -77,17 +77,18 @@ RUN test -f /queen && echo "Build successful"
 # the default image without changing what the default image does.
 #
 # No frontend stage feeds this one and no path dependency reaches out of the
-# directory (queen-kafka/Cargo.toml has none), so the context is the crate alone.
+# directory (protocols/queen-kafka/Cargo.toml has none), so the context is the
+# crate alone.
 FROM rust:1-bookworm AS kafka-builder
 
 WORKDIR /usr/build/queen-kafka
 
 # Layer 1: manifests. Cargo.lock is copied so the image builds the versions the
 # repository tested, exactly as the server stage above does.
-COPY queen-kafka/Cargo.toml queen-kafka/Cargo.lock ./
+COPY protocols/queen-kafka/Cargo.toml protocols/queen-kafka/Cargo.lock ./
 
 # Layer 2: source.
-COPY queen-kafka/src ./src
+COPY protocols/queen-kafka/src ./src
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/build/queen-kafka/target \
@@ -104,17 +105,18 @@ RUN test -f /queen-kafka && echo "Facade build successful"
 # default image without changing what the default image does.
 #
 # No frontend stage feeds this one and no path dependency reaches out of the
-# directory (queen-sqs/Cargo.toml has none), so the context is the crate alone.
+# directory (protocols/queen-sqs/Cargo.toml has none), so the context is the
+# crate alone.
 FROM rust:1-bookworm AS sqs-builder
 
 WORKDIR /usr/build/queen-sqs
 
 # Layer 1: manifests. Cargo.lock is copied so the image builds the versions the
 # repository tested, exactly as the two stages above do.
-COPY queen-sqs/Cargo.toml queen-sqs/Cargo.lock ./
+COPY protocols/queen-sqs/Cargo.toml protocols/queen-sqs/Cargo.lock ./
 
 # Layer 2: source.
-COPY queen-sqs/src ./src
+COPY protocols/queen-sqs/src ./src
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/build/queen-sqs/target \

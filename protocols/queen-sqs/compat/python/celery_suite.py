@@ -4,7 +4,7 @@
 This file is BOTH the suite and the Celery application, because a worker has to
 import the module that defines its tasks:
 
-    python queen-sqs/compat/python/celery_suite.py       # the suite (this runs it)
+    python protocols/queen-sqs/compat/python/celery_suite.py       # the suite (this runs it)
     python -m celery -A celery_suite worker --pool solo  # what the suite spawns
 
 Everything above the `if __name__ == "__main__"` guard is import-safe: reading
@@ -55,7 +55,7 @@ opposite halves of the facade:
   which is byte for byte the call a second worker fleet, or a redeployed one
   whose cache is cold and whose ListQueues is filtered by IAM, would make.
 
-THE CONTRACT (`queen-kafka/CLIENT_MATRIX.md`, as `smoke_m0.py`):
+THE CONTRACT (`protocols/queen-kafka/compat/CLIENT_MATRIX.md`, as `smoke_m0.py`):
 
   * the stack comes from the environment, never from a hardcoded address;
   * ONE `ok NAME` or `FAIL NAME: detail` line per assertion;
@@ -89,9 +89,9 @@ WHAT IS NOT ASSERTED. Ordering — a standard SQS queue does not promise it and
 neither does this facade. Timing beyond the visibility floor. And the exact
 number of `ReceiveMessage` calls, which is a polling-loop detail.
 
-  $ queen-sqs/compat/rig.sh up
-  $ source queen-sqs/compat/.rig/env.sh
-  $ python queen-sqs/compat/python/celery_suite.py
+  $ protocols/queen-sqs/compat/rig.sh up
+  $ source protocols/queen-sqs/compat/.rig/env.sh
+  $ python protocols/queen-sqs/compat/python/celery_suite.py
 """
 
 import json

@@ -2,7 +2,7 @@
 #
 # The brod (Erlang/OTP) row of the M6 client matrix.
 #
-#   queen-kafka/compat/brod/run.sh [scenario]
+#   protocols/queen-kafka/compat/brod/run.sh [scenario]
 #
 # It assumes a stack is ALREADY RUNNING and starts nothing: the stack is
 # rig.sh's job, or yours. Everything it needs comes from the environment.

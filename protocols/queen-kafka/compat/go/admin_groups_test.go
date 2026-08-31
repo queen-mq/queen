@@ -554,7 +554,7 @@ func TestListGroupsSurvivesAFacadeRestart(t *testing.T) {
 
 	restart := os.Getenv("QUEEN_KAFKA_RESTART_CMD")
 	if restart == "" {
-		t.Skip("no QUEEN_KAFKA_RESTART_CMD: run queen-kafka/compat/rig.sh, which sets it")
+		t.Skip("no QUEEN_KAFKA_RESTART_CMD: run protocols/queen-kafka/compat/rig.sh, which sets it")
 	}
 	out, err := exec.CommandContext(ctxFor(t, 90*time.Second), restart).CombinedOutput()
 	if err != nil {

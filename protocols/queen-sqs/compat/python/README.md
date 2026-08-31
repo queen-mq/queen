@@ -37,15 +37,15 @@ python3 -m venv /path/to/awsenv
 /path/to/awsenv/bin/pip install boto3 celery kombu
 
 # 2. the stack
-queen-sqs/compat/rig.sh up
-source queen-sqs/compat/.rig/env.sh
+protocols/queen-sqs/compat/rig.sh up
+source protocols/queen-sqs/compat/.rig/env.sh
 
 # 3. the suites, in either order, independently
-/path/to/awsenv/bin/python queen-sqs/compat/python/query_conformance.py
-/path/to/awsenv/bin/python queen-sqs/compat/python/celery_suite.py
+/path/to/awsenv/bin/python protocols/queen-sqs/compat/python/query_conformance.py
+/path/to/awsenv/bin/python protocols/queen-sqs/compat/python/celery_suite.py
 
 # 4.
-queen-sqs/compat/rig.sh down
+protocols/queen-sqs/compat/rig.sh down
 ```
 
 `pycurl` is **optional**. With it installed, celery's default consumer runs

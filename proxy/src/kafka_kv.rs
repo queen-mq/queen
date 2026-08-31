@@ -45,7 +45,7 @@
 use crate::routes::{Feature, GatedOp, RouteClass};
 
 /// The namespace the facade writes under. Fixed in
-/// `queen-kafka/src/offsets.rs` (`NAMESPACE`), never client-chosen — which is
+/// `protocols/queen-kafka/src/offsets.rs` (`NAMESPACE`), never client-chosen — which is
 /// what makes it usable as half of an authorization decision.
 const KAFKA_NS: &str = "queen-kafka";
 
@@ -85,7 +85,7 @@ const KAFKA_PREFIX: &str = "qk:";
 /// the KV taxonomy cannot inherit the reclassification by accident; it falls
 /// back to `Gated(Kv, Mixed)`, which is exactly today's behaviour and therefore
 /// the safe direction. The facade's own set is
-/// `queen-kafka/src/queen.rs`'s `KvOp` enum, which has these four variants and
+/// `protocols/queen-kafka/src/queen.rs`'s `KvOp` enum, which has these four variants and
 /// no others (`get`, `incr` and `putIfAbsent` it never emits — the last
 /// desugars to `put` + `expect:0`).
 const KAFKA_OPS: [&str; 4] = ["put", "delete", "getMany", "getPrefix"];

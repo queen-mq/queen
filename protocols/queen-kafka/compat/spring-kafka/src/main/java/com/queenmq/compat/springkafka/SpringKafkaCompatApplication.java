@@ -37,7 +37,7 @@
  *     Before M7 F3 that killed a stock Boot producer on its FIRST send, and
  *     spring.kafka.producer.properties.enable.idempotence=false was the one mandatory
  *     config change.  InitProducerId (key 22) is advertised v0-4 now and the sequence
- *     window is enforced in queen-kafka/src/idempotent.rs, so phase 10 runs a producer
+ *     window is enforced in protocols/queen-kafka/src/idempotent.rs, so phase 10 runs a producer
  *     at the stock default and asserts the record lands with a real offset.  This
  *     suite still pins the flag off for its OTHER producers, on purpose, so the rest
  *     of the file keeps measuring the non-idempotent path.

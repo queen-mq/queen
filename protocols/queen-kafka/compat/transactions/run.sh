@@ -15,9 +15,9 @@
 # Nothing it starts outlives it. The container name and every port are its own
 # and are overridable, so it can run beside compat/rig.sh.
 #
-#   queen-kafka/compat/transactions/run.sh              # everything
-#   queen-kafka/compat/transactions/run.sh s1 s3        # only those scenarios
-#   queen-kafka/compat/transactions/run.sh --keep       # leave the stack up
+#   protocols/queen-kafka/compat/transactions/run.sh              # everything
+#   protocols/queen-kafka/compat/transactions/run.sh s1 s3        # only those scenarios
+#   protocols/queen-kafka/compat/transactions/run.sh --keep       # leave the stack up
 #
 # The scenarios, and the DESIGN section 8.2 check each one settles:
 #
@@ -38,7 +38,7 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$HERE/../../.." && pwd)"
+REPO_ROOT="$(cd "$HERE/../../../.." && pwd)"
 
 PG_HOST_PORT="${PG_HOST_PORT:-32910}"
 BROKER_PORT="${BROKER_PORT:-32911}"
@@ -155,7 +155,7 @@ docker exec "$CONTAINER" pg_isready -U postgres >/dev/null 2>&1 || {
 # ----------------------------------------------------------------------- builds
 say "building the broker and the facade (debug)"
 ( cd "$REPO_ROOT/server" && cargo build ) || exit 1
-( cd "$REPO_ROOT/queen-kafka" && cargo build ) || exit 1
+( cd "$REPO_ROOT/protocols/queen-kafka" && cargo build ) || exit 1
 
 # ----------------------------------------------------------------------- broker
 say "broker on 127.0.0.1:$BROKER_PORT"
@@ -196,7 +196,7 @@ QUEEN_KAFKA_ADDR="127.0.0.1:$KAFKA_PORT" \\
 QUEEN_KAFKA_ADVERTISED_ADDR="127.0.0.1:$KAFKA_PORT" \\
 QUEEN_KAFKA_DEFAULT_PARTITIONS="$PARTITIONS" \\
 LOG_LEVEL="${FACADE_LOG_LEVEL:-debug}" \\
-  "$REPO_ROOT/queen-kafka/target/debug/queen-kafka" >> "$FACADE_LOG" 2>&1 &
+  "$REPO_ROOT/protocols/queen-kafka/target/debug/queen-kafka" >> "$FACADE_LOG" 2>&1 &
 echo \$! > "$FACADE_PIDFILE"
 echo "facade old=\${old:-none} new=\$!"
 for _ in \$(seq 1 100); do
@@ -236,7 +236,7 @@ QUEEN_KAFKA_DEFAULT_PARTITIONS="$PARTITIONS" \
 QUEEN_KAFKA_NODE_ID=1 \
 QUEEN_KAFKA_CLUSTER="qktacc" \
 LOG_LEVEL="${FACADE_LOG_LEVEL:-debug}" \
-  "$REPO_ROOT/queen-kafka/target/debug/queen-kafka" > "$CLUSTER_LOG" 2>&1 &
+  "$REPO_ROOT/protocols/queen-kafka/target/debug/queen-kafka" > "$CLUSTER_LOG" 2>&1 &
 CLUSTER_PID=$!
 wait_for_port "$KAFKA_CLUSTER_PORT" "$CLUSTER_PID" "$CLUSTER_LOG" || exit 1
 
@@ -252,7 +252,7 @@ QUEEN_KAFKA_DEFAULT_PARTITIONS="$TIGHT_PARTITIONS" \
 QUEEN_KAFKA_TXN_MAX_BYTES=65536 \
 QUEEN_KAFKA_TXN_MAX_STAGED_BYTES=1048576 \
 LOG_LEVEL="${FACADE_LOG_LEVEL:-debug}" \
-  "$REPO_ROOT/queen-kafka/target/debug/queen-kafka" > "$TIGHT_LOG" 2>&1 &
+  "$REPO_ROOT/protocols/queen-kafka/target/debug/queen-kafka" > "$TIGHT_LOG" 2>&1 &
 TIGHT_PID=$!
 wait_for_port "$KAFKA_TIGHT_PORT" "$TIGHT_PID" "$TIGHT_LOG" || exit 1
 
@@ -296,7 +296,7 @@ for s in "${SCENARIOS[@]}"; do
       # consume and idempotent lanes, against a facade that now has
       # transactions. -count=1 so nothing is served from the test cache.
       say "compat/go quick run (produce, consume, idempotent, smoke)"
-      ( cd "$REPO_ROOT/queen-kafka/compat/go" && GOWORK=off \
+      ( cd "$REPO_ROOT/protocols/queen-kafka/compat/go" && GOWORK=off \
         QUEEN_KAFKA_BOOTSTRAP="127.0.0.1:$KAFKA_PORT" \
         QUEEN_URL="http://127.0.0.1:$BROKER_PORT" \
         QUEEN_KAFKA_PARTITIONS="$PARTITIONS" \

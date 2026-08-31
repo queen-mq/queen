@@ -385,7 +385,7 @@ END;
 $$;
 
 -- ============================================================================
--- queen.kv_qk_unescape — the inverse of queen-kafka/src/offsets.rs::escape.
+-- queen.kv_qk_unescape — the inverse of protocols/queen-kafka/src/offsets.rs::escape.
 --
 -- The Kafka facade keeps its committed offsets in queen.kv under keys shaped
 -- qk:group:<esc group>:<esc topic>:<partition>, where `esc` percent-encodes
@@ -534,7 +534,7 @@ BEGIN
     -- ------------------------------------------------------------ kafka (KV)
     -- THE SMART MIRROR. A Kafka consumer group's cursors are not in
     -- log_consumers at all: the facade commits them to queen.kv (the M4
-    -- decision, queen-kafka/src/offsets.rs — "offsets and existence are
+    -- decision, protocols/queen-kafka/src/offsets.rs — "offsets and existence are
     -- Queen's, liveness is this process's"). Without this leg a group that a
     -- real Kafka client is actively draining is INVISIBLE in the console, and
     -- the operator's only lag number is the one Kafka's own admin API gives.
@@ -588,7 +588,7 @@ BEGIN
     -- sargable.
     --
     -- Kafka topic = Queen queue name; Kafka partition n = the Queen partition
-    -- NAMED "n" (queen-kafka/src/handlers/produce.rs, server/src/handlers/
+    -- NAMED "n" (protocols/queen-kafka/src/handlers/produce.rs, server/src/handlers/
     -- fetch.rs). The queues join carries tenant_id, the same guard fetch.rs
     -- documents, so a KV row naming another tenant's topic yields NO row; a
     -- topic this tenant does not own yields no row either, which is the correct

@@ -146,7 +146,7 @@ pub fn resolve_bin(configured: &str, current_exe: Option<&Path>) -> PathBuf {
 /// A value this function does not recognize answers `false`, which is not a
 /// judgement about the value: it is the deliberate refusal to guess. The child
 /// owns that parse and refuses with the line that names the legal spellings
-/// (`queen-sqs/src/config.rs`), and a broker that shouted about credentials
+/// (`protocols/queen-sqs/src/config.rs`), and a broker that shouted about credentials
 /// instead would be answering a question the operator did not ask.
 fn sigv4_selected(auth: Option<&str>) -> bool {
     match auth.map(str::trim).filter(|v| !v.is_empty()) {
@@ -226,7 +226,7 @@ pub fn loopback_url(local: &std::net::SocketAddr) -> String {
 ///
 /// Empty is not "set": `QUEEN_URL=` is an unset variable spelled by a Helm
 /// template that resolved to nothing, and inheriting it would send the child to
-/// its own boot-time refusal (queen-sqs/src/queen.rs, `normalize_base_url`).
+/// its own boot-time refusal (protocols/queen-sqs/src/queen.rs, `normalize_base_url`).
 /// So the same trim-and-reject-empty rule every other knob here follows.
 pub fn child_queen_url(inherited: Option<&str>, loopback: &str) -> String {
     match inherited.map(str::trim).filter(|v| !v.is_empty()) {
@@ -250,7 +250,7 @@ fn queen_url_source(inherited: Option<&str>) -> &'static str {
 /// The spec is `akid:secret:token[,akid:secret:token…]` and the token is
 /// optional, so this reads the third colon-field of each comma-separated entry.
 /// It is a heuristic for a WARN and nothing else — the authoritative parse is
-/// the child's (`queen-sqs/src/credentials.rs`), which is also the only place
+/// the child's (`protocols/queen-sqs/src/credentials.rs`), which is also the only place
 /// that may reject a malformed spec.
 fn credentials_carry_tokens(spec: Option<&str>) -> bool {
     let Some(spec) = spec else { return false };

@@ -166,7 +166,7 @@ naming the sources it read and the command to regenerate.
 | `gen-metrics.mjs` | `generated/broker-metrics` | the Prometheus exposition assembled in `server/src/metrics.rs` and `server/src/handlers/status.rs` |
 | `gen-proxy-routes.mjs` | `generated/proxy-route-classes` | the request classifier in `proxy/src/routes.rs`, applied to the broker's real route list |
 | `gen-openapi.mjs` | `generated/openapi-coverage`, plus `public/openapi/queen-{broker,proxy}.json` | both routers, each handler's `Query<T>` extractor and body struct, the `StatusCode` variants each handler can return, and the access table |
-| `gen-kafka-apis.mjs` | `generated/kafka-support-matrix` | the `ADVERTISED` table in `queen-kafka/src/versions.rs`, which is both the ApiVersions answer and the gate every request is checked against |
+| `gen-kafka-apis.mjs` | `generated/kafka-support-matrix` | the `ADVERTISED` table in `protocols/queen-kafka/src/versions.rs`, which is both the ApiVersions answer and the gate every request is checked against |
 | `gen-charts.mjs` | `public/charts/*.svg` | the archived CSV and stdout artifacts under `benchmark-queen/`, plotted by `charts.py` |
 | `gen-snippets.mjs` | `snippets/*` and `snippets/index` | marked regions of the client test suites |
 
@@ -248,7 +248,7 @@ caught `/console` and `/console/` collapsing onto one operation id on the first 
 
 ### Kafka support matrix
 
-`queen-kafka/src/versions.rs` holds one `const ADVERTISED` table, and the Kafka facade both
+`protocols/queen-kafka/src/versions.rs` holds one `const ADVERTISED` table, and the Kafka facade both
 builds its `ApiVersions` answer from it and checks every incoming request against it. The
 generator parses that const into the published matrix, so an API the facade offers cannot be
 missing from the page and one it does not offer cannot appear.
@@ -335,7 +335,7 @@ new fingerprint in.
 | `route_access_level` in `server/src/auth.rs` | `gen-routes.mjs` (and re-derived in `gen-openapi.mjs`) |
 | `classify` in `proxy/src/routes.rs` | `gen-proxy-routes.mjs` |
 | `is_operator_route` in `proxy/src/routes.rs` | `gen-proxy-routes.mjs` |
-| `ADVERTISED` in `queen-kafka/src/versions.rs` | `gen-kafka-apis.mjs` |
+| `ADVERTISED` in `protocols/queen-kafka/src/versions.rs` | `gen-kafka-apis.mjs` |
 
 When a guard trips, the generator refuses to run at all. That is the intended behaviour: the
 build stops until a human has compared the two implementations.

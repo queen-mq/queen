@@ -23,8 +23,8 @@ broker's environment verbatim. The only variable the supervisor sets is
 The rig stands the whole shape up, runs the suite and tears it down:
 
 ```sh
-queen-kafka/compat/embedded/rig-embedded.sh
-queen-kafka/compat/embedded/rig-embedded.sh --keep      # leave the stack up
+protocols/queen-kafka/compat/embedded/rig-embedded.sh
+protocols/queen-kafka/compat/embedded/rig-embedded.sh --keep      # leave the stack up
 ```
 
 It starts **one throwaway Postgres** and **three brokers**: one with the facade
@@ -117,7 +117,7 @@ gains four variables and the facade section is not run at all:
 ```sh
 # ... the existing broker launch, plus:
 QUEEN_KAFKA_EMBEDDED=true \
-QUEEN_KAFKA_BIN="$REPO_ROOT/queen-kafka/target/debug/queen-kafka" \
+QUEEN_KAFKA_BIN="$REPO_ROOT/protocols/queen-kafka/target/debug/queen-kafka" \
 QUEEN_KAFKA_ADDR="127.0.0.1:$KAFKA_PORT" \
 QUEEN_KAFKA_ADVERTISED_ADDR="127.0.0.1:$KAFKA_PORT" \
 QUEEN_KAFKA_DEFAULT_PARTITIONS="$PARTITIONS" \

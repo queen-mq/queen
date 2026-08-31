@@ -22,10 +22,10 @@ report of the 2026-08-29 campaign**, so nothing in this file vouches for its
 results. Read it as unratified until somebody re-runs it and says so here.
 
 ```sh
-queen-kafka/compat/rig.sh                    # stand up, run everything, tear down
-queen-kafka/compat/rig.sh -run TestLongPoll -v
-queen-kafka/compat/rig.sh --keep             # leave the stack up to poke at
-queen-kafka/compat/rig.sh --m5               # ...plus a TLS + SASL/PLAIN listener
+protocols/queen-kafka/compat/rig.sh                    # stand up, run everything, tear down
+protocols/queen-kafka/compat/rig.sh -run TestLongPoll -v
+protocols/queen-kafka/compat/rig.sh --keep             # leave the stack up to poke at
+protocols/queen-kafka/compat/rig.sh --m5               # ...plus a TLS + SASL/PLAIN listener
 ```
 
 `rig.sh` starts a throwaway `postgres:16` on **55432** with a tmpfs datadir
@@ -38,7 +38,7 @@ than `--keep` and `--m5` are passed to `go test`.
 Against a stack that is already up, the suite is an ordinary `go test`:
 
 ```sh
-cd queen-kafka/compat/go
+cd protocols/queen-kafka/compat/go
 GOWORK=off \
 QUEEN_KAFKA_BOOTSTRAP=127.0.0.1:19092 \
 QUEEN_URL=http://127.0.0.1:6699 \
@@ -257,17 +257,17 @@ you point at a stack that is already up — `rig.sh --keep` (and, so the franz-g
 suite does not run first, `-run TestNothing`) leaves exactly that stack behind:
 
 ```sh
-queen-kafka/compat/rig.sh --keep -run TestNothing          # stack on 19092, no suite
+protocols/queen-kafka/compat/rig.sh --keep -run TestNothing          # stack on 19092, no suite
 
-(cd queen-kafka/compat/js && npm install && node run.mjs all)   # kafkajs
-queen-kafka/compat/librdkafka/kcat.sh                           # kcat (brew install kcat)
+(cd protocols/queen-kafka/compat/js && npm install && node run.mjs all)   # kafkajs
+protocols/queen-kafka/compat/librdkafka/kcat.sh                           # kcat (brew install kcat)
 python3 -m venv .venv && .venv/bin/pip install confluent-kafka
-.venv/bin/python queen-kafka/compat/librdkafka/confluent_group.py
+.venv/bin/python protocols/queen-kafka/compat/librdkafka/confluent_group.py
 
 java -cp "<jars>/*" \
   -Dorg.slf4j.simpleLogger.log.org.apache.kafka.clients.NetworkClient=debug \
-  queen-kafka/compat/java/QueenKafkaCompat.java 127.0.0.1:19092 run1
-java -cp "<jars>/*" queen-kafka/compat/java/QueenKafkaEdges.java 127.0.0.1:19092 run1
+  protocols/queen-kafka/compat/java/QueenKafkaCompat.java 127.0.0.1:19092 run1
+java -cp "<jars>/*" protocols/queen-kafka/compat/java/QueenKafkaEdges.java 127.0.0.1:19092 run1
 ```
 
 `<jars>` is a directory holding `kafka-clients`, `slf4j-api` and `slf4j-simple`

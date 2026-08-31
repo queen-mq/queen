@@ -2,7 +2,7 @@
 //!
 //! # What asks, and why one field decides everything
 //!
-//! The Kafka facade (`queen-kafka/src/identity.rs`) asks this route once per
+//! The Kafka facade (`protocols/queen-kafka/src/identity.rs`) asks this route once per
 //! credential and reads exactly one field out of the answer:
 //!
 //! ```text
@@ -237,7 +237,7 @@ mod tests {
         }
     }
 
-    /// `queen-kafka/src/identity.rs::tenant_of`, copied here so this test asks
+    /// `protocols/queen-kafka/src/identity.rs::tenant_of`, copied here so this test asks
     /// the question the consumer asks rather than a paraphrase of it. If that
     /// extraction ever changes, this test keeps proving the OLD contract — which
     /// is why the facade's own `the_tenant_is_the_acting_cluster_of_either_surface`

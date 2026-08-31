@@ -1,7 +1,7 @@
 // What happens to a record carrying the SAME header name twice — legal Kafka
 // (the header list is a list, and KIP-82 allows repeats), and the one place
 // kafkajs's round-trip used to lose a value: the facade's decoder collapsed the
-// header list into a map, so `x` arrived once. queen-kafka/src/wire.rs carries
+// header list into a map, so `x` arrived once. protocols/queen-kafka/src/wire.rs carries
 // both now, and `run.mjs roundtrip` asserts it; this stays as the one-record
 // probe that PRINTS what came back, for looking at a live facade by hand.
 import { Kafka, logLevel } from 'kafkajs'

@@ -3,7 +3,7 @@
 //!
 //! WHY THIS EXISTS. A Kafka consumer group's committed offsets do not live in
 //! `queen.log_consumers`. The facade writes them to `queen.kv` under
-//! `qk:group:<esc group>:<esc topic>:<partition>` (queen-kafka/src/offsets.rs —
+//! `qk:group:<esc group>:<esc topic>:<partition>` (protocols/queen-kafka/src/offsets.rs —
 //! "offsets and existence are Queen's, liveness is this process's"), so before
 //! `queen.get_consumer_groups_v4` grew its `kafka_base` CTE a group that a real
 //! Kafka client was actively draining was INVISIBLE in `/api/v1/consumer-groups`
@@ -205,7 +205,7 @@ async fn commit_kafka(
     .await
 }
 
-/// `queen-kafka/src/offsets.rs::escape`, transcribed. The tests compose keys the
+/// `protocols/queen-kafka/src/offsets.rs::escape`, transcribed. The tests compose keys the
 /// way the facade does, so a case that spells a group id with a separator in it
 /// exercises the same bytes the facade would write.
 fn esc(s: &str) -> String {

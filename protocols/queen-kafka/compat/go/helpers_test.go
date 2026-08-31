@@ -8,7 +8,7 @@
 // facade — and then runs `go test ./...` against it, which is what makes this
 // package re-runnable from any later workflow:
 //
-//	queen-kafka/compat/rig.sh                # stand up, run, tear down
+//	protocols/queen-kafka/compat/rig.sh                # stand up, run, tear down
 //	QUEEN_KAFKA_BOOTSTRAP=host:9092 go test  # against a stack that is already up
 //
 // The three knobs are the three things a rig can move: QUEEN_KAFKA_BOOTSTRAP
@@ -83,7 +83,7 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr,
 			"compat: cannot reach the queen-kafka facade at %s: %v\n"+
-				"Start the rig (queen-kafka/compat/rig.sh) or point QUEEN_KAFKA_BOOTSTRAP at one.\n",
+				"Start the rig (protocols/queen-kafka/compat/rig.sh) or point QUEEN_KAFKA_BOOTSTRAP at one.\n",
 			bootstrap(), err)
 		os.Exit(1)
 	}
