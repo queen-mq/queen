@@ -241,10 +241,12 @@ why the proxy's quota accounting is exact in-process state with nothing to coord
   [`queenctl`](/reference/queenctl), a [dashboard](/deploy/dashboard) in the same binary on the
   same port, [Prometheus metrics](/reference/prometheus), [JWT auth](/reference/security/jwt) and
   a disk spool for database outages.
-- **The Kafka wire protocol**, in preview: a separate binary advertising 32 API keys, so an
-  unmodified Kafka producer or consumer reaches Queen by changing `bootstrap.servers` and nothing
-  else. The contract is [reference/kafka](/reference/kafka), running it is
-  [deploy/kafka](/deploy/kafka).
+- **Other brokers' wire protocols**, in the same image as the broker and off until you switch
+  them on. `queen-kafka` advertises 32 Kafka API keys, so an unmodified Kafka producer or consumer
+  reaches Queen by changing `bootstrap.servers` and nothing else; `queen-sqs` answers the SQS and
+  SNS protocols, so an unmodified AWS SDK reaches it by changing `endpoint_url`. The contracts are
+  [reference/kafka](/reference/kafka) and [reference/sqs](/reference/sqs), running them is
+  [deploy/kafka](/deploy/kafka) and [deploy/sqs](/deploy/sqs).
 
 ## When something else is the better tool
 

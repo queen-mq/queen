@@ -3,7 +3,6 @@ title: SQS and SNS protocol support
 description: "Which Amazon SQS and SNS actions the queen-sqs facade answers, how a queue, a message group and a visibility timeout map onto Queen, and every place its behaviour differs from the real service."
 type: reference
 tier: use
-status: preview
 sidebar:
   order: 31
   label: SQS protocol
@@ -30,10 +29,10 @@ by changing `endpoint_url`, and nothing else. Running it is
 [the operator page](/deploy/sqs); this page is the contract a client gets.
 
 <Aside type="caution">
-The facade is a **preview**. It is not part of a Queen release, and what has been run end to end
-against a real broker is narrower than what is implemented: boto3 and the `aws` CLI over the JSON
-protocol, and boto3's SNS client over the Query one. The client matrix and the differential run
-against real AWS are not done, so the divergences at the bottom of this page are the ones known
+The facade ships in the broker image and is started by `QUEEN_SQS_EMBEDDED=true`. What has been run
+end to end against a real broker is narrower than what is implemented: boto3 and the `aws` CLI over
+the JSON protocol, and boto3's SNS client over the Query one. The client matrix and the differential
+run against real AWS are not done, so the divergences at the bottom of this page are the ones known
 today rather than a closed list.
 </Aside>
 

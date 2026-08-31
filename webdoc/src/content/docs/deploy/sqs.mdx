@@ -3,7 +3,6 @@ title: SQS facade
 description: "Running queen-sqs beside a broker or a proxy, or embedded in the broker: every environment variable it reads, the credential model, the one variable a second replica needs, and what a client has to change to reach it."
 type: how-to
 tier: operate
-status: preview
 sidebar:
   order: 13
   label: SQS facade
@@ -18,6 +17,7 @@ sourceOfTruth:
   - server/src/sqs_facade.rs
   - server/src/config.rs
   - Dockerfile
+  - .github/workflows/docker-build.yml
 ---
 
 `queen-sqs` is a separate binary that speaks the Amazon SQS and SNS wire protocols on one port and
@@ -25,11 +25,14 @@ plain HTTP to Queen on another. It is a client of Queen like any SDK is: it hold
 connection, embeds no broker, and stores nothing durable of its own. What a client can do through
 it, and what it deliberately cannot, is [the protocol reference](/reference/sqs).
 
-<Aside type="caution">
-The facade is a **preview** and is not part of a Queen release. The repository's `Dockerfile` builds
-it into the same image as the broker, but no image carrying it has been published and there are no
-Helm values for it yet, so today it comes from a build of this repository. Nothing below has been
-through a release cycle.
+<Aside type="note">
+The facade ships **in the broker image**. `ghcr.io/queen-mq/queen` carries `bin/queen-sqs` beside the
+broker binary from 1.4.0 on, so pulling the broker pulls the facade and there is no second artifact
+to track. `QUEEN_SQS_EMBEDDED=true` is the only thing that starts it: left unset, nothing here is
+read and the image behaves exactly as it did before. What is narrower than the broker's own
+guarantees is the verification: what has been run end to end is listed on [the protocol
+reference](/reference/sqs#what-speaks-to-it), and the divergences there are the ones known today
+rather than a closed list.
 </Aside>
 
 ## It scales out behind an ordinary load balancer
@@ -262,10 +265,11 @@ mode needs no extra configuration in that image. The same image runs the facade 
 `docker run … queen-mq ./bin/queen-sqs`. `EXPOSE 9324` is documentation and publishes nothing on its
 own.
 
-No published image carries the facade yet, and there are no Helm values for it: the chart in this
-repository has a broker and a proxy and nothing else. A Kubernetes deployment today is a manifest an
-operator writes, and it is an ordinary `Deployment` behind an ordinary `Service`, with
-`QUEEN_SQS_HANDLE_SECRET` from a `Secret` and the replica count of your choosing.
+That image is published: `ghcr.io/queen-mq/queen` has carried the facade since 1.4.0, on the same
+tags as the broker, because it is the same build. The repository ships no Helm chart, so a
+Kubernetes deployment is a manifest an operator writes, and it is an ordinary `Deployment` behind an
+ordinary `Service`, with `QUEEN_SQS_HANDLE_SECRET` from a `Secret` and the replica count of your
+choosing.
 
 ## Region, account, and tenancy
 

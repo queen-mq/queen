@@ -3,7 +3,6 @@ title: Kafka facade
 description: "Running queen-kafka beside a broker or a proxy, embedded in the broker, or as a cluster of two or three: every environment variable it reads, the advertised-address footgun, the TLS and SASL pair, and what a client has to change to reach it."
 type: how-to
 tier: operate
-status: preview
 sidebar:
   order: 12
   label: Kafka facade
@@ -23,6 +22,7 @@ sourceOfTruth:
   - proxy/src/kafka_kv.rs
   - proxy/src/kafka_identity.rs
   - Dockerfile
+  - .github/workflows/docker-build.yml
 ---
 
 `queen-kafka` is a separate binary that speaks the Kafka wire protocol on one port and plain
@@ -30,11 +30,14 @@ HTTP to Queen on another. It is a client of Queen like any SDK is: it holds no d
 connection, embeds no broker, and stores nothing durable of its own. What a Kafka client can do
 through it, and what it deliberately cannot, is [the protocol reference](/reference/kafka).
 
-<Aside type="caution">
-The facade is a **preview** and is not part of a Queen release. The repository's `Dockerfile` builds
-it into the same image as the broker, but no image carrying it has been published and there are no
-Helm values for it yet, so today it comes from a build of this repository. Nothing below has been
-through a release cycle.
+<Aside type="note">
+The facade ships **in the broker image**. `ghcr.io/queen-mq/queen` carries `bin/queen-kafka` beside
+the broker binary from 1.4.0 on, so pulling the broker pulls the facade and there is no second
+artifact to track. `QUEEN_KAFKA_EMBEDDED=true` is the only thing that starts it: left unset, nothing
+here is read and the image behaves exactly as it did before. What is narrower than the broker's own
+guarantees is the verification: the facade is checked by its own compatibility suite rather than by
+a released client matrix, and the deviations at the bottom of [the protocol
+reference](/reference/kafka) are the ones known today rather than a closed list.
 </Aside>
 
 ## The two shapes
@@ -180,9 +183,10 @@ embedded mode needs no extra configuration in that image. The same image runs th
 instead, with `docker run … queen-mq ./bin/queen-kafka`. `EXPOSE 9092` is documentation and
 publishes nothing on its own.
 
-No published image carries the facade yet, and there are no Helm values for it: the chart in this
-repository has a broker and a proxy and nothing else. A Kubernetes deployment today is a manifest an
-operator writes, and [cluster mode](#cluster-mode) below has the shape that one has to have.
+That image is published: `ghcr.io/queen-mq/queen` has carried the facade since 1.4.0, on the same
+tags as the broker, because it is the same build. The repository ships no Helm chart, so a
+Kubernetes deployment is a manifest an operator writes, and [cluster mode](#cluster-mode) below has
+the shape that one has to have.
 
 ## Every variable
 
@@ -573,8 +577,8 @@ uses that address once, for its first `Metadata`, and from then on talks only to
 the answer carried. A bootstrap address may be load balanced; an advertised one may not.
 
 Node ids are 1 to 64 and a StatefulSet ordinal starts at 0, so the ordinal plus one is the natural
-mapping and the entrypoint is where that arithmetic belongs. There are no Helm values for any of
-this yet: the chart in this repository has a broker and a proxy and nothing else.
+mapping and the entrypoint is where that arithmetic belongs. The repository ships no Helm chart, so
+the manifest above is the whole of it.
 
 ### Operating it
 

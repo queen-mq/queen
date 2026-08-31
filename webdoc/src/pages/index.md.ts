@@ -84,6 +84,8 @@ const HOME_FEATURES = [
   "Windowed aggregation",
   "Ephemeral queues",
   "Multi-tenancy",
+  "Kafka wire protocol",
+  "SQS and SNS wire protocols",
 ];
 
 /**
@@ -148,6 +150,14 @@ const differentiators = [
     title: "Plain HTTP, six SDKs, one binary",
     body: "No custom wire protocol, no JVM, no Erlang, no ZooKeeper. Anything that can make an HTTP request is a first-class client, and curl is one.",
   },
+  {
+    title: "Kafka clients reach it by changing one line",
+    body: "queen-kafka is a facade that ships in the same image as the broker and stays off until you switch it on. It advertises 32 Kafka API keys, transactions included, so an unmodified producer or consumer moves across by changing bootstrap.servers and nothing else. It holds no database connection and stores nothing durable: it is a Queen client like any SDK is, and what it deliberately does not do is written down.",
+  },
+  {
+    title: "So do SQS and SNS clients",
+    body: "queen-sqs answers both Amazon wire protocols out of that same image, so an unmodified AWS SDK moves across by changing endpoint_url. Nothing durable lives in the process, so any instance answers any request and an ordinary load balancer in front is the supported shape rather than a hazard.",
+  },
 ];
 
 /** The dashboard section, and the screenshot's alt text with it. */
@@ -198,8 +208,10 @@ const HOME_LIMITS =
   "lane is sequential, so if your ordering boundary is everything, the core idea does " +
   "nothing for you. In-group parallelism is bounded by how many distinct entities you " +
   "push to. One PostgreSQL is both the throughput ceiling and the failure domain, there " +
-  "is no tiered object storage and no cross-region replication, and Queen speaks HTTP " +
-  "rather than the Kafka protocol, so none of that ecosystem applies.";
+  "is no tiered object storage and no cross-region replication, and the Kafka facade " +
+  "speaks the wire protocol but not the ecosystem around it, so log compaction, Kafka " +
+  "Streams, Connect's exactly-once source and the Schema Registry's compacted topic all " +
+  "stay out.";
 
 /**
  * The landing page as markdown, from the eyebrow down. The `# ` headline is

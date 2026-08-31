@@ -3,7 +3,6 @@ title: Kafka protocol support
 description: "Which Kafka APIs the queen-kafka facade speaks and at which versions, what it deliberately does not implement, and every place its behaviour differs from a real broker."
 type: reference
 tier: use
-status: preview
 sidebar:
   order: 30
   label: Kafka protocol
@@ -27,9 +26,10 @@ consumer reaches Queen by changing `bootstrap.servers`, and nothing else. Runnin
 [the operator page](/deploy/kafka); this page is the contract a client gets.
 
 <Aside type="caution">
-The facade is a **preview**. It is not part of a Queen release, its behaviour is verified by
-its own compatibility suite rather than by a released client matrix, and the deviations at the
-bottom of this page are the ones known today rather than a closed list.
+The facade ships in the broker image and is started by `QUEEN_KAFKA_EMBEDDED=true`. What is
+narrower than the broker's own guarantees is the verification behind this page: the behaviour
+below is checked by the facade's own compatibility suite rather than by a released client matrix,
+and the deviations at the bottom are the ones known today rather than a closed list.
 </Aside>
 
 The mapping is small enough to state in four lines. A Kafka topic is a Queen queue. Kafka

@@ -91,9 +91,9 @@ SQS is two things at once here, and they are worth separating. It is a fully man
 could choose instead, and it is **an interface Queen speaks**: `queen-sqs` is a facade that answers
 the SQS and SNS wire protocols, so an unmodified AWS SDK, and every driver built on one, reaches
 Queen by changing `endpoint_url`. The comparison below is about the service. The facade is
-[the protocol reference](/reference/sqs), it is a preview, and it changes what the first bullet
-means: the choice stops being SQS or Queen and becomes which of them is behind the SDK your code
-already uses.
+[the protocol reference](/reference/sqs), it ships in the broker image, and it changes what the
+first bullet means: the choice stops being SQS or Queen and becomes which of them is behind the SDK
+your code already uses.
 
 As a service, then. FIFO queues order messages within a message group id and consume a group
 serially, which is structurally the same idea as a Queen partition.
