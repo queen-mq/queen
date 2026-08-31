@@ -352,7 +352,7 @@ compose_active() {
 }
 
 # Reached through the EXIT trap's diagnostic path.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 salvage_active_results() {
     [ -n "$ACTIVE_VOLUME" ] || return 0
     [ -n "$ACTIVE_RUN_ID" ] || return 0
@@ -403,7 +403,7 @@ cleanup_active_lane() {
 }
 
 # Invoked indirectly by the trap registered below.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 on_exit() {
     exit_status=$?
     trap - EXIT INT TERM

@@ -962,7 +962,7 @@ PY
 }
 
 # Called from the EXIT trap as well as the normal lane path.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 capture_active_diagnostics() {
     [ -n "$ACTIVE_PROJECT" ] || return 0
     [ -n "$ACTIVE_LANE_DIRECTORY" ] || return 0
@@ -974,7 +974,7 @@ capture_active_diagnostics() {
 
 # Copy only fixture run directories. The failed-store payload/exception file is
 # deliberately excluded even if an interrupted lane still contains a row.
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 salvage_active_results() {
     [ -n "$ACTIVE_VOLUME" ] || return 0
     [ -n "$ACTIVE_LANE_DIRECTORY" ] || return 0
@@ -1022,7 +1022,7 @@ cleanup_active_lane() {
     ACTIVE_FAILURE_RUN=""
 }
 
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 on_exit() {
     local exit_status=$?
     trap - EXIT INT TERM
