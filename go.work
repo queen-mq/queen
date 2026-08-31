@@ -6,7 +6,7 @@
 // End users running `go install github.com/smartpricing/queen/clients/client-cli/cmd/queenctl@vX.Y.Z`
 // are unaffected: `go install` ignores go.work and resolves modules via
 // the public Go proxy using the versions pinned in client-cli's go.mod.
-go 1.25.7
+go 1.24.0
 
 use (
 	./clients/client-cli
