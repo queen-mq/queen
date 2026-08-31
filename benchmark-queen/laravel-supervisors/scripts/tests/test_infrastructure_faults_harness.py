@@ -228,6 +228,20 @@ class InfrastructureFaultHarnessTest(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, source)
 
+    def test_recovery_deadlines_are_monotonic_and_master_readiness_is_functional(self) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        master_recovery = source.split("        master-sigkill)", 1)[1].split(
+            "            ;;", 1
+        )[0]
+
+        self.assertIn("time.monotonic_ns()", source)
+        self.assertNotIn("$(date +%s)", source)
+        self.assertIn(
+            'wait_for_supervisor_capacity "$target_id" master-restart',
+            master_recovery,
+        )
+        self.assertNotIn('wait_for_health "$target_id" "$ACTIVE_ENGINE"', master_recovery)
+
     def test_script_passes_bash_syntax_validation(self) -> None:
         result = subprocess.run(
             ["bash", "-n", str(SCRIPT)],

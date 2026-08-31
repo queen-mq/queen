@@ -428,6 +428,10 @@ raise SystemExit(returncode if returncode >= 0 else 128 - returncode)
 PY
 }
 
+monotonic_seconds() {
+    python3 -c 'import time; print(time.monotonic_ns() // 1_000_000_000)'
+}
+
 docker_bounded() {
     run_bounded "$DOCKER_OPERATION_TIMEOUT" docker "$@"
 }
@@ -636,14 +640,14 @@ producer_bounded() {
 wait_for_health() {
     health_container="$1"
     health_label="$2"
-    health_deadline=$(( $(date +%s) + READY_TIMEOUT ))
+    health_deadline=$(( $(monotonic_seconds) + READY_TIMEOUT ))
     while :; do
         health_status="$(docker_bounded inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$health_container" 2>/dev/null || true)"
         case "$health_status" in
             healthy|running) return 0 ;;
             exited|dead|unhealthy) die "$health_label entered state: $health_status" ;;
         esac
-        [ "$(date +%s)" -lt "$health_deadline" ] || die "timed out waiting for $health_label health"
+        [ "$(monotonic_seconds)" -lt "$health_deadline" ] || die "timed out waiting for $health_label health"
         sleep 1
     done
 }
@@ -669,7 +673,7 @@ wait_for_supervisor_capacity() {
     capacity_stage="$2"
     capacity_workers_output="${ACTIVE_LANE_DIRECTORY}/workers-${capacity_stage}.tsv"
     capacity_status_output="${ACTIVE_LANE_DIRECTORY}/supervisor-readiness-${capacity_stage}.txt"
-    capacity_deadline=$(( $(date +%s) + READY_TIMEOUT ))
+    capacity_deadline=$(( $(monotonic_seconds) + READY_TIMEOUT ))
     if [ "$ACTIVE_ENGINE" = horizon ]; then
         capacity_needle='artisan horizon:work '
         capacity_status_command='horizon:status'
@@ -695,7 +699,7 @@ wait_for_supervisor_capacity() {
             mv "${capacity_workers_output}.tmp" "$capacity_workers_output"
             return 0
         fi
-        [ "$(date +%s)" -lt "$capacity_deadline" ] || die "$ACTIVE_ENGINE did not recover functional readiness and $WORKERS-worker capacity"
+        [ "$(monotonic_seconds)" -lt "$capacity_deadline" ] || die "$ACTIVE_ENGINE did not recover functional readiness and $WORKERS-worker capacity"
         sleep 0.2
     done
 }
@@ -1128,7 +1132,7 @@ wait_for_fault_qualification() {
     qualification_container="$1"
     qualification_queue_output="${ACTIVE_LANE_DIRECTORY}/queue-before-fault.json"
     qualification_ledger_output="${ACTIVE_LANE_DIRECTORY}/ledger-before-fault.json"
-    qualification_deadline=$(( $(date +%s) + READY_TIMEOUT ))
+    qualification_deadline=$(( $(monotonic_seconds) + READY_TIMEOUT ))
     while :; do
         capture_queue_once "$qualification_container" "$BENCH_CONNECTION" "$ACTIVE_RUN_ID" "${qualification_queue_output}.candidate" || true
         capture_ledger_activity "$qualification_container" "$ACTIVE_RUN_ID" "${qualification_ledger_output}.candidate" || true
@@ -1137,7 +1141,7 @@ wait_for_fault_qualification() {
             mv "${qualification_ledger_output}.candidate" "$qualification_ledger_output"
             return 0
         fi
-        [ "$(date +%s)" -lt "$qualification_deadline" ] || die "timed out waiting for ready backlog and an open ledger attempt"
+        [ "$(monotonic_seconds)" -lt "$qualification_deadline" ] || die "timed out waiting for ready backlog and an open ledger attempt"
         sleep 0.2
     done
 }
@@ -1299,9 +1303,9 @@ inject_and_recover() {
             [ "$master_pid" -ne 1 ] || die "refusing to signal container init instead of the supervisor master"
             printf '%s\n' "$master_rows" >"${ACTIVE_LANE_DIRECTORY}/master-target.tsv"
             docker_bounded exec "$target_id" kill -KILL "$master_pid"
-            stop_deadline=$(( $(date +%s) + READY_TIMEOUT ))
+            stop_deadline=$(( $(monotonic_seconds) + READY_TIMEOUT ))
             while [ "$(docker_bounded inspect --format '{{.State.Running}}' "$target_id" 2>/dev/null || true)" = true ]; do
-                [ "$(date +%s)" -lt "$stop_deadline" ] || die "application container did not stop after master SIGKILL"
+                [ "$(monotonic_seconds)" -lt "$stop_deadline" ] || die "application container did not stop after master SIGKILL"
                 sleep 0.2
             done
             container_pid="$(docker_bounded inspect --format '{{.State.Pid}}' "$target_id")"
@@ -1315,7 +1319,7 @@ inject_and_recover() {
             capture_network "${ACTIVE_LANE_DIRECTORY}/network-during-fault.json"
             sleep "$FAULT_HOLD_SECONDS"
             compose_active_bounded "$STARTUP_TIMEOUT" start "$ACTIVE_ENGINE"
-            wait_for_health "$target_id" "$ACTIVE_ENGINE"
+            wait_for_supervisor_capacity "$target_id" master-restart
             write_fault_evidence master-sigkill "$target_service" true true "$old_tree_gone"
             ;;
     esac
@@ -1333,6 +1337,7 @@ write_lane_result() {
     python3 - "$result_lane" "$result_engine" "$result_scenario" "$result_run_id" "$JOBS" "$JOB_TRIES" \
         "$result_completion_status" "$result_queue_status" "$result_ledger_status" <<'PY'
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
