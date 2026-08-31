@@ -61,7 +61,7 @@ COPY --from=frontend-builder /app/server/webapp/dist ./webapp/dist
 
 # Build. Cargo registry + target dirs are BuildKit caches; copy the binary out of
 # the (non-persisted) target cache so it lands in the image layer.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-server \
     --mount=type=cache,target=/usr/build/server/target \
     cargo build --release && cp target/release/queen /queen
 
@@ -90,7 +90,7 @@ COPY protocols/queen-kafka/Cargo.toml protocols/queen-kafka/Cargo.lock ./
 # Layer 2: source.
 COPY protocols/queen-kafka/src ./src
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-kafka \
     --mount=type=cache,target=/usr/build/queen-kafka/target \
     cargo build --release && cp target/release/queen-kafka /queen-kafka
 
@@ -118,7 +118,7 @@ COPY protocols/queen-sqs/Cargo.toml protocols/queen-sqs/Cargo.lock ./
 # Layer 2: source.
 COPY protocols/queen-sqs/src ./src
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-sqs \
     --mount=type=cache,target=/usr/build/queen-sqs/target \
     cargo build --release && cp target/release/queen-sqs /queen-sqs
 
