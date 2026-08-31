@@ -7,7 +7,7 @@ Works standalone with any PHP 8.3+ project. Laravel extras (service provider, fa
 ## Installation
 
 ```bash
-composer require smartpricing/queen-mq
+composer require queen-mq/php-client
 ```
 
 ### Laravel Setup
@@ -567,8 +567,8 @@ broker failover, not active-active supervisor leadership.
 > Kubernetes use one replica without rolling-surge overlap, or a `Recreate`
 > strategy.
 
-See [`supervisor/README.md`](../../supervisor/README.md) for deployment and
-security details.
+See the [Queen supervisor deployment guide](https://github.com/queen-mq/queen/tree/master/supervisor)
+for deployment and security details.
 
 ## Usage
 

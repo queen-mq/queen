@@ -1,6 +1,6 @@
 ---
 title: How Queen ships
-description: "The registries a release touches, which two of them CI publishes and which four a human publishes, where the version number lives, and the one boundary a rollback cannot cross."
+description: "The registries a release touches, what CI publishes from verified tags, what a maintainer uploads, where each version number lives, and the one boundary a rollback cannot cross."
 type: reference
 tier: internals
 sidebar:
@@ -12,6 +12,7 @@ sourceOfTruth:
   - build.sh
   - .github/workflows/docker-build.yml
   - .github/workflows/release-cli.yml
+  - .github/workflows/release-php-client.yml
   - clients/client-cli/.goreleaser.yaml
   - clients/client-js/package.json
   - clients/client-py/pyproject.toml
@@ -21,8 +22,8 @@ sourceOfTruth:
 ---
 
 A release touches the broker image, six client SDKs and the CLI, across seven package registries
-plus GitHub Releases. Two of those channels are published by CI on a trigger; the rest are
-published by a person running a command. Knowing which is which is the point of this page.
+plus GitHub Releases. Some channels are published by CI from a verified tag; others require a
+maintainer upload. Knowing which is which is the point of this page.
 
 ## Where the version lives
 
@@ -45,7 +46,7 @@ Everything else carries its own version, or none at all.
 | `queen-engine` (the broker crate) | `server/Cargo.toml`, which must say the same string as `server/server.json`: the first is what crates.io serves, the second is what the built binary reports on `/health` |
 | JavaScript client | `clients/client-js/package.json` |
 | Python client | `clients/client-py/pyproject.toml` **and** `clients/client-py/queen/__init__.py`, whose `__version__` the package exports: bumping only the first ships a package that misreports itself |
-| PHP/Laravel client | nowhere: `composer.json` has no `version` field; Packagist reads the git tag |
+| PHP/Laravel client | nowhere: `composer.json` has no `version` field; the split repository receives a bare `vX.Y.Z` tag from `clients/client-laravel/vX.Y.Z` |
 | Go client | nowhere: the git tag *is* the version |
 | Rust client | `clients/client-rust/Cargo.toml` |
 | `queen-protocol` | `crates/queen-protocol/Cargo.toml`, and the version requirement on EVERY dependency on it: both `clients/client-rust/Cargo.toml` and `server/Cargo.toml` pin it by version beside the path |
@@ -72,7 +73,9 @@ broker.
 <Aside type="note">
 Today the broker (`server/server.json`, mirrored in `server/Cargo.toml`), the proxy
 (`proxy/Cargo.toml`), the JavaScript, Python and Rust clients and `queen-protocol` all carry
-`1.3.0`, with `v1.3.0` tags covering the Go module, the CLI and Packagist. The release before
+`1.3.0`, with `v1.3.0` tags covering the Go module and the CLI. The first Packagist release
+will receive its own bare tag in `queen-mq/php-client`, generated from the corresponding
+`clients/client-laravel/vX.Y.Z` source tag. The release before
 it is the exception the rule allows: `1.2.1` was a server-only patch, so the broker sat at
 `1.2.1` while everything else stayed on `1.2.0` and nothing outside `server/` was rebuilt.
 The betas behaved the same way, with the broker at
@@ -142,16 +145,35 @@ lands **on** the `vX.Y.Z` tag. The broker's release notes for that tag and the C
 therefore share one GitHub Release: edit the release that exists rather than creating a second
 one on the same tag.
 
-## What a human publishes
+### The PHP client mirror
 
-Four channels have no workflow. Each needs a command run by a maintainer.
+`queen-mq/queen` is the only source of truth. The `queen-mq/php-client` repository is a
+read-only `clients/client-laravel` subtree, created from `master` and tagged only by
+`.github/workflows/release-php-client.yml`. A source tag such as
+`clients/client-laravel/v1.2.3` is verified on PHP 8.3 and 8.4, exercises the Redis
+`WithoutOverlapping` integration, and checks that the matching native supervisor release exists
+before it can create `v1.2.3` in the mirror. Packagist reads that bare mirror tag.
+
+Before enabling the mirror, install an organization-owned GitHub App on **only**
+`queen-mq/php-client` with repository permission `Contents: Read and write`. Store its App ID in
+the `PHP_CLIENT_MIRROR_APP_ID` Actions variable and its private key in the
+`PHP_CLIENT_MIRROR_APP_PRIVATE_KEY` Actions secret of `queen-mq/queen`. The workflow asks the App
+for a short-lived token scoped to that one repository; it does not use a personal access token or
+a deploy key. Protect `clients/client-laravel/v*` in the source and `v*` in the mirror from
+updates and deletion. The first Packagist submission is manual; enable the Packagist GitHub hook
+on the mirror afterwards.
+
+## What a maintainer publishes
+
+The package registries below either need a direct upload or a source tag created by a maintainer.
+The PHP tag is then verified and mirrored by CI; no one commits to its split repository.
 
 | Channel | Package | How |
 | --- | --- | --- |
 | npm | `queen-mq` | `npm publish` from `clients/client-js` |
 | PyPI | `queen-mq` | `clients/client-py/publish.sh`, which builds the wheel and sdist and uploads with twine |
 | Go modules | `github.com/smartpricing/queen/clients/client-go` | push a `clients/client-go/vX.Y.Z` tag; the module proxy picks it up |
-| Packagist | `smartpricing/queen-mq` | push a `vX.Y.Z` tag; a webhook makes Packagist pull it |
+| Packagist | `queen-mq/php-client` | push `clients/client-laravel/vX.Y.Z`; the verified release workflow mirrors it as `vX.Y.Z`, then the Packagist webhook indexes it |
 | crates.io | `queen-protocol`, then `queen-mq` and `queen-engine` | `cargo publish` from `crates/queen-protocol`, **then** from `clients/client-rust` and from `server/` (the broker package; its library is the embedded engine) |
 
 The C++ client needs nothing published: consumers take `clients/client-cpp/queen_client.hpp` at
@@ -172,19 +194,21 @@ prerelease themselves (`queen-engine = "1.0.0-beta.4"`). Now that all three are 
 versions, a plain `queen-engine = "1"` resolves.
 </Aside>
 
-Two tag shapes are load-bearing and easy to get wrong. Both nested Go modules need the
+Three tag shapes are load-bearing and easy to get wrong. Both nested Go modules need the
 directory-prefixed form (`clients/client-go/v1.0.0` and `clients/client-cli/v1.0.0`) because
-that is how Go's module proxy resolves a module that is not at the repository root. Without the
-prefix, `go get` reports no matching versions. The tags already in the repository follow both
-shapes, alongside the plain `vX.Y.Z` broker tags.
+that is how Go's module proxy resolves a module that is not at the repository root. The PHP
+client likewise uses `clients/client-laravel/v1.0.0`; the release workflow maps it to the bare
+`v1.0.0` tag required by Packagist in `queen-mq/php-client`. Without the Go prefix, `go get`
+reports no matching versions.
 
 ## Order
 
 The broker tag and image go first, because every SDK is released *against* a broker; then npm,
 because most downstream consumers wait on it; then PyPI; then the three crates, protocol before
-client and engine; then the Go module tag; then the plain
-`vX.Y.Z` tag that Packagist and the C++ header hang off; then the CLI tag, which triggers its own
-workflow.
+client and engine; then the Go module tag. Publish the supervisor release before creating the
+PHP source tag: the PHP release workflow verifies the pinned supervisor archives before it
+mirrors `clients/client-laravel/vX.Y.Z` as Packagist `vX.Y.Z`. Finally create the CLI tag, which
+triggers its own workflow.
 
 ## Rollback, and the one place additivity stops
 
@@ -212,9 +236,9 @@ for what each release actually changed, read `CHANGELOG.md` at the repository ro
 
 The CI that was stale the same way is gone: `cpp-server-build.yml` (C++ `make` targets that no
 longer existed) and `cli.yml` (an end-to-end suite pinned to a pre-log-engine `0.14.3` broker
-image) have both been deleted. Four workflows remain, `docker-build.yml`, `release-cli.yml`,
-`tests.yml` and the docs site's `docs.yml`, and the CLI's end-to-end suite now runs in the
-`cli` cell of the tests matrix, against the broker built from the same tree.
+image) have both been deleted. The active release workflows are `docker-build.yml`,
+`release-cli.yml`, `release-supervisor.yml` and `release-php-client.yml`; the CLI's end-to-end
+suite runs in the `cli` cell of the tests matrix, against the broker built from the same tree.
 
 ## Post-release
 

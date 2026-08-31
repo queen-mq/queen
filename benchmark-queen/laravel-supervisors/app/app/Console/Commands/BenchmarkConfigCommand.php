@@ -21,7 +21,7 @@ final class BenchmarkConfigCommand extends Command
             'php' => PHP_VERSION,
             'laravel' => InstalledVersions::getPrettyVersion('laravel/framework'),
             'horizon' => InstalledVersions::getPrettyVersion('laravel/horizon'),
-            'queen_client' => InstalledVersions::getPrettyVersion('smartpricing/queen-mq'),
+            'queen_client' => InstalledVersions::getPrettyVersion('queen-mq/php-client'),
             'benchmark' => config('benchmark'),
             'horizon_supervisor' => array_replace(
                 is_array($horizonDefaults) ? $horizonDefaults : [],

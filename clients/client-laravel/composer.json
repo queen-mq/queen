@@ -1,5 +1,5 @@
 {
-    "name": "smartpricing/queen-mq",
+    "name": "queen-mq/php-client",
     "description": "Queen MQ client library for PHP with optional Laravel integration",
     "type": "library",
     "license": "Apache-2.0",
@@ -16,7 +16,7 @@
     ],
     "support": {
         "issues": "https://github.com/queen-mq/queen/issues",
-        "source": "https://github.com/queen-mq/queen",
+        "source": "https://github.com/queen-mq/php-client",
         "docs": "https://queenmq.com/reference/sdk/php/"
     },
     "require": {

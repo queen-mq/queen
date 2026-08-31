@@ -11,7 +11,7 @@
             "options": {
                 "symlink": false,
                 "versions": {
-                    "smartpricing/queen-mq": "dev-main"
+                    "queen-mq/php-client": "dev-main"
                 }
             }
         }
@@ -27,7 +27,7 @@
         "ext-redis": "*",
         "laravel/framework": "12.68.0",
         "laravel/horizon": "5.48.3",
-        "smartpricing/queen-mq": "dev-main"
+        "queen-mq/php-client": "dev-main"
     },
     "autoload": {
         "psr-4": {

@@ -10,7 +10,7 @@
 //
 // The program checks its own outcome and exits non-zero if a check fails.
 
-// smartpricing/queen-mq is an ordinary Composer package. Laravel auto-discovers
+// queen-mq/php-client is an ordinary Composer package. Laravel auto-discovers
 // its service provider and facade, but none of that is required: what follows is
 // a plain CLI script using the same classes.
 require __DIR__ . '/vendor/autoload.php';

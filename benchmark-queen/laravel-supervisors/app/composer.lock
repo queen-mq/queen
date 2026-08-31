@@ -4,7 +4,7 @@
         "Read more about it at https://getcomposer.org/doc/01-basic-usage.md#installing-dependencies",
         "This file is @generated automatically"
     ],
-    "content-hash": "57bd79b74a044273f12a77b8a14eed10",
+    "content-hash": "a4a063a62525458e50602188b3f43f12",
     "packages": [
         {
             "name": "brick/math",
@@ -3036,6 +3036,81 @@
             "time": "2021-10-29T13:26:27+00:00"
         },
         {
+            "name": "queen-mq/php-client",
+            "version": "dev-main",
+            "dist": {
+                "type": "path",
+                "url": "../../../clients/client-laravel",
+                "reference": "ebc5a24e577d0692b907211ef61d045fb6b67bfe"
+            },
+            "require": {
+                "guzzlehttp/guzzle": "^7.0",
+                "php": "^8.3",
+                "ramsey/uuid": "^4.0"
+            },
+            "require-dev": {
+                "orchestra/testbench": "^10.0",
+                "phpunit/phpunit": "^11.0|^12.0"
+            },
+            "suggest": {
+                "ext-pcntl": "Required by both supervisors and the native Composer launcher on Unix",
+                "ext-phar": "Required by queen:supervisor-install to inspect the native release archive",
+                "ext-posix": "Required by supervisor state/control/dashboard ownership checks, the native installer/launcher, and lease-renewal fencing on Unix",
+                "illuminate/console": "Required by the Laravel Artisan commands",
+                "illuminate/queue": "Required to use Queen as a Laravel queue connection",
+                "illuminate/support": "Required for Laravel service-provider and facade integration",
+                "symfony/process": "Required by the PHP worker supervisor"
+            },
+            "bin": [
+                "bin/queen-supervisor"
+            ],
+            "type": "library",
+            "extra": {
+                "laravel": {
+                    "providers": [
+                        "Queen\\Laravel\\QueenServiceProvider"
+                    ],
+                    "aliases": {
+                        "Queen": "Queen\\Laravel\\QueenFacade"
+                    }
+                }
+            },
+            "autoload": {
+                "psr-4": {
+                    "Queen\\": "src/"
+                }
+            },
+            "autoload-dev": {
+                "psr-4": {
+                    "Queen\\Tests\\": "tests/"
+                }
+            },
+            "license": [
+                "Apache-2.0"
+            ],
+            "description": "Queen MQ client library for PHP with optional Laravel integration",
+            "homepage": "https://queenmq.com",
+            "keywords": [
+                "broker",
+                "consumer-groups",
+                "fifo",
+                "laravel",
+                "message-queue",
+                "postgres",
+                "postgresql",
+                "queue"
+            ],
+            "support": {
+                "issues": "https://github.com/queen-mq/queen/issues",
+                "source": "https://github.com/queen-mq/php-client",
+                "docs": "https://queenmq.com/reference/sdk/php/"
+            },
+            "transport-options": {
+                "symlink": false,
+                "relative": true
+            }
+        },
+        {
             "name": "ralouphie/getallheaders",
             "version": "3.0.3",
             "source": {
@@ -3232,77 +3307,6 @@
                 "source": "https://github.com/ramsey/uuid/tree/4.9.3"
             },
             "time": "2026-06-18T03:57:49+00:00"
-        },
-        {
-            "name": "smartpricing/queen-mq",
-            "version": "dev-main",
-            "dist": {
-                "type": "path",
-                "url": "../../../clients/client-laravel",
-                "reference": "2b2317cd31a50daa56cfc8c1cfc06d2ca776545c"
-            },
-            "require": {
-                "guzzlehttp/guzzle": "^7.0",
-                "php": "^8.3",
-                "ramsey/uuid": "^4.0"
-            },
-            "require-dev": {
-                "orchestra/testbench": "^9.0|^10.0",
-                "phpunit/phpunit": "^11.0|^12.0"
-            },
-            "suggest": {
-                "ext-pcntl": "Required by the PHP worker supervisor on Unix",
-                "ext-posix": "Required by Laravel lease-renewal worker fencing on Unix",
-                "illuminate/console": "Required by the Laravel Artisan commands",
-                "illuminate/queue": "Required to use Queen as a Laravel queue connection",
-                "illuminate/support": "Required for Laravel service-provider and facade integration",
-                "symfony/process": "Required by the PHP worker supervisor"
-            },
-            "type": "library",
-            "extra": {
-                "laravel": {
-                    "providers": [
-                        "Queen\\Laravel\\QueenServiceProvider"
-                    ],
-                    "aliases": {
-                        "Queen": "Queen\\Laravel\\QueenFacade"
-                    }
-                }
-            },
-            "autoload": {
-                "psr-4": {
-                    "Queen\\": "src/"
-                }
-            },
-            "autoload-dev": {
-                "psr-4": {
-                    "Queen\\Tests\\": "tests/"
-                }
-            },
-            "license": [
-                "Apache-2.0"
-            ],
-            "description": "Queen MQ client library for PHP with optional Laravel integration",
-            "homepage": "https://queenmq.com",
-            "keywords": [
-                "broker",
-                "consumer-groups",
-                "fifo",
-                "laravel",
-                "message-queue",
-                "postgres",
-                "postgresql",
-                "queue"
-            ],
-            "support": {
-                "issues": "https://github.com/queen-mq/queen/issues",
-                "source": "https://github.com/queen-mq/queen",
-                "docs": "https://queenmq.com/reference/sdk/php/"
-            },
-            "transport-options": {
-                "symlink": false,
-                "relative": true
-            }
         },
         {
             "name": "symfony/clock",
@@ -6031,7 +6035,7 @@
     "aliases": [],
     "minimum-stability": "stable",
     "stability-flags": {
-        "smartpricing/queen-mq": 20
+        "queen-mq/php-client": 20
     },
     "prefer-stable": true,
     "prefer-lowest": false,
