@@ -69,7 +69,7 @@ def parse_args() -> argparse.Namespace:
         "--client-php",
         type=Path,
         default=Path(
-            "clients/client-laravel/src/Laravel/Supervisor/Binary/SupervisorBinary.php"
+            "clients/client-php/src/Laravel/Supervisor/Binary/SupervisorBinary.php"
         ),
     )
     return parser.parse_args()

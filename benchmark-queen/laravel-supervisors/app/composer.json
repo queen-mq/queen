@@ -7,7 +7,7 @@
     "repositories": [
         {
             "type": "path",
-            "url": "../../../clients/client-laravel",
+            "url": "../../../clients/client-php",
             "options": {
                 "symlink": false,
                 "versions": {

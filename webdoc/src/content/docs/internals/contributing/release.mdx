@@ -16,7 +16,7 @@ sourceOfTruth:
   - clients/client-cli/.goreleaser.yaml
   - clients/client-js/package.json
   - clients/client-py/pyproject.toml
-  - clients/client-laravel/composer.json
+  - clients/client-php/composer.json
   - clients/client-go/go.mod
   - server/src/schema.rs
 ---
@@ -46,7 +46,7 @@ Everything else carries its own version, or none at all.
 | `queen-engine` (the broker crate) | `server/Cargo.toml`, which must say the same string as `server/server.json`: the first is what crates.io serves, the second is what the built binary reports on `/health` |
 | JavaScript client | `clients/client-js/package.json` |
 | Python client | `clients/client-py/pyproject.toml` **and** `clients/client-py/queen/__init__.py`, whose `__version__` the package exports: bumping only the first ships a package that misreports itself |
-| PHP/Laravel client | nowhere: `composer.json` has no `version` field; the split repository receives a bare `vX.Y.Z` tag from `clients/client-laravel/vX.Y.Z` |
+| PHP/Laravel client | nowhere: `composer.json` has no `version` field; the split repository receives a bare `vX.Y.Z` tag from `clients/client-php/vX.Y.Z` |
 | Go client | nowhere: the git tag *is* the version |
 | Rust client | `clients/client-rust/Cargo.toml` |
 | `queen-protocol` | `crates/queen-protocol/Cargo.toml`, and the version requirement on EVERY dependency on it: both `clients/client-rust/Cargo.toml` and `server/Cargo.toml` pin it by version beside the path |
@@ -75,7 +75,7 @@ Today the broker (`server/server.json`, mirrored in `server/Cargo.toml`), the pr
 (`proxy/Cargo.toml`), the JavaScript, Python and Rust clients and `queen-protocol` all carry
 `1.3.0`, with `v1.3.0` tags covering the Go module and the CLI. The first Packagist release
 will receive its own bare tag in `queen-mq/php-client`, generated from the corresponding
-`clients/client-laravel/vX.Y.Z` source tag. The release before
+`clients/client-php/vX.Y.Z` source tag. The release before
 it is the exception the rule allows: `1.2.1` was a server-only patch, so the broker sat at
 `1.2.1` while everything else stayed on `1.2.0` and nothing outside `server/` was rebuilt.
 The betas behaved the same way, with the broker at
@@ -148,9 +148,9 @@ one on the same tag.
 ### The PHP client mirror
 
 `queen-mq/queen` is the only source of truth. The `queen-mq/php-client` repository is a
-read-only `clients/client-laravel` subtree, created from `master` and tagged only by
+read-only `clients/client-php` subtree, created from `master` and tagged only by
 `.github/workflows/release-php-client.yml`. A source tag such as
-`clients/client-laravel/v1.2.3` is verified on PHP 8.3 and 8.4, exercises the Redis
+`clients/client-php/v1.2.3` is verified on PHP 8.3 and 8.4, exercises the Redis
 `WithoutOverlapping` integration, and checks that the matching native supervisor release exists
 before it can create `v1.2.3` in the mirror. Packagist reads that bare mirror tag.
 
@@ -159,7 +159,7 @@ Before enabling the mirror, install an organization-owned GitHub App on **only**
 the `PHP_CLIENT_MIRROR_APP_ID` Actions variable and its private key in the
 `PHP_CLIENT_MIRROR_APP_PRIVATE_KEY` Actions secret of `queen-mq/queen`. The workflow asks the App
 for a short-lived token scoped to that one repository; it does not use a personal access token or
-a deploy key. Protect `clients/client-laravel/v*` in the source and `v*` in the mirror from
+a deploy key. Protect `clients/client-php/v*` in the source and `v*` in the mirror from
 updates and deletion. The first Packagist submission is manual; enable the Packagist GitHub hook
 on the mirror afterwards.
 
@@ -173,7 +173,7 @@ The PHP tag is then verified and mirrored by CI; no one commits to its split rep
 | npm | `queen-mq` | `npm publish` from `clients/client-js` |
 | PyPI | `queen-mq` | `clients/client-py/publish.sh`, which builds the wheel and sdist and uploads with twine |
 | Go modules | `github.com/smartpricing/queen/clients/client-go` | push a `clients/client-go/vX.Y.Z` tag; the module proxy picks it up |
-| Packagist | `queen-mq/php-client` | push `clients/client-laravel/vX.Y.Z`; the verified release workflow mirrors it as `vX.Y.Z`, then the Packagist webhook indexes it |
+| Packagist | `queen-mq/php-client` | push `clients/client-php/vX.Y.Z`; the verified release workflow mirrors it as `vX.Y.Z`, then the Packagist webhook indexes it |
 | crates.io | `queen-protocol`, then `queen-mq` and `queen-engine` | `cargo publish` from `crates/queen-protocol`, **then** from `clients/client-rust` and from `server/` (the broker package; its library is the embedded engine) |
 
 The C++ client needs nothing published: consumers take `clients/client-cpp/queen_client.hpp` at
@@ -197,7 +197,7 @@ versions, a plain `queen-engine = "1"` resolves.
 Three tag shapes are load-bearing and easy to get wrong. Both nested Go modules need the
 directory-prefixed form (`clients/client-go/v1.0.0` and `clients/client-cli/v1.0.0`) because
 that is how Go's module proxy resolves a module that is not at the repository root. The PHP
-client likewise uses `clients/client-laravel/v1.0.0`; the release workflow maps it to the bare
+client likewise uses `clients/client-php/v1.0.0`; the release workflow maps it to the bare
 `v1.0.0` tag required by Packagist in `queen-mq/php-client`. Without the Go prefix, `go get`
 reports no matching versions.
 
@@ -207,7 +207,7 @@ The broker tag and image go first, because every SDK is released *against* a bro
 because most downstream consumers wait on it; then PyPI; then the three crates, protocol before
 client and engine; then the Go module tag. Publish the supervisor release before creating the
 PHP source tag: the PHP release workflow verifies the pinned supervisor archives before it
-mirrors `clients/client-laravel/vX.Y.Z` as Packagist `vX.Y.Z`. Finally create the CLI tag, which
+mirrors `clients/client-php/vX.Y.Z` as Packagist `vX.Y.Z`. Finally create the CLI tag, which
 triggers its own workflow.
 
 ## Rollback, and the one place additivity stops

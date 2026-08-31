@@ -535,7 +535,7 @@ repository = Path(sys.argv[1]).resolve()
 output = Path(sys.argv[2]).resolve()
 pathspecs = [
     "benchmark-queen/laravel-supervisors",
-    "clients/client-laravel",
+    "clients/client-php",
     "server",
     "supervisor",
 ]

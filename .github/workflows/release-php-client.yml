@@ -5,13 +5,13 @@ on:
     branches:
       - master
     paths:
-      - 'clients/client-laravel/**'
+      - 'clients/client-php/**'
     tags:
-      - 'clients/client-laravel/v*'
+      - 'clients/client-php/v*'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing clients/client-laravel/vX.Y.Z tag to publish'
+        description: 'Existing clients/client-php/vX.Y.Z tag to publish'
         required: true
         type: string
 
@@ -41,7 +41,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           split_commit=$(python3 .github/scripts/split-php-client.py HEAD)
-          expected_tree=$(git rev-parse HEAD:clients/client-laravel)
+          expected_tree=$(git rev-parse HEAD:clients/client-php)
           test "$expected_tree" = "$(git rev-parse "${split_commit}^{tree}")" || {
             echo 'subtree split tree does not match the source package' >&2
             exit 1
@@ -73,7 +73,7 @@ jobs:
 
   verify-release:
     if: >-
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/clients/client-laravel/v'))
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/clients/client-php/v'))
       || github.event_name == 'workflow_dispatch'
     name: Verify release on PHP ${{ matrix.php-version }}
     runs-on: ubuntu-24.04
@@ -104,7 +104,7 @@ jobs:
           RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -Eeuo pipefail
-          [[ "$RELEASE_TAG" =~ ^clients/client-laravel/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+          [[ "$RELEASE_TAG" =~ ^clients/client-php/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
             echo "invalid PHP client tag: $RELEASE_TAG" >&2
             exit 1
           }
@@ -125,17 +125,17 @@ jobs:
           coverage: none
           tools: composer:v2
       - name: Validate and install package
-        working-directory: clients/client-laravel
+        working-directory: clients/client-php
         run: |
           composer validate --strict
           composer install --no-interaction --no-progress --prefer-dist
           composer audit --locked --no-interaction
       - name: Run package unit suite
-        working-directory: clients/client-laravel
+        working-directory: clients/client-php
         run: vendor/bin/phpunit --testsuite Unit
       - name: Verify Redis overlap integration
         if: matrix.php-version == '8.3'
-        working-directory: clients/client-laravel
+        working-directory: clients/client-php
         env:
           QUEEN_LARAVEL_TEST_REDIS_HOST: 127.0.0.1
           QUEEN_LARAVEL_TEST_REDIS_PORT: 6379
@@ -150,7 +150,7 @@ jobs:
           import re
           from pathlib import Path
 
-          source = Path('clients/client-laravel/src/Laravel/Supervisor/Binary/SupervisorBinary.php').read_text()
+          source = Path('clients/client-php/src/Laravel/Supervisor/Binary/SupervisorBinary.php').read_text()
           match = re.search(r"const VERSION = '([^']+)'", source)
           if match is None:
               raise SystemExit('cannot determine the pinned supervisor version')
@@ -169,7 +169,7 @@ jobs:
 
   publish-release:
     if: >-
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/clients/client-laravel/v'))
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/clients/client-php/v'))
       || github.event_name == 'workflow_dispatch'
     name: Publish the verified Packagist tag
     needs: verify-release
@@ -187,7 +187,7 @@ jobs:
           RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -Eeuo pipefail
-          [[ "$RELEASE_TAG" =~ ^clients/client-laravel/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+          [[ "$RELEASE_TAG" =~ ^clients/client-php/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
             echo "invalid PHP client tag: $RELEASE_TAG" >&2
             exit 1
           }
@@ -202,13 +202,13 @@ jobs:
             exit 1
           }
           split_commit=$(python3 .github/scripts/split-php-client.py "$source_commit")
-          expected_tree=$(git rev-parse "$source_commit:clients/client-laravel")
+          expected_tree=$(git rev-parse "$source_commit:clients/client-php")
           test "$expected_tree" = "$(git rev-parse "${split_commit}^{tree}")" || {
             echo 'subtree split tree does not match the source package' >&2
             exit 1
           }
           echo "SPLIT_COMMIT=$split_commit" >> "$GITHUB_ENV"
-          echo "PACKAGE_VERSION=${RELEASE_TAG#clients/client-laravel/}" >> "$GITHUB_ENV"
+          echo "PACKAGE_VERSION=${RELEASE_TAG#clients/client-php/}" >> "$GITHUB_ENV"
       - name: Create target-repository token
         id: mirror-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3

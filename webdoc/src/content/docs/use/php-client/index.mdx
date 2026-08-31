@@ -6,24 +6,24 @@ tier: use
 sidebar:
   order: 7
 sourceOfTruth:
-  - clients/client-laravel/composer.json
-  - clients/client-laravel/src/Queen.php
-  - clients/client-laravel/src/Builders/QueueBuilder.php
-  - clients/client-laravel/src/Builders/PushBuilder.php
-  - clients/client-laravel/src/Consumer/ConsumerManager.php
-  - clients/client-laravel/src/Timers.php
-  - clients/client-laravel/src/Laravel/QueenServiceProvider.php
-  - clients/client-laravel/src/Laravel/Queue/QueenQueue.php
-  - clients/client-laravel/src/Laravel/Queue/QueenJob.php
-  - clients/client-laravel/src/Laravel/Commands/ConsumeCommand.php
-  - clients/client-laravel/config/queen.php
+  - clients/client-php/composer.json
+  - clients/client-php/src/Queen.php
+  - clients/client-php/src/Builders/QueueBuilder.php
+  - clients/client-php/src/Builders/PushBuilder.php
+  - clients/client-php/src/Consumer/ConsumerManager.php
+  - clients/client-php/src/Timers.php
+  - clients/client-php/src/Laravel/QueenServiceProvider.php
+  - clients/client-php/src/Laravel/Queue/QueenQueue.php
+  - clients/client-php/src/Laravel/Queue/QueenJob.php
+  - clients/client-php/src/Laravel/Commands/ConsumeCommand.php
+  - clients/client-php/config/queen.php
 verifiedBy:
-  - clients/client-laravel/tests/QueueBuilderTest.php
-  - clients/client-laravel/tests/HighLevelConsumerTest.php
-  - clients/client-laravel/tests/HttpClientTest.php
-  - clients/client-laravel/tests/TimersTest.php
-  - clients/client-laravel/tests/LaravelQueueDriverTest.php
-  - clients/client-laravel/tests/LaravelServiceProviderTest.php
+  - clients/client-php/tests/QueueBuilderTest.php
+  - clients/client-php/tests/HighLevelConsumerTest.php
+  - clients/client-php/tests/HttpClientTest.php
+  - clients/client-php/tests/TimersTest.php
+  - clients/client-php/tests/LaravelQueueDriverTest.php
+  - clients/client-php/tests/LaravelServiceProviderTest.php
 ---
 
 The PHP client is a plain PSR-4 library, `Queen\` mapped onto `src/`, with an optional Laravel

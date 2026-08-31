@@ -5,7 +5,7 @@ declare(strict_types=1);
 use Queen\Laravel\Supervisor\Binary\SupervisorBinary;
 use Queen\Laravel\Supervisor\Binary\SupervisorBinaryInstaller;
 
-require __DIR__ . '/../../clients/client-laravel/vendor/autoload.php';
+require __DIR__ . '/../../clients/client-php/vendor/autoload.php';
 
 if ($argc !== 4) {
     fwrite(STDERR, "usage: php verify_client_archive.php MANIFEST ARCHIVE INSTALL_DIRECTORY\n");

@@ -8,21 +8,21 @@ sidebar:
   order: 5
   label: Queen vs Horizon
 sourceOfTruth:
-  - clients/client-laravel/config/queen.php
-  - clients/client-laravel/src/Laravel/QueenServiceProvider.php
-  - clients/client-laravel/src/Laravel/Queue/QueenQueue.php
-  - clients/client-laravel/src/Laravel/Supervisor/SupervisorConfiguration.php
-  - clients/client-laravel/src/Laravel/Supervisor/PhpSupervisor.php
-  - clients/client-laravel/src/Laravel/Supervisor/SupervisorState.php
-  - clients/client-laravel/src/Laravel/Dashboard/DashboardRepository.php
+  - clients/client-php/config/queen.php
+  - clients/client-php/src/Laravel/QueenServiceProvider.php
+  - clients/client-php/src/Laravel/Queue/QueenQueue.php
+  - clients/client-php/src/Laravel/Supervisor/SupervisorConfiguration.php
+  - clients/client-php/src/Laravel/Supervisor/PhpSupervisor.php
+  - clients/client-php/src/Laravel/Supervisor/SupervisorState.php
+  - clients/client-php/src/Laravel/Dashboard/DashboardRepository.php
   - supervisor/src/main.rs
   - benchmark-queen/laravel-supervisors/QUALIFICATION_SUMMARY_20260829.md
   - benchmark-queen/laravel-supervisors/QUALIFICATION_REPORT_20260829.md
 verifiedBy:
-  - clients/client-laravel/tests/LaravelQueueDriverTest.php
-  - clients/client-laravel/tests/LaravelSupervisorTest.php
-  - clients/client-laravel/tests/LaravelSupervisorProductionTest.php
-  - clients/client-laravel/tests/LaravelDashboardTest.php
+  - clients/client-php/tests/LaravelQueueDriverTest.php
+  - clients/client-php/tests/LaravelSupervisorTest.php
+  - clients/client-php/tests/LaravelSupervisorProductionTest.php
+  - clients/client-php/tests/LaravelDashboardTest.php
 ---
 
 Queen is not a drop-in reimplementation of Horizon. Both can supervise Laravel workers, but they

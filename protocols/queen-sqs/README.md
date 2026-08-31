@@ -99,7 +99,7 @@ actually addresses the queue, and it is the account segment of a queue URL:
 ```
 
 `php artisan queue:work sqs` then runs against Queen. (This is not the same
-thing as `clients/client-laravel`, which is a NATIVE Queen queue driver and the
+thing as `clients/client-php`, which is a NATIVE Queen queue driver and the
 faster of the two — this path exists so an application already written for SQS
 does not have to change.)
 

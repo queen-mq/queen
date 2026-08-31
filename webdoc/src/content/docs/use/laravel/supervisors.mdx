@@ -7,24 +7,24 @@ status: preview
 sidebar:
   order: 2
 sourceOfTruth:
-  - clients/client-laravel/config/queen.php
-  - clients/client-laravel/bin/queen-supervisor
-  - clients/client-laravel/src/Laravel/Commands/SuperviseCommand.php
-  - clients/client-laravel/src/Laravel/Commands/SupervisorConfigCommand.php
-  - clients/client-laravel/src/Laravel/Commands/SupervisorControlCommand.php
-  - clients/client-laravel/src/Laravel/Commands/SupervisorInstallCommand.php
-  - clients/client-laravel/src/Laravel/Supervisor/SupervisorConfiguration.php
-  - clients/client-laravel/src/Laravel/Supervisor/PhpSupervisor.php
-  - clients/client-laravel/src/Laravel/Supervisor/SupervisorState.php
-  - clients/client-laravel/src/Laravel/Supervisor/AutoScaler.php
-  - clients/client-laravel/src/Laravel/Supervisor/Binary/SupervisorBinaryInstaller.php
+  - clients/client-php/config/queen.php
+  - clients/client-php/bin/queen-supervisor
+  - clients/client-php/src/Laravel/Commands/SuperviseCommand.php
+  - clients/client-php/src/Laravel/Commands/SupervisorConfigCommand.php
+  - clients/client-php/src/Laravel/Commands/SupervisorControlCommand.php
+  - clients/client-php/src/Laravel/Commands/SupervisorInstallCommand.php
+  - clients/client-php/src/Laravel/Supervisor/SupervisorConfiguration.php
+  - clients/client-php/src/Laravel/Supervisor/PhpSupervisor.php
+  - clients/client-php/src/Laravel/Supervisor/SupervisorState.php
+  - clients/client-php/src/Laravel/Supervisor/AutoScaler.php
+  - clients/client-php/src/Laravel/Supervisor/Binary/SupervisorBinaryInstaller.php
   - supervisor/src/main.rs
   - .github/workflows/release-supervisor.yml
 verifiedBy:
-  - clients/client-laravel/tests/LaravelSupervisorTest.php
-  - clients/client-laravel/tests/LaravelSupervisorCommandTest.php
-  - clients/client-laravel/tests/LaravelSupervisorProductionTest.php
-  - clients/client-laravel/tests/SupervisorBinaryInstallerTest.php
+  - clients/client-php/tests/LaravelSupervisorTest.php
+  - clients/client-php/tests/LaravelSupervisorCommandTest.php
+  - clients/client-php/tests/LaravelSupervisorProductionTest.php
+  - clients/client-php/tests/SupervisorBinaryInstallerTest.php
 ---
 
 The Queen supervisor is a **local control plane**. It starts ordinary Laravel
