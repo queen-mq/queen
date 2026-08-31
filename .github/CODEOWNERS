@@ -1,0 +1,7 @@
+# Code owners for queen
+#
+# Every pull request targeting a protected branch (master) requires an
+# approving review from a code owner. Branch protection on master also
+# restricts merges to the same owner.
+
+* @alice-viola
