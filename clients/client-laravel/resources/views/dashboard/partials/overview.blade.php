@@ -5,9 +5,9 @@
     </div>
     <dl class="metrics">
         <div class="metric">
-            <dt>Processes</dt>
+            <dt>Worker processes</dt>
             <dd>{{ number_format($supervisor['workers']) }}</dd>
-            <small>Across all worker pools</small>
+            <small>Running across all pools</small>
         </div>
         <div class="metric">
             <dt>Queued jobs</dt>
@@ -20,13 +20,43 @@
             <small>{{ ($failedJobs['available'] ?? false) ? 'Laravel failed-job store' : 'Backend unavailable' }}</small>
         </div>
         <div class="metric">
-            <dt>Status</dt>
+            <dt>Liveness</dt>
             <dd>
-                <span class="operational-state tone-{{ $stateTone }}">
-                    <span class="state-mark" aria-hidden="true"></span>{{ $stateLabel }}
+                <span class="operational-state tone-{{ $livenessTone }}">
+                    <span class="state-mark" aria-hidden="true"></span>{{ $livenessLabel }}
                 </span>
             </dd>
-            <small>{{ $supervisor['availability'] }}</small>
+            <small>Heartbeat and owner lock</small>
+        </div>
+        <div class="metric">
+            <dt>Readiness</dt>
+            <dd>
+                <span class="operational-state tone-{{ $readinessTone }}">
+                    <span class="state-mark" aria-hidden="true"></span>{{ $readinessLabel }}
+                </span>
+            </dd>
+            <small>At least one safe worker per active pool</small>
+        </div>
+        <div class="metric">
+            <dt>Desired capacity</dt>
+            <dd><span class="badge {{ $capacityTone }}">{{ $capacityLabel }}</span></dd>
+            <small>{{ $supervisor['processing_healthy'] ? 'Processing healthy' : 'Processing health degraded' }}</small>
+        </div>
+        <div class="metric">
+            <dt>Process budget</dt>
+            <dd>{{ $budgetLabel }}</dd>
+            <small>
+                @if ($processBudget['valid'])
+                    {{ number_format($processBudget['available']) }} available
+                @else
+                    Report unavailable
+                @endif
+            </small>
+        </div>
+        <div class="metric">
+            <dt>Renewal helpers</dt>
+            <dd>{{ $processBudget['valid'] ? number_format($processBudget['renewal_helpers_reserved']) : '—' }}</dd>
+            <small>Reserved inside the process budget</small>
         </div>
         <div class="metric">
             <dt>Engine</dt>

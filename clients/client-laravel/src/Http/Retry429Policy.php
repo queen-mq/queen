@@ -29,6 +29,9 @@ class Retry429Policy
     public const DEFAULT_BASE_MILLIS = 500;
     public const DEFAULT_CAP_MILLIS = 30000;
 
+    /** A single rate-limit sleep must stay operationally bounded. */
+    public const MAX_CAP_MILLIS = 300000;
+
     /** Fraction of the delay spread either way, to break up a synchronized herd. */
     private const JITTER = 0.2;
 
@@ -40,6 +43,11 @@ class Retry429Policy
         public readonly int $baseMillis = self::DEFAULT_BASE_MILLIS,
         public readonly int $capMillis = self::DEFAULT_CAP_MILLIS,
     ) {
+        if ($capMillis < 1 || $capMillis > self::MAX_CAP_MILLIS) {
+            throw new \InvalidArgumentException(
+                'retry429.capMs must be between 1 and ' . self::MAX_CAP_MILLIS,
+            );
+        }
     }
 
     /**
@@ -76,13 +84,14 @@ class Retry429Policy
     /**
      * Delay in milliseconds before retry number $attemptIndex (0-based).
      * A non-negative Retry-After (seconds) from the server wins over the
-     * exponential backoff (baseMillis * 2^attemptIndex, capped at
-     * capMillis); both are jittered by +-20%.
+     * computed exponential backoff. Both inputs are capped at capMillis before
+     * they are jittered by +-20%, preventing a malformed or hostile response
+     * header from overflowing usleep() or hanging a worker indefinitely.
      */
     public function delayMillis(int $attemptIndex, ?float $retryAfterSeconds = null): int
     {
         if ($retryAfterSeconds !== null && $retryAfterSeconds >= 0) {
-            $delay = $retryAfterSeconds * 1000;
+            $delay = min($this->capMillis, $retryAfterSeconds * 1000);
         } else {
             $exponent = min(max($attemptIndex, 0), self::MAX_EXPONENT);
             $delay = min($this->capMillis, $this->baseMillis * (2 ** $exponent));

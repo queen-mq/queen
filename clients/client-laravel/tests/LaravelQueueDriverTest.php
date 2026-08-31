@@ -6,6 +6,8 @@ use DateInterval;
 use DateTimeImmutable;
 use GuzzleHttp\HandlerStack;
 use Illuminate\Container\Container;
+use Illuminate\Events\Dispatcher;
+use Illuminate\Queue\Events\WorkerStopping;
 use PHPUnit\Framework\TestCase;
 use Queen\Exceptions\ConflationPolicyMismatchException;
 use Queen\Exceptions\HttpException;
@@ -433,7 +435,12 @@ class LaravelQueueDriverTest extends TestCase
                 ['success' => true, 'leaseReleased' => true],
             ]],
         ]);
-        [$queue] = $this->queueFor($handler, ['prefetch' => 3, 'ack_batch' => 3]);
+        $queue = $this->queueWithLeaseRenewer(
+            $handler,
+            new RecordingLeaseRenewer(),
+            prefetch: 3,
+            ackBatch: 3,
+        );
 
         $first = $queue->pop('emails');
         $first->delete();
@@ -485,6 +492,117 @@ class LaravelQueueDriverTest extends TestCase
         $queue->pop('emails')->delete();
         $this->assertSame(['lease-1'], $renewer->forgotten);
         $this->assertSame(['lease-1', 'lease-1', 'lease-1'], $renewer->healthChecks);
+    }
+
+    public function testWorkerStoppingRetriesOneRepresentativePerPrefetchedPartition(): void
+    {
+        $response = $this->popBatchResponse([
+            $this->payload('job-a1'),
+            $this->payload('job-a2'),
+            $this->payload('job-b1'),
+        ]);
+        $response['messages'][2]['partitionId'] = '0298f2c1-4d3a-7c10-9f2b-6a1e5d0c7b83';
+        $response['messages'][2]['partition'] = 'job-0002';
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $response],
+            ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => false]]],
+            ['status' => 200, 'json' => [
+                ['success' => true, 'leaseReleased' => true],
+                ['success' => true, 'leaseReleased' => true],
+            ]],
+        ]);
+        $renewer = new RecordingLeaseRenewer();
+        $queue = $this->queueWithLeaseRenewer($handler, $renewer, prefetch: 3);
+        $container = new Container();
+        $events = new Dispatcher($container);
+        $container->instance('events', $events);
+        $queue->setContainer($container);
+
+        $queue->pop('emails')->delete();
+        $events->dispatch(new WorkerStopping());
+
+        $this->assertCount(3, $handler->requests);
+        $this->assertSame('/api/v1/ack/batch', $handler->requests[2]->getUri()->getPath());
+        $body = json_decode((string) $handler->requests[2]->getBody(), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame(
+            ['transaction-2', 'transaction-3'],
+            array_column($body['acknowledgments'], 'transactionId'),
+        );
+        $this->assertSame(['retry', 'retry'], array_column($body['acknowledgments'], 'status'));
+        $this->assertSame(['lease-1'], $renewer->forgotten);
+        $this->assertSame(1, $renewer->closed);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('after worker shutdown began');
+        $queue->pop('emails');
+    }
+
+    public function testShutdownCombinesDeferredSuccessWithThePrefetchedRetryBoundary(): void
+    {
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popBatchResponse([
+                $this->payload('job-1'),
+                $this->payload('job-2'),
+                $this->payload('job-3'),
+            ])],
+            ['status' => 200, 'json' => [
+                ['success' => true, 'leaseReleased' => false],
+                ['success' => true, 'leaseReleased' => true],
+            ]],
+        ]);
+        $renewer = new RecordingLeaseRenewer();
+        $queue = $this->queueWithLeaseRenewer(
+            $handler,
+            $renewer,
+            prefetch: 3,
+            ackBatch: 3,
+        );
+
+        $queue->pop('emails')->delete();
+        $queue->shutdown();
+
+        $this->assertCount(2, $handler->requests);
+        $body = json_decode((string) $handler->requests[1]->getBody(), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame(
+            ['transaction-1', 'transaction-2'],
+            array_column($body['acknowledgments'], 'transactionId'),
+        );
+        $this->assertSame(['completed', 'retry'], array_column($body['acknowledgments'], 'status'));
+        $this->assertSame(['lease-1'], $renewer->forgotten);
+        $this->assertSame(1, $renewer->closed);
+    }
+
+    public function testUnrenewedJobSpecificTimeoutMustBeShorterThanRetryAfter(): void
+    {
+        $payload = $this->payload('job-too-long');
+        $payload['timeout'] = 120;
+        $handler = new PlanHandler([[
+            'status' => 200,
+            'json' => $this->popResponse($payload),
+        ]]);
+        [$queue] = $this->queueFor($handler);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('job timeout [120]');
+        $this->expectExceptionMessage('retry_after [120]');
+        $queue->pop('emails');
+    }
+
+    public function testRenewedLeaseAcceptsAJobSpecificTimeoutLongerThanItsInitialLease(): void
+    {
+        $payload = $this->payload('job-renewed');
+        $payload['timeout'] = 180;
+        $handler = new PlanHandler([
+            ['status' => 200, 'json' => $this->popResponse($payload)],
+            ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => true]]],
+        ]);
+        $renewer = new RecordingLeaseRenewer();
+        $queue = $this->queueWithLeaseRenewer($handler, $renewer);
+
+        $job = $queue->pop('emails');
+        $this->assertSame(180, $job->timeout());
+        $job->delete();
+        $this->assertSame(['lease-1'], $renewer->forgotten);
     }
 
     public function testUnsafeRenewalDiscardsTheWholeLeaseBeforeAnotherPrefetchedJobRuns(): void
@@ -619,7 +737,7 @@ class LaravelQueueDriverTest extends TestCase
             ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => false]]],
             ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => true]]],
         ]);
-        [$queue] = $this->queueFor($handler, ['prefetch' => 2, 'ack_batch' => 1]);
+        $queue = $this->queueWithLeaseRenewer($handler, new RecordingLeaseRenewer(), prefetch: 2);
 
         $first = $queue->pop('emails');
         try {
@@ -652,7 +770,7 @@ class LaravelQueueDriverTest extends TestCase
             ['status' => 200, 'json' => [['success' => true, 'dlq' => true]]],
             ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => true]]],
         ]);
-        [$queue] = $this->queueFor($handler, ['prefetch' => 3, 'ack_batch' => 1]);
+        $queue = $this->queueWithLeaseRenewer($handler, new RecordingLeaseRenewer(), prefetch: 3);
 
         $failed = $queue->pop('emails');
         $failed->markAsFailed();
@@ -676,7 +794,12 @@ class LaravelQueueDriverTest extends TestCase
                 ['success' => true, 'leaseReleased' => true],
             ]],
         ]);
-        [$queue] = $this->queueFor($handler, ['prefetch' => 8, 'ack_batch' => 8]);
+        $queue = $this->queueWithLeaseRenewer(
+            $handler,
+            new RecordingLeaseRenewer(),
+            prefetch: 8,
+            ackBatch: 8,
+        );
 
         $queue->pop('emails')->delete();
         $this->assertCount(1, $handler->requests);
@@ -696,7 +819,12 @@ class LaravelQueueDriverTest extends TestCase
             ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => true]]],
             ['status' => 200, 'json' => ['success' => true, 'transactionId' => 'bundle-1']],
         ]);
-        [$queue] = $this->queueFor($handler, ['prefetch' => 2, 'ack_batch' => 2]);
+        $queue = $this->queueWithLeaseRenewer(
+            $handler,
+            new RecordingLeaseRenewer(),
+            prefetch: 2,
+            ackBatch: 2,
+        );
 
         $queue->pop('emails')->delete();
         $queue->pop('emails')->release();
@@ -718,7 +846,7 @@ class LaravelQueueDriverTest extends TestCase
             ['status' => 200, 'json' => ['success' => true, 'transactionId' => 'bundle-1']],
             ['status' => 200, 'json' => [['success' => true, 'leaseReleased' => true]]],
         ]);
-        [$queue] = $this->queueFor($handler, ['prefetch' => 2, 'ack_batch' => 1]);
+        $queue = $this->queueWithLeaseRenewer($handler, new RecordingLeaseRenewer(), prefetch: 2);
 
         $queue->pop('emails')->release();
         $sibling = $queue->pop('emails');
@@ -740,7 +868,7 @@ class LaravelQueueDriverTest extends TestCase
             ['status' => 503, 'json' => ['error' => 'database unavailable']],
             ['status' => 200, 'json' => ['success' => true, 'messages' => []]],
         ]);
-        [$queue] = $this->queueFor($handler, ['prefetch' => 2, 'ack_batch' => 1]);
+        $queue = $this->queueWithLeaseRenewer($handler, new RecordingLeaseRenewer(), prefetch: 2);
 
         try {
             $queue->pop('emails')->release();
@@ -753,7 +881,7 @@ class LaravelQueueDriverTest extends TestCase
         $this->assertSame('/api/v1/pop/queue/emails', $handler->requests[array_key_last($handler->requests)]->getUri()->getPath());
     }
 
-    public function testBatchAckFailureRemainsRetryableAndVisible(): void
+    public function testPartialBatchAckFailureIsVisibleAndNotRetriedUnderRenewal(): void
     {
         $handler = new PlanHandler([
             ['status' => 200, 'json' => $this->popBatchResponse([
@@ -764,12 +892,13 @@ class LaravelQueueDriverTest extends TestCase
                 ['success' => true, 'leaseReleased' => true],
                 ['success' => false, 'error' => 'lease expired'],
             ]],
-            ['status' => 200, 'json' => [
-                ['success' => true, 'noop' => true],
-                ['success' => true, 'leaseReleased' => true],
-            ]],
         ]);
-        [$queue] = $this->queueFor($handler, ['prefetch' => 2, 'ack_batch' => 2]);
+        $queue = $this->queueWithLeaseRenewer(
+            $handler,
+            new RecordingLeaseRenewer(),
+            prefetch: 2,
+            ackBatch: 2,
+        );
 
         $queue->pop('emails')->delete();
         try {
@@ -780,7 +909,7 @@ class LaravelQueueDriverTest extends TestCase
         }
 
         $queue->flushAcknowledgements();
-        $this->assertCount(3, $handler->requests, 'the complete idempotent batch is retried');
+        $this->assertCount(2, $handler->requests, 'an ambiguous renewed lease must expire before redelivery');
     }
 
     public function testPopRejectsAConsumerGroupWithPersistedConflation(): void
@@ -1386,6 +1515,8 @@ class RecordingLeaseRenewer implements LeaseRenewer
 
     public ?string $trackFailure = null;
 
+    public int $closed = 0;
+
     public function track(string $leaseId, int $deadlineMonotonicMillis): void
     {
         $this->tracked[] = $leaseId;
@@ -1410,6 +1541,7 @@ class RecordingLeaseRenewer implements LeaseRenewer
 
     public function close(): void
     {
+        $this->closed++;
     }
 }
 

@@ -11,9 +11,12 @@ APP_IMAGE="queen-laravel-supervisor-bench:local"
 BROKER_IMAGE="queen-laravel-supervisor-broker:local"
 
 ENGINES_CSV="horizon,queen-php,queen-rust"
-QUEUES_CSV="critical,default"
-JOBS_PER_QUEUE=12
-WORKERS=2
+QUEUES_CSV="high,default,low"
+QUEUE_COUNTS_CSV="60,30,10"
+JOBS_PER_QUEUE=""
+QUEUE_COUNTS_EXPLICIT=0
+JOBS_PER_QUEUE_EXPLICIT=0
+WORKERS=3
 SLEEP_MS=5
 WAIT_TIMEOUT=180
 SETTLE_MS=1000
@@ -40,9 +43,10 @@ test, not a throughput or resource benchmark.
 Options:
   --output DIRECTORY        Required, new or empty artifact directory
   --engines CSV             Subset of horizon,queen-php,queen-rust
-  --queues CSV              At least two strict queue names (default: critical,default)
-  --jobs-per-queue N        Equal jobs dispatched to every queue (default: 12)
-  --workers N               Fixed worker pool, at least the queue count (default: 2)
+  --queues CSV              At least two strict queue names (default: high,default,low)
+  --queue-counts CSV        Ordered positive counts (default: 60,30,10)
+  --jobs-per-queue N        Compatibility shorthand for equal per-queue counts
+  --workers N               Fixed worker pool, at least the queue count (default: 3)
   --sleep-ms N              Runtime of every multi-queue job (default: 5)
   --timeout SECONDS         Deadline for each wait gate (default: 180)
   --settle-ms N             Continuous empty interval per queue (default: 1000)
@@ -50,8 +54,9 @@ Options:
   --dry-run                 Validate and write protocol metadata without Docker
   -h, --help                Show this help
 
-Every engine gets a unique Compose project, backend and result volume. All
-engines run the same deterministic round-robin multi-queue workload. Queen PHP
+Every engine gets a unique Compose project, backend and result volume. The
+default workload is a deterministic 60%/30%/10% weighted round-robin across
+high/default/low. Queen PHP
 and Queen Rust additionally exercise failed row + broker DLQ -> queue:retry ->
 successful completion -> empty failed store + empty DLQ.
 EOF
@@ -188,7 +193,16 @@ while [ "$#" -gt 0 ]; do
         --output) OUTPUT_DIRECTORY="${2:?--output requires a value}"; shift 2 ;;
         --engines) ENGINES_CSV="${2:?--engines requires a value}"; shift 2 ;;
         --queues) QUEUES_CSV="${2:?--queues requires a value}"; shift 2 ;;
-        --jobs-per-queue) JOBS_PER_QUEUE="${2:?--jobs-per-queue requires a value}"; shift 2 ;;
+        --queue-counts)
+            QUEUE_COUNTS_CSV="${2:?--queue-counts requires a value}"
+            QUEUE_COUNTS_EXPLICIT=1
+            shift 2
+            ;;
+        --jobs-per-queue)
+            JOBS_PER_QUEUE="${2:?--jobs-per-queue requires a value}"
+            JOBS_PER_QUEUE_EXPLICIT=1
+            shift 2
+            ;;
         --workers) WORKERS="${2:?--workers requires a value}"; shift 2 ;;
         --sleep-ms) SLEEP_MS="${2:?--sleep-ms requires a value}"; shift 2 ;;
         --timeout) WAIT_TIMEOUT="${2:?--timeout requires a value}"; shift 2 ;;
@@ -203,12 +217,10 @@ done
 [ -n "$OUTPUT_DIRECTORY" ] || die "--output is required"
 require_command git
 require_command python3
-require_positive_int "--jobs-per-queue" "$JOBS_PER_QUEUE"
 require_positive_int "--workers" "$WORKERS"
 require_uint "--sleep-ms" "$SLEEP_MS"
 require_positive_int "--timeout" "$WAIT_TIMEOUT"
 require_uint "--settle-ms" "$SETTLE_MS"
-[ "$JOBS_PER_QUEUE" -le 1000000 ] || die "--jobs-per-queue must not exceed 1000000"
 [ "$WORKERS" -le 256 ] || die "--workers must not exceed 256"
 [ "$SLEEP_MS" -le 60000 ] || die "--sleep-ms must not exceed 60000"
 [ "$WAIT_TIMEOUT" -le 86400 ] || die "--timeout must not exceed 86400"
@@ -230,12 +242,42 @@ ${QUEUES_CSV}
 EOF
 IFS="$OLD_IFS"
 
+[ "$QUEUE_COUNTS_EXPLICIT" -eq 0 ] || [ "$JOBS_PER_QUEUE_EXPLICIT" -eq 0 ] \
+    || die "--queue-counts and --jobs-per-queue are mutually exclusive"
+if [ "$JOBS_PER_QUEUE_EXPLICIT" -eq 1 ]; then
+    require_positive_int "--jobs-per-queue" "$JOBS_PER_QUEUE"
+    [ "$JOBS_PER_QUEUE" -le 1000000 ] || die "--jobs-per-queue must not exceed 1000000"
+    QUEUE_COUNTS_CSV=""
+    for _queue in "${QUEUES[@]}"; do
+        if [ -n "$QUEUE_COUNTS_CSV" ]; then
+            QUEUE_COUNTS_CSV="${QUEUE_COUNTS_CSV},"
+        fi
+        QUEUE_COUNTS_CSV="${QUEUE_COUNTS_CSV}${JOBS_PER_QUEUE}"
+    done
+fi
+case "$QUEUE_COUNTS_CSV" in
+    ''|,*|*,|*,,*) die "--queue-counts must be a non-empty CSV without empty entries" ;;
+esac
+IFS=',' read -r -a QUEUE_COUNTS <<EOF
+${QUEUE_COUNTS_CSV}
+EOF
+IFS="$OLD_IFS"
+
 [ "${#ENGINES[@]}" -gt 0 ] || die "at least one engine is required"
 [ "${#QUEUES[@]}" -ge 2 ] || die "--queues requires at least two queues"
 [ "${#QUEUES[@]}" -le 256 ] || die "--queues must not contain more than 256 queues"
+[ "${#QUEUE_COUNTS[@]}" -eq "${#QUEUES[@]}" ] \
+    || die "--queue-counts must contain exactly one count for every queue"
 [ "$WORKERS" -ge "${#QUEUES[@]}" ] || die "--workers must cover every configured queue"
-[ "$JOBS_PER_QUEUE" -le $(( 1000000 / ${#QUEUES[@]} )) ] \
-    || die "the multi-queue dispatch must not exceed 1000000 total jobs"
+
+TOTAL_JOBS=0
+for queue_count in "${QUEUE_COUNTS[@]}"; do
+    require_positive_int "--queue-counts entry" "$queue_count"
+    [ "$queue_count" -le 1000000 ] || die "--queue-counts entries must not exceed 1000000"
+    TOTAL_JOBS=$(( TOTAL_JOBS + queue_count ))
+    [ "$TOTAL_JOBS" -le 1000000 ] \
+        || die "the multi-queue dispatch must not exceed 1000000 total jobs"
+done
 
 contains_queen=0
 seen_engines="|"
@@ -276,7 +318,7 @@ git_short="$(git -C "$REPOSITORY_ROOT" rev-parse --short=10 HEAD)"
 campaign_id="feature-${campaign_stamp}-${git_short}-${campaign_token}"
 
 python3 - "$OUTPUT_DIRECTORY" "$campaign_id" "$REPOSITORY_ROOT" "$ENGINES_CSV" \
-    "$QUEUES_CSV" "$JOBS_PER_QUEUE" "$WORKERS" "$SLEEP_MS" "$WAIT_TIMEOUT" \
+    "$QUEUES_CSV" "$QUEUE_COUNTS_CSV" "$WORKERS" "$SLEEP_MS" "$WAIT_TIMEOUT" \
     "$SETTLE_MS" "$BUILD_IMAGES" "$DRY_RUN" <<'PY'
 import datetime as dt
 import json
@@ -286,7 +328,7 @@ import sys
 from pathlib import Path
 
 (
-    output, campaign_id, repository, engines, queues, jobs_per_queue, workers,
+    output, campaign_id, repository, engines, queues, queue_counts, workers,
     sleep_ms, timeout, settle_ms, build_images, dry_run,
 ) = sys.argv[1:]
 
@@ -295,6 +337,9 @@ def command(*args: str) -> str:
 
 engine_list = engines.split(",")
 queue_list = queues.split(",")
+counts = [int(value) for value in queue_counts.split(",")]
+jobs_by_queue = dict(zip(queue_list, counts, strict=True))
+equal_count = counts[0] if len(set(counts)) == 1 else None
 payload = {
     "schema": "queen.laravel-supervisors.feature-parity-protocol/v1",
     "qualification": "diagnostic_feature_smoke",
@@ -310,8 +355,10 @@ payload = {
     "settings": {
         "engines": engine_list,
         "queues": queue_list,
-        "jobs_per_queue": int(jobs_per_queue),
-        "total_jobs_per_lane": int(jobs_per_queue) * len(queue_list),
+        "queue_counts": counts,
+        "jobs_by_queue": jobs_by_queue,
+        "jobs_per_queue": equal_count,
+        "total_jobs_per_lane": sum(counts),
         "workers": int(workers),
         "sleep_ms": int(sleep_ms),
         "wait_timeout_seconds": int(timeout),
@@ -332,7 +379,7 @@ payload = {
     "method": {
         "isolation": "fresh Compose project, backend and named result volume per engine",
         "multi_queue": (
-            "deterministic round-robin equal dispatch; exact job-set and queue identity; "
+            "deterministic weighted round-robin dispatch; exact job-set and queue identity; "
             "continuous quiescence gate on every queue"
         ),
         "failed_job": (
@@ -458,12 +505,17 @@ $kernel->bootstrap();
 $runId = $argv[1];
 $connection = $argv[2];
 $queues = explode(",", $argv[3]);
-$jobsPerQueue = (int) $argv[4];
+$queueCounts = array_map("intval", explode(",", $argv[4]));
+$jobsByQueue = array_combine($queues, $queueCounts);
+if ($jobsByQueue === false || count($queueCounts) !== count($queues)) {
+    fwrite(STDERR, "queue/count cardinality mismatch\n");
+    exit(2);
+}
 $expected = [];
 $perQueue = [];
-foreach ($queues as $queue) {
-    $perQueue[$queue] = ["expected" => $jobsPerQueue, "unique" => 0, "records" => 0];
-    for ($index = 0; $index < $jobsPerQueue; ++$index) {
+foreach ($jobsByQueue as $queue => $queueCount) {
+    $perQueue[$queue] = ["expected" => $queueCount, "unique" => 0, "records" => 0];
+    for ($index = 0; $index < $queueCount; ++$index) {
         $expected[$queue.":".sprintf("%09d", $index)] = $queue;
     }
 }
@@ -506,14 +558,20 @@ sort($missing);
 sort($unexpected);
 sort($identityMismatches);
 ksort($duplicates);
+$starved = [];
+foreach ($perQueue as $queue => $counts) {
+    if ($counts["expected"] > 0 && $counts["unique"] === 0) {
+        $starved[] = $queue;
+    }
+}
 $passed = $missing === [] && $unexpected === [] && $duplicates === []
-    && $identityMismatches === [] && $records === count($expected);
+    && $identityMismatches === [] && $starved === [] && $records === count($expected);
 $result = [
     "schema" => "queen.laravel-supervisors.multi-queue-result/v1",
     "run_id" => $runId,
     "connection" => $connection,
     "queues" => $queues,
-    "jobs_per_queue" => $jobsPerQueue,
+    "jobs_by_queue" => $jobsByQueue,
     "expected" => count($expected),
     "records" => $records,
     "per_queue" => $perQueue,
@@ -521,11 +579,12 @@ $result = [
     "unexpected" => $unexpected,
     "duplicates" => $duplicates,
     "identity_mismatches" => $identityMismatches,
+    "starved_queues" => $starved,
     "passed" => $passed,
 ];
 echo json_encode($result, JSON_THROW_ON_ERROR | JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), PHP_EOL;
 exit($passed ? 0 : 1);
-' "$run_id" "$connection" "$QUEUES_CSV" "$JOBS_PER_QUEUE"
+' "$run_id" "$connection" "$QUEUES_CSV" "$QUEUE_COUNTS_CSV"
 }
 
 lifecycle_snapshot() {
@@ -1026,6 +1085,7 @@ worker_integrity = read(lane / "worker-integrity" / "result.json")
 multi_pass = (
     multi_summary.get("complete") is True
     and multi_exact.get("passed") is True
+    and multi_exact.get("starved_queues") == []
     and bool(queue_states)
     and all(
         state.get("quiescent") is True
@@ -1084,7 +1144,9 @@ result = {
     "multi_queue": {
         "expected": multi_exact.get("expected"),
         "records": multi_exact.get("records"),
+        "jobs_by_queue": multi_exact.get("jobs_by_queue"),
         "per_queue": multi_exact.get("per_queue"),
+        "starved_queues": multi_exact.get("starved_queues"),
         "queue_states": queue_states,
         "passed": multi_pass,
     },
@@ -1118,7 +1180,7 @@ run_lane() {
     local first_queue="${QUEUES[0]}"
     local group
     local app_id
-    local expected_jobs=$(( JOBS_PER_QUEUE * ${#QUEUES[@]} ))
+    local expected_jobs="$TOTAL_JOBS"
     local queue_index
     local failure_id
     local probe_id="probe-1"
@@ -1169,12 +1231,14 @@ run_lane() {
     export QUEEN_POP_FUSION=0
 
     python3 - "$ACTIVE_LANE_DIRECTORY" "$lane_engine" "$ACTIVE_PROJECT" "$ACTIVE_VOLUME" \
-        "$connection" "$group" "$QUEUES_CSV" "$JOBS_PER_QUEUE" "$WORKERS" <<'PY'
+        "$connection" "$group" "$QUEUES_CSV" "$QUEUE_COUNTS_CSV" "$WORKERS" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-lane, engine, project, volume, connection, group, queues, jobs, workers = sys.argv[1:]
+lane, engine, project, volume, connection, group, queues, counts, workers = sys.argv[1:]
+queue_list = queues.split(",")
+queue_counts = [int(value) for value in counts.split(",")]
 payload = {
     "schema": "queen.laravel-supervisors.feature-parity-lane-plan/v1",
     "engine": engine,
@@ -1182,8 +1246,10 @@ payload = {
     "results_volume": volume,
     "connection": connection,
     "consumer_group": group,
-    "queues": queues.split(","),
-    "jobs_per_queue": int(jobs),
+    "queues": queue_list,
+    "queue_counts": queue_counts,
+    "jobs_by_queue": dict(zip(queue_list, queue_counts, strict=True)),
+    "total_jobs": sum(queue_counts),
     "workers": int(workers),
     "failed_store": "file" if engine.startswith("queen-") else "null",
     "lease_renewal": False,
@@ -1231,7 +1297,7 @@ PY
 
     producer php artisan bench:dispatch-multi --no-ansi \
         --run-id="$ACTIVE_MULTI_RUN" \
-        --jobs-per-queue="$JOBS_PER_QUEUE" \
+        --queue-counts="$QUEUE_COUNTS_CSV" \
         --queues="$QUEUES_CSV" \
         --sleep-ms="$SLEEP_MS" \
         --cpu-iterations=0 \
@@ -1371,7 +1437,7 @@ for lane in lanes:
     )
 lines.extend([
     "",
-    "Multi-queue requires the exact expected job set, equal per-queue counts and a settled empty state for every queue.",
+    "Multi-queue requires the declared weighted job set, no starved queue and a settled empty state for every queue.",
     "Queen failed lifecycle requires one matching Laravel failed row and broker DLQ snapshot, one successful manual retry, then both stores empty.",
     "Worker integrity requires the same PID plus Linux process start-tick identity at the post-health baseline and post-workload final snapshot.",
     "Artifacts redact failed payloads and exception bodies and never contain resolved Compose configuration or environment dumps.",

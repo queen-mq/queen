@@ -43,6 +43,13 @@ class CampaignStatsTest(unittest.TestCase):
                 "cpu_iterations": 0,
                 "dispatch_mode": "single",
                 "ledger_mode": "off",
+                "durability": {
+                    "storage": "fresh_named_volumes",
+                    "redis_appendonly": "yes",
+                    "redis_appendfsync": "everysec",
+                    "postgres_synchronous_commit": "on",
+                    "broker_file_buffer": "named_volume",
+                },
                 "queues": ["benchmark"],
                 "failed_driver": "null",
                 "lease_renewal": False,

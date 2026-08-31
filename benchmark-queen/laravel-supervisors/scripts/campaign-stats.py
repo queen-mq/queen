@@ -129,6 +129,27 @@ METRICS: tuple[Metric, ...] = (
         path_metric("resources", "orchestrator", "rss_bytes", "max"),
     ),
     Metric(
+        "lease_renewer_cpu_seconds",
+        "Lease-renewer CPU",
+        "seconds",
+        "lower_is_better",
+        path_metric("resources", "lease_renewers", "cpu_seconds"),
+    ),
+    Metric(
+        "lease_renewer_pss_max_bytes",
+        "Lease-renewer peak PSS",
+        "bytes",
+        "lower_is_better",
+        path_metric("resources", "lease_renewers", "pss_bytes", "max"),
+    ),
+    Metric(
+        "lease_renewer_processes_peak",
+        "Lease-renewer peak processes",
+        "processes",
+        "lower_is_better",
+        path_metric("resources", "lease_renewers", "processes_peak"),
+    ),
+    Metric(
         "workers_cpu_seconds",
         "Worker CPU",
         "seconds",
@@ -238,6 +259,7 @@ METADATA_SETTING_FIELDS: tuple[str, ...] = (
     "cpu_iterations",
     "dispatch_mode",
     "ledger_mode",
+    "durability",
     "queues",
     "failed_driver",
     "lease_renewal",
@@ -1502,15 +1524,15 @@ def render_markdown(report: Mapping[str, Any]) -> str:
             "",
             "Values are median [Q1, Q3] over valid runs only.",
             "",
-            "| Engine | Profile | Aggregated/valid/total | Aggregate gate | Completion jobs/s | E2E p95 ms | Orchestrator PSS MiB | Stack CPU s | Stack MiB |",
-            "| --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |",
+            "| Engine | Profile | Aggregated/valid/total | Aggregate gate | Completion jobs/s | E2E p95 ms | Orchestrator PSS MiB | Renewer PSS MiB | Renewer processes | Stack CPU s | Stack MiB |",
+            "| --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
     )
     for group in report["aggregates"]:
         metrics = group["metrics"]
         lines.append(
             "| {engine} | {profile} | {aggregated}/{valid}/{total} | {gate} | {throughput} | {latency} | "
-            "{opss} | {cpu} | {memory} |".format(
+            "{opss} | {rpss} | {rprocs} | {cpu} | {memory} |".format(
                 engine=markdown_escape(group["engine"]),
                 profile=markdown_escape(group["profile"]),
                 valid=group["runs_valid"],
@@ -1522,6 +1544,10 @@ def render_markdown(report: Mapping[str, Any]) -> str:
                 opss=stat_cell(
                     metrics["orchestrator_pss_max_bytes"], scale=1024 * 1024, digits=1
                 ),
+                rpss=stat_cell(
+                    metrics["lease_renewer_pss_max_bytes"], scale=1024 * 1024, digits=1
+                ),
+                rprocs=stat_cell(metrics["lease_renewer_processes_peak"], digits=1),
                 cpu=stat_cell(metrics["stack_cpu_seconds"], digits=3),
                 memory=stat_cell(
                     metrics["stack_memory_max_bytes"], scale=1024 * 1024, digits=1

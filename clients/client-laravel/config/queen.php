@@ -81,6 +81,9 @@ return [
         'heartbeat_timeout' => env('QUEEN_SUPERVISOR_HEARTBEAT_TIMEOUT'),
         'read_bearer_token' => env('QUEEN_SUPERVISOR_READ_BEARER_TOKEN'),
         'shutdown_grace' => env('QUEEN_SUPERVISOR_SHUTDOWN_GRACE', 75),
+        // Hard budget for supervised child processes. A normal worker costs
+        // one slot; a lease-renewal worker reserves a second slot for its
+        // lazy helper, including while the worker is gracefully draining.
         'process_limit' => env('QUEEN_SUPERVISOR_PROCESS_LIMIT', 256),
         // The final directory is 0700. Every existing parent must be owned by
         // root/the supervisor UID and not group/world-writable, except for a
@@ -162,7 +165,8 @@ return [
     // Backoff for HTTP 429 (rate limited by the proxy), independent of the
     // retry_attempts above. Nulls keep the per-request-kind defaults: 10
     // attempts for ordinary requests, unbounded for long-poll pops, 500ms
-    // base doubling up to a 30s cap. A Retry-After header always wins.
+    // base doubling up to a 30s cap. Retry-After wins as the delay source, then
+    // the same cap is applied to protect long-running workers from bad headers.
     'retry_429' => [
         'maxAttempts' => env('QUEEN_RETRY_429_MAX_ATTEMPTS'),
         'baseMs' => env('QUEEN_RETRY_429_BASE_MS'),

@@ -27,6 +27,11 @@ from typing import Any, Iterable
 SCHEMA = "queen.laravel-supervisors.stats/v1"
 LABEL_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 WORKER_MARKERS = ("horizon:work", "queue:work")
+LEASE_RENEWER_MARKERS = (
+    "leaserenewalworker::main",
+    "lease-renewal-worker",
+    "lease-renewer",
+)
 ORCHESTRATOR_MARKERS = (
     "horizon:supervisor",
     "horizon:master",
@@ -433,6 +438,8 @@ def classify_process(command: str, kind: str) -> str:
         return kind
     if any(marker in normalized for marker in WORKER_MARKERS):
         return "worker"
+    if any(marker in normalized for marker in LEASE_RENEWER_MARKERS):
+        return "lease-renewer"
     if any(marker in normalized for marker in ORCHESTRATOR_MARKERS):
         return "orchestrator"
     # `artisan horizon` is the Horizon master, but horizon:work was handled

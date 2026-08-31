@@ -208,6 +208,13 @@ final class SupervisorConfiguration
                     );
                 }
             }
+            $processCostPerWorker = $leaseRenewal ? 2 : 1;
+            if ($max > intdiv($processLimit, $processCostPerWorker)) {
+                throw new InvalidArgumentException(
+                    "Queen supervisor [{$name}] reserves {$processCostPerWorker} child processes per worker and exceeds "
+                    . "process_limit [{$processLimit}].",
+                );
+            }
             $connections[$connection] = self::readConnection($connectionConfig);
             $depthWaves = intdiv(count($queues) + self::DEPTH_POLL_CONCURRENCY - 1, self::DEPTH_POLL_CONCURRENCY);
             $backendCount = self::connectionBackendCount($connectionConfig);
@@ -261,8 +268,15 @@ final class SupervisorConfiguration
         }
 
         $totalMaxProcesses = array_sum(array_column($resolved, 'max_processes'));
-        if ($totalMaxProcesses > $processLimit) {
-            throw new InvalidArgumentException("Queen supervisors exceed the aggregate process_limit [{$processLimit}].");
+        $totalMaxProcessBudget = array_sum(array_map(
+            static fn (array $options): int => $options['max_processes'] * ($options['lease_renewal'] ? 2 : 1),
+            $resolved,
+        ));
+        if ($totalMaxProcessBudget > $processLimit) {
+            throw new InvalidArgumentException(
+                "Queen supervisors reserve [{$totalMaxProcessBudget}] child processes and exceed the aggregate "
+                . "process_limit [{$processLimit}].",
+            );
         }
         $timeSupervisors = count(array_filter(
             $resolved,

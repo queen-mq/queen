@@ -150,6 +150,31 @@ jobs:
       - name: Redis-backed Laravel overlap integration
         run: vendor/bin/phpunit --testsuite RedisIntegration --testdox
 
+  # The qualification harness is executable test infrastructure: a parser or
+  # fault-gate regression can make a green product look safe or a fast lane
+  # look comparable when it is not. Keep its offline contract tests and static
+  # shell checks in CI independently of long-running Docker campaigns.
+  laravel-supervisor-harness-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: benchmark-queen/laravel-supervisors
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Python lint tooling
+        run: python3 -m pip install --disable-pip-version-check "ruff==0.15.4"
+      - name: Harness unit tests
+        run: python3 -m unittest discover -s scripts/tests -v
+      - name: Python lint contract
+        run: ruff check scripts
+      - name: Shell syntax and static analysis
+        run: |
+          bash -n scripts/*.sh
+          shellcheck scripts/*.sh
+      - name: PHP fixture syntax
+        run: find app/app app/config app/tests -name '*.php' -print0 | xargs -0 -n1 php -l
+
   # Broker tests that do not require the live PostgreSQL stack. Native for fast
   # caching; live integration cases remain in the Docker-backed matrix above.
   rust-unit:

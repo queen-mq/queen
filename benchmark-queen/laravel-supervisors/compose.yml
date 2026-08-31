@@ -39,9 +39,9 @@ x-app-environment: &app-environment
   QUEEN_BULK_BATCH: ${QUEEN_BULK_BATCH:-100}
   QUEEN_PARTITIONS: ${QUEEN_PARTITIONS:-64}
   QUEEN_POP_FUSION: ${QUEEN_POP_FUSION:-0}
-  # Reliability probes opt in explicitly. Timed benchmark lanes keep the
-  # renewal helper disabled so its per-worker process is never hidden inside
-  # a supervisor resource comparison.
+  # The runner enables renewal whenever prefetch is greater than one. The
+  # sampler reports every helper as its own lease-renewer process role so the
+  # production-safe profile cannot hide that CPU, memory or PID cost.
   QUEEN_LEASE_RENEWAL: "${BENCH_LEASE_RENEWAL:-false}"
   QUEEN_LEASE_RENEWAL_INTERVAL: ${BENCH_LEASE_RENEWAL_INTERVAL:-}
   QUEEN_LEASE_RENEWAL_TIMEOUT: ${BENCH_LEASE_RENEWAL_TIMEOUT:-5}
@@ -84,7 +84,9 @@ services:
       - --save
       - ""
       - --appendonly
-      - "no"
+      - "${BENCH_REDIS_APPENDONLY:-yes}"
+      - --appendfsync
+      - "${BENCH_REDIS_APPEND_FSYNC:-everysec}"
       - --maxmemory
       - 1664mb
       - --maxmemory-policy
@@ -93,6 +95,8 @@ services:
     cpus: ${BENCH_REDIS_CPUS:-2.0}
     mem_limit: ${BENCH_REDIS_MEMORY:-2048m}
     pids_limit: 128
+    volumes:
+      - redis-data:/data
     healthcheck:
       test: [CMD, redis-cli, ping]
       # Probe quickly during bootstrap, then get out of the measured hot path.
@@ -121,8 +125,8 @@ services:
     cpus: ${BENCH_POSTGRES_CPUS:-1.0}
     mem_limit: ${BENCH_POSTGRES_MEMORY:-1024m}
     pids_limit: 256
-    tmpfs:
-      - /var/lib/postgresql/data:rw,nosuid,nodev,size=768m
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: [CMD-SHELL, pg_isready -U queen -d queen]
       start_interval: 1s
@@ -156,8 +160,8 @@ services:
     cpus: ${BENCH_BROKER_CPUS:-1.0}
     mem_limit: ${BENCH_BROKER_MEMORY:-1024m}
     pids_limit: 256
-    tmpfs:
-      - /var/lib/queen/buffers:rw,nosuid,nodev,size=256m
+    volumes:
+      - broker-buffers:/var/lib/queen/buffers
     healthcheck:
       test:
         - CMD-SHELL
@@ -252,3 +256,6 @@ services:
 volumes:
   results:
     name: ${BENCH_RESULTS_VOLUME:-queen-laravel-supervisor-results}
+  redis-data:
+  postgres-data:
+  broker-buffers:

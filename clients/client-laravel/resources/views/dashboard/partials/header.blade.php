@@ -23,8 +23,11 @@
                 unavailable
             @endif
         </span>
-        <span class="operational-state tone-{{ $stateTone }}">
-            <span class="state-mark" aria-hidden="true"></span>{{ $stateLabel }}
+        <span class="operational-state tone-{{ $livenessTone }}">
+            <span class="state-mark" aria-hidden="true"></span>{{ $livenessLabel }}
+        </span>
+        <span class="operational-state tone-{{ $readinessTone }}">
+            <span class="state-mark" aria-hidden="true"></span>{{ $readinessLabel }}
         </span>
     </div>
 </header>

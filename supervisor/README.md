@@ -59,19 +59,19 @@ cooldown windows. `balance_max_shift` limits subsequent elastic changes.
 `restart_backoff`, `restart_backoff_max` and `stable_after` bound crash loops.
 Scale-up remains immediate; downscale is applied only after the lower target
 has stayed valid for the entire delay. Both engines apply capped exponential
-backoff to unexpected short-lived exits. The Rust engine additionally opens a
-circuit after five consecutive failures and, after its cooldown, admits one
-probe until that worker becomes stable. The PHP engine has no open/one-probe
-circuit: from the fifth failure onward it keeps using `restart_backoff_max`.
+backoff to unexpected short-lived exits, open a circuit after five consecutive
+failures and, after its cooldown, admit exactly one probe until that worker
+becomes stable.
 Scale-down sends `SIGTERM` and moves workers to a separately tracked draining
 set, so the control loop remains responsive while an in-flight job finishes;
 the shared grace deadline still ends with a forced kill when needed. Draining
 workers continue to consume `process_limit` capacity, preventing repeated
-rebalances from exceeding the configured global safety limit. Both engines
+rebalances from exceeding the configured global safety limit. The limit is a
+child-process budget: a worker with lease renewal reserves two slots, one for
+Artisan and one for its lazy renewal helper. Both engines
 send graceful termination only to the Artisan leader, allowing an active
 lease-renewal helper to protect the in-flight job; a forced kill targets the
-whole worker process group in the Rust engine. The PHP engine targets the
-Artisan worker process itself.
+whole worker process group in both engines.
 
 Runtime files are matched on supervisor, connection and consumer group. The
 `time` strategy combines each matching worker's runtime EWMA using a capped
@@ -106,7 +106,9 @@ with either engine:
 ```bash
 php artisan queen:supervisor status
 php artisan queen:supervisor status --json
-php artisan queen:supervisor status --check # suitable for a process health check
+php artisan queen:supervisor status --check # liveness plus minimum serving readiness
+php artisan queen:supervisor status --check-capacity # every desired worker is running
+php artisan queen:supervisor status --check-liveness # master heartbeat only
 php artisan queen:supervisor pause
 php artisan queen:supervisor continue
 php artisan queen:supervisor terminate
@@ -117,8 +119,16 @@ until `continue`; this prevents a prefetched, leased tail from becoming stale
 during an unbounded operator pause. Continue reconciles fresh workers, while
 terminate initiates a graceful `SIGTERM` shutdown. Remaining workers are killed
 after `shutdown_grace`. The Artisan status command also checks the shared lock and
-adds `live`; a leftover `running`/`paused` document is reported as `stale` when
-no engine owns it.
+adds `live` and recomputes `ready`; a leftover `running`/`paused` document is
+reported as `stale` when no engine owns it. Readiness fails closed when any
+pool lacks a current depth sample or has zero running workers while its desired
+capacity is greater than zero. A pool with surviving workers stays ready while
+a replacement is in backoff or probe. The per-pool `capacity_satisfied` field
+separately exposes ordinary scale-up lag without flapping a readiness probe
+during a healthy rebalance. Use `--check-capacity` when a deployment or alert
+must instead fail on any such shortfall or unhealthy restart circuit; unlike
+readiness, that check is expected to be temporarily false during normal elastic
+scale-up.
 Status and commands carry a per-start `instance_id`; a delayed command aimed at
 a replaced supervisor is discarded. Status includes both an ISO-8601 UTC
 `updated_at` value and its `updated_at_epoch` counterpart, plus the number of
@@ -164,6 +174,12 @@ the master can drain each worker without prematurely killing its lease-renewal
 helper; systemd still applies the final `SIGKILL` to the whole cgroup after the
 deadline. Keep `SendSIGKILL=yes`, and set `TimeoutStopSec` strictly above the
 configured `shutdown_grace`.
+
+On Linux, the Rust engine also arms every Artisan leader with a hard parent-
+death signal. This is an immediate fence, not a replacement for cgroup cleanup:
+both engines publish `external_unit_cleanup_required=true`, because arbitrary
+job subprocesses can escape a process group. Run the master and all children in
+one systemd service or container and never restart only the master PID.
 
 A complete editable unit is shipped as
 [`dist/queen-supervisor.service.example`](dist/queen-supervisor.service.example);

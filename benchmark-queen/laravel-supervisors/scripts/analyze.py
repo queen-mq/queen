@@ -12,6 +12,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -26,8 +27,24 @@ REPORT_SCHEMA = "queen.laravel-supervisors.report/v1"
 QUEUE_STATE_SCHEMA = "queen.laravel-supervisors.queue-state/v1"
 LEDGER_SCHEMA = "queen.laravel-supervisors.effect-ledger/v1"
 FAILURE_WORDS = {"failed", "failure", "error", "exception", "dead", "timeout"}
-ROLE_PRIORITY = {"worker": 5, "orchestrator": 4, "app": 3, "backend": 2, "stack": 1}
+ROLE_PRIORITY = {
+    "worker": 6,
+    "lease-renewer": 5,
+    "orchestrator": 4,
+    "app": 3,
+    "backend": 2,
+    "stack": 1,
+}
+PROCESS_ROLES = ("orchestrator", "lease-renewer", "worker", "app", "backend", "stack")
 MAX_DISPATCH_JOBS = 1_000_000
+QUEEN_PROCESS_COUNTERS = (
+    "queen_process_push_requests_total",
+    "queen_process_pop_requests_total",
+    "queen_process_ack_requests_total",
+    "queen_process_push_messages_total",
+    "queen_process_pop_messages_total",
+    "queen_process_ack_messages_total",
+)
 
 
 @dataclass
@@ -142,6 +159,181 @@ def read_stats(run_directory: Path) -> JsonlSnapshot:
     return read_jsonl(path)
 
 
+def read_text(path: Path) -> tuple[str | None, str | None]:
+    try:
+        return path.read_text(encoding="utf-8"), None
+    except FileNotFoundError:
+        return None, f"missing metrics snapshot: {path.name}"
+    except (OSError, UnicodeDecodeError) as exception:
+        return None, f"cannot read metrics snapshot {path.name}: {exception}"
+
+
+def redis_info_counters(content: str) -> tuple[dict[str, int], list[str]]:
+    counters: dict[str, int] = {}
+    errors: list[str] = []
+    total_match = re.search(r"(?m)^total_commands_processed:(\d+)\r?$", content)
+    if total_match is None:
+        errors.append("Redis INFO has no total_commands_processed counter")
+    else:
+        counters["total_commands_processed"] = int(total_match.group(1))
+
+    for match in re.finditer(
+        r"(?m)^cmdstat_([^:]+):[^\r\n]*\bcalls=(\d+)(?:,|\r?$)", content
+    ):
+        counters[f"command:{match.group(1)}"] = int(match.group(2))
+    if not any(key.startswith("command:") for key in counters):
+        errors.append("Redis INFO has no commandstats counters")
+    return counters, errors
+
+
+def prometheus_counters(content: str) -> tuple[dict[str, int], list[str]]:
+    counters: dict[str, int] = {}
+    errors: list[str] = []
+    for name in QUEEN_PROCESS_COUNTERS:
+        match = re.search(rf"(?m)^{re.escape(name)}\s+([0-9]+(?:\.0+)?)\s*$", content)
+        if match is None:
+            errors.append(f"Prometheus snapshot has no {name} counter")
+            continue
+        counters[name] = int(float(match.group(1)))
+    return counters, errors
+
+
+def counter_delta(
+    before: dict[str, int], after: dict[str, int]
+) -> tuple[dict[str, int], list[str]]:
+    deltas: dict[str, int] = {}
+    errors: list[str] = []
+    for name in sorted(set(before) | set(after)):
+        start = before.get(name, 0)
+        finish = after.get(name, 0)
+        if finish < start:
+            errors.append(f"counter decreased: {name}")
+            continue
+        deltas[name] = finish - start
+    return deltas, errors
+
+
+def per_job(value: int | None, completed: int) -> float | None:
+    if value is None or completed <= 0:
+        return None
+    return value / completed
+
+
+def backend_operation_summary(
+    run_directory: Path, manifest: dict[str, Any], completed: int
+) -> dict[str, Any]:
+    connection = manifest.get("connection")
+    errors: list[str] = []
+    if connection == "redis":
+        source = "redis-info-commandstats"
+        before_path = run_directory / "backend-metrics.before.redis-info.txt"
+        after_path = run_directory / "backend-metrics.after.redis-info.txt"
+        parser = redis_info_counters
+    elif connection == "queen":
+        source = "queen-process-prometheus"
+        before_path = run_directory / "backend-metrics.before.prom"
+        after_path = run_directory / "backend-metrics.after.prom"
+        parser = prometheus_counters
+    else:
+        return {
+            "available": False,
+            "source": None,
+            "validation_errors": ["dispatch connection is neither redis nor queen"],
+        }
+
+    before_text, before_error = read_text(before_path)
+    after_text, after_error = read_text(after_path)
+    errors.extend(error for error in (before_error, after_error) if error is not None)
+    if before_text is None or after_text is None:
+        return {
+            "available": False,
+            "source": source,
+            "validation_errors": errors,
+        }
+
+    before, before_errors = parser(before_text)
+    after, after_errors = parser(after_text)
+    errors.extend(before_errors)
+    errors.extend(after_errors)
+    deltas, delta_errors = counter_delta(before, after)
+    errors.extend(delta_errors)
+
+    if connection == "redis":
+        command_deltas = {
+            key.removeprefix("command:"): value
+            for key, value in deltas.items()
+            if key.startswith("command:") and value > 0
+        }
+        observed_total = deltas.get("total_commands_processed")
+        # Exactly one of the two snapshot INFO calls lies inside the counter
+        # interval. Any additional INFO calls belong to the measured stack and
+        # must remain visible rather than being silently attributed to us.
+        observer_commands = min(1, command_deltas.get("info", 0))
+        operational_total = (
+            max(0, observed_total - observer_commands)
+            if observed_total is not None
+            else None
+        )
+        return {
+            "available": not errors,
+            "source": source,
+            "counter_scope": "redis-server",
+            "measurement_boundary": "after-final-quiescence-probe",
+            "observed_commands": observed_total,
+            "observer_commands_excluded": observer_commands,
+            "operational_commands": operational_total,
+            "operational_commands_per_completed_job": per_job(
+                operational_total, completed
+            ),
+            "command_calls": command_deltas,
+            "validation_errors": errors,
+            "comparability_note": (
+                "Redis commands are protocol operations, not semantically identical "
+                "to Queen API requests. Command types are retained for attribution. "
+                "The interval includes the bounded final quiescence observer."
+            ),
+        }
+
+    request_deltas = {
+        "push": deltas.get("queen_process_push_requests_total", 0),
+        "pop": deltas.get("queen_process_pop_requests_total", 0),
+        "ack": deltas.get("queen_process_ack_requests_total", 0),
+    }
+    message_deltas = {
+        "push": deltas.get("queen_process_push_messages_total", 0),
+        "pop": deltas.get("queen_process_pop_messages_total", 0),
+        "ack": deltas.get("queen_process_ack_messages_total", 0),
+    }
+    total_requests = sum(request_deltas.values())
+    consumer_requests = request_deltas["pop"] + request_deltas["ack"]
+    return {
+        "available": not errors,
+        "source": source,
+        "counter_scope": "broker-process",
+        "measurement_boundary": "after-final-quiescence-probe",
+        "requests": request_deltas,
+        "messages": message_deltas,
+        "total_requests": total_requests,
+        "total_requests_per_completed_job": per_job(total_requests, completed),
+        "consumer_requests": consumer_requests,
+        "consumer_requests_per_completed_job": per_job(consumer_requests, completed),
+        "messages_per_request": {
+            operation: (
+                message_deltas[operation] / request_deltas[operation]
+                if request_deltas[operation] > 0
+                else None
+            )
+            for operation in ("push", "pop", "ack")
+        },
+        "validation_errors": errors,
+        "comparability_note": (
+            "Queen counters are API requests. Compare their batching shape, not "
+            "their absolute count, directly with Redis command totals. The interval "
+            "includes the bounded final quiescence observer."
+        ),
+    }
+
+
 def is_failure(record: dict[str, Any]) -> bool:
     if record.get("success") is False:
         return True
@@ -173,21 +365,21 @@ def expected_job_ids(manifest: dict[str, Any]) -> tuple[set[str], list[str]]:
         return set(), [f"dispatch.jobs may not exceed {MAX_DISPATCH_JOBS}"]
 
     jobs_per_queue_raw = manifest.get("jobs_per_queue")
+    jobs_by_queue_raw = manifest.get("jobs_by_queue")
     queues_csv_raw = manifest.get("queues_csv")
-    multi_queue = jobs_per_queue_raw is not None or queues_csv_raw is not None
+    multi_queue = (
+        jobs_per_queue_raw is not None
+        or jobs_by_queue_raw is not None
+        or queues_csv_raw is not None
+    )
     if not multi_queue:
         return {f"{index:09d}" for index in range(expected)}, errors
 
     jobs_per_queue = nonnegative_integer(jobs_per_queue_raw)
-    if jobs_per_queue in {None, 0}:
-        errors.append("dispatch.jobs_per_queue must be a positive integer")
-    elif jobs_per_queue > MAX_DISPATCH_JOBS:
+    if jobs_per_queue is not None and jobs_per_queue == 0:
+        errors.append("dispatch.jobs_per_queue must be a positive integer when present")
+    elif jobs_per_queue is not None and jobs_per_queue > MAX_DISPATCH_JOBS:
         errors.append(f"dispatch.jobs_per_queue may not exceed {MAX_DISPATCH_JOBS}")
-
-    if manifest.get("dispatch_mode") != "round-robin-single":
-        errors.append(
-            "a multi-queue dispatch manifest must use dispatch_mode round-robin-single"
-        )
 
     queues: list[str] = []
     if not isinstance(queues_csv_raw, str) or not queues_csv_raw:
@@ -213,17 +405,58 @@ def expected_job_ids(manifest: dict[str, Any]) -> tuple[set[str], list[str]]:
                 errors.append(f"dispatch.queues_csv contains duplicate queue {queue!r}")
             seen.add(queue)
 
-    if jobs_per_queue is not None and jobs_per_queue > 0 and queues:
-        declared = jobs_per_queue * len(queues)
-        if declared != expected:
+    counts: dict[str, int] = {}
+    if jobs_by_queue_raw is not None:
+        if not isinstance(jobs_by_queue_raw, dict):
+            errors.append("dispatch.jobs_by_queue must be an object")
+        else:
+            if set(jobs_by_queue_raw) != set(queues):
+                errors.append("dispatch.jobs_by_queue keys must exactly match queues_csv")
+            for queue in queues:
+                count = nonnegative_integer(jobs_by_queue_raw.get(queue))
+                if count in {None, 0}:
+                    errors.append(
+                        f"dispatch.jobs_by_queue[{queue!r}] must be a positive integer"
+                    )
+                elif count > MAX_DISPATCH_JOBS:
+                    errors.append(
+                        f"dispatch.jobs_by_queue[{queue!r}] may not exceed {MAX_DISPATCH_JOBS}"
+                    )
+                else:
+                    counts[queue] = count
+        if manifest.get("dispatch_mode") != "weighted-round-robin-single":
             errors.append(
-                "dispatch.jobs does not equal jobs_per_queue multiplied by the queue count"
+                "a weighted multi-queue manifest must use dispatch_mode weighted-round-robin-single"
+            )
+        if jobs_per_queue is not None and counts and any(
+            count != jobs_per_queue for count in counts.values()
+        ):
+            errors.append(
+                "dispatch.jobs_per_queue conflicts with weighted jobs_by_queue"
+            )
+    else:
+        if jobs_per_queue in {None, 0}:
+            errors.append("dispatch.jobs_per_queue must be a positive integer")
+        elif queues:
+            counts = {queue: jobs_per_queue for queue in queues}
+        if manifest.get("dispatch_mode") != "round-robin-single":
+            errors.append(
+                "an equal multi-queue manifest must use dispatch_mode round-robin-single"
             )
 
-    if errors or jobs_per_queue is None:
+    if counts and sum(counts.values()) != expected:
+        errors.append(
+            "dispatch.jobs does not equal the sum of per-queue counts"
+            if jobs_by_queue_raw is not None
+            else "dispatch.jobs does not equal jobs_per_queue multiplied by the queue count"
+        )
+
+    if errors or not counts:
         return set(), errors
     return {
-        f"{queue}:{index:09d}" for queue in queues for index in range(jobs_per_queue)
+        f"{queue}:{index:09d}"
+        for queue in queues
+        for index in range(counts[queue])
     }, errors
 
 
@@ -506,7 +739,7 @@ def process_resource_summary(
                 bucket["private_count"] += 1
 
         if inside:
-            for role in ("orchestrator", "worker", "app", "backend", "stack"):
+            for role in PROCESS_ROLES:
                 bucket = per_role[role]
                 memory_series[role]["count"].append(bucket["count"])
                 memory_series[role]["pss_count"].append(bucket["pss_count"])
@@ -522,7 +755,7 @@ def process_resource_summary(
     else:
         duration_ns = 0
     output: dict[str, dict[str, Any]] = {}
-    for role in ("orchestrator", "worker", "app", "backend", "stack"):
+    for role in PROCESS_ROLES:
         runtime_ns = sum(
             tracked_delta(track, "runtime")
             for track in tracks.values()
@@ -741,6 +974,7 @@ def resource_window(
         else None,
         "samples": len(selected),
         "orchestrator": processes["orchestrator"],
+        "lease_renewers": processes["lease-renewer"],
         "workers": processes["worker"],
         "app": cgroups["app"],
         "backend": cgroups["backend"],
@@ -1388,6 +1622,9 @@ def summarize_run(run_directory: Path, maximum_ids: int = 100) -> dict[str, Any]
     )
 
     completed_ids = set(selected)
+    backend_operations = backend_operation_summary(
+        run_directory, manifest, len(completed_ids)
+    )
     missing_count = (
         max(0, expected - events["expected_completed"]) if expected is not None else 0
     )
@@ -1585,8 +1822,9 @@ def summarize_run(run_directory: Path, maximum_ids: int = 100) -> dict[str, Any]
         )
     pss_requested = sampler_metadata.get("pss_enabled") is True
     pss_complete = not pss_requested or all(
-        value_at(headline, role, "pss_coverage") == 1.0
-        for role in ("orchestrator", "workers")
+        value_at(headline, role, "processes_peak") == 0
+        or value_at(headline, role, "pss_coverage") == 1.0
+        for role in ("orchestrator", "lease_renewers", "workers")
     )
     complete = expected is not None and events["expected_completed"] == expected
     correct = (
@@ -1648,6 +1886,7 @@ def summarize_run(run_directory: Path, maximum_ids: int = 100) -> dict[str, Any]
         },
         "queue_state": queue_state,
         "effect_ledger": effect_ledger,
+        "backend_operations": backend_operations,
         "throughput": {
             "headline_jobs_per_second": duration_rate(
                 len(selected), dispatch_to_complete_ns
@@ -1677,6 +1916,7 @@ def summarize_run(run_directory: Path, maximum_ids: int = 100) -> dict[str, Any]
                 if key.endswith("_ns") or key == "samples"
             },
             "orchestrator": headline["orchestrator"],
+            "lease_renewers": headline["lease_renewers"],
             "workers": headline["workers"],
             "app": headline["app"],
             "backend": headline["backend"],
@@ -2008,6 +2248,55 @@ def markdown_report(report: dict[str, Any]) -> str:
                 bmem=mib(value_at(resources, "backend", "memory_current_bytes", "max")),
                 scpu=decimal(value_at(resources, "stack", "cpu_seconds"), 3),
                 smem=mib(value_at(resources, "stack", "memory_current_bytes", "max")),
+            )
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Backend operation shape",
+            "",
+            "Redis values are protocol commands; Queen values are broker API requests. "
+            "They are intentionally not used as cross-engine ratios because the units "
+            "are not semantically identical.",
+            "",
+            "| Scenario | Source | Backend units/job | Push requests | Pop requests | ACK requests | Consumer requests/job | Pop messages/request | ACK messages/request |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for scenario in report["scenarios"]:
+        operations = scenario["summary"].get("backend_operations", {})
+        available = operations.get("available") is True
+        values = operations if available else {}
+        redis_per_job = value_at(values, "operational_commands_per_completed_job")
+        queen_per_job = value_at(values, "total_requests_per_completed_job")
+        units_per_job = redis_per_job if redis_per_job is not None else queen_per_job
+        source = str(operations.get("source") or "n/a")
+        if not available:
+            errors = operations.get("validation_errors")
+            detail = (
+                "; ".join(str(error) for error in errors)
+                if isinstance(errors, list)
+                else ""
+            )
+            source += f" (unavailable: {detail or 'validation failed'})"
+        lines.append(
+            "| {label} | {source} | {units} | {push} | {pop} | {ack} | {consumer} | {pop_batch} | {ack_batch} |".format(
+                label=scenario["label"].replace("|", "\\|"),
+                source=source.replace("|", "\\|"),
+                units=decimal(units_per_job, 3),
+                push=decimal(value_at(values, "requests", "push"), 0),
+                pop=decimal(value_at(values, "requests", "pop"), 0),
+                ack=decimal(value_at(values, "requests", "ack"), 0),
+                consumer=decimal(
+                    value_at(values, "consumer_requests_per_completed_job"), 3
+                ),
+                pop_batch=decimal(
+                    value_at(values, "messages_per_request", "pop"), 2
+                ),
+                ack_batch=decimal(
+                    value_at(values, "messages_per_request", "ack"), 2
+                ),
             )
         )
 

@@ -254,6 +254,45 @@ class EffectLedgerGateTest(unittest.TestCase):
             errors,
         )
 
+    def test_weighted_multi_queue_manifest_uses_declared_counts(self) -> None:
+        expected_ids, errors = analyze.expected_job_ids(
+            {
+                "jobs": 4,
+                "jobs_per_queue": None,
+                "jobs_by_queue": {"critical": 3, "default": 1},
+                "queues_csv": "critical,default",
+                "dispatch_mode": "weighted-round-robin-single",
+            }
+        )
+
+        self.assertEqual(
+            {
+                "critical:000000000",
+                "critical:000000001",
+                "critical:000000002",
+                "default:000000000",
+            },
+            expected_ids,
+        )
+        self.assertEqual([], errors)
+
+    def test_weighted_multi_queue_manifest_fails_on_count_drift(self) -> None:
+        expected_ids, errors = analyze.expected_job_ids(
+            {
+                "jobs": 5,
+                "jobs_per_queue": None,
+                "jobs_by_queue": {"critical": 3, "default": 1},
+                "queues_csv": "critical,default",
+                "dispatch_mode": "weighted-round-robin-single",
+            }
+        )
+
+        self.assertEqual(set(), expected_ids)
+        self.assertIn(
+            "dispatch.jobs does not equal the sum of per-queue counts",
+            errors,
+        )
+
     def test_retry_is_observed_as_dedup_without_duplicate_effect(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

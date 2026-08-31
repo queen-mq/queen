@@ -110,8 +110,9 @@ job. Use this profile while validating a migration and whenever every job, inclu
 fits inside `retry_after`.
 
 Values above one reduce broker round trips, but they widen the at-least-once redelivery window. A
-Laravel worker may also pause while it still owns a prefetched tail. Queen therefore rejects a
-supervisor configuration with `prefetch > 1` unless lease renewal is enabled.
+Laravel worker may also pause while it still owns a prefetched tail. The Queen connector therefore
+rejects `prefetch > 1` unless lease renewal is enabled, whether workers are started by Queen or by
+another process manager.
 
 ```dotenv
 QUEEN_PREFETCH=4
@@ -121,8 +122,10 @@ QUEEN_LEASE_RENEWAL=true
 
 Enable lease renewal even with `prefetch=1` when the longest runtime cannot be bounded safely. Lease
 renewal starts a small PHP helper beside each worker. It extends the active lease and fences the
-worker if renewal can no longer finish safely. It cannot make external side effects exactly once,
-so jobs must remain idempotent.
+worker if renewal can no longer finish safely. An exact-PID `SIGCHLD` watchdog also kills the
+owning worker if that helper disappears while a lease is active. This Unix CLI path requires
+PCNTL/POSIX support, and application code must not replace Queen's signal handler. Renewal cannot
+make external side effects exactly once, so jobs must remain idempotent.
 
 ## What changes from another Laravel connection
 

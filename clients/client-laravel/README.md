@@ -69,8 +69,8 @@ its whole-lease ACK fast path. Delivery remains at least once, but a process
 crash can redeliver up to the unflushed batch and can leave unprocessed
 prefetched jobs leased until `retry_after`. Laravel can pause between those
 jobs for an unbounded period (maintenance mode, `queue:pause` or a Looping
-listener), so Queen's supervisors require `QUEEN_LEASE_RENEWAL=true` whenever
-`QUEEN_PREFETCH>1`; apply the same rule to directly managed `queue:work`.
+listener), so the Queen connector rejects `QUEEN_PREFETCH>1` unless
+`QUEEN_LEASE_RENEWAL=true`, including directly managed `queue:work`.
 Keep prefetch at `1` for a no-helper profile, long-running jobs, strict per-job
 ACK confirmation, or comma-separated priority queues. Reentrant `pop()` while
 a prefetched job is still active is rejected.
@@ -83,9 +83,14 @@ shared by the active job, the local prefetch tail and any ACK awaiting
 confirmation. It is created in a
 clean subprocess, receives credentials over a private pipe, and exits when the
 worker closes that pipe. This mode requires Unix CLI PHP with `proc_open`,
-`proc_terminate`, `posix_getppid`, `posix_kill` and `posix_setpgid`; the first
-consume fails closed before delivering a job when the platform cannot provide
-them. The helper leaves the worker process group before confirming readiness,
+`proc_terminate`, PCNTL asynchronous signals, `posix_getppid`, `posix_kill` and
+`posix_setpgid`; the first consume fails closed before delivering a job when
+the platform cannot provide them. Once a lease is tracked, an exact-PID
+`SIGCHLD` watchdog immediately kills the owning worker if its helper exits; it
+chains the previously installed handler and never reaps unrelated children.
+Application bootstrap and job code must not replace Queen's `SIGCHLD` handler
+or disable asynchronous PCNTL dispatch while a job is active. The helper
+leaves the worker process group before confirming readiness,
 so a graceful Rust scale-down cannot stop renewal underneath the active job.
 When the Rust supervisor is PID 1, run it behind a real container init (for
 example Docker `--init`/Compose `init: true` or tini) so forcibly orphaned
@@ -102,12 +107,21 @@ and the connector additionally requires this conservative budget to fit:
 `interval + 2 × (HTTP timeout × backend count) + 1s retry + kill grace + safety
 margin < retry_after`. Defaults are one-third of `retry_after`, 5s HTTP timeout,
 2s kill grace and 1s safety margin. Each Laravel worker gains one PHP helper
-process; include its RSS/CPU in capacity planning and do not attribute it to
-the PHP or Rust supervisor's control-plane footprint. The initial deadline is
-derived from the host's 64-bit monotonic clock before the pop request starts;
+process; the supervisors reserve two child-process slots per renewed worker,
+but the external PID budget still needs headroom for the master, init and job
+subprocesses. Include helper RSS/CPU in capacity planning and do not attribute
+it to the PHP or Rust supervisor's control-plane footprint. The initial
+deadline is derived from the host's 64-bit monotonic clock before the pop request starts;
 a slow/long poll can therefore fence early but can never overestimate how long
 the broker lease remains valid. The helper acknowledges lease registration
 over the pipe before the job is handed to Laravel.
+
+The Queen supervisors validate their configured worker timeout against
+`retry_after`, and the driver rejects an explicit per-job timeout that is not
+safe without renewal. Laravel does not expose a directly invoked
+`queue:work --timeout` value through the connection contract, so deployments
+that bypass Queen's supervisors must enforce `--timeout < retry_after`
+themselves. Avoid deriving this policy from process arguments.
 
 Laravel's `Queue::bulk()` uses bounded, multi-partition Queen requests instead
 of looping over singleton pushes. `QUEEN_BULK_BATCH` bounds each request and
@@ -325,16 +339,17 @@ and support these balancing modes:
 workers; `default_runtime_seconds` is used until samples are available. Both
 strategies are bounded by `min_processes`, `max_processes`,
 `balance_cooldown`, `balance_max_shift` and the aggregate `process_limit`.
+`process_limit` is a supervised child-process budget rather than only a worker
+count: a renewal-enabled worker reserves two slots, including while draining,
+so its lazy helper cannot silently double the configured PID envelope.
 The supervisor establishes `processes` in `simple` mode, or at least
 `min_processes` otherwise, immediately; `balance_max_shift` applies only to
 elastic changes above that baseline.
 Workers being gracefully drained remain charged to `process_limit` until they
 actually exit, so a scale-down/reallocation cannot create a temporary process
 spike above the configured cap.
-Both engines cap exponential worker-restart backoff. Only the Rust engine opens
-a circuit after five consecutive crashes and allows a single probe after the
-cooldown; the PHP engine has no open/one-probe state and keeps retrying at
-`restart_backoff_max`.
+Both engines cap exponential worker-restart backoff, open a circuit after five
+consecutive crashes and allow exactly one probe after the cooldown.
 
 A minimal supervisor configuration is:
 
@@ -393,7 +408,9 @@ directory:
 ```bash
 php artisan queen:supervisor status
 php artisan queen:supervisor status --json
-php artisan queen:supervisor status --check # non-zero unless live
+php artisan queen:supervisor status --check # live plus minimum serving capacity
+php artisan queen:supervisor status --check-capacity # full desired capacity
+php artisan queen:supervisor status --check-liveness # heartbeat/owner only
 php artisan queen:supervisor pause
 php artisan queen:supervisor continue
 php artisan queen:supervisor terminate
@@ -405,6 +422,20 @@ worker shutdown and a non-zero master exit. During forced shutdown the master
 keeps `supervisor.lock` and retries/observes child termination; it does not
 publish `stopped` or permit generation takeover merely because SIGKILL was
 requested.
+
+Readiness requires a current queue-depth sample and at least one running worker
+whenever a pool currently desires capacity. A surviving pool stays ready while
+a replacement is in backoff or probe; that degraded circuit remains visible in
+pool health and makes `--check-capacity` fail. Readiness deliberately remains
+healthy during ordinary partial scale-up; use `--check-capacity` when every
+desired worker and a healthy restart circuit are required. Neither check replaces
+application SLO monitoring: alert separately on oldest-job age, completion rate,
+failures and DLQ growth. `process_limit` excludes the
+master, container init and arbitrary subprocesses created by job code, so the
+unit/container PID limit still needs explicit headroom. Both engines require
+whole-unit cleanup on master failure; the Rust engine additionally hard-fences
+the Artisan leader with `PDEATHSIG` on Linux, while PHP relies on the external
+systemd/container boundary.
 
 #### Supervisor dashboard
 
@@ -1368,7 +1399,9 @@ Laravel worker ever received it. Alert on that DLQ separately.
 Behind the Queen proxy a request can be rate limited (HTTP 429) or refused by
 a plan/tenant rule (HTTP 403). 429s are retried transparently: the client waits
 `Retry-After` seconds when the response carries one, otherwise an exponential
-backoff (500ms doubling up to 30s), always with ±20% jitter. Ordinary requests
+backoff (500ms doubling up to 30s). Both are capped by `capMs` before ±20%
+jitter, and `capMs` itself may not exceed 300,000ms, so an invalid response
+header or configuration cannot overflow or indefinitely park a worker. Ordinary requests
 give up after 10 attempts; a long-poll pop (`wait(true)`, the consumers, the
 artisan command) retries for as long as it polls. A 429 is a tenant signal, not
 a backend-health one, so it never marks a server unhealthy nor fails over to

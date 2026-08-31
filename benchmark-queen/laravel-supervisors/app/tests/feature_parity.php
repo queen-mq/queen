@@ -24,6 +24,7 @@ final class FeatureParityTest
         try {
             $this->testMultiQueueConfiguration($baseDirectory);
             $this->testMultiQueueDispatch($baseDirectory);
+            $this->testWeightedMultiQueueDispatch($baseDirectory);
             $this->testStrictQueueListValidation($baseDirectory);
             $this->testPersistentFailedStore($baseDirectory);
             $this->testFailureProbeFailsOnce($baseDirectory);
@@ -47,6 +48,20 @@ final class FeatureParityTest
         $this->same('critical', $config['benchmark']['queue'] ?? null, 'first queue is the default');
         $this->same(['critical', 'default'], $config['horizon_supervisor']['queue'] ?? null, 'Horizon queues');
         $this->same(['critical', 'default'], $config['queen_supervisor']['queues'] ?? null, 'Queen queues');
+        $this->same(2, $config['queen_process_limit'] ?? null, 'ordinary worker process budget');
+
+        [$exitCode, $stdout, $stderr] = $this->artisan(
+            $baseDirectory,
+            ['bench:config'],
+            [
+                'BENCH_QUEUES' => 'critical,default',
+                'BENCH_WORKERS' => '2',
+                'QUEEN_LEASE_RENEWAL' => 'true',
+            ],
+        );
+        $this->same(0, $exitCode, "renewal bench:config failed: {$stderr}");
+        $renewal = $this->lastJsonDocument($stdout);
+        $this->same(4, $renewal['queen_process_limit'] ?? null, 'worker plus renewal-helper process budget');
 
         [$exitCode, $stdout, $stderr] = $this->artisan(
             $baseDirectory,
@@ -89,6 +104,63 @@ final class FeatureParityTest
             }
         }
         $this->same(['critical' => 3, 'default' => 3], $prefixes, 'round-robin job distribution');
+    }
+
+    private function testWeightedMultiQueueDispatch(string $baseDirectory): void
+    {
+        [$exitCode, $stdout, $stderr] = $this->artisan(
+            $baseDirectory,
+            [
+                'bench:dispatch-multi',
+                '--run-id=weighted-multi-queue',
+                '--queue-counts=6,3,1',
+                '--queues=high,default,low',
+                '--sleep-ms=0',
+                '--connection=sync',
+            ],
+            ['BENCH_QUEUES' => 'high,default,low', 'BENCH_WORKERS' => '3'],
+        );
+        $this->same(0, $exitCode, "weighted bench:dispatch-multi failed: {$stderr}");
+        $manifest = $this->lastJsonDocument($stdout);
+        $this->same(10, $manifest['jobs'] ?? null, 'weighted multi-queue total jobs');
+        $this->same(null, $manifest['jobs_per_queue'] ?? null, 'weighted counts are not mislabelled as equal');
+        $this->same(
+            ['high' => 6, 'default' => 3, 'low' => 1],
+            $manifest['jobs_by_queue'] ?? null,
+            'weighted queue distribution',
+        );
+
+        $records = (new JsonlResultSink($baseDirectory))->read('weighted-multi-queue');
+        $prefixes = ['high' => 0, 'default' => 0, 'low' => 0];
+        foreach ($records as $record) {
+            $jobId = $record['job_id'] ?? null;
+            if (is_string($jobId)) {
+                $prefix = strstr($jobId, ':', true);
+                if (is_string($prefix) && array_key_exists($prefix, $prefixes)) {
+                    ++$prefixes[$prefix];
+                }
+            }
+        }
+        $this->same(
+            ['high' => 6, 'default' => 3, 'low' => 1],
+            $prefixes,
+            'weighted jobs execute on every queue',
+        );
+
+        [$exitCode] = $this->artisan(
+            $baseDirectory,
+            [
+                'bench:dispatch-multi',
+                '--run-id=ambiguous-multi-queue',
+                '--jobs-per-queue=1',
+                '--queue-counts=6,3,1',
+                '--queues=high,default,low',
+                '--sleep-ms=0',
+                '--connection=sync',
+            ],
+            ['BENCH_QUEUES' => 'high,default,low', 'BENCH_WORKERS' => '3'],
+        );
+        $this->notSame(0, $exitCode, 'equal and weighted queue counts are mutually exclusive');
     }
 
     private function testStrictQueueListValidation(string $baseDirectory): void

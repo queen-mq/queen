@@ -4,16 +4,29 @@
     $restartTone = match ($pool['restart_state']) {
         'open' => 'danger',
         'backoff', 'probe' => 'warning',
-        default => 'success',
+        default => $pool['healthy'] ? 'success' : 'warning',
     };
-    $restartLabel = $pool['restart_state'] === 'closed' && $pool['restart_failures'] === 0
+    $restartLabel = $pool['healthy']
         ? 'Healthy'
-        : ucfirst($pool['restart_state']);
+        : ($pool['restart_state'] === 'closed' ? 'Unknown' : ucfirst($pool['restart_state']));
 @endphp
 <tr>
     <td><strong>{{ $pool['supervisor'] }}</strong></td>
     <td>{{ $pool['queue'] }}</td>
     <td class="number">{{ $pool['processes'] }} / {{ $pool['desired'] }}</td>
+    <td>
+        <span class="health-badges">
+            <span class="badge {{ $pool['ready'] ? 'success' : 'warning' }}">{{ $pool['ready'] ? 'Ready' : 'Not ready' }}</span>
+            <span class="badge {{ $pool['capacity_satisfied'] ? 'success' : 'warning' }}">{{ $pool['capacity_satisfied'] ? 'Full' : 'Scaling' }}</span>
+        </span>
+    </td>
+    <td class="number budget-cell">
+        @if ($pool['reserved_processes'] === null)
+            —
+        @else
+            {{ $pool['reserved_processes'] }} / {{ $pool['renewal_helpers_reserved'] }}
+        @endif
+    </td>
     <td class="number">{{ $pool['draining'] }}</td>
     <td>
         <span class="badge {{ $restartTone }}">{{ $restartLabel }}</span>

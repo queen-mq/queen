@@ -76,6 +76,24 @@ class LaravelSupervisorProductionTest extends TestCase
         ], '/app');
     }
 
+    public function testConfigurationReservesAChildProcessForEveryRenewalHelper(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('reserves 2 child processes per worker');
+
+        SupervisorConfiguration::resolve([
+            'retry_after' => 90,
+            'lease_renewal' => true,
+            'supervisor' => [
+                'process_limit' => 5,
+                'shutdown_grace' => 75,
+                'supervisors' => [
+                    'jobs' => ['max_processes' => 3, 'timeout' => 60],
+                ],
+            ],
+        ], '/app');
+    }
+
     public function testConfigurationEnforcesRustQueueAndDurationBounds(): void
     {
         $queues = array_map(static fn (int $index): string => "queue-{$index}", range(1, 1025));
@@ -929,6 +947,12 @@ class LaravelSupervisorProductionTest extends TestCase
             $this->assertTrue($status['pool_status'][0]['depth_available']);
             $this->assertSame('closed', $status['pool_status'][0]['restart_state']);
             $this->assertTrue($status['pool_status'][0]['healthy']);
+            $this->assertFalse($status['pool_status'][0]['ready']);
+            $this->assertFalse($status['pool_status'][0]['capacity_satisfied']);
+            $this->assertFalse($status['ready']);
+            $this->assertFalse($status['capacity_satisfied']);
+            $this->assertSame(1, $status['pool_status'][0]['process_cost_per_worker']);
+            $this->assertSame(0, $status['process_budget']['used']);
             $this->assertSame(0, $status['pools']['orders']['high']['processes']);
             $this->assertSame(3600, $status['configuration']['control_ttl']);
             $this->assertSame('orders', $status['configuration']['supervisors'][0]['name']);
@@ -1258,6 +1282,27 @@ class LaravelSupervisorProductionTest extends TestCase
         $this->assertSame(realpath($stateDirectory) . '/telemetry', $document['telemetry_directory']);
     }
 
+    public function testPhpWorkerLauncherCreatesAPrivateProcessGroup(): void
+    {
+        if (PHP_OS_FAMILY === 'Windows' || !extension_loaded('posix') || !extension_loaded('pcntl')) {
+            $this->markTestSkipped('Unix process groups require ext-posix and ext-pcntl.');
+        }
+
+        $process = new \Symfony\Component\Process\Process([
+            PHP_BINARY,
+            dirname(__DIR__) . '/src/Laravel/Supervisor/worker_launcher.php',
+            PHP_BINARY,
+            '-r',
+            'echo getmypid().":".posix_getpgrp();',
+        ]);
+        $process->run();
+
+        $this->assertSame(0, $process->getExitCode(), $process->getErrorOutput());
+        [$pid, $group] = array_map('intval', explode(':', trim($process->getOutput())));
+        $this->assertGreaterThan(1, $pid);
+        $this->assertSame($pid, $group);
+    }
+
     public function testPhpSupervisorDoesNotExposeTelemetryToSizeOrFixedSimpleWorkers(): void
     {
         $stateDirectory = $this->temporaryDirectory();
@@ -1527,6 +1572,115 @@ class LaravelSupervisorProductionTest extends TestCase
         $this->assertEqualsWithDelta($before + 4, $second, 0.1);
     }
 
+    public function testPhpCrashCircuitOpensAndAdmitsOnlyOneProbe(): void
+    {
+        $supervisor = new PhpSupervisor(
+            $this->createStub(QueueManager::class),
+            ['state_directory' => $this->temporaryDirectory()],
+        );
+        $crash = new ReflectionMethod(PhpSupervisor::class, 'registerCrash');
+        $permission = new ReflectionMethod(PhpSupervisor::class, 'restartPermission');
+        $options = ['restart_backoff' => 1, 'restart_backoff_max' => 8, 'stable_after' => 60];
+
+        foreach (range(1, 5) as $_) {
+            $crash->invoke($supervisor, 'orders', 'high', $options, 'test');
+        }
+        $key = array_key_first($this->property($supervisor, 'restartPhase'));
+        $this->assertSame('open', $this->property($supervisor, 'restartPhase')[$key]);
+        $this->assertNull($permission->invoke($supervisor, 'orders', 'high'));
+
+        $restartAfter = $this->property($supervisor, 'restartAfter');
+        $restartAfter[$key] = microtime(true) - 1;
+        $this->setProperty($supervisor, 'restartAfter', $restartAfter);
+        $this->assertSame('probe', $permission->invoke($supervisor, 'orders', 'high'));
+
+        $phase = $this->property($supervisor, 'restartPhase');
+        $phase[$key] = 'probe';
+        $this->setProperty($supervisor, 'restartPhase', $phase);
+        $this->assertNull($permission->invoke($supervisor, 'orders', 'high'));
+    }
+
+    public function testPhpLiveProbeOwnsSiblingExitVerdictsUntilItFinishes(): void
+    {
+        $supervisor = new PhpSupervisor(
+            $this->createStub(QueueManager::class),
+            ['state_directory' => $this->temporaryDirectory()],
+        );
+        $key = (new ReflectionMethod(PhpSupervisor::class, 'poolKey'))
+            ->invoke($supervisor, 'orders', 'high');
+        $probe = $this->createStub(\Symfony\Component\Process\Process::class);
+        $probeRunningCalls = 0;
+        $probe->method('isRunning')->willReturnCallback(
+            static function () use (&$probeRunningCalls): bool {
+                return $probeRunningCalls++ < 2;
+            },
+        );
+        $probe->method('isOutputDisabled')->willReturn(true);
+        $probe->method('getExitCode')->willReturn(1);
+        $crashedSibling = $this->createStub(\Symfony\Component\Process\Process::class);
+        $crashedSibling->method('isRunning')->willReturn(false);
+        $crashedSibling->method('getExitCode')->willReturn(1);
+        $cleanSibling = $this->createStub(\Symfony\Component\Process\Process::class);
+        $cleanSibling->method('isRunning')->willReturn(false);
+        $cleanSibling->method('getExitCode')->willReturn(0);
+        $options = ['restart_backoff' => 1, 'restart_backoff_max' => 8, 'stable_after' => 60];
+        $reap = new ReflectionMethod(PhpSupervisor::class, 'reap');
+        $permission = new ReflectionMethod(PhpSupervisor::class, 'restartPermission');
+
+        $this->setProperty($supervisor, 'processes', ['orders' => ['high' => [$crashedSibling, $probe]]]);
+        $this->setProperty($supervisor, 'startedAt', [
+            spl_object_id($crashedSibling) => microtime(true),
+            spl_object_id($probe) => microtime(true),
+        ]);
+        $this->setProperty($supervisor, 'crashCount', [$key => 5]);
+        $this->setProperty($supervisor, 'restartPhase', [$key => 'probe']);
+        $this->setProperty($supervisor, 'restartProbes', [spl_object_id($probe) => $key]);
+
+        $reap->invoke($supervisor, 'orders', $options);
+        $this->assertSame('probe', $this->property($supervisor, 'restartPhase')[$key]);
+        $this->assertNull($permission->invoke($supervisor, 'orders', 'high'));
+
+        $this->setProperty($supervisor, 'processes', ['orders' => ['high' => [$cleanSibling, $probe]]]);
+        $startedAt = $this->property($supervisor, 'startedAt');
+        $startedAt[spl_object_id($cleanSibling)] = microtime(true);
+        $this->setProperty($supervisor, 'startedAt', $startedAt);
+        $reap->invoke($supervisor, 'orders', $options);
+        $this->assertSame('probe', $this->property($supervisor, 'restartPhase')[$key]);
+        $this->assertNull($permission->invoke($supervisor, 'orders', 'high'));
+
+        $startedAt = $this->property($supervisor, 'startedAt');
+        $startedAt[spl_object_id($probe)] = microtime(true) - 61;
+        $this->setProperty($supervisor, 'startedAt', $startedAt);
+        $reap->invoke($supervisor, 'orders', $options);
+        $this->assertSame('open', $this->property($supervisor, 'restartPhase')[$key]);
+        $this->assertSame(6, $this->property($supervisor, 'crashCount')[$key]);
+        $this->assertSame([], $this->property($supervisor, 'restartProbes'));
+    }
+
+    public function testPhpOnlyTheStableProbeClosesAHalfOpenCircuit(): void
+    {
+        $supervisor = new PhpSupervisor(
+            $this->createStub(QueueManager::class),
+            [
+                'state_directory' => $this->temporaryDirectory(),
+                'supervisors' => ['orders' => ['stable_after' => 60]],
+            ],
+        );
+        $key = (new ReflectionMethod(PhpSupervisor::class, 'poolKey'))
+            ->invoke($supervisor, 'orders', 'high');
+        $probe = new \Symfony\Component\Process\Process(['true']);
+        $this->setProperty($supervisor, 'processes', ['orders' => ['high' => [$probe]]]);
+        $this->setProperty($supervisor, 'startedAt', [spl_object_id($probe) => microtime(true) - 61]);
+        $this->setProperty($supervisor, 'crashCount', [$key => 5]);
+        $this->setProperty($supervisor, 'restartPhase', [$key => 'probe']);
+        $this->setProperty($supervisor, 'restartProbes', [spl_object_id($probe) => $key]);
+
+        (new ReflectionMethod(PhpSupervisor::class, 'observeStableWorkers'))->invoke($supervisor);
+
+        $this->assertArrayNotHasKey($key, $this->property($supervisor, 'restartPhase'));
+        $this->assertSame([], $this->property($supervisor, 'restartProbes'));
+    }
+
     public function testRestartBackoffKeysCannotCollideOnColons(): void
     {
         $supervisor = new PhpSupervisor(
@@ -1564,6 +1718,32 @@ class LaravelSupervisorProductionTest extends TestCase
         $this->assertSame(0, $method->invoke($supervisor));
         $this->setProperty($supervisor, 'draining', []);
         $this->assertSame(1, $method->invoke($supervisor));
+    }
+
+    public function testRenewalWorkersAndDrainingHelpersConsumeTwoProcessSlots(): void
+    {
+        $options = ['lease_renewal' => true];
+        $supervisor = new PhpSupervisor(
+            $this->createStub(QueueManager::class),
+            [
+                'state_directory' => $this->temporaryDirectory(),
+                'process_limit' => 5,
+                'supervisors' => ['orders' => $options],
+            ],
+        );
+        $this->setProperty($supervisor, 'processes', [
+            'orders' => ['high' => [new \Symfony\Component\Process\Process(['true'])]],
+        ]);
+        $this->setProperty($supervisor, 'draining', [[
+            'process' => new \Symfony\Component\Process\Process(['true']),
+            'deadline' => microtime(true) + 30,
+            'label' => 'orders:low',
+            'supervisor' => 'orders',
+            'queue' => 'low',
+        ]]);
+
+        $slots = new ReflectionMethod(PhpSupervisor::class, 'remainingProcessSlots');
+        $this->assertSame(1, $slots->invoke($supervisor));
     }
 
     public function testForcedDrainRemainsTrackedUntilTheWorkerActuallyExits(): void

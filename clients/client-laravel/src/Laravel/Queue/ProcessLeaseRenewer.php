@@ -14,6 +14,15 @@ use RuntimeException;
  */
 final class ProcessLeaseRenewer implements LeaseRenewer
 {
+    /** @var array<int, \WeakReference<self>> Helper PID to owning worker-side renewer. */
+    private static array $armedWatchdogs = [];
+
+    private static mixed $previousSigchldHandler = null;
+
+    private static bool $previousAsyncSignals = false;
+
+    private static bool $sigchldHandlerInstalled = false;
+
     /** @var resource|null */
     private $process = null;
 
@@ -33,6 +42,8 @@ final class ProcessLeaseRenewer implements LeaseRenewer
     /** @var list<array> */
     private array $events = [];
 
+    private ?int $watchdogPid = null;
+
     public function __construct(
         private array $clientConfig,
         private int $leaseSeconds,
@@ -47,7 +58,7 @@ final class ProcessLeaseRenewer implements LeaseRenewer
     ) {
         if (!self::isSupported()) {
             throw new RuntimeException(
-                'Queen Laravel lease renewal requires proc_open, proc_terminate, posix_getppid, posix_kill and posix_setpgid on a Unix CLI worker.',
+                'Queen Laravel lease renewal requires proc_open, proc_terminate, pcntl async signals, posix_getppid, posix_kill and posix_setpgid on a Unix CLI worker.',
             );
         }
         if (PHP_SAPI !== 'cli') {
@@ -82,11 +93,15 @@ final class ProcessLeaseRenewer implements LeaseRenewer
             && PHP_INT_SIZE >= 8
             && function_exists('proc_open')
             && function_exists('proc_terminate')
+            && function_exists('pcntl_async_signals')
+            && function_exists('pcntl_signal')
+            && function_exists('pcntl_signal_get_handler')
             && function_exists('posix_getppid')
             && function_exists('posix_kill')
             && function_exists('posix_setpgid')
             && defined('SIGTERM')
-            && defined('SIGKILL');
+            && defined('SIGKILL')
+            && defined('SIGCHLD');
     }
 
     public function __destruct()
@@ -132,6 +147,7 @@ final class ProcessLeaseRenewer implements LeaseRenewer
             throw $exception;
         }
         $this->tracked[$leaseId] = true;
+        $this->armHelperDeathWatchdog();
         $this->assertHealthy($leaseId);
     }
 
@@ -142,6 +158,9 @@ final class ProcessLeaseRenewer implements LeaseRenewer
         }
 
         unset($this->tracked[$leaseId], $this->failures[$leaseId]);
+        if ($this->tracked === []) {
+            $this->disarmHelperDeathWatchdog();
+        }
         if (is_resource($this->process)) {
             try {
                 $this->send(['command' => 'forget', 'lease_id' => $leaseId]);
@@ -171,6 +190,9 @@ final class ProcessLeaseRenewer implements LeaseRenewer
 
     public function close(): void
     {
+        // Intentional shutdown must not be mistaken for an unsafe helper death.
+        $this->disarmHelperDeathWatchdog();
+
         if (!is_resource($this->process)) {
             return;
         }
@@ -203,6 +225,117 @@ final class ProcessLeaseRenewer implements LeaseRenewer
         $this->failures = [];
         $this->stdoutBuffer = '';
         $this->events = [];
+    }
+
+    /**
+     * Fence this PHP worker if its exact renewal child disappears while a
+     * lease is active. The process-wide handler chains any pre-existing
+     * SIGCHLD callback and never reaps unrelated children.
+     */
+    private function armHelperDeathWatchdog(): void
+    {
+        if ($this->watchdogPid !== null || $this->tracked === []) {
+            return;
+        }
+        if (!is_resource($this->process)) {
+            self::fenceCurrentWorker('renewal helper process is unavailable');
+        }
+
+        $status = proc_get_status($this->process);
+        $pid = (int) ($status['pid'] ?? 0);
+        if ($pid < 1) {
+            self::fenceCurrentWorker('renewal helper PID is unavailable');
+        }
+
+        self::installSigchldHandler();
+        $this->watchdogPid = $pid;
+        self::$armedWatchdogs[$pid] = \WeakReference::create($this);
+
+        // Close the registration race: SIGCHLD may have arrived just before
+        // the PID entered the registry.
+        if (!$this->running()) {
+            self::fenceCurrentWorker("renewal helper [{$pid}] already stopped");
+        }
+    }
+
+    private function disarmHelperDeathWatchdog(): void
+    {
+        if ($this->watchdogPid === null) {
+            return;
+        }
+
+        unset(self::$armedWatchdogs[$this->watchdogPid]);
+        $this->watchdogPid = null;
+        self::restoreSigchldHandlerWhenIdle();
+    }
+
+    private static function installSigchldHandler(): void
+    {
+        if (self::$sigchldHandlerInstalled) {
+            return;
+        }
+
+        self::$previousSigchldHandler = pcntl_signal_get_handler(SIGCHLD);
+        self::$previousAsyncSignals = pcntl_async_signals();
+        if (!pcntl_signal(SIGCHLD, [self::class, 'handleSigchld'], true)) {
+            throw new RuntimeException('Unable to install the Queen lease renewal SIGCHLD watchdog.');
+        }
+        pcntl_async_signals(true);
+        self::$sigchldHandlerInstalled = true;
+    }
+
+    /** @internal Signal callback; public only because PCNTL invokes it out of scope. */
+    public static function handleSigchld(int $signal, ?array $info = null): void
+    {
+        $reportedPid = (int) ($info['pid'] ?? 0);
+        foreach (self::$armedWatchdogs as $pid => $reference) {
+            $renewer = $reference->get();
+            if (!$renewer instanceof self) {
+                unset(self::$armedWatchdogs[$pid]);
+                continue;
+            }
+
+            // siginfo identifies the child without touching any other process.
+            // Scanning our own proc handles also covers platforms that omit PID
+            // or coalesce several SIGCHLD deliveries.
+            if ($reportedPid === $pid || !$renewer->running()) {
+                self::fenceCurrentWorker("renewal helper [{$pid}] stopped unexpectedly");
+            }
+        }
+
+        $previous = self::$previousSigchldHandler;
+        if (is_callable($previous) && $previous !== [self::class, 'handleSigchld']) {
+            $previous($signal, $info);
+        }
+
+        self::restoreSigchldHandlerWhenIdle();
+    }
+
+    private static function restoreSigchldHandlerWhenIdle(): void
+    {
+        if (!self::$sigchldHandlerInstalled || self::$armedWatchdogs !== []) {
+            return;
+        }
+
+        $previous = self::$previousSigchldHandler;
+        if (is_callable($previous) || is_int($previous)) {
+            @pcntl_signal(SIGCHLD, $previous, true);
+        } else {
+            @pcntl_signal(SIGCHLD, SIG_DFL, true);
+        }
+        pcntl_async_signals(self::$previousAsyncSignals);
+        self::$previousSigchldHandler = null;
+        self::$sigchldHandlerInstalled = false;
+    }
+
+    private static function fenceCurrentWorker(string $reason): never
+    {
+        error_log("Queen Laravel lease renewal watchdog fenced this worker: {$reason}.");
+        @posix_kill(getmypid(), SIGKILL);
+
+        // SIGKILL should never return. Preserve fail-closed behavior on an
+        // exotic runtime that refuses the signal.
+        exit(1);
     }
 
     private function start(): void

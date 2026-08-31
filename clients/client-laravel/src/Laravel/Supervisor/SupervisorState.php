@@ -239,6 +239,96 @@ final class SupervisorState
             && ($owner['pid'] ?? null) === $pid;
     }
 
+    /**
+     * Evaluate serving readiness independently from generation liveness.
+     *
+     * @return array{ready:bool,issues:list<array{code:string,supervisor?:string,queue?:string}>}
+     */
+    public function readiness(array $status, ?bool $live = null): array
+    {
+        $issues = [];
+        $live ??= $this->isLive($status);
+        if (!$live) {
+            $issues[] = ['code' => 'supervisor_not_live'];
+        }
+        if (($status['state'] ?? null) !== 'running') {
+            $issues[] = ['code' => 'supervisor_not_running'];
+        }
+
+        $pools = $status['pool_status'] ?? null;
+        if (!is_array($pools) || !array_is_list($pools) || $pools === []) {
+            $issues[] = ['code' => 'pool_health_unavailable'];
+
+            return ['ready' => false, 'issues' => $issues];
+        }
+
+        foreach ($pools as $pool) {
+            if (!is_array($pool)) {
+                $issues[] = ['code' => 'pool_health_malformed'];
+                continue;
+            }
+            $supervisor = is_string($pool['supervisor'] ?? null) ? $pool['supervisor'] : '?';
+            $queue = is_string($pool['queue'] ?? null) ? $pool['queue'] : '?';
+            $identity = ['supervisor' => $supervisor, 'queue' => $queue];
+            $desired = $pool['desired'] ?? null;
+            $running = $pool['running'] ?? null;
+
+            if (!is_int($desired) || $desired < 0 || !is_int($running) || $running < 0) {
+                $issues[] = ['code' => 'pool_capacity_malformed', ...$identity];
+            } elseif ($desired > 0 && $running === 0) {
+                $issues[] = ['code' => 'pool_zero_capacity', ...$identity];
+            }
+            if (($pool['depth_available'] ?? null) !== true
+                || !is_int($pool['depth'] ?? null)
+                || $pool['depth'] < 0) {
+                $issues[] = ['code' => 'queue_depth_unavailable', ...$identity];
+            }
+        }
+
+        return ['ready' => $issues === [], 'issues' => $issues];
+    }
+
+    /**
+     * Evaluate full desired-capacity health. Unlike readiness, this is
+     * expected to be temporarily false during an ordinary elastic scale-up.
+     *
+     * @return array{healthy:bool,issues:list<array{code:string,supervisor?:string,queue?:string}>}
+     */
+    public function capacityHealth(array $status, ?bool $live = null): array
+    {
+        $readiness = $this->readiness($status, $live);
+        $issues = $readiness['issues'];
+        $pools = $status['pool_status'] ?? [];
+        if (is_array($pools) && array_is_list($pools)) {
+            foreach ($pools as $pool) {
+                if (!is_array($pool)) {
+                    continue;
+                }
+                $desired = $pool['desired'] ?? null;
+                $running = $pool['running'] ?? null;
+                if (is_int($desired) && $desired >= 0 && is_int($running) && $running >= 0
+                    && $running < $desired) {
+                    $issues[] = [
+                        'code' => 'pool_below_desired_capacity',
+                        'supervisor' => is_string($pool['supervisor'] ?? null) ? $pool['supervisor'] : '?',
+                        'queue' => is_string($pool['queue'] ?? null) ? $pool['queue'] : '?',
+                    ];
+                }
+                if (($pool['restart_state'] ?? null) !== 'closed'
+                    || ($pool['restart_failures'] ?? null) !== 0
+                    || ($pool['healthy'] ?? null) !== true) {
+                    $issues[] = [
+                        'code' => 'worker_restart_circuit_unhealthy',
+                        'supervisor' => is_string($pool['supervisor'] ?? null) ? $pool['supervisor'] : '?',
+                        'queue' => is_string($pool['queue'] ?? null) ? $pool['queue'] : '?',
+                    ];
+                }
+            }
+        }
+
+        return ['healthy' => $issues === [], 'issues' => $issues];
+    }
+
     public function writeStatus(array $status): void
     {
         $updatedAtEpoch = time();

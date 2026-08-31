@@ -28,23 +28,35 @@
     $failedLabel = ($failedJobs['available'] ?? false)
         ? number_format($failedJobs['total']) . (($failedJobs['total_exact'] ?? false) ? '' : '+')
         : '—';
+    $processBudget = $supervisor['process_budget'];
+    $budgetLabel = $processBudget['valid']
+        ? number_format($processBudget['used']) . ' / ' . number_format($processBudget['limit'])
+        : '—';
+    $masterStateLabel = match ($supervisor['state']) {
+        'running' => 'Active',
+        'paused' => 'Paused',
+        'terminating' => 'Stopping',
+        'starting' => 'Starting',
+        'stopped' => 'Stopped',
+        default => 'Unknown',
+    };
     if ($supervisor['availability'] === 'live') {
-        $stateLabel = match ($supervisor['state']) {
-            'running' => 'Active',
-            'paused' => 'Paused',
-            'terminating' => 'Stopping',
-            'starting' => 'Starting',
-            'stopped' => 'Stopped',
-            default => 'Unknown',
-        };
-        $stateTone = $supervisor['state'] === 'running' ? 'success' : 'warning';
+        $stateLabel = $masterStateLabel;
+        $livenessLabel = 'Live';
+        $livenessTone = 'success';
     } elseif ($supervisor['availability'] === 'stale') {
         $stateLabel = 'Stale';
-        $stateTone = 'warning';
+        $livenessLabel = 'Stale';
+        $livenessTone = 'warning';
     } else {
         $stateLabel = 'Unavailable';
-        $stateTone = 'danger';
+        $livenessLabel = 'Unavailable';
+        $livenessTone = 'danger';
     }
+    $readinessLabel = $supervisor['ready'] ? 'Ready' : 'Not ready';
+    $readinessTone = $supervisor['ready'] ? 'success' : ($supervisor['availability'] === 'live' ? 'warning' : 'danger');
+    $capacityLabel = $supervisor['capacity_satisfied'] ? 'Satisfied' : 'Below desired';
+    $capacityTone = $supervisor['capacity_satisfied'] ? 'success' : 'warning';
 @endphp
 
 <a class="skip-link" href="#main-content">Skip to content</a>
