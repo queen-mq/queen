@@ -95,7 +95,34 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 RUN test -f /queen-kafka && echo "Facade build successful"
 
-# Stage 4: Build queenctl (Go operator CLI)
+# Stage 4: Build the queen-sqs facade (SQS/SNS wire protocol front)
+#
+# The twin of the stage above, for the same reason: EMBEDDED MODE
+# (server/src/sqs_facade.rs) has the broker SPAWN this file as a supervised child
+# process, so the image ships the binary and one process tree carries both. It is
+# inert unless QUEEN_SQS_EMBEDDED=true, which is why it can be added to the
+# default image without changing what the default image does.
+#
+# No frontend stage feeds this one and no path dependency reaches out of the
+# directory (queen-sqs/Cargo.toml has none), so the context is the crate alone.
+FROM rust:1-bookworm AS sqs-builder
+
+WORKDIR /usr/build/queen-sqs
+
+# Layer 1: manifests. Cargo.lock is copied so the image builds the versions the
+# repository tested, exactly as the two stages above do.
+COPY queen-sqs/Cargo.toml queen-sqs/Cargo.lock ./
+
+# Layer 2: source.
+COPY queen-sqs/src ./src
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/build/queen-sqs/target \
+    cargo build --release && cp target/release/queen-sqs /queen-sqs
+
+RUN test -f /queen-sqs && echo "SQS facade build successful"
+
+# Stage 5: Build queenctl (Go operator CLI)
 FROM golang:1.24-alpine AS cli-builder
 
 # Embed broker version + commit + build date into the binary so
@@ -133,7 +160,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 # Sanity check: the binary must run without any dynamic deps.
 RUN /out/queenctl version --short
 
-# Stage 5: Runtime Image
+# Stage 6: Runtime Image
 FROM ubuntu:24.04
 
 # Runtime dependencies + PostgreSQL 18 client tools (pg_dump, pg_restore for
@@ -166,6 +193,12 @@ COPY --from=server-builder /queen ./bin/queen
 # instead with `docker run ... queen-mq ./bin/queen-kafka`.
 COPY --from=kafka-builder /queen-kafka ./bin/queen-kafka
 
+# The SQS facade, on the same adjacency contract: with QUEEN_SQS_EMBEDDED=true and
+# no QUEEN_SQS_BIN, the supervisor resolves the child from the directory of its own
+# executable (sqs_facade::resolve_bin). Run it alone instead with
+# `docker run ... queen-mq ./bin/queen-sqs`.
+COPY --from=sqs-builder /queen-sqs ./bin/queen-sqs
+
 # The same dashboard bytes the binary already embeds, on disk for inspection.
 # The binary does not read them: nothing in server/src implements a
 # static-dir override, so this is a copy for humans, not a serving path.
@@ -190,6 +223,14 @@ EXPOSE 6632
 # Remember QUEEN_KAFKA_ADVERTISED_ADDR: a container that advertises its internal
 # address is a bootstrap that succeeds and a produce that hangs.
 EXPOSE 9092
+
+# The SQS listener of the embedded facade. Documentation only, and only reachable
+# with QUEEN_SQS_EMBEDDED=true; 9324 because that is the de-facto self-hosted SQS
+# port every "point boto3 at a local queue" configuration already names.
+# Remember QUEEN_SQS_CREDENTIALS: SigV4 is the default mode and a facade started
+# without keys answers every request InvalidClientTokenId (the broker refuses that
+# combination at boot rather than letting it crash-loop).
+EXPOSE 9324
 
 # Run the Rust broker
 CMD ["./bin/queen"]

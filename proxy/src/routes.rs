@@ -247,6 +247,34 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
     }
 
     // --- kv (PLAN_KV_TIMERS.md §8.1 routes, §9.5 quota rule) ---
+    //
+    // ONE OVERRIDE LIVES OUTSIDE THIS FILE. `POST /api/v1/kv` is also the only
+    // route the Kafka facade has for a consumer group's bookkeeping — committed
+    // offsets, the group index, the fence, transaction markers, the node
+    // registry, the topic-config records — all under namespace `queen-kafka`
+    // and the key prefix `qk:`. `gateway.rs` reclassifies a batch that
+    // addresses NOTHING ELSE to `Consume`, using `kafka_kv::is_kafka_only_batch`
+    // (which is where the rule, the fail-closed direction and its tests live).
+    //
+    // It is not expressed here because it cannot be: this function takes
+    // `(method, path)` and the rule is a property of the BODY. Nor could the
+    // webdoc route table carry it — that table is keyed by (path, method), so
+    // stating a body-conditional rule there would publish a falsehood.
+    //
+    // What the override changes: the `kv` plan flag stops gating Kafka consumer
+    // groups (a group's offsets are the facade's internal bookkeeping, not the
+    // KV product), and the storage/monthly block stops refusing an OffsetFetch.
+    // That second half is the §9.6 trap this file already argues in the
+    // `/api/v1/fetch` arm above — a read a block can refuse strands a consumer
+    // at an offset it can never move past while the backlog it would drain
+    // keeps growing. Metering is unchanged: `Gated(_,_)` and a non-pop
+    // `Consume` both book reqs-only `OpClass::Read`.
+    //
+    // What it does NOT change: a batch carrying one foreign key, one foreign
+    // namespace, one op this proxy has not been told about, or no ops at all
+    // keeps `Gated(Kv, Mixed)` in every one of its five gates. The classes
+    // below are therefore still the whole truth for every non-Kafka caller.
+    //
     // The batch endpoint is the COMPLETE surface and the only one that accepts
     // `getPrefix` and `incr`. Any other method on it is a shape the broker does
     // not register, so it stays fail-closed here rather than travelling to a

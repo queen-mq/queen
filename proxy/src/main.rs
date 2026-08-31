@@ -10,6 +10,8 @@ mod db;
 mod errors;
 mod gateway;
 mod httpget;
+mod kafka_identity;
+mod kafka_kv;
 mod limits;
 mod meter;
 mod oauth;

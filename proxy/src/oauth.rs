@@ -291,6 +291,12 @@ const ME_CLUSTERS_OPERATOR_SQL: &str = "
 /// from Host and 421 when it names none, which is exactly the situation one
 /// webapp hostname puts every request in. This one needs no cluster at all.
 async fn me(State(st): State<St>, headers: HeaderMap) -> Response {
+    // An API-KEY bearer is answered by `kafka_identity` (see that module for
+    // why this route and not a new one). `None` for everything else — no api
+    // key, a session bearer, a cookie — so the browser path below is unchanged.
+    if let Some(resp) = crate::kafka_identity::bearer_me(&st, &headers).await {
+        return resp;
+    }
     // Cookie only: `/auth/me` describes the BROWSER's session. A bearer would
     // answer the same, but the SPA boots from the cookie and keeping one
     // source here avoids reporting a session the browser does not hold.

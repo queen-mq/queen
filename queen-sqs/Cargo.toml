@@ -1,0 +1,101 @@
+[package]
+name = "queen-sqs"
+version = "1.3.0"
+edition = "2021"
+description = "SQS/SNS wire front for QueenMQ: unmodified AWS SDKs and the drivers built on them reach a Queen broker by changing endpoint_url only."
+license = "Apache-2.0"
+homepage = "https://queenmq.com"
+repository = "https://github.com/queen-mq/queen"
+publish = false
+
+[lib]
+name = "queen_sqs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "queen-sqs"
+path = "src/main.rs"
+
+# Every dependency the whole facade will need is declared HERE and now, at the
+# skeleton, deliberately: the modules below this manifest are written in
+# parallel, and a manifest that grows one line per module is a manifest four
+# people edit at once. Nothing in this list is speculative — each entry names
+# the module that consumes it.
+[dependencies]
+# Same pin and feature set as server/Cargo.toml, proxy/Cargo.toml and
+# queen-kafka/Cargo.toml, so the four binaries share one tokio build in a CI
+# cache.
+tokio = { version = "1", features = ["full"] }
+# The listener. queen-sqs is plain HTTP — no framing loop, no per-connection
+# state machine — which is the whole reason it can sit behind an ordinary
+# Service/LB while queen-kafka cannot (PLAN_QUEEN_SQS.md, Architecture). Same
+# major as the broker's and the proxy's.
+axum = "0.7"
+# The OPTIONAL TLS listener (QUEEN_SQS_TLS_CERT/_KEY), exactly as the proxy
+# builds it: `axum::serve` takes a plain TcpListener, so the HTTPS leg drives
+# one hyper connection per accepted stream with the Router as the service.
+# Features on crates already in the repository tree — cmake-free, rustls-only.
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
+http-body-util = "0.1"
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+    "logging",
+] }
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+    "tls12",
+    "logging",
+] }
+# The Queen side (src/queen.rs). Same crate, version and feature set as
+# clients/client-rust and queen-kafka: rustls on `ring` (no OpenSSL on the host,
+# no cmake in the build) and nothing else from the defaults. This binary is a
+# CLIENT of the broker, exactly like the SDK.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "http2",
+    "charset",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytes = "1"
+# The SQS envelope's alphabet (src/envelope.rs: Binary message attributes and
+# the timer payload), the receipt handle's encoding (src/handle.rs) and the
+# base64 of a SigV4 nothing. Same crate and version as the server's.
+base64 = "0.22"
+# SigV4 (src/sigv4.rs): HMAC-SHA256 over the canonical request, and the receipt
+# handle's tag (src/handle.rs). RustCrypto, the repository's ruling — no AWS
+# crates anywhere in this tree.
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+# MD5OfMessageBody / MD5OfMessageAttributes / MD5OfMessageSystemAttributes
+# (src/md5.rs). boto3 VALIDATES these client-side, so they are correctness and
+# not decoration. 0.10 pairs with the same `digest` major as sha2 0.10 above,
+# which keeps one RustCrypto generation in the build.
+md-5 = "0.10"
+# The Query protocol's body and the SigV4 canonical query string
+# (src/proto/query.rs, src/sigv4.rs): `application/x-www-form-urlencoded`
+# parsing with the repeated/indexed keys SQS uses (`Attribute.1.Name`). The
+# crate `url` itself parses with; nothing else from it is needed, and the XML
+# side is hand-rolled in src/proto/xml.rs because only RENDERING is required.
+form_urlencoded = "1"
+# Request ids in every response envelope (both protocols) and the fresh
+# `transactionId` a redrive move rides on (PLAN_QUEEN_SQS.md, DLQ). Same crate
+# and features as the proxy's.
+uuid = { version = "1", features = ["v4", "v7"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+
+[dev-dependencies]
+# `tokio::time::pause`/`advance`. The facade's own clock is injectable
+# (queen::testing::TestClock) precisely so the lease and visibility tests do not
+# sleep, but the HTTP-shaped tests still want a paused runtime. Same union rule
+# as queen-kafka: the binary never gets test-util.
+tokio = { version = "1", features = ["test-util"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

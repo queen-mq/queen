@@ -1,0 +1,360 @@
+---
+title: SQS facade
+description: "Running queen-sqs beside a broker or a proxy, or embedded in the broker: every environment variable it reads, the credential model, the one variable a second replica needs, and what a client has to change to reach it."
+type: how-to
+tier: operate
+status: preview
+sidebar:
+  order: 13
+  label: SQS facade
+sourceOfTruth:
+  - queen-sqs/src/main.rs
+  - queen-sqs/src/lib.rs
+  - queen-sqs/src/config.rs
+  - queen-sqs/src/credentials.rs
+  - queen-sqs/src/handle.rs
+  - queen-sqs/src/sigv4.rs
+  - queen-sqs/src/registry.rs
+  - server/src/sqs_facade.rs
+  - server/src/config.rs
+  - Dockerfile
+---
+
+`queen-sqs` is a separate binary that speaks the Amazon SQS and SNS wire protocols on one port and
+plain HTTP to Queen on another. It is a client of Queen like any SDK is: it holds no database
+connection, embeds no broker, and stores nothing durable of its own. What a client can do through
+it, and what it deliberately cannot, is [the protocol reference](/reference/sqs).
+
+<Aside type="caution">
+The facade is a **preview** and is not part of a Queen release. The repository's `Dockerfile` builds
+it into the same image as the broker, but no image carrying it has been published and there are no
+Helm values for it yet, so today it comes from a build of this repository. Nothing below has been
+through a release cycle.
+</Aside>
+
+## It scales out behind an ordinary load balancer
+
+This is the first thing to know about it, because it is the opposite of
+[the Kafka facade](/deploy/kafka#cluster-mode), which must never be put behind one VIP.
+
+**Any instance answers any request.** There is no cluster mode, no node id, no registry of peers and
+no advertised address, because nothing durable lives in the process. The queue and topic registry,
+the subscription filter policies, the FIFO delete sets and the message-move tasks are all in Queen's
+key/value store under a `qs:` prefix, written under compare-and-set; the messages and the leases are
+the broker's; every in-memory structure here is a cache with a time to live. A restart is free, a
+replica is a replica, and a plain Kubernetes `Service` or any load balancer in front is the
+supported shape rather than a hazard.
+
+### The one variable a second replica needs
+
+**`QUEEN_SQS_HANDLE_SECRET`, set to the same value on every instance.**
+
+A receipt handle is self-contained and tamper-evident: it carries the queue, the partition, the
+transaction, the lease and the message, tagged with an HMAC so that the instance serving a
+`DeleteMessage` need not be the one that served the receive. The key is that HMAC's. Unset, each
+process generates its own 32 byte key, which is correct for a single instance and means the second
+one rejects every handle the first minted, as `ReceiptHandleIsInvalid`. The boot line says which of
+the two happened, in one field, precisely because this is discovered under a load balancer
+otherwise:
+
+```text
+handle_secret="generated"     # per process. One instance only.
+handle_secret="configured"    # shared. Safe to scale out.
+```
+
+At least 16 bytes, and it is refused shorter rather than padded: whoever can guess the key can
+delete any message in any queue this facade serves, and the verification is offline arithmetic on a
+string the client already holds, so there is no rate limit in front of it.
+
+## The two shapes
+
+**Beside the broker (self-hosted).** The facade runs next to a broker, points `QUEEN_URL` at it, and
+carries one `QUEEN_TOKEN` for the whole listener, unless a credential names its own. Every SQS client
+on that port reaches Queen as that identity, so the SQS port inherits exactly the trust boundary the
+broker's own port has: keep it on the same private network, behind the same perimeter. This is the
+shape the compatibility rig runs and the one to start with.
+
+**Beside the proxy (Cloud).** The facade points `QUEEN_URL` at a cell's proxy and gives each SigV4
+principal its own Queen token, so tenancy, quota, metering and freeze stay the proxy's, unchanged.
+Two things follow from the fact that this facade consumes through the ordinary `pop` and `ack`
+routes rather than a read arm of its own: a delivery through SQS is metered as the delivery it is,
+with none of the Kafka facade's [fetch-billing gap](/deploy/kafka#kafka-deliveries-are-not-message-metered);
+and a long poll is a pop carrying `wait=true` in the query, which is the shape the proxy's
+parked-connection gauge counts, so SQS consumers are visible on it where Kafka consumers are not.
+
+<Aside type="note">
+The Cloud shape is a design property here and not yet a measured one. There is no equivalent of the
+Kafka facade's `queen-kafka/compat/cloud` suite for SQS, so nothing on this page should be read as
+evidence that a whole cell has been driven end to end through it. The self-hosted shape is what the
+rig runs.
+</Aside>
+
+## Build and run
+
+The crate is standalone, so it builds on its own manifest and produces one binary. Running it inside
+the broker's own process tree instead is [embedded mode](#embedded-in-the-broker).
+
+```bash
+cargo build --release --manifest-path queen-sqs/Cargo.toml
+QUEEN_URL=http://localhost:6632 \
+QUEEN_SQS_CREDENTIALS=AKIAEXAMPLE:a-secret-of-your-own:the-queen-token \
+QUEEN_SQS_HANDLE_SECRET=a-shared-key-of-at-least-16-bytes \
+  ./queen-sqs/target/release/queen-sqs
+```
+
+The listener defaults to `0.0.0.0:9324`. That port is not arbitrary: it is the de-facto self-hosted
+SQS port, the one ElasticMQ uses and the one every "point boto3 at a local queue" tutorial already
+writes, so a client configuration that worked against one of those works here unchanged.
+
+Every value is validated before the listener binds, and a bad one is a fatal boot with a message
+naming the variable. A value that does not parse is never a silent fall back to the default, and a
+variable that is present but empty or whitespace-only counts as unset, because an empty value in a
+Compose file or a Helm template is a variable somebody meant to set.
+
+## Credentials
+
+SigV4 is SCRAM-shaped: the secret never crosses the wire, so the verifier has to hold it. That is
+why this facade has a credential map where [the Kafka one](/deploy/kafka#tls-and-sasl) has none, and
+the map is operator configuration rather than a directory, in the MinIO model.
+
+```bash
+QUEEN_SQS_CREDENTIALS=akid:secret[:queen_token][,akid:secret[:queen_token],…]
+```
+
+Each entry is one principal. The third field is **the Queen bearer this facade presents upstream for
+that principal**, and it is what makes one listener in front of several tenants possible without a
+credential ever reaching an action implementation. Omit it and the principal uses the process
+default, `QUEEN_TOKEN`, which is the single-tenant self-hosted shape.
+
+The secret is held in memory for the life of the process, by necessity. It is never logged, never
+rendered in an error, and never compared with `==`: the comparison is constant time, because a
+byte-by-byte early exit on a signature comparison is a remote timing oracle for the signature and
+through it for the secret.
+
+**`QUEEN_SQS_AUTH=off` accepts anything.** It is ElasticMQ parity for local development, and boto3
+still wants dummy credentials configured, which is its normal fake-endpoint workflow. Every request
+is then attributed to the label `anonymous` and reaches Queen with `QUEEN_TOKEN`, or with no bearer
+at all. The facade warns at boot every time, and warns louder when the listener is not bound to
+loopback, because anything that can reach that port can read, write and delete every queue on that
+broker.
+
+**`sigv4` is the default, and it has no default keypair.** A `sigv4` listener with an empty
+credential map could answer nothing but `InvalidClientTokenId`, which reads to a client as its own
+misconfiguration rather than as a server started without its keys, so that combination is a fatal
+boot with a message naming both ways forward.
+
+## Every variable
+
+| Variable | Default | What it is |
+| --- | --- | --- |
+| `QUEEN_URL` | `http://localhost:6632` | The broker or proxy the facade calls. Must be an `http`/`https` URL; a trailing slash is normalised away. Checked at boot. |
+| `QUEEN_TOKEN` | none | The bearer used for a principal that names none, and the only one on an `auth=off` listener. Never logged: the boot line reports whether there is one, not what it is. |
+| `QUEEN_SQS_LISTEN` | `0.0.0.0:9324` | The address the listener binds. `host:port`. Port 0 is refused, because an ephemeral port is one no client can be told about. |
+| `QUEEN_SQS_AUTH` | `sigv4` | `sigv4` or `off`. Also accepts `on`, `v4`, `sig-v4`, and `none`/`disabled` for off. Anything else is a fatal boot rather than a guess. |
+| `QUEEN_SQS_CREDENTIALS` | none | `akid:secret[:queen_token]`, comma separated. Required under `sigv4`. A malformed entry fails the boot with a message that names the entry and never carries the secret. |
+| `QUEEN_SQS_REGION` | `queen-1` | A label, not a place: it appears in queue URLs, in ARNs and in the SigV4 credential scope, and any region a client signs for is accepted. Letters, digits, `-` and `_` only. |
+| `QUEEN_SQS_ACCOUNT` | `000000000000` | The account segment of every queue URL and ARN. Twelve zeroes is what every SQS-compatible emulator uses, so tooling that parses ARNs is happy. Same charset rule. |
+| `QUEEN_SQS_DEFAULT_PARTITIONS` | `64` | The lanes a standard queue synthesizes at `CreateQueue`. Integer in 1 to 100,000. It is **stamped into each queue's record**, so changing it moves the default for queues created afterwards and never for queues that already exist. It is also the ceiling on that queue's in-flight concurrency: see [the divergence](/reference/sqs#the-divergence-to-read-first-a-standard-queues-concurrency-is-its-width). |
+| `QUEEN_SQS_HANDLE_SECRET` | generated per process | The HMAC key every receipt handle is tagged with. At least 16 bytes. [Set it before a second replica exists](#the-one-variable-a-second-replica-needs). |
+| `QUEEN_SQS_RECEIVE_MODE` | `exact` | `exact` is one pop per message, which is what makes every SQS verb exact. `amortized` is a decided part of the plan and **refused at boot today**: it needs a `maxPerPartition` parameter on the broker's pop that is not implemented, and accepting the name would run every receive in `exact` mode under the other mode's name. |
+| `QUEEN_SQS_TLS_CERT` | none | PEM certificate chain. Both this and the key, or neither: a key alone serves nothing, and a certificate alone would leave every minted queue URL saying `https` for a listener answering in the clear. |
+| `QUEEN_SQS_TLS_KEY` | none | PEM private key, read and parsed at boot, so a key that does not match its certificate fails the process and not every client. SDKs are perfectly happy on plain HTTP against a custom endpoint, so this exists for deployments whose policy is not. |
+| `QUEEN_SQS_SHUTDOWN_GRACE_MS` | `25000` | How long in-flight requests get after the listener stops accepting. Larger than a web server's usual grace on purpose: it has to outlive one long poll. Capped at 600,000, and zero is legal and means do not wait. Read by the **broker** too in embedded mode, [with a different default](#one-variable-two-readers). |
+| `QUEEN_SQS_EMBEDDED` | `false` | Read by the facade only to report it. The variable that matters is [the broker's](#embedded-in-the-broker). |
+| `LOG_LEVEL` | `info` | Tracing filter, `EnvFilter` syntax. |
+| `RUST_LOG` | none | Same, and it wins over `LOG_LEVEL`. |
+| `QUEEN_LOG_JSON` | `false` | `true` switches the log format to JSON. |
+
+`QUEEN_SQS_BIN` is the one name in the plan's config surface that this process never reads. It tells
+the **broker** which binary to spawn in embedded mode, and it is in the table below.
+
+## Embedded in the broker
+
+`QUEEN_SQS_EMBEDDED=true` makes the broker spawn and supervise the facade as a child process, wired
+to the broker's own listener over loopback and derived from the address that listener actually
+bound, so `PORT=0` and a wildcard bind both come out right. One deployment, two processes, one image.
+
+It is a child and not a library on purpose. The facade is an HTTP server with its own accept loop,
+its own connection budget and its own decoders, running SigV4 over bytes the client chose, two wire
+codecs, base64 and XML, and the broker is built with `panic = "abort"`, so a malformed request that
+walked a decoder into an allocation failure would take the broker down rather than one task. A child
+keeps the blast radius at the facade: it dies, the broker keeps serving, and the supervisor brings it
+back on a backoff that doubles from one second to a thirty second ceiling and resets after an hour of
+healthy running.
+
+These three are read by the **broker**, not by the facade:
+
+| Variable | Default | What it is |
+| --- | --- | --- |
+| `QUEEN_SQS_EMBEDDED` | `false` | `true` spawns the facade. Off, nothing in the supervisor is read and the broker behaves exactly as it always did, which is why the binary can ship in the default image without changing what the default image does. |
+| `QUEEN_SQS_BIN` | the `queen-sqs` file beside the broker executable | Where the binary is. The default is resolved from the running executable's own directory at boot rather than written down as a path, and it is what makes the image work with no configuration at all. |
+| `QUEEN_SQS_SHUTDOWN_GRACE_MS` | `5000` | How long a stopping child has between SIGTERM and SIGKILL. Floored at 100 ms, because a grace of zero is a SIGKILL with extra steps. |
+
+### One variable, two readers
+
+`QUEEN_SQS_SHUTDOWN_GRACE_MS` is read by the supervisor (how long a stopping child has between
+SIGTERM and SIGKILL) and, because the child inherits this environment, by the child itself (how long
+it drains in-flight requests after it stops accepting). Set, the two agree by construction. Left
+unset they do not: the supervisor's default is 5s and the facade's own is 25s, because the facade
+sizes its default to outlive one 20s long poll. **A deployment that wants a
+`ReceiveMessage(WaitTimeSeconds=20)` answered rather than cut at a rolling restart sets the variable
+explicitly**, and both sides then read the one number the operator wrote. It is not defaulted to 25s
+on the supervisor's side because the broker's own exit would then wait half a minute on a child
+that, in the common case, has nothing to drain.
+
+### What is refused at boot, and what is only a warning
+
+Two mistakes are refused by the broker rather than discovered as a crash loop:
+
+- **a `QUEEN_SQS_BIN` that is not a file**, with the message naming the path, the image's `/app/bin`
+  convention and the variable to unset;
+- **`QUEEN_SQS_EMBEDDED=true` with `QUEEN_SQS_AUTH=sigv4` (the default) and no
+  `QUEEN_SQS_CREDENTIALS`.** This is the SQS twin of the Kafka supervisor's advertised-address gate:
+  the one setting the facade cannot default, because SigV4 is verified against the secret half of a
+  keypair and there is no default keypair to invent. The child's own boot refuses it too, so left to
+  itself the child exits 1 on every spawn for ever and the operator reads a backoff ladder instead
+  of the one sentence that fixes it. Catching it in the broker turns a crash loop into a
+  configuration error somebody can read.
+
+One is a warning. With `JWT_ENABLED=true` and neither `QUEEN_TOKEN` nor a Queen token on any
+credential entry, every send and receive the child makes is answered `401`: the hop the child makes
+is authenticated like any other client's, whether it is the loopback the supervisor injects or a
+`QUEEN_URL` an operator set, because a private door into the broker is the kind of thing that is
+later found open from somewhere else.
+
+The environment forwards verbatim, `QUEEN_TOKEN` included, because that is the child's own
+credential. Four of the broker's secrets are stripped before exec and the facade reads none of them:
+`PG_PASSWORD`, `JWT_SECRET`, `QUEEN_ENCRYPTION_KEY` and `QUEEN_SYNC_SECRET`.
+
+The loopback is the **default**, not the only answer. An explicitly set, non-empty `QUEEN_URL` in the
+broker's own environment wins, and the child is given that instead, which is what makes embedded mode
+usable in a Cloud cell where the facade has to reach the broker through the proxy. An empty
+`QUEEN_URL=` is treated as unset, because that is a Helm template that resolved to nothing rather
+than an operator's decision. The boot line says which branch was taken, as `queen_url_from`, either
+`QUEEN_URL (explicit)` or `loopback (bound listener)`.
+
+The child's stdout and stderr are forwarded into the broker's log, stripped of escape sequences and
+control bytes, truncated at 4 KiB a line, and budgeted at 200 lines per ten second window with a
+`suppressed` count when the budget is spent. `GET /status` grows an `sqs` block when embedded mode is
+on, and only then: `mode`, `phase`, `pid`, `restarts`, `lastExit`, `uptimeMs` and `backoffMs`. It is
+independent of the `kafka` block, and a deployment may run either, both or neither.
+
+### What a stop guarantees, and what it does not
+
+The child is put in its own process group, so a stop signals the whole group and a grandchild dies
+with it rather than being re-parented.
+
+- **The broker gets SIGTERM or Ctrl-C**: guaranteed. The supervisor runs after the broker's serve
+  loop drains, sends SIGTERM to the group, and escalates to SIGKILL after the grace window.
+- **The broker panics or drops the handle**: the child is reaped with it.
+- **The broker is itself SIGKILLed**: this is where the platforms differ, and the honest answer is
+  two answers. On **Linux** the child carries `PR_SET_PDEATHSIG`, so the kernel kills it whatever the
+  parent died of. On **macOS and BSD** there is no equivalent: a SIGKILLed broker leaves the facade
+  running, re-parented to init and still holding its SQS port. That is a development machine caveat
+  rather than a production one, and it is stated rather than papered over.
+
+### The image
+
+The repository's `Dockerfile` builds the facade in a stage of its own and copies it next to the
+broker binary in `/app/bin`. That adjacency is the contract: with `QUEEN_SQS_EMBEDDED=true` and no
+`QUEEN_SQS_BIN`, the supervisor resolves the child out of its own executable's directory, so embedded
+mode needs no extra configuration in that image. The same image runs the facade alone instead, with
+`docker run … queen-mq ./bin/queen-sqs`. `EXPOSE 9324` is documentation and publishes nothing on its
+own.
+
+No published image carries the facade yet, and there are no Helm values for it: the chart in this
+repository has a broker and a proxy and nothing else. A Kubernetes deployment today is a manifest an
+operator writes, and it is an ordinary `Deployment` behind an ordinary `Service`, with
+`QUEEN_SQS_HANDLE_SECRET` from a `Secret` and the replica count of your choosing.
+
+## Region, account, and tenancy
+
+The account segment is not decoration: it is half of the identity of every queue URL and ARN this
+deployment mints.
+
+```text
+http://sqs.example.com:9324/000000000000/orders
+arn:aws:sqs:queen-1:000000000000:orders
+```
+
+Both come from `QUEEN_SQS_REGION` and `QUEEN_SQS_ACCOUNT`, and the same pair parses a client-supplied
+`QueueUrl` back to a name. A URL bearing a different account, or a traversal, resolves to nothing and
+the client is answered `QueueDoesNotExist` rather than a malformed-request error. The host in a
+minted URL is the host the **client** reached, not the one this process bound, so a queue URL is
+usable from where it was asked for; a TLS-terminating load balancer in front is the one case that
+needs the URLs rewritten, which is the caveat every self-hosted S3 and SQS endpoint carries.
+
+**The tenant of a request is the tenant of the Queen token on the SigV4 principal that signed it, and
+nothing else.** That is the whole of the tenancy model today, and it is enough for the two shapes on
+this page: several tenants on one listener are several credential entries, each carrying its own
+bearer, and the registry cache is keyed by credential as well as by name, because a cache keyed by
+name alone would serve one tenant another's queue attributes.
+
+No client header is ever forwarded to Queen, so an inbound `x-queen-tenant` cannot travel through
+this facade. What is **not** wired is the other half of the Cloud lift: every call reaches Queen with
+the `Host` of `QUEEN_URL` rather than with the one the client dialled, so the shared-host routing the
+proxy does for the Kafka facade has no equivalent here yet. Against a proxy that resolves a cluster
+from the hostname, `QUEEN_URL` has to name the host that resolves. The plan carries the tenant in the
+**account segment** of the queue URL rather than in a hostname, which is why this is a milestone
+boundary rather than a missing line.
+
+## What the boot log says
+
+One line, and it is the one to compare against what the clients are configured with:
+
+```text
+queen-sqs starting listen=0.0.0.0:9324 queen_url=http://localhost:6632 authenticated=true
+  auth=sigv4 principals=3 receive_mode=exact default_partitions=64
+  endpoint=http://<host>/000000000000/<queue> region=queen-1 account=000000000000
+  handle_secret=configured tls=false embedded=false shutdown_grace_ms=25000
+```
+
+`authenticated` is whether there is a token, never the token. No credential reaches the log at any
+level. `handle_secret` is the field to read on any deployment with more than one replica, and
+`principals` is the count of configured keypairs, which is the fastest way to notice that a
+`QUEEN_SQS_CREDENTIALS` a template built came out empty.
+
+## Onboarding a client
+
+Everything a client changes is its endpoint and its credentials. No library changes, no rebuild.
+
+```python
+import boto3
+
+sqs = boto3.client(
+    "sqs",
+    endpoint_url="http://sqs.example.com:9324",
+    region_name="queen-1",                      # QUEEN_SQS_REGION
+    aws_access_key_id="AKIAEXAMPLE",            # the akid half of the entry
+    aws_secret_access_key="a-secret-of-your-own",
+)
+```
+
+The same two settings in the shapes other stacks spell them:
+
+```bash
+# aws CLI
+aws --endpoint-url http://sqs.example.com:9324 --region queen-1 sqs list-queues
+```
+
+```php
+// Laravel config/queue.php, the stock sqs driver
+'sqs' => [
+    'driver' => 'sqs',
+    'key' => env('AWS_ACCESS_KEY_ID'),
+    'secret' => env('AWS_SECRET_ACCESS_KEY'),
+    'prefix' => 'http://sqs.example.com:9324/000000000000',
+    'queue' => 'default',
+    'region' => 'queen-1',
+    'endpoint' => 'http://sqs.example.com:9324',
+],
+```
+
+An SNS client is configured the same way, against the same endpoint and the same port: one listener
+answers both services, and a request is signed for `sqs` or for `sns` as the client already does.
+
+Two settings are worth thinking about before the first queue is created rather than after.
+`queen.partitions` at `CreateQueue` is a decision that cannot be revisited, and the
+[reference page has the guidance](/reference/sqs#the-divergence-to-read-first-a-standard-queues-concurrency-is-its-width).
+`queen.dedupWindowSeconds` is the one attribute here that has no AWS equivalent: it widens the FIFO
+deduplication window past AWS's fixed five minutes, up to a year.

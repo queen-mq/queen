@@ -50,6 +50,9 @@ mod internal;
 // HTTP to the broker's listener, and an embedded `queen::Broker` has no listener.
 // `handlers::status` reads its process-global, which is `None` here.
 mod kafka_facade;
+// Twin of the `mod sqs_facade;` in main.rs, on the same terms as `kafka_facade`
+// above: compiled, never started, and its process-global reads `None` here.
+mod sqs_facade;
 mod lease;
 mod mesh;
 mod metrics;

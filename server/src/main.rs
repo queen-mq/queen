@@ -29,6 +29,12 @@ mod internal;
 // `queen::Broker` has no HTTP listener to point a facade at), so the read is `None`
 // and /status renders exactly as it always did.
 mod kafka_facade;
+// EMBEDDED MODE for the SQS/SNS wire facade (PLAN_QUEEN_SQS.md, Architecture):
+// the twin of `kafka_facade` above, spawning and supervising the queen-sqs
+// binary under `QUEEN_SQS_EMBEDDED=true`. Listed here rather than in alphabetical
+// order because the two are read together. In BOTH crate roots for the same
+// reason as its twin, and never STARTED in the library target.
+mod sqs_facade;
 mod lease;
 mod mesh;
 mod metrics;
@@ -125,6 +131,34 @@ async fn main() {
             std::env::var("QUEEN_KAFKA_SASL").ok().as_deref(),
         ) {
             tracing::warn!(target: "kafka", "{msg}");
+        }
+        Some(bin)
+    } else {
+        None
+    };
+
+    // EMBEDDED MODE for the SQS facade (sqs_facade.rs), resolved on exactly the
+    // same terms and in the same place as its Kafka twin above. Its second
+    // unfixable-by-retry case is not an advertised address but the credential
+    // pair SigV4 — the default mode — has no default for.
+    let sqs_bin = if cfg.sqs_facade.enabled {
+        let bin = sqs_facade::resolve_bin(
+            &cfg.sqs_facade.bin,
+            std::env::current_exe().ok().as_deref(),
+        );
+        if let Err(e) = sqs_facade::preflight(
+            &bin,
+            std::env::var("QUEEN_SQS_AUTH").ok().as_deref(),
+            std::env::var("QUEEN_SQS_CREDENTIALS").ok().as_deref(),
+        ) {
+            obs::fatal(e);
+        }
+        if let Some(msg) = sqs_facade::auth_advisory(
+            cfg.auth.enabled,
+            std::env::var("QUEEN_TOKEN").ok().as_deref(),
+            std::env::var("QUEEN_SQS_CREDENTIALS").ok().as_deref(),
+        ) {
+            tracing::warn!(target: "sqs", "{msg}");
         }
         Some(bin)
     } else {
@@ -1350,6 +1384,18 @@ async fn main() {
         };
         kafka_facade::spawn(&cfg.kafka_facade, bin, url)
     });
+    // The SQS facade (sqs_facade.rs), spawned HERE for the same reason and from
+    // the same bound address. The two are independent: either, both or neither.
+    let sqs = sqs_bin.map(|bin| {
+        let url = match listener.local_addr() {
+            Ok(a) => sqs_facade::loopback_url(&a),
+            Err(e) => {
+                tracing::warn!(target: "sqs", error = %e, "listener local_addr failed; using the configured address for QUEEN_URL");
+                format!("http://{}", config::host_port(&cfg.bind_addr, &cfg.port))
+            }
+        };
+        sqs_facade::spawn(&cfg.sqs_facade, bin, url)
+    });
     // TCP_NODELAY on every accepted connection (doc 18 §10): the broker's
     // responses are small latency-sensitive JSON frames; Nagle would add up to
     // one delayed-ACK RTT per response. axum 0.7.9's Serve builder exposes this
@@ -1368,6 +1414,12 @@ async fn main() {
     // by a facade nobody is supervising. Bounded inside `shutdown`.
     if let Some(k) = kafka {
         k.shutdown().await;
+    }
+    // ...and the SQS facade, on the same terms. Sequential and not joined: each
+    // wait is bounded by its own grace window, and a broker that is exiting has
+    // nothing better to do with the second one.
+    if let Some(s) = sqs {
+        s.shutdown().await;
     }
     let pending = file_buffer.pending_count();
     if pending > 0 {
