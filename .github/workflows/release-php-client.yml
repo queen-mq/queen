@@ -6,6 +6,11 @@ on:
       - master
     paths:
       - 'clients/client-php/**'
+      # The tooling that produces the mirror commit is part of what gets
+      # mirrored. Without these, a fix to the split logic never re-runs the
+      # job it fixes, and a stale mirror cannot be repaired by repairing it.
+      - '.github/scripts/split-php-client.py'
+      - '.github/workflows/release-php-client.yml'
     tags:
       - 'clients/client-php/v*'
   workflow_dispatch:
