@@ -3,6 +3,24 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## 1.4.1 — 2026-09-02
+
+**A Kafka topic can declare its own partition count.** Until now the width every topic was
+advertised at came from one broker-wide knob: `max(live lanes, QUEEN_KAFKA_DEFAULT_PARTITIONS)`,
+where the second term is a start-up setting. A create's `num_partitions` was accepted and
+discarded, so a low-volume topic and a high-volume one could not differ, and changing either meant
+restarting the broker for all of them. `CreateTopics` now stores the number it was asked for as
+that topic's own width **floor**, and the topic is advertised at `max(live lanes, its floor)`.
+Two topics on one broker can be 8 and 512 lanes wide, declared by the clients that made them.
+
+**`CreateTopics` is the only writer.** Both alter paths carry an existing floor through untouched,
+so a `retention.ms` change cannot silently narrow a topic, and there is no config key that sets
+one. `CreatePartitions` still refuses, in the same words a real broker uses for the two cases a
+real broker also refuses; its message now says what to do instead. Changing a declared width means
+deleting the topic and creating it again. A `num_partitions` above 100,000 is refused
+`INVALID_PARTITIONS` rather than clamped, so the facade never stores a number it would then
+quietly answer as something else.
+
 ## 1.4.0 — 2026-08-31
 
 **Kafka and SQS clients connect directly.** Two wire-protocol facades now ship inside

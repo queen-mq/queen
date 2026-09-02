@@ -284,7 +284,8 @@ pub struct Queue {
     /// 012_configure.sql), so a queue that has never been pushed to reports 0
     /// and a queue pushed to on lanes 0 and 7 reports 2. Turning this into the
     /// number Kafka needs is [`crate::handlers::metadata`]'s job, not this
-    /// module's.
+    /// module's — it is the FIRST term of that width, and [`Queue::floor`] is
+    /// the second.
     #[serde(default)]
     pub partitions: i64,
     /// The queue's `id`, as `GET /api/v1/resources/queues` reports it
@@ -299,6 +300,28 @@ pub struct Queue {
     /// to compare, and [`crate::topic_record`] says what that degrades to.
     #[serde(default)]
     pub id: Option<String>,
+    /// This topic's stored width FLOOR, already checked against [`Queue::id`],
+    /// or `None` for "use `QUEEN_KAFKA_DEFAULT_PARTITIONS`".
+    ///
+    /// `serde(skip)`, because the admin API does not send this and never will:
+    /// Queen declares no width per queue. It is the facade's own number, read
+    /// from [`crate::topic_record`] and attached by [`Catalog::fetch`] on the
+    /// same refresh that produced `partitions`, so that the width is settled
+    /// once per cache entry rather than once per request.
+    #[serde(skip)]
+    pub floor: Option<u32>,
+}
+
+impl Queue {
+    /// The second term of this queue's advertised width — its own declared
+    /// floor, or the broker-wide default when it declared none.
+    ///
+    /// The first term is [`Queue::partitions`], and
+    /// [`crate::handlers::metadata::advertised_partitions`] takes the max. This
+    /// can only ever WIDEN a topic.
+    pub fn floor_or(&self, default_partitions: u32) -> u32 {
+        self.floor.unwrap_or(default_partitions)
+    }
 }
 
 /// One message to write, as `POST /api/v1/push` takes it.
@@ -1762,6 +1785,23 @@ pub fn normalize_base_url(raw: &str) -> std::result::Result<String, String> {
 /// operator's, and this number has no operator-visible effect worth tuning.
 const LIST_TTL: Duration = Duration::from_secs(3);
 
+/// How often a tenant's width floors are re-scanned, once they are known.
+///
+/// Ten times [`LIST_TTL`], because the two answer different questions. Lane
+/// counts move constantly — every first push to a new lane changes one — so the
+/// queue list is worth re-reading every few seconds. A floor changes only at
+/// CreateTopics, which drops the whole entry ([`Catalog::invalidate`]), so
+/// within one facade the scan learns nothing between those. Re-reading it on
+/// every cold list would spend a prefix walk of EVERY config record, per tenant,
+/// every three seconds, to confirm a number that did not move.
+///
+/// What this bounds is the CROSS-NODE window: a floor another facade declared is
+/// invisible here for up to this long, during which this node advertises the
+/// narrower width and refuses a produce to the new high lanes with a retriable
+/// UNKNOWN_TOPIC_OR_PARTITION. Self-healing, and the same shape of staleness the
+/// queue list already has — just longer, which is the price of not scanning.
+const FLOORS_TTL: Duration = Duration::from_secs(30);
+
 /// The queue list, cached briefly, with single-flight refresh.
 ///
 /// ## Nothing waits behind the admin call
@@ -1862,6 +1902,23 @@ struct Entry {
     /// from the cache without a call to Queen, so its `probed_at` sits still
     /// while it is doing exactly what it is here for.
     used_at: Instant,
+    /// This tenant's width floors as of the last scan that FINISHED one.
+    ///
+    /// Carried across a failed or short scan for the same reason `queues` is
+    /// carried across a failed list, and a sharper one: losing a floor does not
+    /// blank a topic, it NARROWS it, and a narrowing partition count re-hashes
+    /// live keys onto different lanes. A one-second Queen blip must not become
+    /// fleet-wide metadata churn.
+    floors: Arc<HashMap<String, crate::topic_record::StoredFloor>>,
+    /// When a scan last FINISHED for this tenant, or `None` if none ever has.
+    ///
+    /// `None` is load-bearing and not bookkeeping. An entry with no floors has
+    /// two indistinguishable meanings — "this tenant declared none" and "nobody
+    /// has looked yet" — and treating the second as the first is how a cached
+    /// entry comes to say every topic is at the broker default. So a fetch that
+    /// finds `None` scans WHATEVER the caller asked for, and only a scan that
+    /// actually finished may set it.
+    floors_at: Option<Instant>,
 }
 
 impl Catalog {
@@ -1942,7 +1999,7 @@ impl Catalog {
         // have landed between the two.
         let answer = match self.cached(&key, cred).await {
             Some(fresh) => fresh,
-            None => self.fetch(&key, cred, token, true).await,
+            None => self.fetch(&key, cred, token, true, true).await,
         };
         drop(held);
         answer
@@ -1980,7 +2037,7 @@ impl Catalog {
         if let Some(e) = self.remembered_failure(&key, cred).await {
             return Err(e);
         }
-        self.fetch(&key, cred, token, false).await
+        self.fetch(&key, cred, token, false, false).await
     }
 
     /// The answer for `key` if the last call to Queen finished within the TTL:
@@ -2043,6 +2100,17 @@ impl Catalog {
     /// failure means: for [`Catalog::list`] a slightly old world, for
     /// [`Catalog::refresh`] an error.
     ///
+    /// `want_floors` is what keeps the width scan off the paths that have no
+    /// width to answer. [`Catalog::list`] serves every width consumer
+    /// (Metadata, Produce, Fetch, ListOffsets, CreatePartitions) and asks for
+    /// them; [`Catalog::refresh`] is authentication and the config writers, and
+    /// does not — so a connection handshake costs exactly what it did before.
+    /// A refresh DOES still scan for a tenant nobody has scanned for, because
+    /// this function caches what it computes: carrying an empty map forward
+    /// would strip every queue's floor and serve the broker default from cache
+    /// for a whole TTL. Once the floors are known, they refresh on their own
+    /// slower cadence ([`FLOORS_TTL`]).
+    ///
     /// The caller holds the credential's refresh lock; the map lock is taken
     /// twice here and never across the call.
     async fn fetch(
@@ -2051,17 +2119,87 @@ impl Catalog {
         cred: CredentialKey,
         token: Option<&str>,
         fall_back_to_stale: bool,
+        want_floors: bool,
     ) -> Result<Arc<Vec<Queue>>> {
         // Read before the call so a failure does not forget the last good list.
-        let previous = self
-            .entries
-            .lock()
-            .await
-            .get(key)
-            .and_then(|e| e.queues.as_ref().map(|q| (Arc::clone(q), e.listed_at)));
+        // The floors come with it, and for a stronger reason: a lost floor
+        // narrows a topic, so a short scan must fall back to what was already
+        // known rather than to the broker-wide default.
+        let (previous, previous_floors, previous_floors_at) = {
+            let entries = self.entries.lock().await;
+            let e = entries.get(key);
+            (
+                e.and_then(|e| e.queues.as_ref().map(|q| (Arc::clone(q), e.listed_at))),
+                e.map(|e| Arc::clone(&e.floors))
+                    .unwrap_or_else(|| Arc::new(HashMap::new())),
+                e.and_then(|e| e.floors_at),
+            )
+        };
 
-        match self.api.list_queues(token).await {
-            Ok(queues) => {
+        // Concurrent, not sequential: the floor scan needs no topic list to ask
+        // for, so when it runs it costs wall-clock max() rather than sum. The
+        // steady-state Produce and Fetch paths pay nothing at all — they read
+        // the cache this writes.
+        let scan = match previous_floors_at {
+            // NEVER SCANNED, so scan — even on a path that has no width to
+            // answer. This arm is the whole safety property. `fetch` is the only
+            // writer of an entry, and it CACHES what it computes: a refresh that
+            // carried an empty map forward would strip `floor` off every queue
+            // in `attach_floors`, cache that, and every `list` inside the TTL
+            // would then serve the broker default for a topic that declared 64.
+            // Cold entries are ordinary — a process restart, a `make_room`
+            // eviction, and every `create`/`create_with`/`delete`, each of which
+            // drops the entry immediately before a refresh refills it.
+            None => true,
+            // Known. Only the width consumers refresh them, and only on the
+            // floors' own slower cadence: a floor changes at CreateTopics, which
+            // invalidates the entry outright, so re-reading every queue list is
+            // spending a prefix scan of every config record to learn nothing.
+            Some(at) => want_floors && at.elapsed() >= FLOORS_TTL,
+        };
+        let (listed, scanned) = tokio::join!(self.api.list_queues(token), async {
+            match scan {
+                true => Some(crate::topic_record::load_floors(self.api.as_ref(), token).await),
+                false => None,
+            }
+        });
+
+        // `floors_at` advances ONLY on a scan that finished. A short or failed
+        // one leaves it where it was — `None` for a tenant never scanned, which
+        // makes the next fetch try again instead of caching a map it has no
+        // reason to believe.
+        let mut floors_at = previous_floors_at;
+        let floors = match scanned.unwrap_or(Ok((HashMap::new(), false))) {
+            Ok((floors, true)) => {
+                floors_at = Some(Instant::now());
+                Arc::new(floors)
+            }
+            // A scan that could not finish is not a smaller set of floors, it is
+            // an unknown one. Keep what was known: see `Entry::floors`.
+            Ok((_, false)) => {
+                if scan {
+                    tracing::warn!(
+                        target: "kafka",
+                        kept = previous_floors.len(),
+                        "the topic width scan did not finish; keeping the floors already known"
+                    );
+                }
+                previous_floors
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "kafka",
+                    error = %e,
+                    kept = previous_floors.len(),
+                    "the topic width scan failed; keeping the floors already known"
+                );
+                previous_floors
+            }
+        };
+
+        match listed {
+            Ok(mut queues) => {
+                attach_floors(&mut queues, &floors);
                 let queues = Arc::new(queues);
                 let now = Instant::now();
                 let mut entries = self.entries.lock().await;
@@ -2074,6 +2212,8 @@ impl Catalog {
                         failure: None,
                         probed_at: now,
                         used_at: now,
+                        floors,
+                        floors_at,
                     },
                 );
                 drop(entries);
@@ -2092,6 +2232,11 @@ impl Catalog {
                         failure: Some((cred, e.clone())),
                         probed_at: Instant::now(),
                         used_at: Instant::now(),
+                        // The carried-forward list already has its floors
+                        // attached; keeping the map keeps the next refresh's
+                        // fallback non-empty.
+                        floors,
+                        floors_at,
                     },
                 );
                 drop(entries);
@@ -2154,6 +2299,23 @@ impl Catalog {
         self.entries.lock().await.remove(&key);
         answer
     }
+
+    /// Drop this credential's cached entry without making a call.
+    ///
+    /// The width-floor path's own invalidation: a CreateTopics that declared a
+    /// floor wrote it to KV AFTER `create_with` had already dropped and possibly
+    /// refilled the entry, so the cached queues carry the old width until this
+    /// forces the next read to scan again. Without it, the very next Metadata —
+    /// which is what a client sends immediately after a create — answers the
+    /// default rather than the width it was just told it has.
+    ///
+    /// Whole-entry, like every other invalidation here: there is no per-topic
+    /// eviction, so this belongs on admin paths only and must never reach a data
+    /// path.
+    pub async fn invalidate(&self, token: Option<&str>) {
+        let key = self.identities.known(token);
+        self.entries.lock().await.remove(&key);
+    }
 }
 
 /// The failure `cred`'s own last call left on `entry`, if that is whose it was.
@@ -2167,6 +2329,22 @@ fn remembered(entry: &Entry, cred: CredentialKey) -> Option<Error> {
         .as_ref()
         .filter(|(who, _)| *who == cred)
         .map(|(_, e)| e.clone())
+}
+
+/// Settle every queue's width floor against the scan, once per refresh.
+///
+/// The `qid` gate is applied HERE and not at read time, so that the hot paths
+/// hold a number that is already true rather than a record they must re-check.
+/// A stored floor whose `qid` does not match the queue that is there now
+/// describes a queue that was dropped and recreated under the same name, and
+/// advertising its width would be advertising a number nothing enforces.
+fn attach_floors(queues: &mut [Queue], floors: &HashMap<String, crate::topic_record::StoredFloor>) {
+    for q in queues.iter_mut() {
+        q.floor = floors
+            .get(&q.name)
+            .filter(|f| f.qid.as_deref() == q.id.as_deref())
+            .map(|f| f.partitions);
+    }
 }
 
 /// Drop the coldest entry if `key` would take the map past its bound.
@@ -2253,6 +2431,9 @@ pub mod testing {
         pub kv_calls: Mutex<Vec<Vec<KvOp>>>,
         /// When set, the next KV call fails with exactly this error.
         pub kv_error: Mutex<Option<Error>>,
+        /// A one-shot failure aimed at the catalog's width scan, which
+        /// [`FakeQueen::fail_kv`] deliberately never hits.
+        pub floor_scan_error: Mutex<Option<Error>>,
         /// A SECOND WRITER, landing between two of the facade's own calls.
         ///
         /// One entry is popped per KV call and applied to the store BEFORE that
@@ -2361,6 +2542,7 @@ pub mod testing {
                             name: n.to_string(),
                             partitions: *p,
                             id: None,
+                            floor: None,
                         })
                         .collect(),
                 ),
@@ -2384,6 +2566,7 @@ pub mod testing {
                 logs: Mutex::new(HashMap::new()),
                 kv_calls: Mutex::new(Vec::new()),
                 kv_error: Mutex::new(None),
+                floor_scan_error: Mutex::new(None),
                 kv_interpose: Mutex::new(std::collections::VecDeque::new()),
                 transactions: Mutex::new(Vec::new()),
                 transaction_error: Mutex::new(None),
@@ -2585,6 +2768,12 @@ pub mod testing {
                 .flatten()
                 .cloned()
                 .collect()
+        }
+
+        /// The next width scan fails with `e`. The mirror of
+        /// [`FakeQueen::fail_kv`], which never hits the scan.
+        pub fn fail_floor_scan(&self, e: Error) {
+            *self.floor_scan_error.lock().unwrap() = Some(e);
         }
 
         /// The next KV call fails with `e`.
@@ -2792,6 +2981,7 @@ pub mod testing {
                     name: name.to_string(),
                     partitions: 0,
                     id: None,
+                    floor: None,
                 });
                 Ok(())
             })
@@ -2821,6 +3011,7 @@ pub mod testing {
                     name: name.to_string(),
                     partitions: 0,
                     id: None,
+                    floor: None,
                 });
                 Ok(())
             })
@@ -2983,7 +3174,18 @@ pub mod testing {
             Box::pin(async move {
                 self.tokens.lock().unwrap().push(token.map(str::to_string));
                 self.kv_calls.lock().unwrap().push(ops.to_vec());
-                if let Some(e) = self.kv_error.lock().unwrap().take() {
+                if crate::topic_record::is_floor_scan(ops) {
+                    if let Some(e) = self.floor_scan_error.lock().unwrap().take() {
+                        return Err(e);
+                    }
+                }
+                // A scripted failure belongs to the caller's own read, never to
+                // the catalog's width scan that now precedes it — see
+                // `topic_record::is_floor_scan`.
+                if let Some(e) = (!crate::topic_record::is_floor_scan(ops))
+                    .then(|| self.kv_error.lock().unwrap().take())
+                    .flatten()
+                {
                     return Err(e);
                 }
                 if let Some(e) = self.fail.lock().unwrap().clone() {
@@ -3391,11 +3593,13 @@ mod tests {
                     name: "orders".into(),
                     partitions: 12,
                     id: Some("0d5a1e9c-1f7f-4f2f-9a02-6b6b1f0b1a11".into()),
+                    floor: None,
                 },
                 Queue {
                     name: "clicks".into(),
                     partitions: 0,
                     id: Some("1d5a1e9c-1f7f-4f2f-9a02-6b6b1f0b1a12".into()),
+                    floor: None,
                 },
             ]
         );
@@ -3965,6 +4169,7 @@ mod tests {
                         name: n.to_string(),
                         partitions: *p,
                         id: None,
+                        floor: None,
                     })
                     .collect(),
                 through: tokio::sync::Semaphore::new(0),
@@ -4039,7 +4244,16 @@ mod tests {
             _: &'a [KvOp],
             _: Option<&'a str>,
         ) -> BoxFuture<'a, Result<Vec<KvAnswer>>> {
-            unreachable!("the stall test only lists")
+            // A `list` now also scans for width floors (`Catalog::fetch`), and
+            // this double gates only the LIST. An empty, untruncated answer is
+            // "this tenant declared no floors", which leaves the stall these
+            // tests are about exactly where it was.
+            Box::pin(async {
+                Ok(vec![serde_json::from_value::<KvAnswer>(
+                    serde_json::json!({"op": "getPrefix"}),
+                )
+                .expect("every KvAnswer field has a serde default")])
+            })
         }
 
         fn transaction<'a>(
@@ -4136,8 +4350,13 @@ mod tests {
         );
         // Each credential still reaches Queen as ITSELF: the entry is shared,
         // the bearer never is.
+        // Deduplicated: a cold fetch makes two calls that carry the credential —
+        // the queue list and the width scan. What this pins is which
+        // credentials reached Queen, not how many calls each made.
+        let mut tokens = api.tokens.lock().unwrap().clone();
+        tokens.dedup();
         assert_eq!(
-            api.tokens.lock().unwrap().as_slice(),
+            tokens.as_slice(),
             [
                 Some("key-a".to_string()),
                 Some("key-b".to_string()),
@@ -4189,10 +4408,133 @@ mod tests {
         catalog.list(Some("tenant-b")).await.unwrap();
         catalog.list(Some("tenant-a")).await.unwrap();
         assert_eq!(api.lists.load(Ordering::SeqCst), 2);
+        // Deduplicated: each fetch now makes two calls that carry the token —
+        // the queue list and the catalog's width scan — and what this pins is
+        // which credentials reached Queen, not how many calls each made.
+        let mut tokens = api.tokens.lock().unwrap().clone();
+        tokens.dedup();
         assert_eq!(
-            api.tokens.lock().unwrap().as_slice(),
+            tokens.as_slice(),
             [Some("tenant-a".to_string()), Some("tenant-b".to_string())]
         );
+    }
+
+    /// A REFRESH ON A COLD ENTRY MUST NOT CACHE A FLOORLESS LIST.
+    ///
+    /// `fetch` is the only writer of an entry and it caches what it computes, so
+    /// a refresh that skipped the scan would attach `floor: None` to every queue
+    /// and every `list` inside the TTL would then serve the broker default for a
+    /// topic that declared 64 — a live narrowing, which re-hashes keys onto
+    /// different lanes. Cold entries are ordinary: a process restart, a
+    /// `make_room` eviction, and every create/delete, each of which drops the
+    /// entry immediately before a refresh refills it.
+    ///
+    /// This is the exact shape of `Facade::verify` — the SASL handshake — which
+    /// is a `refresh` and is the FIRST thing every connection does.
+    #[tokio::test]
+    async fn a_refresh_on_a_cold_entry_does_not_cache_away_the_floors() {
+        let api = FakeQueen::with(&[("wide", 1)]);
+        api.kv_seed(
+            crate::offsets::NAMESPACE,
+            &crate::topic_record::key("wide"),
+            serde_json::json!({"qid": null, "set": {}, "at": 1, "partitions": 64}),
+        );
+        let catalog = Catalog::new(api.clone());
+
+        // The handshake, on an entry nobody has ever scanned for.
+        catalog.refresh(None).await.unwrap();
+
+        let queues = catalog.list(None).await.unwrap();
+        assert_eq!(
+            queues[0].floor,
+            Some(64),
+            "a refresh cached a floorless list and narrowed the topic"
+        );
+    }
+
+    /// ...and the same, through the sequence that actually produces it in
+    /// production: an auto-create drops the entry (`Catalog::create`) and the
+    /// record write immediately refreshes it back.
+    #[tokio::test]
+    async fn a_create_then_refresh_does_not_cache_away_the_floors() {
+        let api = FakeQueen::with(&[("wide", 1)]);
+        api.kv_seed(
+            crate::offsets::NAMESPACE,
+            &crate::topic_record::key("wide"),
+            serde_json::json!({"qid": null, "set": {}, "at": 1, "partitions": 64}),
+        );
+        let catalog = Catalog::new(api.clone());
+        assert_eq!(catalog.list(None).await.unwrap()[0].floor, Some(64));
+
+        // `create` removes the entry; the refresh that follows it refills one.
+        catalog.create("brand-new", None).await.unwrap();
+        catalog.refresh(None).await.unwrap();
+
+        let wide = catalog
+            .list(None)
+            .await
+            .unwrap()
+            .iter()
+            .find(|q| q.name == "wide")
+            .cloned()
+            .expect("wide is still there");
+        assert_eq!(
+            wide.floor,
+            Some(64),
+            "a create followed by a refresh narrowed an unrelated topic"
+        );
+    }
+
+    /// A FAILED width scan must keep the floors already known, not fall back to
+    /// the broker default.
+    ///
+    /// This is the sharpest failure this feature has. Losing a floor does not
+    /// blank a topic, it NARROWS it — and a narrowing Kafka partition count
+    /// re-hashes live keys onto different lanes and loses ordering. A one-second
+    /// Queen blip must not become fleet-wide metadata churn.
+    #[tokio::test]
+    async fn a_failed_width_scan_keeps_the_floors_already_known() {
+        let api = FakeQueen::with(&[("orders", 1)]);
+        api.kv_seed(
+            crate::offsets::NAMESPACE,
+            &crate::topic_record::key("orders"),
+            serde_json::json!({"qid": null, "set": {}, "at": 1, "partitions": 64}),
+        );
+        let catalog = Catalog::with_ttl(api.clone(), Duration::from_millis(0));
+
+        let first = catalog.list(None).await.unwrap();
+        assert_eq!(first[0].floor, Some(64), "the floor was read");
+
+        // The TTL is zero, so the next list refetches — and its scan fails.
+        api.fail_floor_scan(Error::Transport("kv is down".into()));
+        let second = catalog.list(None).await.unwrap();
+        assert_eq!(
+            second[0].floor,
+            Some(64),
+            "a failed scan narrowed a topic instead of keeping what it knew"
+        );
+    }
+
+    /// A floor pinned to a queue id that is not the one there now is not
+    /// attached: the queue was dropped and recreated under the same name, and
+    /// its old record describes a width nothing enforces.
+    #[tokio::test]
+    async fn a_floor_is_not_attached_across_a_recreated_queue() {
+        let api = FakeQueen::with(&[]);
+        api.queues.lock().unwrap().push(Queue {
+            name: "orders".to_string(),
+            partitions: 1,
+            id: Some("q-NEW".to_string()),
+            floor: None,
+        });
+        api.kv_seed(
+            crate::offsets::NAMESPACE,
+            &crate::topic_record::key("orders"),
+            serde_json::json!({"qid": "q-OLD", "set": {}, "at": 1, "partitions": 64}),
+        );
+
+        let queues = Catalog::new(api.clone()).list(None).await.unwrap();
+        assert_eq!(queues[0].floor, None, "a stale record's floor was attached");
     }
 
     /// ...and the key space that makes those two entries two is a space a peer

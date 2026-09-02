@@ -6,10 +6,16 @@
 //! option keys and `partitions` is not one of them, `queen.queues` has no such
 //! column, and a lane comes into existence only when something is pushed to it
 //! (`003_log_push.sql`). The width this facade advertises is
-//! `max(live lanes, QUEEN_KAFKA_DEFAULT_PARTITIONS)`
-//! ([`metadata::advertised_partitions`]) and the second half of that is a
-//! BROKER START-UP knob, not a per-topic number. So there is no write that
-//! widens one topic, and this API cannot be implemented — only answered.
+//! `max(live lanes, the topic's declared floor or QUEEN_KAFKA_DEFAULT_PARTITIONS)`
+//! ([`metadata::advertised_partitions`]).
+//!
+//! A topic CAN now carry its own floor — but it is written once, by CreateTopics
+//! ([`super::create_topics`]), and this API is not that writer. Making it one
+//! would turn a ratified divergence from the oracle into a conformance, which is
+//! a decision and not a refactor: `compat/differential` classifies the increase
+//! case as a deliberate deviation, and two of the three answers below are
+//! byte-identical to apache/kafka. So this stays an answered refusal, and only
+//! the sentence it answers with changed.
 //!
 //! Advertising a refusal is normally against `versions::ADVERTISED`'s own rule.
 //! It is right here because two of the three answers are not refusals of a
@@ -80,6 +86,10 @@ use kafka_protocol::protocol::StrBytes;
 use crate::handlers::metadata;
 use crate::{queen, throttle, Facade};
 
+/// The live width inputs for every topic this request names — lane count and
+/// declared floor — or the one refusal every topic gets when the list failed.
+type Catalog = Result<HashMap<String, (i64, Option<u32>)>, (ResponseError, String)>;
+
 pub async fn handle(
     facade: &Facade,
     req: &CreatePartitionsRequest,
@@ -96,8 +106,8 @@ pub async fn handle(
         match facade.catalog.list(token).await {
             Ok(queues) => Ok(queues
                 .iter()
-                .map(|q| (q.name.clone(), q.partitions))
-                .collect::<HashMap<String, i64>>()),
+                .map(|q| (q.name.clone(), (q.partitions, q.floor)))
+                .collect::<HashMap<String, (i64, Option<u32>)>>()),
             Err(e) => {
                 tracing::warn!(
                     target: "kafka",
@@ -124,7 +134,7 @@ pub async fn handle(
 fn one(
     facade: &Facade,
     t: &CreatePartitionsTopic,
-    catalog: &Result<HashMap<String, i64>, (ResponseError, String)>,
+    catalog: &Catalog,
 ) -> CreatePartitionsTopicResult {
     let name = t.name.0.as_str();
 
@@ -138,11 +148,12 @@ fn one(
         Ok(live) => live,
         Err((e, why)) => return answer(name, Some(*e), Some(why.clone())),
     };
-    let Some(lanes) = live.get(name) else {
+    let Some((lanes, floor)) = live.get(name) else {
         return answer(name, Some(ResponseError::UnknownTopicOrPartition), None);
     };
 
-    let current = metadata::advertised_partitions(*lanes, facade.default_partitions);
+    let current =
+        metadata::advertised_partitions(*lanes, floor.unwrap_or(facade.default_partitions));
     let wanted = t.count;
 
     // The oracle's own two sentences, in the oracle's own order. Recorded off
@@ -187,10 +198,11 @@ fn one(
         Some(ResponseError::InvalidPartitions),
         Some(format!(
             "Queen declares no width per queue: a partition exists once something has been \
-             written to it, and the width this facade advertises is max(live lanes, \
-             QUEEN_KAFKA_DEFAULT_PARTITIONS), which is {current} for {name}. That second number \
-             is a broker start-up setting, not a per-topic one, so a topic cannot be widened \
-             through this API. Raise QUEEN_KAFKA_DEFAULT_PARTITIONS (it applies to every topic), \
+             written to it, and the width this facade advertises is max(live lanes, the topic's \
+             own declared floor or QUEEN_KAFKA_DEFAULT_PARTITIONS), which is {current} for \
+             {name}. A floor is declared once, by CreateTopics `numPartitions`, and this API \
+             does not change it. Recreate the topic with the width you want, raise \
+             QUEEN_KAFKA_DEFAULT_PARTITIONS (it applies to every topic that declared none), \
              or produce to the higher lanes directly."
         )),
     )

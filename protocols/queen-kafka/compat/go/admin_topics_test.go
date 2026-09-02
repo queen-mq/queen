@@ -53,6 +53,11 @@ func createTopics(t *testing.T, cl *kgo.Client, version int16, req *kmsg.CreateT
 	return resp
 }
 
+// The partition count the create scenarios declare. Since M7 a declared count
+// is the topic's own width floor, so this is also the width they must be served
+// at — see the note in TestCreateTopics.
+const declaredWidth int32 = 4
+
 func newCreate(topic string, partitions int32, replication int16) kmsg.CreateTopicsRequestTopic {
 	rt := kmsg.NewCreateTopicsRequestTopic()
 	rt.Topic = topic
@@ -169,12 +174,20 @@ func TestCreateTopicsCreatesAQueueASecondClientCanSee(t *testing.T) {
 	if got.ErrorCode != errNone {
 		t.Fatalf("create %s: error code %d (%v)", topic, got.ErrorCode, got.ErrorMessage)
 	}
-	// The width the facade will actually serve, NOT the 4 that was asked for:
-	// Queen declares no width per queue. The contract is that this number and
-	// the client's next Metadata agree, which is what the check below is.
-	if got.NumPartitions != topicWidth(t) {
-		t.Fatalf("create %s reported %d partitions, the facade serves %d",
-			topic, got.NumPartitions, topicWidth(t))
+	// THE ASK IS HONOURED since per-topic width floors (M7): `num_partitions`
+	// is stored as this topic's own floor, and its width becomes
+	// max(live lanes, 4) rather than max(live lanes,
+	// QUEEN_KAFKA_DEFAULT_PARTITIONS). The floor REPLACES the broker default as
+	// the second term — it is a floor under the live lanes, not under the
+	// default — so a topic may legitimately be narrower than the default when
+	// that is what the client asked for. A brand-new topic has no lanes, so the
+	// answer is exactly the 4 requested.
+	//
+	// The contract that has not changed is the one checked below: this number
+	// and the client's next Metadata agree.
+	if got.NumPartitions != declaredWidth {
+		t.Fatalf("create %s reported %d partitions, want the %d it declared",
+			topic, got.NumPartitions, declaredWidth)
 	}
 	if got.ReplicationFactor != 1 {
 		t.Fatalf("create %s reported replication %d, want 1", topic, got.ReplicationFactor)
@@ -366,9 +379,11 @@ func TestCreateTopicsValidateOnlyWritesNothing(t *testing.T) {
 	if resp.Topics[0].ErrorCode != errNone {
 		t.Fatalf("validate_only: error code %d (%v)", resp.Topics[0].ErrorCode, resp.Topics[0].ErrorMessage)
 	}
-	if resp.Topics[0].NumPartitions != topicWidth(t) {
+	// The declared floor, not the broker default: validate_only answers what the
+	// create WOULD have produced, and a create that declares 4 produces 4.
+	if resp.Topics[0].NumPartitions != declaredWidth {
 		t.Fatalf("validate_only reported %d partitions, want %d",
-			resp.Topics[0].NumPartitions, topicWidth(t))
+			resp.Topics[0].NumPartitions, declaredWidth)
 	}
 	if listedTopics(t, newClient(t))[topic] {
 		t.Fatalf("validate_only created %s", topic)

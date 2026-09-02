@@ -14,7 +14,7 @@ defining abstraction is one logical ordered partition per application entity (a 
 account, a conversation, a device, a workflow, a session, a job), created by the first push that
 names it, never provisioned in advance.
 
-[Documentation](https://queenmq.com) · [Benchmarks](https://queenmq.com/benchmarks) · [Quickstart](https://queenmq.com/start/quickstart) · Apache-2.0 · v1.4.0
+[Documentation](https://queenmq.com) · [Benchmarks](https://queenmq.com/benchmarks) · [Quickstart](https://queenmq.com/start/quickstart) · Apache-2.0 · v1.4.1
 
 
 Queen speaks HTTP, but is also protocol-compatible with Kafka and SQS clients.
@@ -70,7 +70,11 @@ fan-out and cache invalidation: the shapes that should not pay for replay and re
 existing client moves over by changing its connection URL. The supported
 surface, and every place behaviour differs from the real thing, are in
 [reference/kafka](https://queenmq.com/reference/kafka) and
-[reference/sqs](https://queenmq.com/reference/sqs).
+[reference/sqs](https://queenmq.com/reference/sqs). The two protocols share the rows rather than
+copying them, so a Kafka producer and a Queen consumer can read the same messages at the same
+time with no connector in between:
+[Kafka in, Queen out](https://queenmq.com/use/full-examples/cross-protocol)
+([code](examples/cross-protocol)).
 
 **One binary, no sidecars.** Stateless, and curl is a first-class client · six SDKs (JavaScript,
 Python, Go, Rust, C++, PHP/Laravel) plus `queenctl` · a dashboard served by the same binary on the

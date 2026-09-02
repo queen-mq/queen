@@ -2,12 +2,13 @@ package main
 
 // M7 F4's CreatePartitions scenario (key 37).
 //
-// The facade cannot widen a topic and never will be able to on this design:
-// Queen declares no width per queue, so the number a client sees is
-// `max(live lanes, QUEEN_KAFKA_DEFAULT_PARTITIONS)` and the second half of that
-// is a broker start-up setting. What the facade CAN do is refuse in the same
-// words a real broker uses for the two cases where a real broker also refuses,
-// and that is what this scenario measures.
+// This API cannot widen a topic. Queen declares no width per queue, so the
+// number a client sees is `max(live lanes, the topic's declared floor or
+// QUEEN_KAFKA_DEFAULT_PARTITIONS)`. A topic may carry its own floor since M7 —
+// but it is declared ONCE, at CreateTopics, and this API is not that writer, so
+// there is still no write HERE that widens a topic. What the facade CAN do is
+// refuse in the same words a real broker uses for the two cases where a real
+// broker also refuses, and that is what this scenario measures.
 //
 // So the acceptance is split, deliberately:
 //

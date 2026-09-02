@@ -334,12 +334,17 @@ sarama:
 Three things a create does NOT do, all deliberate and all answered honestly
 rather than obeyed:
 
-* **`--partitions N` is accepted and not honoured.** Queen declares no width per
-  queue: `/configure` creates the queue row and a partition row materialises on
-  the first push to that lane. The width is
-  `max(live lanes, QUEEN_KAFKA_DEFAULT_PARTITIONS)`, which is a property of the
-  facade, and the create's own answer reports it — so the number the create
-  returns is the number the client's next Metadata agrees with.
+* **`--partitions N` is honoured at CREATE, as a floor.** Queen still declares
+  no width per queue: `/configure` creates the queue row and a partition row
+  materialises on the first push to that lane. What a create can set is the
+  facade's own second term — `N` is stored on the topic's config record and the
+  width becomes `max(live lanes, N)` instead of
+  `max(live lanes, QUEEN_KAFKA_DEFAULT_PARTITIONS)`. The floor REPLACES the
+  default rather than being compared against it, so a topic may be narrower than
+  the broker default when that is what was asked for. The create's own answer
+  reports the resulting width, so the number the create returns is still the
+  number the client's next Metadata agrees with. `--alter --partitions` cannot
+  change a floor: see the CreatePartitions row.
   `kafka-topics.sh --create --partitions 4` prints `Created topic …` and the
   following `--describe` says `PartitionCount: 8` on a facade configured for 8.
 * **`--replication-factor N` is accepted and reported back as 1.** One logical
@@ -709,11 +714,14 @@ F4 adds five more, all of them classified `deliberate` in the differential and
 none of them a defect:
 
 - **CreatePartitions refuses an INCREASE**, where the oracle widens the topic.
-  This is the one genuine capability gap of the three cases: Queen declares no
-  width per queue, a lane exists once something has been written to it, and the
-  advertised width is `max(live lanes, QUEEN_KAFKA_DEFAULT_PARTITIONS)` whose
-  second half is a broker start-up knob. The refusal names the knob and the
-  alternative (produce to the higher lanes directly, which materialises them).
+  This is the one genuine capability gap of the three cases. Queen declares no
+  width per queue and a lane exists once something has been written to it; the
+  advertised width is `max(live lanes, the topic's declared floor or
+  QUEEN_KAFKA_DEFAULT_PARTITIONS)`. A topic can carry its own floor since M7, but
+  it is declared ONCE, at CreateTopics, and this API is not that writer —
+  changing a declared width means recreating the topic. The refusal names all
+  three alternatives: recreate with the width wanted, raise the broker knob, or
+  produce to the higher lanes directly (which materialises them).
 - **A tracked topic with no retention set reports `retention.ms = -1`**, where
   Kafka's own default is 604800000. Queen's default is retention OFF, and OFF
   IS Kafka's `-1`, so the facade is reporting its own truth rather than Kafka's
@@ -766,9 +774,14 @@ None of these is a defect; each is a shipped choice that nobody has ratified.
    delete topics and delete groups. Apache Kafka has ACLs here. A default-OFF
    knob for the destructive half is the cheap posture until there is a role
    model.
-4. **`num_partitions` and `replication_factor` are accepted and not honoured**,
-   and the create's own answer reports the facade's real width and 1. Refusing
-   would break every provisioner whose default is 3.
+4. **`num_partitions` is honoured as a per-topic width FLOOR; `replication_factor`
+   is accepted and not honoured.** A declared count is stored on the topic's
+   config record and the width becomes `max(live lanes, it)`, so the floor
+   replaces `QUEEN_KAFKA_DEFAULT_PARTITIONS` as the second term rather than being
+   compared against it — a topic may be narrower than the broker default when
+   that is what was asked for. A count past 100000 is refused rather than
+   clamped. Replication is still reported as 1, because refusing it would break
+   every provisioner whose default is 3.
 5. **`retention.ms` now round-trips, out of the facade's own record rather than
    out of Queen.** F4 closed the asymmetry this entry used to describe, and the
    way it closed it is the thing to ratify: the facade persists the options bag

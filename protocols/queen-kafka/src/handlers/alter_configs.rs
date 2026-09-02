@@ -68,6 +68,13 @@ pub(crate) enum Verdict {
     Write {
         qid: Option<String>,
         bag: Map<String, Value>,
+        /// The topic's stored width floor, carried through UNCHANGED.
+        ///
+        /// An alter rewrites the whole record, so a floor this path did not
+        /// carry would be erased by the next `retention.ms` change — silently
+        /// narrowing the topic, which is the one failure the width rule exists
+        /// to prevent. No config key sets this: CreateTopics is the only writer.
+        partitions: Option<u32>,
     },
     /// The bag the request computes is the bag already stored, so there is
     /// nothing to do. Answered 0 with no call to Queen, which also narrows the
@@ -164,6 +171,10 @@ pub(crate) async fn context(facade: &Facade, topics: &[String], token: Option<&s
     }
 }
 
+/// What a tracked topic's record yields to a plan: the queue id it is pinned to,
+/// the config bag to merge onto, and the width floor to carry through untouched.
+pub(crate) type Tracked = (Option<String>, Map<String, Value>, Option<u32>);
+
 impl Context {
     /// The bag the facade last applied to `topic` and the queue id it is pinned
     /// to, or the reason this topic cannot be altered here.
@@ -172,10 +183,7 @@ impl Context {
     /// here, then a topic that does not exist, then a read that failed, then a
     /// topic with no valid record. Only the last of those is final on a topic
     /// that exists, and it is the one whose sentence a person reads.
-    pub(crate) fn tracked(
-        &self,
-        topic: &str,
-    ) -> Result<(Option<String>, Map<String, Value>), Verdict> {
+    pub(crate) fn tracked(&self, topic: &str) -> Result<Tracked, Verdict> {
         // The SAME rule every read path applies, in the code this surface
         // answers it with: a `__` name is invisible here and an illegal name is
         // not a topic this facade has.
@@ -217,7 +225,7 @@ impl Context {
         };
         match records.get(topic) {
             Some(record) if record.describes(live_id.as_deref()) => {
-                Ok((live_id.clone(), record.set.clone()))
+                Ok((live_id.clone(), record.set.clone(), record.partitions))
             }
             _ => Err(Verdict::Refuse(
                 ResponseError::InvalidConfig,
@@ -326,6 +334,7 @@ pub(crate) async fn commit(
     topic: &str,
     qid: Option<String>,
     bag: Map<String, Value>,
+    partitions: Option<u32>,
     token: Option<&str>,
 ) -> Landed {
     let options = Value::Object(bag.clone());
@@ -343,7 +352,7 @@ pub(crate) async fn commit(
         };
     }
 
-    let record = Record::new(qid, bag);
+    let record = Record::new(qid, bag).with_partitions(partitions);
     if let Err(e) = topic_record::store(facade.queen.as_ref(), topic, &record, token).await {
         tracing::error!(
             target: "kafka",
@@ -464,8 +473,20 @@ pub async fn handle(
             // point of the flag — a client uses it to find out what WOULD
             // happen.
             Verdict::Write { .. } if req.validate_only => None,
-            Verdict::Write { qid, bag } => {
-                let landed = commit(facade, resource.resource_name.as_str(), qid, bag, token).await;
+            Verdict::Write {
+                qid,
+                bag,
+                partitions,
+            } => {
+                let landed = commit(
+                    facade,
+                    resource.resource_name.as_str(),
+                    qid,
+                    bag,
+                    partitions,
+                    token,
+                )
+                .await;
                 throttle_ms = throttle::longest(throttle_ms, landed.throttle_ms);
                 landed.error
             }
@@ -502,7 +523,7 @@ fn plan_topic(
     topic: &str,
     configs: &[kafka_protocol::messages::alter_configs_request::AlterableConfig],
 ) -> Verdict {
-    let (qid, stored) = match ctx.tracked(topic) {
+    let (qid, stored, partitions) = match ctx.tracked(topic) {
         Ok(found) => found,
         Err(refusal) => return refusal,
     };
@@ -522,7 +543,11 @@ fn plan_topic(
     if desired == stored {
         Verdict::Unchanged
     } else {
-        Verdict::Write { qid, bag: desired }
+        Verdict::Write {
+            qid,
+            bag: desired,
+            partitions,
+        }
     }
 }
 
@@ -555,6 +580,67 @@ pub(crate) mod tests {
                     .collect::<Map<String, Value>>(),
                 "at": 1,
             }),
+        );
+    }
+
+    /// The same, for a topic that also declared a width floor at CreateTopics.
+    pub(crate) fn track_with_floor(
+        api: &Arc<FakeQueen>,
+        topic: &str,
+        set: &[(&str, Value)],
+        floor: u32,
+    ) {
+        api.kv_seed(
+            crate::offsets::NAMESPACE,
+            &topic_record::key(topic),
+            json!({
+                "qid": null,
+                "set": set
+                    .iter()
+                    .map(|(k, v)| ((*k).to_string(), v.clone()))
+                    .collect::<Map<String, Value>>(),
+                "at": 1,
+                "partitions": floor,
+            }),
+        );
+    }
+
+    /// AN ALTER MUST NOT ERASE THE TOPIC'S WIDTH FLOOR.
+    ///
+    /// The record is rewritten WHOLE on every alter, so a floor this path did
+    /// not carry through would vanish the first time anyone changed
+    /// `retention.ms` — silently narrowing the topic, which re-hashes live keys
+    /// onto different lanes. No config key sets this and none can; CreateTopics
+    /// is the only writer, and this path's whole job is to leave it alone.
+    #[tokio::test]
+    async fn an_alter_does_not_erase_the_topics_width_floor() {
+        let (f, api) = facade_and_queen(&[("orders", 1)]);
+        track_with_floor(&api, "orders", &[], 64);
+
+        let r = handle(
+            &f,
+            &request(vec![resource(
+                RESOURCE_TOPIC,
+                "orders",
+                vec![config("retention.ms", Some("604800000"))],
+            )]),
+            None,
+        )
+        .await;
+        assert_eq!(r.responses[0].error_code, 0, "the alter landed");
+
+        let stored = api
+            .kv_get(crate::offsets::NAMESPACE, &topic_record::key("orders"))
+            .expect("the record is still there");
+        assert_eq!(
+            stored["partitions"],
+            json!(64),
+            "the alter erased the topic's declared width"
+        );
+        assert_eq!(
+            stored["set"]["retentionSeconds"],
+            json!(604_800),
+            "and it still applied the change it was asked for"
         );
     }
 
@@ -930,7 +1016,7 @@ pub(crate) mod tests {
         ]
         .into_iter()
         .collect();
-        let landed = commit(&f, "orders", None, bag, None).await;
+        let landed = commit(&f, "orders", None, bag, None, None).await;
 
         assert_eq!(
             landed.error.as_ref().map(|(code, _)| *code),
@@ -1114,8 +1200,17 @@ pub(crate) mod tests {
         .await;
         assert_eq!(api.list_count(), 1);
         // One getMany for the three records, then one put per topic that
-        // actually changed.
-        assert_eq!(api.kv_calls.lock().unwrap().len() - before, 4);
+        // actually changed. The catalog's width scan is excluded: it is once per
+        // cold refresh for the whole tenant, never per topic, so it does not
+        // reintroduce the per-topic cost this pins against.
+        let calls = api.kv_calls.lock().unwrap().clone();
+        assert_eq!(
+            calls[before..]
+                .iter()
+                .filter(|ops| !crate::topic_record::is_floor_scan(ops))
+                .count(),
+            4
+        );
     }
 
     /// Every call carries the connection's credential, so one tenant cannot

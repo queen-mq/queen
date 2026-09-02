@@ -76,8 +76,20 @@ pub async fn handle(
             Verdict::Unchanged => None,
             // `validate_only` (v0-v1), honoured the same way key 33 honours it.
             Verdict::Write { .. } if req.validate_only => None,
-            Verdict::Write { qid, bag } => {
-                let landed = commit(facade, resource.resource_name.as_str(), qid, bag, token).await;
+            Verdict::Write {
+                qid,
+                bag,
+                partitions,
+            } => {
+                let landed = commit(
+                    facade,
+                    resource.resource_name.as_str(),
+                    qid,
+                    bag,
+                    partitions,
+                    token,
+                )
+                .await;
                 throttle_ms = throttle::longest(throttle_ms, landed.throttle_ms);
                 landed.error
             }
@@ -99,7 +111,7 @@ pub async fn handle(
 
 /// The delta, merged onto what the facade last applied.
 fn plan_topic(ctx: &Context, topic: &str, configs: &[AlterableConfig]) -> Verdict {
-    let (qid, stored) = match ctx.tracked(topic) {
+    let (qid, stored, partitions) = match ctx.tracked(topic) {
         Ok(found) => found,
         Err(refusal) => return refusal,
     };
@@ -119,7 +131,11 @@ fn plan_topic(ctx: &Context, topic: &str, configs: &[AlterableConfig]) -> Verdic
     if desired == stored {
         Verdict::Unchanged
     } else {
-        Verdict::Write { qid, bag: desired }
+        Verdict::Write {
+            qid,
+            bag: desired,
+            partitions,
+        }
     }
 }
 

@@ -109,6 +109,7 @@
     "/use/examples",
     "/use/full-examples",
     "/use/full-examples/chat",
+    "/use/full-examples/cross-protocol",
     "/use/full-examples/exactly-once",
     "/use/full-examples/rate-limiter",
     "/use/full-examples/saga",

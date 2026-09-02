@@ -2426,8 +2426,13 @@ mod tests {
         };
         let (mut peer, api) = over_tls(policy, "shared.queenmq.cloud").await;
         assert!(metadata_works(&mut peer).await);
+        // Deduplicated, not counted: a metadata now costs a queue list AND the
+        // catalog's width scan, and what this test is about is that EVERY call
+        // carries the dialled name — not how many there are.
+        let mut hosts = api.hosts();
+        hosts.dedup();
         assert_eq!(
-            api.hosts(),
+            hosts,
             ["shared.queenmq.cloud"],
             "the call to Queen did not carry the name the client dialled"
         );

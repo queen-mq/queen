@@ -224,6 +224,7 @@ only correct behaviour for a group that has never committed.
 |---|---|---|---|
 | `INVALID_TOPIC_EXCEPTION` (17) | no | the name is not a legal Kafka topic name, or begins with `__` | The second API that emits it, and for the reason the audit's rule names: this is a surface where a NAME is validated, so the client can act on it. `__` is INVALID here and UNKNOWN in Metadata on purpose — creating one would make a queue the facade then refuses to show anywhere. |
 | `TOPIC_ALREADY_EXISTS` (36) | no | the catalog already has a queue of that name | And `POST /api/v1/configure` is **not** called for it. The stored procedure is an upsert that rewrites every config column to its defaults, so a create over a live queue would silently reset its leaseTime, retention, retry policy and dedup window. |
+| `INVALID_PARTITIONS` (37) | no | `numPartitions` above `MAX_ADVERTISED_PARTITIONS` (100000) | A declared count is stored as the topic's own width floor, so a number this facade would then clamp is REFUSED rather than accepted and quietly answered as something else. `QUEEN_KAFKA_DEFAULT_PARTITIONS` gets a hard boot error for the same number; this is the wire's version of it. `-1` (KIP-464's "I do not care") and `0` declare nothing and are not errors. |
 | `INVALID_REPLICA_ASSIGNMENT` (39) | no | a non-empty `assignments` | A manual assignment names broker ids to place partitions on; this facade places nothing anywhere. Accepting it would be silently discarding an explicit operator instruction. |
 | `INVALID_CONFIG` (40) | no | `cleanup.policy=compact` (or `compact,delete`); `retention.ms` under 1000 ms or below -1; any config name outside the mapping | The mapping is `src/topic_config.rs`. Compaction is refused because it is a stated non-goal and nothing compacts — which is what makes Kafka Connect fail at startup instead of losing its connector configuration on a later restart. A sub-second retention is refused rather than rounded to zero, which would mean "delete everything". |
 | `INVALID_REQUEST` (42) | no | the same topic name appears more than once in one request | Apache Kafka's own answer, and none of the entries is created. It is also what stops the second configure for one name being an upsert over the queue the first one just made. |
@@ -414,9 +415,10 @@ already stored writes nothing either, and answers 0.
 **This whole API is a refusal, and two thirds of it is Apache Kafka's own.**
 Queen declares no width per queue: `POST /api/v1/configure` has no `partitions`
 option, `queen.queues` has no such column, and a lane exists once something has
-been pushed to it. The width advertised is `max(live lanes,
-QUEEN_KAFKA_DEFAULT_PARTITIONS)`, and the second half of that is a broker
-start-up setting rather than a per-topic one, so no write widens one topic.
+been pushed to it. The width advertised is `max(live lanes, the topic's declared
+floor or QUEEN_KAFKA_DEFAULT_PARTITIONS)`. A topic CAN carry its own floor since
+M7 — but it is written once, by CreateTopics, and **this** API is not that
+writer, so no write here widens a topic.
 
 The three messages, the first two recorded off `apache/kafka:3.9.1` in KRaft
 mode rather than copied from a document:

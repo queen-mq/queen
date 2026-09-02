@@ -388,7 +388,8 @@ fn broker_configs(facade: &Facade) -> Vec<Reported> {
             kind: Kind::Int,
             read_only: true,
             documentation: "QUEEN_KAFKA_DEFAULT_PARTITIONS. Queen declares no width per queue, \
-                            so a topic is advertised at max(live lanes, this).",
+                            so a topic is advertised at max(live lanes, its own declared width, \
+                            or this when it declared none).",
         },
         Reported {
             name: "auto.create.topics.enable",
@@ -650,7 +651,18 @@ mod tests {
             None,
         )
         .await;
-        assert_eq!(api.kv_calls.lock().unwrap().len(), 1);
+        // ONE record read for all three topics, which is what this test is for.
+        // The catalog's width scan is the other call: once per cold refresh for
+        // the whole tenant, never per topic — so it does not reintroduce the
+        // per-topic cost this pins against.
+        let calls = api.kv_calls.lock().unwrap().clone();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|ops| !crate::topic_record::is_floor_scan(ops))
+                .count(),
+            1
+        );
     }
 
     /// A KV failure costs the retention row and nothing else: the two rows that

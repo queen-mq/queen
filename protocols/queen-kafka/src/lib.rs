@@ -666,7 +666,11 @@ mod tests {
             .list(None)
             .await
             .unwrap();
-        assert_eq!(api.hosts(), ["acme.test"]);
+        // Deduplicated: a list also runs the catalog's width scan, and the
+        // question here is whether every call carries the forwarded host.
+        let mut hosts = api.hosts();
+        hosts.dedup();
+        assert_eq!(hosts, ["acme.test"]);
     }
 
     // ------------------------------------------------- the scope of a group
@@ -845,9 +849,11 @@ mod tests {
         let connection = facade.for_connection(None).authenticated_as("tenant-token");
         assert_eq!(connection.token(), Some("tenant-token"));
         connection.catalog.list(connection.token()).await.unwrap();
-        assert_eq!(
-            api.tokens.lock().unwrap().as_slice(),
-            [Some("tenant-token".to_string())]
-        );
+        // Deduplicated: a list makes two calls that carry the token — the queue
+        // list and the catalog's width scan — and what this pins is WHICH
+        // credential reached Queen, not how many calls carried it.
+        let mut tokens = api.tokens.lock().unwrap().clone();
+        tokens.dedup();
+        assert_eq!(tokens.as_slice(), [Some("tenant-token".to_string())]);
     }
 }

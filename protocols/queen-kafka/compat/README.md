@@ -324,10 +324,14 @@ Three client behaviours to know before reading a failure in these:
   inverted into positive checks of the 21-key surface rather than deleted, and
   every one of those suites was re-run to green. Two things the inversion
   taught, both worth keeping in mind before writing the next one:
-  **CreateTopics does not honour `num_partitions`** (`create_topics.rs` takes
-  the wider of the live lane count and `QUEEN_KAFKA_DEFAULT_PARTITIONS`), so the
-  obvious inversion "created with the 4 partitions asked for" is itself wrong
-  and the suites now assert the true width and name the deviation on the line;
+  **CreateTopics honours `num_partitions` as a per-topic width FLOOR** since M7
+  (`create_topics.rs` stores it on the topic's config record, and
+  `create_partitions.rs` still refuses to change one). The width is
+  `max(live lanes, that floor or QUEEN_KAFKA_DEFAULT_PARTITIONS)`, so a create
+  that declares 4 is served at 4 — the floor REPLACES the broker default as the
+  second term rather than being compared against it. Before M7 the ask was
+  discarded and the suites asserted the broker default instead; if you are
+  reading an older suite, that is why;
   and the ruby/php **zstd detector was blind rather than merely fail-open**,
   because librdkafka's "Broker does not support compression type" notice rides
   the `msg` debug facility while both suites set `debug=protocol`. It is now

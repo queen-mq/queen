@@ -142,6 +142,21 @@ pub struct Record {
     /// one nobody can reason about when they are looking at why a topic reports
     /// the retention it reports.
     pub at: i64,
+    /// This topic's advertised-width FLOOR, or `None` for "use
+    /// `QUEEN_KAFKA_DEFAULT_PARTITIONS`".
+    ///
+    /// A FLOOR and never a cap: the width is still
+    /// `max(live lanes, this)` ([`crate::handlers::metadata::advertised_partitions`]),
+    /// so this can only ever widen a topic. Queen still declares no width per
+    /// queue — this is the facade's own number, which is why it lives here and
+    /// not in a twentieth `/configure` option key.
+    ///
+    /// Deliberately NOT a member of [`Record::set`]: that bag is posted verbatim
+    /// to `POST /api/v1/configure` and `configure_queue_v1` has no partition key
+    /// among its nineteen, so a `partitions` member there would ride along on
+    /// every future configure as an option Queen ignores — and would be exposed
+    /// to a client's `--delete-config` through [`merge`].
+    pub partitions: Option<u32>,
 }
 
 impl Record {
@@ -151,7 +166,27 @@ impl Record {
             qid,
             set,
             at: now_millis(),
+            partitions: None,
         }
+    }
+
+    /// The same record carrying a width floor.
+    ///
+    /// Separate from [`Record::new`] so that the paths with no floor to declare
+    /// — every alter, and the auto-create in `handlers::metadata` — cannot
+    /// silently erase one by simply not knowing about it.
+    pub fn with_partitions(mut self, partitions: Option<u32>) -> Record {
+        self.partitions = partitions;
+        self
+    }
+
+    /// The floor this record declares FOR THE QUEUE THAT IS THERE NOW.
+    ///
+    /// The same `qid` gate `handlers::describe_configs` applies to the retention
+    /// it reports, for the same reason: a record whose queue was dropped and
+    /// recreated under the same name describes a width nothing is enforcing.
+    pub fn floor(&self, live: Option<&str>) -> Option<u32> {
+        self.describes(live).then_some(self.partitions).flatten()
     }
 
     fn to_value(&self) -> Value {
@@ -159,6 +194,7 @@ impl Record {
             "qid": self.qid,
             "set": Value::Object(self.set.clone()),
             "at": self.at,
+            "partitions": self.partitions,
         })
     }
 
@@ -170,6 +206,29 @@ impl Record {
             qid: v.get("qid").and_then(|q| q.as_str()).map(str::to_string),
             set: v.get("set")?.as_object()?.clone(),
             at: v.get("at").and_then(|t| t.as_i64()).unwrap_or_default(),
+            // NO `?`, deliberately, and the contrast with `set` above is the
+            // point: a record written before this field existed has no
+            // `partitions` member at all, and one written since may carry
+            // `null`. Both are "no floor declared" and neither is a reason to
+            // throw the record away — an unparseable record reads as ABSENT,
+            // which would untrack the topic, blank its `retention.ms` in
+            // DescribeConfigs and refuse every alter against it.
+            //
+            // Range-filtered on the way IN rather than trusted, because unlike
+            // `QUEEN_KAFKA_DEFAULT_PARTITIONS` — validated at boot against the
+            // same ceiling, with a hard error — this number arrived from a
+            // client. A stored `0` or a negative would otherwise reach
+            // `advertised_partitions`, whose clamp floor is 0, and advertise a
+            // topic at zero partitions: the un-producible state the width rule
+            // exists to prevent.
+            partitions: v
+                .get("partitions")
+                .and_then(|p| p.as_u64())
+                .filter(|n| {
+                    (1..=u64::from(crate::handlers::metadata::MAX_ADVERTISED_PARTITIONS))
+                        .contains(n)
+                })
+                .map(|n| n as u32),
         })
     }
 
@@ -181,6 +240,22 @@ impl Record {
     pub fn describes(&self, live: Option<&str>) -> bool {
         self.qid.as_deref() == live
     }
+}
+
+/// One topic's stored width floor, and the queue id it was pinned to.
+///
+/// The two fields of a [`Record`] the width path needs, without the config bag:
+/// the catalog holds one of these per topic per tenant for the life of a cache
+/// entry, and carrying every tenant's `set` maps there to read one integer would
+/// be a retention policy nobody asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredFloor {
+    /// [`Record::qid`], checked against the live queue's id before the floor is
+    /// believed. See [`Record::floor`].
+    pub qid: Option<String>,
+    /// Always `Some`'s inner value: a record with no floor is not stored here at
+    /// all, so absence from the map and "declared no floor" are one state.
+    pub partitions: u32,
 }
 
 /// `stored` with `delta` applied: a `Some` value sets the key, a `None` removes
@@ -310,6 +385,95 @@ pub async fn load_many(
     Ok(out)
 }
 
+/// Pages of [`queen::MAX_KV_PREFIX_LIMIT`] this scan will walk before giving up.
+///
+/// 32 x 1000 is 32k topics for one tenant, an order of magnitude past the widest
+/// listing this facade will answer. The bound exists so a pathological key space
+/// cannot turn one catalog refresh into an unbounded walk, not because the limit
+/// is expected to bind.
+const MAX_PREFIX_PAGES: usize = 32;
+
+/// Every width floor this credential can see, and whether the scan FINISHED.
+///
+/// A prefix scan and not a [`load_many`], because the catalog has no topic name
+/// list to ask for until the queue list lands — and a scan can run CONCURRENTLY
+/// with that list instead of after it.
+///
+/// **The `bool` is the load-bearing half.** `false` does not mean "no floors": it
+/// means "do not believe this map". Every way this read can come back short — a
+/// KV error, a `truncated` answer this walk could not finish, a value
+/// [`Record::from_value`] rejects — resolves a topic to the global default,
+/// which NARROWS it. A Kafka partition count that shrinks makes clients re-hash
+/// existing keys onto different partitions and lose ordering
+/// (`handlers::metadata`'s module header), so the caller must carry its previous
+/// map forward rather than adopt a short one.
+pub async fn load_floors(
+    api: &dyn QueenApi,
+    token: Option<&str>,
+) -> queen::Result<(HashMap<String, StoredFloor>, bool)> {
+    let mut out = HashMap::new();
+    let mut after: Option<String> = None;
+    for _ in 0..MAX_PREFIX_PAGES {
+        let ops = [KvOp::GetPrefix {
+            ns: NAMESPACE.to_string(),
+            prefix: KEY_PREFIX.to_string(),
+            limit: queen::MAX_KV_PREFIX_LIMIT,
+            after: after.take(),
+        }];
+        let answers = api.kv(&ops, token).await?;
+        let answer = answers
+            .into_iter()
+            .next()
+            .ok_or_else(|| queen::Error::Body("kv answered nothing for a getPrefix".to_string()))?;
+        for row in &answer.rows {
+            let Some(topic) = row.key.strip_prefix(KEY_PREFIX) else {
+                tracing::warn!(target: "kafka", key = %row.key, "unreadable topic config key");
+                continue;
+            };
+            // Only records that DECLARE a floor are kept: absence from this map
+            // and "declared none" are deliberately the same state, so the map
+            // stays the size of the topics that opted in rather than the size of
+            // every topic the facade has ever configured.
+            if let Some(partitions) = Record::from_value(&row.value).and_then(|r| {
+                r.partitions.map(|p| StoredFloor {
+                    qid: r.qid,
+                    partitions: p,
+                })
+            }) {
+                out.insert(topic.to_string(), partitions);
+            }
+        }
+        // NOT ignored, unlike `load_many`'s: keys lost to the 4 MiB call budget
+        // are in neither `rows` nor `missing` ([`queen::KvAnswer::truncated`]),
+        // and for a floor "not there" is a narrower topic rather than a missing
+        // config row.
+        if !answer.truncated {
+            return Ok((out, true));
+        }
+        after = answer.next_after.clone();
+        if after.is_none() {
+            // Truncated with nowhere to continue from. Nothing more can be read,
+            // and what was read is not the whole set.
+            return Ok((out, false));
+        }
+    }
+    Ok((out, false))
+}
+
+/// Whether `ops` is the catalog's width scan and not a caller's own read.
+///
+/// For the test doubles: a scripted one-shot KV failure means "the next call
+/// THIS HANDLER makes fails", and the scan — which `Catalog::fetch` now issues
+/// ahead of it — must not be the one that swallows it. Without this, a test
+/// that names a failing record read silently stops exercising one.
+#[cfg(test)]
+pub(crate) fn is_floor_scan(ops: &[KvOp]) -> bool {
+    matches!(
+        ops,
+        [KvOp::GetPrefix { ns, prefix, .. }] if ns == NAMESPACE && prefix == KEY_PREFIX
+    )
+}
+
 /// Wall-clock milliseconds. Not tokio's: this is a timestamp that is STORED and
 /// read by a person, and a paused test clock would write 1970 into the database.
 fn now_millis() -> i64 {
@@ -349,6 +513,154 @@ mod tests {
                 "{other} lives under {KEY_PREFIX}"
             );
         }
+    }
+
+    // ------------------------------------------------------- the width floor
+
+    /// A record written before floors existed has no `partitions` member at
+    /// all. It must read as "declared no floor" and NOT as an unparseable
+    /// record: absence is how this module says "untracked", and untracking
+    /// every already-stored topic would blank its `retention.ms` in
+    /// DescribeConfigs and refuse every alter against it.
+    #[test]
+    fn a_record_written_before_floors_existed_reads_as_no_floor() {
+        let old = json!({"qid": "q-1", "set": {"retentionSeconds": 604_800}, "at": 17});
+        let read = Record::from_value(&old).expect("an old record is still one of ours");
+        assert_eq!(read.partitions, None);
+        assert_eq!(read.qid.as_deref(), Some("q-1"));
+        assert_eq!(read.set.len(), 1, "the config bag survived");
+    }
+
+    /// An explicit `null` — what the new writer stores for a topic that declared
+    /// nothing — is the same answer, by the same route.
+    #[test]
+    fn an_explicit_null_floor_is_no_floor() {
+        let v = json!({"qid": null, "set": {}, "at": 17, "partitions": null});
+        assert_eq!(Record::from_value(&v).unwrap().partitions, None);
+    }
+
+    /// The floor arrives from a CLIENT, unlike `QUEEN_KAFKA_DEFAULT_PARTITIONS`
+    /// which is validated at boot with a hard error. A stored value outside the
+    /// advertisable range is dropped on the way in rather than trusted: `0` and
+    /// negatives would otherwise reach `advertised_partitions`, whose clamp
+    /// floor is 0, and advertise a topic at ZERO partitions — the un-producible
+    /// state the whole width rule exists to prevent.
+    #[test]
+    fn a_stored_floor_outside_the_advertisable_range_is_ignored() {
+        for bad in [
+            json!(0),
+            json!(-1),
+            json!(i64::from(u32::MAX) + 1),
+            json!("64"),
+        ] {
+            let v = json!({"qid": null, "set": {}, "at": 1, "partitions": bad});
+            let read = Record::from_value(&v).expect("the record is still readable");
+            assert_eq!(read.partitions, None, "{bad} was stored as a floor");
+        }
+        let past = json!(u64::from(crate::handlers::metadata::MAX_ADVERTISED_PARTITIONS) + 1);
+        let v = json!({"qid": null, "set": {}, "at": 1, "partitions": past});
+        assert_eq!(Record::from_value(&v).unwrap().partitions, None);
+    }
+
+    /// A legal floor survives the round trip it is stored and read through.
+    #[test]
+    fn a_floor_survives_the_round_trip() {
+        let r = Record::new(Some("q-1".into()), bag(&[])).with_partitions(Some(64));
+        assert_eq!(
+            Record::from_value(&r.to_value()).unwrap().partitions,
+            Some(64)
+        );
+    }
+
+    /// The `qid` gate applies to the floor exactly as it applies to the
+    /// retention DescribeConfigs reports: a record pinned to a queue that was
+    /// dropped and recreated under the same name describes a width nothing is
+    /// enforcing, so it is not one this facade will advertise.
+    #[test]
+    fn a_floor_belongs_only_to_the_queue_it_was_pinned_to() {
+        let r = Record::new(Some("q-1".into()), bag(&[])).with_partitions(Some(64));
+        assert_eq!(r.floor(Some("q-1")), Some(64), "the same queue");
+        assert_eq!(r.floor(Some("q-2")), None, "a recreated queue");
+        assert_eq!(r.floor(None), None, "a list that reports no id");
+    }
+
+    /// `new` must not invent a floor, so that every path with none to declare —
+    /// every alter, and the auto-create in `handlers::metadata` — cannot set one
+    /// by accident.
+    #[test]
+    fn a_plain_record_declares_no_floor() {
+        assert_eq!(Record::new(None, bag(&[])).partitions, None);
+    }
+
+    /// The width scan reads only the records that DECLARE a floor, and reports
+    /// that it finished.
+    #[tokio::test]
+    async fn the_scan_reads_the_floors_and_skips_the_topics_without_one() {
+        let api = FakeQueen::with(&[]);
+        api.kv_seed(
+            NAMESPACE,
+            &key("wide"),
+            Record::new(Some("q-1".into()), bag(&[]))
+                .with_partitions(Some(64))
+                .to_value(),
+        );
+        api.kv_seed(
+            NAMESPACE,
+            &key("plain"),
+            Record::new(Some("q-2".into()), bag(&[])).to_value(),
+        );
+
+        let (floors, finished) = load_floors(api.as_ref(), None).await.unwrap();
+        assert!(finished, "an untruncated scan finished");
+        assert_eq!(floors.len(), 1, "only the topic that declared one is kept");
+        let f = &floors["wide"];
+        assert_eq!(f.partitions, 64);
+        assert_eq!(f.qid.as_deref(), Some("q-1"));
+    }
+
+    /// A truncated PAGE is not a short scan: the walk follows `nextAfter` and
+    /// still finishes. This is the case that happens in production every time a
+    /// tenant has more floors than one page holds.
+    #[tokio::test]
+    async fn a_paged_scan_still_finishes() {
+        let api = FakeQueen::with(&[]);
+        for n in 0..4 {
+            api.kv_seed(
+                NAMESPACE,
+                &key(&format!("t{n}")),
+                Record::new(None, bag(&[]))
+                    .with_partitions(Some(8))
+                    .to_value(),
+            );
+        }
+        api.kv_truncate_reads_at(1);
+
+        let (floors, finished) = load_floors(api.as_ref(), None).await.unwrap();
+        assert!(finished, "a paged walk that reached the end finished");
+        assert_eq!(floors.len(), 4, "every page was followed");
+    }
+
+    /// A scan that runs out of PAGES reports `false`, and the caller must not
+    /// treat the short map as the whole set: every topic missing from it would
+    /// fall back to the broker default, which NARROWS it.
+    #[tokio::test]
+    async fn a_scan_past_the_page_budget_says_it_did_not_finish() {
+        let api = FakeQueen::with(&[]);
+        for n in 0..(MAX_PREFIX_PAGES + 8) {
+            api.kv_seed(
+                NAMESPACE,
+                &key(&format!("t{n:04}")),
+                Record::new(None, bag(&[]))
+                    .with_partitions(Some(8))
+                    .to_value(),
+            );
+        }
+        // One row per page, so the walk needs more pages than it is allowed.
+        api.kv_truncate_reads_at(1);
+
+        let (floors, finished) = load_floors(api.as_ref(), None).await.unwrap();
+        assert!(!finished, "a scan cut by the page budget must say so");
+        assert_eq!(floors.len(), MAX_PREFIX_PAGES, "it read exactly its budget");
     }
 
     /// The widest legal topic name still composes a key the store accepts, which

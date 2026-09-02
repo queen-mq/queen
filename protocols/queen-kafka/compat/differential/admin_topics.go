@@ -182,9 +182,10 @@ func scenCreateTopics(c *runctx) {
 	}
 	defer k.Close()
 
-	// 1. The ordinary create, asking for a width. The two brokers disagree here
-	//    on purpose and the disagreement is the deviation: Queen declares no
-	//    width per queue, so the facade reports the width it will SERVE.
+	// 1. The ordinary create, asking for a width. Since M7 the ask is HONOURED
+	//    as a per-topic floor, so both brokers report the 4 that were asked for
+	//    and this case no longer diverges. The facade still reports the width it
+	//    will SERVE — which for a brand-new topic with no lanes is the floor.
 	fresh := c.topic("ct-new")
 	got, err := createTopic(k, newTopicSpec(fresh, 4, 1), false)
 	recordCreate(c, "create.new", got, err)

@@ -44,7 +44,11 @@
 //! second ago therefore has zero partitions, and a topic with zero partitions is
 //! one a producer cannot send to.
 //!
-//! So the advertised width is `max(live, QUEEN_KAFKA_DEFAULT_PARTITIONS)`:
+//! So the advertised width is `max(live, floor)`, where `floor` is the topic's
+//! OWN declared width when it has one ([`crate::topic_record::Record::partitions`],
+//! set once by CreateTopics) and `QUEEN_KAFKA_DEFAULT_PARTITIONS` when it does
+//! not. Queen still declares no width per queue: the floor is the facade's own
+//! number, and it is a floor rather than a cap for the second reason below.
 //!
 //!   * it is never zero, so a fresh topic is usable immediately;
 //!   * it never shrinks as lanes materialise, and a Kafka partition count that
@@ -200,24 +204,42 @@ pub enum Plan {
 /// Decide what to do with one requested topic name.
 ///
 /// `live` is the queue's partition count from the catalog, or `None` when there
-/// is no such queue.
-pub fn plan(
-    name: &str,
-    live: Option<i64>,
-    allow_auto_create: bool,
-    default_partitions: u32,
-) -> Plan {
+/// is no such queue. `floor` is the second term of the width — the topic's own
+/// stored floor when it declared one, and `QUEEN_KAFKA_DEFAULT_PARTITIONS`
+/// otherwise. Prefer [`plan_for`], which reads both off one [`Queue`].
+pub fn plan(name: &str, live: Option<i64>, allow_auto_create: bool, floor: u32) -> Plan {
     if let Some(e) = reserved_or_invalid(name) {
         return Plan::Reject(e);
     }
     match live {
-        Some(live) => Plan::Serve(advertised_partitions(live, default_partitions)),
+        Some(live) => Plan::Serve(advertised_partitions(live, floor)),
         None if allow_auto_create => Plan::Create,
         // The client asked us not to create it, so the honest answer is that it
         // is not here. This is also the code a consumer subscribed to a topic
         // nobody has produced to yet sees, and it retries — as it should.
         None => Plan::Reject(ResponseError::UnknownTopicOrPartition),
     }
+}
+
+/// [`plan`], reading both terms of the width off the catalog's own queue.
+///
+/// The one place that decides which floor applies, so that a call site cannot
+/// pass `partitions` from one queue and the default from nowhere. A topic that
+/// declared no floor, and one the facade never created, both resolve to
+/// `default_partitions` — which is byte-for-byte what this facade answered
+/// before per-topic floors existed.
+pub fn plan_for(
+    name: &str,
+    queue: Option<&Queue>,
+    allow_auto_create: bool,
+    default_partitions: u32,
+) -> Plan {
+    plan(
+        name,
+        queue.map(|q| q.partitions),
+        allow_auto_create,
+        queue.map_or(default_partitions, |q| q.floor_or(default_partitions)),
+    )
 }
 
 /// The rule for a name, independent of whether the queue exists.
@@ -341,7 +363,7 @@ pub(crate) async fn advertised_widths<'a>(
         .map(|q| {
             (
                 q.name.clone(),
-                advertised_partitions(q.partitions, facade.default_partitions),
+                advertised_partitions(q.partitions, q.floor_or(facade.default_partitions)),
             )
         })
         .collect()
@@ -452,7 +474,7 @@ fn listing(
         .iter()
         .filter(|q| reserved_or_invalid(&q.name).is_none())
     {
-        let width = advertised_partitions(q.partitions, facade.default_partitions);
+        let width = advertised_partitions(q.partitions, q.floor_or(facade.default_partitions));
         // The first topic always fits, or a single wide queue would empty the
         // listing entirely and tell a client the cluster has no topics.
         if !out.is_empty() && spent + width as usize > MAX_LISTING_PARTITIONS {
@@ -491,13 +513,11 @@ async fn requested(
     // The catalog as a lookup and not a scan: both sides of it are client-set
     // (up to [`MAX_REQUESTED_TOPICS`] names against a tenant's whole queue
     // list), and their product is the one quadratic in this handler.
-    let live: HashMap<&str, i64> = catalog
-        .map(|queues| {
-            queues
-                .iter()
-                .map(|q| (q.name.as_str(), q.partitions))
-                .collect()
-        })
+    // The whole `Queue` and not just its lane count: the width's second term is
+    // now the queue's own stored floor, and reading it here keeps `plan_for` the
+    // only place that decides which floor applies.
+    let live: HashMap<&str, &Queue> = catalog
+        .map(|queues| queues.iter().map(|q| (q.name.as_str(), q)).collect())
         .unwrap_or_default();
     let mut planned: Vec<(Option<&str>, Plan)> = names
         .iter()
@@ -514,7 +534,7 @@ async fn requested(
             (Some(n), None) => (Some(n), Plan::Reject(ResponseError::LeaderNotAvailable)),
             (Some(n), Some(_)) => (
                 Some(n),
-                plan(
+                plan_for(
                     n,
                     live.get(n).copied(),
                     allow_auto_create,
@@ -587,10 +607,7 @@ pub(crate) async fn create_absent(
 
     // Looked up rather than scanned: the names are the client's and the queue
     // list is the tenant's, so a scan per name is their product.
-    let live: HashMap<&str, i64> = fresh
-        .iter()
-        .map(|q| (q.name.as_str(), q.partitions))
-        .collect();
+    let live: HashMap<&str, &Queue> = fresh.iter().map(|q| (q.name.as_str(), q)).collect();
     let mut created = 0usize;
     let mut deferred = 0usize;
     // The names that actually landed, for the config records written after the
@@ -603,10 +620,10 @@ pub(crate) async fn create_absent(
         let Some(name) = *name else { continue };
         // It appeared between the plan and the re-read (a native `/configure`,
         // or another connection's auto-create): serve it, do not re-upsert it.
-        if let Some(partitions) = live.get(name) {
+        if let Some(q) = live.get(name) {
             *p = Plan::Serve(advertised_partitions(
-                *partitions,
-                facade.default_partitions,
+                q.partitions,
+                q.floor_or(facade.default_partitions),
             ));
             continue;
         }
@@ -1248,6 +1265,7 @@ mod tests {
             name: "orders".into(),
             partitions: 40,
             id: None,
+            floor: None,
         });
 
         let resp = handle(&f, &request(Some(&["orders"]), true), 9, None).await;
@@ -1281,12 +1299,116 @@ mod tests {
         }
     }
 
+    // ------------------------------------------------------- the width floor
+
+    /// Seed a topic's stored width floor, the way a CreateTopics that declared
+    /// one would have left it. `qid` is `None` because `FakeQueen::with` builds
+    /// queues with no id, and `None == None` is the match the record's own gate
+    /// documents.
+    fn seed_floor(api: &FakeQueen, topic: &str, floor: u32) {
+        api.kv_seed(
+            crate::offsets::NAMESPACE,
+            &topic_record::key(topic),
+            serde_json::json!({
+                "qid": null,
+                "set": {},
+                "at": 1_787_824_800_123i64,
+                "partitions": floor,
+            }),
+        );
+    }
+
+    fn width_of(r: &MetadataResponse, topic: &str) -> usize {
+        r.topics
+            .iter()
+            .find(|t| t.name.as_ref().is_some_and(|n| n.as_str() == topic))
+            .unwrap_or_else(|| panic!("{topic} is not in the response"))
+            .partitions
+            .len()
+    }
+
+    /// The whole feature, end to end: a topic that declared its own floor is
+    /// advertised at it, and a topic that declared none still follows
+    /// `QUEEN_KAFKA_DEFAULT_PARTITIONS` — in the SAME response, which is what
+    /// makes the floor per-topic rather than a second global knob.
+    #[tokio::test]
+    async fn a_declared_floor_widens_only_the_topic_that_declared_it() {
+        let (f, api) = facade(&[("wide", 0), ("plain", 0)], 4);
+        seed_floor(&api, "wide", 64);
+
+        let r = handle(&f, &request(Some(&["wide", "plain"]), false), 9, None).await;
+        assert_eq!(width_of(&r, "wide"), 64, "the declared floor applies");
+        assert_eq!(
+            width_of(&r, "plain"),
+            4,
+            "and only to the topic that declared it"
+        );
+    }
+
+    /// It is a FLOOR and never a cap. A topic with more live lanes than its
+    /// declared floor keeps the lanes: narrowing a Kafka partition count
+    /// re-hashes live keys onto different lanes and loses ordering, which is the
+    /// one outcome this number may never cause.
+    #[tokio::test]
+    async fn a_floor_never_narrows_a_topic_that_already_has_more_lanes() {
+        let (f, api) = facade(&[("busy", 128)], 4);
+        seed_floor(&api, "busy", 16);
+
+        let r = handle(&f, &request(Some(&["busy"]), false), 9, None).await;
+        assert_eq!(
+            width_of(&r, "busy"),
+            128,
+            "the lanes win over a lower floor"
+        );
+    }
+
+    /// A floor pinned to a queue id that is not the one there now describes a
+    /// queue that was dropped and recreated under the same name. Advertising its
+    /// width would be advertising a number nothing enforces.
+    #[tokio::test]
+    async fn a_floor_from_a_recreated_queue_is_not_advertised() {
+        let (f, api) = facade(&[], 4);
+        api.queues.lock().unwrap().push(crate::queen::Queue {
+            name: "orders".to_string(),
+            partitions: 0,
+            id: Some("q-NEW".to_string()),
+            floor: None,
+        });
+        api.kv_seed(
+            crate::offsets::NAMESPACE,
+            &topic_record::key("orders"),
+            serde_json::json!({"qid": "q-OLD", "set": {}, "at": 1, "partitions": 64}),
+        );
+
+        let r = handle(&f, &request(Some(&["orders"]), false), 9, None).await;
+        assert_eq!(
+            width_of(&r, "orders"),
+            4,
+            "a stale record's width must not be advertised"
+        );
+    }
+
     /// A request with nothing to create does not re-read at all, and does not
     /// touch the record store either — which is every Metadata after the first,
     /// on the hottest path this facade has.
     #[tokio::test]
     async fn a_request_that_creates_nothing_costs_one_call() {
         let (f, api) = facade(&[("orders", 2)], 4);
+        handle(&f, &request(Some(&["orders"]), true), 9, None).await;
+        assert_eq!(api.list_count(), 1);
+        // The COLD list also scans for width floors: once for the whole tenant,
+        // concurrently with the list, and never per topic.
+        let scans = api.kv_calls.lock().unwrap().clone();
+        assert_eq!(scans.len(), 1);
+        assert!(
+            crate::topic_record::is_floor_scan(&scans[0]),
+            "the only KV call a plain Metadata may make is the width scan"
+        );
+
+        // ...and the claim this test is named for: every Metadata AFTER the
+        // first is served from the cache and costs nothing at all — no list, no
+        // scan, no record read. This is the property the width floor had to keep.
+        api.kv_calls.lock().unwrap().clear();
         handle(&f, &request(Some(&["orders"]), true), 9, None).await;
         assert_eq!(api.list_count(), 1);
         assert!(api.kv_calls.lock().unwrap().is_empty());
@@ -1310,8 +1432,18 @@ mod tests {
                 serde_json::json!({})
             );
         }
-        // ONE KV call for the whole request, not one per topic.
-        assert_eq!(api.kv_calls.lock().unwrap().len(), 1);
+        // ONE record write for the whole request, not one per topic. The width
+        // scans are excluded rather than counted: an auto-create drops the
+        // catalog entry, so how many cold refreshes follow is this handler's
+        // business and not what this test is about.
+        let calls = api.kv_calls.lock().unwrap().clone();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|ops| !crate::topic_record::is_floor_scan(ops))
+                .count(),
+            1
+        );
     }
 
     /// ...and an auto-create whose record could not be written still serves the

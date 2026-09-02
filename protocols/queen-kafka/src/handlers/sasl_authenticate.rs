@@ -235,10 +235,12 @@ mod tests {
         );
         // The check was a REAL authenticated call, carrying the token the
         // client presented and not the process credential.
-        assert_eq!(
-            api.tokens.lock().unwrap().as_slice(),
-            [Some("tenant-token".to_string())]
-        );
+        // Deduplicated: the handshake's refresh now also scans for width floors
+        // on a tenant nobody has scanned for, and both calls carry the token.
+        // What this pins is WHICH credential reached Queen.
+        let mut tokens = api.tokens.lock().unwrap().clone();
+        tokens.dedup();
+        assert_eq!(tokens.as_slice(), [Some("tenant-token".to_string())]);
     }
 
     /// The exact bytes kafka-python and aiokafka put on the wire: one config
@@ -264,10 +266,12 @@ mod tests {
                 user: "acme".into()
             }
         );
-        assert_eq!(
-            api.tokens.lock().unwrap().as_slice(),
-            [Some("tenant-token".to_string())]
-        );
+        // Deduplicated: the handshake's refresh now also scans for width floors
+        // on a tenant nobody has scanned for, and both calls carry the token.
+        // What this pins is WHICH credential reached Queen.
+        let mut tokens = api.tokens.lock().unwrap().clone();
+        tokens.dedup();
+        assert_eq!(tokens.as_slice(), [Some("tenant-token".to_string())]);
     }
 
     #[tokio::test]

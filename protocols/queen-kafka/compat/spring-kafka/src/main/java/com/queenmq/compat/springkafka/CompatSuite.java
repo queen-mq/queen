@@ -674,9 +674,10 @@ public class CompatSuite {
             check.ok(made != null && width >= 3,
                     "the created topic exists and is describable with " + width + " partitions, "
                             + "at least the 3 the NewTopic bean asked for");
-            check.note("the bean's partitions(3) is accepted and not acted on: the width is "
-                    + "max(live lanes, QUEEN_KAFKA_DEFAULT_PARTITIONS) = " + width
-                    + ", a deliberate deviation on PLAN_QUEEN_KAFKA.md's list");
+            check.note("the bean's partitions(3) is stored as this topic's own width floor: "
+                    + "the width is max(live lanes, that floor) = " + width
+                    + ". Before M7 the ask was discarded and the width was "
+                    + "max(live lanes, QUEEN_KAFKA_DEFAULT_PARTITIONS)");
             check.note("consequence: a Boot app MAY declare NewTopic beans now; auto-create on first "
                     + "Metadata still works and is still the simplest option");
         } catch (Exception e) {

@@ -29,17 +29,32 @@
 //!
 //! ## What is honoured, and what is answered honestly instead
 //!
-//! `num_partitions` is the interesting one. **Queen has no declared width.**
-//! `configure_queue_v1` creates the queue row and nothing else; a
-//! `queen.log_partitions` row materialises on the first push to that lane. The
-//! width a client sees is `max(live lanes, QUEEN_KAFKA_DEFAULT_PARTITIONS)`
-//! ([`super::metadata::advertised_partitions`]) and that is a property of the
-//! FACADE, not a per-topic number a create can set. So a request for N is
-//! accepted, nothing is done with it, and the v5+ response reports the width the
-//! topic actually has — which is the number the client's very next Metadata will
-//! agree with. Asking for fewer than the default is harmless (the client
-//! re-reads Metadata and hashes modulo the real width); asking for more is an
-//! unmet request and says so in the log.
+//! `num_partitions` is the interesting one, and it is HONOURED — as a floor.
+//!
+//! **Queen still has no declared width.** `configure_queue_v1` creates the queue
+//! row and nothing else; a `queen.log_partitions` row materialises on the first
+//! push to that lane. What a create can set is the facade's own second term: `N`
+//! is stored on the topic's config record
+//! ([`crate::topic_record::Record::partitions`]) and the width becomes
+//! `max(live lanes, N)` instead of `max(live lanes,
+//! QUEEN_KAFKA_DEFAULT_PARTITIONS)` ([`super::metadata::advertised_partitions`]).
+//! The v5+ response reports the width that produces, which is the number the
+//! client's very next Metadata agrees with.
+//!
+//! A FLOOR and never a cap, for the reason the metadata module header gives: a
+//! Kafka partition count that shrinks re-hashes live keys onto different lanes.
+//! So a topic with more live lanes than its declared floor keeps the lanes, and
+//! a create that asks for fewer than it already has is not a narrowing — it is
+//! simply not a widening. `-1` (KIP-464's "I do not care", what a modern
+//! AdminClient sends) and `0` declare nothing and keep the broker-wide default.
+//! A count past [`super::metadata::MAX_ADVERTISED_PARTITIONS`] is REFUSED rather
+//! than clamped, so the facade never stores a number it would then silently
+//! answer as something else.
+//!
+//! This is the ONLY writer of a floor. There is no config key for it, and
+//! neither alter path can change one — they carry it through untouched, which is
+//! what stops a `retention.ms` change from narrowing a topic. Changing a
+//! declared width means deleting and recreating the topic.
 //!
 //! `replication_factor` is the same shape with a shorter argument: one logical
 //! broker, and replication is Postgres's business. Any value including -1 is
@@ -67,7 +82,7 @@ use kafka_protocol::messages::{CreateTopicsRequest, CreateTopicsResponse, TopicN
 use kafka_protocol::protocol::StrBytes;
 use std::collections::HashSet;
 
-use crate::handlers::metadata::{self, advertised_partitions};
+use crate::handlers::metadata::{self, advertised_partitions, MAX_ADVERTISED_PARTITIONS};
 use crate::topic_config::{self, Applied};
 use crate::topic_record;
 use crate::{queen, throttle, Facade};
@@ -185,7 +200,11 @@ pub async fn handle(
     let mut results = Vec::with_capacity(planned.len());
     // The bags that actually landed, for the config records written after the
     // loop. See [`record_what_was_created`].
-    let mut recordable: Vec<(String, serde_json::Map<String, serde_json::Value>)> = Vec::new();
+    let mut recordable: Vec<(
+        String,
+        serde_json::Map<String, serde_json::Value>,
+        Option<u32>,
+    )> = Vec::new();
     for (topic, plan) in planned {
         let name = topic.name.clone();
         let applied = match plan {
@@ -214,11 +233,31 @@ pub async fn handle(
             continue;
         }
 
+        // Refused rather than clamped, and this is the one place it can be:
+        // `advertised_partitions` clamps silently, so a number that arrived past
+        // the ceiling would be stored, then quietly answered as something else
+        // for the life of the topic. `QUEEN_KAFKA_DEFAULT_PARTITIONS` gets a
+        // hard boot error for the same number (main.rs); this is the wire's.
+        if topic.num_partitions > MAX_ADVERTISED_PARTITIONS as i32 {
+            results.push(errored(
+                name,
+                ResponseError::InvalidPartitions,
+                format!(
+                    "numPartitions {} is past the {MAX_ADVERTISED_PARTITIONS} this facade will \
+                     advertise for one topic",
+                    topic.num_partitions
+                ),
+            ));
+            continue;
+        }
+
         // The width the topic will actually have, which is the number the
         // client's next Metadata reports. A fresh queue has no lanes yet, so it
-        // is the configured default.
-        let width = advertised_partitions(0, facade.default_partitions);
-        note_unmet_width(&name, topic.num_partitions, width);
+        // is the floor: this topic's own if it declared one, the configured
+        // default otherwise.
+        let floor = requested_floor(topic.num_partitions);
+        let width = advertised_partitions(0, floor.unwrap_or(facade.default_partitions));
+        note_declared_width(&name, floor);
 
         // `validate_only`: everything above ran, nothing below does. The answer
         // says what WOULD have happened, which is the whole point of the flag.
@@ -256,7 +295,7 @@ pub async fn handle(
                     configs = applied.options.len(),
                     "created a queue for a Kafka topic (CreateTopics)"
                 );
-                recordable.push((name.to_string(), applied.options.clone()));
+                recordable.push((name.to_string(), applied.options.clone(), floor));
                 results.push(made(name, width, &applied));
             }
             Err(e) => {
@@ -299,7 +338,11 @@ pub async fn handle(
 /// bookkeeping that can be absent.
 async fn record_what_was_created(
     facade: &Facade,
-    created: &[(String, serde_json::Map<String, serde_json::Value>)],
+    created: &[(
+        String,
+        serde_json::Map<String, serde_json::Value>,
+        Option<u32>,
+    )],
     token: Option<&str>,
 ) {
     if created.is_empty() {
@@ -324,21 +367,53 @@ async fn record_what_was_created(
         .collect();
     let records: Vec<(String, topic_record::Record)> = created
         .iter()
-        .map(|(name, options)| {
+        .map(|(name, options, floor)| {
             let qid = ids.get(name.as_str()).cloned().flatten();
             (
                 name.clone(),
-                topic_record::Record::new(qid, options.clone()),
+                topic_record::Record::new(qid, options.clone()).with_partitions(*floor),
             )
         })
         .collect();
     if let Err(e) = topic_record::store_many(facade.queen.as_ref(), &records, token).await {
+        // The queues exist; their records do not. For retention that degrades to
+        // a topic that describes without `retention.ms` until an alter
+        // re-establishes it. For a DECLARED WIDTH it is sharper and is named
+        // separately: this call already answered the client the width its floor
+        // would produce, and without the record that floor does not exist — so
+        // the client's next Metadata will disagree with the create it just made,
+        // which is the one contract CreateTopics otherwise keeps. There is no
+        // repair but to delete the topic and create it again.
+        let declared = created.iter().filter(|(_, _, f)| f.is_some()).count();
         tracing::warn!(
             target: "kafka",
             error = %e,
             topics = records.len(),
+            declared_widths = declared,
             "the topics were created but their config records were not written"
         );
+        if declared > 0 {
+            tracing::error!(
+                target: "kafka",
+                topics = declared,
+                "...and {declared} of them declared a width that is now LOST: this call answered \
+                 the width their floor would produce, but the floor was not stored, so their next \
+                 Metadata reports the broker default instead. Delete and recreate them"
+            );
+        }
+        return;
+    }
+    // The floors were written AFTER `refresh` above had already refilled the
+    // cache, so the entry it left behind carries the old width. Drop it, or the
+    // Metadata a client sends immediately after its create — which is what every
+    // AdminClient does — answers the default instead of the width this call just
+    // told it the topic has.
+    //
+    // Only when a floor was actually declared: a plain create changes no width,
+    // and forcing every tenant's next list to re-scan for nothing would put an
+    // admin path's cost on the whole fleet.
+    if created.iter().any(|(_, _, floor)| floor.is_some()) {
+        facade.catalog.invalidate(token).await;
     }
 }
 
@@ -485,28 +560,37 @@ fn failed(e: &queen::Error, version: i16) -> (ResponseError, String) {
     (code, e.wire_reason())
 }
 
-/// One INFO line per window when a client asked for a width it did not get.
+/// The width floor a `numPartitions` asks for, or `None` for "no opinion".
 ///
-/// Not an error: the client's next Metadata reports the real width and every
-/// producer hashes modulo what Metadata said, so nothing breaks. It is logged
-/// because an operator who set `--partitions 32` and sees 8 deserves to find out
-/// why from the facade rather than by counting lanes.
-fn note_unmet_width(name: &TopicName, asked: i32, width: i32) {
-    // -1 is KIP-464's "I do not care", which is what a modern AdminClient sends
-    // by default. Nothing unmet about it.
-    if asked <= 0 || asked <= width {
+/// `-1` is KIP-464's "I do not care", which is what a modern AdminClient sends
+/// by default, and `0` is not a width. Both mean the topic declares nothing and
+/// falls back to `QUEEN_KAFKA_DEFAULT_PARTITIONS` — byte-for-byte what every
+/// topic did before floors existed. The upper bound is refused by the caller
+/// rather than clamped here, so this cannot narrow what it was given.
+fn requested_floor(asked: i32) -> Option<u32> {
+    (asked > 0).then_some(asked as u32)
+}
+
+/// Note a topic that declared its own width, sampled like every other
+/// operator-facing line here.
+///
+/// Info and not warn: a declared floor is the feature working. What it is worth
+/// saying is that this topic has stopped tracking
+/// `QUEEN_KAFKA_DEFAULT_PARTITIONS`, because an operator who later raises that
+/// knob will find this topic did not move with it.
+fn note_declared_width(name: &TopicName, floor: Option<u32>) {
+    let Some(floor) = floor else {
         return;
-    }
+    };
     if let Some(suppressed) = UNMET.tick_now() {
         tracing::info!(
             target: "kafka",
             topic = name.as_str(),
-            asked,
-            width,
+            floor,
             suppressed,
-            "CreateTopics asked for a partition count this facade does not declare per topic; \
-             the width is max(live lanes, QUEEN_KAFKA_DEFAULT_PARTITIONS) and the response \
-             reports the real one"
+            "CreateTopics declared a per-topic width floor; this topic is advertised at \
+             max(live lanes, its own floor) and no longer follows \
+             QUEEN_KAFKA_DEFAULT_PARTITIONS"
         );
     }
 }
@@ -677,6 +761,85 @@ mod tests {
         assert!(flags.contains(&("retention.ms".into(), false)), "{flags:?}");
     }
 
+    // ------------------------------------------------------- the width floor
+
+    /// `numPartitions` is no longer discarded: it is stored as the topic's own
+    /// width FLOOR, and the response reports the width that produces.
+    #[tokio::test]
+    async fn a_create_that_asks_for_partitions_stores_them_as_the_topics_floor() {
+        let (f, api) = facade_and_queen(&[]);
+        let r = handle(
+            &f,
+            &request(vec![topic("wide").with_num_partitions(64)]),
+            6,
+            None,
+        )
+        .await;
+
+        assert_eq!(r.topics[0].error_code, 0);
+        assert_eq!(
+            api.kv_get(crate::offsets::NAMESPACE, &topic_record::key("wide"))
+                .unwrap()["partitions"],
+            serde_json::json!(64)
+        );
+    }
+
+    /// `-1` is KIP-464's "I do not care", which is what a modern AdminClient
+    /// sends by default, and `0` is not a width. Both must store NO floor, or
+    /// every ordinary create would silently pin its topic to a number the
+    /// client never chose and an operator raising
+    /// `QUEEN_KAFKA_DEFAULT_PARTITIONS` would find it did not move.
+    #[tokio::test]
+    async fn a_create_that_declares_nothing_stores_no_floor() {
+        let (f, api) = facade_and_queen(&[]);
+        handle(
+            &f,
+            &request(vec![
+                topic("dontcare").with_num_partitions(-1),
+                topic("zero").with_num_partitions(0),
+            ]),
+            6,
+            None,
+        )
+        .await;
+
+        for t in ["dontcare", "zero"] {
+            assert_eq!(
+                api.kv_get(crate::offsets::NAMESPACE, &topic_record::key(t))
+                    .unwrap()["partitions"],
+                serde_json::Value::Null,
+                "{t} was pinned to a floor nobody asked for"
+            );
+        }
+    }
+
+    /// Refused rather than clamped. `advertised_partitions` clamps silently, so
+    /// a number past the ceiling would be stored and then quietly answered as
+    /// something else for the life of the topic; the boot knob gets a hard error
+    /// for the same number and this is the wire's version of it.
+    #[tokio::test]
+    async fn a_partition_count_past_the_ceiling_is_refused() {
+        let (f, api) = facade_and_queen(&[]);
+        let past = MAX_ADVERTISED_PARTITIONS as i32 + 1;
+        let r = handle(
+            &f,
+            &request(vec![topic("huge").with_num_partitions(past)]),
+            6,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            r.topics[0].error_code,
+            ResponseError::InvalidPartitions.code()
+        );
+        assert!(
+            api.kv_get(crate::offsets::NAMESPACE, &topic_record::key("huge"))
+                .is_none(),
+            "a refused create must leave no record"
+        );
+    }
+
     /// The create writes the facade's own record of the bag it sent
     /// ([`crate::topic_record`]) — which is what a later describe reports the
     /// retention from and what a later alter merges onto.
@@ -712,7 +875,16 @@ mod tests {
         // the plan read, and the read that carries the queue ids.
         assert_eq!(api.list_count(), 2);
         // ...and one KV call for both records.
-        assert_eq!(api.kv_calls.lock().unwrap().len(), 1);
+        // ONE record write for the whole request, not one per topic. The
+        // catalog's width scan is excluded — it is per refresh, not per topic.
+        let calls = api.kv_calls.lock().unwrap().clone();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|ops| !crate::topic_record::is_floor_scan(ops))
+                .count(),
+            1
+        );
     }
 
     /// Bookkeeping that can fail a create is worse than bookkeeping that can be
@@ -756,8 +928,14 @@ mod tests {
         assert!(api
             .kv_get(crate::offsets::NAMESPACE, &topic_record::key("later"))
             .is_none());
+        // The catalog's width scan may have run; what must not have happened is
+        // a write to the RECORD STORE.
         assert!(
-            api.kv_calls.lock().unwrap().is_empty(),
+            api.kv_calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|ops| crate::topic_record::is_floor_scan(ops)),
             "a refused create still reached the record store"
         );
     }

@@ -905,13 +905,14 @@ func scenarioEdges(r *runner, st *state) {
 			// facade that answered error_code 0 and created nothing would pass
 			// a bare "did not return an error" inversion.
 			//
-			// NumPartitions is asked for as 4 and is NOT expected back as 4.
-			// Queen has no declared per-topic width: the number every client
-			// sees is max(live lanes, QUEEN_KAFKA_DEFAULT_PARTITIONS), so a
-			// create's num_partitions is accepted, not acted on, and the next
-			// Metadata reports the facade's width. That is a deliberate
-			// deviation on PLAN_QUEEN_KAFKA.md's list, and it is asserted here
-			// rather than avoided because a sarama user WILL pass a number and
+			// NumPartitions is asked for as 4 and IS expected back as 4 since
+			// M7: a declared count is stored as the topic's own width floor, so
+			// the number every client sees is max(live lanes, that floor). The
+			// floor REPLACES QUEEN_KAFKA_DEFAULT_PARTITIONS as the second term
+			// rather than being compared against it, and a brand-new topic has
+			// no lanes, so the answer is the 4 that were asked for. It is
+			// asserted here rather than avoided because a sarama user WILL pass
+			// a number and
 			// needs this file to say what becomes of it.
 			created := fmt.Sprintf("sarama-%s-created", st.env.runID)
 			var createErr error
@@ -929,9 +930,11 @@ func scenarioEdges(r *runner, st *state) {
 				})
 				d, seen := after[created]
 				if r.check(seen, "%s exists after CreateTopic, without anyone producing to it", created) {
-					r.check(d.NumPartitions == int32(st.env.partsWant),
-						"...at the facade's own width of %d and not the 4 that were requested: "+
-							"num_partitions is accepted and not acted on, by design", d.NumPartitions)
+					r.check(d.NumPartitions == 4,
+						"...at the %d partitions the create DECLARED: num_partitions is stored "+
+							"as this topic's own width floor since M7, and the floor replaces "+
+							"the broker default as the second term of max(live lanes, floor)",
+						d.NumPartitions)
 				}
 			}
 

@@ -196,7 +196,7 @@ the shape that one has to have.
 | `QUEEN_TOKEN` | none | Bearer token for that broker. Optional, and never logged: the boot line reports whether there is one, not what it is. With SASL on, a connection's own token replaces it. |
 | `QUEEN_KAFKA_ADDR` | `0.0.0.0:9092` | The address the Kafka listener binds. `host:port`, or `[v6]:port`. |
 | `QUEEN_KAFKA_ADVERTISED_ADDR` | **required** | The `host:port` other machines use to reach this process. No default. See below. |
-| `QUEEN_KAFKA_DEFAULT_PARTITIONS` | `1024` | Partition count for a topic the facade auto-creates, and the floor for the width it advertises. Integer in 1 to 100,000. |
+| `QUEEN_KAFKA_DEFAULT_PARTITIONS` | `1024` | Partition count for a topic the facade auto-creates, and the floor for the width it advertises to topics that declared none of their own. A topic created through CreateTopics with a `numPartitions` carries that number as its own floor instead, so this knob stops applying to it. Integer in 1 to 100,000. |
 | `QUEEN_KAFKA_MAX_CONNECTIONS` | `4096` | How many connections the listener serves at once. Integer in 16 to 1,000,000. Past it a new connection is closed immediately, which is a client that reconnects rather than a facade accepting work it cannot do. |
 | `QUEEN_KAFKA_TLS_CERT` | none | PEM certificate chain. Both this and the key, or neither. |
 | `QUEEN_KAFKA_TLS_KEY` | none | PEM private key. Read and parsed at boot, so a key that does not match its certificate fails the process and not every client. |

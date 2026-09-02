@@ -213,11 +213,12 @@ batch is always whole enough to carry one record however large it is, so a consu
 stall on an oversized record. Apache Kafka rotates the partition order between fetches to keep
 trailing partitions from starving behind saturated leaders, and the facade does not yet.
 
-**A topic's partition count is `max(live, QUEEN_KAFKA_DEFAULT_PARTITIONS)`.** A Queen queue
-declares no width: a lane materialises the first time something is pushed to it, so a queue
-created a second ago has zero partitions and a topic with zero partitions is one a producer
-cannot send to. Taking the maximum makes a fresh topic usable immediately, never shrinks as
-lanes materialise (a Kafka partition count that shrinks re-hashes existing keys onto different
+**A topic's partition count is `max(live, floor)`,** where `floor` is the width the topic
+declared at CreateTopics if it declared one, and `QUEEN_KAFKA_DEFAULT_PARTITIONS` otherwise. A
+Queen queue declares no width: a lane materialises the first time something is pushed to it, so
+a queue created a second ago has zero partitions and a topic with zero partitions is one a
+producer cannot send to. Taking the maximum makes a fresh topic usable immediately, never
+shrinks as lanes materialise (a Kafka partition count that shrinks re-hashes existing keys onto different
 partitions and loses ordering), and still covers a native Queen queue wider than the configured
 default. The advertised width is clamped at 100,000, because every partition is written out in
 full in every Metadata response.

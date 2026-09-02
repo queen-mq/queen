@@ -372,14 +372,11 @@ async fn topic_plans<'a>(
     // ...and the catalog as a lookup for the same reason: both sides are big
     // numbers a client and a tenant choose independently, and their product is
     // the other quadratic.
-    let live: HashMap<&str, i64> = catalog
+    // The whole `Queue`: the width's second term is the queue's own stored
+    // floor, and `plan_for` is the one place that resolves it.
+    let live: HashMap<&str, &crate::queen::Queue> = catalog
         .as_deref()
-        .map(|queues| {
-            queues
-                .iter()
-                .map(|q| (q.name.as_str(), q.partitions))
-                .collect()
-        })
+        .map(|queues| queues.iter().map(|q| (q.name.as_str(), q)).collect())
         .unwrap_or_default();
     let mut planned: Vec<(Option<&str>, Plan)> = names
         .iter()
@@ -390,7 +387,7 @@ async fn topic_plans<'a>(
             None => (Some(*name), Plan::Reject(ResponseError::LeaderNotAvailable)),
             Some(_) => (
                 Some(*name),
-                metadata::plan(
+                metadata::plan_for(
                     name,
                     live.get(name).copied(),
                     true,

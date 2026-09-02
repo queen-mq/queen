@@ -95,6 +95,17 @@ const SOURCES = [
     suite: "Complete applications",
     command: "examples/apps/run.sh",
   },
+  // The cross-protocol pair, which is its own directory rather than part of
+  // `examples/apps` for one reason: it needs a librdkafka binding, and putting a
+  // native dependency in the shared example package would make every unrelated
+  // example pay for it. It also needs a broker with the Kafka facade listening,
+  // which `examples/apps/run.sh` does not require, so it is run by hand.
+  {
+    dir: "examples/cross-protocol",
+    lang: "js",
+    suite: "Cross-protocol",
+    command: "cd examples/cross-protocol && npm install && node producer.mjs",
+  },
 ];
 
 const EXT_LANG = {

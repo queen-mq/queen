@@ -1,0 +1,123 @@
+// docs:start(app-js-cross-producer)
+// Cross-protocol example, PRODUCER half.
+//
+//   npm install
+//   node producer.mjs                  # foreground
+//   node producer.mjs &                # detached from this shell
+//
+// Produces to the Kafka facade on 9092. Its partner, consumer.mjs, reads the
+// same rows through Queen's own API on 6632. Nothing replicates between them:
+// a Kafka topic IS a Queen queue, and both halves address the same rows.
+//
+//   TOPIC=orders PARTITIONS=32 node producer.mjs
+//   BROKER=localhost:9092 TOPIC=orders node producer.mjs
+//
+// Split into its own process on purpose: run together, produce and consume
+// compete for one Node event loop and each one's number is really a measure of
+// the pair. Separately, each is its own measurement.
+
+// Setup the broker like:
+// docker run -d --name queen --network queen -e PG_HOST=queen-pg -e PG_PASSWORD=postgres 
+// -e QUEEN_SERVER=http://localhost:6632 -e QUEEN_KAFKA_EMBEDDED=true -e QUEEN_KAFKA_ADVERTISED_ADDR=localhost:9092 
+// -e QUEEN_KAFKA_DEFAULT_PARTITIONS=16 -e QUEEN_KV_WRITE_RATE=2000 -e QUEEN_KV_WRITE_BURST=4000 
+// -p 6632:6632 -p 9092:9092 ghcr.io/queen-mq/queen:1.4.1
+
+import Confluent from '@confluentinc/kafka-javascript'
+
+const TOPIC = process.env.TOPIC ?? 'cross-topic-big'
+const BROKER = process.env.BROKER ?? 'localhost:9092'
+
+// The width to declare for TOPIC. Since M7 the facade stores a create's
+// numPartitions as that topic's own width FLOOR: it is advertised at
+// max(live lanes, this) instead of max(live lanes,
+// QUEEN_KAFKA_DEFAULT_PARTITIONS).
+//
+// TWO THINGS THAT WILL BITE:
+//
+// 1. The floor is set ONCE, AT CREATE. A create against a topic that already
+//    exists is answered TOPIC_ALREADY_EXISTS and changes nothing -- there is no
+//    alter for it. To change a width you delete the topic and make it again. So
+//    this has to run BEFORE anything produces to TOPIC, or the producer's own
+//    auto-create wins and makes it at the broker default with no floor.
+// 2. The floor REPLACES the broker default rather than being compared against
+//    it. Declaring 4 where QUEEN_KAFKA_DEFAULT_PARTITIONS is 8 gives a 4-wide
+//    topic, not an 8-wide one. It is a floor under the LIVE LANE COUNT, not
+//    under the default.
+const PARTITIONS = Number(process.env.PARTITIONS ?? 1000)
+
+const { KafkaJS } = Confluent
+
+const kafka = new KafkaJS.Kafka({
+  'bootstrap.servers': BROKER,
+  kafkaJS: { clientId: 'cross-producer' },
+})
+
+// Declare the width before a single record exists, then report what the broker
+// actually advertises -- which is the only number that matters, and is what the
+// consumer half will see as Queen partition NAMES "0".."N-1".
+async function declareWidth () {
+  const admin = kafka.admin()
+  await admin.connect()
+  try {
+    const created = await admin.createTopics({
+      topics: [{ topic: TOPIC, numPartitions: PARTITIONS, replicationFactor: 1 }],
+    })
+    // An ARRAY, not kafkajs's `{ topics: [...] }` — one more divergence to know
+    // about when porting: this client returns the topic list directly.
+    const [described] = await admin.fetchTopicMetadata({ topics: [TOPIC] })
+    const width = described.partitions.length
+    console.log(
+      created
+        ? `created ${TOPIC} declaring ${PARTITIONS} partitions -> advertised at ${width}`
+        : `${TOPIC} already existed, so the declared ${PARTITIONS} was NOT applied -> still ${width}. ` +
+          `Delete it, or set TOPIC=<new name>, to see a different width.`
+    )
+    return width
+  } finally {
+    await admin.disconnect()
+  }
+}
+
+// One message per send, never awaited individually, so librdkafka's per-partition
+// accumulator can batch across them. linger.ms is what makes that pay.
+const producer = kafka.producer({
+  kafkaJS: { acks: -1, idempotent: false, allowAutoTopicCreation: true },
+  'linger.ms': 1,
+})
+
+const WINDOW = 10000
+const LOG_EVERY = 10000
+
+let sent = 0
+let nextLog = LOG_EVERY
+const startTime = Date.now()
+
+process.on('SIGINT', async () => {
+  console.log('flushing...')
+  await producer.flush({ timeout: 10000 }).catch(() => {})
+  await producer.disconnect().catch(() => {})
+  process.exit(0)
+})
+
+await declareWidth()
+
+await producer.connect()
+console.log(`producing to ${TOPIC} via ${BROKER} (pid ${process.pid})`)
+
+while (true) {
+  const inflight = []
+  for (let k = 0; k < WINDOW; k++) {
+    inflight.push(producer.send({ topic: TOPIC, messages: [{ value: 'mex-' + (sent + k) }] }))
+  }
+  await Promise.all(inflight)
+  sent += WINDOW
+
+  // A threshold, never `sent % N === 0`: the counter advances in batch-sized
+  // jumps and would step straight over the multiples.
+  if (sent >= nextLog) {
+    nextLog += LOG_EVERY
+    const secs = (Date.now() - startTime) / 1000
+    console.log(new Date().toISOString(), 'produced', sent, Math.round(sent / secs), 'msg/s avg')
+  }
+}
+// docs:end

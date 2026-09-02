@@ -8,6 +8,12 @@ two or three facades can also present themselves to clients as **one cluster**
 restart behaves like a Kafka broker restart: clients rejoin and resume from
 their committed offsets, which live in Queen.
 
+A topic is a Queen queue and nothing is copied between the two protocols, so a
+native Queen consumer can read what a Kafka producer just wrote, and the other
+way round. [Kafka in, Queen out](https://queenmq.com/use/full-examples/cross-protocol)
+is a runnable pair that shows it, with the stored record envelope printed before
+it is decoded; the code is in [`examples/cross-protocol`](../../examples/cross-protocol).
+
 ## What it can do
 
 - **Produce**: acks 0/1/all, gzip/snappy/lz4/zstd, keys, headers, timestamps.
@@ -40,12 +46,12 @@ The advertised table is 32 API keys. The thirteen admin keys,
 
 | API | key | versions | Notes |
 | --- | --- | --- | --- |
-| CreateTopics | 19 | v2-v6 | `--partitions` and `--replication-factor` are accepted and reported back as the facade's own width and 1; `cleanup.policy=compact` is refused |
+| CreateTopics | 19 | v2-v6 | `--partitions` is stored as the topic's own width FLOOR (`max(live lanes, it)`) and reported back; `--replication-factor` is accepted and reported as 1; `cleanup.policy=compact` is refused |
 | DeleteTopics | 20 | v1-v5 | deletes the underlying Queen queue, which native producers may share |
 | DescribeConfigs | 32 | v1-v4 | topics and this broker; `retention.ms` round-trips for topics this facade created |
 | AlterConfigs | 33 | v0-v2 | the deprecated FULL-REPLACEMENT form: a key the request does not name is reset to its default. Prefer key 44 |
 | IncrementalAlterConfigs | 44 | v0-v1 | the delta form, and the one `kafka-configs.sh --alter` sends. Only on topics this facade created |
-| CreatePartitions | 37 | v0-v3 | an advertised refusal: Queen declares no width per queue. A decrease and an equal count answer Kafka's own sentences |
+| CreatePartitions | 37 | v0-v3 | an advertised refusal: a width floor is declared once, at CreateTopics, and this API does not change it. A decrease and an equal count answer Kafka's own sentences |
 | ListGroups | 16 | v0-v4 | live membership merged with a durable index of every group that ever committed |
 | DescribeGroups | 15 | v0-v3 | members, host, client id and the assignment |
 | DeleteGroups | 42 | v0-v2 | irreversibly removes committed offsets; refuses a group with members |

@@ -405,12 +405,12 @@ var deliberate = []classification{
 
 	// ------------------------------------------------ M7 F1: topics admin
 	{regexp.MustCompile(`^createtopics/create\.\w+\.num_partitions$`),
-		"documented deviation: Queen declares no width per queue (configure_queue_v1 creates the queue row and " +
-			"nothing else; a log_partitions row materialises on the first push), so the facade cannot honour a " +
-			"per-topic partition count. It accepts the number, does nothing with it, and reports the width the " +
-			"topic will actually have — max(live lanes, QUEEN_KAFKA_DEFAULT_PARTITIONS). The property that matters " +
-			"is kept and is asserted beside this one: create.new.metadata_agrees is true on both brokers, so the " +
-			"number the create reports is the number the client's next Metadata hashes modulo"},
+		"since M7 this is NOT a deviation: Queen still declares no width per queue (configure_queue_v1 creates " +
+			"the queue row and nothing else; a log_partitions row materialises on the first push), but the facade " +
+			"stores a declared num_partitions as the topic's own width FLOOR and reports max(live lanes, that " +
+			"floor). A brand-new topic has no lanes, so both brokers answer the count that was asked for. The " +
+			"property that matters is asserted beside this one: create.new.metadata_agrees is true on both " +
+			"brokers, so the number the create reports is the number the client's next Metadata hashes modulo"},
 	{regexp.MustCompile(`^createtopics/create\.internal_name\.`),
 		"documented: __-prefixed topics are hidden and refused everywhere (metadata::reserved_or_invalid). Apache " +
 			"Kafka treats them as ordinary names; creating one here would make a queue the facade then refuses to " +

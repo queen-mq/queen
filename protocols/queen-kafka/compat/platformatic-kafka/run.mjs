@@ -305,8 +305,8 @@ async function metadata () {
       const made = created?.find?.((t) => t.name === madeTopic)
       info(`admin.createTopics -> ${JSON.stringify(created)}`)
       if (check(!!made, `admin.createTopics created ${madeTopic} (CreateTopics, key 19)`)) {
-        check(made.partitions === PARTITIONS,
-          `the response reports the facade's own width of ${made.partitions}, not the 4 requested: num_partitions is accepted and not acted on`)
+        check(made.partitions === 4,
+          `the response reports the ${made.partitions} partitions the create DECLARED: num_partitions is stored as this topic's own width floor since M7, and the floor replaces the broker default as the second term of max(live lanes, floor)`)
       }
       const m4 = await deadline(admin.metadata({ topics: [madeTopic], autocreateTopics: false }), 30000, 'admin.metadata(created)')
       check(m4.topics.has(madeTopic), `${madeTopic} is in a fresh Metadata, so the create really made something`)

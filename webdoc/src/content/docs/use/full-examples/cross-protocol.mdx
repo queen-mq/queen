@@ -1,0 +1,116 @@
+---
+title: Kafka in, Queen out
+description: "Produce with a Kafka client, consume with the Queen SDK, against one set of rows. No connector, no mirror-maker, no second copy."
+type: example
+tier: use
+sidebar:
+  order: 7
+  label: Cross-protocol
+verifiedBy:
+  - examples/cross-protocol/producer.mjs
+  - examples/cross-protocol/consumer.mjs
+sourceOfTruth:
+  - protocols/queen-kafka/src/records.rs
+  - protocols/queen-kafka/src/handlers/produce.rs
+  - protocols/queen-kafka/src/handlers/metadata.rs
+---
+
+Most systems that speak more than one protocol speak them over separate data. A connector copies
+rows from one place to another, and from then on you own two copies and the lag between them.
+
+This pair does not copy anything. The producer writes over the Kafka wire protocol on port 9092.
+The consumer reads over Queen's own API on port 6632. Both address **the same rows**, at the same
+time, and neither knows the other exists.
+
+## Why it works
+
+Two translations, and both of them are the facade's, not yours.
+
+**A Kafka topic is a Queen queue.** The Kafka partition *index* is the Queen partition *name*,
+written out in decimal. Topic `orders` partition 7 is queue `orders`, partition `"7"`. Nothing
+converts and nothing is mapped at read time: they are one row in one table.
+
+**A record is stored in an envelope.** A Queen payload is JSON and a Kafka key and value are
+arbitrary bytes, so the facade wraps each record and base64s the byte fields:
+
+```json
+{ "k": "<base64 key, or null>",
+  "v": "<base64 value, or null>",
+  "h": [{ "k": "header-name", "v": "<base64>" }],
+  "t": 1788264581846 }
+```
+
+`h` and `t` are **omitted entirely** when the record carries no headers and no producer
+timestamp, so a reader has to treat both as optional rather than assume the shape. The consumer
+below prints the raw payload once, before it decodes anything, so the translation is visible
+rather than asserted.
+
+## The code
+
+<Tabs>
+  <TabItem label="Producer (Kafka wire)">
+    <Render file="snippets/app-js-cross-producer" />
+  </TabItem>
+  <TabItem label="Consumer (Queen SDK)">
+    <Render file="snippets/app-js-cross-consumer" />
+  </TabItem>
+</Tabs>
+
+## Run it
+
+Against a broker from [the quickstart](/start/quickstart), with the Kafka facade listening (see
+[deploy/kafka](/deploy/kafka)):
+
+```bash
+cd examples/cross-protocol
+npm install
+TOPIC=orders PARTITIONS=32 node producer.mjs &
+TOPIC=orders node consumer.mjs &
+```
+
+`TOPIC` drives both halves. They are separate processes on purpose: run together in one Node
+process, the producer and the consumer compete for one event loop, and each number you read is
+really a measurement of the pair.
+
+The consumer prints the stored envelope once, then the decoded records:
+
+```text
+raw Queen payload as stored by the Kafka facade:
+  {"k":null,"t":1788264581846,"v":"bWV4LTYwMDAw"}
+  decoded: {"key":null,"value":"mex-60000","headers":[],"timestamp":1788264581846}
+```
+
+## What the dashboard shows, and why it differs
+
+Watch **Consumer Groups** while both halves run, and the difference between the two protocols is
+visible in the counters.
+
+A Kafka consumer reads through `POST /api/v1/fetch`, which takes no lease, claims nothing and
+moves no cursor. Its progress lives in committed offsets in `queen.kv`. So a topic consumed only
+by Kafka clients shows `0.0 POP`, `0.0 ACK` and a `pending` count that never falls, because only
+retention removes those messages. That is correct, not a stall.
+
+The consumer here is a native one, so it pops and acks. The same queue, read the other way, moves
+the pop and ack counters and drains `pending` as it goes.
+
+<Aside type="caution" title="Three things that will catch you">
+**`TOPIC` has to match both halves.** They are separate processes with separate defaults. A
+consumer pointed at a topic nobody is producing to long-polls an empty queue and looks stalled.
+
+**A width is declared once, at create.** `PARTITIONS` reaches the broker as CreateTopics
+`numPartitions`, which is stored as that topic's width floor. A create against a topic that
+already exists is answered `TOPIC_ALREADY_EXISTS` and changes nothing, and there is no alter for
+it. The producer therefore declares the width before it connects, because its own auto-create
+would otherwise win and make the topic at the broker default. To change a width, use a new topic.
+
+**The floor replaces the broker default, it does not compete with it.** Declaring 4 where
+`QUEEN_KAFKA_DEFAULT_PARTITIONS` is 8 gives a topic 4 lanes wide, not 8. It is a floor under the
+live lane count, not under the default.
+</Aside>
+
+## Going the other way
+
+This example proves Kafka in, Queen out. The reverse direction, a native push read by a Kafka
+consumer, is the same two translations applied backwards, and the record decoder is written to
+cope with a payload that is not an envelope at all. It is not measured here, so treat it as
+untested rather than as working.
