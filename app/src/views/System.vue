@@ -34,10 +34,10 @@
            made of, so either failure is a fact about the page. A single panel's
            failure stays inside that panel as .panel-err. -->
       <div v-if="dataSource === 'system' && metrics.failed.value" class="status-banner banner-bad view-banner">
-        <span><strong>Could not load server metrics</strong> · {{ describeApiError(metrics.error.value) }}<template v-if="systemData"> · showing the last samples that loaded{{ metrics.lastUpdated.value ? ` (as of ${metrics.lastUpdated.value.toLocaleTimeString()})` : '' }}</template></span>
+        <span :title="formatTimestampUtc(metrics.lastUpdated.value)"><strong>Could not load server metrics</strong> · {{ describeApiError(metrics.error.value) }}<template v-if="systemData"> · showing the last samples that loaded{{ metrics.lastUpdated.value ? ` (as of ${formatTimestamp(metrics.lastUpdated.value)})` : '' }}</template></span>
       </div>
       <div v-if="dataSource === 'postgres' && pg.failed.value" class="status-banner banner-bad view-banner">
-        <span><strong>Could not load Postgres stats</strong> · {{ describeApiError(pg.error.value) }}<template v-if="postgresData"> · showing the last stats that loaded{{ pg.lastUpdated.value ? ` (as of ${pg.lastUpdated.value.toLocaleTimeString()})` : '' }}</template></span>
+        <span :title="formatTimestampUtc(pg.lastUpdated.value)"><strong>Could not load Postgres stats</strong> · {{ describeApiError(pg.error.value) }}<template v-if="postgresData"> · showing the last stats that loaded{{ pg.lastUpdated.value ? ` (as of ${formatTimestamp(pg.lastUpdated.value)})` : '' }}</template></span>
       </div>
 
       <!-- =================== FILTERS =================== -->
@@ -96,11 +96,11 @@
           <div v-if="dataSource === 'system' && customMode" class="filter-row filter-row-sep">
             <div class="filter-field">
               <span class="label-xs">From</span>
-              <input v-model="customFrom" type="datetime-local" class="input" />
+              <input v-model="customFrom" type="datetime-local" class="input" :title="formatTimestampUtc(customFrom)" />
             </div>
             <div class="filter-field">
               <span class="label-xs">To</span>
-              <input v-model="customTo" type="datetime-local" class="input" />
+              <input v-model="customTo" type="datetime-local" class="input" :title="formatTimestampUtc(customTo)" />
             </div>
             <button class="btn btn-primary" :disabled="!customRangeValid" @click="applyCustomRange">Apply</button>
             <span v-if="customError" class="filter-invalid">{{ customError }}</span>
@@ -664,7 +664,10 @@ import BaseChart from '@/components/BaseChart.vue'
 import { describeApiError, operator } from '@/api'
 import { formatNumber, formatRelativeTime, toNum, useApi } from '@/composables/useApi'
 import { chartColor } from '@/composables/useChartTheme'
-import { formatChartLabel, formatDateTimeLocal, isMultiDay, validateRange } from '@/composables/useFormat'
+import {
+  formatChartLabel, formatDateTimeLocal, formatTimestamp, formatTimestampUtc,
+  isMultiDay, validateRange,
+} from '@/composables/useFormat'
 import { useRefresh } from '@/composables/useRefresh'
 import { stamp } from '@/composables/useStamp'
 import { useIdentity } from '@/stores/identity'

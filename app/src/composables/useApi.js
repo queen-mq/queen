@@ -175,22 +175,6 @@ export function formatBytes(bytes) {
 }
 
 /**
- * Format date/time
- */
-export function formatDateTime(date) {
-  if (!date) return '-'
-  
-  const d = new Date(date)
-  return d.toLocaleString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit'
-  })
-}
-
-/**
  * Convert a value to a finite number, or `null` when missing or non-numeric.
  *
  * Use this when building chart series so a missing bucket value renders as
@@ -286,4 +270,3 @@ export function formatRelativeTime(date) {
   if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`
   return `${Math.floor(diff / 86400000)}d ago`
 }
-

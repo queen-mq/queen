@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { apiFetch } from '../api.js'
+import { formatTimestamp, formatTimestampUtc } from '../format.js'
 
 const members = ref([])
 const error = ref(null)
@@ -74,10 +75,6 @@ async function revoke(email) {
   }
 }
 
-function fmtDate(s) {
-  if (!s) return '—'
-  return new Date(s).toLocaleString()
-}
 </script>
 
 <template>
@@ -136,7 +133,7 @@ function fmtDate(s) {
                 <option v-for="r in ALL_ROLES" :key="r" :value="r">{{ r }}</option>
               </select>
             </td>
-            <td>{{ fmtDate(m.granted_at) }}</td>
+            <td :title="formatTimestampUtc(m.granted_at)">{{ formatTimestamp(m.granted_at) }}</td>
             <td>
               <button v-if="confirmingRevoke !== m.email" class="btn-link danger" @click="confirmingRevoke = m.email">
                 Remove

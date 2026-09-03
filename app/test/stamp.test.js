@@ -10,24 +10,24 @@ const panel = (failed, lastUpdated = instant) => ({
   lastUpdated: { value: lastUpdated },
 })
 
-test('time formatting names the effective timezone', () => {
+test('time formatting follows the effective browser timezone', () => {
   assert.equal(
     formatTimeWithZone(instant, 'en-US', { timeZone: 'UTC' }),
-    '11:11:17 AM UTC',
+    '11:11:17 AM',
   )
-  assert.match(
+  assert.equal(
     formatTimeWithZone(instant, 'en-US', { timeZone: 'Europe/Rome' }),
-    /^1:11:17 PM (?:GMT\+2|CEST)$/,
+    '01:11:17 PM',
   )
 })
 
-test('freshness stamps include the timezone for fresh and stale data', () => {
+test('freshness stamps stay compact for fresh and stale data', () => {
   const options = { timeZone: 'UTC' }
 
-  assert.equal(stamp(panel(false), 'en-US', options), 'as of 11:11:17 AM UTC')
+  assert.equal(stamp(panel(false), 'en-US', options), 'as of 11:11:17 AM')
   assert.equal(
     stamp(panel(true), 'en-US', options),
-    'stale · last good 11:11:17 AM UTC',
+    'stale · last good 11:11:17 AM',
   )
 })
 

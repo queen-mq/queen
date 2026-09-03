@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { apiFetch } from '../api.js'
+import { formatTimestamp, formatTimestampUtc } from '../format.js'
 
 const keys = ref([])
 const error = ref(null)
@@ -85,10 +86,6 @@ async function revoke(id) {
   }
 }
 
-function fmtDate(s) {
-  if (!s) return '—'
-  return new Date(s).toLocaleString()
-}
 </script>
 
 <template>
@@ -149,8 +146,8 @@ function fmtDate(s) {
           <tr v-for="k in keys" :key="k.id">
             <td>{{ k.name }}</td>
             <td class="mono">{{ k.scopes.join(', ') }}</td>
-            <td>{{ fmtDate(k.created_at) }}</td>
-            <td>{{ fmtDate(k.last_used_at) }}</td>
+            <td :title="formatTimestampUtc(k.created_at)">{{ formatTimestamp(k.created_at) }}</td>
+            <td :title="formatTimestampUtc(k.last_used_at)">{{ formatTimestamp(k.last_used_at) }}</td>
             <td>
               <span v-if="k.revoked_at" class="pill pill-off">Revoked</span>
               <span v-else class="pill pill-on">Active</span>

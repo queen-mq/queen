@@ -1,3 +1,5 @@
+import { formatTimestampTime } from './useFormat.js'
+
 /**
  * Freshness of a single `useApi` panel, as one short string.
  *
@@ -11,13 +13,9 @@
  * only freshness, everywhere.
  */
 export function formatTimeWithZone(date, locales, options = {}) {
-  return date.toLocaleTimeString(locales, {
-    ...options,
-    // A webview can run in a different timezone from the host OS. Keep the
-    // time in the runtime's effective timezone, but always name that timezone
-    // so an operator never has to guess whether a bare clock time is local.
-    timeZoneName: 'short',
-  })
+  // A webview can run in a different timezone from the host OS. The product
+  // contract is to follow that effective browser timezone.
+  return formatTimestampTime(date, locales, options)
 }
 
 export function stamp(panel, locales, options) {

@@ -16,7 +16,7 @@
 
     <!-- Page banners: the failure first, then the broker-capability caveat. -->
     <div v-if="error" class="status-banner banner-bad view-banner">
-      <span>
+      <span :title="formatTimestampUtc(tracePanel.lastUpdated.value)">
         <strong>Could not load traces</strong> · {{ error }}<template v-if="traces.length"> · showing the last rows that loaded{{ lastGoodText ? ` (${lastGoodText})` : '' }}</template>
       </span>
     </div>
@@ -191,8 +191,8 @@
 
                 <!-- Time -->
                 <td>
-                  <span class="font-mono" style="font-size:12px; color:var(--text-mid); white-space:nowrap;">
-                    {{ formatDateTime(trace.created_at) }}
+                  <span :title="formatTimestampUtc(trace.created_at)" class="font-mono" style="font-size:12px; color:var(--text-mid); white-space:nowrap;">
+                    {{ formatTimestamp(trace.created_at) }}
                   </span>
                 </td>
 
@@ -324,7 +324,7 @@
             <div style="display:flex; flex-direction:column; gap:14px;">
               <div>
                 <label class="label-xs" style="display:block; margin-bottom:6px;">Time</label>
-                <p style="font-size:13px; color:var(--text-hi);">{{ formatDateTime(selectedTrace.created_at) }}</p>
+                <p :title="formatTimestampUtc(selectedTrace.created_at)" style="font-size:13px; color:var(--text-hi);">{{ formatTimestamp(selectedTrace.created_at) }}</p>
               </div>
 
               <div>
@@ -401,7 +401,8 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { traces as tracesApi, describeApiError } from '@/api'
-import { useApi, formatDateTime } from '@/composables/useApi'
+import { useApi } from '@/composables/useApi'
+import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
 import { useRefresh } from '@/composables/useRefresh'
 import { stamp } from '@/composables/useStamp'
 import { useIdentity } from '@/stores/identity'
@@ -442,7 +443,7 @@ const error = computed(() =>
 const firstLoad = computed(() => loading.value && !traceData.value)
 /** When a refresh fails over rows that are still on screen, say how old they are. */
 const lastGoodText = computed(() =>
-  tracePanel.lastUpdated.value ? tracePanel.lastUpdated.value.toLocaleTimeString() : ''
+  tracePanel.lastUpdated.value ? formatTimestamp(tracePanel.lastUpdated.value) : ''
 )
 // Flipped off when a page comes back larger than it was asked for: that broker
 // is not applying the limit, so a page range would be fiction.

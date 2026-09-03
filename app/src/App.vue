@@ -34,7 +34,7 @@
       <div v-if="offline" class="status-strip">
         <div class="status-banner banner-bad">
           <span class="pulse-ember" style="width:7px; height:7px; flex-shrink:0;" />
-          <span>
+          <span :title="formatTimestampUtc(offlineSince)">
             <strong>Cannot reach the API</strong> ·
             everything on screen is from before {{ offlineSinceText }} and may be wrong
           </span>
@@ -64,6 +64,7 @@ import { computed, onUnmounted, provide, ref, watch } from 'vue'
 import Sidebar from '@/components/Sidebar.vue'
 import Header from '@/components/Header.vue'
 import ToastHost from '@/components/ToastHost.vue'
+import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
 import { useIdentity } from '@/stores/identity'
 import { useUiStore } from '@/stores/ui'
 
@@ -73,7 +74,7 @@ const { offline, offlineSince } = useUiStore()
 const collapsed = ref(false)
 
 const offlineSinceText = computed(() =>
-  offlineSince.value ? new Date(offlineSince.value).toLocaleTimeString() : 'the last successful load'
+  offlineSince.value ? formatTimestamp(offlineSince.value) : 'the last successful load'
 )
 
 const retry = () => { ensureIdentity().catch(() => {}) }

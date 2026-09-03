@@ -20,8 +20,8 @@
          banner — the same container Queues uses for the same event, not a
          loose .panel-err, which belongs inside the panel it describes. -->
     <div v-if="groups.failed.value" class="status-banner banner-bad view-banner">
-      <span>
-        <strong>Could not load consumer groups</strong> · {{ groupsErrorText }}<template v-if="consumers.length"> · showing the last rows that loaded{{ groups.lastUpdated.value ? ` (${groups.lastUpdated.value.toLocaleTimeString()})` : '' }}</template>
+      <span :title="formatTimestampUtc(groups.lastUpdated.value)">
+        <strong>Could not load consumer groups</strong> · {{ groupsErrorText }}<template v-if="consumers.length"> · showing the last rows that loaded{{ groups.lastUpdated.value ? ` (${formatTimestamp(groups.lastUpdated.value)})` : '' }}</template>
       </span>
     </div>
 
@@ -230,7 +230,7 @@
                   >{{ formatDuration((p.time_lag_seconds || 0) * 1000) }}</span>
                 </td>
                 <td>
-                  <span class="font-mono" style="font-size:11.5px; color:var(--text-mid);">{{ formatDateTime(p.oldest_unconsumed_at) }}</span>
+                  <span :title="formatTimestampUtc(p.oldest_unconsumed_at)" class="font-mono" style="font-size:11.5px; color:var(--text-mid);">{{ formatTimestamp(p.oldest_unconsumed_at) }}</span>
                 </td>
                 <td v-if="canAdmin" style="text-align:right;">
                   <button
@@ -449,7 +449,7 @@
 
             <div>
               <span class="label-xs" style="display:block; margin-bottom:8px;">Target timestamp</span>
-              <input v-model="seekTimestamp" type="datetime-local" class="input" />
+              <input v-model="seekTimestamp" type="datetime-local" class="input" :title="formatTimestampUtc(seekTimestamp)" />
               <p style="font-size:12px; color:var(--text-low); margin-top:8px;">
                 The cursor will move to the last message at or before this timestamp. Messages after this point will be re-consumed.
               </p>
@@ -498,10 +498,10 @@ import { useRoute } from 'vue-router'
 import ConsumerHealthGrid from '@/components/ConsumerHealthGrid.vue'
 import { consumers as consumersApi, describeApiError } from '@/api'
 import {
-  formatDateTime, formatDuration, formatNumber, toNum, useApi,
+  formatDuration, formatNumber, toNum, useApi,
 } from '@/composables/useApi'
 import { conflatingKeys, isConflating, partitionConflates } from '@/composables/useConflation'
-import { formatDateTimeLocal } from '@/composables/useFormat'
+import { formatDateTimeLocal, formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
 import { useRefresh } from '@/composables/useRefresh'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'

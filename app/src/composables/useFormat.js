@@ -6,6 +6,62 @@
 // Numeric / duration / relative-time formatting lives in useApi.js — import
 // from there rather than adding a competing variant here.
 
+/** The browser/webview timezone used for every human-readable timestamp. */
+export function runtimeTimeZone() {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || 'local time'
+}
+
+const asValidDate = (value) => {
+  if (!value) return null
+  const date = value instanceof Date ? value : new Date(value)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+const zoned = (value, locales, options, defaults) => {
+  const date = asValidDate(value)
+  if (!date) return value ? String(value) : '—'
+
+  const { timeZone = runtimeTimeZone(), ...overrides } = options
+  const formatted = new Intl.DateTimeFormat(locales, {
+    ...defaults,
+    ...overrides,
+    ...(timeZone === 'local time' ? {} : { timeZone }),
+  }).format(date)
+  return formatted
+}
+
+/** Full timestamp rendered in the browser's local timezone. */
+export function formatTimestamp(value, locales = 'en-US', options = {}) {
+  return zoned(value, locales, options, {
+    year: 'numeric', month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  })
+}
+
+/** Compact freshness timestamp rendered in the browser's local timezone. */
+export function formatTimestampTime(value, locales = 'en-US', options = {}) {
+  return zoned(value, locales, options, {
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  })
+}
+
+/** Applied custom ranges are absolute facts, so both ends name their zone. */
+export function formatTimestampRange(from, to, locales = 'en-US', options = {}) {
+  return `${formatTimestamp(from, locales, options)} → ${formatTimestamp(to, locales, options)}`
+}
+
+/** Exact UTC value for a timestamp's hover title. */
+export function formatTimestampUtc(value) {
+  const date = asValidDate(value)
+  return date ? `UTC: ${date.toISOString()}` : ''
+}
+
+export function formatTimestampRangeUtc(from, to) {
+  const fromUtc = formatTimestampUtc(from)
+  const toUtc = formatTimestampUtc(to)
+  return fromUtc && toUtc ? `${fromUtc} → ${toUtc.replace(/^UTC: /, '')}` : ''
+}
+
 /** `Date` → the exact string an <input type="datetime-local"> accepts. */
 export function formatDateTimeLocal(date) {
   const year = date.getFullYear()

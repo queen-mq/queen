@@ -64,7 +64,7 @@
       <!-- Stale data presented as live is the failure mode: the store keeps the
            last rows that loaded, so say how old they are and why. -->
       <div v-if="isStale" class="status-banner banner-bad view-banner">
-        <span>
+        <span :title="formatTimestampUtc(lastFetched)">
           <strong>Could not refresh the ephemeral queues</strong> ·
           {{ describeApiError(error) }} · showing the last rows that loaded
           ({{ lastFetchedText }}), which on a RAM class may already be gone.
@@ -370,6 +370,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import { ephemeral as ephemeralApi, describeApiError } from '@/api'
 import { formatBytes, formatNumber, toNum } from '@/composables/useApi'
+import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
 import { useRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { useToast } from '@/composables/useToast'
@@ -422,7 +423,7 @@ const dropClass = (v) => (v ? 'eph-drop on' : 'eph-drop')
 
 const firstLoad = computed(() => loading.value && lastFetched.value === 0)
 const lastFetchedText = computed(() =>
-  lastFetched.value ? new Date(lastFetched.value).toLocaleTimeString() : 'an earlier load'
+  lastFetched.value ? formatTimestamp(lastFetched.value) : 'an earlier load'
 )
 // Fed by the LAST GOOD load, not by the last attempt: a tick that resets on a
 // failed poll claims freshness it does not have.
