@@ -80,6 +80,17 @@
               <option :value="200">200</option>
             </select>
           </div>
+          <div v-if="canAdmin" class="filter-field-col dlq-bulk-action">
+            <label class="label-xs">Bulk cleanup</label>
+            <button
+              class="btn btn-danger"
+              :disabled="!filterQueue.trim() || bulkPurging"
+              :title="filterQueue.trim() ? bulkPurgeButtonTitle : 'Choose a queue before bulk purging'"
+              @click="openBulkPurge"
+            >
+              Purge by criteria
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -265,6 +276,30 @@
     <!-- Detail drawer (teleported to body to avoid transform issues).
          Backdrop before the panel, so DOM order matches paint order. -->
     <Teleport to="body">
+      <div v-if="bulkTarget" class="modal-backdrop" @click.self="closeBulkPurge">
+        <div class="card modal-card">
+          <div class="card-header"><h3>Purge matching DLQ records</h3></div>
+          <div class="card-body">
+            <div v-if="bulkPurgeError" class="panel-err">{{ bulkPurgeError }}</div>
+            <p>
+              This will permanently purge every dead-letter record for queue
+              <strong class="font-mono">{{ bulkTarget.queue }}</strong><template v-if="bulkTarget.consumerGroup">
+                and consumer group <strong class="font-mono">{{ bulkTarget.consumerGroup }}</strong></template>.
+            </p>
+            <p class="dlq-bulk-note">
+              The error breakdown filter is page-only and is not part of this cleanup.
+              This action cannot be undone.
+            </p>
+          </div>
+          <div class="modal-foot">
+            <button class="btn btn-ghost" :disabled="bulkPurging" @click="closeBulkPurge">Cancel</button>
+            <button class="btn btn-danger" :disabled="bulkPurging" @click="purgeByCriteria">
+              {{ bulkPurging ? 'Purging…' : 'Purge all matching records' }}
+            </button>
+          </div>
+        </div>
+      </div>
+
       <div v-if="selectedMsg" class="modal-backdrop" @click="closeDetail"></div>
 
       <div v-if="selectedMsg" class="drawer-panel">
@@ -444,6 +479,9 @@ const serverPaginates = ref(true)
 // which are replaced wholesale on every refresh.
 const deleting = ref(new Set())
 const rowErrors = ref(new Map())
+const bulkTarget = ref(null)
+const bulkPurging = ref(false)
+const bulkPurgeError = ref(null)
 // Rows this session verified as purged (success:true). Cleared on every reload,
 // so a row that comes back is a row the broker still has.
 const purged = ref(new Set())
@@ -524,6 +562,11 @@ const isDeleting = (msg) => deleting.value.has(msgKey(msg))
 const rowError = (msg) => rowErrors.value.get(msgKey(msg)) || null
 
 const canAdmin = computed(() => can('queueAdmin'))
+const bulkPurgeButtonTitle = computed(() => (
+  filterGroup.value.trim()
+    ? `Purge all DLQ records for ${filterQueue.value.trim()} and consumer group ${filterGroup.value.trim()}`
+    : `Purge all DLQ records for ${filterQueue.value.trim()}`
+))
 
 // ---------------------------------------------------------------------------
 // Failure breakdown — the page's only summary, and the table's filter
@@ -717,6 +760,50 @@ const purge = async (msg) => {
   }
 }
 
+const openBulkPurge = () => {
+  if (!canAdmin.value) return
+  const queue = filterQueue.value.trim()
+  if (!queue) return
+  bulkPurgeError.value = null
+  bulkTarget.value = {
+    queue,
+    consumerGroup: filterGroup.value.trim() || null,
+  }
+}
+
+const closeBulkPurge = () => {
+  if (bulkPurging.value) return
+  bulkTarget.value = null
+  bulkPurgeError.value = null
+}
+
+const purgeByCriteria = async () => {
+  if (!bulkTarget.value || bulkPurging.value) return
+  const target = { ...bulkTarget.value }
+  const params = { queue: target.queue }
+  if (target.consumerGroup) params.consumerGroup = target.consumerGroup
+  bulkPurging.value = true
+  bulkPurgeError.value = null
+  try {
+    const res = await dlq.purge(params)
+    if (res.data?.success !== true || !Number.isInteger(res.data?.deleted)) {
+      throw new Error(res.data?.message || 'The broker did not confirm the bulk purge.')
+    }
+    const deleted = res.data.deleted
+    bulkTarget.value = null
+    page.value = 1
+    errorFilter.value = null
+    await fetchMessages()
+    notifySuccess(
+      deleted === 1 ? 'Purged 1 DLQ record' : `Purged ${formatNumber(deleted)} DLQ records`,
+    )
+  } catch (err) {
+    bulkPurgeError.value = describeApiError(err)
+  } finally {
+    bulkPurging.value = false
+  }
+}
+
 // One shared ticker for the whole app (paused while the tab is hidden) instead
 // of a private setInterval: under the proxy every poll is metered.
 useRefresh(fetchMessages, { auto: true })
@@ -733,6 +820,8 @@ fetchMessages()
 /* Queue names here are dotted and long (`connect.newsletter.sendgrid`), so the
    picker gets more room than the 220px the shared filter column allows. */
 .filter-field-wide { flex-basis: 240px; max-width: 300px; }
+.dlq-bulk-action { flex: 0 0 auto; }
+.dlq-bulk-note { margin-top: 12px; color: var(--text-low); font-size: 12px; }
 
 /* --- Failure breakdown -----------------------------------------------------
    The page's summary, so it is sized like a strip and not like a panel: a 6px

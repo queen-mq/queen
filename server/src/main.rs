@@ -1093,7 +1093,10 @@ async fn main() {
             "/api/v1/messages/:partitionId/:transactionId/retry",
             post(handlers::handle_retry_message),
         )
-        .route("/api/v1/dlq", get(handlers::handle_dlq))
+        .route(
+            "/api/v1/dlq",
+            get(handlers::handle_dlq).delete(handlers::handle_purge_dlq),
+        )
         .route("/api/v1/traces", post(handlers::handle_record_trace))
         .route("/api/v1/traces/names", get(handlers::handle_trace_names))
         .route(

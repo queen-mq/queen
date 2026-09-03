@@ -222,6 +222,9 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
     if p.starts_with("/api/v1/messages/") && *m == Method::DELETE {
         return RouteClass::QueueAdmin;
     }
+    if p == "/api/v1/dlq" && *m == Method::DELETE {
+        return RouteClass::QueueAdmin;
+    }
     if p.starts_with("/api/v1/consumer-groups") && (*m == Method::DELETE || *m == Method::POST) {
         return RouteClass::QueueAdmin;
     }
@@ -430,6 +433,11 @@ mod tests {
             classify(&Method::DELETE, "/api/v1/resources/queues/orders"),
             RouteClass::QueueAdmin
         );
+        assert_eq!(
+            classify(&Method::DELETE, "/api/v1/dlq"),
+            RouteClass::QueueAdmin
+        );
+        assert_eq!(classify(&Method::GET, "/api/v1/dlq"), RouteClass::Read);
         assert_eq!(
             classify(&Method::GET, "/api/v1/resources/queues"),
             RouteClass::Read

@@ -393,6 +393,9 @@ pub fn route_access_level(method: &Method, path: &str) -> AccessLevel {
     if m == "DELETE" && path.starts_with("/api/v1/resources/queues/") {
         return Admin;
     }
+    if m == "DELETE" && path == "/api/v1/dlq" {
+        return Admin;
+    }
     if path == "/api/v1/stats/refresh" {
         return Admin;
     }
@@ -794,6 +797,18 @@ mod tests {
         assert_eq!(
             route_access_level(&Method::GET, "/api/v1/pop/queue/orders"),
             AccessLevel::ReadWrite
+        );
+    }
+
+    #[test]
+    fn bulk_dlq_purge_requires_admin_access() {
+        assert_eq!(
+            route_access_level(&Method::DELETE, "/api/v1/dlq"),
+            AccessLevel::Admin
+        );
+        assert_eq!(
+            route_access_level(&Method::GET, "/api/v1/dlq"),
+            AccessLevel::ReadOnly
         );
     }
 }
