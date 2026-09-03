@@ -177,8 +177,8 @@ async fn verify_local(st: &St, email: &str, password: &str) -> Option<UserRef> {
 // sessions
 // ---------------------------------------------------------------------------
 
-/// Mint a session JWT, record a `login` op, and redirect to `next` with the
-/// session cookie set.
+/// Mint a session JWT, record the successful login, and redirect to `next`
+/// with the session cookie set.
 async fn establish_session(st: &St, headers: &HeaderMap, user: UserRef, next: &str) -> Response {
     let token = match st.keys.mint_user_jwt(user.user_id, SESSION_ROLE, None, st.cfg.jwt_ttl_s) {
         Ok(t) => t,
@@ -192,9 +192,27 @@ async fn establish_session(st: &St, headers: &HeaderMap, user: UserRef, next: &s
             return err_500("session token could not be minted");
         }
     };
-    record_op(st, user.tenant_id, user.user_id, "login", Some(user.user_id.to_string()), json!({})).await;
+    record_login(st, user.user_id).await;
     let cookie = session_cookie(st, headers, &token);
     redirect(StatusCode::SEE_OTHER, next, Some(&cookie))
+}
+
+/// Persist the account's latest successful authentication and its audit event
+/// in one database function call. This is best-effort for the same reason the
+/// previous login audit was: a temporary pxdb failure must not discard a valid
+/// session after password/OAuth verification and token minting succeeded.
+async fn record_login(st: &St, user_id: Uuid) {
+    let Some(pool) = st.db.as_ref() else { return };
+    let Ok(client) = pool.get().await else { return };
+    if let Err(e) = client
+        .execute(
+            "SELECT queen_proxy.record_user_login($1::text::uuid)",
+            &[&user_id.to_string()],
+        )
+        .await
+    {
+        tracing::warn!(target: "oauth", err = %e, "record_user_login failed (non-fatal)");
+    }
 }
 
 /// Log out: deny-list the presented session, then clear the cookie.

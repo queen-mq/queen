@@ -31,7 +31,8 @@ const isJsonApiPath = (url = '') => url.startsWith('/api/') || url === '/health'
 // QUEEN_PROXY_SHARED_HOSTS), so sending it changes nothing on a per-cluster
 // hostname or broker-direct.
 const isClusterScoped = (url = '') =>
-  url.startsWith('/api/v1/') || url.startsWith('/api/console/') || url === '/health'
+  url.startsWith('/api/v1/') || url.startsWith('/api/console/') ||
+  url.startsWith('/api/operator/') || url === '/health'
 
 // ---------------------------------------------------------------------------
 // Request: one place, and only one, attaches the acting cluster.

@@ -1,7 +1,9 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
-import { can, ensureIdentity } from '@/stores/identity'
+import { can, ensureIdentity, useIdentity } from '@/stores/identity'
 import { notifyError } from '@/stores/ui'
+
+const { standalone } = useIdentity()
 
 // Route meta is the declaration of what a page needs and what it is about.
 // Nothing else may decide either — the sidebar and the guard both read it.
@@ -15,6 +17,7 @@ import { notifyError } from '@/stores/ui'
 //              number is the lie class this shell exists to prevent.
 //   nav      : { group, order } to appear in the sidebar. Omit to stay
 //              reachable by URL but out of the nav.
+//   proxyOnly: the broker-direct dashboard has no pxdb-backed account store.
 const routes = [
   {
     path: '/',
@@ -136,6 +139,16 @@ const routes = [
     }
   },
   {
+    path: '/users',
+    name: 'Users',
+    component: () => import('@/views/Users.vue'),
+    meta: {
+      title: 'Users', subtitle: 'Cell-level: user accounts and cluster access',
+      requires: 'operator', scope: 'cell', proxyOnly: true,
+      nav: { group: 'Cell', icon: 'users', order: 2 },
+    }
+  },
+  {
     path: '/:pathMatch(.*)*',
     name: 'NotFound',
     component: () => import('@/components/NotFound.vue'),
@@ -162,6 +175,11 @@ router.beforeEach(async (to) => {
     // Boot failed (network / 5xx). App.vue renders the failure; let the
     // navigation through so it has something to render into.
     return true
+  }
+
+  if (to.meta.proxyOnly && standalone.value) {
+    notifyError('User accounts are managed by queen-proxy and are unavailable in broker-direct mode', 'Not available')
+    return { path: '/', replace: true }
   }
 
   const requires = to.meta.requires || 'read'

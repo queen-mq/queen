@@ -281,7 +281,10 @@ lookup and no way in.
 
 A live operator is `admin` on every cluster on that cell, membership row or not, and is
 the only principal that can open the cell-wide surfaces: broker status, buffer state,
-host and PostgreSQL metrics, maintenance mode, and the Prometheus endpoint. Operator
+host and PostgreSQL metrics, maintenance mode, the Prometheus endpoint, and the proxy-backed
+Users page. That page can create and name local or OAuth-first accounts for tenants represented
+on the selected cell, edit their display names, show their latest successful login, and add, change, or remove their roles on clusters on that cell. It cannot set the
+operator bit. Operator
 access is logged, sampled to one line per minute with a suppressed count, because a
 dashboard polls those routes.
 

@@ -12,6 +12,8 @@ sourceOfTruth:
   - proxy/migrations/003_limit_override.sql
   - proxy/migrations/004_lifecycle.sql
   - proxy/migrations/006_operator.sql
+  - proxy/migrations/010_user_name.sql
+  - proxy/migrations/011_user_last_login.sql
   - proxy/src/auth.rs
   - proxy/src/registry.rs
   - proxy/src/console.rs
@@ -29,7 +31,7 @@ optional.
 | Table | Holds | Lifecycle |
 | --- | --- | --- |
 | `tenants` | The organisation. `slug` (DNS-label shaped, unique), `name`, `status` | `status`, never `DELETE` |
-| `users` | Login identity, scoped to one tenant. `email` globally unique, optional bcrypt `password_hash`, `is_operator` | Cascades with its tenant |
+| `users` | Login identity, scoped to one tenant. Non-unique optional display `name`, globally unique `email`, optional bcrypt `password_hash`, `last_login_at`, `is_operator` | Cascades with its tenant |
 | `identities` | One row per linked provider (`local`, `google`, `github`) per user, with `verified` | Cascades with its user |
 | `plans` | The limit catalog. `code`, `cell_class`, eleven limit columns, `monthly_msgs_quota`, `features` jsonb | Referenced with `RESTRICT` |
 | `cells` | One physical stack. `slug`, `region`, `base_url`, `class`, `cell_secret`, `status`, `capacity_slots`, `used_slots` | Inserted by hand |
@@ -191,6 +193,8 @@ in a form the login path accepts.
 | --- | --- |
 | `create_tenant(slug, name)` → uuid | |
 | `create_user(tenant, email, password_hash, provider)` → uuid | Writes `users` only. It does **not** write `identities`: the OAuth login path is what creates those rows, and local password login does not consult them |
+| `set_user_name(user, name)` | Sets the user's display name and records the change |
+| `record_user_login(user)` → timestamptz | Stores the latest successful local or OAuth login and appends its audit event atomically |
 | `create_cluster(tenant, slug, plan_code, cell_id)` → uuid | `broker_tenant_uuid` comes from the column default |
 | `assign_plan(cluster, plan_code)` | |
 | `set_limit_override(cluster, overrides)` | |

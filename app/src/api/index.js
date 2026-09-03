@@ -186,6 +186,15 @@ export const system = {
 // Never render one of these numbers without saying it covers the whole cell.
 // ============================================
 export const operator = {
+  /** Users and cluster grants for every tenant represented on the acting cell. */
+  listUsers: (config) => client.get('/api/operator/users', config),
+  createUser: (body, config) => client.post('/api/operator/users', body, config),
+  updateUser: (userId, body, config) =>
+    client.patch(`/api/operator/users/${encodeURIComponent(userId)}`, body, config),
+  setUserRole: (userId, clusterId, role, config) =>
+    client.put(`/api/operator/users/${encodeURIComponent(userId)}/roles/${encodeURIComponent(clusterId)}`, { role }, config),
+  removeUserRole: (userId, clusterId, config) =>
+    client.delete(`/api/operator/users/${encodeURIComponent(userId)}/roles/${encodeURIComponent(clusterId)}`, config),
   /** Cell-wide broker status (every tenant on this cell). */
   getStatus: (params, config) => client.get('/api/v1/status', { params, ...config }),
   /** Disk file-buffer state for the cell. */

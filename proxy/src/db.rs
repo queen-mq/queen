@@ -93,6 +93,8 @@ pub fn migrations() -> Vec<(&'static str, &'static str)> {
         ("007_tenant_delete", include_str!("../migrations/007_tenant_delete.sql")),
         ("008_bootstrap_password", include_str!("../migrations/008_bootstrap_password.sql")),
         ("009_default_families", include_str!("../migrations/009_default_families.sql")),
+        ("010_user_name", include_str!("../migrations/010_user_name.sql")),
+        ("011_user_last_login", include_str!("../migrations/011_user_last_login.sql")),
     ]
 }
 

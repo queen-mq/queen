@@ -87,6 +87,11 @@ BEGIN
         RAISE NOTICE 'set dev password for dev@localhost (devpass)';
     END IF;
 
+    -- Human-readable fixture name for the operator user management page.
+    UPDATE queen_proxy.users
+       SET name = 'Dev Operator'
+     WHERE id = v_user AND name IS NULL;
+
     -- cell 'local' -----------------------------------------------------
     -- Infrastructure row, not tenant business data -- no queen_proxy.*
     -- function creates cells (see 001_init.sql's comment on the cells
