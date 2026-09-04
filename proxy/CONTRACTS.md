@@ -65,8 +65,9 @@ agents work inside this crate. **Read both before writing code.**
   set_limit_override in 003; revoke_session, sweep_revoked_tokens,
   grant_cluster_role, revoke_cluster_role, bootstrap_tenant,
   rollup_usage_days, cluster_month_msgs, emit_outbox in 004;
-  prune_usage_minutes in 005) — SECURITY DEFINER-style discipline: validate,
-  write, append `operations` row, `pg_notify('queen_proxy_inval', cluster_id)`.
+  prune_usage_minutes in 005; set_user_name in 010; record_user_login in 011)
+  — SECURITY DEFINER-style discipline: validate, write, append `operations`
+  row, `pg_notify('queen_proxy_inval', cluster_id)`.
   `bootstrap_tenant` is the one-call onboarding path (tenant + cluster + admin
   user + role + first api key, returning the plaintext key once).
 - Broker-facing constants: header `x-queen-tenant` (config::TENANT_HEADER),

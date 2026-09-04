@@ -1026,6 +1026,13 @@ impl Keys {
         role
     }
 
+    /// Drop one cached positive role after a control-plane role mutation.
+    /// Revocations must take effect on the next request rather than after the
+    /// normal short TTL expires.
+    pub fn invalidate_role(&self, user_id: Uuid, cluster_id: Uuid) {
+        self.role_cache.lock().unwrap().remove(&(user_id, cluster_id));
+    }
+
     /// Does this user hold the operator bit (`queen_proxy.users.is_operator`)?
     /// Cached `ROLE_TTL`, both answers.
     ///

@@ -11,8 +11,10 @@ sourceOfTruth:
   - app/src/router/index.js
   - app/src/stores/identity.js
   - app/src/views/System.vue
+  - app/src/views/Users.vue
   - app/src/views/DeadLetter.vue
   - proxy/src/webapp.rs
+  - proxy/src/operator.rs
 ---
 
 Every broker serves a dashboard on its own port, with nothing to deploy: the built single-page
@@ -35,7 +37,7 @@ so a missing path under `/api/` or `/auth/` still answers a JSON 404 instead of 
 
 ## The views
 
-Every view is tenant-scoped except System, and the exception is labelled on screen.
+Every view is tenant-scoped except System and Users, and both exceptions are labelled on screen.
 
 - **Dashboard**, `/`: the resource overview, namespaces and tasks
 - **Queue Operations**, `/operations`: per-queue throughput, lag and consumer health
@@ -50,6 +52,8 @@ Every view is tenant-scoped except System, and the exception is labelled on scre
   per-row purge
 - **System**, `/system`: cell-level host CPU and memory, worker metrics, PostgreSQL internals,
   the disk spool, the maintenance switch
+- **Users**, `/users`: cell-level accounts for tenants represented on the selected cell, with
+  account creation, latest-login visibility and per-cluster role management; available only behind `queen_proxy`
 
 <Screenshot
   src="dashboard-consumer-groups"
@@ -57,8 +61,8 @@ Every view is tenant-scoped except System, and the exception is labelled on scre
   caption="Five groups keeping pace and two that stopped, separated by the broker's own offsets rather than by inference. The two slow readers here are deliberate."
 />
 
-Three things to know before reading a number off this UI. System covers the whole cell and
-every tenant on it, so a cell figure is not a tenant figure. The dead-letter view inspects and
+Three things to know before reading a number off this UI. System and Users cover the whole cell
+and every tenant on it, so a cell figure or account list is not a tenant figure. The dead-letter view inspects and
 purges: replaying a dead-lettered message is a broker route,
 [`POST /api/v1/messages/:partitionId/:transactionId/retry`](/reference/http/messages-dlq), and
 this console does not call it yet, so purge is the only action on a row. And an unknown is not a
@@ -117,7 +121,8 @@ it, so whoever answers that route is the whole difference between three deployme
 - **Broker-direct, auth on** (`JWT_ENABLED=true`): `401 {"code":"auth_required"}`, and the login
   redirect lands on a terminal static page saying so.
 - **Behind `queen_proxy`**: the proxy's cookie-authenticated session, with real users,
-  per-cluster roles, an operator flag and a login page the broker never sees.
+  per-cluster roles, an operator flag, cell-level user management for live operators, and a
+  login page the broker never sees.
 
 The `standalone` flag hides the cluster selector and the sign-out, because there is nothing to
 switch to and no session to end. Nothing is granted with it: the API was already open to anyone

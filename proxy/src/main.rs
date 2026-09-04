@@ -16,6 +16,7 @@ mod limits;
 mod meter;
 mod oauth;
 mod obs;
+mod operator;
 mod pgtls;
 mod registry;
 mod routes;
@@ -281,6 +282,7 @@ async fn async_main(worker_threads: usize) {
         .route("/.well-known/jwks.json", get(jwks))
         .nest("/auth", oauth::router())
         .nest("/api/console", console::router())
+        .nest("/api/operator", operator::router())
         // three routes, not a bare wildcard: /console/*path alone does not
         // match "/console/" (empty remainder) under axum 0.7's matchit
         .route("/console", get(console::spa))
