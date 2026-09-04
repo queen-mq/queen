@@ -21,7 +21,7 @@ PGMQ_DIR="results/fanout-$STAMP-pgmq"
 QUEEN_DIR="results/fanout-$STAMP-queen"
 mkdir -p "$PGMQ_DIR" "$QUEEN_DIR"
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
-load_node() { [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && nvm use 22 >/dev/null 2>&1; return 0; }
+load_node() { [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && nvm use 24 >/dev/null 2>&1; return 0; }
 last_idx=$((GROUPS - 1))
 # PGMQ_ORDERED=1 -> faithful Smartchat: per-partition FIFO inside each group queue
 # (fanoutfifo producer + read_grouped_head consumers + FIFO index). Otherwise

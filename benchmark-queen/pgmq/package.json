@@ -4,6 +4,9 @@
   "type": "module",
   "private": true,
   "description": "Closed-loop SQL load harness for benchmarking pgmq (vs Queen) through PgBouncer",
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "dependencies": {
     "autocannon": "^8.0.0",
     "axios": "^1.13.2",

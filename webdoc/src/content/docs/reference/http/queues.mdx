@@ -334,10 +334,16 @@ stale by the stats cadence).
   "queue": "orders",
   "group": null,
   "pending": 310,
+  "processing": 24,
+  "ready": 286,
   "partitionsPending": 4,
+  "partitionsReady": 3,
   "conflation": false,
   "effectivePending": 310,
-  "partitions": [ { "partition": "Default", "pending": 310 } ]
+  "effectiveReady": 286,
+  "partitions": [
+    { "partition": "Default", "pending": 310, "processing": 24, "ready": 286 }
+  ]
 }
 ```
 
@@ -351,11 +357,17 @@ the partition's whole retained range. A queue with no `queen.queues` row answers
 every group: `queenctl queue depth` used to compute it client-side and call it
 `partitionsNonEmpty`.
 
+`processing` is the portion of pending work covered by live leases, clamped to `pending`;
+`ready` is `pending - processing`, and `partitionsReady` counts partitions whose `ready` value is
+non-zero. These fields are computed from the same consumer rows as pending, not from a message or
+segment scan.
+
 `conflation` and `effectivePending` describe [last-value
 delivery](/reference/http/pop#conflation). `conflation` is the group's stored delivery
 policy (`false` without `?group=`, which addresses no group). `effectivePending`
-is `partitionsPending` for a conflating group and `pending` for every other, and
-the distinction is the one that decides whether you are looking at an incident:
+is `partitionsPending` for a conflating group and `pending` for every other;
+`effectiveReady` similarly selects `partitionsReady` or `ready`. The distinction is the one that
+decides whether you are looking at an incident:
 
 > For a conflating group, `pending` is **log depth**, the positions still to
 > retire, and `effectivePending` is **work depth**, the handler invocations that

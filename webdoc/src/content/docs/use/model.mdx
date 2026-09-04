@@ -27,6 +27,7 @@ digest: >-
   stored: mode `new`, the default, skips the backlog and `all` delivers everything retained,
   and passing the mode later changes nothing. An ack is an offset commit, so acking one message
   completes every earlier unacked message in that partition for that group.
+# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 Queen stores a queue as a set of ordered partitions, and a consumer group as one cursor per

@@ -18,7 +18,7 @@ PGMQ_RUN="cmp-${STAMP}-pgmq"
 QUEEN_RUN="cmp-${STAMP}-queen"
 
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
-load_node() { [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && nvm use 22 >/dev/null 2>&1; return 0; }
+load_node() { [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && nvm use 24 >/dev/null 2>&1; return 0; }
 
 echo "##############################################################"
 echo "# COMPARE  duration=${DURATION}s  conns/role=${CONNECTIONS}  msgs/push=${MSGS_PER_PUSH}"

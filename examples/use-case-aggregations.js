@@ -21,7 +21,7 @@
  *   - At least one row exists in queen_streams.state for our query.
  *
  * Run:
- *   nvm use 22 && node examples/use-case-aggregations.js
+ *   nvm use 24 && node examples/use-case-aggregations.js
  */
 
 import { Queen, Stream } from 'queen-mq'

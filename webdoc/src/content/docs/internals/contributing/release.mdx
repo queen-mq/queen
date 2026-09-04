@@ -19,6 +19,7 @@ sourceOfTruth:
   - clients/client-php/composer.json
   - clients/client-go/go.mod
   - server/src/schema.rs
+# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 A release touches the broker image, six client SDKs and the CLI, across seven package registries
@@ -64,16 +65,16 @@ updates the file and moves on. Run it in each of the four directories before tag
 
 ## The versioning rule
 
-**The broker and the SDKs are version-aligned since 1.0.0.** One version line across the
-broker image, npm, PyPI, crates.io, Packagist, the Go module tag and the CLI tag, so a client
-version tells you which broker line it was released against without a compatibility matrix.
-The alignment is the `MAJOR.MINOR`: a patch that rebuilds only the broker moves only the
-broker.
+Each published component carries its own release version. Coordinated product releases through
+1.3 kept the broker, proxy and SDK minor lines aligned; from 1.4 onward, broker/proxy releases may
+advance without republishing SDKs when the stable `/api/v1` contract remains compatible. Never
+infer the installed SDK version from the broker tag: read the manifest or component tag in the
+table above. A patch that rebuilds only one component moves only that component.
 
 <Aside type="note">
-Today the broker (`server/server.json`, mirrored in `server/Cargo.toml`), the proxy
-(`proxy/Cargo.toml`), the JavaScript, Python and Rust clients and `queen-protocol` all carry
-`1.3.0`, with `v1.3.0` tags covering the Go module and the CLI. The first Packagist release
+Today the broker (`server/server.json`, mirrored in `server/Cargo.toml`) and proxy
+(`proxy/Cargo.toml`) carry `1.5.0`. The JavaScript, Python and Rust clients and
+`queen-protocol` carry `1.3.0`, with `v1.3.0` tags covering the Go module and the CLI. The first Packagist release
 will receive its own bare tag in `queen-mq/php-client`, generated from the corresponding
 `clients/client-php/vX.Y.Z` source tag. The release before
 it is the exception the rule allows: `1.2.1` was a server-only patch, so the broker sat at
@@ -213,7 +214,7 @@ triggers its own workflow.
 ## Rollback, and the one place additivity stops
 
 Schema application is idempotent by construction: `server/src/schema.rs` re-applies `schema.sql`
-and the 31 stored-procedure files at every boot (the [schema catalogue](/internals/schema) has
+and the 33 stored-procedure files at every boot (the [schema catalogue](/internals/schema) has
 the mechanism), so re-applying is always safe, and rolling the broker image back to a previous
 1.x is safe at the database level. Note that the procedures are embedded in the binary, so the
 binary and the procedures roll together: you cannot roll one back independently.

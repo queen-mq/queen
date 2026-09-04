@@ -1,6 +1,6 @@
 ---
 title: Messages and the dead-letter queue
-description: "Browsing messages, reading or deleting one by (partitionId, transactionId), replaying a dead-lettered message, and listing the DLQ."
+description: "Browsing messages, reading, deleting or replaying one by (partitionId, transactionId), and listing or purging the DLQ."
 type: reference
 tier: use
 sidebar:
@@ -15,11 +15,12 @@ sourceOfTruth:
   - server/sql/procedures/005_log_ack.sql
   - server/sql/procedures/006_log_maintenance.sql
   - server/sql/procedures/010_log_admin.sql
+  - server/sql/procedures/016_messages.sql
 verifiedBy:
   - clients/client-js/test-v2/dlq.js
   - clients/client-rust/tests/coverage.rs
   - proxy/scripts/isolation-smoke.sh
-# sourceOfTruth re-read 2026-08-27 (through a6cbac22 + working tree): page matches the code.
+# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 These are inspection routes, not a consumption path. Live payloads live inside
@@ -317,7 +318,33 @@ no segment decode is involved.
 - `total`, again, is the length of this page.
 
 Retention never purges `queen.log_dlq`. Dead-lettered messages stay until you
-delete or replay them, or the queue is deleted.
+delete, replay or bulk-purge them, or the queue is deleted.
+
+## DELETE /api/v1/dlq
+
+Access level **admin**. Bulk-purges DLQ snapshots for one exact queue, optionally narrowed to one
+exact consumer group:
+
+```bash
+curl -sS -X DELETE \
+  'http://localhost:6632/api/v1/dlq?queue=orders&consumerGroup=invoicer'
+```
+
+`queue` is required and must be non-empty, so an omitted filter can never become a tenant-wide
+delete. An omitted or empty `consumerGroup` purges every group for that queue. Both filters and the
+delete itself remain tenant-scoped in SQL.
+
+```json
+{
+  "success": true,
+  "deleted": 17,
+  "queue": "orders",
+  "consumerGroup": "invoicer"
+}
+```
+
+No matches is a successful, idempotent delete with `deleted: 0`. A missing queue parameter returns
+`400` with `error: "queue is required"`; a database failure returns `500`.
 
 ## Ownership gating
 
@@ -342,6 +369,7 @@ into the stored procedure inside the filter JSON.
 | `DELETE /api/v1/messages/:partitionId/:transactionId` | read-write |
 | `POST /api/v1/messages/:partitionId/:transactionId/retry` | read-write |
 | `GET /api/v1/dlq` | read-only |
+| `DELETE /api/v1/dlq` | admin |
 
 Related: [consumer groups](/reference/http/consumer-groups) for the cursors these
 statuses are computed against, and [traces](/reference/http/traces) for per-message

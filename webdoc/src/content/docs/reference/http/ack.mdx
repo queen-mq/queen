@@ -25,6 +25,7 @@ digest: >-
   skips validation and commits. At or below the cursor `completed` is `noop: true`,
   `failed`/`retry`/`dlq` fail as `already committed`, an unresolvable `transactionId` fails,
   redelivering if leased.
+# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 An acknowledgement is not a per-message delete. Consumption state is one cursor per

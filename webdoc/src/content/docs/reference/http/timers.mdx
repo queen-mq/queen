@@ -14,6 +14,7 @@ sourceOfTruth:
 verifiedBy:
   - server/tests/timers_fault_injection.rs
   - server/tests/timers_tenant_isolation.rs
+# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 A timer is a message that is not in the log yet. Scheduling one promises a frame in a queue at a
@@ -31,7 +32,7 @@ Every broker registers these routes and runs the fire. There is no variable that
 | `POST` | `/api/v1/timers` | write-only | schedule, reschedule and cancel, in one batch |
 | `DELETE` | `/api/v1/timers/:queue/*timerKey` | read-write | cancel, on its own route |
 | `GET` | `/api/v1/timers/:queue/*timerKey` | read-only | peek one timer, with its payload |
-| `GET` | `/api/v1/timers/:queue` | read-only | keyset list of a queue's pending timers |
+| `GET` | `/api/v1/timers/:queue` | read-only | keyset list, or an exact prefix count with `mode=count` |
 
 `POST` is `write-only` because scheduling a timer **is** a produce operation: the timer becomes a
 message, so a produce-only credential must be able to do it.
@@ -230,12 +231,19 @@ exclusive keyset cursor over `timerKey`, stable across machines because the colu
 collation. `limit` defaults to 100 and is clamped rather than rejected, with `truncated` telling the
 truth.
 
+The same route with `?mode=count&prefix=<value>` returns `{count}` for timer keys beginning with
+that literal prefix. The prefix is required, non-empty, at most 128 UTF-8 bytes, and may not contain
+NUL; `%` and `_` have no wildcard meaning. Count mode rejects `after` and `limit`, so an accidental
+whole-queue count or a response mistaken for a list fails loudly. Omitting `mode`, or sending
+`mode=list`, keeps the list contract above.
+
 ## Status codes
 
 | Code | When | `error` |
 | --- | --- | --- |
 | `200` | the call ran, whatever each operation decided | |
 | `400` | shape: no queue, no `timerKey`, no `delayMs`, no `txn`, a payload that is not base64, a server-owned field, a duplicated `(queue, timerKey)` | `timers_bad_request` |
+| `400` | count mode without a valid prefix, with paging parameters, or an unknown read mode | `timers_count_*`, `timers_read_mode_unknown` |
 | `403` | the pending-timer quota is exhausted | `timers_quota_exceeded` |
 | `403` | `delayMs` is beyond the horizon in force | `timer_horizon_exceeded` |
 | `403` | the feature is not on the plan, or tenancy is on and there is no quota row | `feature_gated` |

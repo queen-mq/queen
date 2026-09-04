@@ -23,6 +23,7 @@ sourceOfTruth:
   - webdoc/scripts/gen-snippets.mjs
   - webdoc/scripts/lib/source.mjs
   - .github/workflows/docs.yml
+# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 This site exists because the previous one drifted far enough from the implementation to
@@ -89,7 +90,7 @@ removes the partial.
 
 ## The frontmatter contract
 
-`src/content.config.ts` registers the docs collection with five fields added to the Nimbus base
+`src/content.config.ts` registers the docs collection with eight fields added to the Nimbus base
 schema:
 
 ```yaml
@@ -99,6 +100,7 @@ description: "One sentence. Quote it if it contains a colon."
 type: concept          # overview|quickstart|tutorial|how-to|concept|reference|example|troubleshooting|changelog
 tier: use              # use|operate|internals
 status: stable         # stable|beta|preview|internal, defaults to stable
+audience: human        # optional; adjusts alternate-format controls
 sidebar:
   order: 3
   label: Shorter label
@@ -107,19 +109,24 @@ sourceOfTruth:
 verifiedBy:
   - clients/client-js/test-v2/push.js
 generated: false
+digest: >-
+  Optional contribution to /llms-brief.txt.
 ---
 ```
 
 `title` is required and becomes the H1, so the body must not repeat it. `type` names the recipe
 the page follows: one page, one reader question. `tier` marks which reading tier it belongs to.
 `status` renders a badge for anything other than `stable`, so a reader never mistakes a preview
-for a contract.
+for a contract. `audience: human` marks a page whose layout should adjust its alternate-format
+controls; it is the only accepted audience value.
 
-The last three are the traceability contract, and they are the part that matters most.
+The last four are the traceability contract, and they are the part that matters most.
 `sourceOfTruth` lists the repo-relative paths of the code that governs the page: if that code
 changes, the page is in debt, and the list is what tells you which pages to re-read.
 `verifiedBy` lists tests or examples that execute what the page shows. A page claiming
-"verified" has to name what verified it. `generated` marks machine-written content.
+"verified" has to name what verified it. `generated` marks machine-written content. `digest`
+is the optional, self-contained contribution a page makes to `/llms-brief.txt`; most pages should
+not have one.
 
 Undeclared keys do not silently pass: `nimbus/frontmatter-shape` is configured as an error, so
 a stray field fails `pnpm lint:docs`.
@@ -146,8 +153,9 @@ Three more are warnings rather than errors: `nimbus/duplicate-heading-text`,
 Beyond the linter, two MDX facts bite regularly. Components must be PascalCase **and**
 registered in `src/components.ts`. The registered set is `Accordion`, `AccordionContent`,
 `AccordionGroup`, `AccordionTrigger`, `Aside`, `Badge`, `Card`, `CardGrid`, `Code`, `CodeGroup`,
-`FileTree`, `Frame`, `LinkButton`, `LinkCard`, `PackageManagers`, `Render`, `Step`, `Steps`,
-`TabItem` and `Tabs`, and nothing else is available without importing it. And remark or rehype
+`Chart`, `FileTree`, `Frame`, `LinkButton`, `LinkCard`, `PackageManagers`, `Partition`, `Render`,
+`Screenshot`, `Step`, `Steps`, `TabItem` and `Tabs`, and nothing else is available without
+importing it. And remark or rehype
 plugins attached through the MDX integration are dropped, so Mermaid is not wired in as a
 build-time plugin: diagrams are `<pre class="mermaid">` blocks in the page source, rendered in
 the browser by `src/scripts/mermaid.ts`, which the base layout loads on every page.
@@ -351,30 +359,24 @@ build stops until a human has compared the two implementations.
 | `pnpm lint:docs:fix` | the same, applying the fixable rules |
 | `pnpm build` | static build into `dist/`, including the Pagefind index |
 | `pnpm typecheck` | `astro check` |
-| `pnpm verify` | the whole chain, in order: `gen:check`, `build`, `check:markdown`, `check:brief`, `lint:docs`, `check:prose`, `check:sourceoftruth` (what to run before pushing) |
+| `pnpm verify` | the whole content chain, in order: `gen:check`, `build`, `check:markdown`, `check:brief`, `lint:docs`, `check:prose`, `check:sourceoftruth` (what to run before pushing); run `pnpm typecheck` alongside it |
 
 Run them from `webdoc/`, or with `pnpm --dir webdoc <script>` from the repository root.
 
 ## In CI
 
-`.github/workflows/docs.yml` runs `pnpm gen:check`, then `pnpm build`, then `pnpm lint:docs`, so
-a page built from source can never be published behind that source. The order matters: the
+`.github/workflows/docs.yml` runs the generator drift check, typecheck, build, all four content
+guards and the Nimbus linter, so a page built from source can never be published behind that
+source. Checkout uses the full git history because the source-of-truth guard compares commit
+timestamps. The order matters: the
 `nimbus/internal-link` rule resolves links against `.nimbus/routes.json`, which Astro
 materializes at `astro:build:done`, so linting before building checks links against a stale
 route map, or none at all on a clean checkout.
 
 Its path filter is the other interesting part: because the generators read code, the workflow
 triggers on changes to `server/src/**`, `server/sql/**`, the proxy's router, console and auth
-modules, and the JavaScript, Python and Go client test directories, not only on changes under
-`webdoc/**`.
-
-<Aside type="note">
-`gen-snippets.mjs` also scans `clients/client-cpp`, `clients/client-rust/tests` and
-`examples/full`, none of which the workflow's path filter includes. No C++ file carries a marker
-today, but the Rust tests carry six and `examples/full` carries twelve, so editing a marked
-region in either publishes a changed snippet without the drift check ever running. Until the
-filter is extended, a change there has to be caught by `pnpm --dir webdoc gen --check` locally.
-</Aside>
+modules, and every client/example tree scanned by the snippet generator, not only on changes
+under `webdoc/**`.
 
 The workflow builds and gates; it does not deploy. Deployment is Cloudflare Pages against
 `dist/`.
@@ -393,9 +395,10 @@ The workflow builds and gates; it does not deploy. Deployment is Cloudflare Page
    code. If a flow you want to show has no snippet, consider adding markers to the test that
    already covers it rather than transcribing it.
 
-4. Check the whole contract in one command.
+4. Check the whole contract.
 
    ```bash
+   pnpm --dir webdoc typecheck
    pnpm --dir webdoc verify
    ```
 
