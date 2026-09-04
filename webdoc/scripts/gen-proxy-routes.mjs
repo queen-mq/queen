@@ -46,7 +46,12 @@ const MAIN = "server/src/main.rs";
 // are `Blocked` rather than left to travel to a 405, the same fail-closed rule
 // the kv/timer/ephemeral families state. Re-read in full: nothing else in the
 // function moved, and `is_operator_route` is untouched.
-const CLASSIFY_FINGERPRINT = "854404d1da627198";
+// 2026-09-04: `classify` grew ONE arm, for `DELETE /api/v1/dlq` — the bulk
+// dead-letter purge. `QueueAdmin`, like the single-row `DELETE` on
+// `/api/v1/messages/` above it, and path-exact rather than a prefix, so the
+// `GET` on the same path keeps falling through to `Read`. Re-read in full:
+// nothing else in the function moved, and `is_operator_route` is untouched.
+const CLASSIFY_FINGERPRINT = "0049cc9343c2e7ed";
 const OPERATOR_FINGERPRINT = "04d6dea7366b466d";
 
 // --- mirror of `is_operator_route` -----------------------------------------
@@ -97,6 +102,7 @@ function classify(m, p) {
   if (p === "/api/v1/configure") return "queue admin";
   if (p.startsWith("/api/v1/resources/queues/") && m === "DELETE") return "queue admin";
   if (p.startsWith("/api/v1/messages/") && m === "DELETE") return "queue admin";
+  if (p === "/api/v1/dlq" && m === "DELETE") return "queue admin";
   if (p.startsWith("/api/v1/consumer-groups") && (m === "DELETE" || m === "POST")) return "queue admin";
 
   if (p.startsWith("/streams/")) return "gated (streams)";

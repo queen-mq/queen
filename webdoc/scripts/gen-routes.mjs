@@ -75,7 +75,11 @@ function parseRoutes(text) {
 // it sits AFTER the `m === "GET"` block rather than inside it, because a batch
 // fetch carries its request in a body. Without the arm it reaches the
 // read-write fallthrough and the table claims a log read needs write access.
-const ACCESS_FINGERPRINT = "8a02b3abba911b6a";
+// 2026-09-04: re-read for the bulk DLQ purge. One new rule, mirrored below in
+// the position the Rust evaluates it: `DELETE /api/v1/dlq` is admin, and it
+// sits in the admin block ABOVE the GET block, so the `GET /api/v1/dlq` read
+// stays read-only. Path-exact, not a prefix: the Rust writes `path ==`.
+const ACCESS_FINGERPRINT = "3e144152a943e6c6";
 
 function accessLevel(method, path) {
   const m = method;
@@ -90,6 +94,9 @@ function accessLevel(method, path) {
   if (path.startsWith("/api/v1/system/") || path.startsWith("/internal/")) return "admin";
   if (m === "DELETE" && path.startsWith("/api/v1/consumer-groups/")) return "admin";
   if (m === "DELETE" && path.startsWith("/api/v1/resources/queues/")) return "admin";
+  // Bulk DLQ purge: a queue-wide delete, so admin rather than the read-write
+  // a single-row purge takes. Path-exact, mirroring the Rust.
+  if (m === "DELETE" && path === "/api/v1/dlq") return "admin";
   if (path === "/api/v1/stats/refresh") return "admin";
 
   if (m === "GET") {

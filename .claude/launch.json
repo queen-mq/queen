@@ -4,14 +4,44 @@
     {
       "name": "webdoc",
       "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["--dir", "webdoc", "dev", "--port", "4378"],
+      "runtimeArgs": [
+        "--dir",
+        "webdoc",
+        "dev",
+        "--port",
+        "4378"
+      ],
       "port": 4378
     },
     {
       "name": "webdoc-preview",
       "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["--dir", "webdoc", "preview", "--port", "4381"],
+      "runtimeArgs": [
+        "--dir",
+        "webdoc",
+        "preview",
+        "--port",
+        "4381"
+      ],
       "port": 4381
+    },
+    {
+      "name": "queen-broker",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "PG_HOST=localhost PG_PORT=5456 PG_USER=postgres PG_PASSWORD=postgres PG_DATABASE=postgres PORT=6632 QUEEN_APPLY_SCHEMA=1 DB_POOL_SIZE=16 exec server/target/release/queen"
+      ],
+      "port": 6632
+    },
+    {
+      "name": "queen-proxy",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "PXDB_HOST=localhost PXDB_PORT=5456 PXDB_USER=postgres PXDB_PASSWORD=postgres PXDB_DB=queen_proxy QUEEN_PROXY_PORT=6711 QUEEN_PROXY_OPERATOR_ENABLED=true QUEEN_PROXY_JWT_SECRET=dev-only-secret-not-for-production QUEEN_PROXY_SPOOL_DIR=/private/tmp/claude-502/-Users-alice-Work-queen/14c49b73-9301-42e3-9611-3fbb256dfa6f/scratchpad/proxy-spool exec proxy/target/release/queen-proxy"
+      ],
+      "port": 6711
     }
   ]
 }

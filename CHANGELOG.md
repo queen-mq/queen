@@ -3,6 +3,19 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## 1.4.2 — 2026-09-04
+
+**Dashboard timestamps name their clock.** Freshness stamps render in the viewer's own timezone and
+say which one, with the UTC value alongside, in the dashboard and the account console alike.
+
+**Dead letters clear in bulk.** The dead-letter view purges every record for one queue, optionally
+narrowed to a consumer group. The queue is required at every layer, so an omitted filter can never
+become a tenant-wide delete.
+
+**Cell operators manage accounts.** A proxy-backed Users page creates accounts for the tenants
+represented on the selected cell, renames them, shows their latest sign-in, and grants or removes
+their roles on that cell's clusters. It cannot set the operator bit.
+
 ## 1.4.1 — 2026-09-02
 
 **A Kafka topic can declare its own partition count.** Until now the width every topic was

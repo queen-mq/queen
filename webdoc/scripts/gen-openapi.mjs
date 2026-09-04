@@ -379,6 +379,8 @@ function parseRouterChain(block) {
  * arms are still absent here and are still a KNOWN gap of this mirror (they only
  * widen `read-only` to `read-write` in the spec, never the reverse), left
  * untouched by this change so that its diff says exactly one thing.
+ * 2026-09-04: the bulk DLQ purge arm, in the admin block above the GET block
+ * exactly as the Rust places it, so `GET /api/v1/dlq` stays read-only.
  */
 function accessLevel(method, path) {
   const m = method.toUpperCase();
@@ -389,6 +391,7 @@ function accessLevel(method, path) {
   if (path.startsWith("/api/v1/system/") || path.startsWith("/internal/")) return "admin";
   if (m === "DELETE" && path.startsWith("/api/v1/consumer-groups/")) return "admin";
   if (m === "DELETE" && path.startsWith("/api/v1/resources/queues/")) return "admin";
+  if (m === "DELETE" && path === "/api/v1/dlq") return "admin";
   if (path === "/api/v1/stats/refresh") return "admin";
   if (m === "GET") {
     if (path === "/status") return "read-only";
