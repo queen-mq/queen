@@ -7,14 +7,16 @@
 
 # Queen MQ
 
-**High-performance transactional messaging for applications that need an ordered stream per entity.**
+**High-performance transactional messaging on PostgreSQL, with an ordered stream per entity.**
+
+**You can offload most of your complex application logic to Queen.**
 
 Queen is a message broker written in **Rust** that keeps every byte of its state in **PostgreSQL**. Its
 defining abstraction is one logical ordered partition per application entity (a customer, an
 account, a conversation, a device, a workflow, a session, a job), created by the first push that
 names it, never provisioned in advance.
 
-[Documentation](https://queenmq.com) · [Benchmarks](https://queenmq.com/benchmarks) · [Quickstart](https://queenmq.com/start/quickstart) · [Try it](https://queenmq.cloud) · Apache-2.0 · v1.4.1
+[Documentation](https://queenmq.com) · [Benchmarks](https://queenmq.com/benchmarks) · [Quickstart](https://queenmq.com/start/quickstart) · [Try it](https://queenmq.cloud) · Apache-2.0 · v1.5.0
 
 
 Queen speaks HTTP, but is also protocol-compatible with Kafka and SQS clients.
@@ -36,8 +38,6 @@ outbox and its relay, the idempotency table, the scheduler, the retry bookkeepin
 scripts, the Redis for state, the state store a stream processor needs. All of that is coordination
 state, and Queen commits ack, push, kv and timers together in one transaction, so it stops being
 yours to write: not a broker that scales partitions, but one that holds the coordination logic.
-
-**You can offload most of your complex application logic to Queen.**
 
 ---
 

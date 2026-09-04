@@ -47,7 +47,7 @@ function snippet(raw: string, id: string): string {
 
 /** The page's `<h1>`, verbatim. */
 export const HOME_HEADLINE =
-  "High-performance transactional messaging for applications that need an ordered stream per entity.";
+  "High-performance transactional messaging on PostgreSQL, with an ordered stream per entity.";
 
 /**
  * One line describing the page, for the index and corpus rows that list it.
@@ -67,6 +67,7 @@ const HOME_EYEBROW = "Queen MQ · Apache 2.0";
  * and its JSX line wrapping collapsed.
  */
 const HOME_LEAD =
+  "You can offload most of your complex application logic to Queen.\n\n" +
   "Queen is a message broker written in Rust that keeps every byte of its state in " +
   "PostgreSQL. Its defining abstraction is **one logical ordered partition per application " +
   "entity**, a customer, an account, a conversation, a device, a workflow, a session or a " +

@@ -175,10 +175,13 @@ const featureLine = [
           class="mt-3 max-w-3xl text-foreground leading-[1.08]"
           style="font-size: clamp(2rem, 4.2vw, 3rem); font-weight: var(--nb-h1-weight); letter-spacing: -0.02em;"
         >
-          High-performance transactional messaging for applications that need an ordered stream
+          High-performance transactional messaging on PostgreSQL, with an ordered stream
           per entity.
         </h1>
-        <p class="mt-6 max-w-2xl text-lg text-muted-foreground leading-relaxed">
+        <p class="mt-6 max-w-2xl text-lg font-medium text-foreground leading-relaxed">
+          You can offload most of your complex application logic to Queen.
+        </p>
+        <p class="mt-4 max-w-2xl text-lg text-muted-foreground leading-relaxed">
           Queen is a message broker written in Rust that keeps every byte of its state in
           PostgreSQL. Its defining abstraction is <strong>one logical ordered partition per
           application entity</strong>, a customer, an account, a conversation, a device, a
@@ -192,6 +195,12 @@ const featureLine = [
             class="rounded-lg bg-foreground px-5 py-2.5 text-sm font-medium text-background no-underline transition-opacity hover:opacity-90"
           >
             Push your first message
+          </a>
+          <a
+            href="https://queenmq.cloud/try"
+            class="rounded-lg border border-border px-5 py-2.5 text-sm font-medium text-foreground no-underline transition-colors hover:border-border-strong"
+          >
+            Try it free, hosted
           </a>
           <a
             href="/use/model/"

@@ -507,6 +507,8 @@ broker's own workload, and the sink is a process inside the pod that already exi
 
 ## In Queen Cloud
 
+[Queen Cloud](https://queenmq.cloud/try) runs the broker as a managed cell, and has a free tier.
+
 In Cloud the sink does not talk to a broker, it talks to the **cell proxy**, and the proxy talks to
 the broker. That is the whole of the difference, and it is one variable: point `QUEEN_URL` at the
 proxy's Service. Every call then crosses the proxy's authentication, tenant scoping, quotas and
