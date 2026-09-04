@@ -49,6 +49,12 @@ RUN npm run build
 
 # Stage 3: Build the Rust proxy
 FROM rust:1-bookworm AS proxy-builder
+# TARGETARCH folds the platform into the cache ids below: a multi-platform build
+# runs this stage once per platform CONCURRENTLY, and two cargo processes
+# unpacking one registry (or writing one target/) race — `.cargo-ok` /
+# `File exists (os error 17)` at the first crate, before any Queen code compiles.
+# Per-platform ids give each half its own cache; nothing is shared across arches.
+ARG TARGETARCH
 
 # The crate sits at /usr/build/proxy so that its `../server/webapp/dist`
 # embed resolves to /usr/build/server/webapp/dist. Moving either path breaks the
@@ -69,8 +75,8 @@ COPY --from=webapp-builder /app/server/webapp/dist /usr/build/server/webapp/dist
 
 # Build. Cargo registry + target dirs are BuildKit caches; copy the binary out of
 # the (non-persisted) target cache so it lands in the image layer.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/build/proxy/target \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-proxy-${TARGETARCH} \
+    --mount=type=cache,target=/usr/build/proxy/target,id=target-proxy-${TARGETARCH} \
     cargo build --release && cp target/release/queen-proxy /queen-proxy
 
 RUN test -f /queen-proxy && echo "Build successful"

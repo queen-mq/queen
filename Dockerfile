@@ -37,6 +37,12 @@ RUN npm run build
 
 # Stage 2: Build the Rust broker
 FROM rust:1-bookworm AS server-builder
+# TARGETARCH folds the platform into the cache ids below: a multi-platform build
+# runs this stage once per platform CONCURRENTLY, and two cargo processes
+# unpacking one registry (or writing one target/) race — `.cargo-ok` /
+# `File exists (os error 17)` at the first crate, before any Queen code compiles.
+# Per-platform ids give each half its own cache; nothing is shared across arches.
+ARG TARGETARCH
 
 WORKDIR /usr/build/server
 
@@ -61,8 +67,8 @@ COPY --from=frontend-builder /app/server/webapp/dist ./webapp/dist
 
 # Build. Cargo registry + target dirs are BuildKit caches; copy the binary out of
 # the (non-persisted) target cache so it lands in the image layer.
-RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-server \
-    --mount=type=cache,target=/usr/build/server/target \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-server-${TARGETARCH} \
+    --mount=type=cache,target=/usr/build/server/target,id=target-server-${TARGETARCH} \
     cargo build --release && cp target/release/queen /queen
 
 # Verify
@@ -80,6 +86,12 @@ RUN test -f /queen && echo "Build successful"
 # directory (protocols/queen-kafka/Cargo.toml has none), so the context is the
 # crate alone.
 FROM rust:1-bookworm AS kafka-builder
+# TARGETARCH folds the platform into the cache ids below: a multi-platform build
+# runs this stage once per platform CONCURRENTLY, and two cargo processes
+# unpacking one registry (or writing one target/) race — `.cargo-ok` /
+# `File exists (os error 17)` at the first crate, before any Queen code compiles.
+# Per-platform ids give each half its own cache; nothing is shared across arches.
+ARG TARGETARCH
 
 WORKDIR /usr/build/queen-kafka
 
@@ -90,8 +102,8 @@ COPY protocols/queen-kafka/Cargo.toml protocols/queen-kafka/Cargo.lock ./
 # Layer 2: source.
 COPY protocols/queen-kafka/src ./src
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-kafka \
-    --mount=type=cache,target=/usr/build/queen-kafka/target \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-kafka-${TARGETARCH} \
+    --mount=type=cache,target=/usr/build/queen-kafka/target,id=target-kafka-${TARGETARCH} \
     cargo build --release && cp target/release/queen-kafka /queen-kafka
 
 RUN test -f /queen-kafka && echo "Facade build successful"
@@ -108,6 +120,12 @@ RUN test -f /queen-kafka && echo "Facade build successful"
 # directory (protocols/queen-sqs/Cargo.toml has none), so the context is the
 # crate alone.
 FROM rust:1-bookworm AS sqs-builder
+# TARGETARCH folds the platform into the cache ids below: a multi-platform build
+# runs this stage once per platform CONCURRENTLY, and two cargo processes
+# unpacking one registry (or writing one target/) race — `.cargo-ok` /
+# `File exists (os error 17)` at the first crate, before any Queen code compiles.
+# Per-platform ids give each half its own cache; nothing is shared across arches.
+ARG TARGETARCH
 
 WORKDIR /usr/build/queen-sqs
 
@@ -118,8 +136,8 @@ COPY protocols/queen-sqs/Cargo.toml protocols/queen-sqs/Cargo.lock ./
 # Layer 2: source.
 COPY protocols/queen-sqs/src ./src
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-sqs \
-    --mount=type=cache,target=/usr/build/queen-sqs/target \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-sqs-${TARGETARCH} \
+    --mount=type=cache,target=/usr/build/queen-sqs/target,id=target-sqs-${TARGETARCH} \
     cargo build --release && cp target/release/queen-sqs /queen-sqs
 
 RUN test -f /queen-sqs && echo "SQS facade build successful"
@@ -140,6 +158,12 @@ RUN test -f /queen-sqs && echo "SQS facade build successful"
 # directory (connectors/queen-s3/Cargo.toml has none), so the context is the
 # crate alone.
 FROM rust:1-bookworm AS s3-builder
+# TARGETARCH folds the platform into the cache ids below: a multi-platform build
+# runs this stage once per platform CONCURRENTLY, and two cargo processes
+# unpacking one registry (or writing one target/) race — `.cargo-ok` /
+# `File exists (os error 17)` at the first crate, before any Queen code compiles.
+# Per-platform ids give each half its own cache; nothing is shared across arches.
+ARG TARGETARCH
 
 WORKDIR /usr/build/queen-s3
 
@@ -154,8 +178,8 @@ COPY connectors/queen-s3/src ./src
 # BuildKit and a shared cache mount is a shared lock: `cargo-registry-s3` keeps
 # this stage off the other three's mount rather than serialising all of them
 # behind one directory.
-RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-s3 \
-    --mount=type=cache,target=/usr/build/queen-s3/target \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-s3-${TARGETARCH} \
+    --mount=type=cache,target=/usr/build/queen-s3/target,id=target-s3-${TARGETARCH} \
     cargo build --release && cp target/release/queen-s3 /queen-s3
 
 RUN test -f /queen-s3 && echo "S3 sink build successful"
