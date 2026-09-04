@@ -230,7 +230,15 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
             Ok(b) => b,
             Err(_) => return errors::err_413("request body exceeds cap"),
         };
+        // Two carve-outs, chained, and the order does not matter: each demands
+        // that EVERY op of the batch sit in its OWN namespace, so a body can
+        // satisfy at most one of them and a body that satisfies neither comes
+        // back unchanged. The second is the S3 sink's (`s3_kv.rs`, PLAN_S3_SINK
+        // §8/D4): `queen-s3` / `s3:`, whose window commit is the one WRITE a
+        // read path cannot proceed without — refusing it under the storage
+        // block re-uploads the same window for ever while the lag grows.
         let class = crate::kafka_kv::effective_class(class, &buffered);
+        let class = crate::s3_kv::effective_class(class, &buffered);
         (class, Request::from_parts(parts, Body::from(buffered)))
     } else {
         (class, req)
@@ -2608,6 +2616,16 @@ mod tests {
         // fetch response shape, and a wrong debit 429s the next request.
         assert_eq!(op_for("/api/v1/fetch", RouteClass::Consume), OpClass::Read);
         assert!(!is_pop_path("/api/v1/fetch"));
+        // PLAN_S3_SINK.md §5.1/§8. Partition discovery is `Consume` for its
+        // authorization and is not a pop path either, so it books reqs-only —
+        // the same arm, and deliberately so: its response carries no messages
+        // at all, so `Delivery` would debit the bucket off a count that does
+        // not exist.
+        assert_eq!(
+            op_for("/api/v1/partitions/changed", RouteClass::Consume),
+            OpClass::Read
+        );
+        assert!(!is_pop_path("/api/v1/partitions/changed"));
         assert_eq!(
             op_for("/api/v1/configure", RouteClass::QueueAdmin),
             OpClass::Configure
@@ -2883,6 +2901,7 @@ mod tests {
             (Method::PUT, "/api/v1/kv/queen-kafka/qk:group:g:orders:0"),
             (Method::DELETE, "/api/v1/kv/queen-kafka/qk:group:g:orders:0"),
             (Method::POST, "/api/v1/fetch"),
+            (Method::POST, "/api/v1/partitions/changed"),
         ] {
             let before = classify(&m, p);
             assert_eq!(
@@ -2890,6 +2909,151 @@ mod tests {
                 before,
                 "{m} {p}"
             );
+        }
+    }
+
+    // ---- the S3 sink's kv override (s3_kv.rs), at the same gates ----
+    //
+    // The sniffer's own behaviour is pinned in `s3_kv.rs`. These are about what
+    // the RECLASSIFICATION does once it has happened, which is this file's
+    // property, and they are the sink's half of the two tests above.
+
+    /// THE trap this carve-out exists for, and it is sharper than the Kafka
+    /// one. A tenant over its storage quota is push-blocked on purpose; if the
+    /// same block refuses the sink's WINDOW COMMIT, the sink re-uploads and
+    /// re-commits the identical window for ever while its lag grows without
+    /// bound — and a commit pointer of a few hundred bytes is not what the
+    /// storage block exists to stop. `mixed_block` is computed for the CLASS,
+    /// and `Consume` is not a class it is computed for.
+    #[test]
+    fn a_blocked_tenant_can_still_commit_a_window() {
+        use crate::routes::classify;
+        let kv_batch = classify(&Method::POST, "/api/v1/kv");
+        for body in [
+            // the commit: a CAS put with a required precondition
+            br#"{"operations":[{"op":"put","ns":"queen-s3","key":"s3:commit:sink-a:orders","value":{"tEnd":"2026-09-04T10:00:00Z"},"expect":41,"required":true,"forever":true}]}"#.as_slice(),
+            // the recovery read that precedes it
+            br#"{"operations":[{"op":"getMany","ns":"queen-s3","keys":["s3:commit:sink-a:orders"]}]}"#,
+        ] {
+            let class = crate::s3_kv::effective_class(kv_batch, body);
+            assert_eq!(class, RouteClass::Consume);
+            let would_block = matches!(class, RouteClass::Gated(_, crate::routes::GatedOp::Mixed));
+            assert!(!would_block, "{}", String::from_utf8_lossy(body));
+        }
+    }
+
+    /// The sink is a CONSUMER, so a consume-scoped credential — the one it
+    /// holds for the fetch and the discovery call — is enough for its
+    /// bookkeeping too, and a plan that never mentions `kv` does not gate it.
+    #[test]
+    fn a_sink_batch_reaches_a_tenant_whose_plan_has_no_kv() {
+        use crate::routes::{classify, Feature};
+        let kv_batch = classify(&Method::POST, "/api/v1/kv");
+        let body = br#"{"operations":[{"op":"putIfAbsent","ns":"queen-s3","key":"s3:instance:sink-a","value":{},"ttlSeconds":60}]}"#;
+        let class = crate::s3_kv::effective_class(kv_batch, body);
+        assert_eq!(class, RouteClass::Consume);
+        assert!(!feature_enabled(
+            Feature::Kv,
+            &crate::state::Features::default()
+        ));
+        assert!(
+            !matches!(class, RouteClass::Gated(_, _)),
+            "a Gated class would still meet the plan flag"
+        );
+        let consumer = crate::state::Principal::ApiKey {
+            key_id: uuid::Uuid::nil(),
+            scopes: crate::state::Scopes {
+                consume: true,
+                read: true,
+                produce: false,
+                admin: false,
+            },
+        };
+        assert!(crate::auth::authorize(&consumer, class).is_ok());
+    }
+
+    /// No bill moves because of a classification, same as the Kafka override:
+    /// `Gated(_,_)` meters reqs-only `Read`, and a `Consume` that is not a pop
+    /// path meters reqs-only `Read` too.
+    #[test]
+    fn a_sink_batch_meters_the_same_as_before() {
+        use crate::routes::classify;
+        let before = classify(&Method::POST, "/api/v1/kv");
+        let after = crate::s3_kv::effective_class(
+            before,
+            br#"{"operations":[{"op":"getPrefix","ns":"queen-s3","prefix":"s3:instance:","limit":500}]}"#,
+        );
+        assert_ne!(before, after, "the class really did change");
+        assert_eq!(op_for("/api/v1/kv", before), OpClass::Read);
+        assert_eq!(op_for("/api/v1/kv", after), OpClass::Read);
+        assert!(!is_pop_path("/api/v1/kv"));
+        assert!(!is_wait_pop("/api/v1/kv", Some("wait=true&timeout=30000")));
+    }
+
+    /// A non-`s3:` batch is the KV product and keeps `Gated(Kv, Mixed)` in
+    /// every gate — and the two carve-outs stay disjoint, so chaining them in
+    /// `handle` cannot grant a class neither would grant alone.
+    #[test]
+    fn a_plain_kv_batch_survives_both_carve_outs_unchanged() {
+        use crate::routes::{classify, Feature, GatedOp};
+        let kv_batch = classify(&Method::POST, "/api/v1/kv");
+        for body in [
+            br#"{"operations":[{"op":"put","ns":"app","key":"cache:x","value":1}]}"#.as_slice(),
+            // ...one that only LOOKS like the sink's
+            br#"{"operations":[{"op":"put","ns":"app","key":"s3:commit:a","value":1}]}"#,
+            // ...and one that mixes the two reserved spaces, which must fail
+            // closed onto the old class whichever predicate sees it first
+            br#"{"operations":[{"op":"put","ns":"queen-s3","key":"s3:commit:a","value":1},{"op":"put","ns":"queen-kafka","key":"qk:group:g","value":1}]}"#,
+        ] {
+            let why = String::from_utf8_lossy(body);
+            // the chain `handle` runs, in the order it runs it
+            let class = crate::s3_kv::effective_class(
+                crate::kafka_kv::effective_class(kv_batch, body),
+                body,
+            );
+            assert_eq!(
+                class,
+                RouteClass::Gated(Feature::Kv, GatedOp::Mixed),
+                "{why}"
+            );
+            assert!(
+                !feature_enabled(Feature::Kv, &crate::state::Features::default()),
+                "{why}"
+            );
+            let read_only = crate::state::Principal::ApiKey {
+                key_id: uuid::Uuid::nil(),
+                scopes: crate::state::Scopes {
+                    read: true,
+                    produce: false,
+                    consume: false,
+                    admin: false,
+                },
+            };
+            assert!(crate::auth::authorize(&read_only, class).is_err(), "{why}");
+            assert!(matches!(class, RouteClass::Gated(_, GatedOp::Mixed)), "{why}");
+            assert_eq!(op_for("/api/v1/kv", class), OpClass::Read, "{why}");
+        }
+    }
+
+    /// The sink override is scoped to the one class that asks its body, the
+    /// discovery route it serves included.
+    #[test]
+    fn the_sink_override_touches_no_other_route() {
+        use crate::routes::classify;
+        let s3 = br#"{"operations":[{"op":"put","ns":"queen-s3","key":"s3:commit:a","value":1}]}"#;
+        for (m, p) in [
+            (Method::POST, "/api/v1/push"),
+            (Method::POST, "/api/v1/transaction"),
+            (Method::POST, "/api/v1/timers"),
+            (Method::POST, "/streams/v1/cycle"),
+            (Method::GET, "/api/v1/kv/queen-s3/s3:commit:a"),
+            (Method::PUT, "/api/v1/kv/queen-s3/s3:commit:a"),
+            (Method::DELETE, "/api/v1/kv/queen-s3/s3:commit:a"),
+            (Method::POST, "/api/v1/fetch"),
+            (Method::POST, "/api/v1/partitions/changed"),
+        ] {
+            let before = classify(&m, p);
+            assert_eq!(crate::s3_kv::effective_class(before, s3), before, "{m} {p}");
         }
     }
 

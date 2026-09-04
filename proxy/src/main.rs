@@ -20,6 +20,9 @@ mod operator;
 mod pgtls;
 mod registry;
 mod routes;
+// PLAN_S3_SINK.md §8/D4 — the S3 sink's reserved KV key space, the body-
+// conditional twin of `kafka_kv` one namespace over.
+mod s3_kv;
 mod spool;
 mod state;
 mod webapp;

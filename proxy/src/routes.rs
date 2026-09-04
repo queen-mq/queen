@@ -211,6 +211,44 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
             RouteClass::Blocked
         };
     }
+    // PLAN_S3_SINK.md §5.1/§8 — `POST /api/v1/partitions/changed`, the
+    // partition-discovery call, and the fetch arm above copied with the path
+    // swapped. Everything that argument says holds here, for the same reasons:
+    //
+    // `Consume` rather than `Read`, because the class is an AUTHORIZATION
+    // decision and this route hands out the partition NAMES, offsets and
+    // retention watermarks of a tenant's queues — the map a consumer needs and
+    // the only way an entity-partitioned queue is readable at all. That is the
+    // authority of the pop it stands beside: `Read` for an api key is
+    // `scopes.read || scopes.admin` (auth.rs), which the consume-scoped key a
+    // sink holds does not carry — it would be 403'd on the route it exists to
+    // call — and `Read` for a user principal is true for EVERY role, so a
+    // Viewer who may not pop could enumerate every partition of every queue
+    // and then read them by offset through the fetch beside this.
+    //
+    // Never quota-blocked, and here the trap has one extra tooth. A discovery
+    // call grows nothing a storage quota bounds, and refusing it strands a sink
+    // exactly as refusing a fetch strands a consumer — but a sink refused
+    // DISCOVERY cannot even learn which partitions it is behind on, so it
+    // stops mirroring a queue whose backlog keeps growing, which is the
+    // opposite of what a storage block is for.
+    //
+    // Metering needs no new `op_for` arm: this is not an `is_pop_path`, so it
+    // books reqs-only `Read` like ack, lease and fetch. `OpClass::Delivery`
+    // would debit the delivery bucket off a count that does not exist here —
+    // the response carries no messages at all.
+    //
+    // POST only, and the exact path only. The broker registers one method
+    // (`main.rs`, `.route("/api/v1/partitions/changed", post(...))`) and axum
+    // redirects no trailing slash, so every other spelling fails closed instead
+    // of travelling to a 405 or the broker's own 404.
+    if p == "/api/v1/partitions/changed" {
+        return if *m == Method::POST {
+            RouteClass::Consume
+        } else {
+            RouteClass::Blocked
+        };
+    }
 
     // --- queue admin ---
     if p == "/api/v1/configure" {
@@ -504,6 +542,68 @@ mod tests {
         assert_eq!(classify(&post, "/api/v1/fetch/"), RouteClass::Blocked);
         // and the arm does not swallow a neighbour that does not exist yet
         assert_eq!(classify(&post, "/api/v1/fetchall"), RouteClass::Blocked);
+    }
+
+    /// PLAN_S3_SINK.md §5.1/§8. Partition discovery is the fetch's twin and
+    /// classifies identically: it hands out the partition names, offsets and
+    /// watermarks of a tenant's queues, which is the authority of a consumer,
+    /// and it is POST-only on one exact path.
+    #[test]
+    fn partitions_changed_is_consume_and_post_only() {
+        let post = Method::POST;
+        assert_eq!(
+            classify(&post, "/api/v1/partitions/changed"),
+            RouteClass::Consume
+        );
+        assert_eq!(
+            classify(&post, "/api/v1/partitions/changed"),
+            classify(&post, "/api/v1/fetch"),
+            "discovery and the fetch it feeds carry one authority"
+        );
+        // `Read` would be the wrong authority in both directions: a
+        // consume-scoped api key does not have it, and every user role does.
+        assert_ne!(
+            classify(&post, "/api/v1/partitions/changed"),
+            RouteClass::Read
+        );
+        // One method on one exact path at the broker, so every other shape
+        // fails closed here instead of travelling to a 405.
+        for m in [Method::GET, Method::PUT, Method::DELETE, Method::PATCH] {
+            assert_eq!(
+                classify(&m, "/api/v1/partitions/changed"),
+                RouteClass::Blocked,
+                "{m} /api/v1/partitions/changed"
+            );
+        }
+        // Axum redirects no trailing slash, so the spelling the broker 404s is
+        // the spelling the proxy blocks.
+        assert_eq!(
+            classify(&post, "/api/v1/partitions/changed/"),
+            RouteClass::Blocked
+        );
+        // ...and the arm does not swallow a neighbour that does not exist yet.
+        for p in [
+            "/api/v1/partitions",
+            "/api/v1/partitions/",
+            "/api/v1/partitions/changedall",
+            "/api/v1/partitions/list",
+        ] {
+            assert_eq!(classify(&post, p), RouteClass::Blocked, "{p}");
+        }
+    }
+
+    /// The §9.6 trap with one extra tooth: a sink refused DISCOVERY cannot even
+    /// learn which partitions it is behind on, so it stops mirroring a queue
+    /// whose backlog keeps growing — the opposite of what a storage block is
+    /// for. The route must therefore never land on a class a block can refuse.
+    #[test]
+    fn partitions_changed_is_never_on_a_quota_blockable_class() {
+        let c = classify(&Method::POST, "/api/v1/partitions/changed");
+        assert_ne!(c, RouteClass::Produce);
+        assert!(
+            !matches!(c, RouteClass::Gated(_, _)),
+            "{c:?} would put a plan gate on the discovery path"
+        );
     }
 
     /// A fetch grows nothing and must never come back as a class a storage or
