@@ -17,6 +17,13 @@
 //! *would* deny, tagged `blocked=true` (enforcing) or `would_block=true`
 //! (shadow) — see `log_deny`.
 //!
+//! Storage: a per-cluster account (same 16-way sharding) holding the last
+//! retained-bytes figure the reconciler published plus the push payload bytes
+//! accepted since that figure was computed. `push_block_reason_for` answers
+//! the gateway off both, so the quota bites inside a broker recompute window
+//! instead of after it. See `StorageAccount` for the 2026-09-03 measurement
+//! that made it necessary.
+//!
 //! GC: idle (>10min, zero outstanding parked count) cluster entries are
 //! pruned lazily, piggybacked on real traffic (`maybe_gc`), throttled to at
 //! most one sweep per `GC_INTERVAL` via a non-blocking `try_lock` so it never
@@ -67,6 +74,43 @@ pub enum PushBlock {
 /// one — a tenant whose disk pressure is blocking pushes needs to hear that
 /// before a billing ceiling that will clear on its own at the month boundary.
 const PUSH_BLOCK_PRECEDENCE: &[PushBlock] = &[PushBlock::Storage, PushBlock::MonthlyQuota];
+
+/// Per-cluster storage estimate: the last retained-bytes figure published by
+/// the registry reconciler, plus the push payload bytes accepted since that
+/// figure was computed.
+///
+/// WHY THIS EXISTS (measured on the trial cell, 2026-09-03/04). The retained
+/// figure is recomputed BY THE BROKER on its own slow lane
+/// (RETAINED_BYTES_INTERVAL_MS, default 600s), and the proxy then picks it up
+/// with a lag of its own (up to ~96s observed). Between the two, the gate saw
+/// a frozen number and refused nothing: pushing straight after a recompute,
+/// one key put 2.5 GB past a 256 MiB quota in 174s with no 403 at all, and the
+/// first refusal arrived 96s after the NEXT recompute. Shortening the broker
+/// lane to 60s bounds that to ~2 GB per window; it does not close it. Counting
+/// what we accept between computations does.
+struct StorageAccount {
+    /// Last total published by the reconciler (`publish_retained`). Zero until
+    /// the first publication, which is the honest value for a cluster this
+    /// process has not yet measured: the same posture as the push-blocked
+    /// flag, which is likewise unset until the first reconcile pass.
+    measured: i64,
+    /// Push payload bytes accepted since `measured` last CHANGED.
+    in_flight: i64,
+    last_seen: Instant,
+}
+
+impl StorageAccount {
+    fn new(now: Instant) -> StorageAccount {
+        StorageAccount { measured: 0, in_flight: 0, last_seen: now }
+    }
+
+    /// Estimated retained bytes right now. Saturating: a malformed or huge
+    /// measurement plus a long in-flight run must not wrap into a small number,
+    /// which would read as "plenty of room".
+    fn estimate(&self) -> i64 {
+        self.measured.saturating_add(self.in_flight)
+    }
+}
 
 pub struct ParkedGuard {
     cell_gauge: Option<Arc<AtomicI64>>,
@@ -196,6 +240,10 @@ pub struct Limits {
     buckets: Vec<Mutex<HashMap<Uuid, ClusterBuckets>>>,
     parked: Vec<Mutex<HashMap<Uuid, ParkedEntry>>>,
     push_blocked: RwLock<HashSet<(Uuid, PushBlock)>>,
+    /// Per-cluster storage estimate, sharded like the buckets. Read on every
+    /// push (`storage_over_cap`), written by the storage pump in main.rs
+    /// (`publish_retained`) and by the produce path (`note_accepted_bytes`).
+    storage: Vec<Mutex<HashMap<Uuid, StorageAccount>>>,
     gc_next: Mutex<Instant>,
 }
 
@@ -215,6 +263,7 @@ impl Limits {
             buckets: new_shards(),
             parked: new_shards(),
             push_blocked: RwLock::new(HashSet::new()),
+            storage: new_shards(),
             gc_next: Mutex::new(Instant::now() + GC_INTERVAL),
         }
     }
@@ -336,6 +385,102 @@ impl Limits {
             .find(|reason| set.contains(&(cluster_id, *reason)))
     }
 
+    /// `push_block_reason` plus the in-flight storage estimate, which needs the
+    /// cluster's own `max_retained_bytes` and so cannot be answered from a
+    /// cluster id alone. This is what the gateway calls; the id-only form stays
+    /// for callers that only care about the pump-set flags.
+    ///
+    /// The estimate can only ever ADD a `Storage` reason, never remove one, and
+    /// it is resolved through the same PUSH_BLOCK_PRECEDENCE so a cluster that
+    /// is both over storage and out of monthly messages still reports storage.
+    pub fn push_block_reason_for(&self, ctx: &ClusterCtx) -> Option<PushBlock> {
+        // Computed BEFORE the flag lock is taken, not inside the closure: two
+        // locks held at once here and in the other order anywhere else is how a
+        // deadlock gets built, and nothing about this needs them together.
+        let over_estimate = self.storage_over_cap(ctx);
+        let set = self.push_blocked.read().unwrap();
+        PUSH_BLOCK_PRECEDENCE.iter().copied().find(|reason| {
+            set.contains(&(ctx.cluster_id, *reason))
+                || (*reason == PushBlock::Storage && over_estimate)
+        })
+    }
+
+    /// Is this cluster at or over its retained-bytes cap once the bytes we have
+    /// accepted since the last computation are counted?
+    ///
+    /// `>=`, where `decide_over_storage` uses `>`. Not an inconsistency: that
+    /// one judges a MEASURED total, so "exactly at the cap" is a fact and the
+    /// tenant gets the benefit of it. This one runs BEFORE the batch in hand is
+    /// counted, so it is always at least one batch behind the truth, and the
+    /// boundary case is resolved against the tenant rather than against the
+    /// cell's disk. The gate order also means exactly one batch may cross the
+    /// cap before anything is refused, which is the least overshoot a
+    /// check-then-forward proxy can have.
+    ///
+    /// HARD, like the pump-set storage flag it backstops (see
+    /// gateway::push_block_response): a quota that only warns protects neither
+    /// the cell's disk nor the bill, so `enforcing()` is deliberately not
+    /// consulted. `None` (unlimited) is answered without touching the shard.
+    pub fn storage_over_cap(&self, ctx: &ClusterCtx) -> bool {
+        let Some(max) = ctx.limits.max_retained_bytes else { return false };
+        let idx = shard_index(&ctx.cluster_id);
+        let shard = self.storage[idx].lock().unwrap();
+        shard.get(&ctx.cluster_id).is_some_and(|a| a.estimate() >= max)
+    }
+
+    /// Record payload bytes the proxy has just accepted for forwarding.
+    ///
+    /// Counted at the moment of the decision rather than off the broker's
+    /// response: an over-count (the broker later rejects the batch) is
+    /// conservative and is erased by the next computation, whereas waiting for
+    /// the response would reopen the window this whole mechanism exists to
+    /// close. The measure is the raw JSON payload text, the same basis every
+    /// other size cap in gateway.rs uses; the broker stores those bytes
+    /// COMPRESSED, so the estimate runs high, which again only ever refuses
+    /// earlier.
+    pub fn note_accepted_bytes(&self, cluster_id: Uuid, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        let now = Instant::now();
+        let idx = shard_index(&cluster_id);
+        let mut shard = self.storage[idx].lock().unwrap();
+        let account = shard.entry(cluster_id).or_insert_with(|| StorageAccount::new(now));
+        account.last_seen = now;
+        account.in_flight = account.in_flight.saturating_add(bytes.min(i64::MAX as u64) as i64);
+    }
+
+    /// Publish the reconciler's latest retained-bytes total for a cluster, from
+    /// the storage pump in main.rs.
+    ///
+    /// The in-flight counter is reset only when the VALUE CHANGES, which is the
+    /// only evidence of a fresh computation the broker gives us: its
+    /// `resources/queues` response carries the number and no timestamp for it
+    /// (server/sql/procedures/018_stats.sql), so republishing an identical
+    /// total means the slow lane has not run again and the bytes we counted
+    /// since are still uncounted by it. Resetting on every poll instead would
+    /// forget most of a 600s broker window within one 10s proxy tick and put
+    /// the 2026-09-03 hole straight back.
+    ///
+    /// This cannot deadlock a cluster into a permanent estimate-driven refusal:
+    /// the in-flight bytes are ones the broker really did store, so its next
+    /// recompute must move the total, which resets the counter. Pushes and
+    /// expiry cancelling to the exact byte across a whole broker period is the
+    /// only way the value holds still while in-flight grows, and a cluster in
+    /// that state is by definition sitting at a steady occupancy that the
+    /// measured total already describes.
+    pub fn publish_retained(&self, cluster_id: Uuid, measured: i64) {
+        let now = Instant::now();
+        let idx = shard_index(&cluster_id);
+        let mut shard = self.storage[idx].lock().unwrap();
+        let account = shard.entry(cluster_id).or_insert_with(|| StorageAccount::new(now));
+        account.last_seen = now;
+        if account.measured != measured {
+            account.measured = measured;
+            account.in_flight = 0;
+        }
+    }
+
     /// Core dual-bucket decision: get-or-create the cluster's bucket pair,
     /// refresh it to the caller's current plan values, refill for elapsed
     /// time, then try to debit `n`. Only debits on success — a Deny never
@@ -429,11 +574,27 @@ impl Limits {
             });
             parked_evicted += before - m.len();
         }
-        if bucket_evicted > 0 || parked_evicted > 0 {
+        // Storage accounts are refreshed by the pump for every cluster the
+        // reconciler still targets (`c.status <> 'deleting'`), so a LIVE
+        // cluster's entry is never idle and never evicted here. What ages out
+        // is a cluster nobody publishes for any more: deleted, or moved off
+        // this cell. Losing an idle account's `in_flight` is safe on the same
+        // grounds: IDLE_TTL is ten minutes, so a cluster that has neither
+        // pushed nor been measured in that long has had any bytes it did push
+        // counted by the broker's slow lane long since.
+        let mut storage_evicted = 0usize;
+        for shard in &self.storage {
+            let mut m = shard.lock().unwrap();
+            let before = m.len();
+            m.retain(|_, v| now.saturating_duration_since(v.last_seen) < IDLE_TTL);
+            storage_evicted += before - m.len();
+        }
+        if bucket_evicted > 0 || parked_evicted > 0 || storage_evicted > 0 {
             tracing::debug!(
                 target: "limits",
                 bucket_evicted,
                 parked_evicted,
+                storage_evicted,
                 "gc: pruned idle cluster entries"
             );
         }
@@ -456,6 +617,15 @@ impl Limits {
         let idx = shard_index(&cluster_id);
         let shard = self.buckets[idx].lock().unwrap();
         shard.get(&cluster_id).map(|e| e.msgs.tokens)
+    }
+
+    /// White-box peek for tests only: measured + in-flight for the cluster, if
+    /// it has a storage account at all.
+    #[cfg(test)]
+    fn debug_storage_estimate(&self, cluster_id: Uuid) -> Option<i64> {
+        let idx = shard_index(&cluster_id);
+        let shard = self.storage[idx].lock().unwrap();
+        shard.get(&cluster_id).map(StorageAccount::estimate)
     }
 }
 
@@ -744,6 +914,143 @@ mod tests {
         limits.set_push_blocked_reason(a, PushBlock::MonthlyQuota, true);
         assert_eq!(limits.push_block_reason(a), Some(PushBlock::MonthlyQuota));
         assert_eq!(limits.push_block_reason(b), None, "one cluster's quota must not block another's");
+    }
+
+    // ---- in-flight storage accounting (2026-09-03 blind-window defect) ----
+
+    /// A cluster 1 byte under a 1000-byte cap: the reconciler's number alone
+    /// says "fine", and before this counter that stayed true for a whole broker
+    /// recompute period no matter how much arrived. Bytes accepted inside the
+    /// window have to refuse the push WITHOUT waiting for a new computation.
+    #[test]
+    fn accepted_bytes_refuse_inside_the_window_with_no_new_computation() {
+        let limits = Limits::new_for_test(true);
+        let ctx = test_ctx(EffectiveLimits { max_retained_bytes: Some(1_000), ..Default::default() });
+
+        limits.publish_retained(ctx.cluster_id, 999);
+        assert!(!limits.storage_over_cap(&ctx), "the measured figure is under the cap");
+        assert_eq!(limits.push_block_reason_for(&ctx), None);
+
+        limits.note_accepted_bytes(ctx.cluster_id, 1);
+        assert!(limits.storage_over_cap(&ctx), "999 measured + 1 accepted reaches the cap");
+        assert_eq!(
+            limits.push_block_reason_for(&ctx),
+            Some(PushBlock::Storage),
+            "the gateway must see Storage without any pump or reconciler tick"
+        );
+        // The pump-set flag is untouched: this is a second, faster route to the
+        // same verdict, not a rewrite of the first.
+        assert_eq!(limits.push_block_reason(ctx.cluster_id), None);
+    }
+
+    #[test]
+    fn a_new_computation_resets_the_in_flight_counter() {
+        let limits = Limits::new_for_test(true);
+        let ctx = test_ctx(EffectiveLimits { max_retained_bytes: Some(1_000), ..Default::default() });
+
+        limits.publish_retained(ctx.cluster_id, 500);
+        limits.note_accepted_bytes(ctx.cluster_id, 600);
+        assert!(limits.storage_over_cap(&ctx), "500 + 600 is over 1000");
+
+        // The broker recomputed and the tenant had meanwhile deleted data: the
+        // fresh figure supersedes everything counted against the old one.
+        limits.publish_retained(ctx.cluster_id, 400);
+        assert!(!limits.storage_over_cap(&ctx), "a fresh computation clears the in-flight bytes");
+        assert_eq!(limits.debug_storage_estimate(ctx.cluster_id), Some(400));
+    }
+
+    /// The counterpart, and the reason the reset is keyed on the VALUE: the
+    /// pump republishes the same figure every tick, and each republication must
+    /// neither drop the bytes counted since (which would reopen the window) nor
+    /// add them again (which would refuse a tenant that is nowhere near its cap).
+    #[test]
+    fn republishing_an_unchanged_figure_neither_forgets_nor_double_counts() {
+        let limits = Limits::new_for_test(true);
+        let ctx = test_ctx(EffectiveLimits { max_retained_bytes: Some(1_000), ..Default::default() });
+
+        limits.publish_retained(ctx.cluster_id, 100);
+        limits.note_accepted_bytes(ctx.cluster_id, 50);
+        assert_eq!(limits.debug_storage_estimate(ctx.cluster_id), Some(150));
+
+        for _ in 0..5 {
+            limits.publish_retained(ctx.cluster_id, 100);
+        }
+        assert_eq!(
+            limits.debug_storage_estimate(ctx.cluster_id),
+            Some(150),
+            "five pump ticks on the same broker figure must not move the estimate"
+        );
+
+        limits.note_accepted_bytes(ctx.cluster_id, 25);
+        assert_eq!(limits.debug_storage_estimate(ctx.cluster_id), Some(175));
+    }
+
+    #[test]
+    fn unlimited_retained_bytes_never_refuses_and_never_touches_the_shard() {
+        let limits = Limits::new_for_test(true);
+        let ctx = test_ctx(EffectiveLimits::default()); // max_retained_bytes: None
+        limits.note_accepted_bytes(ctx.cluster_id, 1_000_000_000);
+        assert!(!limits.storage_over_cap(&ctx), "no cap, no refusal");
+        assert_eq!(limits.push_block_reason_for(&ctx), None);
+    }
+
+    #[test]
+    fn storage_estimate_is_per_cluster() {
+        let limits = Limits::new_for_test(true);
+        let a = test_ctx(EffectiveLimits { max_retained_bytes: Some(100), ..Default::default() });
+        let b = test_ctx(EffectiveLimits { max_retained_bytes: Some(100), ..Default::default() });
+        limits.note_accepted_bytes(a.cluster_id, 500);
+        assert!(limits.storage_over_cap(&a));
+        assert!(!limits.storage_over_cap(&b), "one tenant's bytes must not block another's");
+    }
+
+    /// Shadow mode does not soften this one, by the same rule the pump-set
+    /// storage flag already follows (gateway::push_block_response: both live
+    /// flags are hard gates).
+    #[test]
+    fn the_storage_estimate_is_a_hard_gate_in_shadow_mode() {
+        let limits = Limits::new_for_test(false);
+        let ctx = test_ctx(EffectiveLimits { max_retained_bytes: Some(10), ..Default::default() });
+        limits.note_accepted_bytes(ctx.cluster_id, 10);
+        assert_eq!(limits.push_block_reason_for(&ctx), Some(PushBlock::Storage));
+    }
+
+    /// Storage leads MonthlyQuota whichever of the two routes raised it.
+    #[test]
+    fn an_estimated_storage_block_still_outranks_a_monthly_quota_flag() {
+        let limits = Limits::new_for_test(true);
+        let ctx = test_ctx(EffectiveLimits { max_retained_bytes: Some(10), ..Default::default() });
+        limits.set_push_blocked_reason(ctx.cluster_id, PushBlock::MonthlyQuota, true);
+        assert_eq!(limits.push_block_reason_for(&ctx), Some(PushBlock::MonthlyQuota));
+        limits.note_accepted_bytes(ctx.cluster_id, 10);
+        assert_eq!(limits.push_block_reason_for(&ctx), Some(PushBlock::Storage));
+    }
+
+    /// A huge measurement plus a huge in-flight run must saturate, not wrap:
+    /// wrapping would turn "far over quota" into "plenty of room".
+    #[test]
+    fn the_estimate_saturates_instead_of_wrapping() {
+        let limits = Limits::new_for_test(true);
+        let ctx = test_ctx(EffectiveLimits { max_retained_bytes: Some(i64::MAX), ..Default::default() });
+        limits.publish_retained(ctx.cluster_id, i64::MAX - 1);
+        limits.note_accepted_bytes(ctx.cluster_id, u64::MAX);
+        assert_eq!(limits.debug_storage_estimate(ctx.cluster_id), Some(i64::MAX));
+        assert!(limits.storage_over_cap(&ctx));
+    }
+
+    #[test]
+    fn gc_prunes_a_storage_account_nobody_publishes_for_any_more() {
+        let limits = Limits::new_for_test(true);
+        let ctx = test_ctx(EffectiveLimits { max_retained_bytes: Some(10), ..Default::default() });
+        limits.note_accepted_bytes(ctx.cluster_id, 1);
+        assert_eq!(limits.debug_storage_estimate(ctx.cluster_id), Some(1));
+
+        limits.gc_sweep(Instant::now() + IDLE_TTL + Duration::from_secs(1));
+        assert_eq!(
+            limits.debug_storage_estimate(ctx.cluster_id),
+            None,
+            "an account the pump has stopped refreshing ages out"
+        );
     }
 
     // ---- GC (synthetic future Instant, no real sleep) ----

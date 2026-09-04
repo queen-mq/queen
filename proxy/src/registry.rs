@@ -53,9 +53,30 @@ const MAX_RECONCILE_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 /// aged out data, not that a rounding wobble crossed the line.
 const STORAGE_RELEASE_PERCENT: i64 = 90;
 
-/// How many consecutive empty inventories it takes before the deleted-queue
-/// sweep runs -- see the call site in `reconcile_cluster`.
-const EMPTY_INVENTORY_SWEEPS: u32 = 2;
+/// What this cycle learned about a cluster's queues, which is what decides
+/// whether the deleted-queue sweep may run.
+///
+/// Until 2026-09-04 the sweep was gated on an empty inventory REPEATING, on the
+/// reasoning that "a genuinely empty cluster looks exactly like a broker that
+/// answered before its stats were readable". It does not: `seen_names` is built
+/// from `queues[].name`, and the broker builds that list straight from
+/// `queen.queues` (server/sql/procedures/018_stats.sql: `FROM queen.queues q
+/// WHERE q.tenant_id = p_tenant`). Stats readiness moves `partitions` and
+/// `retainedBytes`; it cannot invent or withhold a name. So a 200 carrying an
+/// empty array IS the answer "this tenant has no queues" -- which is exactly the
+/// state a customer who has just deleted everything is in, and the state whose
+/// convergence the deferral was delaying. Everything genuinely ambiguous -- an
+/// unreachable cell, a timeout, a body without a `queues` array -- returns
+/// before the sweep is ever considered, and is `Unreachable` here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Inventory {
+    /// The broker answered 200 and we parsed its `queues` array. Its contents
+    /// are the truth about what exists, empty or not.
+    Confirmed { empty: bool },
+    /// No usable answer this cycle. Says nothing about what exists, so it must
+    /// not be allowed to delete anything.
+    Unreachable,
+}
 
 /// queen_proxy.queues.partitions_count is INTEGER (001_init.sql), while
 /// partition counts are carried as i64 throughout this module. Binding the i64
@@ -83,11 +104,11 @@ struct ClusterRegistry {
     /// reconciler). A floor, not a ceiling -- see module doc.
     db_partition_floor: HashMap<String, i64>,
     /// Queue names known to exist (DB lazy-load, reconciler, or this
-    /// process's own admits) -- backs the max_queues check.
+    /// process's own admits) -- backs the max_queues check. Pruned to the
+    /// broker's inventory on every confirmed reconcile pass, and dropped
+    /// wholesale by `invalidate` when pxdb says the cluster changed: a name in
+    /// here that no longer exists is a plan slot the tenant cannot use.
     queue_names: HashSet<String>,
-    /// Consecutive reconcile passes that returned an empty queue inventory.
-    /// Gates the deleted-queue sweep (`note_inventory`).
-    empty_inventory_streak: u32,
     /// Has this cluster's cell already been reported as not sending the
     /// kv/timer usage fields? One line per cluster per proxy lifetime — see
     /// `kv_timer_bytes`.
@@ -105,6 +126,11 @@ pub struct Registry {
     /// reconciler's last successful byte count. Read by the storage-quota
     /// pump in main.rs -- see `over_storage`.
     over_storage: Arc<RwLock<HashSet<Uuid>>>,
+    /// The last retained-bytes TOTAL measured for each cluster, alongside the
+    /// over/under verdict derived from it. The verdict alone cannot drive the
+    /// in-flight accounting in limits.rs: that needs the number, so it can tell
+    /// a fresh computation from a republication of the same one.
+    retained: Arc<RwLock<HashMap<Uuid, i64>>>,
     /// Queue rows admitted since the last persist tick: (cluster, queue) ->
     /// highest projected partition count. Bounded by the number of queues.
     pending: Arc<Pending>,
@@ -117,6 +143,7 @@ impl Registry {
             known: Arc::new(RwLock::new(HashMap::new())),
             loaded: Arc::new(RwLock::new(HashSet::new())),
             over_storage: Arc::new(RwLock::new(HashSet::new())),
+            retained: Arc::new(RwLock::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -279,6 +306,40 @@ impl Registry {
         self.over_storage.read().unwrap().iter().copied().collect()
     }
 
+    /// The reconciler's last measured retained-bytes total per cluster.
+    ///
+    /// The storage pump in main.rs feeds these to `Limits::publish_retained`,
+    /// which is what lets the push gate add the bytes accepted since a total
+    /// was computed instead of trusting a figure that may be a whole broker
+    /// recompute period old.
+    pub fn retained_totals(&self) -> Vec<(Uuid, i64)> {
+        self.retained.read().unwrap().iter().map(|(id, bytes)| (*id, *bytes)).collect()
+    }
+
+    /// Drop a cluster's in-memory queue registry so the next `admit` rebuilds
+    /// it from pxdb, where the `deleted_at IS NULL` filter lives.
+    ///
+    /// The partition-cap floor survives, because `ensure_loaded` re-reads it
+    /// from `queen_proxy.queues`; the exact partition NAMES this process
+    /// admitted do not, which is the same position a restart leaves the
+    /// registry in and which the floor exists to cover (module doc).
+    pub fn invalidate(&self, cluster_id: Uuid) {
+        invalidate_cluster(&self.known, &self.loaded, cluster_id);
+    }
+
+    /// `invalidate` as a standalone callable, for the pxdb NOTIFY listener in
+    /// cache.rs to hold.
+    ///
+    /// Handing over clones of the two maps rather than an `Arc<Registry>` (or,
+    /// worse, the `AppState` that owns it) keeps this a leaf: the listener task
+    /// outlives nothing and owns nothing that owns it, so there is no reference
+    /// cycle to reason about and `AppState`'s shape is untouched.
+    pub fn invalidator(&self) -> impl Fn(Uuid) + Send + Sync + 'static {
+        let known = self.known.clone();
+        let loaded = self.loaded.clone();
+        move |cluster_id| invalidate_cluster(&known, &loaded, cluster_id)
+    }
+
     pub fn spawn_reconciler(&self) {
         let Some(pool) = self.db.clone() else {
             tracing::info!("registry reconciler: no pxdb configured, skipping (dev-static mode)");
@@ -286,6 +347,7 @@ impl Registry {
         };
         let known = self.known.clone();
         let over_storage = self.over_storage.clone();
+        let retained = self.retained.clone();
         tokio::spawn(async move {
             // env-tunable so e2e smokes don't wait a full minute per cycle
             let interval = std::time::Duration::from_millis(crate::config::env_u64(
@@ -296,16 +358,29 @@ impl Registry {
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tick.tick().await;
-                reconcile_once(&pool, &known, &over_storage).await;
+                reconcile_once(&pool, &known, &over_storage, &retained).await;
             }
         });
     }
 
     #[allow(dead_code)]
     pub fn forget(&self, cluster_id: Uuid) {
-        self.known.write().unwrap().remove(&cluster_id);
-        self.loaded.write().unwrap().remove(&cluster_id);
+        self.invalidate(cluster_id);
     }
+}
+
+/// The one place a cluster's in-memory registry is dropped, shared by
+/// `Registry::invalidate` and the closure `invalidator` hands the listener.
+/// `loaded` is cleared LAST: a concurrent `admit` that reads `loaded` between
+/// the two writes re-runs `ensure_loaded`, which is a wasted query at worst,
+/// whereas the opposite order can leave the stale entry marked as loaded.
+fn invalidate_cluster(
+    known: &Arc<RwLock<HashMap<Uuid, ClusterRegistry>>>,
+    loaded: &Arc<RwLock<HashSet<Uuid>>>,
+    cluster_id: Uuid,
+) {
+    known.write().unwrap().remove(&cluster_id);
+    loaded.write().unwrap().remove(&cluster_id);
 }
 
 // -------------------------------------------------------------- persister
@@ -375,6 +450,7 @@ async fn reconcile_once(
     pool: &deadpool_postgres::Pool,
     known: &Arc<RwLock<HashMap<Uuid, ClusterRegistry>>>,
     over_storage: &Arc<RwLock<HashSet<Uuid>>>,
+    retained: &Arc<RwLock<HashMap<Uuid, i64>>>,
 ) {
     let targets = match load_targets(pool).await {
         Ok(t) => t,
@@ -384,7 +460,7 @@ async fn reconcile_once(
         }
     };
     for target in targets {
-        reconcile_cluster(pool, known, over_storage, &target).await;
+        reconcile_cluster(pool, known, over_storage, retained, &target).await;
     }
 }
 
@@ -424,6 +500,7 @@ async fn reconcile_cluster(
     pool: &deadpool_postgres::Pool,
     known: &Arc<RwLock<HashMap<Uuid, ClusterRegistry>>>,
     over_storage: &Arc<RwLock<HashSet<Uuid>>>,
+    retained: &Arc<RwLock<HashMap<Uuid, i64>>>,
     target: &ReconcileTarget,
 ) {
     // `?stats=cached`: the reconciler reads `name`, `partitions`, `retainedBytes`
@@ -444,12 +521,12 @@ async fn reconcile_cluster(
         Err(e) => {
             // Resilience requirement: cell down -> log and skip, never
             // panic or poison the cycle for other clusters.
-            tracing::warn!(cluster = %target.cluster_id, cell = %target.base_url, error = %e, "registry reconciler: cell unreachable, skipping");
+            skip_without_inventory(target, &format!("cell unreachable: {e}"));
             return;
         }
     };
     let Some(queues) = body.get("queues").and_then(|q| q.as_array()) else {
-        tracing::warn!(cluster = %target.cluster_id, "registry reconciler: unexpected response shape (no \"queues\" array)");
+        skip_without_inventory(target, "unexpected response shape (no \"queues\" array)");
         return;
     };
 
@@ -556,16 +633,10 @@ async fn reconcile_cluster(
     // queen_proxy.queues is a CACHE (ownership is broker-side, PLAN §5), so a
     // false sweep never touches broker data. It isn't free either: the swept
     // rows are what re-seeds `db_partition_floor` after a proxy restart
-    // (module doc), so losing them loses the partition-cap floor. A 200 with
-    // an empty array is ambiguous -- a genuinely empty cluster looks exactly
-    // like a broker that answered before its stats were readable -- so an
-    // empty inventory has to repeat before it counts as real.
-    let sweep_due = {
-        let mut map = known.write().unwrap();
-        let cr = map.entry(target.cluster_id).or_default();
-        note_inventory(cr, seen_names.is_empty())
-    };
-    if sweep_due {
+    // (module doc), so losing them loses the partition-cap floor. Which answers
+    // are trustworthy enough to delete on is `Inventory`'s whole subject.
+    let inventory = Inventory::Confirmed { empty: seen_names.is_empty() };
+    if sweep_allowed(inventory) {
         let cluster_id_str = target.cluster_id.to_string();
         let sweep_stmt = "UPDATE queen_proxy.queues SET deleted_at = now() \
                            WHERE cluster_id = $1::text::uuid AND deleted_at IS NULL AND NOT (name = ANY($2))";
@@ -575,17 +646,47 @@ async fn reconcile_cluster(
             // The swept rows are gone: forget their floor too, so a queue
             // that comes back is written again rather than skipped as
             // unchanged.
+            //
+            // ...and forget the NAMES, which is what `admit` counts against
+            // max_queues. Until 2026-09-04 this line was missing and nothing
+            // else ever removed from `queue_names`, so the count was of every
+            // queue the process had ever seen. Measured on the trial cell: a
+            // cluster with 61 tombstoned rows and 0 live ones refused every
+            // push to a new queue name with `queue limit reached (20)` until
+            // the proxy was restarted, because a restart is the only thing that
+            // re-ran the lazy load and its `deleted_at IS NULL` filter. Pruned
+            // in the SAME branch as the DB write so the two never disagree
+            // about what exists; a failed sweep retries next cycle.
             let seen: HashSet<&str> = seen_names.iter().map(String::as_str).collect();
             let mut map = known.write().unwrap();
             if let Some(cr) = map.get_mut(&target.cluster_id) {
                 cr.db_partition_floor.retain(|name, _| seen.contains(name.as_str()));
+                let before = cr.queue_names.len();
+                cr.queue_names.retain(|name| seen.contains(name.as_str()));
+                // The exact partition names of a swept queue go with it: they
+                // describe a queue the broker no longer has, and leaving them
+                // would keep the pair fast-path answering Allowed for it.
+                cr.partitions.retain(|name, _| seen.contains(name.as_str()));
+                let freed = before - cr.queue_names.len();
+                if freed > 0 {
+                    tracing::info!(
+                        target: "limits", cluster = %target.cluster_id, kind = "queues",
+                        freed, live = cr.queue_names.len(),
+                        "registry: released queue slots for queues the broker no longer has"
+                    );
+                }
             }
         }
     } else {
-        tracing::warn!(cluster = %target.cluster_id, cell = %target.base_url, "registry reconciler: empty queue inventory, deferring sweep one cycle");
+        tracing::warn!(cluster = %target.cluster_id, cell = %target.base_url, "registry reconciler: unconfirmed queue inventory, deferring sweep");
     }
 
     if bytes_found {
+        // Published whether or not the cluster has a cap: the number is a
+        // measurement, and `limits` is the one that knows whether this cluster
+        // has anything to measure it against. Published BEFORE the verdict so
+        // the two can never disagree about which computation they describe.
+        retained.write().unwrap().insert(target.cluster_id, total_bytes);
         if let Some(max) = target.max_retained_bytes {
             let mut over = over_storage.write().unwrap();
             let blocked = over.contains(&target.cluster_id);
@@ -637,16 +738,25 @@ fn decide_over_storage(blocked: bool, total_bytes: i64, max: i64) -> bool {
     total_bytes > release_at
 }
 
-/// Records this cycle's inventory shape and answers whether the deleted-queue
-/// sweep may run. A non-empty inventory always sweeps and clears the streak;
-/// an empty one only sweeps once it has repeated EMPTY_INVENTORY_SWEEPS times.
-fn note_inventory(cr: &mut ClusterRegistry, empty: bool) -> bool {
-    if !empty {
-        cr.empty_inventory_streak = 0;
-        return true;
-    }
-    cr.empty_inventory_streak = cr.empty_inventory_streak.saturating_add(1);
-    cr.empty_inventory_streak >= EMPTY_INVENTORY_SWEEPS
+/// Whether this cycle's inventory may drive the deleted-queue sweep. A
+/// confirmed listing sweeps whether or not it is empty; anything else defers.
+fn sweep_allowed(inventory: Inventory) -> bool {
+    matches!(inventory, Inventory::Confirmed { .. })
+}
+
+/// This cluster produced no usable listing this cycle, so nothing about it can
+/// be reconciled and, in particular, nothing may be swept. One shape for both
+/// causes (cell unreachable or unreadable, body without a `queues` array), and
+/// the deferral is stated rather than left implicit in an early `return`. The
+/// rows this protects are the partition-cap floor a restart reads back.
+fn skip_without_inventory(target: &ReconcileTarget, cause: &str) {
+    tracing::warn!(
+        cluster = %target.cluster_id,
+        cell = %target.base_url,
+        cause,
+        sweep = sweep_allowed(Inventory::Unreachable),
+        "registry reconciler: no usable queue inventory, skipping cluster"
+    );
 }
 
 // --------------------------------------------------- minimal headered GET
@@ -948,24 +1058,91 @@ mod tests {
         assert_eq!(kv_timer_bytes(&body(never_measured)), Some(0));
     }
 
-    // ---- empty-inventory sweep guard ----
+    // ---- inventory sweep guard (2026-09-04) ----
 
+    /// The case the old two-cycle deferral was blocking: a customer deletes
+    /// every queue, the broker answers 200 with an empty array, and that IS the
+    /// answer. Deferring it left the cluster's tombstones (and, before the
+    /// `queue_names` prune, its plan slots) waiting on a second cycle.
     #[test]
-    fn empty_inventory_defers_one_sweep_then_proceeds() {
-        let mut cr = ClusterRegistry::default();
-        assert!(!note_inventory(&mut cr, true), "first empty inventory is treated as a blip");
-        assert!(note_inventory(&mut cr, true), "a second one in a row is real");
-        assert!(note_inventory(&mut cr, true), "and it stays real");
+    fn a_confirmed_empty_inventory_sweeps_immediately() {
+        assert!(sweep_allowed(Inventory::Confirmed { empty: true }));
     }
 
     #[test]
-    fn non_empty_inventory_always_sweeps_and_clears_the_streak() {
-        let mut cr = ClusterRegistry::default();
-        assert!(!note_inventory(&mut cr, true));
-        assert!(note_inventory(&mut cr, false), "a real listing sweeps immediately");
-        assert_eq!(cr.empty_inventory_streak, 0);
-        // Streak reset means the next blip is deferred again, not swept.
-        assert!(!note_inventory(&mut cr, true));
+    fn a_confirmed_listing_sweeps() {
+        assert!(sweep_allowed(Inventory::Confirmed { empty: false }));
+    }
+
+    /// The distinction that matters: "the broker says nothing exists" is not
+    /// "the broker said nothing". An unreachable cell, a timeout or an
+    /// unreadable body must never soft-delete a row -- those rows are the
+    /// partition-cap floor a restart reads back.
+    #[test]
+    fn an_unreachable_broker_still_defers() {
+        assert!(!sweep_allowed(Inventory::Unreachable));
+    }
+
+    // ---- max_queues counts live queues only (2026-09-03 defect B) ----
+
+    /// The trial-cell bug in miniature: fill the plan's queue slots, then have
+    /// the reconciler observe that the broker no longer has those queues. The
+    /// slots must come back without a restart.
+    #[tokio::test]
+    async fn pruning_swept_names_frees_queue_slots_without_a_restart() {
+        let reg = Registry::new(None);
+        let ctx = test_ctx(Some(2), None);
+        assert_eq!(reg.admit(&ctx, "orders", "p0").await, Admit::Allowed);
+        assert_eq!(reg.admit(&ctx, "shipments", "p0").await, Admit::Allowed);
+        assert_eq!(reg.admit(&ctx, "invoices", "p0").await, Admit::OverQueues { max: 2 });
+
+        // What the reconciler's sweep branch does to the in-memory registry
+        // once the broker's inventory comes back empty.
+        {
+            let mut map = reg.known.write().unwrap();
+            let cr = map.get_mut(&ctx.cluster_id).expect("registry entry");
+            cr.queue_names.clear();
+            cr.partitions.clear();
+            cr.db_partition_floor.clear();
+        }
+
+        assert_eq!(
+            reg.admit(&ctx, "invoices", "p0").await,
+            Admit::Allowed,
+            "a queue the broker no longer has must not hold a plan slot"
+        );
+    }
+
+    /// The other half of the fix: a soft-delete performed anywhere else (the
+    /// console, an operator's hand) reaches the proxy as a pxdb NOTIFY, and the
+    /// invalidator has to make the next admit rebuild from the live rows.
+    #[tokio::test]
+    async fn invalidate_frees_queue_slots_without_a_restart() {
+        let reg = Registry::new(None);
+        let ctx = test_ctx(Some(1), None);
+        assert_eq!(reg.admit(&ctx, "orders", "p0").await, Admit::Allowed);
+        assert_eq!(reg.admit(&ctx, "shipments", "p0").await, Admit::OverQueues { max: 1 });
+
+        reg.invalidate(ctx.cluster_id);
+        assert_eq!(
+            reg.admit(&ctx, "shipments", "p0").await,
+            Admit::Allowed,
+            "after invalidation the count is rebuilt, not inherited"
+        );
+    }
+
+    #[test]
+    fn the_invalidator_closure_clears_the_same_state() {
+        let reg = Registry::new(None);
+        let cluster_id = Uuid::from_u128(42);
+        reg.known.write().unwrap().insert(cluster_id, ClusterRegistry::default());
+        reg.loaded.write().unwrap().insert(cluster_id);
+
+        let invalidate = reg.invalidator();
+        invalidate(cluster_id);
+
+        assert!(!reg.known.read().unwrap().contains_key(&cluster_id));
+        assert!(!reg.loaded.read().unwrap().contains(&cluster_id));
     }
 
     #[test]
@@ -977,5 +1154,17 @@ mod tests {
         reg.forget(cluster_id);
         assert!(!reg.known.read().unwrap().contains_key(&cluster_id));
         assert!(!reg.loaded.read().unwrap().contains(&cluster_id));
+    }
+
+    #[test]
+    fn retained_totals_round_trip_for_the_storage_pump() {
+        let reg = Registry::new(None);
+        let a = Uuid::from_u128(1);
+        let b = Uuid::from_u128(2);
+        reg.retained.write().unwrap().insert(a, 4_096);
+        reg.retained.write().unwrap().insert(b, 0);
+        let mut got = reg.retained_totals();
+        got.sort();
+        assert_eq!(got, vec![(a, 4_096), (b, 0)]);
     }
 }

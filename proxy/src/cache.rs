@@ -285,7 +285,19 @@ pub struct ClusterCache {
     host_flights: Arc<Flights<Lookup<Arc<ClusterCtx>>>>,
     key_flights: Arc<Flights<Lookup<KeyResult>>>,
     touched: Arc<Touched>,
+    /// Extra per-cluster state to drop alongside this cache's own entries when
+    /// pxdb says a cluster changed. `queen_proxy_inval` is the cell's ONE
+    /// "this cluster is not what you think it is" signal, and the host/key
+    /// caches were not the only thing keyed on a cluster: the queue registry
+    /// (registry.rs) holds the live queue-name set that `max_queues` counts,
+    /// and until 2026-09-04 nothing invalidated it, so a soft-deleted queue
+    /// kept its plan slot until the proxy restarted.
+    inval_subscribers: Arc<RwLock<Vec<InvalHook>>>,
 }
+
+/// A subscriber to `queen_proxy_inval`. Boxed rather than a concrete type so
+/// cache.rs keeps no dependency on whatever holds the state being dropped.
+type InvalHook = Arc<dyn Fn(Uuid) + Send + Sync>;
 
 impl ClusterCache {
     pub fn new(cfg: &Config, db: Option<deadpool_postgres::Pool>) -> ClusterCache {
@@ -321,7 +333,20 @@ impl ClusterCache {
             host_flights: Flights::new(),
             key_flights: Flights::new(),
             touched: Arc::new(Mutex::new(HashSet::new())),
+            inval_subscribers: Arc::new(RwLock::new(Vec::new())),
         }
+    }
+
+    /// Register a callback to run on every cluster invalidation, from the
+    /// NOTIFY listener and from `invalidate`. Call it BEFORE `spawn_listener`:
+    /// the listener task takes its own handle on the subscriber list, so a hook
+    /// added afterwards still fires, but registering first means no
+    /// notification can land in the gap.
+    pub fn on_invalidate<F>(&self, hook: F)
+    where
+        F: Fn(Uuid) + Send + Sync + 'static,
+    {
+        self.inval_subscribers.write().unwrap().push(Arc::new(hook));
     }
 
     /// Resolve the cluster for an inbound Host header (host[:port]).
@@ -468,7 +493,7 @@ impl ClusterCache {
 
     /// Invalidate a cluster (NOTIFY payload or admin action).
     pub fn invalidate(&self, cluster_id: Uuid) {
-        invalidate_caches(&self.host_cache, &self.key_cache, cluster_id);
+        fan_out_invalidation(&self.host_cache, &self.key_cache, &self.inval_subscribers, cluster_id);
     }
 
     /// Spawn the LISTEN task. Called from main.rs at startup, next to
@@ -485,8 +510,9 @@ impl ClusterCache {
         };
         let host_cache = self.host_cache.clone();
         let key_cache = self.key_cache.clone();
+        let subscribers = self.inval_subscribers.clone();
         tokio::spawn(async move {
-            listen_forever(pxcfg, host_cache, key_cache).await;
+            listen_forever(pxcfg, host_cache, key_cache, subscribers).await;
         });
     }
 
@@ -798,6 +824,26 @@ fn invalidate_caches(host_cache: &HostMap, key_cache: &KeyMap, cluster_id: Uuid)
     });
 }
 
+/// This cache's own entries plus every registered subscriber, in that order.
+///
+/// The hooks are CLONED OUT before any of them runs, so no subscriber executes
+/// while the list's read lock is held: a hook that registered another one (or
+/// that took a lock some other thread holds while waiting on this list) would
+/// otherwise deadlock the LISTEN task, and the LISTEN task is the only thing
+/// delivering invalidations.
+fn fan_out_invalidation(
+    host_cache: &HostMap,
+    key_cache: &KeyMap,
+    subscribers: &RwLock<Vec<InvalHook>>,
+    cluster_id: Uuid,
+) {
+    invalidate_caches(host_cache, key_cache, cluster_id);
+    let hooks: Vec<InvalHook> = subscribers.read().unwrap().clone();
+    for hook in hooks {
+        hook(cluster_id);
+    }
+}
+
 // ---------------------------------------------------------------- listener
 
 /// Drives the dedicated LISTEN connection forever, reconnecting with
@@ -805,11 +851,16 @@ fn invalidate_caches(host_cache: &HostMap, key_cache: &KeyMap, cluster_id: Uuid)
 /// resets to its floor once a session has stayed up "long enough" to count
 /// as healthy, so a blip doesn't leave the listener limping at the max
 /// backoff long after pxdb recovers.
-async fn listen_forever(pxcfg: PxdbConfig, host_cache: Arc<HostMap>, key_cache: Arc<KeyMap>) {
+async fn listen_forever(
+    pxcfg: PxdbConfig,
+    host_cache: Arc<HostMap>,
+    key_cache: Arc<KeyMap>,
+    subscribers: Arc<RwLock<Vec<InvalHook>>>,
+) {
     let mut backoff = Duration::from_secs(1);
     loop {
         let started = Instant::now();
-        if let Err(e) = listen_once(&pxcfg, &host_cache, &key_cache).await {
+        if let Err(e) = listen_once(&pxcfg, &host_cache, &key_cache, &subscribers).await {
             tracing::warn!(error = %e, backoff_s = backoff.as_secs(), "queen_proxy_inval listener: connection lost, retrying");
         }
         backoff = if started.elapsed() >= LISTENER_HEALTHY_SESSION_MIN {
@@ -828,7 +879,12 @@ async fn listen_forever(pxcfg: PxdbConfig, host_cache: Arc<HostMap>, key_cache: 
 /// (`std::future::poll_fn` bridging `Connection::poll_message`, the
 /// documented tokio-postgres LISTEN/NOTIFY pattern) rather than spawning it
 /// as a bare driver task, which is what would discard notifications.
-async fn listen_once(pxcfg: &PxdbConfig, host_cache: &Arc<HostMap>, key_cache: &Arc<KeyMap>) -> Result<(), String> {
+async fn listen_once(
+    pxcfg: &PxdbConfig,
+    host_cache: &Arc<HostMap>,
+    key_cache: &Arc<KeyMap>,
+    subscribers: &Arc<RwLock<Vec<InvalHook>>>,
+) -> Result<(), String> {
     let mut pg = tokio_postgres::Config::new();
     pg.host(&pxcfg.host)
         .port(pxcfg.port)
@@ -850,11 +906,11 @@ async fn listen_once(pxcfg: &PxdbConfig, host_cache: &Arc<HostMap>, key_cache: &
         )
         .map_err(|e| format!("PXDB_SSL_ROOT_CERT: {e}"))?;
         let (client, connection) = pg.connect(connector).await.map_err(|e| format!("connect: {e}"))?;
-        run_listen_session(client, connection, &listen_stmt, host_cache, key_cache, true).await
+        run_listen_session(client, connection, &listen_stmt, host_cache, key_cache, subscribers, true).await
     } else {
         let (client, connection) =
             pg.connect(tokio_postgres::NoTls).await.map_err(|e| format!("connect: {e}"))?;
-        run_listen_session(client, connection, &listen_stmt, host_cache, key_cache, false).await
+        run_listen_session(client, connection, &listen_stmt, host_cache, key_cache, subscribers, false).await
     }
 }
 
@@ -873,6 +929,7 @@ async fn run_listen_session<S, T>(
     listen_stmt: &str,
     host_cache: &Arc<HostMap>,
     key_cache: &Arc<KeyMap>,
+    subscribers: &Arc<RwLock<Vec<InvalHook>>>,
     tls: bool,
 ) -> Result<(), String>
 where
@@ -893,7 +950,7 @@ where
             msg = std::future::poll_fn(|cx| connection.poll_message(cx)) => {
                 match msg {
                     Some(Ok(tokio_postgres::AsyncMessage::Notification(n))) => {
-                        handle_notification(&n, host_cache, key_cache);
+                        handle_notification(&n, host_cache, key_cache, subscribers);
                     }
                     Some(Ok(_)) => {} // notices etc., nothing to do
                     Some(Err(e)) => return Err(format!("connection error: {e}")),
@@ -904,14 +961,19 @@ where
     }
 }
 
-fn handle_notification(n: &tokio_postgres::Notification, host_cache: &Arc<HostMap>, key_cache: &Arc<KeyMap>) {
+fn handle_notification(
+    n: &tokio_postgres::Notification,
+    host_cache: &Arc<HostMap>,
+    key_cache: &Arc<KeyMap>,
+    subscribers: &Arc<RwLock<Vec<InvalHook>>>,
+) {
     if n.channel() != INVAL_CHANNEL {
         return;
     }
     match Uuid::parse_str(n.payload()) {
         Ok(cluster_id) => {
             tracing::debug!(cluster = %cluster_id, "cache invalidated via NOTIFY");
-            invalidate_caches(host_cache, key_cache, cluster_id);
+            fan_out_invalidation(host_cache, key_cache, subscribers, cluster_id);
         }
         Err(e) => {
             tracing::warn!(payload = n.payload(), error = %e, "queen_proxy_inval: unparseable NOTIFY payload");

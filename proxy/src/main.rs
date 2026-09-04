@@ -240,6 +240,13 @@ async fn async_main(worker_threads: usize) {
         keys,
     });
 
+    // Subscribe the queue registry to `queen_proxy_inval` BEFORE the listener
+    // starts, so no notification can arrive before the hook is in place. The
+    // channel is the cell's one "this cluster is not what you think it is"
+    // signal and the registry is keyed on a cluster like the caches are: its
+    // queue-name set is what `max_queues` counts, and a soft-deleted queue held
+    // its plan slot until the next restart while nothing invalidated it.
+    st.cache.on_invalidate(st.registry.invalidator());
     st.cache.spawn_listener();
     // Batched api_keys.last_used_at: one statement per interval, off the
     // request path.
@@ -254,21 +261,49 @@ async fn async_main(worker_threads: usize) {
     meter::spawn_rollup(st.clone());
 
     // Storage-quota pump: over_storage (registry reconciler, from the broker's
-    // retainedBytes) -> limits.set_push_blocked, with release when back under.
+    // retainedBytes) -> limits.set_push_blocked, with release when back under,
+    // plus the measured totals the in-flight accounting keys on.
+    //
+    // This is the proxy's OWN storage refresh cadence, and it is now named and
+    // configurable rather than a bare `sleep(10)`. It was worth naming: the
+    // 2026-09-03 trial measurement put the total lag from "the broker recomputes"
+    // to "the proxy refuses" at up to ~96s, and this tick is one of the two
+    // terms in it (QUEEN_PROXY_RECONCILE_MS, default 60s, is the other). The
+    // floor of 500ms keeps a misconfigured cell from spinning the loop.
     {
         let st2 = st.clone();
         tokio::spawn(async move {
+            let every = std::time::Duration::from_millis(
+                config::env_u64("QUEEN_PROXY_STORAGE_REFRESH_MS", 10_000).max(500),
+            );
+            tracing::info!(
+                target: "limits",
+                refresh_ms = every.as_millis() as u64,
+                "storage-quota pump started"
+            );
+            let mut tick = tokio::time::interval(every);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // The first tick of a tokio interval fires immediately; the old
+            // `sleep`-first loop waited a full period before its first pass, and
+            // starting a storage gate a period late is the wrong direction.
             let mut blocked: std::collections::HashSet<uuid::Uuid> = Default::default();
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                tick.tick().await;
+                // Measured totals first: `publish_retained` resets a cluster's
+                // in-flight counter when the figure changes, so publishing
+                // before the verdict means the two always describe the same
+                // computation.
+                for (id, total) in st2.registry.retained_totals() {
+                    st2.limits.publish_retained(id, total);
+                }
                 let now: std::collections::HashSet<uuid::Uuid> =
                     st2.registry.over_storage().into_iter().collect();
                 for id in now.difference(&blocked) {
-                    tracing::warn!(target: "limits", cluster = %id, "storage quota exceeded; pushes blocked");
+                    tracing::warn!(target: "limits", cluster = %id, kind = "storage", blocked = true, "storage quota exceeded; pushes blocked");
                     st2.limits.set_push_blocked(*id, true);
                 }
                 for id in blocked.difference(&now) {
-                    tracing::info!(target: "limits", cluster = %id, "storage back under quota; pushes unblocked");
+                    tracing::info!(target: "limits", cluster = %id, kind = "storage", blocked = false, "storage back under quota; pushes unblocked");
                     st2.limits.set_push_blocked(*id, false);
                 }
                 blocked = now;
