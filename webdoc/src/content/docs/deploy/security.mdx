@@ -30,7 +30,7 @@ digest: >-
   every `queen_streams` table to `PUBLIC`. With native tenancy on,
   `x-queen-tenant` is checked for shape, never authority, and `QUEEN_TENANCY_HEADER=1` refuses to
   boot unless `QUEEN_KV_TRUSTED_PROXY=1` is set with it.
-# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
+# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 The broker is one process with one plaintext listener. It binds `PORT` on `QUEEN_BIND_ADDR`, which

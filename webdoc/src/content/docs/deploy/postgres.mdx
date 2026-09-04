@@ -26,7 +26,7 @@ digest: >-
   DB_POOL_SIZE plus superuser_reserved_connections plus tooling has to stay under max_connections:
   three brokers at the default want 480 connections where a stock PostgreSQL allows 100, and the
   mismatch answers 500 with an error of pool.
-# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
+# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 PostgreSQL is not a dependency of Queen, it is Queen's storage engine. Messages, offsets, the

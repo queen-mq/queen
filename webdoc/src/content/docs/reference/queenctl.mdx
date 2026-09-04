@@ -57,14 +57,15 @@ digest: >-
   auth, `4` no-op (an empty pop). `pop --auto-ack` commits inside the pop transaction, so messages
   lost after the pop are never redelivered. `tail` without `--cg` advances the real
   `queenctl-tail` group. `queue configure` drops zero-valued flags, so `--dlq=false` cannot
-  disable dead-lettering; `/configure` is a full replace. `dlq drain` deletes; no command wraps the
-  DLQ retry route; `partition seek` is end only.
+  disable dead-lettering; `/configure` is a full replace. `dlq drain` deletes, while `dlq retry`
+  replays one address and requires `--yes`; `partition seek` is end only.
+# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 `queenctl` is a single static Go binary built on the [Go client](/reference/sdk/go). It exposes the
 broker's data plane (push, pop, ack, transaction, lease) and its management plane (queues,
-partitions, consumer groups, DLQ, traces, maintenance, metrics, analytics). Version 1.0.0, aligned
-with the broker.
+partitions, consumer groups, DLQ, traces, maintenance, metrics, analytics). Version 1.3.0, aligned
+with the broker's 1.3 line.
 
 Every command below is registered in `clients/client-cli/cmd`. Nothing else is: if a name is not
 in this page, the binary does not have it.

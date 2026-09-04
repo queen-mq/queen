@@ -26,7 +26,7 @@ digest: >-
   deterministic transactionIds; a pop never is, because a retry is a new claim rather than a
   repeat; and a kv incr never is, because it has no precondition and counts twice. Every 204 has
   no body at all, deliberately.
-# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
+# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 Queen's broker speaks plain HTTP/1.1 with JSON bodies. There is no binary protocol, no
@@ -47,9 +47,9 @@ The broker binds `PORT`, which defaults to **6632**, on `QUEEN_BIND_ADDR`, which
 | `/health`, `/metrics`, `/metrics/prometheus`, `/status` | operational endpoints |
 | everything else | the embedded dashboard SPA, served from assets compiled into the binary |
 
-There is exactly one API version, `v1`, and version 1.0.0 of the broker and of every client
-SDK are released together. A path is the version: there is no `Accept` header negotiation and
-no version query parameter.
+There is exactly one API version, `v1`. Since the 1.0.0 line, broker and SDK minor versions are
+released in alignment. A path is the API version: there is no `Accept` header negotiation and no
+version query parameter.
 
 <Aside type="caution">
 The broker has **no TLS listener and no CORS layer**. It expects to sit behind something that

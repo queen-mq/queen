@@ -12,10 +12,12 @@ sourceOfTruth:
 verifiedBy:
   - clients/client-cpp/test_client.cpp
   - clients/client-cpp/test_retry429.cpp
+# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 One header, `queen_client.hpp`, namespace `queen`. Everything is `inline`, so there is nothing to
-link. Version 1.2.0, aligned with the broker's 1.2 line.
+link. It has no separately published package version: the header is the version at the repository
+tag or commit you check out.
 
 ```cpp
 #include "queen_client.hpp"

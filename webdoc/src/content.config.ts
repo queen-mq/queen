@@ -18,6 +18,8 @@ import { docsCollection, partialsCollection } from "@cloudflare/nimbus-docs/cont
  *   status        publication maturity. Anything other than `stable` renders
  *                 a badge, so a reader never mistakes a preview for a
  *                 contract.
+ *   audience      marks content written specifically for human readers so the
+ *                 layout can adjust its alternate-format controls.
  *   sourceOfTruth repo-relative paths of the code that governs the page. If
  *                 that code changes, the page is in debt.
  *   verifiedBy    repo-relative paths of tests or examples that execute the
@@ -57,6 +59,7 @@ export const collections = {
         type: z.enum(RECIPE_TYPES).optional(),
         tier: z.enum(["use", "operate", "internals"]).optional(),
         status: z.enum(["stable", "beta", "preview", "internal"]).default("stable"),
+        audience: z.literal("human").optional(),
         sourceOfTruth: z.array(z.string()).optional(),
         verifiedBy: z.array(z.string()).optional(),
         generated: z.boolean().default(false),

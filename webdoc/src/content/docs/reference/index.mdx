@@ -8,7 +8,7 @@ sourceOfTruth:
   - server/src/main.rs
   - server/src/auth.rs
   - server/src/config.rs
-# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
+# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 This section is lookup material. Every page names the source files that govern it and the test
@@ -18,9 +18,9 @@ from the code when the site is built. [The documentation site](/internals/contri
 covers both mechanisms: what those two frontmatter fields oblige a page to, and which generator
 emits which table.
 
-The version documented here is **1.2.1** for the broker and **1.2.0** for the client SDKs.
-Releases keep the broker and the SDKs version-aligned; 1.2.1 is a server-only patch, so no
-SDK carries it.
+The current broker and proxy line is **1.5.0**. The JavaScript, Python, Go and Rust clients,
+`queen-protocol` and `queenctl` remain on their compatible **1.3.0** releases; PHP is prepared for
+Packagist but has no tagged release, and C++ is consumed directly from a repository tag or commit.
 
 ## What is generated from source
 

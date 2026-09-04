@@ -22,12 +22,13 @@ digest: >-
   `batch` 200 (call-wide budget), `partitions` 1, `autoAck` and `wait` false, `timeout` 30000 ms
   (needs `wait=true`), `consumerGroup` `__QUEUE_MODE__`, `subscriptionMode` `new` (seeds absent
   cursors, never in queue mode), `leaseSeconds` the queue's `leaseTime`, else 60. 200 gives
-  `leaseId`, `messages` of `id`, `transactionId`, `data`, `partitionId`, `deliveryAttempt`, no offset;
+  `leaseId`, `messages` of `id`, `transactionId`, `data`, `partitionId`, absolute `offset` and
+  `deliveryAttempt`;
   ack per-message `partitionId`. A bare `204` covers idle, `delayedProcessing`/`windowBuffer`
   holdback, pop maintenance, procedure errors, `wait=true` timeouts. One live leased batch per
   `(partition, group)` caps parallelism at the partition count; expiry redelivers, `autoAck=true`
   is at-most-once.
-# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
+# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 A pop claims a **leased batch**: a contiguous span of offsets just past the consumer group's
@@ -167,6 +168,7 @@ consumer's queue name now leaves an empty queue behind rather than nothing.
       "data": { "orderId": 8891, "total": 4200 },
       "producerSub": null,
       "createdAt": "2026-07-30T11:02:44.512873Z",
+      "offset": 8192,
       "partitionId": "b1c2d3e4-5f60-7180-9a0b-1c2d3e4f5061",
       "partition": "customer-42",
       "leaseId": "0198f2c1-9a7b-7d20-8e31-4c5d6e7f8a90",
@@ -269,6 +271,7 @@ message's own `partitionId`.
 | `data` | any JSON value | the payload, spliced back verbatim; decrypted transparently if it was encrypted |
 | `producerSub` | string or `null` | the `sub` of the JWT that pushed it, when authentication was on |
 | `createdAt` | string | the timestamp of the **segment** that holds this message |
+| `offset` | integer | the message's absolute zero-based position in its partition |
 | `partitionId` | string | this message's partition id, the one to ack with |
 | `partition` | string | this message's partition name |
 | `leaseId` | string | repeated on every message for convenience; empty on `autoAck` |
@@ -284,9 +287,6 @@ work, the count resets to `1`.
 
 These absences are deliberate and each one has a consequence:
 
-- **No offset or position.** The message's place in the partition is never exposed. You cannot
-  ack "up to offset N" over HTTP; you ack a `transactionId` and the broker resolves it to an
-  offset.
 - **No lease expiry timestamp.** You know the lease id, not when it dies. Use `leaseSeconds` (or
   the queue's `leaseTime`) as the budget you plan against, and
   [extend the lease](/reference/http/lease) if you need more.
@@ -303,10 +303,14 @@ These absences are deliberate and each one has a consequence:
 frames, and the broker coalesces concurrent pushes to the same partition into one segment, so
 messages written by the same call (and messages from different calls that were coalesced)
 all report an identical `createdAt`. It orders segments, not messages inside a segment; ordering
-inside a partition is the offset order in which `messages` is returned. It is formatted by PostgreSQL
-with a literal `Z` suffix, and the broker does not set a session time zone. Keep the database's
-`timezone` at UTC or the suffix will disagree with the value, including in the broker's own
-delivery-lag metric.
+inside a partition is the offset order in which `messages` is returned. PostgreSQL converts it to
+UTC explicitly before formatting the literal `Z` suffix, so the wire value is independent of the
+database session timezone.
+
+`offset` is informational on the HTTP surface: acknowledgements are still addressed by
+`transactionId`, not by an "ack through offset" parameter. It is computed as the segment's base
+sequence plus the frame index, so partial and multi-segment claims keep the absolute partition
+position rather than restarting at zero.
 
 ### An empty pop is a 204 with no body
 

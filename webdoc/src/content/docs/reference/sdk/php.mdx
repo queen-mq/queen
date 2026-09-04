@@ -53,12 +53,14 @@ verifiedBy:
   - clients/client-php/tests/ProcessLeaseRenewerTest.php
   - clients/client-php/tests/SyncedFailedJobProviderLifecycleTest.php
   - clients/client-php/tests/LaravelDashboardTest.php
+# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 The Composer package is `queen-mq/php-client`, PSR-4 namespace `Queen\`. It requires PHP 8.3 or
 newer plus Guzzle 7 and `ramsey/uuid`. The client is **synchronous**: there is no promise or
 async variant. Laravel integration (service provider, facade, artisan command) ships in the same
-package and is optional. Version 1.2.0, aligned with the broker's 1.2 line.
+package and is optional. The source is prepared for the aligned release train, but Packagist has
+no tagged release yet; install it from the repository only if you intentionally accept that status.
 
 ```php
 use Queen\Queen;

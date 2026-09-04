@@ -14,10 +14,10 @@ sourceOfTruth:
   - server/sql/procedures/004_log_pop.sql
   - server/build.rs
 digest: >-
-  A release is one broker binary plus client SDKs at the same version for JavaScript,
-  Python, Go, Rust, PHP with Laravel and C++, plus the Go command-line client. There is no Java or
-  .NET SDK; those languages use HTTP directly. The deployment model is always-virgin: the
-  broker embeds schema.sql and 31 stored-procedure files numbered 001 to 031, applies all of them
+  The HTTP API is the stable compatibility surface; component release numbers are independent.
+  There is no Java or .NET SDK; those languages use HTTP directly. The deployment model is
+  always-virgin: the broker embeds schema.sql and 33
+  stored-procedure files numbered 001 to 033, applies all of them
   in lexical order at every boot under a session advisory lock before serving a request, with
   no migration engine, no version table and nothing to run by hand. Every statement is idempotent,
   and any DDL error aborts the boot naming the failing file, except lock contention against live
@@ -26,11 +26,13 @@ digest: >-
   QUEEN_APPLY_SCHEMA=0 skips the apply, moving DDL and ordering responsibility to the operator: a
   broker that skips it and finds an older schema fails on the first request needing a missing
   object, not at boot.
+# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
-Queen MQ 1.2.1 is one broker binary plus a set of client SDKs released in
-lockstep at 1.2.0 (1.2.1 is a server-only patch): JavaScript, Python, Go, Rust,
-PHP (Laravel), C++, and a Go command-line client. The broker reports its version
+The current broker and proxy release is 1.5.0. The compatible JavaScript, Python, Go and Rust
+clients, `queen-protocol` and the Go command-line client remain at 1.3.0; the PHP/Laravel source
+has no tagged Packagist release yet, and the C++ header is consumed at a repository revision.
+The broker reports its version
 on `GET /health` and in its boot log; the
 value is compiled in from a single file, so the binary, the container tag and the
 health document can never disagree.
@@ -73,8 +75,8 @@ not to.
 
 ## The schema is applied at every boot
 
-The broker owns its own schema. It embeds `schema.sql` and 31 stored-procedure
-files (`001`–`031`) into the binary at compile time and applies all of them on
+The broker owns its own schema. It embeds `schema.sql` and 33 stored-procedure
+files (`001`–`033`) into the binary at compile time and applies all of them on
 every start, in lexical file order, before it accepts a request.
 
 Three properties make that safe to do on every boot:
