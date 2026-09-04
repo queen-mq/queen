@@ -1,3 +1,5 @@
+import { formatTimestampTime } from './useFormat.js'
+
 /**
  * Freshness of a single `useApi` panel, as one short string.
  *
@@ -10,11 +12,19 @@
  * System.vue so the app's right-hand card-header slot means freshness, and
  * only freshness, everywhere.
  */
-export function stamp(panel) {
+export function formatTimeWithZone(date, locales, options = {}) {
+  // A webview can run in a different timezone from the host OS. The product
+  // contract is to follow that effective browser timezone.
+  return formatTimestampTime(date, locales, options)
+}
+
+export function stamp(panel, locales, options) {
   if (panel.failed.value) {
     return panel.lastUpdated.value
-      ? `stale · last good ${panel.lastUpdated.value.toLocaleTimeString()}`
+      ? `stale · last good ${formatTimeWithZone(panel.lastUpdated.value, locales, options)}`
       : 'unavailable'
   }
-  return panel.lastUpdated.value ? `as of ${panel.lastUpdated.value.toLocaleTimeString()}` : ''
+  return panel.lastUpdated.value
+    ? `as of ${formatTimeWithZone(panel.lastUpdated.value, locales, options)}`
+    : ''
 }

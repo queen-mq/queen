@@ -124,7 +124,7 @@
       <!-- A refresh that failed while data is on screen: the counts and config
            below are the last good ones, not the current ones. -->
       <div v-if="detailStale" class="status-banner banner-bad view-banner">
-        <span>
+        <span :title="formatTimestampUtc(lastRefreshAt)">
           <strong>Could not load live status</strong> ·
           {{ describeApiError(detailStale) }} · showing the counts and
           configuration that were on screen at {{ lastRefreshText }}.
@@ -464,7 +464,7 @@
             </div>
             <div class="qd-config">
               <span class="label-xs">Created</span>
-              <span class="qd-config-val font-mono">{{ formatDate(queueData.createdAt) }}</span>
+              <span :title="formatTimestampUtc(queueData.createdAt)" class="qd-config-val font-mono">{{ formatTimestamp(queueData.createdAt) }}</span>
               <span class="qd-config-hint">{{ formatRelative(queueData.createdAt) }}</span>
             </div>
           </div>
@@ -508,7 +508,7 @@ import {
   consumers as consumersApi, describeApiError,
 } from '@/api'
 import { formatNumber, formatDuration, toNum, latestFinite, trimIncompleteBuckets, useApi } from '@/composables/useApi'
-import { formatChartLabel } from '@/composables/useFormat'
+import { formatChartLabel, formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
 import {
   laggingGroupsVerdict, pendingDepthAdvisory, PENDING_DEPTH_FLOOR,
 } from '@/composables/useConflation'
@@ -566,7 +566,7 @@ const firstLoad = computed(() => loading.value && !statusData.value)
 
 const lastRefreshAt = ref(null)
 const lastRefreshText = computed(() =>
-  lastRefreshAt.value ? new Date(lastRefreshAt.value).toLocaleTimeString() : 'an earlier load'
+  lastRefreshAt.value ? formatTimestamp(lastRefreshAt.value) : 'an earlier load'
 )
 // Live tick, off the app's one shared ticker.
 const refreshAgo = useRefreshAgo(lastRefreshAt)
@@ -1044,13 +1044,6 @@ const fmtFillPct = (n) => {
   if (!Number.isFinite(v)) return '—'
   return v.toFixed(1) + '%'
 }
-const formatDate = (ts) => {
-  if (!ts) return '—'
-  return new Date(ts).toLocaleString('en-US', {
-    month: 'short', day: 'numeric', year: 'numeric',
-    hour: '2-digit', minute: '2-digit'
-  })
-}
 const formatRelative = (ts) => {
   if (!ts) return '—'
   const diffMs = Date.now() - new Date(ts).getTime()
@@ -1059,7 +1052,7 @@ const formatRelative = (ts) => {
   if (diffMs < 3600_000) return `${Math.floor(diffMs / 60_000)}m ago`
   if (diffMs < 86400_000) return `${Math.floor(diffMs / 3600_000)}h ago`
   if (diffMs < 30 * 86400_000) return `${Math.floor(diffMs / 86400_000)}d ago`
-  return formatDate(ts)
+  return formatTimestamp(ts)
 }
 // ---------------------------------------------------------------------------
 // Navigation helpers

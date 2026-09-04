@@ -105,12 +105,12 @@
         <div class="filter-row">
           <div class="filter-field">
             <span class="label-xs">From</span>
-            <input v-model="filterFrom" type="datetime-local" class="input" />
+            <input v-model="filterFrom" type="datetime-local" class="input" :title="formatTimestampUtc(filterFrom)" />
           </div>
 
           <div class="filter-field">
             <span class="label-xs">To</span>
-            <input v-model="filterTo" type="datetime-local" class="input" />
+            <input v-model="filterTo" type="datetime-local" class="input" :title="formatTimestampUtc(filterTo)" />
           </div>
 
           <div class="filter-field">
@@ -212,8 +212,8 @@
                     payload expired
                   </span>
                 </td>
-                <td class="font-mono tabular-nums" style="text-align:right; font-size:12px; color:var(--text-mid); white-space:nowrap;">
-                  {{ formatDateTime(message.createdAt) }}
+                <td :title="formatTimestampUtc(message.createdAt)" class="font-mono tabular-nums" style="text-align:right; font-size:12px; color:var(--text-mid); white-space:nowrap;">
+                  {{ formatTimestamp(message.createdAt) }}
                 </td>
                 <td style="text-align:right;">
                   <div style="display:flex; flex-direction:column; align-items:flex-end; gap:4px;">
@@ -343,7 +343,7 @@
 
               <div>
                 <label class="label-xs" style="display:block; margin-bottom:6px;">Created</label>
-                <p style="font-size:13px; color:var(--text-mid);">{{ formatDateTime(messageDetail.createdAt) }}</p>
+                <p :title="formatTimestampUtc(messageDetail.createdAt)" style="font-size:13px; color:var(--text-mid);">{{ formatTimestamp(messageDetail.createdAt) }}</p>
               </div>
 
               <div v-if="messageDetail.traceId">
@@ -490,7 +490,8 @@
 import { ref, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { messages as messagesApi, queues as queuesApi, describeApiError } from '@/api'
-import { useApi, formatNumber, formatDateTime, formatRelativeTime } from '@/composables/useApi'
+import { useApi, formatNumber, formatRelativeTime } from '@/composables/useApi'
+import { formatDateTimeLocal, formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
 import { useRefresh } from '@/composables/useRefresh'
 import { stamp } from '@/composables/useStamp'
 import { useToast } from '@/composables/useToast'
@@ -610,16 +611,6 @@ const payloadAvailable = computed(() => messageDetail.value?.payloadAvailable !=
 const isAddressable = (m) => Boolean(m?.partitionId && m?.transactionId)
 const rowKey = (m, idx) => m.transactionId || m.txnHash || `${m.partitionId || 'na'}:${idx}`
 const headKey = (rows) => (rows.length ? rowKey(rows[0], 0) : null)
-
-// Helper to format Date to datetime-local input format
-const formatDateTimeLocal = (date) => {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  const hours = String(date.getHours()).padStart(2, '0')
-  const minutes = String(date.getMinutes()).padStart(2, '0')
-  return `${year}-${month}-${day}T${hours}:${minutes}`
-}
 
 // Helper to convert datetime-local to ISO string
 const toISOString = (dateTimeLocal) => {

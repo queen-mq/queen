@@ -11,7 +11,7 @@
         <span class="scope-sep">·</span>cell {{ actingCellSlug || 'unknown' }}
       </span>
       <span class="scope-fill"></span>
-      <span class="scope-meta">{{ rangeLabel }}</span>
+      <span class="scope-meta" :title="rangeUtcTitle">{{ rangeLabel }}</span>
     </div>
 
     <!-- Controls: time range picker. The "Source" toggle that used to live
@@ -54,11 +54,11 @@
         <div v-if="customMode" class="filter-row filter-row-sep">
           <div class="filter-field">
             <span class="label-xs">From</span>
-            <input v-model="customFrom" type="datetime-local" class="input" />
+            <input v-model="customFrom" type="datetime-local" class="input" :title="formatTimestampUtc(customFrom)" />
           </div>
           <div class="filter-field">
             <span class="label-xs">To</span>
-            <input v-model="customTo" type="datetime-local" class="input" />
+            <input v-model="customTo" type="datetime-local" class="input" :title="formatTimestampUtc(customTo)" />
           </div>
           <button class="btn btn-primary" :disabled="!customRangeValid" @click="applyCustomRange">Apply</button>
           <span v-if="customError" class="filter-invalid">{{ customError }}</span>
@@ -575,7 +575,7 @@
                             {{ worker.maxEventLoopLagMs }}ms
                           </span>
                         </td>
-                        <td style="font-size:12px; color:var(--text-low);">{{ formatTime(worker.lastSeen) }}</td>
+                        <td :title="formatTimestampUtc(worker.lastSeen)" style="font-size:12px; color:var(--text-low);">{{ formatTimestampTime(worker.lastSeen) }}</td>
                       </tr>
                     </tbody>
                   </table>
@@ -593,7 +593,11 @@
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { system, operator as operatorApi, describeApiError } from '@/api'
 import { toNum, trimIncompleteBuckets, formatNumber } from '@/composables/useApi'
-import { formatChartLabel, formatDateTimeLocal, isMultiDay, validateRange } from '@/composables/useFormat'
+import {
+  formatChartLabel, formatDateTimeLocal, formatTimestampRange, formatTimestampRangeUtc,
+  formatTimestampTime, formatTimestampUtc,
+  isMultiDay, validateRange,
+} from '@/composables/useFormat'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { stamp } from '@/composables/useStamp'
@@ -663,15 +667,6 @@ const formatDurationMs = (ms) => {
   return `${(ms / 60000).toFixed(1)}m`
 }
 
-const formatTime = (timestamp) => {
-  if (!timestamp) return '-'
-  return new Date(timestamp).toLocaleTimeString('en-US', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit'
-  })
-}
-
 const formatRate = (v) => {
   const n = Number(v) || 0
   if (n === 0) return '0/s'
@@ -701,11 +696,16 @@ function currentRange() {
 const rangeLabel = computed(() => {
   if (customMode.value && appliedCustom.value) {
     const { from, to } = appliedCustom.value
-    return `${from.toLocaleString()} → ${to.toLocaleString()}`
+    return formatTimestampRange(from, to)
   }
   const r = timeRanges.find(t => t.value === timeRange.value)
   return `last ${r ? r.label : `${timeRange.value}m`}`
 })
+const rangeUtcTitle = computed(() => (
+  customMode.value && appliedCustom.value
+    ? formatTimestampRangeUtc(appliedCustom.value.from, appliedCustom.value.to)
+    : ''
+))
 
 // Live, not on-click: an invalid range explains itself as it is typed instead
 // of leaving the user with a button that does nothing when pressed. The message

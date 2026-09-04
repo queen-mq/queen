@@ -35,7 +35,7 @@
     <!-- Stale data presented as live is the failure mode: the store keeps the
          last-good rows on a failed refresh, so say how old they are. -->
     <div v-if="queuesStale" class="status-banner banner-bad view-banner">
-      <span>
+      <span :title="formatTimestampUtc(lastFetched)">
         <strong>Could not load the queue list</strong> ·
         {{ describeApiError(queuesError) }} · showing the last rows that
         loaded ({{ lastFetchedText }}), which may no longer be true.
@@ -189,6 +189,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { queues as queuesApi, system as systemApi, describeApiError } from '@/api'
 import { formatNumber, toNum } from '@/composables/useApi'
+import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { useToast } from '@/composables/useToast'
@@ -216,7 +217,7 @@ const {
 } = queuesStore
 
 const lastFetchedText = computed(() =>
-  lastFetched.value ? new Date(lastFetched.value).toLocaleTimeString() : 'an earlier load'
+  lastFetched.value ? formatTimestamp(lastFetched.value) : 'an earlier load'
 )
 
 // Ephemeral cross-link. The same store the /ephemeral view uses, so the family

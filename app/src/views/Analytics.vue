@@ -11,7 +11,7 @@
         <span class="scope-sep">·</span>cell {{ actingCellSlug || 'unknown' }}
       </span>
       <span class="scope-fill"></span>
-      <span class="scope-meta">{{ rangeLabel }}</span>
+      <span class="scope-meta" :title="rangeUtcTitle">{{ rangeLabel }}</span>
     </div>
 
     <!-- Filters -->
@@ -75,11 +75,11 @@
         <div v-if="customMode" class="filter-row filter-row-sep">
           <div class="filter-field">
             <span class="label-xs">From</span>
-            <input v-model="customFrom" type="datetime-local" class="input" />
+            <input v-model="customFrom" type="datetime-local" class="input" :title="formatTimestampUtc(customFrom)" />
           </div>
           <div class="filter-field">
             <span class="label-xs">To</span>
-            <input v-model="customTo" type="datetime-local" class="input" />
+            <input v-model="customTo" type="datetime-local" class="input" :title="formatTimestampUtc(customTo)" />
           </div>
           <button class="btn btn-primary" :disabled="!customRangeValid" @click="applyCustomRange">Apply</button>
           <span v-if="customError" class="filter-invalid">{{ customError }}</span>
@@ -258,7 +258,10 @@ import {
   formatDuration, formatNumber, toNum, trimIncompleteBuckets, useApi,
 } from '@/composables/useApi'
 import { stateColor } from '@/composables/useChartTheme'
-import { formatChartLabel, formatDateTimeLocal, isMultiDay, validateRange } from '@/composables/useFormat'
+import {
+  formatChartLabel, formatDateTimeLocal, formatTimestampRange, formatTimestampRangeUtc,
+  formatTimestampUtc, isMultiDay, validateRange,
+} from '@/composables/useFormat'
 import { useRefresh } from '@/composables/useRefresh'
 import { stamp } from '@/composables/useStamp'
 import { useIdentity } from '@/stores/identity'
@@ -310,11 +313,16 @@ function currentRange() {
 const rangeLabel = computed(() => {
   if (customMode.value && appliedCustom.value) {
     const { from, to } = appliedCustom.value
-    return `${from.toLocaleString()} → ${to.toLocaleString()}`
+    return formatTimestampRange(from, to)
   }
   const r = timeRanges.find(t => t.value === selectedRange.value)
   return `last ${r ? r.label : selectedRange.value}`
 })
+const rangeUtcTitle = computed(() => (
+  customMode.value && appliedCustom.value
+    ? formatTimestampRangeUtc(appliedCustom.value.from, appliedCustom.value.to)
+    : ''
+))
 
 // Live, not on-click: an invalid range explains itself as it is typed instead
 // of leaving the user with a button that does nothing when pressed.

@@ -268,10 +268,17 @@
       <div v-if="selectedMsg" class="modal-backdrop" @click="closeDetail"></div>
 
       <div v-if="selectedMsg" class="drawer-panel">
-        <div class="card-header">
+        <div class="card-header dlq-detail-header">
           <h3>DLQ Message Detail</h3>
           <span class="card-sub font-mono">{{ selectedMsg.transactionId || selectedMsg.id }}</span>
-          <button @click="closeDetail" class="btn btn-ghost btn-icon modal-close">
+          <button
+            class="btn btn-ghost dlq-copy-report"
+            title="Copy the failure, routing details, timestamps, and payload as Markdown"
+            @click="copyMarkdown"
+          >
+            {{ markdownCopied ? 'Markdown copied!' : 'Copy as Markdown' }}
+          </button>
+          <button @click="closeDetail" class="btn btn-ghost btn-icon modal-close" aria-label="Close message detail">
             <svg style="width:18px; height:18px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
           </button>
         </div>
@@ -293,15 +300,30 @@
             </div>
             <div class="dlq-kv-row">
               <label class="label-xs">Partition</label>
-              <span class="font-mono" style="font-size:12px; color:var(--text-mid); word-break:break-all;">{{ selectedMsg.partition }}</span>
+              <div class="dlq-copyable-field">
+                <span class="font-mono">{{ selectedMsg.partition }}</span>
+                <button class="btn btn-ghost" aria-label="Copy partition" @click="copyField('partition', selectedMsg.partition)">
+                  {{ copiedField === 'partition' ? 'Copied!' : 'Copy' }}
+                </button>
+              </div>
             </div>
             <div class="dlq-kv-row">
               <label class="label-xs">Partition ID</label>
-              <span class="font-mono" style="font-size:12px; color:var(--text-mid); word-break:break-all;">{{ selectedMsg.partitionId }}</span>
+              <div class="dlq-copyable-field">
+                <span class="font-mono">{{ selectedMsg.partitionId }}</span>
+                <button class="btn btn-ghost" aria-label="Copy partition ID" @click="copyField('partitionId', selectedMsg.partitionId)">
+                  {{ copiedField === 'partitionId' ? 'Copied!' : 'Copy' }}
+                </button>
+              </div>
             </div>
             <div class="dlq-kv-row">
               <label class="label-xs">Transaction ID</label>
-              <span class="font-mono" style="font-size:12px; color:var(--text-mid); word-break:break-all;">{{ selectedMsg.transactionId }}</span>
+              <div class="dlq-copyable-field">
+                <span class="font-mono">{{ selectedMsg.transactionId }}</span>
+                <button class="btn btn-ghost" aria-label="Copy transaction ID" @click="copyField('transactionId', selectedMsg.transactionId)">
+                  {{ copiedField === 'transactionId' ? 'Copied!' : 'Copy' }}
+                </button>
+              </div>
             </div>
             <div class="dlq-kv-row">
               <label class="label-xs">Consumer group</label>
@@ -312,11 +334,11 @@
                  instant twice under two labels invents a fact. -->
             <div v-if="hasDistinctCreatedAt(selectedMsg)" class="dlq-kv-row">
               <label class="label-xs">Created</label>
-              <span style="font-size:13px; color:var(--text-mid);">{{ formatDateTime(selectedMsg.createdAt) }}</span>
+              <span :title="formatTimestampUtc(selectedMsg.createdAt)" style="font-size:13px; color:var(--text-mid);">{{ formatTimestamp(selectedMsg.createdAt) }}</span>
             </div>
             <div class="dlq-kv-row">
               <label class="label-xs">Failed at</label>
-              <span style="font-size:13px; color:var(--text-mid);">{{ formatDateTime(selectedMsg.failedAt) }}</span>
+              <span :title="formatTimestampUtc(selectedMsg.failedAt)" style="font-size:13px; color:var(--text-mid);">{{ formatTimestamp(selectedMsg.failedAt) }}</span>
               <span v-if="!hasDistinctCreatedAt(selectedMsg)" style="font-size:11px; color:var(--text-low);">
                 Enqueue time is not recorded for this entry.
               </span>
@@ -328,7 +350,7 @@
           </div>
 
           <!-- Payload -->
-          <div v-if="selectedMsg.data" style="margin-top:24px;">
+          <div v-if="selectedMsg.data !== undefined" style="margin-top:24px;">
             <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px;">
               <label class="label-xs">Payload</label>
               <button class="btn btn-ghost" style="padding:2px 8px; font-size:11px;" @click="copyPayload">
@@ -344,7 +366,17 @@
                 returns them as stored. This is ciphertext, not the message body.
               </span>
             </div>
-            <pre class="dlq-code">{{ JSON.stringify(selectedMsg.data, null, 2) }}</pre>
+            <div class="dlq-code dlq-json-viewer">
+              <VueJsonPretty
+                :data="selectedMsg.data"
+                :deep="4"
+                :collapsed-node-length="20"
+                :show-length="true"
+                :show-line="true"
+                :show-icon="true"
+                theme="dark"
+              />
+            </div>
           </div>
 
           <!-- Actions. No "replay": the broker exposes no re-push route for a
@@ -367,8 +399,12 @@
 
 <script setup>
 import { ref, computed, watch } from 'vue'
+import VueJsonPretty from 'vue-json-pretty'
+import 'vue-json-pretty/lib/styles.css'
 import { dlq, queues as queuesApi, describeApiError } from '@/api'
-import { useApi, formatNumber, formatDateTime, formatRelativeTime } from '@/composables/useApi'
+import { useApi, formatNumber, formatRelativeTime } from '@/composables/useApi'
+import { formatDlqMarkdown } from '@/composables/useDlqMarkdown'
+import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
 import { useRefresh } from '@/composables/useRefresh'
 import { stamp } from '@/composables/useStamp'
 import { useToast } from '@/composables/useToast'
@@ -391,6 +427,8 @@ const errorKey = (msg) => msg.errorMessage || NO_ERROR_TEXT
 
 const selectedKey = ref(null)
 const copied = ref(false)
+const markdownCopied = ref(false)
+const copiedField = ref(null)
 // Client-side narrowing of the loaded page by one error text. Not a request
 // parameter: the DLQ endpoint takes queue and consumerGroup only.
 const errorFilter = ref(null)
@@ -578,18 +616,51 @@ const truncateError = (err) => {
 const selectMessage = (msg) => {
   selectedKey.value = selectedKey.value === msgKey(msg) ? null : msgKey(msg)
   copied.value = false
+  markdownCopied.value = false
+  copiedField.value = null
 }
 
 const closeDetail = () => { selectedKey.value = null }
 
-const copyPayload = async () => {
-  if (!selectedMsg.value?.data) return
+const writeClipboard = async (text) => {
   try {
-    await navigator.clipboard.writeText(JSON.stringify(selectedMsg.value.data, null, 2))
-    copied.value = true
-    setTimeout(() => { copied.value = false }, 2000)
+    await navigator.clipboard.writeText(text)
+    return true
   } catch {
     notifyError('Could not copy to the clipboard', 'Copy failed')
+    return false
+  }
+}
+
+const copyPayload = async () => {
+  if (selectedMsg.value?.data === undefined) return
+  if (await writeClipboard(JSON.stringify(selectedMsg.value.data, null, 2))) {
+    copied.value = true
+    setTimeout(() => { copied.value = false }, 2000)
+  }
+}
+
+const copyField = async (field, value) => {
+  if (value === null || value === undefined) return
+  if (await writeClipboard(String(value))) {
+    copiedField.value = field
+    setTimeout(() => {
+      if (copiedField.value === field) copiedField.value = null
+    }, 2000)
+  }
+}
+
+const copyMarkdown = async () => {
+  if (!selectedMsg.value) return
+  const markdown = formatDlqMarkdown(selectedMsg.value, {
+    tenant: actingTenantSlug.value,
+    cluster: actingClusterSlug.value,
+    cell: actingCellSlug.value,
+    encryptedEnvelope: encryptedPayload.value,
+  })
+  if (await writeClipboard(markdown)) {
+    markdownCopied.value = true
+    setTimeout(() => { markdownCopied.value = false }, 2000)
   }
 }
 
@@ -716,6 +787,19 @@ fetchMessages()
 .dlq-kv { display: flex; flex-direction: column; gap: 16px; }
 .dlq-kv-row { display: flex; flex-direction: column; gap: 4px; }
 
+.dlq-detail-header h3,
+.dlq-copy-report { flex-shrink: 0; }
+.dlq-detail-header .card-sub {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dlq-detail-header .modal-close { margin-left: 0; flex-shrink: 0; }
+
+.dlq-copyable-field { display: flex; align-items: flex-start; gap: 8px; }
+.dlq-copyable-field .font-mono {
+  flex: 1; min-width: 0; font-size: 12px; color: var(--text-mid); word-break: break-all;
+}
+.dlq-copyable-field .btn { flex-shrink: 0; padding: 1px 6px; font-size: 10.5px; }
+
 /* Stored envelope / payload: recessed against the drawer. */
 .dlq-code {
   font-family: 'JetBrains Mono', monospace;
@@ -726,5 +810,23 @@ fetchMessages()
   background: var(--recessed);
   white-space: pre; overflow-x: auto;
   max-height: 400px; overflow-y: auto;
+}
+
+.dlq-json-viewer { white-space: normal; }
+.dlq-json-viewer :deep(.vjs-tree) { font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+.dlq-json-viewer :deep(.vjs-key) { color: var(--ice-400); }
+.dlq-json-viewer :deep(.vjs-value-string) { color: var(--ok-500); }
+.dlq-json-viewer :deep(.vjs-value-number),
+.dlq-json-viewer :deep(.vjs-value-boolean) { color: var(--crown-400); }
+.dlq-json-viewer :deep(.vjs-value-null),
+.dlq-json-viewer :deep(.vjs-value-undefined) { color: var(--ember-400); }
+.dlq-json-viewer :deep(.vjs-comment),
+.dlq-json-viewer :deep(.vjs-tree-brackets) { color: var(--text-low); }
+.dlq-json-viewer :deep(.vjs-tree-node.dark:hover) { background: var(--ink-4); }
+.dlq-json-viewer :deep(.vjs-indent-unit.has-line) { border-left-color: var(--bd-hi); }
+
+@media (max-width: 640px) {
+  .dlq-detail-header .card-sub { display: none; }
+  .dlq-copy-report { margin-left: auto; }
 }
 </style>
