@@ -487,6 +487,10 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
                 }
             }
         }
+        // A sink emit grows retained bytes exactly like a push, so it feeds the
+        // same in-flight storage account, at the same point in the order (after
+        // every cap, before the forward).
+        st.limits.note_accepted_bytes(ctx.cluster_id, cycle_sinks.payload_bytes);
         Body::from(buffered)
     } else if let Some(blocked) = mixed_block {
         // 4b''. A kv/timers batch on a blocked cluster (PLAN_KV_TIMERS.md
@@ -926,7 +930,22 @@ async fn enforce_produce(
         }
     }
 
+    // Every cap has passed and the batch is about to be forwarded, so these
+    // bytes are ours to account for: they land on the broker's disk long before
+    // its next retained-bytes computation notices them, and the storage gate
+    // has to see them in the meantime (limits.rs, `StorageAccount`). LAST in
+    // this function on purpose: a batch refused above is never forwarded, so
+    // counting it would refuse later pushes over bytes that were never stored.
+    st.limits.note_accepted_bytes(ctx.cluster_id, payload_bytes(&items));
+
     Ok(n)
+}
+
+/// Total payload bytes of a produce batch, on the same raw-JSON-text basis as
+/// the per-item cap (`ItemInfo::payload_len`). Saturating because the sum is
+/// fed to a quota estimate, where wrapping would read as room to spare.
+fn payload_bytes(items: &[ItemInfo]) -> u64 {
+    items.iter().fold(0u64, |acc, it| acc.saturating_add(it.payload_len as u64))
 }
 
 /// The two projections into `admit_pairs`' pair set, as named functions rather
@@ -960,11 +979,14 @@ fn sink_pair(g: &((String, String), u64)) -> (&str, &str) {
 /// item list with repeats and the cycle arrives pre-grouped, and re-hashing an
 /// already-distinct handful of pairs costs nothing next to one `admit` call.
 ///
-/// Shadow-aware. The deny log deliberately keeps `enforce_produce`'s ORIGINAL
-/// field shape — the kind spelled into `would_block` itself, rather than the
-/// canonical `kind` + `would_block = true` pair `log_configure_deny` uses. This
-/// IS the produce path's line and the limits dashboards filter on it; making the
-/// new caller tidier would silently move it for every push.
+/// Shadow-aware, and it LOGS EITHER WAY (2026-09-04). The enforcing arms used
+/// to return their 403 without a line, which is how a cluster refused every new
+/// queue for hours with nothing in the proxy's logs to show for it; they now
+/// emit the canonical `kind` + `blocked = true` shape `log_configure_deny` and
+/// limits.rs::log_deny use. The shadow lines keep the kind spelled into
+/// `would_block` as well as in `kind`. This IS the produce path's line and the
+/// limits dashboards filter on it, so the old field stays put and the canonical
+/// one is added beside it rather than replacing it.
 ///
 /// Takes the registry and the enforcing flag rather than `St`: the decision
 /// needs exactly those two things, and a function that does not need an
@@ -985,25 +1007,39 @@ async fn admit_pairs<'a>(
             Admit::Allowed => {}
             Admit::OverQueues { max } => {
                 if enforcing {
+                    // Until 2026-09-04 this arm returned in SILENCE. On the
+                    // trial cell that meant every push to a new queue name came
+                    // back 403 `queue limit reached (20)` with not one line in
+                    // the proxy's logs to say which cluster, which queue, or
+                    // that a limit had fired at all, so the refusals could only
+                    // be found from the client side.
+                    tracing::warn!(
+                        target: "limits", kind = "queues", cluster = %ctx.slug,
+                        max, queue, blocked = true, rid, "queue limit reached"
+                    );
                     return Err(errors::err_403(
                         errors::CODE_QUOTA_EXCEEDED,
                         &format!("queue limit reached ({max})"),
                     ));
                 }
                 tracing::warn!(
-                    target: "limits", would_block = "queues", cluster = %ctx.slug,
+                    target: "limits", kind = "queues", would_block = "queues", cluster = %ctx.slug,
                     max, queue, rid, "shadow deny"
                 );
             }
             Admit::OverPartitions { max } => {
                 if enforcing {
+                    tracing::warn!(
+                        target: "limits", kind = "partitions", cluster = %ctx.slug,
+                        max, queue, partition, blocked = true, rid, "partition limit reached"
+                    );
                     return Err(errors::err_403(
                         errors::CODE_QUOTA_EXCEEDED,
                         &format!("partition limit reached ({max})"),
                     ));
                 }
                 tracing::warn!(
-                    target: "limits", would_block = "partitions", cluster = %ctx.slug,
+                    target: "limits", kind = "partitions", would_block = "partitions", cluster = %ctx.slug,
                     max, queue, partition, rid, "shadow deny"
                 );
             }
@@ -1468,7 +1504,11 @@ fn count_pop_messages(bytes: &[u8]) -> Option<u64> {
 /// bill) and it is the surprising part: a misconfigured monthly_msgs_quota
 /// blocks production pushes even on a cell deployed in shadow mode.
 fn push_block_response(st: &St, ctx: &ClusterCtx) -> Option<Response> {
-    match st.limits.push_block_reason(ctx.cluster_id) {
+    // `_for`, not the cluster-id form: the storage verdict now has two sources,
+    // the pump's flag and the in-flight estimate that catches a cluster going
+    // over BETWEEN the broker's retained-bytes computations (limits.rs,
+    // `StorageAccount`), and the second needs this cluster's own cap.
+    match st.limits.push_block_reason_for(ctx) {
         Some(crate::limits::PushBlock::Storage) => {
             return Some(errors::err_403(
                 errors::CODE_STORAGE_QUOTA,
@@ -1612,6 +1652,10 @@ struct CycleSinks {
     /// per group and never says how many messages the group carried, so this is
     /// the only place that number exists — it is threaded from step 4 to step 6.
     groups: Vec<((String, String), u64)>,
+    /// Payload bytes over every COUNTED item, for the in-flight storage
+    /// account. `heaviest` answers the per-item cap and cannot answer this: the
+    /// quota is about the total a cycle adds to the disk, not its worst element.
+    payload_bytes: u64,
     /// `(index in push_items as sent, payload bytes)` of the HEAVIEST counted
     /// item — everything the per-item payload cap needs, without a vector of
     /// lengths. `enforce_produce` refuses the FIRST item over the cap; this
@@ -1689,6 +1733,7 @@ fn count_cycle_push_items(body: &[u8]) -> CycleSinks {
         out.total += 1;
         // `payload`, else the broker's `data` alias, else the `{}` it stores.
         let payload_len = item.payload.or(item.data).map(|p| p.get().len()).unwrap_or(0);
+        out.payload_bytes = out.payload_bytes.saturating_add(payload_len as u64);
         match out.heaviest {
             Some((_, len)) if len >= payload_len => {}
             _ => out.heaviest = Some((idx, payload_len)),
