@@ -717,7 +717,7 @@ const copyMarkdown = async () => {
 }
 
 // A failed load keeps whatever loaded last; the banner above says it is stale.
-// The failure itself is already on the global surface (axios interceptor).
+// The failure itself is already on the global surface (shared HTTP client).
 const fetchMessages = () => {
   const params = { limit: pageSize.value, offset: (page.value - 1) * pageSize.value }
   if (filterQueue.value) params.queue = filterQueue.value
