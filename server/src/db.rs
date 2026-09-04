@@ -1172,6 +1172,24 @@ pub async fn delete_message(
         .unwrap_or(false))
 }
 
+// Purge dead-letter snapshots for one queue in one tenant, optionally narrowed
+// to a consumer group. The queue is deliberately mandatory at the HTTP layer:
+// there is no tenant-wide form of this destructive operation.
+pub async fn purge_dlq(
+    client: &deadpool_postgres::Client,
+    tenant: &str,
+    queue: &str,
+    consumer_group: Option<&str>,
+) -> Result<i64, tokio_postgres::Error> {
+    client
+        .query_one(
+            "SELECT queen.purge_dlq_v1($1::text::uuid, $2, $3)",
+            &[&tenant, &queue, &consumer_group],
+        )
+        .await
+        .map(|row| row.get(0))
+}
+
 // ------------------------------------------------------------------- traces
 // All four trace SPs are engine-agnostic (queen.message_traces keyed by
 // transaction_id) — no blob decode. record_trace_v1 is log-aware

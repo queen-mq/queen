@@ -158,6 +158,8 @@ export const consumers = {
 // ============================================
 export const dlq = {
   list: (params, config) => client.get('/api/v1/dlq', { params, ...config }),
+  /** Purge every DLQ entry matching an exact queue and optional consumer group. */
+  purge: (params, config) => client.delete('/api/v1/dlq', { params, ...config }),
   /** Purge one DLQ entry. 200 {success:false} when nothing matched — check it. */
   delete: (partitionId, transactionId, config) =>
     client.delete(addr(partitionId, transactionId), config),

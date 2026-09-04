@@ -55,3 +55,38 @@ $$;
 -- (list_messages_v1 / get_dlq_messages_v1 are granted by 010_log_admin, which
 --  owns the live definitions; get_message_v1 no longer exists.)
 GRANT EXECUTE ON FUNCTION queen.delete_message_v1(UUID, TEXT) TO PUBLIC;
+
+-- ============================================================================
+-- queen.purge_dlq_v1: Delete dead-letter snapshots by queue criteria
+-- ============================================================================
+-- A queue is mandatory by signature. Tenant is part of the join predicate so
+-- the same queue name in another tenant is never touched. Consumer group is an
+-- optional additional exact-match criterion.
+CREATE OR REPLACE FUNCTION queen.purge_dlq_v1(
+    p_tenant_id UUID,
+    p_queue TEXT,
+    p_consumer_group TEXT DEFAULT NULL
+)
+RETURNS BIGINT
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_deleted BIGINT;
+BEGIN
+    WITH deleted AS (
+        DELETE FROM queen.log_dlq d
+        USING queen.log_partitions p, queen.queues q
+        WHERE d.partition_id = p.id
+          AND p.queue_id = q.id
+          AND q.tenant_id = p_tenant_id
+          AND q.name = p_queue
+          AND (p_consumer_group IS NULL OR d.consumer_group = p_consumer_group)
+        RETURNING d.id
+    )
+    SELECT count(*) INTO v_deleted FROM deleted;
+
+    RETURN v_deleted;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION queen.purge_dlq_v1(UUID, TEXT, TEXT) TO PUBLIC;

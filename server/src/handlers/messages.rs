@@ -619,6 +619,62 @@ pub async fn handle_dlq(
     json(StatusCode::OK, v.to_string())
 }
 
+// ------------------------------------------------------------ DELETE /api/v1/dlq
+// Purge DLQ snapshots by exact queue name, optionally narrowed to an exact
+// consumer group. Queue is required so an omitted query parameter can never
+// become a tenant-wide delete. The SQL function repeats the tenant boundary;
+// queue names alone are not globally unique.
+pub async fn handle_purge_dlq(
+    State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let queue = match params.get("queue").filter(|value| !value.is_empty()) {
+        Some(queue) => queue,
+        None => {
+            return json(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({
+                    "success": false,
+                    "error": "queue is required",
+                    "message": "Bulk DLQ purge requires an exact queue name",
+                })
+                .to_string(),
+            )
+        }
+    };
+    let consumer_group = params
+        .get("consumerGroup")
+        .filter(|value| !value.is_empty())
+        .map(String::as_str);
+
+    let client = match st.pool.get().await {
+        Ok(c) => c,
+        Err(_) => {
+            return json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{\"error\":\"pool\"}".to_string(),
+            )
+        }
+    };
+    match db::purge_dlq(&client, tenant.as_str(), queue, consumer_group).await {
+        Ok(deleted) => json(
+            StatusCode::OK,
+            serde_json::json!({
+                "success": true,
+                "deleted": deleted,
+                "queue": queue,
+                "consumerGroup": consumer_group,
+            })
+            .to_string(),
+        ),
+        Err(e) => json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json_err("bulk dlq purge failed: ", &e),
+        ),
+    }
+}
+
 // Walk a get_dlq_messages_v1 result and replace every encrypted `data` envelope
 // with its plaintext, flagging the row with isEncrypted so the client can tell
 // a decrypted payload from one that was never encrypted. A payload that does
