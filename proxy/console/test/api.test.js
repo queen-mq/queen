@@ -1,6 +1,6 @@
 // Auth-mode tests for the console's fetch helpers.
 //
-// The runner is node's own (`node --test`, Node 18+): the console carries no
+// The runner is node's own (`node --test`, Node 24+): the console carries no
 // UI or HTTP library beyond Vue, and a test runner is not the place to break
 // that. `fetch` and `window` are the only globals api.js touches, and both are
 // stubbed here, so nothing boots — no vite, no jsdom, no browser.

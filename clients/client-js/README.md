@@ -6,7 +6,7 @@
 
 [![npm](https://img.shields.io/npm/v/queen-mq.svg)](https://www.npmjs.com/package/queen-mq)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE.md)
-[![Node](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen.svg)](https://nodejs.org/)
+[![Node](https://img.shields.io/badge/node-%3E%3D24.0.0-brightgreen.svg)](https://nodejs.org/)
 
 [Quick Start](#quick-start) • [Complete Guide](client-v2/README.md) • [Examples](#examples) • [API Reference](#api-reference)
 
@@ -40,7 +40,7 @@ This client provides a fluent, promise-based API for Node.js applications.
 npm install queen-mq
 ```
 
-**Requirements:** Node.js 22+
+**Requirements:** Node.js 24+
 
 ---
 
@@ -970,4 +970,3 @@ const messages: Message<OrderData>[] = await queen.queue('orders').pop()
 ## License
 
 Apache 2.0 - See [LICENSE.md](../LICENSE.md)
-

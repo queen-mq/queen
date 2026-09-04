@@ -27,7 +27,7 @@ RUN_NAME="${1:-queen-c${CONNECTIONS}-p${NUM_PARTITIONS}-$(date +%Y%m%d-%H%M%S)}"
 OUTDIR="results/${RUN_NAME}"
 
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
-load_node() { [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && nvm use 22 >/dev/null 2>&1; return 0; }
+load_node() { [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && nvm use 24 >/dev/null 2>&1; return 0; }
 
 mkdir -p "$OUTDIR"
 echo ">> run: $RUN_NAME (QUEEN)"

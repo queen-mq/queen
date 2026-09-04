@@ -16,7 +16,7 @@ parallel, without touching your live Postgres on `:5432`.
 
 | suite | what it is | single | ha | tenanted | ha-tenanted | notes |
 |-------|------------|:------:|:--:|:--------:|:-----------:|-------|
-| `js`   | `client-js/test-v2` human + stream | ✓ | ✓ | ✓ | — | Node 22 |
+| `js`   | `client-js/test-v2` human + stream | ✓ | ✓ | ✓ | — | Node 24 |
 | `go`   | `client-go/tests` + `streams_integration` | ✓ | ✓ | ✓ | — | Go 1.24, standalone module (`GOWORK=off`) |
 | `py`   | `client-py/tests` (pytest, incl. streams) | ✓ | ✓ | ✓ | — | Python 3.12 |
 | `cli`  | `queenctl` E2E (`client-cli/tests`) | ✓ | ✓ | ✓ | — | needs the Go **workspace** (local client-go) + `QUEEN_E2E=1` |

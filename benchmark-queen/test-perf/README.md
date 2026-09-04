@@ -34,7 +34,7 @@ And we sample CPU during the window so we can say whether PG (docker) or the ser
 ## One-time setup
 
 ```bash
-nvm use 22
+nvm use 24
 
 # Build the server once (deps must already be downloaded).
 cd server && make deps   # only if vendor/ is empty
@@ -48,32 +48,32 @@ cd ..
 chmod +x test-perf/scripts/*.sh
 ```
 
-Requirements: Docker running locally, Node.js 22+, and the `queen-server` binary built at `server/bin/queen-server`.
+Requirements: Docker running locally, Node.js 24+, and the `queen-server` binary built at `server/bin/queen-server`.
 
 ## Usage
 
 Run all 7 scenarios × 3 runs (~32 min):
 
 ```bash
-nvm use 22 && ./test-perf/scripts/run-all.sh
+nvm use 24 && ./test-perf/scripts/run-all.sh
 ```
 
 Run a subset:
 
 ```bash
-nvm use 22 && ./test-perf/scripts/run-all.sh 1 4 6
+nvm use 24 && ./test-perf/scripts/run-all.sh 1 4 6
 ```
 
 Smoke test (1 run per scenario, ~11 min):
 
 ```bash
-nvm use 22 && RUNS_PER_SCENARIO=1 ./test-perf/scripts/run-all.sh
+nvm use 24 && RUNS_PER_SCENARIO=1 ./test-perf/scripts/run-all.sh
 ```
 
 Even shorter for debugging the harness itself:
 
 ```bash
-nvm use 22 && RUNS_PER_SCENARIO=1 WARMUP_SECONDS=3 MEASURE_SECONDS=10 \
+nvm use 24 && RUNS_PER_SCENARIO=1 WARMUP_SECONDS=3 MEASURE_SECONDS=10 \
   ./test-perf/scripts/run-all.sh 1
 ```
 
@@ -167,7 +167,7 @@ A `compare-campaigns.js` script can be added later if we find ourselves doing th
 - **PG fails to start**: check `docker logs queen-pg-bench`. Usually the volume wasn't wiped; `./test-perf/scripts/pg-down.sh` then retry.
 - **Server dies at boot**: the server needs the `lib/schema/` directory relative to its CWD. `server-up.sh` `cd`s to the repo root before launching; don't change that.
 - **Port conflicts**: the harness uses `6632` (server) and `5434` (PG). If something else owns those, override via `SERVER_PORT` / `PG_PORT` before calling `run-all.sh`.
-- **Node.js version**: workload uses ESM + top-level await; needs Node 22+.
+- **Node.js version**: workload uses ESM + top-level await; needs Node 24+.
 - **Autocannon non-2xx spam**: usually means PG hit connection limit. Lower `DB_POOL_SIZE_PER_WORKER` or raise `PG_MAX_CONN`.
 - **macOS memory caps**: Docker Desktop has its own VM memory limit. Scenario 7 wants 8 GB for PG — check Docker Desktop → Settings → Resources has enough.
 

@@ -28,7 +28,7 @@
  *   - localhost:6632  Queen broker
  *
  * Run:
- *   nvm use 22 && node examples/use-case-pipeline.js
+ *   nvm use 24 && node examples/use-case-pipeline.js
  */
 
 import { Queen } from 'queen-mq'

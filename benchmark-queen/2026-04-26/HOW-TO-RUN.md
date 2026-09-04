@@ -11,15 +11,15 @@ This document describes how to reproduce any of the runs in this folder. All scr
 - ≥ 64 GiB RAM (Postgres `shared_buffers=24GB` + working set + Queen + autocannon clients ≈ 35 GiB used at peak)
 - No swap recommended (we ran with `Swap: 0B`)
 - Docker with BuildKit (`--ulimit nofile=65535`)
-- `bash`, `node ≥ 20`, `jq`, `curl`, `python3` for log analysis
+- `bash`, `node ≥ 24`, `jq`, `curl`, `python3` for log analysis
 
 ### Software
 
 ```bash
 # Verify
 docker --version          # ≥ 24
-node --version            # ≥ 22 (we used v22.22.2)
-nvm use 22 && which node  # if using nvm
+node --version            # ≥ 24 (the published run used v22.22.2)
+nvm use 24 && which node  # if using nvm
 which jq                  # for analytics-endpoint parsing
 ```
 

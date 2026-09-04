@@ -28,7 +28,7 @@ A beautiful, modern dashboard for monitoring and managing Queen message queues.
 
 ### Prerequisites
 
-- Node.js 22+ (the rest of the monorepo targets Node 22; we recommend using nvm)
+- Node.js 24+ (the rest of the monorepo targets Node 24; we recommend using nvm)
 - npm
 
 ### Installation
@@ -200,4 +200,3 @@ The app includes several reusable components:
 ## License
 
 Apache 2.0 — see [`../LICENSE.md`](../LICENSE.md).
-

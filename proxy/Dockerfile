@@ -20,7 +20,7 @@
 # the proxy talks to PG through tokio-postgres-rustls. Nothing here shells out.
 
 # Stage 1: Build the broker dashboard (app/)
-FROM node:22-alpine AS webapp-builder
+FROM node:24-alpine AS webapp-builder
 
 WORKDIR /app/webapp
 
@@ -35,7 +35,7 @@ COPY app/ ./
 RUN npm run build
 
 # Stage 2: Build the operator console (proxy/console/)
-FROM node:22-alpine AS console-builder
+FROM node:24-alpine AS console-builder
 
 WORKDIR /build/console
 

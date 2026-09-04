@@ -1,6 +1,6 @@
 # JS client integration runner. Build context = repo root.
 #   docker build -f test/runners/js/Dockerfile -t queen-test-runner-js .
-FROM node:22-bookworm-slim
+FROM node:24-bookworm-slim
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl ca-certificates \
