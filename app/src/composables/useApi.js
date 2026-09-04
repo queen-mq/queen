@@ -13,7 +13,7 @@ import { currentEpoch, onClusterChange } from '@/stores/identity'
  * an unreachable panel never renders as an empty or zeroed one.
  *
  * `fetchFn` receives `{ signal }` as its last argument — pass it through to
- * the api wrapper (every wrapper takes an axios config) and the request is
+ * the API wrapper (every wrapper accepts a request config) and the request is
  * aborted on unmount and on a cluster switch, so a late response can never
  * overwrite the new tenant's state.
  */

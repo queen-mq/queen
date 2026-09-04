@@ -1,6 +1,6 @@
 // View-facing handle on the global notification surface.
 //
-// API failures are ALREADY reported by the axios interceptor — do not
+// API failures are ALREADY reported by the shared HTTP client — do not
 // re-announce one you caught, or the same failure shows up twice. Use this for
 // what the shell cannot see: the outcome of a local action, a refusal you
 // decided yourself, a validation message.

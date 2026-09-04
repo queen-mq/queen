@@ -12,7 +12,7 @@ import { notifyError } from './stores/ui'
 
 const app = createApp(App)
 
-// Backstop for everything the interceptors and the views do not catch. A
+// Backstop for everything the HTTP client and the views do not catch. A
 // render error or a stray rejection must not leave the product looking like
 // nothing happened.
 app.config.errorHandler = (err, _instance, info) => {

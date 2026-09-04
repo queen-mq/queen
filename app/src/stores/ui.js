@@ -1,7 +1,7 @@
 // Global error/notification surface — module singleton.
 //
 // The rule this store exists to enforce: NO failed call is invisible. The
-// axios interceptor reports every API failure here (see api/client.js), so a
+// shared HTTP client reports every API failure here (see api/client.js), so a
 // view that swallows an error still cannot make the product look healthy. A
 // dead broker paints a banner, not a dashboard of zeros.
 //
