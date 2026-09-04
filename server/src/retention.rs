@@ -127,6 +127,29 @@
 //! its watermark and would re-appear at the head of the due list every cycle
 //! forever. [`Backoff`] skips such a partition for a doubling number of cycles.
 //!
+//! THE SINK FLOOR (PLAN_S3_SINK.md §5.3, decision D5) is the one policy term
+//! added to the cutoffs since, and it is a term and not a mechanism — exactly
+//! what fact F13 predicted, because the cutoffs were already computed
+//! caller-side, per cycle, per queue. A queue whose `retentionSinkHold` names an
+//! S3 sink has its two SEGMENT-DELETING cutoffs (rules 1 and 2) floored at
+//! `GREATEST(committed.tEnd - 60 s, now() - retentionSinkHoldMaxSeconds)`, so
+//! the broker does not delete a segment the lake has not copied yet — Kafka's
+//! tiered storage rule, with the sink's KV commit pointer standing in for the
+//! upload. The cap (default 7 days) is what made it shippable: without it a
+//! stopped sink is unbounded retention and the first symptom is a full disk.
+//! The txns purge and the max-wait eviction are NOT floored — they delete by
+//! different rules (a dedup hash, an undeliverable-by-SLA message) and a copy in
+//! a lake does not change either. `work_list_sql` states each half.
+//!
+//! The pointers are read in ONE statement — db::retention_sink_holds — that
+//! runs FIRST inside the work-list transaction, before the work list touches
+//! log_partitions, which is what keeps the lock order of 024_kv.sql:15-30 (no
+//! lock on queen.kv acquired after one on queues/log_partitions/log_consumers).
+//! It is a plain SELECT and takes no row lock at all. A failure of that read
+//! degrades to "no pointers known" — every held queue keeps its cap-only floor —
+//! rather than failing the cycle: the KV value is tenant-writable, and a
+//! malformed one must never be able to stop deletion cluster-wide.
+//!
 //! THE PER-CYCLE PATH NEVER FALLS BACK TO Θ(#partitions). The full walk still
 //! exists, but only as the watermark BACKFILL + SAFETY WALK (`walk_loop`
 //! below): its own lease row, its own slow cadence, its own bounded batches.
@@ -236,16 +259,59 @@ pub const SAFETY_WALK_MAX_MS: u64 = 365 * 24 * 3_600_000;
 /// is no name+tenant bridge left to get wrong, and one tenant's cutoffs can
 /// never be emitted against another tenant's partitions (which the step calls
 /// below execute as DELETEs).
+///
+/// THE SINK FLOOR (PLAN_S3_SINK.md §5.3, decision D5) is the only term added to
+/// this statement since the redesign, and it is one more term, not a mechanism:
+/// `$1`/`$2` carry the (queue id, committed `tEnd`) pairs the hold read found a
+/// statement earlier (db::retention_sink_holds), and a queue naming a sink has
+/// its two SEGMENT-DELETING cutoffs floored at
+///
+/// ```text
+/// GREATEST(tEnd - SINK_HOLD_SLACK_SECS, now() - retention_sink_hold_max_seconds)
+/// ```
+///
+/// so the broker never deletes a segment the lake has not copied. The two halves
+/// are both load-bearing: `GREATEST` with a NULL `tEnd` leaves the CAP, so a
+/// sink that has never committed protects everything younger than the cap
+/// (safe from the moment the option is set, before the sink starts), and the
+/// cap also wins whenever the sink is behind by more than it, so a stopped sink
+/// can never park retention for ever (§12's named risk).
+///
+/// Three details in how it is applied, each deliberate:
+///
+///   * `LEAST(cutoff, sink_floor)` sits INSIDE the existing CASE arms rather
+///     than around them. PostgreSQL's `LEAST` ignores NULLs, so a floor on a
+///     queue with no rule would otherwise CREATE a cutoff and start deleting on
+///     a queue whose retention is off. Inside the arm, a disabled rule is still
+///     NULL and still emits nothing — the invariant `a_disabled_rule_emits_no_
+///     partitions` pins — and a queue with no sink still gets `LEAST(cutoff,
+///     NULL)` = the cutoff, unchanged, byte for byte.
+///   * `txns_cutoff` and `max_wait_cutoff` are NOT floored, on purpose. The
+///     sidecar purge deletes log_txns HASHES, not messages — the lake holds
+///     records, so a copy changes nothing about when a dedup hash may go — and
+///     the max-wait eviction is an SLA verb ("this message is too old to be
+///     worth delivering"), which is a statement about DELIVERY, not about
+///     durability. Flooring either would make the sink able to change semantics
+///     it has no business in; §5.3 asks only for `cutoff_all`.
+///   * the due probes read the FLOORED cutoffs for free, because they are
+///     computed from the same `q` rows: a partition whose data the sink has not
+///     copied is not nominated at all, so the floor costs no step calls rather
+///     than costing one no-op call per partition per cycle.
 fn work_list_sql(due_cap: usize) -> String {
+    let slack = crate::db::SINK_HOLD_SLACK_SECS;
     format!(
-        "WITH q AS ( \
+        "WITH hold AS ( \
+             SELECT h.qid, h.t_end FROM unnest($1::text[], $2::text[]) AS h(qid, t_end) \
+         ), q AS ( \
              SELECT qq.id, \
                     CASE WHEN qq.retention_enabled AND COALESCE(qq.retention_seconds, 0) > 0 \
-                         THEN now() - make_interval(secs => qq.retention_seconds) \
+                         THEN LEAST(now() - make_interval(secs => qq.retention_seconds), \
+                                    sf.sink_floor) \
                          END AS all_cutoff, \
                     CASE WHEN qq.retention_enabled \
                           AND COALESCE(qq.completed_retention_seconds, 0) > 0 \
-                         THEN now() - make_interval(secs => qq.completed_retention_seconds) \
+                         THEN LEAST(now() - make_interval(secs => qq.completed_retention_seconds), \
+                                    sf.sink_floor) \
                          END AS completed_cutoff, \
                     now() - make_interval(secs => GREATEST( \
                         qq.dedup_window_seconds, \
@@ -255,6 +321,14 @@ fn work_list_sql(due_cap: usize) -> String {
                          THEN now() - make_interval(secs => qq.max_wait_time_seconds) \
                          END AS max_wait_cutoff \
              FROM queen.queues qq \
+             LEFT JOIN hold h ON h.qid = qq.id::text \
+             CROSS JOIN LATERAL ( \
+                 SELECT CASE WHEN qq.retention_sink_hold <> '' \
+                             THEN GREATEST( \
+                                 h.t_end::timestamptz - make_interval(secs => {slack}), \
+                                 now() - make_interval( \
+                                     secs => qq.retention_sink_hold_max_seconds)) \
+                             END AS sink_floor) sf \
          ) \
          SELECT 0::int AS phase, NULL::text AS pid, q.id::text AS queue_id, \
                 q.all_cutoff::text, q.completed_cutoff::text, \
@@ -559,6 +633,84 @@ enum Outcome {
 static CYCLE_ERR: crate::obs::Sampler = crate::obs::Sampler::new(30_000);
 static PURGE_ERR: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
 
+/// The sink hold's two lines (PLAN_S3_SINK.md §5.3). Both describe a fact that
+/// changes on the scale of DAYS — which queues name a sink, and whether that
+/// sink is keeping up — evaluated every RETENTION_INTERVAL (5 s by default), so
+/// both are sampled at a minute rather than emitted per cycle.
+static HOLD_ERR: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
+static HOLD_INFO: crate::obs::Sampler = crate::obs::Sampler::new(60_000);
+
+/// Queues named individually in one hold line. Past this the line reports the
+/// counts and how many it did not name: a fleet where a hundred queues feed a
+/// sink must not turn one INFO line into a kilobyte every minute (the
+/// anti-flood doctrine the hotlist's top-N line already follows).
+const HOLD_LOG_QUEUES: usize = 8;
+
+/// THE line for PLAN_S3_SINK §5.3: which queues retention is holding for a
+/// sink, where their floor is, and whether the CAP produced that floor — i.e.
+/// whether the sink has fallen so far behind that retention has resumed
+/// deleting data the lake does not hold. That last bit is the alarm; §4.6 calls
+/// the same event "the one failure that is data loss", and this is the broker
+/// side of saying it out loud.
+///
+/// Silent when no queue names a sink, which is every deployment that has not
+/// configured one: the feature costs no log volume until it is switched on.
+///
+/// CAPPED QUEUES FIRST, because a truncated line must not spend its budget on
+/// the healthy ones.
+fn log_sink_holds(holds: &[db::SinkHold]) {
+    if holds.is_empty() {
+        return;
+    }
+    let Some(suppressed) = HOLD_INFO.tick_now() else {
+        return;
+    };
+    let line = render_sink_holds(holds);
+    tracing::info!(
+        target: "retention",
+        held = line.held,
+        capped = line.capped,
+        unnamed = line.unnamed,
+        queues = %line.queues,
+        suppressed,
+        "sink hold"
+    );
+}
+
+/// The hold line's fields. Split out of [`log_sink_holds`] so the rendering is
+/// testable without a subscriber: `tracing::info!` does not evaluate its field
+/// expressions when no subscriber is listening, which is exactly the state a
+/// unit test runs in — a formatter left inside the macro is a formatter nothing
+/// ever checks.
+struct HoldLine {
+    held: usize,
+    capped: usize,
+    unnamed: usize,
+    queues: String,
+}
+
+fn render_sink_holds(holds: &[db::SinkHold]) -> HoldLine {
+    let mut order: Vec<&db::SinkHold> = holds.iter().collect();
+    order.sort_by(|a, b| b.capped.cmp(&a.capped).then_with(|| a.queue.cmp(&b.queue)));
+    let capped = order.iter().filter(|h| h.capped).count();
+    let named: Vec<String> = order
+        .iter()
+        .take(HOLD_LOG_QUEUES)
+        .map(|h| {
+            // "cap" vs "sink" names WHICH term won, so the line reads as a
+            // verdict and not as a timestamp an operator has to compare by eye.
+            let by = if h.capped { "cap" } else { "sink" };
+            format!("{}@{} by-{}", h.queue, h.floor, by)
+        })
+        .collect();
+    HoldLine {
+        held: holds.len(),
+        capped,
+        unnamed: holds.len().saturating_sub(named.len()),
+        queues: named.join(", "),
+    }
+}
+
 /// One maintenance cycle: open the lock-holder transaction, try the XACT
 /// advisory lock inside it, run the work list and the phases on OTHER
 /// connections (each an autocommitting SP call — no wrapping transaction around
@@ -653,13 +805,40 @@ async fn cycle_body(
     list_tx
         .batch_execute(&format!("SET LOCAL statement_timeout = {}", knobs.lock_stmt_timeout_ms))
         .await?;
+    // SINK HOLD (PLAN_S3_SINK.md §5.3), and it runs HERE — first statement of
+    // this transaction, before the work list — for the lock-order rule of
+    // 024_kv.sql:15-30: nothing may ACQUIRE a lock on queen.kv after acquiring
+    // one on queen.queues, log_partitions or log_consumers. A plain SELECT
+    // takes no row lock at all, and this one runs before the work list touches
+    // log_partitions, so the order holds on both readings. Moving this call
+    // after the work list, or giving it a FOR UPDATE, breaks it.
+    //
+    // A FAILING hold read does NOT fail the cycle: it degrades to "no pointers
+    // known", which floors every held queue at its cap alone — the same answer
+    // a sink that has never committed gets, and the safe direction (more data
+    // kept, retention still running). The one thing that must never happen is
+    // a malformed KV value stopping deletion cluster-wide, and the value is
+    // tenant-writable.
+    let holds = match db::retention_sink_holds(&list_tx).await {
+        Ok(h) => h,
+        Err(e) => {
+            if let Some(suppressed) = HOLD_ERR.tick_now() {
+                tracing::warn!(target: "retention", error = %e, suppressed,
+                    "sink hold read failed; queues with retentionSinkHold keep their cap only");
+            }
+            Vec::new()
+        }
+    };
+    let hold_ids: Vec<&str> = holds.iter().map(|h| h.queue_id.as_str()).collect();
+    let hold_ends: Vec<Option<&str>> = holds.iter().map(|h| h.t_end.as_deref()).collect();
     let stmt = list_tx.prepare_cached(work_list).await?;
-    let rows = list_tx.query(&stmt, &[]).await?;
+    let rows = list_tx.query(&stmt, &[&hold_ids, &hold_ends]).await?;
     let (rules, mut due) = parse_work_list(&rows);
     // Read-only: commit and rollback are equivalent here, and both release the
     // locks. Commit is the arm that also proves the connection is healthy
     // before it goes back to the pool.
     list_tx.commit().await?;
+    log_sink_holds(&holds);
     // Back to the pool BEFORE the fan-out: a connection idling here is one the
     // phase workers cannot have (the cycle is sized against pool capacity).
     drop(list_client);
@@ -1411,14 +1590,26 @@ mod tests {
              relation locks for the whole cycle"
         );
         // ...and the work list runs on a connection of its own, in a
-        // transaction that ends with the query.
+        // transaction that ends with the query. (The parameters are the sink
+        // hold's two arrays since PLAN_S3_SINK §5.3; what this pins is the
+        // TRANSACTION the statement runs on, not its argument list.)
         assert!(
-            cycle_body.contains("let rows = list_tx.query(&stmt, &[]).await?;"),
+            cycle_body.contains("let rows = list_tx.query(&stmt,"),
             "the work list must run on the list transaction"
         );
         assert!(
             cycle_body.contains("list_tx.commit().await?;"),
             "the work list's transaction must END, or its locks outlive the query anyway"
+        );
+        // The sink-hold read shares that transaction and must come FIRST in it:
+        // it is the only statement of the cycle that names queen.kv, and the
+        // lock order of 024_kv.sql:15-30 is about ACQUISITION order.
+        let (before_list, _) = cycle_body
+            .split_once("let stmt = list_tx.prepare_cached(work_list)")
+            .expect("the work list is prepared in cycle_body");
+        assert!(
+            before_list.contains("db::retention_sink_holds(&list_tx)"),
+            "the sink hold read must run on the list transaction, BEFORE the work list"
         );
     }
 
@@ -1504,6 +1695,206 @@ mod tests {
         // The txns cutoff has a 900 s floor and is therefore never NULL: the
         // phase is gated by the watermark alone.
         assert!(sql.contains("GREATEST( ") && sql.contains("qq.dedup_window_seconds"));
+    }
+
+    // -- PLAN_S3_SINK §5.3, the sink floor ----------------------------------
+
+    /// The floor is applied to the two SEGMENT-DELETING cutoffs and to nothing
+    /// else. The txns purge deletes dedup HASHES and the max-wait eviction is a
+    /// delivery-SLA verb; neither becomes a different decision because a copy of
+    /// the messages exists in a lake, and flooring them would let a sink change
+    /// semantics it has no business in.
+    #[test]
+    fn the_sink_floor_reaches_only_the_two_segment_cutoffs() {
+        let sql = work_list_sql(5000);
+        assert_eq!(
+            sql.matches("AS sink_floor").count(),
+            1,
+            "the floor is computed once"
+        );
+        assert_eq!(
+            sql.matches("sf.sink_floor").count(),
+            2,
+            "...and applied to exactly two cutoffs"
+        );
+        // Both applications sit INSIDE the CASE arm, so a disabled rule stays
+        // NULL: LEAST ignores NULLs, and a floor around the arm would CREATE a
+        // cutoff on a queue whose retention is off.
+        for rule in ["qq.retention_seconds", "qq.completed_retention_seconds"] {
+            assert!(
+                sql.contains(&format!(
+                    "THEN LEAST(now() - make_interval(secs => {rule}), \
+                     sf.sink_floor)"
+                )),
+                "{rule} is not floored inside its CASE arm"
+            );
+        }
+        // The other two cutoffs are untouched, and are still built by a bare
+        // subtraction with no LEAST anywhere near them.
+        assert!(sql.contains(
+            "now() - make_interval(secs => GREATEST( qq.dedup_window_seconds, \
+             COALESCE(qq.completed_retention_seconds, 0), 900)) AS txns_cutoff"
+        ));
+        assert!(sql.contains(
+            "THEN now() - make_interval(secs => qq.max_wait_time_seconds) \
+             END AS max_wait_cutoff"
+        ));
+    }
+
+    /// The floor's two terms, and the direction each one fails in. `GREATEST`
+    /// with a NULL `tEnd` leaves the CAP standing, which is what makes a queue
+    /// safe from the moment the option is set — before its sink has ever run —
+    /// and the cap also wins over a stale pointer, which is what stops a dead
+    /// sink from parking retention for ever (§12).
+    #[test]
+    fn the_sink_floor_is_the_greater_of_the_pointer_and_the_cap() {
+        let sql = work_list_sql(5000);
+        assert!(sql.contains(
+            "SELECT CASE WHEN qq.retention_sink_hold <> '' \
+             THEN GREATEST( h.t_end::timestamptz - make_interval(secs => 60), \
+             now() - make_interval( secs => qq.retention_sink_hold_max_seconds)) \
+             END AS sink_floor"
+        ));
+        // A queue that names NO sink gets a NULL floor, and LEAST(cutoff, NULL)
+        // is the cutoff — the byte-identical answer every pre-feature
+        // deployment already had.
+        assert!(sql.contains("WHEN qq.retention_sink_hold <> ''"));
+        // The pointers arrive as parameters, from the hold read one statement
+        // earlier; the work list never reaches into queen.kv itself, or it
+        // would be acquiring that lock after queen.queues.
+        assert!(sql.contains("unnest($1::text[], $2::text[]) AS h(qid, t_end)"));
+        assert!(!sql.contains("queen.kv"));
+        // ...joined by ID, like everything else the cutoffs are keyed by: a
+        // name+tenant bridge here would let one tenant's sink floor another
+        // tenant's same-named queue.
+        assert!(sql.contains("LEFT JOIN hold h ON h.qid = qq.id::text"));
+    }
+
+    /// The slack is ONE number in two statements — db.rs reports the floor for
+    /// the log line, the work list applies it to the cutoffs — so a change to
+    /// the const must move both or the line stops describing the cutoff.
+    #[test]
+    fn the_sink_hold_slack_is_one_number() {
+        assert_eq!(crate::db::SINK_HOLD_SLACK_SECS, 60);
+        let sql = work_list_sql(10);
+        assert!(sql.contains(&format!(
+            "h.t_end::timestamptz - make_interval(secs => {})",
+            crate::db::SINK_HOLD_SLACK_SECS
+        )));
+        let db = include_str!("db.rs");
+        let (_, hold_sql) = db
+            .split_once("const SINK_HOLD_SQL")
+            .expect("the hold statement is a named const");
+        let (hold_sql, _) = hold_sql
+            .split_once("pub struct SinkHold")
+            .expect("const terminated");
+        assert_eq!(
+            hold_sql
+                .matches(&format!(
+                    "ce.t_end - make_interval(secs => {})",
+                    crate::db::SINK_HOLD_SLACK_SECS
+                ))
+                .count(),
+            2,
+            "the hold read must use the same slack for the floor and for the cap verdict"
+        );
+    }
+
+    /// The two option names, spelled identically in the SQL that writes the
+    /// columns, in the SQL that reads them, and in the client type that sends
+    /// them. Three files, none of which fails if one drifts — the same
+    /// conformance discipline as the fetch error markers.
+    #[test]
+    fn the_sink_hold_options_agree_across_sql_broker_and_client() {
+        let configure = include_str!("../sql/procedures/012_configure.sql");
+        let schema = include_str!("../sql/schema.sql");
+        let work_list = work_list_sql(10);
+        let hold_read = include_str!("db.rs");
+        for (json, column) in [
+            ("retentionSinkHold", "retention_sink_hold"),
+            (
+                "retentionSinkHoldMaxSeconds",
+                "retention_sink_hold_max_seconds",
+            ),
+        ] {
+            assert!(
+                configure.contains(&format!("p_options->>'{json}'")),
+                "configure_queue_v1 must read {json}"
+            );
+            assert!(
+                configure.contains(&format!("'{json}',")),
+                "configure_queue_v1 must echo {json} back in its options object"
+            );
+            assert!(
+                schema.contains(&format!("ADD COLUMN IF NOT EXISTS {column}")),
+                "queen.queues must gain {column} on an already-booted database too"
+            );
+        }
+        // The two columns the cycle actually reads, each in its own statement.
+        assert!(work_list.contains("qq.retention_sink_hold <> ''"));
+        assert!(work_list.contains("qq.retention_sink_hold_max_seconds"));
+        assert!(hold_read.contains("q.retention_sink_hold <> ''"));
+        // The client type sends the same two keys (queen-protocol's own test
+        // pins the serialization; this pins that it is the SAME spelling).
+        let opts = queen_protocol::QueueOptions {
+            retention_sink_hold: Some("default".into()),
+            retention_sink_hold_max_seconds: Some(604_800),
+            ..Default::default()
+        };
+        let wire = serde_json::to_string(&opts).unwrap();
+        assert!(wire.contains(r#""retentionSinkHold":"default""#), "{wire}");
+        assert!(
+            wire.contains(r#""retentionSinkHoldMaxSeconds":604800"#),
+            "{wire}"
+        );
+    }
+
+    fn hold(queue: &str, floor: &str, capped: bool) -> db::SinkHold {
+        db::SinkHold {
+            queue_id: format!("id-{queue}"),
+            queue: queue.to_string(),
+            t_end: capped.then(|| "2020-01-01 00:00:00+00".to_string()),
+            floor: floor.to_string(),
+            capped,
+        }
+    }
+
+    /// The hold line's ordering rule: a truncated line must spend its budget on
+    /// the queues whose sink is BEHIND ITS CAP — the ones where retention has
+    /// resumed deleting data the lake does not hold — not on the healthy ones.
+    #[test]
+    fn the_hold_line_names_the_capped_queues_first() {
+        let holds: Vec<db::SinkHold> = (0..HOLD_LOG_QUEUES + 4)
+            .map(|i| hold(&format!("q{i:02}"), "2026-09-04T10:00:00+00", false))
+            .chain(std::iter::once(hold(
+                "zz-late",
+                "2026-08-28T10:00:00+00",
+                true,
+            )))
+            .collect();
+        let line = render_sink_holds(&holds);
+        assert_eq!(line.held, HOLD_LOG_QUEUES + 5);
+        assert_eq!(line.capped, 1);
+        assert_eq!(
+            line.unnamed, 5,
+            "the line is truncated, and says by how much"
+        );
+        let named: Vec<&str> = line.queues.split(", ").collect();
+        assert_eq!(named.len(), HOLD_LOG_QUEUES);
+        assert_eq!(
+            named[0], "zz-late@2026-08-28T10:00:00+00 by-cap",
+            "the capped queue must be named first, and named as capped"
+        );
+        assert!(
+            named[1..].iter().all(|s| s.ends_with("by-sink")),
+            "a healthy queue must not read as capped: {}",
+            line.queues
+        );
+        assert!(named[1] < named[2], "the rest stay in name order");
+        assert_eq!(named[1], "q00@2026-09-04T10:00:00+00 by-sink");
+        // Nothing is emitted at all when no queue names a sink: the feature
+        // costs no log volume until it is switched on.
+        log_sink_holds(&[]);
     }
 
     fn raw(phase: i32, pid: Option<&str>, queue: &str, cutoffs: [Option<&str>; 4]) -> RawRow {

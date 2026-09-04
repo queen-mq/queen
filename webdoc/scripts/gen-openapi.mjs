@@ -381,6 +381,8 @@ function parseRouterChain(block) {
  * untouched by this change so that its diff says exactly one thing.
  * 2026-09-04: the bulk DLQ purge arm, in the admin block above the GET block
  * exactly as the Rust places it, so `GET /api/v1/dlq` stays read-only.
+ * 2026-09-04: the partition-discovery arm (PLAN_S3_SINK.md §5.1), beside the
+ * fetch arm it is the twin of and outside the GET block for the same reason.
  */
 function accessLevel(method, path) {
   const m = method.toUpperCase();
@@ -407,6 +409,9 @@ function accessLevel(method, path) {
   // PLAN_QUEEN_KAFKA.md C2: a pure read, outside the GET block because the
   // batch request is a body.
   if (m === "POST" && path === "/api/v1/fetch") return "read-only";
+  // PLAN_S3_SINK.md §5.1: the fetch arm's twin, and read-only for the same
+  // reason.
+  if (m === "POST" && path === "/api/v1/partitions/changed") return "read-only";
   if (path === "/streams/v1/state/get") return "read-only";
   if (path.startsWith("/streams/")) return "read-write";
   if (path === "/api/v1/push") return "write-only";

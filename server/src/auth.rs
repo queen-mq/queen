@@ -460,6 +460,18 @@ pub fn route_access_level(method: &Method, path: &str) -> AccessLevel {
         return ReadOnly;
     }
 
+    // PLAN_S3_SINK.md §5.1 — `POST /api/v1/partitions/changed` is the fetch
+    // arm's twin and takes the same level for the same reason: it is a pure
+    // read (two indexed selects, nothing leased, nothing moved) that cannot
+    // ride the `m == "GET"` block above only because its request is a batch
+    // body. It hands out partition names and offsets, which is strictly less
+    // than the message payloads the fetch beside it already serves at this
+    // level. Spelled with the method so a future verb on the path does not
+    // inherit the level by accident.
+    if m == "POST" && path == "/api/v1/partitions/changed" {
+        return ReadOnly;
+    }
+
     // -------- Streams --------
     if path == "/streams/v1/state/get" {
         return ReadOnly;
@@ -796,6 +808,34 @@ mod tests {
         );
         assert_eq!(
             route_access_level(&Method::GET, "/api/v1/pop/queue/orders"),
+            AccessLevel::ReadWrite
+        );
+    }
+
+    /// PLAN_S3_SINK.md §5.1. `POST /api/v1/partitions/changed` is the fetch
+    /// arm's twin: a pure read that must NOT land on the ReadWrite
+    /// fallthrough, or a read-only token is refused the one route that tells it
+    /// what partitions exist.
+    #[test]
+    fn partition_discovery_is_a_read_like_the_fetch_it_feeds() {
+        let post = Method::POST;
+        assert_eq!(
+            route_access_level(&post, "/api/v1/partitions/changed"),
+            AccessLevel::ReadOnly
+        );
+        assert_eq!(
+            route_access_level(&post, "/api/v1/partitions/changed"),
+            route_access_level(&post, "/api/v1/fetch"),
+            "discovery hands out strictly less than the fetch beside it"
+        );
+        // The method is part of the decision, same as the fetch arm.
+        assert_eq!(
+            route_access_level(&Method::GET, "/api/v1/partitions/changed"),
+            AccessLevel::ReadWrite
+        );
+        // ...and the arm is exact: no neighbouring path inherits it.
+        assert_eq!(
+            route_access_level(&post, "/api/v1/partitions"),
             AccessLevel::ReadWrite
         );
     }

@@ -3,6 +3,38 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## 1.5.0 — 2026-09-04
+
+**An S3 / data-lake sink connector.** `queen-s3` ships inside `ghcr.io/queen-mq/queen`,
+beside the broker binary and the two wire facades. It reads the log through
+`POST /api/v1/fetch` and writes open-format objects — JSONL with zstd or gzip, or
+Parquet — under a Hive-partitioned layout (`queue=…/dt=…/hour=…`) that an object-store
+query engine reads with no loader in front of it. Each object is one closed time
+window, and a window is only visible after a compare-and-set on a pointer in Queen's
+key/value store, so a crash, a retry or a restart rewrites the same object under the
+same deterministic key rather than adding a second copy of a row: exactly once, with
+no coordinator and nothing durable of its own beyond three small keys per queue (intent, commit pointer, lease). Windows are
+per QUEUE and not per partition, which is what lets a queue with a million partitions
+be one object an hour instead of a million objects — the cardinality Queen has and a
+partitioned log does not. The connector is inert until `QUEEN_S3_EMBEDDED=true`, where
+the broker spawns and supervises it as a child process on a backoff, exactly as it
+does the two facades; run it on its own with `docker run … queen-mq ./bin/queen-s3`
+and it is an ordinary Queen client holding a token, which is how it scales out across
+queues. What it writes, and every knob that shapes it, is
+[reference/s3](https://queenmq.com/reference/s3); running it is
+[deploy/s3](https://queenmq.com/deploy/s3).
+
+**One read-only broker endpoint, and a carve-out in the proxy.**
+`POST /api/v1/partitions/changed` answers which partitions of a batch of queues have
+been written since a given time, as one index scan over a small table, together with
+the `safeTime` the sink uses as its window frontier. Nothing about push, pop,
+retention or any table changes, and nothing but the sink calls it. On a Queen Cloud
+cell the route carries the same authority as `fetch`, and a key/value batch that
+touches nothing outside the sink's reserved `s3:` prefix is reclassified with it: a
+tenant over its storage quota must still be able to commit a window, because the
+pointer it writes is a few hundred bytes and the alternative is a sink that re-uploads
+the same window for ever while its lag grows.
+
 ## 1.4.2 — 2026-09-04
 
 **Dashboard timestamps name their clock.** Freshness stamps render in the viewer's own timezone and

@@ -155,6 +155,31 @@ pub struct QueueOptions {
         skip_serializing_if = "Option::is_none"
     )]
     pub dedup_window_seconds: Option<i32>,
+
+    /// Name of the S3 sink that copies this queue to a data lake. Default `""`
+    /// (off). When set, retention will not delete a segment the sink has not
+    /// committed yet, bounded by [`Self::retention_sink_hold_max_seconds`].
+    ///
+    /// Must match `[A-Za-z0-9._-]{0,64}` — it is a segment of the sink's own
+    /// commit key, so anything else is **rejected**, not clamped: the broker
+    /// answers with an `error` body and the queue keeps its old configuration.
+    #[serde(
+        rename = "retentionSinkHold",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub retention_sink_hold: Option<String>,
+
+    /// Cap on how far back [`Self::retention_sink_hold`] may hold retention, in
+    /// seconds. Default `604800` (7 days). A sink that stops committing cannot
+    /// park retention beyond this. Must be in `60..=31536000`; out of range is
+    /// **rejected**, not clamped, for the same reason as the field above.
+    #[serde(
+        rename = "retentionSinkHoldMaxSeconds",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub retention_sink_hold_max_seconds: Option<i32>,
 }
 
 /// Body of `POST /api/v1/configure`.
@@ -682,6 +707,49 @@ mod tests {
         ] {
             assert!(s.contains(key), "missing {key} in {s}");
         }
+    }
+
+    /// The retention sink hold (PLAN_S3_SINK §5.3): both keys must reach the
+    /// broker in the casing `queen.configure_queue_v1` reads them by, and both
+    /// must survive the round trip through the SP's own echo — the echo is what
+    /// an operator reads back to check that the hold is on, and a key that only
+    /// travels one way would show the queue as unheld while it is held.
+    #[test]
+    fn the_sink_hold_options_use_the_camel_case_keys_the_sql_reads() {
+        let req = ConfigureRequest::new("orders").options(QueueOptions {
+            retention_enabled: Some(true),
+            retention_seconds: Some(86_400),
+            retention_sink_hold: Some("default".into()),
+            retention_sink_hold_max_seconds: Some(604_800),
+            ..Default::default()
+        });
+        let s = serde_json::to_string(&req).unwrap();
+        for key in [
+            r#""retentionSinkHold":"default""#,
+            r#""retentionSinkHoldMaxSeconds":604800"#,
+        ] {
+            assert!(s.contains(key), "missing {key} in {s}");
+        }
+        // Off is the DEFAULT and therefore the absent key: a queue that never
+        // names a sink must not start sending one.
+        let bare = serde_json::to_string(&ConfigureRequest::new("orders")).unwrap();
+        assert!(!bare.contains("retentionSinkHold"));
+        // ...and an explicit "" is a legal, sent value, because that is how a
+        // full-replace /configure turns the hold OFF again.
+        let off = ConfigureRequest::new("orders").options(QueueOptions {
+            retention_sink_hold: Some(String::new()),
+            ..Default::default()
+        });
+        assert_eq!(
+            serde_json::to_string(&off).unwrap(),
+            r#"{"queue":"orders","options":{"retentionSinkHold":""}}"#
+        );
+        let back: QueueOptions = serde_json::from_str(
+            r#"{"retentionSinkHold":"lake","retentionSinkHoldMaxSeconds":60}"#,
+        )
+        .unwrap();
+        assert_eq!(back.retention_sink_hold.as_deref(), Some("lake"));
+        assert_eq!(back.retention_sink_hold_max_seconds, Some(60));
     }
 
     #[test]

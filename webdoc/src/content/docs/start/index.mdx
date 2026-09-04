@@ -247,6 +247,12 @@ why the proxy's quota accounting is exact in-process state with nothing to coord
   SNS protocols, so an unmodified AWS SDK reaches it by changing `endpoint_url`. The contracts are
   [reference/kafka](/reference/kafka) and [reference/sqs](/reference/sqs), running them is
   [deploy/kafka](/deploy/kafka) and [deploy/sqs](/deploy/sqs).
+- **The log lands in your data lake.** `queen-s3`, in the same image and off until you switch
+  it on, reads a queue through the broker's own API and writes JSONL or Parquet into any
+  S3-compatible bucket under a Hive layout, exactly once, at any partition cardinality, with the
+  per-entity order kept as two columns. DuckDB, Spark, ClickHouse and the rest read it without
+  Queen. What the objects contain is [reference/s3](/reference/s3), running it is
+  [deploy/s3](/deploy/s3).
 
 ## When something else is the better tool
 

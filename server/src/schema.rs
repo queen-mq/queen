@@ -217,6 +217,22 @@ const PROCEDURES: &[(&str, &str)] = &[
     // last because it is newest, and because nothing else may come to depend on
     // it — it is a leaf of the corpus, like 030 was before 031 arrived.
     ("032_log_fetch.sql", include_str!("../sql/procedures/032_log_fetch.sql")),
+    // PLAN_S3_SINK.md §5.1/§5.2 — the partition-discovery surface behind
+    // `POST /api/v1/partitions/changed`. Same position argument as 032, and for
+    // the same reasons: plpgsql (names resolve at runtime), reads only
+    // queen.queues and queen.log_partitions (both from 001) plus
+    // pg_stat_activity, and nothing else in the corpus may come to depend on
+    // it. It sits last because it is newest.
+    // ONE LINE, like every entry above it, and rustfmt disagrees: this entry is
+    // over the width and `cargo fmt` would split it across four lines. It must
+    // not be split. `tests/kv_timers_source_pins.rs` proves every file in
+    // sql/procedures/ is in this list by looking for the literal `("<name>"` —
+    // a split entry puts a newline between the paren and the quote, the pin
+    // stops finding the file, and it reports the one failure mode it exists to
+    // catch (a .sql that is never applied, a green boot, and 42883 at the first
+    // call). Several entries above are long for the same reason and carry the
+    // same disagreement.
+    ("033_log_partitions_changed.sql", include_str!("../sql/procedures/033_log_partitions_changed.sql")),
 ];
 
 /// Minimum PostgreSQL this schema can be applied to, as `server_version_num`

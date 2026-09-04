@@ -62,8 +62,41 @@ CREATE TABLE IF NOT EXISTS queen.queues (
     -- Absorbed from queen.log_queues (2026-07-31 queue-identity merge): the
     -- push dedup probe window. 0 disables the probe.
     dedup_window_seconds INTEGER NOT NULL DEFAULT 3600,
+    -- RETENTION SINK HOLD (PLAN_S3_SINK.md §5.3, decision D5). The NAME of the
+    -- S3 sink that copies this queue to a lake; '' = off, which is every
+    -- deployment that has not configured one and therefore byte-identical
+    -- behaviour. When set, the retention cycle floors this queue's two
+    -- segment-deleting cutoffs at what the sink has already committed, so the
+    -- broker never deletes a segment the lake does not hold — Kafka tiered
+    -- storage's "never delete a local segment before it is uploaded", with the
+    -- sink's KV commit pointer standing in for the upload.
+    -- See the ALTERs below for why this column also exists twice.
+    retention_sink_hold TEXT NOT NULL DEFAULT '',
+    -- The CAP on that hold, and the reason §5.3 could ship at all: a sink that
+    -- is stopped, broken or simply removed would otherwise turn its queue's
+    -- retention off for ever, silently, and the first symptom would be a full
+    -- disk. Past this age the floor stops following the sink and retention
+    -- resumes deleting. Default 604800 = 7 days (D5's stated cap).
+    retention_sink_hold_max_seconds INTEGER NOT NULL DEFAULT 604800,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- RETENTION SINK HOLD (PLAN_S3_SINK.md §5.3): the two columns above, again, as
+-- idempotent ALTERs. The CREATE TABLE is IF NOT EXISTS, so it is a SILENT no-op
+-- ON THE SHAPE — a cell that already booted an earlier version keeps its old
+-- queen.queues and would discover the missing column as a 42703 at the first
+-- retention cycle, i.e. in maintenance, where nothing is watching. Precedent
+-- and rationale: the `conflation` ALTER below on consumer_groups_metadata, and
+-- the queen.kv_quota block of 024_kv.sql which states the trap in full.
+--
+-- One statement each, both taking their own AccessExclusive on a small table
+-- for the length of one statement (schema.rs's per-statement transactions), and
+-- both metadata-only: a volatile-free DEFAULT on PG 11+ does not rewrite the
+-- table, so NOT NULL costs nothing here even on a populated queues table.
+ALTER TABLE queen.queues
+    ADD COLUMN IF NOT EXISTS retention_sink_hold TEXT NOT NULL DEFAULT '';
+ALTER TABLE queen.queues
+    ADD COLUMN IF NOT EXISTS retention_sink_hold_max_seconds INTEGER NOT NULL DEFAULT 604800;
 
 -- This is a log-engine-only broker: messages live in queen.log_segments,
 -- partitions in queen.log_partitions, cursors in queen.log_consumers and dead

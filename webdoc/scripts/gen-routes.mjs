@@ -79,7 +79,14 @@ function parseRoutes(text) {
 // the position the Rust evaluates it: `DELETE /api/v1/dlq` is admin, and it
 // sits in the admin block ABOVE the GET block, so the `GET /api/v1/dlq` read
 // stays read-only. Path-exact, not a prefix: the Rust writes `path ==`.
-const ACCESS_FINGERPRINT = "3e144152a943e6c6";
+// 2026-09-04: re-read for PLAN_S3_SINK.md §5.1. One new rule, mirrored below in
+// the position the Rust evaluates it: `POST /api/v1/partitions/changed` is
+// read-only, immediately after the fetch arm it is the twin of, and outside the
+// `m === "GET"` block for the same reason (the batch request is a body).
+// Without the arm it reaches the read-write fallthrough and the table claims
+// that listing partition names needs write access, which would make a read-only
+// token useless to the sink.
+const ACCESS_FINGERPRINT = "e58553c3eb7704c2";
 
 function accessLevel(method, path) {
   const m = method;
@@ -118,6 +125,11 @@ function accessLevel(method, path) {
   // PLAN_QUEEN_KAFKA.md C2: a pure read that takes no lease and moves no
   // cursor. Outside the GET block because the batch request is a body.
   if (m === "POST" && path === "/api/v1/fetch") return "read-only";
+
+  // PLAN_S3_SINK.md §5.1: the fetch arm's twin. Two indexed selects, nothing
+  // leased and nothing moved, and it hands out strictly less than the fetch
+  // beside it. Method-exact, so a future verb on the path does not inherit it.
+  if (m === "POST" && path === "/api/v1/partitions/changed") return "read-only";
 
   if (path === "/streams/v1/state/get") return "read-only";
   if (path.startsWith("/streams/")) return "read-write";

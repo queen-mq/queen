@@ -284,6 +284,39 @@ jobs:
           cargo clippy --manifest-path protocols/queen-kafka/Cargo.toml --locked \
             --all-targets -- -D warnings
 
+  # The S3 / data-lake sink connector (PLAN_S3_SINK.md). Its own workspace root,
+  # excluded from every other manifest by construction — so, exactly like the
+  # Kafka facade above, named nowhere it would be tested nowhere.
+  #
+  # This job exists FROM DAY ONE, deliberately, and that is the whole point of
+  # the note: queen-sqs shipped in 1.4.0 with 715 tests and NO CI job, so for a
+  # release those tests only ever ran where somebody happened to run them.
+  # PLAN_S3_SINK.md F11 names that as the trap not to repeat. A suite CI never
+  # executes is a suite whose green is a memory.
+  #
+  # Unit tests only. The e2e scenarios (plan §9) need a live broker, a
+  # PostgreSQL and an S3-compatible endpoint; they join test/run.sh when they are
+  # boring, and stay OUT of this workflow until then — the proxyimpr lesson: a
+  # flaky new lane in the release-day matrix is discovered on release day.
+  s3-sink:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy, rustfmt
+          # See rust-unit: name the manifest, or rust-cache probes the root.
+          cache-workspaces: connectors/queen-s3
+      - name: cargo test
+        run: cargo test --manifest-path connectors/queen-s3/Cargo.toml --locked
+      - name: rustfmt
+        run: cargo fmt --manifest-path connectors/queen-s3/Cargo.toml --check
+      - name: clippy
+        run: |
+          cargo clippy --manifest-path connectors/queen-s3/Cargo.toml --locked \
+            --all-targets -- -D warnings
+
   # `rust-version` in the client's Cargo.toml is a promise to anyone on an older
   # toolchain. Every other job runs current stable, so without this the promise
   # is never checked — which is how it came to say 1.75 while the crate had not

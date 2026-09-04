@@ -24,18 +24,20 @@ use crate::fusion::{json_escape_into, AddMsg, Fusion, ItemResult, OwnedFrame, Pu
 use crate::metrics::Metrics;
 use crate::util::uuidv7_bytes;
 
-// EMBEDDED MODE (server/src/kafka_facade.rs, server/src/sqs_facade.rs) reports the
-// supervised children HERE and nowhere else: /status is where an operator already
-// looks for "what is this process doing", it needs no auth token by default
-// (JWT_SKIP_PATHS), and adding a key to it is not new API surface the way a new
-// route would be. Each facade contributes one key under its own name, and only
-// when it is enabled: with both off — every deployment that has not opted in — the
-// body is byte-for-byte the string it has always been, and a deployment that runs
-// only the Kafka facade reads exactly as it did before the SQS one existed.
+// EMBEDDED MODE (server/src/kafka_facade.rs, server/src/sqs_facade.rs,
+// server/src/s3_sink.rs) reports the supervised children HERE and nowhere else:
+// /status is where an operator already looks for "what is this process doing", it
+// needs no auth token by default (JWT_SKIP_PATHS), and adding a key to it is not
+// new API surface the way a new route would be. Each child contributes one key
+// under its own name, and only when it is enabled: with all three off — every
+// deployment that has not opted in — the body is byte-for-byte the string it has
+// always been, and a deployment that runs only the Kafka facade reads exactly as
+// it did before the SQS facade and the S3 sink existed.
 pub async fn handle_status() -> Response {
     let kafka = crate::kafka_facade::status_value();
     let sqs = crate::sqs_facade::status_value();
-    if kafka.is_none() && sqs.is_none() {
+    let s3 = crate::s3_sink::status_value();
+    if kafka.is_none() && sqs.is_none() && s3.is_none() {
         return json(
             StatusCode::OK,
             "{\"status\":\"ok\",\"engine\":\"segments-rust\"}".to_string(),
@@ -53,6 +55,9 @@ pub async fn handle_status() -> Response {
         }
         if let Some(sqs) = sqs {
             fields.insert("sqs".to_string(), sqs);
+        }
+        if let Some(s3) = s3 {
+            fields.insert("s3".to_string(), s3);
         }
     }
     json(StatusCode::OK, body.to_string())

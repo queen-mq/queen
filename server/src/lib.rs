@@ -53,6 +53,10 @@ mod kafka_facade;
 // Twin of the `mod sqs_facade;` in main.rs, on the same terms as `kafka_facade`
 // above: compiled, never started, and its process-global reads `None` here.
 mod sqs_facade;
+// Twin of the `mod s3_sink;` in main.rs (the S3 / data-lake sink connector), on
+// the same terms as the two facades above: compiled, never started, and its
+// process-global reads `None` here.
+mod s3_sink;
 mod lease;
 mod mesh;
 mod metrics;

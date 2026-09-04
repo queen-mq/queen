@@ -40,9 +40,9 @@ Four parts, of which two are required:
 Nothing is installed into either required part. The DDL and the 31 stored-procedure files are
 compiled into the binary and re-applied idempotently at every boot under an advisory lock, so
 there is no migration step and no extension. The dashboard, `queenctl` and the PostgreSQL client
-tools travel inside the same image, and so do the two wire-protocol facades: `queen-kafka` and
-`queen-sqs` sit beside the broker binary and stay inert until `QUEEN_KAFKA_EMBEDDED` or
-`QUEEN_SQS_EMBEDDED` says otherwise.
+tools travel inside the same image, and so do the two wire-protocol facades and the lake sink:
+`queen-kafka`, `queen-sqs` and `queen-s3` sit beside the broker binary and stay inert until
+`QUEEN_KAFKA_EMBEDDED`, `QUEEN_SQS_EMBEDDED` or `QUEEN_S3_EMBEDDED` says otherwise.
 
 A complete deployment, ready to verify:
 
@@ -129,6 +129,11 @@ Every variable the broker reads, with the default the code applies, is in
     href="/deploy/sqs"
     title="SQS facade"
     description="queen-sqs in the same image: SigV4 credentials, and the one variable a second replica needs."
+  />
+  <LinkCard
+    href="/deploy/s3"
+    title="S3 sink"
+    description="queen-s3 in the same image: the log into any S3-compatible bucket as JSONL or Parquet, exactly once, every variable and the bucket policy."
   />
 </CardGrid>
 

@@ -34,6 +34,8 @@ DECLARE
     v_max_wait_time_seconds INTEGER;
     v_min_pop_wait_time INTEGER;
     v_dedup_window_seconds INTEGER;
+    v_retention_sink_hold TEXT;
+    v_retention_sink_hold_max_seconds INTEGER;
     v_queue_id UUID;
 BEGIN
     -- Parse options with defaults
@@ -68,6 +70,44 @@ BEGIN
     -- the single writer, replacing the handler's separate log-queue upsert.
     -- Default 3600 = the column default; clamped at 0 like the handler used to.
     v_dedup_window_seconds := GREATEST(COALESCE((p_options->>'dedupWindowSeconds')::integer, 3600), 0);
+    -- RETENTION SINK HOLD (PLAN_S3_SINK.md §5.3, decision D5). Default '' = off
+    -- and 604800 = 7 days, i.e. the SQL defaults of the two columns, so the
+    -- full-replace rule of this SP leaves a queue that never mentions them
+    -- byte-identical to a pre-feature one.
+    v_retention_sink_hold := COALESCE(p_options->>'retentionSinkHold', '');
+    v_retention_sink_hold_max_seconds :=
+        COALESCE((p_options->>'retentionSinkHoldMaxSeconds')::integer, 604800);
+
+    -- These two are REJECTED out of range, not clamped like minPopWaitTime and
+    -- dedupWindowSeconds above, and the difference is deliberate. Those two are
+    -- bounded independently by something else (the caller's own long-poll
+    -- deadline; the probe simply not firing), so a clamp turns a typo into a
+    -- harmless value. These GOVERN DELETION: a silently clamped 0 would floor
+    -- the hold at now()-60s and hand the lake a hole, a silently clamped
+    -- 999999999 would park retention for 31 years. Both directions are damage
+    -- an operator must be told about, so the call fails and the queue keeps the
+    -- configuration it had.
+    --
+    -- The sink name is the middle segment of the KV key the retention cycle
+    -- probes (`s3:<sink>:<esc queue>:committed`, PLAN_S3_SINK §4.3), and that
+    -- key is built by CONCATENATION. The character set is therefore the one
+    -- thing standing between a sink name and authority over the key structure:
+    -- a name containing ':' composes the same key as a different (sink, queue)
+    -- pair. It is the same set the sink's own escape() preserves
+    -- (connectors/queen-s3/src/layout.rs), so a legal name is never rewritten.
+    IF v_retention_sink_hold !~ '^[A-Za-z0-9._-]{0,64}$' THEN
+        RETURN jsonb_build_object(
+            'error', format('retentionSinkHold must match [A-Za-z0-9._-]{0,64}, got %L',
+                            v_retention_sink_hold));
+    END IF;
+    -- 60 s floor: below one retention cycle's own cadence the hold cannot mean
+    -- anything. 31536000 = one year ceiling: past that the cap is
+    -- indistinguishable from the unbounded retention D5 exists to prevent.
+    IF v_retention_sink_hold_max_seconds < 60 OR v_retention_sink_hold_max_seconds > 31536000 THEN
+        RETURN jsonb_build_object(
+            'error', format('retentionSinkHoldMaxSeconds must be between 60 and 31536000, got %s',
+                            v_retention_sink_hold_max_seconds));
+    END IF;
 
     -- Insert or update queue (Track B: identity is (tenant_id, name)).
     INSERT INTO queen.queues (
@@ -75,13 +115,13 @@ BEGIN
         max_queue_size, ttl, dead_letter_queue, dlq_after_max_retries, delayed_processing,
         window_buffer, retention_seconds, completed_retention_seconds,
         retention_enabled, encryption_enabled, max_wait_time_seconds, min_pop_wait_time,
-        dedup_window_seconds
+        dedup_window_seconds, retention_sink_hold, retention_sink_hold_max_seconds
     ) VALUES (
         p_tenant, p_queue_name, v_namespace, v_task, v_priority, v_lease_time, v_retry_limit, v_retry_delay,
         v_max_size, v_ttl, v_dead_letter_queue, v_dlq_after_max_retries, v_delayed_processing,
         v_window_buffer, v_retention_seconds, v_completed_retention_seconds,
         v_retention_enabled, v_encryption_enabled, v_max_wait_time_seconds, v_min_pop_wait_time,
-        v_dedup_window_seconds
+        v_dedup_window_seconds, v_retention_sink_hold, v_retention_sink_hold_max_seconds
     )
     ON CONFLICT (tenant_id, name) DO UPDATE SET
         namespace = EXCLUDED.namespace,
@@ -102,7 +142,9 @@ BEGIN
         encryption_enabled = EXCLUDED.encryption_enabled,
         max_wait_time_seconds = EXCLUDED.max_wait_time_seconds,
         min_pop_wait_time = EXCLUDED.min_pop_wait_time,
-        dedup_window_seconds = EXCLUDED.dedup_window_seconds
+        dedup_window_seconds = EXCLUDED.dedup_window_seconds,
+        retention_sink_hold = EXCLUDED.retention_sink_hold,
+        retention_sink_hold_max_seconds = EXCLUDED.retention_sink_hold_max_seconds
     RETURNING id INTO v_queue_id;
     
     -- The legacy "ensure a Default partition row" write went away with the rows
@@ -139,7 +181,9 @@ BEGIN
             'encryptionEnabled', v_encryption_enabled,
             'maxWaitTimeSeconds', v_max_wait_time_seconds,
             'minPopWaitTime', v_min_pop_wait_time,
-            'dedupWindowSeconds', v_dedup_window_seconds
+            'dedupWindowSeconds', v_dedup_window_seconds,
+            'retentionSinkHold', v_retention_sink_hold,
+            'retentionSinkHoldMaxSeconds', v_retention_sink_hold_max_seconds
         )
     );
 END;

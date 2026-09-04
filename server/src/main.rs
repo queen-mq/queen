@@ -35,6 +35,12 @@ mod kafka_facade;
 // order because the two are read together. In BOTH crate roots for the same
 // reason as its twin, and never STARTED in the library target.
 mod sqs_facade;
+// EMBEDDED MODE for the S3 / data-lake sink connector (PLAN_S3_SINK.md §3): the
+// third twin, spawning and supervising the queen-s3 binary under
+// QUEEN_S3_EMBEDDED=true. Listed here rather than in alphabetical order because
+// the three are read together. In BOTH crate roots for the same reason as its
+// twins, and never STARTED in the library target.
+mod s3_sink;
 mod lease;
 mod mesh;
 mod metrics;
@@ -159,6 +165,27 @@ async fn main() {
             std::env::var("QUEEN_SQS_CREDENTIALS").ok().as_deref(),
         ) {
             tracing::warn!(target: "sqs", "{msg}");
+        }
+        Some(bin)
+    } else {
+        None
+    };
+
+    // EMBEDDED MODE for the S3 sink (s3_sink.rs), resolved on exactly the same
+    // terms and in the same place as its two twins above. Its unfixable-by-retry
+    // cases are a binary that is not there, a binary that is there and not
+    // executable, and the destination the connector cannot default — a sink with
+    // no bucket is not a sink.
+    let s3_bin = if cfg.s3_sink.enabled {
+        let bin = s3_sink::resolve_bin(&cfg.s3_sink.bin, std::env::current_exe().ok().as_deref());
+        if let Err(e) = s3_sink::preflight(&bin, std::env::var("QUEEN_S3_BUCKET").ok().as_deref()) {
+            obs::fatal(e);
+        }
+        if let Some(msg) = s3_sink::auth_advisory(
+            cfg.auth.enabled,
+            std::env::var("QUEEN_TOKEN").ok().as_deref(),
+        ) {
+            tracing::warn!(target: "s3", "{msg}");
         }
         Some(bin)
     } else {
@@ -1050,6 +1077,14 @@ async fn main() {
         // (queue, partition, offset) triples that does not fit a query string.
         // Nothing about it is destructive: no lease, no cursor, no claim.
         .route("/api/v1/fetch", post(handlers::handle_fetch))
+        // PLAN_S3_SINK.md §5.1 — partition DISCOVERY, next to the fetch it
+        // feeds: the only route that lists partition NAMES, and the only way an
+        // entity-partitioned queue is readable over HTTP at all. Read-only and
+        // POST for the same reason as the fetch above: the request is a batch.
+        .route(
+            "/api/v1/partitions/changed",
+            post(handlers::handle_partitions_changed),
+        )
         .route("/api/v1/ack", post(handlers::handle_ack))
         .route("/api/v1/ack/batch", post(handlers::handle_ack_batch))
         .route("/api/v1/transaction", post(handlers::handle_transaction))
@@ -1399,6 +1434,22 @@ async fn main() {
         };
         sqs_facade::spawn(&cfg.sqs_facade, bin, url)
     });
+    // The S3 sink (s3_sink.rs), spawned HERE for the same reason and from the same
+    // bound address — and here the ordering is not belt and braces: this child
+    // calls the broker at boot rather than waiting for a client (its first act is
+    // discovery), so a spawn before the bind would burn a restart on a connection
+    // refused. Independent of the two facades: any subset of the three runs,
+    // including none.
+    let s3 = s3_bin.map(|bin| {
+        let url = match listener.local_addr() {
+            Ok(a) => s3_sink::loopback_url(&a),
+            Err(e) => {
+                tracing::warn!(target: "s3", error = %e, "listener local_addr failed; using the configured address for QUEEN_URL");
+                format!("http://{}", config::host_port(&cfg.bind_addr, &cfg.port))
+            }
+        };
+        s3_sink::spawn(&cfg.s3_sink, bin, url)
+    });
     // TCP_NODELAY on every accepted connection (doc 18 §10): the broker's
     // responses are small latency-sensitive JSON frames; Nagle would add up to
     // one delayed-ACK RTT per response. axum 0.7.9's Serve builder exposes this
@@ -1422,6 +1473,14 @@ async fn main() {
     // wait is bounded by its own grace window, and a broker that is exiting has
     // nothing better to do with the second one.
     if let Some(s) = sqs {
+        s.shutdown().await;
+    }
+    // ...and the S3 sink, LAST of the three and with the longest wait of the
+    // three: its grace is 30s by default, because the child is finishing an
+    // upload and the compare-and-set that commits it, not just closing sockets.
+    // Sequential for the same reason as above, and last so the two short waits
+    // are already spent by the time this one starts.
+    if let Some(s) = s3 {
         s.shutdown().await;
     }
     let pending = file_buffer.pending_count();

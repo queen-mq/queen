@@ -19,7 +19,7 @@ names it, never provisioned in advance.
 
 Queen speaks HTTP, but is also protocol-compatible with Kafka and SQS clients.
 
-[Try Queen on a hosted test instance](https://queenmq.cloud)
+[Free on Queen Cloud](https://queenmq.cloud). The same broker, hosted.
 </div>
 
 ---
@@ -77,6 +77,15 @@ copying them, so a Kafka producer and a Queen consumer can read the same message
 time with no connector in between:
 [Kafka in, Queen out](https://queenmq.com/use/full-examples/cross-protocol)
 ([code](examples/cross-protocol)).
+
+**The log lands in your data lake.** Since 1.5.0 a sink connector ships in the same image: it reads
+a queue through the broker's own API and writes JSONL or Parquet into any S3-compatible bucket,
+under a Hive layout DuckDB, Spark, Trino, ClickHouse and Snowflake read with nothing in front of
+them. One object per closed time window, committed exactly once, so a crash or a retry rewrites the
+same object rather than adding a second copy of a row. Windows are per queue, not per partition,
+which is what makes a queue with a million partitions one object an hour instead of a million
+objects: [reference/s3](https://queenmq.com/reference/s3) and
+[deploy/s3](https://queenmq.com/deploy/s3).
 
 **One binary, no sidecars.** Stateless, and curl is a first-class client · six SDKs (JavaScript,
 Python, Go, Rust, C++, PHP/Laravel) plus `queenctl` · a dashboard served by the same binary on the
@@ -262,8 +271,8 @@ proxy and two brokers in [Compose](https://queenmq.com/deploy/compose).
 
 - **[The model](https://queenmq.com/use/model)**: queues, partitions, groups, offsets, leases, retention.
 - **[Transactions](https://queenmq.com/reference/http/transaction)**: bundle shape, rollback causes, the exactly-once boundary.
-- **[KV](https://queenmq.com/use/kv)** · **[Timers](https://queenmq.com/use/timers)** · **[Streams](https://queenmq.com/use/streams)** · **[Ephemeral](https://queenmq.com/use/ephemeral)**: beyond push and pop.
-- **[Deploy](https://queenmq.com/deploy)** · [PostgreSQL](https://queenmq.com/deploy/postgres) · [HA](https://queenmq.com/deploy/ha) · [Kubernetes](https://queenmq.com/deploy/kubernetes) · [Kafka](https://queenmq.com/deploy/kafka) · [SQS](https://queenmq.com/deploy/sqs).
+- **[KV](https://queenmq.com/use/kv)** · **[Timers](https://queenmq.com/use/timers)** · **[Streams](https://queenmq.com/use/streams)** · **[Ephemeral](https://queenmq.com/use/ephemeral)** · **[S3 lake](https://queenmq.com/reference/s3)**: beyond push and pop.
+- **[Deploy](https://queenmq.com/deploy)** · [PostgreSQL](https://queenmq.com/deploy/postgres) · [HA](https://queenmq.com/deploy/ha) · [Kubernetes](https://queenmq.com/deploy/kubernetes) · [Kafka](https://queenmq.com/deploy/kafka) · [SQS](https://queenmq.com/deploy/sqs) · [S3 sink](https://queenmq.com/deploy/s3).
 - **[Multi-tenant](https://queenmq.com/deploy/multi-tenant)** · [Proxy](https://queenmq.com/deploy/proxy) · [Isolation](https://queenmq.com/reference/multi-tenant/isolation).
 - **[Internals](https://queenmq.com/internals)**: storage model, life of a push and a pop, dedup, retention, mesh.
 - **[Benchmarks](https://queenmq.com/benchmarks)** · [method and rig](https://queenmq.com/benchmarks/method) · [comparison](https://queenmq.com/start/compare).

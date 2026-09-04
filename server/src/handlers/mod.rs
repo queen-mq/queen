@@ -511,6 +511,11 @@ mod timers;
 // pop path's claim machinery nor its response shape, and the one thing it does
 // borrow (the payload splice) is imported by name.
 mod fetch;
+// PLAN_S3_SINK.md §5.1 — `POST /api/v1/partitions/changed`, the partition
+// DISCOVERY surface. Its own module and not another handler in `fetch`: it
+// shares neither that path's segment machinery nor its long poll, and it is the
+// only route in the file whose entire body is composed by the SQL.
+mod partitions;
 mod queues;
 mod messages;
 mod traces;
@@ -531,6 +536,7 @@ pub use kv::*;
 pub use ephemeral::*;
 pub use timers::*;
 pub use fetch::*;
+pub use partitions::*;
 pub use queues::*;
 pub use messages::*;
 pub use traces::*;

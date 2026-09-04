@@ -766,6 +766,107 @@
         }
       }
     },
+    "/api/v1/partitions/changed": {
+      "post": {
+        "operationId": "partitions_changed",
+        "tags": [
+          "Other"
+        ],
+        "summary": "POST /api/v1/partitions/changed",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          },
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/partitions.rs::handle_partitions_changed",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "entries": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "queue": {
+                          "type": "string"
+                        },
+                        "since": {
+                          "type": "string"
+                        },
+                        "after": {
+                          "type": "string"
+                        },
+                        "limit": {
+                          "type": "integer",
+                          "format": "int64"
+                        }
+                      },
+                      "required": [
+                        "queue"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "x-queen-schema": "derived",
+          "x-queen-schema-source": "ChangedBody"
+        }
+      }
+    },
     "/api/v1/ack": {
       "post": {
         "operationId": "ack",

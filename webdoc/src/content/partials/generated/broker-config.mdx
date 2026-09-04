@@ -10,7 +10,7 @@ description: "Every environment variable the broker reads, with the default the 
       - server/src/fusion.rs (fusion-only overrides)
 */}
 
-The broker is configured entirely through environment variables: 167 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
+The broker is configured entirely through environment variables: 170 of them, listed below with the defaults the code actually applies. Booleans go through one strict parser: an unparseable value is a fatal boot error, while unset and empty both fall back to the default.
 
 Two columns record what a variable falls back to. **Also read as** is an older name for the same setting: either name configures the same thing, and the row's name wins when both are set. **Default inherited from** is a different knob whose value this one starts at when it is unset: setting that knob moves this variable and everything else that inherits from it, while setting this variable moves only this one.
 
@@ -242,6 +242,9 @@ Two columns record what a variable falls back to. **Also read as** is an older n
 | `QUEEN_KAFKA_SHUTDOWN_GRACE_MS` | integer | `5000` |  |  |
 | `QUEEN_RETENTION_DUE_CAP` | integer | `0` |  |  |
 | `QUEEN_RETENTION_SAFETY_WALK_MS` | integer | `86_400_000` |  |  |
+| `QUEEN_S3_BIN` | string | `(empty)` |  |  |
+| `QUEEN_S3_EMBEDDED` | boolean | `false` |  |  |
+| `QUEEN_S3_SHUTDOWN_GRACE_MS` | integer | `30000` |  |  |
 | `QUEEN_SQS_BIN` | string | `(empty)` |  |  |
 | `QUEEN_SQS_EMBEDDED` | boolean | `false` |  |  |
 | `QUEEN_SQS_SHUTDOWN_GRACE_MS` | integer | `5000` |  |  |

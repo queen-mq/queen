@@ -524,6 +524,10 @@ pub struct Config {
     // EMBEDDED MODE for the SQS/SNS wire facade (server/src/sqs_facade.rs). Its
     // twin, and independent of it: same default-off, same silence when off.
     pub sqs_facade: SqsFacadeConfig,
+    // EMBEDDED MODE for the S3 / data-lake sink connector (server/src/s3_sink.rs).
+    // The third of the three, on the same terms: default-off, silent when off, and
+    // independent of the other two.
+    pub s3_sink: S3SinkConfig,
     // Wildcard candidate hot-list (19-wildcard-hotlist.md, server/src/hotlist.rs).
     // Broker-side candidate selection for wildcard pops. Default ON;
     // QUEEN_HOTLIST=0 (or =false) reverts to the legacy per-pop SQL candidate
@@ -1025,6 +1029,58 @@ impl SqsFacadeConfig {
     }
 }
 
+/// Embedded queen-s3 (server/src/s3_sink.rs): the S3 / data-lake sink connector
+/// run as a supervised CHILD PROCESS of this broker, talking to it over loopback
+/// HTTP. The third twin of [`KafkaFacadeConfig`] and [`SqsFacadeConfig`], knob for
+/// knob, and independent of both: a deployment may run any subset of the three,
+/// and the default is none.
+///
+/// Three knobs, and only the first one decides anything: with `enabled` false the
+/// supervisor is never constructed, no child is spawned, and `/status` renders the
+/// two fields it always did. The CHILD's own configuration is not repeated here —
+/// it inherits this process's environment, so every `QUEEN_S3_*` variable the sink
+/// documents (`QUEEN_S3_QUEUES`, `_ENDPOINT`, `_REGION`, `_BUCKET`, `_PREFIX`,
+/// `_ACCESS_KEY`, `_SECRET_KEY`, `_FORMAT`, `_COMPRESSION`, `_LAYOUT`, `_ALIGN`,
+/// `_TARGET_MB`, `_MAX_WINDOW_MS`, `_START`, `_SSE*`, `_LISTEN`, the sizing and
+/// discovery timings) forwards verbatim and has exactly the meaning it has when
+/// the sink runs on its own.
+#[derive(Clone)]
+pub struct S3SinkConfig {
+    pub enabled: bool,
+    /// Empty means "the `queen-s3` file next to the broker executable", which
+    /// is resolved from `current_exe` at boot rather than written down here: a
+    /// path derived from argv is not a configuration default.
+    pub bin: String,
+    /// How long a stopping child has between SIGTERM and SIGKILL.
+    pub shutdown_grace_ms: u64,
+}
+
+impl S3SinkConfig {
+    fn from_env() -> S3SinkConfig {
+        S3SinkConfig {
+            enabled: env_bool("QUEEN_S3_EMBEDDED", false),
+            bin: env_str("QUEEN_S3_BIN", ""),
+            // 30s, and NOT the facades' 5s — the one number in this triple that
+            // is not the twins'. A stopping facade is closing sockets; a stopping
+            // SINK has an open window to finish: buffered records, an upload in
+            // flight, and the KV compare-and-set that turns that upload into a
+            // committed window. Cut before the commit, nothing is lost (the next
+            // start rewrites the window from the committed pointer) but the work
+            // is repeated, so the grace is sized to let the common close finish
+            // instead. Floored at 100ms because a grace of zero is a SIGKILL with
+            // extra steps.
+            //
+            // Unlike QUEEN_SQS_SHUTDOWN_GRACE_MS this variable has exactly ONE
+            // reader — the supervisor. The sink sets no deadline on itself: it
+            // catches SIGTERM, finishes its window and exits, so this number is
+            // not a deadline the two sides agree on, it IS the child's deadline,
+            // enforced from outside by the SIGKILL that follows it. See the "One
+            // variable, ONE reader" section of server/src/s3_sink.rs.
+            shutdown_grace_ms: env_int("QUEEN_S3_SHUTDOWN_GRACE_MS", 30000).max(100) as u64,
+        }
+    }
+}
+
 // C++ `get_env_string` parity (config.hpp:29-33): a present-but-empty env var
 // returns "" verbatim; only a genuinely-unset var falls back to the default.
 // (RUSTFIX item 6 — the old `.filter(|v| !v.is_empty())` treated ""` as unset,
@@ -1395,6 +1451,23 @@ pub fn log_effective(cfg: &Config) {
             "config: sqs_facade"
         );
     }
+    // Embedded queen-s3, on the same terms as the two above: printed ONLY when it
+    // is on, so a broker without the feature reads exactly as it read before the
+    // feature existed. The sink prints its own resolved configuration — bucket,
+    // prefix, queues, format, window sizing — and that line arrives in this same
+    // log stream tagged `s3`.
+    if cfg.s3_sink.enabled {
+        tracing::info!(
+            target: "boot",
+            bin = %if cfg.s3_sink.bin.trim().is_empty() {
+                "<beside the broker binary>".to_string()
+            } else {
+                cfg.s3_sink.bin.clone()
+            },
+            shutdown_grace_ms = cfg.s3_sink.shutdown_grace_ms,
+            "config: s3_sink"
+        );
+    }
     tracing::info!(
         target: "boot",
         encryption_key = %mask(&env_str("QUEEN_ENCRYPTION_KEY", "")),
@@ -1758,6 +1831,7 @@ pub fn load() -> Config {
         file_buffer: FileBufferConfig::from_env(),
         kafka_facade: KafkaFacadeConfig::from_env(),
         sqs_facade: SqsFacadeConfig::from_env(),
+        s3_sink: S3SinkConfig::from_env(),
         // HOT-LIST default ON (operator decision 2026-07-24 after the VM A/B:
         // candidate scans gone from the profile, ingress lag flat, combo with
         // ack fusion beats the scan path on total delivered even on a slow

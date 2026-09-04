@@ -29,6 +29,7 @@ pub mod ephemeral;
 pub mod error;
 pub mod fetch;
 pub mod kv;
+pub mod partitions;
 pub mod pop;
 pub mod push;
 pub mod streams;
@@ -57,6 +58,16 @@ pub use fetch::{
 pub use kv::{
     Expiry, KvDeleteBody, KvOpKind, KvOperation, KvPutBody, KvReason, KvRequest, KvResponse,
     KvResult, KvRow,
+};
+// `partitions::ERR_UNKNOWN_TOPIC_OR_PARTITION` is deliberately NOT re-exported
+// here: it is the same marker, spelled the same way and carrying the same
+// meaning, as the one `fetch` already exports at this level — the broker
+// answers one string for "no such queue for this tenant" on both routes, and a
+// second root-level constant would invite a caller to believe there are two
+// conditions. Reach it as `partitions::ERR_UNKNOWN_TOPIC_OR_PARTITION` when the
+// module context matters.
+pub use partitions::{
+    ChangedEntry, ChangedPartition, ChangedRequest, ChangedResponse, ChangedResult, ERR_BAD_CURSOR,
 };
 pub use pop::{AutopilotEcho, Message, PopParams, PopResponse, SubscriptionMode};
 pub use push::{PushItem, PushRequest, PushResult, PushStatus};

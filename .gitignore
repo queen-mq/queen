@@ -49,3 +49,6 @@ my-docs
 # Local GHCR publish button (wraps the tracked build.sh). Untracked so the
 # credential flow and the flag defaults stay a personal choice.
 .build-images-ghcr.sh
+
+# Python bytecode caches (compat lanes, harness scripts)
+__pycache__/

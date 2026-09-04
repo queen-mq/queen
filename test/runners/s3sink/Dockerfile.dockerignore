@@ -1,0 +1,28 @@
+# Sidecar ignore (buildx honors <dockerfile>.dockerignore) — keeps the repo-root
+# build context light. This runner COPYs only connectors/queen-s3 and two files
+# under test/runners; everything else is weight on every build.
+#
+# `**/target` is the load-bearing line: connectors/queen-s3/target is a couple of
+# gigabytes on a developer machine and would be tarred into the context on every
+# build, then thrown away by the stage that rebuilds it anyway.
+.git
+.claude
+server
+proxy
+protocols
+app
+webapp
+webdoc
+clients
+crates
+examples
+assets
+helm
+helm_v1
+helm_queen
+benchmark-queen
+**/target
+**/node_modules
+**/.venv
+**/__pycache__
+**/*.log

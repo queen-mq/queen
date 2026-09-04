@@ -1,6 +1,6 @@
 ---
 title: Queues and resources
-description: "POST /api/v1/configure and the /api/v1/resources/* listings: every enforced option, its default, and what reads it."
+description: "POST /api/v1/configure, the /api/v1/resources/* listings and the partition-discovery route: every enforced option, its default, and what reads it."
 type: reference
 tier: use
 sidebar:
@@ -8,6 +8,8 @@ sidebar:
   label: Queues
 sourceOfTruth:
   - server/src/handlers/queues.rs
+  - server/src/handlers/partitions.rs
+  - server/sql/procedures/033_log_partitions_changed.sql
   - server/src/main.rs
   - server/src/auth.rs
   - server/src/db.rs
@@ -111,9 +113,12 @@ can predict the behaviour change from setting it.
 | `maxWaitTimeSeconds` | `0` | **Deletes whole segments older than the cutoff for every consumer group, in-flight leases included.** Independent of `retentionEnabled`. See below. |
 | `encryptionEnabled` | `false` | Stored on `queen.queues` and read at push time; payloads are stored as an encrypted envelope when a key is configured. |
 | `dedupWindowSeconds` | `3600` (seconds) | Written to `queen.queues.dedup_window_seconds`. The push path probes `queen.log_txns` within this window before allocating an offset. `0` disables the probe entirely. |
+| `retentionSinkHold` | `""` (off) | The name of an S3 sink that has to keep up with this queue. Retention will not delete a segment that sink has not committed to its lake yet. Must match `[A-Za-z0-9._-]{0,64}`. See below. |
+| `retentionSinkHoldMaxSeconds` | `604800` (7 days) | The ceiling on that hold. Must be between `60` and `31536000`. |
 
 Values are stored as given. The broker does not validate ranges, apart from the
-SQL clamp on `minPopWaitTime` and a `max(0)` floor on `dedupWindowSeconds`.
+SQL clamp on `minPopWaitTime`, a `max(0)` floor on `dedupWindowSeconds`, and the
+two sink-hold options, which are **rejected** rather than clamped.
 
 <Aside type="note">
 The effective `leaseTime` depends on how the queue came to exist. A queue created
@@ -146,6 +151,41 @@ including groups holding a live lease on them. The SQL calls this data loss by
 design. A cursor left below the new log start resumes at the next existing
 offset; the pop scan tolerates the gap. Use it only where dropping stale work is
 the intent.
+
+#### The sink hold is rejected out of range, never clamped
+
+`retentionSinkHold` and `retentionSinkHoldMaxSeconds` are the only two options
+`012_configure.sql` refuses. A name outside `[A-Za-z0-9._-]{0,64}`, or a cap
+outside 60 to 31,536,000 seconds, answers an error and **the queue keeps the
+configuration it had**; nothing partial is written. The difference from the
+clamps above is deliberate, because these two govern *deletion*: a silently
+clamped `0` would floor the hold at a minute ago and hand the lake a hole, and a
+silently clamped `999999999` would park retention for thirty-one years. The
+character set is narrow for a second reason: the name is the middle segment of
+the key/value key the retention cycle probes
+(`s3:<sink>:<queue>:committed`), built by concatenation, so a name containing
+`:` would compose the same key as a different (sink, queue) pair.
+
+With a hold set, the two segment-deleting cutoffs are floored at
+
+```text
+GREATEST(committed window end - 60 s, now() - retentionSinkHoldMaxSeconds)
+```
+
+Both halves earn their place. The minute of slack covers the sub-second skew of a
+watermark-derived bound, paid in kept bytes and never in lost ones. The cap is
+what makes the option safe to ship: without it a stopped sink is unbounded
+retention, and it also means the hold works from the moment it is set, before the
+sink has committed anything, because a queue with no pointer yet keeps everything
+younger than the cap.
+
+Two limits worth knowing. The hold floors the cutoffs that delete **segments**,
+and deliberately not the dedup-hash purge or the `maxWaitTimeSeconds` eviction:
+those delete by different rules, and a copy in a lake says nothing about when a
+dedup hash may go. And the pointer read degrades rather than fails: if it cannot
+be read, every held queue falls back to its cap-only floor, because that value is
+tenant-writable and a malformed one must never stop deletion cluster-wide. The
+operator's view of all this is on [the S3 sink page](/deploy/s3#the-lag-slo-and-the-retention-rule).
 
 ### Response
 
@@ -399,6 +439,166 @@ also changes meaning between the branches: `queen.stats` namespace rows for the
 default tenant, `COUNT(DISTINCT namespace)` for a tenant.
 </Aside>
 
+## POST /api/v1/partitions/changed
+
+The only route that lists partition **names**. Everything else answers a per-queue
+count, which is enough for a queue whose partitions are numbered `0..N-1` and
+useless for one partitioned by entity, where the names are order ids or customer
+ids and nothing enumerates them. It is the discovery half of what
+`POST /api/v1/fetch` is the read half of, and it answers `lastOffset` and
+`logStart` alongside each name so a caller can start fetching without a second
+round trip.
+
+Like the fetch, it is **not a pop**: no lease, no cursor, no claim, nothing
+written anywhere. It reads two tables, `queen.queues` and `queen.log_partitions`,
+plus `pg_stat_activity` for the watermark below. Two callers asking the same
+question get the same answer and neither disturbs a consumer group. Its access
+level is `read-only`, and it takes **no admission permit**: this is one indexed
+scan of a small table, so the connection pool is the backpressure and the
+statement timeout is the ceiling.
+
+The one client that exists for it today is [the S3 sink](/deploy/s3).
+
+### Request
+
+```json
+{ "entries": [ { "queue": "orders",
+                 "since": "2026-09-04T10:00:00.000000Z",
+                 "after": "t|1788515700123456|cust-0419",
+                 "limit": 1000 } ] }
+```
+
+| Field | Required | What it is |
+| --- | --- | --- |
+| `entries` | yes | At most **64**. An entry is a *queue*, not a partition, and each one can cost 1000 rows. More than 64 is a `400`, not a truncation: silently dropping entries would leave the caller waiting for queues the broker never looked at. |
+| `queue` | yes | The queue name. Empty is a `400`, because an empty name can only come back as unknown and would read as "this queue was deleted". |
+| `since` | no | Absent or `null` enumerates the queue's whole partition set, ordered by name. Present returns only partitions written at or after it, ordered by `(lastWriteAt, name)`. It is parsed by PostgreSQL, so the accepted spellings are the ones every other timestamp on this wire accepts; one it cannot parse is a `400` naming the literal. |
+| `after` | no | The opaque cursor from a previous answer's `next`, echoed back unmodified. |
+| `limit` | no | Partitions for this entry. Default 1000, clamped to 1 to 1000, never rejected. A caller that asks for more learns the real bound from `next` being non-null. |
+
+### The answer
+
+```json
+{ "safeTime": "2026-09-04T10:04:57.412331Z",
+  "safeTimeDegraded": false,
+  "entries": [ { "queue": "orders",
+                 "partitions": [ { "name": "cust-0420",
+                                   "lastOffset": 1811,
+                                   "logStart": 1400,
+                                   "lastWriteAt": "2026-09-04T10:04:12.000000Z" } ],
+                 "next": null } ] }
+```
+
+`lastOffset` is the allocator's last offset, so the high watermark is
+`lastOffset + 1`. `logStart` is the oldest offset retention still holds.
+Timestamps are rendered UTC at microsecond precision.
+
+`next` is non-null **only when the page filled**, which is the rule to page on: a
+short page is the end of the sweep. The cost is one extra empty round trip when
+the partition count is an exact multiple of the limit; a look-ahead row would buy
+nothing a caller can act on.
+
+**The cursor is opaque and mode-tagged. Do not parse it.** Its shape is the
+broker's, and it carries which kind of sweep produced it, so a cursor from an
+enumeration sent with a `since` (or the reverse) is answered `BAD_CURSOR` for that
+entry rather than paging silently against the wrong column. Restarting quietly
+would loop a paging client for ever on its own first page.
+
+Two per-entry errors replace `partitions` and `next`:
+
+| `error` | When |
+| --- | --- |
+| `UNKNOWN_TOPIC_OR_PARTITION` | The queue does not exist **for this tenant**. Byte-identical to the answer for a queue that exists nowhere, so this route cannot be used to discover another tenant's queue names. |
+| `BAD_CURSOR` | The `after` cursor does not belong to the sweep it was sent with. |
+
+**Paging is sound because `lastWriteAt` only moves up.** The push path quantizes
+it to at most one real change per second per partition and never writes it
+backwards, so a row bumped between two pages of one sweep moves *forward* past
+the cursor and is seen a second time on a later page. Seen twice is free, since
+the caller re-reads bounds it already had; missed would be a silent hole in
+whatever the caller is mirroring. That asymmetry is the whole argument.
+
+### `safeTime`
+
+Every answer carries a watermark, and it is the reason the route exists in this
+shape rather than as a listing:
+
+**`safeTime` is an instant such that no segment with an earlier `created_at` can
+still become visible.** A segment's `created_at` is stamped while the partition
+allocator's row lock is held, so it is at or after the inserting transaction's
+`xact_start`; the oldest `xact_start` among in-transaction sessions is therefore
+a floor under every `created_at` still to arrive, and anything strictly below it
+is settled. A guard of five seconds is subtracted, covering the skew between one
+backend's snapshot of `pg_stat_activity` and another's.
+
+That is what lets a reader treat a time range as a **closed set**: re-reading
+`[A, B)` for `B` at or below `safeTime` yields exactly the same rows, which is
+what makes a reader's retry idempotent without naming offsets.
+
+Three consequences worth knowing:
+
+- An **idle** session pins nothing, because its `xact_start` is null.
+- A **long read-only** transaction, a stats refresh for instance, pins `safeTime`
+  and holds the watermark back for its own duration. That is latency, never
+  incorrectness.
+- **HA needs nothing.** `pg_stat_activity` is cluster-wide, so a second broker's
+  sessions pin correctly with no mesh involvement.
+
+`safeTime` is computed once per call, before any partition row is read, and it is
+answered even for an **empty** `entries` array: a caller whose queues are all idle
+still needs the watermark, and an empty batch is how it asks for one.
+
+#### The order of that first read is load-bearing, and so is `VOLATILE`
+
+`queen.log_partitions_changed_v1` writes nothing, so `STABLE` is what its body
+looks like it deserves. `STABLE` is wrong here, and the reason has nothing to do
+with writes. A `STABLE` function's statements all run under the snapshot the
+*calling* query took, but `pg_stat_activity` is not read through a snapshot at
+all: it reports live backend state. The two therefore observe the database at
+different instants, and a transaction can slip through the gap: the caller takes
+its snapshot while a long write transaction `T` is in flight, `T` commits, the
+body reads `pg_stat_activity` and finds nothing to hold the watermark back, and
+the partition scan still runs under the older snapshot that cannot see `T`'s row.
+`T` is then in neither the enumeration nor the watermark, and a sink can close a
+window above records it was never told about. Silent loss, of exactly the rows the
+protocol exists not to lose. It was found by the engine's randomized test, not by
+reading the code.
+
+`VOLATILE` closes it, because a `VOLATILE` function takes a **fresh snapshot for
+each statement of its body** instead of inheriting the caller's. Combined with
+reading `pg_stat_activity` **first**, before the queue is resolved and before any
+partition is scanned, both cases are covered: a partition whose transaction
+committed before the scan's snapshot is enumerated and read normally, and one that
+had not committed by then either was already in flight at the activity read (so its
+`xact_start` is inside the minimum) or had not started (so its `xact_start` is
+later than the read). Either way its records are at or above `safeTime` and belong
+to a later window. Reading the activity *after* the scan, or putting any table read
+before it, re-opens the gap; the five second guard is belt and not the argument.
+
+One precondition holds it up, and the broker meets it: fresh-snapshot-per-statement
+is READ COMMITTED behaviour. A caller that wrapped this call in an explicit
+REPEATABLE READ or SERIALIZABLE transaction would pin one snapshot for the whole
+transaction and reinstate the hole, `VOLATILE` or not. The broker issues it as a
+single autocommit statement at the default isolation.
+
+<Aside type="caution">
+**`safeTimeDegraded: true` means the honest watermark was unknowable.**
+PostgreSQL masks `pg_stat_activity` across roles: for a session owned by a role
+the reader is not a member of, and without `pg_read_all_stats`, `state` and
+`xact_start` come back null. Such a row contributes nothing to a minimum while
+being exactly the kind of session that could hold a write transaction open, so a
+minimum over the visible rows would *overestimate* the safe instant, which is the
+one direction that loses data.
+
+Masked rows are therefore counted, and one is enough: the answer falls back to
+`now()` minus `QUEEN_FETCH_SAFE_FLOOR_MS` (default 30,000 ms, which must exceed
+any write statement's timeout) and says so. Degraded is correct and usable; it
+only costs lag. Granting `pg_read_all_stats` to the broker's role is what buys the
+lag back, and on PostgreSQL 16 without it the degrade is permanent rather than
+occasional, because `backend_type` is masked too. See
+[the S3 sink's deploy page](/deploy/s3#grant-pg_read_all_stats-to-the-broker-role).
+</Aside>
+
 ## Access levels
 
 Access levels are a role *set*, not a ladder. A `WriteOnly` token passes
@@ -415,6 +615,7 @@ listings.
 | `GET /api/v1/resources/overview` | read-only |
 | `GET /api/v1/resources/namespaces` | read-only |
 | `GET /api/v1/resources/tasks` | read-only |
+| `POST /api/v1/partitions/changed` | read-only |
 
 Every route here resolves a tenant from the request, so with
 `QUEEN_TENANCY_HEADER` on they are scoped to the caller's tenant. The full route

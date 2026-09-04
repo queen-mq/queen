@@ -14,6 +14,11 @@
 #            conflation         -> the PLAN_CONFLATION.md §7.3 end-to-end
 #                                  scenarios at the raw HTTP wire (no SDK),
 #                                  `single` only
+#            s3sink             -> the PLAN_S3_SINK.md §9 end-to-end scenarios:
+#                                  the queen-s3 connector, a versitygw gateway
+#                                  and a DuckDB reader, all inside the runner
+#                                  image, against the stack's broker.
+#                                  `single` + `tenanted` (the parity rule).
 #
 #   topologies:
 #     single       1 PG + 1 broker                       (QUEEN_TENANCY_HEADER off)
@@ -38,6 +43,7 @@
 #   test/run.sh --suite tenancy        # two-tenant isolation over the HA pair
 #   test/run.sh --suite http           # every kv/timer route, no SDK in the way
 #   test/run.sh --suite conflation     # PLAN_CONFLATION §7.3 e2e, no SDK in the way
+#   test/run.sh --suite s3sink         # PLAN_S3_SINK §9 e2e: sink + versitygw + DuckDB
 #   test/run.sh --no-build-broker      # reuse an existing queen:test
 #   test/run.sh -j 3                   # cap parallelism (default: 4)
 #   test/run.sh --keep                 # leave stacks up for debugging
@@ -45,8 +51,14 @@
 # Env: QUEEN_TEST_MAX_PARALLEL overrides -j.
 set -uo pipefail
 
-ALL_SUITES="js go py cli cpp laravel rust-client rust mesh tenancy http conflation"
+ALL_SUITES="js go py cli cpp laravel rust-client rust mesh tenancy http conflation s3sink"
 CLIENT_SUITES="js go py cli cpp laravel rust-client"
+# Suites whose `single` and `tenanted` lanes must agree (the tenancy parity gate
+# at the bottom). Every client suite, plus s3sink: the sink reads through fetch
+# and partitions/changed and commits through kv, and all three take the tenant
+# from the broker's own header handling — so a divergence between the flag-off
+# and default-tenant lanes is exactly the regression the gate exists to catch.
+PARITY_SUITES="$CLIENT_SUITES s3sink"
 
 SUITES="$ALL_SUITES"
 TOPOS="single ha tenanted"
@@ -69,7 +81,7 @@ while [ $# -gt 0 ]; do
     --no-build)         BUILD_RUNNERS=0; BUILD_BROKER=0; shift;;
     -j)       MAXP="$2"; shift 2;;
     --keep)   KEEP=1; shift;;
-    -h|--help) sed -n '2,41p' "$0"; exit 0;;
+    -h|--help) sed -n '2,49p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -155,6 +167,15 @@ for s in $SUITES; do
     # — none of which changes shape across the mesh, and the ha lanes of the
     # client suites already exercise the transport.
     add_job conflation single
+  elif [ "$s" = "s3sink" ]; then
+    # PLAN_S3_SINK.md §9. `single` and `tenanted` only: the sink is a client of
+    # three routes whose tenant handling is the subject of the parity rule, and
+    # the mesh adds nothing to it — window commits are per queue and go through
+    # one KV key pair, so a second broker exercises the transport and not the
+    # protocol. The runner carries the sink binary, the S3 gateway and the
+    # reader, so the stack is the same pg + broker every other suite runs.
+    want_topo single   && add_job s3sink single
+    want_topo tenanted && add_job s3sink tenanted
   elif [ "$s" = "rust" ]; then
     add_job rust unit          # no stack
   fi
@@ -280,7 +301,7 @@ tally() {  # logfile -> comparable pass tally, or "" if the suite prints none
 }
 
 parity_checked=0; parity_bad=0
-for s in $CLIENT_SUITES; do
+for s in $PARITY_SUITES; do
   want_suite "$s" || continue
   fo="$LOGDIR/$s-single.code"; fn="$LOGDIR/$s-tenanted.code"
   [ -f "$fo" ] && [ -f "$fn" ] || continue

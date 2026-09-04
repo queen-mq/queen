@@ -1867,6 +1867,54 @@ pub async fn log_fetch_changed(
     Ok(row.get(0))
 }
 
+// ------------------------------------------------- partition discovery
+// PLAN_S3_SINK.md §5.1 — the batched, paged partition listing behind
+// `POST /api/v1/partitions/changed` (queen.log_partitions_changed_v1,
+// 033_log_partitions_changed). Reads queen.queues and queen.log_partitions and
+// nothing else; takes no lease, moves no cursor and never touches
+// queen.log_segments, so it is a pure read in the class of the fetch it feeds.
+//
+// Returns the SP's whole answer as text — `{"safeTime":..,
+// "safeTimeDegraded":.., "entries":[..]}` — which the handler passes through
+// verbatim: the SQL composes the entire body, so there is nothing to re-render
+// and no second spelling of the field names to keep in step.
+//
+// `since` is bound as TEXT and cast to TIMESTAMPTZ inside the statement on
+// purpose (`$2::text[]::timestamptz[]`): PostgreSQL is the one parser for every
+// timestamp on this wire, so the accepted spellings cannot drift from the rest
+// of the API, and a value it rejects arrives as SQLSTATE 22007/22008, which the
+// handler answers 400. `$7::text::uuid` pins $7 to TEXT so the tenant &str
+// binds, the same idiom the fetch pair uses.
+#[allow(clippy::too_many_arguments)]
+pub async fn log_partitions_changed(
+    client: &deadpool_postgres::Client,
+    queues: &[String],
+    since: &[Option<String>],
+    after: &[Option<String>],
+    limits: &[i32],
+    guard_s: i32,
+    floor_s: i32,
+    // Track B (§5): scopes the queue resolve, so a queue of another tenant
+    // answers the same 'UNKNOWN_TOPIC_OR_PARTITION' as one that does not exist.
+    tenant: &str,
+) -> Result<String, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached(
+            "SELECT queen.log_partitions_changed_v1(\
+                 $1,$2::text[]::timestamptz[],$3,$4,$5::int,$6::int,$7::text::uuid)::text",
+        )
+        .await?;
+    let row = client
+        .query_one(
+            &stmt,
+            &[
+                &queues, &since, &after, &limits, &guard_s, &floor_s, &tenant,
+            ],
+        )
+        .await?;
+    Ok(row.get(0))
+}
+
 // Namespace/task discovery pop — GET /api/v1/pop (no queue in path). Wildcard-pops
 // across every log queue whose queen.queues row matches the namespace/task
 // filter, returning the SAME {"partitions":[...]} shape as pop_wildcard. Empty
@@ -2407,6 +2455,152 @@ pub async fn kv_apply(
         .await?;
     let row = client.query_one(&stmt, &[&ops_json, &tenant, &in_wire]).await?;
     Ok(row.get(0))
+}
+
+// ------------------------------------------------------- retention sink hold
+// PLAN_S3_SINK.md §5.3 (decision D5) — the ONE statement the retention cycle
+// runs against queen.kv, and the reason it is HERE rather than in retention.rs:
+// this file is the only layer allowed to name that table (§13.1, the rule
+// `tests/kv_handler_isolation.rs` greps for), and the tenant it binds must come
+// from a table and never from anything a caller can influence. It does: the
+// join is `k.tenant_id = q.tenant_id`, the queue row's OWN tenant, so a sink
+// pointer of tenant A can never floor tenant B's retention.
+//
+// WHAT IT READS. The S3 sink commits one KV document per (sink, queue) —
+// namespace `queen-s3`, key `s3:<sink>:<esc queue>:committed` (§4.3) — whose
+// `tEnd` is the EXCLUSIVE upper bound of segment `created_at` the lake already
+// holds. `<esc queue>` is the queue name percent-encoded outside
+// `[A-Za-z0-9._-]` with uppercase hex, byte by byte, which is what the
+// generate_series/get_byte block rebuilds: the same function and the same set as
+// `connectors/queen-s3/src/layout.rs::escape` and the Kafka offset store's
+// `queen.kv_qk_unescape` inverts (010_log_admin). It is not decoration — a queue
+// named `a:b` would otherwise compose the same key as another (sink, queue)
+// pair, and a queue named `a/b` would leave its prefix.
+//
+// LOCK ORDER (024_kv.sql:15-30). The rule is about ACQUISITION order: nothing
+// may take a lock on queen.kv after taking one on queen.queues,
+// log_partitions or log_consumers. This is a PLAIN SELECT — it takes no row
+// lock at all — and retention.rs runs it as the FIRST statement of the
+// work-list transaction, before the work list touches log_partitions. Adding a
+// `FOR UPDATE` here, or moving the call after the work list, breaks the rule.
+//
+// TOTALITY. `value` is tenant-writable JSONB, so `tEnd` can be anything at all.
+// The regex admits only the sink's own shape — ISO-8601 microseconds with a
+// literal `Z`, which also removes every timezone ambiguity from the cast — and
+// anything else reads as NULL, i.e. as "this sink has not committed", which is
+// the FAIL-SAFE direction: the queue then keeps everything younger than its cap
+// instead of losing the floor. (retention.rs covers the residual case — a
+// well-shaped but impossible date, which casts with 22008 — by treating a
+// failed hold read as "no pointers known", same direction.)
+/// Seconds subtracted from a sink's committed `tEnd` before it becomes a
+/// retention floor (PLAN_S3_SINK.md §5.3's `slack`). `tEnd` is an EXCLUSIVE
+/// bound taken from `safeTime`, so a segment stamped a hair below it can still
+/// be in flight; one minute is far wider than the sub-second skew that costs,
+/// and it is paid in kept bytes, never in lost ones.
+///
+/// Spelled into TWO statements — [`SINK_HOLD_SQL`] here (which reports the
+/// floor for the log line) and `retention::work_list_sql` (which applies it to
+/// the cutoffs) — so it is a const, and `the_sink_hold_slack_is_one_number`
+/// pins both sites to it.
+pub const SINK_HOLD_SLACK_SECS: i64 = 60;
+
+/// `AS MATERIALIZED` IS LOAD-BEARING, MEASURED, and the only non-obvious thing
+/// in this statement. A CTE referenced once is INLINED since PostgreSQL 12, and
+/// inlining flattens the built key back into the join condition, where the
+/// planner will no longer put it in the index cond:
+///
+/// ```text
+///   inlined:      Index Cond: (tenant_id = .. AND namespace = 'queen-s3')
+///                 Join Filter: (k.key = ('s3:' || .. || string_agg(..) || ..))
+///   materialized: Index Cond: (tenant_id = .. AND namespace = 'queen-s3'
+///                              AND key = h.kv_key)
+/// ```
+///
+/// The first form reads EVERY pointer the tenant has in the namespace once per
+/// held queue — three rows per (sink, queue) by §4.3, so it is quadratic in the
+/// number of queues feeding a sink, every cycle. The second is one PK probe per
+/// held queue. Both were run on PG 16 against a seeded database; the plans above
+/// are the two answers, and `the_key_probe_stays_a_pk_lookup` pins the keyword.
+const SINK_HOLD_SQL: &str = "\
+     WITH h AS MATERIALIZED ( \
+          SELECT q.id, q.name, q.tenant_id, \
+                 q.retention_sink_hold_max_seconds AS cap_s, \
+                 's3:' || q.retention_sink_hold || ':' || e.esc || ':committed' AS kv_key \
+            FROM queen.queues q \
+            CROSS JOIN LATERAL (SELECT convert_to(q.name, 'UTF8') AS nb) qn \
+            CROSS JOIN LATERAL ( \
+                 SELECT COALESCE(string_agg( \
+                            CASE WHEN get_byte(qn.nb, s.i) BETWEEN 48 AND 57 \
+                                      OR get_byte(qn.nb, s.i) BETWEEN 65 AND 90 \
+                                      OR get_byte(qn.nb, s.i) BETWEEN 97 AND 122 \
+                                      OR get_byte(qn.nb, s.i) IN (45, 46, 95) \
+                                 THEN chr(get_byte(qn.nb, s.i)) \
+                                 ELSE '%' || upper(lpad(to_hex(get_byte(qn.nb, s.i)), 2, '0')) \
+                            END, '' ORDER BY s.i), '') AS esc \
+                   FROM generate_series(0, octet_length(qn.nb) - 1) AS s(i)) e \
+           WHERE q.retention_sink_hold <> '' \
+     ) \
+     SELECT h.id::text, \
+            h.name, \
+            ce.t_end::text, \
+            GREATEST(ce.t_end - make_interval(secs => 60), \
+                     now() - make_interval(secs => h.cap_s))::text, \
+            (ce.t_end IS NULL \
+             OR ce.t_end - make_interval(secs => 60) \
+                < now() - make_interval(secs => h.cap_s)) \
+       FROM h \
+       LEFT JOIN queen.kv k \
+              ON k.tenant_id = h.tenant_id \
+             AND k.namespace = 'queen-s3' \
+             AND k.key = h.kv_key COLLATE \"C\" \
+             AND queen.kv_live_v1(k.expires_at, now()) \
+       CROSS JOIN LATERAL ( \
+            SELECT CASE WHEN k.value->>'tEnd' ~ \
+                        '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{1,6})?Z$' \
+                        THEN (k.value->>'tEnd')::timestamptz END AS t_end) ce";
+
+/// One queue whose `retentionSinkHold` names a sink, as the cycle's hold read
+/// found it.
+pub struct SinkHold {
+    /// `queen.queues.id`, the key the work list joins the floor back on.
+    pub queue_id: String,
+    /// The queue's name — for the log line only; nothing joins by it.
+    pub queue: String,
+    /// The sink's committed `tEnd`, `timestamptz::text`. `None` = the sink has
+    /// never committed, or its pointer is not a readable timestamp.
+    pub t_end: Option<String>,
+    /// The floor this cycle applies to the queue, `timestamptz::text`, AS THE
+    /// READ'S CLOCK COMPUTED IT. The cutoffs themselves are floored again from
+    /// the work list's own `now()` one statement later on the same connection,
+    /// so this is the same value to within that gap: it is a log line, not a
+    /// cutoff, and nothing deletes by it.
+    pub floor: String,
+    /// `true` when the CAP set the floor rather than the sink's own pointer —
+    /// i.e. the sink is stopped, broken, or has never run, and retention has
+    /// resumed. The one bit an operator needs out of this feature.
+    pub capped: bool,
+}
+
+/// Every queue with a sink hold, and what the sink has committed for it.
+///
+/// Takes the CALLER's transaction, not a pooled client, because the position of
+/// this statement inside that transaction is the whole lock-order argument
+/// above — it must be the FIRST one, on the work-list connection.
+pub async fn retention_sink_holds(
+    tx: &deadpool_postgres::Transaction<'_>,
+) -> Result<Vec<SinkHold>, tokio_postgres::Error> {
+    let stmt = tx.prepare_cached(SINK_HOLD_SQL).await?;
+    let rows = tx.query(&stmt, &[]).await?;
+    Ok(rows
+        .iter()
+        .map(|r| SinkHold {
+            queue_id: r.get(0),
+            queue: r.get(1),
+            t_end: r.get(2),
+            floor: r.get(3),
+            capped: r.get(4),
+        })
+        .collect())
 }
 
 // --------------------------------------------------------------- kv quota
@@ -2983,3 +3177,7 @@ mod classify_sql_tests;
 #[cfg(test)]
 #[path = "tests_unit/fire_sql_pin.rs"]
 mod fire_sql_pin_tests;
+
+#[cfg(test)]
+#[path = "tests_unit/sink_hold_sql.rs"]
+mod sink_hold_sql_tests;

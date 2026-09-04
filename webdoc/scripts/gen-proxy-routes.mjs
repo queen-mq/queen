@@ -51,7 +51,19 @@ const MAIN = "server/src/main.rs";
 // `/api/v1/messages/` above it, and path-exact rather than a prefix, so the
 // `GET` on the same path keeps falling through to `Read`. Re-read in full:
 // nothing else in the function moved, and `is_operator_route` is untouched.
-const CLASSIFY_FINGERPRINT = "0049cc9343c2e7ed";
+// 2026-09-04: `classify` grew ONE arm, for `POST /api/v1/partitions/changed`
+// (PLAN_S3_SINK.md §5.1, §8) — the partition-discovery call the S3 sink reads
+// its queue map from, and the fetch arm above copied with the path swapped. It
+// answers `Consume` for the same reason the fetch does: the class is an
+// authorization decision, and this route hands out the partition names,
+// offsets and retention watermarks of a tenant's queues. POST on the exact path
+// only, everything else `Blocked`. Re-read in full: nothing else in the
+// function moved, and `is_operator_route` is untouched. The body-conditional
+// KV reclassification that ships with it lives in `proxy/src/s3_kv.rs` and is
+// deliberately NOT here: this table is keyed by (path, method), so a rule that
+// depends on a request body cannot be stated in it without publishing a
+// falsehood — the same reason `kafka_kv.rs` is absent.
+const CLASSIFY_FINGERPRINT = "a872cfb429591f4e";
 const OPERATOR_FINGERPRINT = "04d6dea7366b466d";
 
 // --- mirror of `is_operator_route` -----------------------------------------
@@ -96,6 +108,11 @@ function classify(m, p) {
   // slash, so every other spelling is `Blocked` in the Rust rather than left to
   // travel to a 405.
   if (p === "/api/v1/fetch") {
+    return m === "POST" ? "consume" : "blocked";
+  }
+  // PLAN_S3_SINK.md §5.1: the fetch arm with the path swapped, and method-exact
+  // on the exact path for the same reason.
+  if (p === "/api/v1/partitions/changed") {
     return m === "POST" ? "consume" : "blocked";
   }
 
@@ -173,7 +190,7 @@ const CLASS_MEANING = [
   ["produce", "Counted against the message quota. May create queues and partitions implicitly."],
   [
     "consume",
-    "Pop, ack, lease extension, and the batched read-from-offset the Kafka facade consumes through. A `wait=true` pop also holds a parked-consumer slot; the fetch does not, since its long poll is a body field rather than a query flag. The fetch is classified for the authority it needs rather than for what it writes: it is non-destructive and never quota-blocked, but it hands out message payloads, so it carries the authority of the pop it stands in for instead of the read level every user role already has.",
+    "Pop, ack, lease extension, the batched read-from-offset the Kafka facade consumes through, and the partition discovery the S3 sink maps a queue with. A `wait=true` pop also holds a parked-consumer slot; the fetch does not, since its long poll is a body field rather than a query flag. Both reads are classified for the authority they need rather than for what they write: they are non-destructive and never quota-blocked, but one hands out message payloads and the other the partition names and offsets to read them by, so they carry the authority of the pop they stand in for instead of the read level every user role already has.",
   ],
   ["queue admin", "Configuration, deletions, seeks and subscription changes."],
   ["read", "Listings, status, analytics, DLQ and message reads, all tenant-scoped."],

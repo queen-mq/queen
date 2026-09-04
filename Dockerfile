@@ -124,7 +124,43 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-sqs \
 
 RUN test -f /queen-sqs && echo "SQS facade build successful"
 
-# Stage 5: Build queenctl (Go operator CLI)
+# Stage 5: Build the queen-s3 sink connector (S3 / data-lake sink)
+#
+# The third binary that rides beside the broker, on the same contract as the two
+# facades above: EMBEDDED MODE (server/src/s3_sink.rs) has the broker SPAWN this
+# file as a supervised child process, so the image ships it and one process tree
+# carries them all. It is inert unless QUEEN_S3_EMBEDDED=true, which is why it can
+# be added to the default image without changing what the default image does.
+#
+# It is NOT a wire-protocol facade: nothing connects TO it. It is a Queen client
+# that reads the log through POST /api/v1/fetch and writes JSONL or Parquet
+# objects to an object store (PLAN_S3_SINK.md §3).
+#
+# No frontend stage feeds this one and no path dependency reaches out of the
+# directory (connectors/queen-s3/Cargo.toml has none), so the context is the
+# crate alone.
+FROM rust:1-bookworm AS s3-builder
+
+WORKDIR /usr/build/queen-s3
+
+# Layer 1: manifests. Cargo.lock is copied so the image builds the versions the
+# repository tested, exactly as the three stages above do.
+COPY connectors/queen-s3/Cargo.toml connectors/queen-s3/Cargo.lock ./
+
+# Layer 2: source.
+COPY connectors/queen-s3/src ./src
+
+# Its OWN registry cache id. The four Rust stages build in parallel under
+# BuildKit and a shared cache mount is a shared lock: `cargo-registry-s3` keeps
+# this stage off the other three's mount rather than serialising all of them
+# behind one directory.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-s3 \
+    --mount=type=cache,target=/usr/build/queen-s3/target \
+    cargo build --release && cp target/release/queen-s3 /queen-s3
+
+RUN test -f /queen-s3 && echo "S3 sink build successful"
+
+# Stage 6: Build queenctl (Go operator CLI)
 FROM golang:1.24-alpine AS cli-builder
 
 # Embed broker version + commit + build date into the binary so
@@ -162,7 +198,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 # Sanity check: the binary must run without any dynamic deps.
 RUN /out/queenctl version --short
 
-# Stage 6: Runtime Image
+# Stage 7: Runtime Image
 FROM ubuntu:24.04
 
 # Runtime dependencies + PostgreSQL 18 client tools (pg_dump, pg_restore for
@@ -201,6 +237,13 @@ COPY --from=kafka-builder /queen-kafka ./bin/queen-kafka
 # `docker run ... queen-mq ./bin/queen-sqs`.
 COPY --from=sqs-builder /queen-sqs ./bin/queen-sqs
 
+# The S3 sink, on the same adjacency contract: with QUEEN_S3_EMBEDDED=true and no
+# QUEEN_S3_BIN, the supervisor resolves the child from the directory of its own
+# executable (s3_sink::resolve_bin). Run it alone instead with
+# `docker run ... queen-mq ./bin/queen-s3` — which is the shape that scales out,
+# because a sink is a client and needs nothing from the broker's container.
+COPY --from=s3-builder /queen-s3 ./bin/queen-s3
+
 # The same dashboard bytes the binary already embeds, on disk for inspection.
 # The binary does not read them: nothing in server/src implements a
 # static-dir override, so this is a copy for humans, not a serving path.
@@ -233,6 +276,13 @@ EXPOSE 9092
 # without keys answers every request InvalidClientTokenId (the broker refuses that
 # combination at boot rather than letting it crash-loop).
 EXPOSE 9324
+
+# The S3 sink gets NO EXPOSE, deliberately. Nothing connects to it — it is a
+# client of the broker and of an object store, in that direction only — and its
+# one listener (QUEEN_S3_LISTEN, /healthz and /metrics) defaults to 127.0.0.1,
+# which an EXPOSE would advertise as reachable when it is not. A deployment that
+# wants those two endpoints scraped sets QUEEN_S3_LISTEN to 0.0.0.0:9333 and
+# publishes the port itself.
 
 # Run the Rust broker
 CMD ["./bin/queen"]
