@@ -299,152 +299,119 @@
           </div>
         </div>
       </div>
-
-      <div v-if="selectedMsg" class="modal-backdrop" @click="closeDetail"></div>
-
-      <div v-if="selectedMsg" class="drawer-panel dlq-detail-drawer">
-        <div class="card-header dlq-detail-header">
-          <h3>DLQ Message Detail</h3>
-          <span class="card-sub font-mono">{{ selectedMsg.transactionId || selectedMsg.id }}</span>
-          <button
-            class="btn btn-ghost dlq-copy-report"
-            title="Copy the failure, routing details, timestamps, and payload as Markdown"
-            @click="copyMarkdown"
-          >
-            {{ markdownCopied ? 'Markdown copied!' : 'Copy as Markdown' }}
-          </button>
-          <button @click="closeDetail" class="btn btn-ghost btn-icon modal-close" aria-label="Close message detail">
-            <svg style="width:18px; height:18px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
-          </button>
-        </div>
-
-        <div class="card-body dlq-detail-body">
-          <div class="dlq-detail-summary">
-            <!-- Status chips -->
-            <div class="dlq-detail-status">
-              <span class="chip chip-bad">dead_letter</span>
-              <span v-if="selectedMsg.retryCount" class="chip chip-warn">
-                {{ selectedMsg.retryCount }} retries
-              </span>
-            </div>
-
-            <!-- Key-value fields -->
-            <div class="dlq-kv">
-              <div class="dlq-kv-row">
-                <label class="label-xs">Queue</label>
-                <span style="font-weight:500; color:var(--text-hi);">{{ selectedMsg.queue }}</span>
-              </div>
-              <div class="dlq-kv-row">
-                <label class="label-xs">Partition</label>
-                <div class="dlq-copyable-field">
-                  <span class="font-mono">{{ selectedMsg.partition }}</span>
-                  <button class="btn btn-ghost" aria-label="Copy partition" @click="copyField('partition', selectedMsg.partition)">
-                    {{ copiedField === 'partition' ? 'Copied!' : 'Copy' }}
-                  </button>
-                </div>
-              </div>
-              <div class="dlq-kv-row">
-                <label class="label-xs">Partition ID</label>
-                <div class="dlq-copyable-field">
-                  <span class="font-mono">{{ selectedMsg.partitionId }}</span>
-                  <button class="btn btn-ghost" aria-label="Copy partition ID" @click="copyField('partitionId', selectedMsg.partitionId)">
-                    {{ copiedField === 'partitionId' ? 'Copied!' : 'Copy' }}
-                  </button>
-                </div>
-              </div>
-              <div class="dlq-kv-row">
-                <label class="label-xs">Transaction ID</label>
-                <div class="dlq-copyable-field">
-                  <span class="font-mono">{{ selectedMsg.transactionId }}</span>
-                  <button class="btn btn-ghost" aria-label="Copy transaction ID" @click="copyField('transactionId', selectedMsg.transactionId)">
-                    {{ copiedField === 'transactionId' ? 'Copied!' : 'Copy' }}
-                  </button>
-                </div>
-              </div>
-              <div class="dlq-kv-row">
-                <label class="label-xs">Consumer group</label>
-                <span class="font-mono" style="font-size:12px; color:var(--ice-400);">{{ selectedMsg.consumerGroup }}</span>
-              </div>
-              <!-- The log engine cannot recover the enqueue time from an opaque
-                   blob, so it echoes failed_at as createdAt. Showing the same
-                   instant twice under two labels invents a fact. -->
-              <div v-if="hasDistinctCreatedAt(selectedMsg)" class="dlq-kv-row">
-                <label class="label-xs">Created</label>
-                <span :title="formatTimestampUtc(selectedMsg.createdAt)" style="font-size:13px; color:var(--text-mid);">{{ formatTimestamp(selectedMsg.createdAt) }}</span>
-              </div>
-              <div class="dlq-kv-row">
-                <label class="label-xs">Failed at</label>
-                <span :title="formatTimestampUtc(selectedMsg.failedAt)" style="font-size:13px; color:var(--text-mid);">{{ formatTimestamp(selectedMsg.failedAt) }}</span>
-                <span v-if="!hasDistinctCreatedAt(selectedMsg)" style="font-size:11px; color:var(--text-low);">
-                  Enqueue time is not recorded for this entry.
-                </span>
-              </div>
-            </div>
-
-            <div v-if="selectedMsg.errorMessage" class="dlq-error-panel">
-              <div class="dlq-block-header">
-                <label class="label-xs">Error</label>
-                <button class="btn btn-ghost" style="padding:2px 8px; font-size:11px;" @click="copyField('error', selectedMsg.errorMessage)">
-                  {{ copiedField === 'error' ? 'Copied!' : 'Copy' }}
-                </button>
-              </div>
-              <div class="dlq-code dlq-error-box">{{ selectedMsg.errorMessage }}</div>
-            </div>
-
-            <!-- Actions. No "replay": the broker exposes no re-push route for a
-                 DLQ snapshot, and a button that cannot verify its own outcome is
-                 worse than no button. -->
-            <div v-if="canAdmin" class="dlq-detail-actions">
-              <button class="btn btn-danger" style="width:100%; justify-content:center;" @click="purge(selectedMsg)" :disabled="isDeleting(selectedMsg)">
-                {{ isDeleting(selectedMsg) ? 'Purging…' : 'Purge message' }}
-              </button>
-              <p v-if="rowError(selectedMsg)" style="font-size:12px; color:var(--ember-400);">{{ rowError(selectedMsg) }}</p>
-            </div>
-            <p v-else class="dlq-detail-permission">
-              Purging needs the admin role on this cluster.
-            </p>
-          </div>
-
-          <!-- Payload gets the larger column: long JSON is the exceptional case
-               where the shared compact drawer would waste the viewport. -->
-          <div v-if="selectedMsg.data !== undefined" class="dlq-payload-panel">
-            <div class="dlq-block-header">
-              <label class="label-xs">Payload</label>
-              <button class="btn btn-ghost" style="padding:2px 8px; font-size:11px;" @click="copyPayload">
-                {{ copied ? 'Copied!' : (encryptedPayload ? 'Copy envelope' : 'Copy') }}
-              </button>
-            </div>
-            <!-- The DLQ read path does no decryption: what follows is the stored
-                 envelope, not the message. Saying "payload" over ciphertext is
-                 how a debugger loses an hour. -->
-            <div v-if="encryptedPayload" class="status-banner banner-warn view-banner">
-              <span>
-                <strong>Encrypted envelope</strong> · this queue encrypts payloads and the DLQ endpoint
-                returns them as stored. This is ciphertext, not the message body.
-              </span>
-            </div>
-            <div class="dlq-code dlq-json-viewer">
-              <VueJsonPretty
-                :data="selectedMsg.data"
-                :deep="4"
-                :collapsed-node-length="20"
-                :show-length="true"
-                :show-line="true"
-                :show-icon="true"
-                theme="dark"
-              />
-            </div>
-          </div>
-        </div>
-      </div>
     </Teleport>
+
+    <DetailDrawer
+      :open="Boolean(selectedMsg)"
+      title="DLQ Message Detail"
+      :subtitle="selectedMsg?.transactionId || selectedMsg?.id || ''"
+      wide
+      split
+      @close="closeDetail"
+    >
+      <template #actions>
+        <button
+          class="btn btn-ghost"
+          title="Copy the failure, routing details, timestamps, and payload as Markdown"
+          @click="copyMarkdown"
+        >
+          {{ markdownCopied ? 'Markdown copied!' : 'Copy as Markdown' }}
+        </button>
+      </template>
+
+      <template v-if="selectedMsg">
+        <div class="detail-status-row">
+          <span class="chip chip-bad">dead_letter</span>
+          <span v-if="selectedMsg.retryCount" class="chip chip-warn">
+            {{ selectedMsg.retryCount }} retries
+          </span>
+        </div>
+
+        <div class="detail-fields">
+          <DetailField label="Queue" :value="selectedMsg.queue" tone="high" />
+          <DetailField label="Partition" :value="selectedMsg.partition" mono copyable />
+          <DetailField label="Partition ID" :value="selectedMsg.partitionId" mono copyable />
+          <DetailField label="Transaction ID" :value="selectedMsg.transactionId" mono copyable />
+          <DetailField label="Consumer group" :value="selectedMsg.consumerGroup" mono tone="accent" />
+
+          <!-- The log engine cannot recover the enqueue time from an opaque
+               blob, so it echoes failed_at as createdAt. Showing the same
+               instant twice under two labels invents a fact. -->
+          <DetailField
+            v-if="hasDistinctCreatedAt(selectedMsg)"
+            label="Created"
+            :value="formatTimestamp(selectedMsg.createdAt)"
+            :title="formatTimestampUtc(selectedMsg.createdAt)"
+          />
+          <DetailField
+            label="Failed at"
+            :value="formatTimestamp(selectedMsg.failedAt)"
+            :title="formatTimestampUtc(selectedMsg.failedAt)"
+          >
+            <span v-if="!hasDistinctCreatedAt(selectedMsg)" class="detail-note">
+              Enqueue time is not recorded for this entry.
+            </span>
+          </DetailField>
+        </div>
+
+        <DetailField
+          v-if="selectedMsg.errorMessage"
+          class="detail-section"
+          label="Error"
+          :value="selectedMsg.errorMessage"
+          mono
+          copyable
+          boxed
+          tone="danger"
+        />
+
+        <!-- Actions. No "replay": the broker exposes no re-push route for a
+             DLQ snapshot, and a button that cannot verify its own outcome is
+             worse than no button. -->
+        <div v-if="canAdmin" class="detail-actions">
+          <button
+            class="btn btn-danger"
+            style="width:100%; justify-content:center;"
+            :disabled="isDeleting(selectedMsg)"
+            @click="purge(selectedMsg)"
+          >
+            {{ isDeleting(selectedMsg) ? 'Purging…' : 'Purge message' }}
+          </button>
+          <p v-if="rowError(selectedMsg)" style="font-size:12px; color:var(--ember-400);">
+            {{ rowError(selectedMsg) }}
+          </p>
+        </div>
+        <p v-else class="detail-actions detail-note">
+          Purging needs the admin role on this cluster.
+        </p>
+      </template>
+
+      <template #secondary>
+        <div v-if="selectedMsg?.data !== undefined">
+          <div class="detail-section-header">
+            <label class="label-xs">Payload</label>
+            <button class="btn btn-ghost detail-copy-button" @click="copyPayload">
+              {{ copied ? 'Copied!' : (encryptedPayload ? 'Copy envelope' : 'Copy') }}
+            </button>
+          </div>
+          <!-- The DLQ read path does no decryption: what follows is the stored
+               envelope, not the message. Saying "payload" over ciphertext is
+               how a debugger loses an hour. -->
+          <div v-if="encryptedPayload" class="status-banner banner-warn view-banner">
+            <span>
+              <strong>Encrypted envelope</strong> · this queue encrypts payloads and the DLQ endpoint
+              returns them as stored. This is ciphertext, not the message body.
+            </span>
+          </div>
+          <JsonViewer :value="selectedMsg.data" />
+        </div>
+      </template>
+    </DetailDrawer>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, watch } from 'vue'
-import VueJsonPretty from 'vue-json-pretty'
-import 'vue-json-pretty/lib/styles.css'
 import { dlq, queues as queuesApi, describeApiError } from '@/api'
 import { useApi, formatNumber, formatRelativeTime } from '@/composables/useApi'
 import { formatDlqMarkdown } from '@/composables/useDlqMarkdown'
@@ -454,6 +421,9 @@ import { stamp } from '@/composables/useStamp'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
 import Autocomplete from '@/components/Autocomplete.vue'
+import DetailDrawer from '@/components/DetailDrawer.vue'
+import DetailField from '@/components/DetailField.vue'
+import JsonViewer from '@/components/JsonViewer.vue'
 
 const { can, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
 const { notifySuccess, notifyError } = useToast()
@@ -472,7 +442,6 @@ const errorKey = (msg) => msg.errorMessage || NO_ERROR_TEXT
 const selectedKey = ref(null)
 const copied = ref(false)
 const markdownCopied = ref(false)
-const copiedField = ref(null)
 // Client-side narrowing of the loaded page by one error text. Not a request
 // parameter: the DLQ endpoint takes queue and consumerGroup only.
 const errorFilter = ref(null)
@@ -669,7 +638,6 @@ const selectMessage = (msg) => {
   selectedKey.value = selectedKey.value === msgKey(msg) ? null : msgKey(msg)
   copied.value = false
   markdownCopied.value = false
-  copiedField.value = null
 }
 
 const closeDetail = () => { selectedKey.value = null }
@@ -689,16 +657,6 @@ const copyPayload = async () => {
   if (await writeClipboard(JSON.stringify(selectedMsg.value.data, null, 2))) {
     copied.value = true
     setTimeout(() => { copied.value = false }, 2000)
-  }
-}
-
-const copyField = async (field, value) => {
-  if (value === null || value === undefined) return
-  if (await writeClipboard(String(value))) {
-    copiedField.value = field
-    setTimeout(() => {
-      if (copiedField.value === field) copiedField.value = null
-    }, 2000)
   }
 }
 
@@ -882,86 +840,4 @@ fetchMessages()
 .dlq-filter-chip { cursor: pointer; max-width: 340px; }
 .dlq-filter-chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.dlq-kv { display: flex; flex-direction: column; gap: 16px; }
-.dlq-kv-row { display: flex; flex-direction: column; gap: 4px; }
-
-/* Message detail is the one drawer that benefits from desktop width: its two
-   independent reading surfaces can sit together instead of forming one long
-   scroll. Shared Messages and Traces drawers remain compact. */
-.dlq-detail-drawer { max-width: min(1120px, calc(100vw - 40px)); }
-.dlq-detail-body {
-  display: grid; grid-template-columns: minmax(300px, .8fr) minmax(420px, 1.2fr);
-  gap: 24px; align-items: start;
-}
-.dlq-detail-summary,
-.dlq-payload-panel { min-width: 0; }
-.dlq-detail-status { display: flex; align-items: center; gap: 6px; margin-bottom: 20px; }
-.dlq-payload-panel { padding-left: 24px; border-left: 1px solid var(--bd); }
-.dlq-block-header {
-  display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;
-}
-.dlq-error-panel { margin-top: 20px; }
-.dlq-detail-actions,
-.dlq-detail-permission {
-  margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--bd);
-}
-.dlq-detail-actions { display: flex; flex-direction: column; gap: 8px; }
-.dlq-detail-permission { font-size: 12px; color: var(--text-low); }
-
-.dlq-detail-header h3,
-.dlq-copy-report { flex-shrink: 0; }
-.dlq-detail-header .card-sub {
-  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.dlq-detail-header .modal-close { margin-left: 0; flex-shrink: 0; }
-
-.dlq-copyable-field { display: flex; align-items: flex-start; gap: 8px; }
-.dlq-copyable-field .font-mono {
-  flex: 1; min-width: 0; font-size: 12px; color: var(--text-mid); word-break: break-all;
-}
-.dlq-copyable-field .btn { flex-shrink: 0; padding: 1px 6px; font-size: 10.5px; }
-
-/* Stored envelope / payload: recessed against the drawer. */
-.dlq-code {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 12px; line-height: 1.6;
-  padding: 14px 16px; border-radius: var(--r-card);
-  border: 1px solid var(--bd);
-  color: var(--text-mid);
-  background: var(--recessed);
-  white-space: pre; overflow-x: auto;
-  max-height: calc(100vh - 112px); overflow-y: auto;
-}
-
-.dlq-json-viewer { white-space: normal; }
-.dlq-error-box {
-  max-height: 180px; color: var(--ember-400);
-  white-space: pre-wrap; overflow-wrap: anywhere;
-}
-.dlq-json-viewer :deep(.vjs-tree) { font-family: 'JetBrains Mono', monospace; font-size: 12px; }
-.dlq-json-viewer :deep(.vjs-key) { color: var(--ice-400); }
-.dlq-json-viewer :deep(.vjs-value-string) { color: var(--ok-500); }
-.dlq-json-viewer :deep(.vjs-value-number),
-.dlq-json-viewer :deep(.vjs-value-boolean) { color: var(--crown-400); }
-.dlq-json-viewer :deep(.vjs-value-null),
-.dlq-json-viewer :deep(.vjs-value-undefined) { color: var(--ember-400); }
-.dlq-json-viewer :deep(.vjs-comment),
-.dlq-json-viewer :deep(.vjs-tree-brackets) { color: var(--text-low); }
-.dlq-json-viewer :deep(.vjs-tree-node.dark:hover) { background: var(--ink-4); }
-.dlq-json-viewer :deep(.vjs-indent-unit.has-line) { border-left-color: var(--bd-hi); }
-
-@media (max-width: 640px) {
-  .dlq-detail-header .card-sub { display: none; }
-  .dlq-copy-report { margin-left: auto; }
-}
-
-@media (max-width: 900px) {
-  .dlq-detail-drawer { max-width: 640px; }
-  .dlq-detail-body { display: block; }
-  .dlq-payload-panel {
-    margin-top: 24px; padding-top: 24px; padding-left: 0;
-    border-top: 1px solid var(--bd); border-left: 0;
-  }
-  .dlq-code { max-height: 400px; }
-}
 </style>

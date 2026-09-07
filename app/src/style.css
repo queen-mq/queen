@@ -969,6 +969,39 @@
     border-left: 1px solid var(--bd);
   }
 
+  /* --- Drawer detail language -------------------------------------------
+     Message and DLQ detail use one vertical rhythm. Their data and actions
+     differ, but routing, payload and status should not move between views. */
+  .detail-status-row {
+    display: flex; align-items: center; gap: 6px; margin-bottom: 20px;
+  }
+  .detail-fields { display: flex; flex-direction: column; gap: 16px; }
+  .detail-section { margin-top: 24px; }
+  .detail-section-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 8px;
+  }
+  .detail-section-title {
+    margin-bottom: 8px; font-size: 10.5px; letter-spacing: .14em;
+    text-transform: uppercase; font-weight: 500; color: var(--text-low);
+  }
+  .detail-copy-button { padding: 2px 8px; font-size: 11px; }
+  .detail-note { font-size: 11px; color: var(--text-low); }
+  .detail-actions {
+    display: flex; flex-direction: column; gap: 8px;
+    margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--bd);
+  }
+  .detail-config-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+    padding: 14px 16px; font-size: 13px;
+  }
+  .detail-config-grid > div { display: flex; align-items: baseline; gap: 4px; }
+  .detail-config-grid span { color: var(--text-low); }
+  .detail-config-grid strong {
+    color: var(--text-hi); font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums; font-weight: 500;
+  }
+
   /* --- Multi-select pill row ---------------------------------------------
      A `.pill` row is multi-select; a `.seg` is single-select. Keeping them
      visually distinct is load-bearing. */
