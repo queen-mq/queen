@@ -131,11 +131,10 @@
 //!     broker with it.
 
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use deadpool_postgres::Pool;
-use tokio::sync::Notify;
 
 use crate::config::Config;
 use crate::db::{self, SqlClass, TimerClaim};
@@ -277,85 +276,15 @@ pub(crate) fn sleep_ms(o: CycleOutcome, idle_cycles: u32, k: &SleepKnobs, jitter
 // ===========================================================================
 // The local wake-up (§7.4)
 // ===========================================================================
-
-/// The in-process, best-effort wake: an `AtomicI64` holding the nearest locally
-/// committed `deliver_at` plus a `Notify`.
-///
-/// The handler of `POST /api/v1/timers` and the transaction wire ring it **after
-/// the commit and never before** — a wake for a transaction that then rolls back
-/// costs a wasted cycle and, worse, teaches the loop that work exists which does
-/// not. The cost is one CAS, and the anti-storm property is free: the hint only
-/// applies when the new minimum is EARLIER, so scheduling a million timers for
-/// next week produces exactly ONE wake.
-///
-/// Losing a hint costs latency and never correctness: `QUEEN_SWEEPER_MAX_SLEEP_MS`
-/// is the recovery window and `deliverAt` is "no earlier than".
-pub struct Wake {
-    /// Epoch ms of the nearest hinted delivery, `i64::MAX` when nothing is
-    /// pending. Re-armed at the top of every cycle.
-    earliest_ms: AtomicI64,
-    notify: Notify,
-}
-
-impl Default for Wake {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Wake {
-    pub fn new() -> Self {
-        Wake { earliest_ms: AtomicI64::new(i64::MAX), notify: Notify::new() }
-    }
-
-    /// Ring for a timer that becomes due in `delay_ms`. A past or negative delay
-    /// is legal (§4.2: a `deliverAt` in the past fires on the first cycle).
-    pub fn hint(&self, delay_ms: i64) {
-        let at = crate::util::now_epoch_ms().saturating_add(delay_ms.max(0));
-        loop {
-            let cur = self.earliest_ms.load(Ordering::Relaxed);
-            if at >= cur {
-                return; // not earlier than what we already promised to wake for
-            }
-            if self
-                .earliest_ms
-                .compare_exchange_weak(cur, at, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-            {
-                // `notify_one` stores a permit when nobody is waiting, so a hint
-                // that lands mid-cycle is not lost.
-                self.notify.notify_one();
-                return;
-            }
-        }
-    }
-
-    /// Re-arm at the top of a cycle: anything hinted from here on is news.
-    fn arm(&self) {
-        self.earliest_ms.store(i64::MAX, Ordering::Relaxed);
-    }
-
-    async fn notified(&self) {
-        self.notify.notified().await;
-    }
-}
-
-static WAKE: OnceLock<Arc<Wake>> = OnceLock::new();
-
-/// The process-wide waker. Process-global rather than a field of `AppState`
-/// because the embedded facade, the HTTP handlers and this loop all need the
-/// same one, and a second `Broker` in one process shares the first one's sweeper
-/// exactly as it shares its admission arbiter.
-pub fn wake() -> &'static Arc<Wake> {
-    WAKE.get_or_init(|| Arc::new(Wake::new()))
-}
-
-/// One-liner for the two commit seams (§7.4). Safe to call whether or not the
-/// sweeper task was ever spawned.
-#[allow(dead_code)] // no caller until the timers handler and the wire ring it (F4)
-pub fn hint_in_ms(delay_ms: i64) {
-    wake().hint(delay_ms);
-}
+//
+// The waker itself — `notify::SweeperWake`, the process-wide
+// `notify::sweeper_wake()` and the `notify::hint_sweeper_in_ms` one-liner the
+// commit seams call — lives in `notify.rs`, not here. This module is declared by
+// `main.rs` only (the embedded broker has no sweeper), while the seams that ring
+// the waker, the timers handler and the transaction wire, are compiled into both
+// crate roots; a handler naming `crate::sweeper` breaks the library build. The
+// loop below only ever `arm()`s the waker at the top of a cycle and awaits
+// `notified()` in its sleep.
 
 // ===========================================================================
 // Spawn
@@ -400,6 +329,15 @@ struct Knobs {
 /// boot sequence (§7.1); `main.rs` ignores it, as it does for every other
 /// background loop.
 ///
+/// `announcer` is how a fire tells the pop path about the frames it landed: the
+/// same hot-list mark and peer fan-out a push makes after its commit
+/// (`handlers::announce_landed`). It was missing from 1.0.3 through 1.5.1, and
+/// the cost was not the fire's — the fire was on time — but the delivery's: a
+/// fired frame sat in the log with no group ring aware of its partition, so the
+/// queue-scoped pop routes did not consider it until the periodic reseed
+/// (`QUEEN_HOTLIST_RESEED_MS`, 30 s by default), and a parked long-poll was
+/// woken only by that reseed's promotion.
+///
 /// **`None` means the task was not spawned at all**, and now only
 /// `QUEEN_SWEEPER=false` can produce it. It used to also return `None` when both
 /// kv/timers boot flags were off, so that an installation which would never use
@@ -413,6 +351,7 @@ pub fn spawn(
     switches: Arc<crate::switches::Switches>,
     quotas: Arc<crate::quota::Quotas>,
     ephemeral: Arc<crate::ephemeral::Ephemeral>,
+    announcer: crate::handlers::Announcer,
 ) -> Option<tokio::task::JoinHandle<()>> {
     if !cfg.sweeper_enabled {
         // NOTE for the ephemeral backstop (EPHEMERAL_QUEUES.md §3.2): with the
@@ -490,7 +429,7 @@ pub fn spawn(
         "service started"
     );
     Some(tokio::spawn(async move {
-        run_loop(pool, metrics, knobs, switches, quotas, ephemeral).await
+        run_loop(pool, metrics, knobs, switches, quotas, ephemeral, announcer).await
     }))
 }
 
@@ -567,6 +506,7 @@ async fn run_loop(
     switches: Arc<crate::switches::Switches>,
     quotas: Arc<crate::quota::Quotas>,
     ephemeral: Arc<crate::ephemeral::Ephemeral>,
+    announcer: crate::handlers::Announcer,
 ) {
     let mut idle_cycles: u32 = 0;
     // Consecutive cycles in which the fire pass hit a ceiling. This is the ONLY
@@ -588,7 +528,7 @@ async fn run_loop(
         let cycle_start = Instant::now();
         // Re-arm BEFORE the work: a hint that lands while we are firing must
         // survive into this cycle's sleep decision.
-        wake().arm();
+        crate::notify::sweeper_wake().arm();
         rot = (rot + 1).rem_euclid(SHARDS);
         let shards = shard_ring(rot);
 
@@ -615,7 +555,9 @@ async fn run_loop(
         // a log stops being read.
         if switches.fire_allowed() {
             let t0 = Instant::now();
-            match fire_pass(&pool, &metrics, &k, &shards, cycle_budget(&k, pressure)).await {
+            match fire_pass(&pool, &metrics, &k, &shards, cycle_budget(&k, pressure), &announcer)
+                .await
+            {
                 Ok(pass) => {
                     fired_rows = pass.rows;
                     worked |= pass.rows > 0;
@@ -847,7 +789,7 @@ async fn run_loop(
             _ = tokio::time::sleep(Duration::from_millis(ms)) => {}
             // A local hint (§7.4). It resets the idle backoff, which is what
             // makes a 30 s empty-table sleep safe to have at all.
-            _ = wake().notified() => { idle_cycles = 0; }
+            _ = crate::notify::sweeper_wake().notified() => { idle_cycles = 0; }
         }
     }
 }
@@ -1024,6 +966,7 @@ async fn fire_pass(
     k: &Knobs,
     shards: &[i16],
     budget_rows: i64,
+    announcer: &crate::handlers::Announcer,
 ) -> Result<PassResult, CallErr> {
     // ------------------------------------------------------------------- A
     let c = checkout(pool).await?;
@@ -1060,6 +1003,7 @@ async fn fire_pass(
             shards.to_vec(),
             Arc::clone(&st),
             deadline,
+            announcer.clone(),
         )
         .await
         .err()
@@ -1073,6 +1017,7 @@ async fn fire_pass(
                 shards.to_vec(),
                 Arc::clone(&st),
                 deadline,
+                announcer.clone(),
             )));
         }
         // Join ALL of them before reporting anything: a worker that failed must
@@ -1137,6 +1082,7 @@ async fn drain_worker(
     shards: Vec<i16>,
     st: Arc<DrainState>,
     deadline: Instant,
+    announcer: crate::handlers::Announcer,
 ) -> Result<(), CallErr> {
     loop {
         if st.stop.load(Ordering::Relaxed) {
@@ -1165,7 +1111,7 @@ async fn drain_worker(
         // committed and the fire has not started, so nothing is held while zstd
         // runs.
         for batch in group_and_pack(claims, &k) {
-            fire_batch(&pool, &metrics, &k, batch).await;
+            fire_batch(&pool, &metrics, &k, batch, &announcer).await;
         }
     }
 }
@@ -1365,11 +1311,17 @@ fn pack_one(key: &(String, String, String), rows: Vec<Row>, zstd_level: i32) -> 
 // The fire itself
 // ---------------------------------------------------------------------------
 
-async fn fire_batch(pool: &Pool, metrics: &Metrics, k: &Knobs, batch: Vec<Packed>) {
+async fn fire_batch(
+    pool: &Pool,
+    metrics: &Metrics,
+    k: &Knobs,
+    batch: Vec<Packed>,
+    announcer: &crate::handlers::Announcer,
+) {
     if batch.is_empty() {
         return;
     }
-    if !fire_attempt(pool, metrics, k, &batch).await {
+    if !fire_attempt(pool, metrics, k, &batch, announcer).await {
         return;
     }
     // POISON ISOLATION (§7.6). One poisoned segment fails the whole transaction,
@@ -1390,13 +1342,19 @@ async fn fire_batch(pool: &Pool, metrics: &Metrics, k: &Knobs, batch: Vec<Packed
         let one = vec![seg];
         // A single segment can no longer be isolated further, so the verdict is
         // final and `fire_attempt` takes the fail/DLQ path itself.
-        let _ = fire_attempt(pool, metrics, k, &one).await;
+        let _ = fire_attempt(pool, metrics, k, &one, announcer).await;
     }
 }
 
 /// One `log_timers_fire_v1` call. Returns `true` when the caller should replay
 /// the batch one segment at a time.
-async fn fire_attempt(pool: &Pool, metrics: &Metrics, k: &Knobs, batch: &[Packed]) -> bool {
+async fn fire_attempt(
+    pool: &Pool,
+    metrics: &Metrics,
+    k: &Knobs,
+    batch: &[Packed],
+    announcer: &crate::handlers::Announcer,
+) -> bool {
     // Two families of arrays. Mixing them up is exactly what the SP's alignment
     // guards exist to catch loudly rather than quietly.
     //   per SEGMENT, byte for byte the order log_push_multi_v1 uses:
@@ -1444,7 +1402,14 @@ async fn fire_attempt(pool: &Pool, metrics: &Metrics, k: &Knobs, batch: &[Packed
     .await;
     match c.finish(res, "timers_fire", metrics) {
         Ok(txt) => {
-            account_fire(metrics, batch, &txt);
+            // The commit is behind us: make the frames discoverable, with the
+            // announce a push makes after ITS commit (`handlers::announce_landed`)
+            // and for exactly the segments the SP reported `fired` — a
+            // `duplicate` or `stale` segment wrote nothing. Without this the
+            // queue-scoped pop routes, which consult only their group rings,
+            // did not see the partition until the periodic reseed: the fire
+            // was on time, the delivery about 30 s late.
+            announcer.landed(&account_fire(metrics, batch, &txt));
             false
         }
         Err(e) => {
@@ -1461,9 +1426,15 @@ async fn fire_attempt(pool: &Pool, metrics: &Metrics, k: &Knobs, batch: &[Packed
 /// Read the fire's per-segment verdicts. The taxonomy is CLOSED —
 /// `fired | duplicate | stale` — and anything else is a contract break, counted
 /// as `stale` so the loop keeps going rather than silently dropping the count.
-fn account_fire(metrics: &Metrics, batch: &[Packed], txt: &str) {
+///
+/// Returns the `(tenant-queue key, partition, frames)` of every segment that
+/// FIRED, which is what the caller announces after the commit, so the verdicts
+/// are walked once. The key is the same composite the push handler marks with,
+/// because the ring and the wake gate are keyed by (tenant, queue) (Track B §5).
+fn account_fire(metrics: &Metrics, batch: &[Packed], txt: &str) -> Vec<(String, String, u32)> {
     let v: serde_json::Value = serde_json::from_str(txt).unwrap_or(serde_json::Value::Null);
     let arr = v.as_array().map(|a| a.as_slice()).unwrap_or(&[]);
+    let mut fired: Vec<(String, String, u32)> = Vec::new();
     for (i, s) in batch.iter().enumerate() {
         let r = arr.get(i);
         let result = r.and_then(|x| x.get("result")).and_then(|x| x.as_str()).unwrap_or("stale");
@@ -1478,6 +1449,11 @@ fn account_fire(metrics: &Metrics, batch: &[Packed], txt: &str) {
                 // holds no timestamp.
                 let worst = s.rows.iter().map(|r| r.late_ms).max().unwrap_or(0);
                 metrics.kvt.fire_lag(&s.tenant, worst as f64);
+                fired.push((
+                    crate::handlers::tenant_queue_key(&s.tenant, &s.queue),
+                    s.partition.clone(),
+                    s.count.max(0) as u32,
+                ));
             }
             "duplicate" => {
                 // The fixed txn was already in the log: those timers were
@@ -1502,6 +1478,7 @@ fn account_fire(metrics: &Metrics, batch: &[Packed], txt: &str) {
             }
         }
     }
+    fired
 }
 
 /// The fire failed. Push the lease out by a backoff, NULL the claim token — so
@@ -1880,38 +1857,5 @@ mod tests {
         // Saturates at the floor rather than reaching zero, and does not panic
         // on a shift wider than the type.
         assert_eq!(cycle_budget(&k, 40), 200);
-    }
-
-    /// `hint` applies only when the new minimum is EARLIER. That single property
-    /// is the whole anti-storm defence of §7.4: a million timers scheduled for
-    /// next week must produce exactly one wake, not a million.
-    #[test]
-    fn a_later_hint_does_not_move_the_minimum() {
-        let w = Wake::new();
-        w.arm();
-        w.hint(1000);
-        let after_first = w.earliest_ms.load(Ordering::Relaxed);
-        assert!(after_first < i64::MAX);
-        w.hint(60_000);
-        assert_eq!(
-            w.earliest_ms.load(Ordering::Relaxed),
-            after_first,
-            "a later delivery must not move the minimum"
-        );
-        w.hint(1);
-        assert!(w.earliest_ms.load(Ordering::Relaxed) < after_first, "an earlier one must");
-    }
-
-    /// A negative delay is legal (§4.2: a `deliverAt` in the past fires on the
-    /// first cycle) and must not underflow into a distant past that would then
-    /// swallow every later hint.
-    #[test]
-    fn a_past_hint_is_clamped_to_now_not_to_the_epoch() {
-        let w = Wake::new();
-        w.arm();
-        w.hint(i64::MIN);
-        let v = w.earliest_ms.load(Ordering::Relaxed);
-        assert!(v > 0, "a past hint must not underflow: {v}");
-        assert!(v <= crate::util::now_epoch_ms() + 1);
     }
 }

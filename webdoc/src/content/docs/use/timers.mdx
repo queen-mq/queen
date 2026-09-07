@@ -66,11 +66,18 @@ A cancel is a `DELETE`. It is idempotent, and cancelling a timer that never exis
 
 **`deliverAt` is a floor, never an appointment.** The contract is "no earlier than". The measured floor
 on this stack is a single hop, p50 around 10 ms with an fsync around 4 ms, plus one sweep cycle. A
-healthy timer lands within a few milliseconds above `QUEEN_SWEEPER_MIN_SLEEP_MS`; a timer consistently
-later than `QUEEN_SWEEPER_MAX_SLEEP_MS` (1000 ms) has a wake-up problem rather than a load problem, and
-`queen_timers_fire_lag_seconds` is what measures it. This is not a high-frequency
-scheduler. It is a durable one, and under a burst of a million due timers the delivery lag rises
-linearly while the backlog drains rather than anything being lost.
+healthy timer lands within a few milliseconds above `QUEEN_SWEEPER_MIN_SLEEP_MS`, and a consumer
+parked on the queue receives it in the same cycle, because the fire announces its commit to the
+hot-list the way a push does; a timer consistently later than `QUEEN_SWEEPER_MAX_SLEEP_MS` (1000 ms)
+has a wake-up problem rather than a load problem, and `queen_timers_fire_lag_seconds` is what
+measures it. This is not a high-frequency scheduler. It is a durable one, and under a burst of a
+million due timers the delivery lag rises linearly while the backlog drains rather than anything
+being lost.
+
+One caveat for older brokers: from 1.0.3 through 1.5.1 a timer scheduled on an idle broker could
+take about 30 s to fire, and then about 30 s more to reach a consumer on the queue-scoped pop routes,
+whatever its delay. On those versions set `QUEEN_SWEEPER_IDLE_MAX_SLEEP_MS` and
+`QUEEN_HOTLIST_RESEED_MS` to 1000, or upgrade.
 
 **The order of two timers is decided at the fire, not at the schedule.** Two timers on the same queue
 and partition that come due in the same batch enter the log in the order the claim returned them,

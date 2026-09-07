@@ -7,6 +7,8 @@ sidebar:
   order: 14
 sourceOfTruth:
   - server/src/sweeper.rs
+  - server/src/notify.rs
+  - server/src/handlers/mod.rs
   - server/sql/procedures/025_log_timers.sql
   - server/sql/procedures/026_kv_sweeper.sql
   - server/src/config.rs
@@ -137,7 +139,26 @@ instant, plus a notification. Both seams that can create a timer, the HTTP handl
 wire, ring it **after** the commit and never before, because a wake for a transaction that then rolls
 back teaches the loop that work exists which does not. The hint applies only when the new instant is
 earlier than the one already promised, so scheduling a million timers for next week produces exactly
-one wake.
+one wake. A hint that arrives during a sleep cuts it short and resets the idle backoff, which is what
+makes a 30 s empty-table sleep safe to have at all.
+
+The waker lives in the notifier module, beside the wake gates the long-poll parks on, and not in the
+sweeper's own module. The reason is the twin module lists of the binary and the library: the sweeper
+is compiled into the binary alone, since the embedded broker runs none, while both seams are compiled
+into the library as well, and a handler that named the sweeper would not build there. That split is
+why nothing rang the waker from 1.0.3 through 1.5.1: a timer scheduled while the table had been empty
+waited out the idle backoff, up to `QUEEN_SWEEPER_IDLE_MAX_SLEEP_MS`, whatever its delay.
+
+**The fire announces its commit the way a push does.** Landing a frame in the log is not the same as
+delivering it. The queue-scoped pop routes consult their group rings on the [hot-list](/internals/hotlist),
+not the log, so a partition no ring was told about stays invisible until the periodic reseed
+(`QUEEN_HOTLIST_RESEED_MS`, 30 s), and a parked long-poll is woken only by that reseed's promotion.
+Every path that lands frames therefore announces after its commit through one shared function: the
+push, the streams cycle, the spool drain and the fire, which announces every segment the procedure
+reports as fired. The partition is marked on every group ring of the queue, the local wake is
+coalesced into the hot-list's wake tick, and peers get the batched message-available frame. From
+1.0.3 through 1.5.1 the fire only counted its verdicts, and a fired timer reached a parked consumer
+about 30 s after it fired; the pinned partition route, which reads the log directly, never noticed.
 
 There is deliberately no `LISTEN`/`NOTIFY`. It would need a dedicated connection held open forever
 outside the pool, which the pool does not offer, and PostgreSQL's notify queue is a shared area that,

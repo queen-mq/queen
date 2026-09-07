@@ -27,6 +27,7 @@
 //! carry the tenant explicitly, so the key never travels the wire as one blob.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -433,9 +434,166 @@ impl Notifier {
 
 }
 
+// ===========================================================================
+// The sweeper's local wake (PLAN_KV_TIMERS.md §7.4)
+// ===========================================================================
+
+/// The in-process, best-effort wake of the timer sweeper: an `AtomicI64` holding
+/// the nearest locally committed `deliver_at` plus a `Notify`.
+///
+/// It lives HERE and not in `sweeper.rs`, which owns the loop that awaits it,
+/// because the seams that ring it are compiled into both crate roots (the twin
+/// module lists of `src/main.rs` and `src/lib.rs`) while the sweeper is declared
+/// by the binary alone: the embedded broker has no sweeper. A handler naming
+/// `crate::sweeper` breaks the library build, so the waker sits in a module both
+/// targets list. The embedded broker therefore holds a waker nobody awaits, which
+/// is harmless: a hint is one CAS and a permit nobody takes.
+///
+/// The handler of `POST /api/v1/timers` and the transaction wire ring it **after
+/// the commit and never before** — a wake for a transaction that then rolls back
+/// costs a wasted cycle and, worse, teaches the loop that work exists which does
+/// not. The cost is one CAS, and the anti-storm property is free: the hint only
+/// applies when the new minimum is EARLIER, so scheduling a million timers for
+/// next week produces exactly ONE wake.
+///
+/// Losing a hint costs latency and never correctness: `QUEEN_SWEEPER_MAX_SLEEP_MS`
+/// is the recovery window and `deliverAt` is "no earlier than". What a MISSING
+/// hint cost, from 1.0.3 through 1.5.1 when nothing rang this: a timer scheduled
+/// on an idle broker waited out the idle backoff, up to
+/// `QUEEN_SWEEPER_IDLE_MAX_SLEEP_MS` (30 s), whatever its delay.
+pub struct SweeperWake {
+    /// Epoch ms of the nearest hinted delivery, `i64::MAX` when nothing is
+    /// pending. Re-armed at the top of every sweeper cycle.
+    earliest_ms: AtomicI64,
+    notify: Notify,
+}
+
+impl Default for SweeperWake {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SweeperWake {
+    pub fn new() -> Self {
+        SweeperWake { earliest_ms: AtomicI64::new(i64::MAX), notify: Notify::new() }
+    }
+
+    /// Ring for a timer that becomes due in `delay_ms`. A past or negative delay
+    /// is legal (§4.2: a `deliverAt` in the past fires on the first cycle).
+    pub fn hint(&self, delay_ms: i64) {
+        let at = crate::util::now_epoch_ms().saturating_add(delay_ms.max(0));
+        loop {
+            let cur = self.earliest_ms.load(Ordering::Relaxed);
+            if at >= cur {
+                return; // not earlier than what we already promised to wake for
+            }
+            if self
+                .earliest_ms
+                .compare_exchange_weak(cur, at, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                // `notify_one` stores a permit when nobody is waiting, so a hint
+                // that lands mid-cycle is not lost.
+                self.notify.notify_one();
+                return;
+            }
+        }
+    }
+
+    /// Re-arm at the top of a cycle: anything hinted from here on is news.
+    pub(crate) fn arm(&self) {
+        self.earliest_ms.store(i64::MAX, Ordering::Relaxed);
+    }
+
+    /// Resolves on the next hint that moves the minimum, or at once on the
+    /// permit left by one that landed while nobody was waiting.
+    pub(crate) async fn notified(&self) {
+        self.notify.notified().await;
+    }
+}
+
+static SWEEPER_WAKE: OnceLock<Arc<SweeperWake>> = OnceLock::new();
+
+/// The process-wide sweeper waker. Process-global rather than a field of
+/// `AppState` because the embedded facade, the HTTP handlers and the sweeper loop
+/// all need the same one, and a second `Broker` in one process shares the first
+/// one's sweeper exactly as it shares its admission arbiter.
+pub fn sweeper_wake() -> &'static Arc<SweeperWake> {
+    SWEEPER_WAKE.get_or_init(|| Arc::new(SweeperWake::new()))
+}
+
+/// One-liner for the commit seams (§7.4): the timers handler, the transaction
+/// wire, and the ephemeral engine's lease backstop through its injected hook.
+/// Safe to call whether or not a sweeper task was ever spawned.
+pub fn hint_sweeper_in_ms(delay_ms: i64) {
+    sweeper_wake().hint(delay_ms);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ------------------------------------------------ the sweeper's wake (§7.4)
+
+    /// `hint` applies only when the new minimum is EARLIER. That single property
+    /// is the whole anti-storm defence of §7.4: a million timers scheduled for
+    /// next week must produce exactly one wake, not a million.
+    #[test]
+    fn a_later_sweeper_hint_does_not_move_the_minimum() {
+        let w = SweeperWake::new();
+        w.arm();
+        w.hint(1000);
+        let after_first = w.earliest_ms.load(Ordering::Relaxed);
+        assert!(after_first < i64::MAX);
+        w.hint(60_000);
+        assert_eq!(
+            w.earliest_ms.load(Ordering::Relaxed),
+            after_first,
+            "a later delivery must not move the minimum"
+        );
+        w.hint(1);
+        assert!(w.earliest_ms.load(Ordering::Relaxed) < after_first, "an earlier one must");
+    }
+
+    /// A negative delay is legal (§4.2: a `deliverAt` in the past fires on the
+    /// first cycle) and must not underflow into a distant past that would then
+    /// swallow every later hint.
+    #[test]
+    fn a_past_sweeper_hint_is_clamped_to_now_not_to_the_epoch() {
+        let w = SweeperWake::new();
+        w.arm();
+        w.hint(i64::MIN);
+        let v = w.earliest_ms.load(Ordering::Relaxed);
+        assert!(v > 0, "a past hint must not underflow: {v}");
+        assert!(v <= crate::util::now_epoch_ms() + 1);
+    }
+
+    /// A hint that lands while nobody is sleeping is not lost: `notify_one`
+    /// stores a permit, so the next wait returns at once. This is what lets a
+    /// timer scheduled during a fire pass cut the following sleep short.
+    #[tokio::test]
+    async fn a_sweeper_hint_that_lands_mid_cycle_is_kept_as_a_permit() {
+        let w = SweeperWake::new();
+        w.arm();
+        w.hint(5);
+        tokio::time::timeout(Duration::from_millis(500), w.notified())
+            .await
+            .expect("the permit stored by the hint must resolve the next wait");
+    }
+
+    /// With the hot list off, the announce a committed write makes is the legacy
+    /// wake: the gate a parked pop created receives the partition hint, exactly
+    /// as a push's did before the hot list existed. The hot-list-on half is
+    /// pinned from the ring's side in `hotlist.rs`.
+    #[test]
+    fn announce_with_the_hot_list_off_hands_the_gate_the_partition_hint() {
+        let n = Notifier::new(false);
+        let h = crate::hotlist::HotList::new(false, 1, 100, false, false);
+        n.gate("q"); // a parked pop created the gate
+        crate::handlers::announce_landed(&h, &n, &[("q".to_string(), "p7".to_string(), 3)]);
+        assert_eq!(n.drain_hints("q", 10), vec!["p7".to_string()]);
+    }
 
     #[test]
     fn unpolled_queue_allocates_no_gate_and_stores_no_hint() {

@@ -121,8 +121,17 @@ the delivered frame without a second call.
 ### `deliverAt` is a floor
 
 `deliverAt` means "not before", never "exactly at". A healthy timer lands within about ten
-milliseconds of the sweeper's minimum sleep. Above `QUEEN_SWEEPER_MAX_SLEEP_MS` you have a wake-up
-problem, not a load problem, and `queen_timers_fire_lag_seconds` is the series that says which.
+milliseconds of the sweeper's minimum sleep, and reaches a consumer parked on the queue in the same
+cycle: the fire announces its commit to the hot-list exactly as a push does, and a schedule rings
+the sweeper's waker so an idle broker does not sleep through the delay. Above
+`QUEEN_SWEEPER_MAX_SLEEP_MS` you have a wake-up problem, not a load problem, and
+`queen_timers_fire_lag_seconds` is the series that says which.
+
+Brokers from 1.0.3 through 1.5.1 did neither. A timer scheduled on an idle broker could wait out the
+sweeper's idle backoff (`QUEEN_SWEEPER_IDLE_MAX_SLEEP_MS`, 30 s) before it fired, and the fired
+frame then stayed invisible to the queue-scoped pop routes until the next hot-list reseed
+(`QUEEN_HOTLIST_RESEED_MS`, 30 s): a 2 s timer measured at about 30 s, on both schedule routes.
+The pinned partition route was never affected. Setting both knobs to 1000 was the workaround.
 
 Order within a batch of due timers is decided **at the fire, not at the schedule**. Two timers on
 the same queue and partition that mature in the same cycle enter the log in expiry order, which is

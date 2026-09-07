@@ -506,6 +506,17 @@ async fn apply_ops(
             ),
         ));
     }
+    // The nearest delivery this batch promises, for the sweeper wake after the
+    // commit (§7.4). Schedules and reschedules carry `delayMs`; a cancel carries
+    // none and rings nothing. A reschedule to a LATER instant rings for nothing
+    // too, harmlessly: the hint applies only when the new minimum is earlier
+    // than the one the loop already promised, so the minimum over the batch's
+    // schedules covers every case that needs a ring.
+    let nearest_ms: Option<i64> = ops
+        .iter()
+        .filter_map(|o| o.get("delayMs").and_then(Value::as_f64))
+        .map(|d| d as i64)
+        .min();
     let ops_json = Value::Array(ops).to_string();
 
     let client = match st.pool.get().await {
@@ -530,7 +541,22 @@ async fn apply_ops(
 
     match super::kv::resolve_db(res, client, cancel, "timers_apply", &st.metrics) {
         Ok(txt) => match serde_json::from_str::<Value>(&txt) {
-            Ok(Value::Array(a)) => Ok(a),
+            Ok(Value::Array(a)) => {
+                // SEAM (§7.4): the local, in-process sweeper wake, AFTER the
+                // commit and never before — a wake for a transaction that then
+                // rolls back costs a wasted cycle and, worse, teaches the loop
+                // that work exists which does not. One CAS, and the anti-storm
+                // property is free: the hint applies only when the new minimum
+                // is EARLIER, so a million timers scheduled for next week
+                // produce exactly one wake. An op the procedure refused inside
+                // a committed batch rings for nothing, which costs one probe.
+                // Rung HERE, in the one path to the database, so the cancel
+                // route shares the seam and cannot drift from it.
+                if let Some(ms) = nearest_ms {
+                    crate::notify::hint_sweeper_in_ms(ms);
+                }
+                Ok(a)
+            }
             _ => {
                 st.metrics.record_db_error();
                 Err(json(
@@ -702,19 +728,9 @@ async fn timers_batch_inner(
         }
     }
 
+    // The sweeper wake (§7.4) rang inside `apply_ops`, after the commit.
     match apply_ops(st, tenant.as_str(), producer_sub.as_deref(), ops, schedules).await {
-        Ok(results) => {
-            // SEAM (§7.4): the local, in-process sweeper wake goes HERE, AFTER
-            // the commit and never before — a wake for a transaction that then
-            // rolls back costs a wasted cycle and, worse, teaches the loop that
-            // work exists which does not. It is one `st.timer_wake.hint(ms)`
-            // once AppState carries the waker, and the anti-storm property is
-            // free: the hint applies only when the new minimum is EARLIER, so a
-            // million timers scheduled for next week produce exactly one wake.
-            // Without it nothing breaks: QUEEN_SWEEPER_MAX_SLEEP_MS (1 s) is the
-            // recovery window, and deliverAt is "not before", never "exactly at".
-            batch_response(results)
-        }
+        Ok(results) => batch_response(results),
         Err(resp) => resp,
     }
 }

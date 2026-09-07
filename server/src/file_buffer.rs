@@ -169,6 +169,16 @@ pub struct FileBufferManager {
     failed_dir: PathBuf,
     /// Head-of-FIFO poison tracker: (file, consecutive permanent-failure count).
     poison: Mutex<Option<(PathBuf, u32)>>,
+    /// How a replayed batch announces the frames it landed — the hot-list mark,
+    /// the coalesced wake and the peer fan-out a push makes after its commit
+    /// (`handlers::announce_landed`). Attached by the boot path once the hot list
+    /// exists, which is after this manager is built and its drain spawned; a
+    /// drain that runs before then (startup recovery, before the listener is up)
+    /// announces to nobody, which is exactly who is parked at that point, and the
+    /// first pop of a group seeds its ring from the log anyway. Without it a
+    /// message buffered during an outage stayed invisible to the queue-scoped pop
+    /// routes for a reseed interval after the drain.
+    announcer: std::sync::OnceLock<crate::handlers::Announcer>,
 }
 
 impl FileBufferManager {
@@ -227,7 +237,13 @@ impl FileBufferManager {
             cooldown_until: Mutex::new(None),
             failed_dir,
             poison: Mutex::new(None),
+            announcer: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Wire the post-commit announce. Only the first call wins; safe to never call.
+    pub fn attach_announcer(&self, a: crate::handlers::Announcer) {
+        let _ = self.announcer.set(a);
     }
 
     /// Record a permanent failure for the current FIFO-head file; returns its
@@ -673,6 +689,22 @@ impl FileBufferManager {
             .map_err(|e| classify_push_error(&e))?;
         if let Some(sl) = slot.as_mut() {
             sl.commit_done(t0.elapsed());
+        }
+        // Committed: announce every replayed (tenant, queue, partition) the way
+        // the push handler announces its segment. Unconditional over the batch —
+        // a `duplicate` segment (an earlier partial drain already landed it)
+        // marks a partition with nothing new, the usual harmless false positive,
+        // and the alternative is parsing the SP's verdicts to save one empty
+        // probe on a path that only runs after an outage.
+        if let Some(a) = self.announcer.get() {
+            let landed: Vec<(String, String, u32)> = order
+                .iter()
+                .zip(&counts)
+                .map(|((t, q, p), n)| {
+                    (crate::handlers::tenant_queue_key(t, q), p.clone(), (*n).max(0) as u32)
+                })
+                .collect();
+            a.landed(&landed);
         }
         Ok(())
     }

@@ -374,26 +374,17 @@ pub async fn handle_push(
     // the flush's pack_frames stamps it into the frame (FLAG_PSUB) — so auth-enabled
     // pushes coalesce across requests exactly like the anonymous path.
     let pending = groups.len();
-    // Capture the pushed (qkey, partition) set before the submit loop consumes
-    // `groups`, so we can wake parked pops / notify peers once the write lands.
-    // Track B (§5): the ring and the wake gate are keyed by (tenant, queue), so the
-    // composite key is built HERE — one String per touched queue, exactly the
-    // allocation the bare-name clone already cost.
-    let notify_keys: Vec<(String, String)> = groups
-        .keys()
-        .map(|(q, p)| (tenant_queue_key(tenant.as_str(), q), p.clone()))
+    // Capture the pushed (qkey, partition, frame count) set before the submit
+    // loop consumes `groups`, so the post-commit announce can mark the hot list
+    // (the count is the windowBuffer batch fattening of 19-wildcard-hotlist §2),
+    // wake parked pops and notify peers once the write lands. Track B (§5): the
+    // ring and the wake gate are keyed by (tenant, queue), so the composite key
+    // is built HERE — one String per touched queue, exactly the allocation the
+    // bare-name clone already cost.
+    let landed: Vec<(String, String, u32)> = groups
+        .iter()
+        .map(|((q, p), v)| (tenant_queue_key(tenant.as_str(), q), p.clone(), v.len() as u32))
         .collect();
-    // 19-wildcard-hotlist §2: capture (qkey, partition, count) before `groups`
-    // is consumed, so the post-commit mark knows each partition's frame count
-    // (windowBuffer batch fattening). Only when the flag is on (else zero cost).
-    let hotlist_marks: Vec<(String, String, u32)> = if st.hotlist.enabled() {
-        groups
-            .iter()
-            .map(|((q, p), v)| (tenant_queue_key(tenant.as_str(), q), p.clone(), v.len() as u32))
-            .collect()
-    } else {
-        Vec::new()
-    };
     let (tx, rx) = tokio::sync::oneshot::channel();
     let state = Arc::new(PushState {
         results: Mutex::new(results),
@@ -433,27 +424,13 @@ pub async fn handle_push(
             st.metrics.per_queue.add_push(tenant.as_str(), q, msgs);
         }
     }
-    // The segment is committed — make it discoverable. Two paths:
-    if st.hotlist.enabled() {
-        // 19-wildcard-hotlist §2 + C1: mark each pushed (queue, partition) pending on
-        // every group ring (QUIET — no per-push local wake). The local wake is
-        // COALESCED into main's ~5ms wake tick (mark_local_quiet flags the queue), so
-        // a hot queue at 25k push/s costs ~200 notify_waiters/s, not 25k×O(parked).
-        // Peers still get an IMMEDIATE batched MESSAGE_AVAILABLE (fan_out_pushed_batch)
-        // so cross-broker discovery stays prompt even in a mixed on/off cluster; the
-        // coalesced HOTLIST_DIRTY hints are additive. Incondizionato; a mark on a
-        // partition whose push actually failed is the usual harmless false positive.
-        let now_ms = crate::util::now_epoch_ms();
-        for (qkey, p, n) in &hotlist_marks {
-            st.hotlist.mark_local_quiet(qkey, p, *n, now_ms);
-        }
-        st.notifier.fan_out_pushed_batch(&notify_keys);
-    } else {
-        // Flag off ⇒ byte-identical: wake any parked long-poll pops on these queues
-        // (local, with partition hints) and notify peer replicas so cross-replica
-        // consume is immediate. One batched MESSAGE_AVAILABLE covers the whole bundle.
-        st.notifier.notify_pushed_batch(&notify_keys);
-    }
+    // The segment is committed — make it discoverable: the hot-list mark, the
+    // coalesced local wake and the peer fan-out (or, with the hot list off, the
+    // legacy wake with partition hints), in the one place every path that lands
+    // frames shares (`announce_landed`, beside `tenant_queue_key`). Unconditional;
+    // a mark on a partition whose push actually failed is the usual harmless
+    // false positive.
+    announce_landed(&st.hotlist, &st.notifier, &landed);
 
     // RUSTFIX item 1: an "error" status means the whole DB transaction failed
     // (connection/timeout) — fusion committed nothing. Spool those items to the
@@ -5828,17 +5805,20 @@ pub async fn handle_transaction(
                     );
                 }
 
-                // SEAM (§7.4): the local, in-process sweeper wake goes HERE,
-                // AFTER the commit and never before — a wake for a transaction
-                // that then rolls back costs a wasted cycle and, worse, teaches
-                // the loop that work exists which does not. It is one
-                // `sweeper::hint_in_ms(ms)` call, and it cannot be written yet:
-                // `sweeper` is declared in `main.rs` only and NOT in the twin
-                // list in `lib.rs` (§7.1 names both), so naming it from a file
-                // compiled into both targets breaks the library build. Nothing
-                // breaks without it: QUEEN_SWEEPER_MAX_SLEEP_MS (1 s) is the
-                // recovery window and `deliverAt` is "no earlier than".
-                let _wake_in_ms = riders.min_delay_ms;
+                // The local, in-process sweeper wake (§7.4), AFTER the commit
+                // and never before — a wake for a transaction that then rolls
+                // back costs a wasted cycle and, worse, teaches the loop that
+                // work exists which does not. The waker lives in `notify.rs`
+                // precisely so this file, compiled into both crate roots, can
+                // name it; the sweeper itself is declared by `main.rs` alone.
+                // One CAS, applied only when the bundle's nearest delivery is
+                // EARLIER than what the loop already promised to wake for.
+                // Without it a timer scheduled on an idle broker waited out the
+                // idle backoff, up to QUEEN_SWEEPER_IDLE_MAX_SLEEP_MS (30 s),
+                // whatever its delay.
+                if let Some(ms) = riders.min_delay_ms {
+                    crate::notify::hint_sweeper_in_ms(ms);
+                }
 
                 // The bundle committed, so what the ladder charged actually
                 // happened and the local delta keeps it (§9.3).

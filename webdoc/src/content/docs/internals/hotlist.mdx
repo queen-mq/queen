@@ -7,6 +7,7 @@ sidebar:
   order: 5
 sourceOfTruth:
   - server/src/hotlist.rs
+  - server/src/handlers/mod.rs
   - server/src/handlers/data.rs
   - server/src/handlers/consumer_groups.rs
   - server/src/reconcile.rs
@@ -83,10 +84,19 @@ accumulated mark count, a drained flag, and the two ring links. The state byte i
 
 ## Marks: how a partition becomes a candidate
 
-A mark says "this partition just received data". It comes from four places: a local push (quiet;
-see the wake tick below), a transaction commit or DLQ move (which wakes immediately), a peer's mesh
-dirty hint (wakes immediately, never re-broadcast), and a reseed row (local discovery, no
-broadcast).
+A mark says "this partition just received data". It comes from four places: a local write that
+landed frames (quiet; see the wake tick below), a transaction commit or DLQ move (which wakes
+immediately), a peer's mesh dirty hint (wakes immediately, never re-broadcast), and a reseed row
+(local discovery, no broadcast).
+
+The first of those is one function, shared by every path that lands frames in the log: the push
+handler, the streams cycle's sink emit, the spool drain's replay after a database outage, and the
+[sweeper's](/internals/sweeper) timer fire, for every segment the fire procedure reports as fired.
+A fire marks exactly like a push: the partition goes pending on every group ring of its queue, the
+local wake is coalesced into the tick, and peers get the batched message-available frame. That
+matters because these routes consult the ring, not the log: a partition no ring was told about is
+invisible until the reseed floor, which is how a fired timer reached its consumer about 30 s late
+from 1.0.3 through 1.5.1.
 
 A mark is applied to **every existing group ring** of the queue, because a push makes the partition
 pending for every group already polling it. A group nobody polls has no ring and therefore no

@@ -3037,6 +3037,31 @@ mod tests {
         assert_eq!(parse_uuid16("--0000000000000000000000000000000a"), parse_uuid16("0000000000000000000000000000000a"));
     }
 
+    // ------------------------------------------------ the post-commit announce
+
+    // `handlers::announce_landed` is the ONE thing every path that lands frames
+    // does after its commit: the push, the streams sink emit, the sweeper's timer
+    // fire and the spool replay. The fire and the replay had no announce from
+    // 1.0.3 through 1.5.1 — a fired timer sat in the log with no ring aware of its
+    // partition, so the queue-scoped pop routes ignored it until the periodic
+    // reseed, about 30 s. Pinned from the ring's side: after the announce the
+    // group's lane holds the partition, and the queue is flagged for exactly one
+    // coalesced wake. The hot-list-off half is pinned in `notify.rs`.
+    #[test]
+    fn the_announce_of_a_landed_write_readies_the_partition_on_the_group_ring() {
+        let h = hl1();
+        let n = Notifier::new(false);
+        reg(&h, "q", "g");
+        let now = crate::util::now_epoch_ms();
+        assert_eq!(h.ready_peek("q", "g", now).0, 0, "nothing landed yet");
+
+        crate::handlers::announce_landed(&h, &n, &[("q".to_string(), "p0".to_string(), 2)]);
+
+        assert_eq!(h.ready_peek("q", "g", now).0, 1, "the landed partition is a candidate");
+        assert_eq!(h.wake_tick(), 1, "and the queue is flagged for the coalesced wake");
+        assert_eq!(h.wake_tick(), 0, "exactly once");
+    }
+
     // ------------------------------------------------ burst-resolved telemetry
 
     // The window's provenance counters and its three maxima, driven through the

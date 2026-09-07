@@ -399,6 +399,14 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
         cfg.tenancy_header,
     );
     hotlist.attach_notifier(notifier.clone());
+    // KEEP IN SYNC with main.rs: the spool drain announces what it replays the
+    // way a push does (hot-list mark, coalesced wake, peer fan-out). It was
+    // spawned above, before the hot list existed, so it takes the two hands
+    // late: see `FileBufferManager::announcer`.
+    file_buffer.attach_announcer(crate::handlers::Announcer {
+        hotlist: hotlist.clone(),
+        notifier: notifier.clone(),
+    });
     // KEEP IN SYNC with main.rs. An embedded broker has no HA peer, so it cannot be the
     // standby of a pair — but it can still hold a queue nobody pops (a write-only stretch,
     // a consumer that stopped), which is the same accumulation.

@@ -3,6 +3,21 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## Unreleased
+
+**Timers reach their consumer when they fire.** Two gaps, each worth up to 30 seconds with
+default settings, made a 2 second timer arrive after about 30 seconds on an idle broker,
+through `POST /api/v1/timers` and the transaction rider alike. The sweeper's fire landed the
+frame in the log but never told the pop path, so a consumer parked on the queue saw it only at
+the next hot-list reseed (`QUEEN_HOTLIST_RESEED_MS`), and nothing rang the sweeper's own waker,
+so a timer scheduled while the timer table had been empty waited out the idle backoff
+(`QUEEN_SWEEPER_IDLE_MAX_SLEEP_MS`) before it fired, whatever its delay. The fire now announces
+every fired segment exactly as a push announces its commit, and both schedule seams ring the
+waker after their commit. The same announce now covers messages the spool drain replays after a
+database outage, which stayed invisible for a reseed interval too. Affects 1.0.3 through 1.5.1;
+the pinned partition route was never affected. Setting both knobs to 1000 was the workaround
+and is no longer needed.
+
 ## 1.5.0 — 2026-09-04
 
 **An S3 / data-lake sink connector.** `queen-s3` ships inside `ghcr.io/queen-mq/queen`

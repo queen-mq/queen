@@ -225,6 +225,66 @@ pub(crate) fn split_tenant_queue(key: &str) -> (&str, &str) {
     }
 }
 
+/// A committed write landed frames on these `(tenant-queue key, partition,
+/// frame count)` triples — make them discoverable. ONE behaviour for every path
+/// that lands frames in the log: the HTTP push, the streams cycle's sink emit,
+/// the sweeper's timer fire and the spool drain's replay. After the commit and
+/// never before: a mark for a write that then rolls back is merely a harmless
+/// false positive (the pop finds nothing and the entry clears), but the point of
+/// one function is that no landing path can forget the announce — which is what
+/// the fire and the replay did from 1.0.3 through 1.5.1, leaving their frames
+/// invisible to the queue-scoped pop routes until the periodic reseed.
+///
+/// Hot list on (19-wildcard-hotlist §2 + C1): mark each partition pending on
+/// every group ring of its queue, QUIETLY — the local wake is coalesced into the
+/// ~5 ms wake tick, so a hot queue at 25k push/s costs ~200 `notify_waiters`/s
+/// rather than one per push — then hand peers ONE batched MESSAGE_AVAILABLE so
+/// cross-broker discovery stays prompt even in a mixed on/off cluster (the
+/// coalesced dirty hints the mark queues are additive). Off: the legacy wake,
+/// local parked pops with their partition hints plus the same peer frame.
+///
+/// The `(qkey, partition)` list the notifier wants is built only when someone
+/// will read it, so the default configuration — hot list on, no peers — pays
+/// for the marks alone.
+pub(crate) fn announce_landed(
+    hotlist: &crate::hotlist::HotList,
+    notifier: &crate::notify::Notifier,
+    marks: &[(String, String, u32)],
+) {
+    if marks.is_empty() {
+        return;
+    }
+    let keys = || -> Vec<(String, String)> {
+        marks.iter().map(|(q, p, _)| (q.clone(), p.clone())).collect()
+    };
+    if hotlist.enabled() {
+        let now_ms = crate::util::now_epoch_ms();
+        for (qkey, p, n) in marks {
+            hotlist.mark_local_quiet(qkey, p, *n, now_ms);
+        }
+        if notifier.transport().is_some() {
+            notifier.fan_out_pushed_batch(&keys());
+        }
+    } else {
+        notifier.notify_pushed_batch(&keys());
+    }
+}
+
+/// The two hands [`announce_landed`] needs, bundled for the writers that land
+/// frames outside a request and so hold no `AppState`: the sweeper's timer fire
+/// and the spool drain. Cheap to clone, two `Arc`s.
+#[derive(Clone)]
+pub(crate) struct Announcer {
+    pub hotlist: Arc<crate::hotlist::HotList>,
+    pub notifier: Arc<crate::notify::Notifier>,
+}
+
+impl Announcer {
+    pub(crate) fn landed(&self, marks: &[(String, String, u32)]) {
+        announce_landed(&self.hotlist, &self.notifier, marks);
+    }
+}
+
 impl AppState {
     // Resolve the queue's lease time, caching the lookup. Falls back to
     // DEFAULT_LEASE_SECONDS when the queue has no queen.queues row yet or the DB

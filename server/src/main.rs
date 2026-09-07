@@ -475,6 +475,13 @@ async fn main() {
         cfg.tenancy_header,
     );
     hotlist.attach_notifier(notifier.clone());
+    // The spool drain announces what it replays the way a push does (hot-list
+    // mark, coalesced wake, peer fan-out). It was spawned above, before the hot
+    // list existed, so it takes the two hands late: see `FileBufferManager::announcer`.
+    file_buffer.attach_announcer(handlers::Announcer {
+        hotlist: hotlist.clone(),
+        notifier: notifier.clone(),
+    });
     // Standby-ring bound: see `HotList::trim_unserved` / `hotlist_unserved_trim_ms`.
     hotlist.set_unserved_trim_ms(cfg.hotlist_unserved_trim_ms);
     if cfg.hotlist_enabled {
@@ -532,11 +539,12 @@ async fn main() {
         ),
     }
     // The lease-expiry / ttl backstop rides the sweeper's existing waker rather
-    // than adding a second timer task to the process (M10). Injected instead of
-    // called directly because `sweeper` exists only in this crate root — the
-    // embedded broker has no sweeper, and there the on-touch sweep is the whole
-    // mechanism.
-    ephemeral.attach_wake_hint(sweeper::hint_in_ms);
+    // than adding a second timer task to the process (M10). Still injected rather
+    // than called directly, although the waker now lives in `notify.rs` where the
+    // engine could name it: the embedded broker has no sweeper, so a hint rung
+    // there would promise a wake nobody delivers, and there the on-touch sweep is
+    // the whole mechanism. `embedded/boot.rs` deliberately attaches nothing.
+    ephemeral.attach_wake_hint(notify::hint_sweeper_in_ms);
     tracing::info!(
         target: "boot",
         // The incarnation id every ephemeral message carries (M4). Logged
@@ -869,6 +877,10 @@ async fn main() {
         // measured in microseconds, and a process that already runs a due-driven
         // loop does not need a second one to run it in.
         ephemeral.clone(),
+        // The fire's post-commit announce: the same hot-list mark and peer
+        // fan-out a push makes, so a fired timer reaches a parked consumer in
+        // the same cycle instead of at the next reseed.
+        handlers::Announcer { hotlist: hotlist.clone(), notifier: notifier.clone() },
     );
     if !cfg.sweeper_enabled {
         // The configuration that silently accumulates: live surfaces with their only

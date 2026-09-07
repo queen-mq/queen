@@ -539,20 +539,22 @@ pub async fn handle_streams_cycle(
                 }
 
                 let now_ms = crate::util::now_epoch_ms();
+                // The sink emit is committed — announce it exactly as a push
+                // announces its segment (`announce_landed`: the hot-list mark, the
+                // coalesced local wake and the peer fan-out, or the legacy wake
+                // with the hot list off). Track B (§5): the ring key is (tenant,
+                // queue) — the same tenant the encryption lookup and the SP's sink
+                // resolve used. Marking the default tenant's key would advertise
+                // this emit to consumers of a DIFFERENT tenant's same-named queue,
+                // and leave the real one invisible until the reseed floor.
+                let landed: Vec<(String, String, u32)> = sink_marks
+                    .iter()
+                    .map(|(q, p, n)| {
+                        (crate::handlers::tenant_queue_key(tenant.as_str(), q), p.clone(), *n)
+                    })
+                    .collect();
+                crate::handlers::announce_landed(&st.hotlist, &st.notifier, &landed);
                 if st.hotlist.enabled() {
-                    // mark_local (not the push path's mark_local_quiet): this is a
-                    // low-frequency path with no separate notify, so it must do the
-                    // local wake itself. Also queues the coalesced mesh dirty hint,
-                    // so peers discover sink emits too.
-                    // Track B (§5): the ring key is (tenant, queue) — the same tenant
-                    // the encryption lookup and the SP's sink resolve used. Marking
-                    // the default tenant's key would advertise this emit to consumers
-                    // of a DIFFERENT tenant's same-named queue, and leave the real
-                    // one invisible until the reseed floor.
-                    for (q, p, n) in &sink_marks {
-                        let qkey = crate::handlers::tenant_queue_key(tenant.as_str(), q);
-                        st.hotlist.mark_local(&qkey, p, *n, now_ms);
-                    }
                     // §7 promote-on-ack: the cycle's ack released the source lease
                     // (the SP reports which). covered=true only when the ack both
                     // succeeded AND released — i.e. it completed the WHOLE leased
@@ -586,17 +588,6 @@ pub async fn handle_streams_cycle(
                             );
                         }
                     }
-                } else if !sink_marks.is_empty() {
-                    // Flag off ⇒ pops fall back to the SQL candidate scan, which sees
-                    // the committed rows directly; all that is missing is the wake, so
-                    // mirror handle_push's else-branch (local parked pops + peers).
-                    let keys: Vec<(String, String)> = sink_marks
-                        .iter()
-                        .map(|(q, p, _)| {
-                            (crate::handlers::tenant_queue_key(tenant.as_str(), q), p.clone())
-                        })
-                        .collect();
-                    st.notifier.notify_pushed_batch(&keys);
                 }
             }
             json(StatusCode::OK, result.to_string())
