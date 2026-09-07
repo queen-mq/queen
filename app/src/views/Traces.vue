@@ -292,34 +292,21 @@
       </div>
     </div>
 
-    <!-- Trace detail drawer (teleported to body to avoid transform issues).
-         Backdrop first, so DOM order matches paint order. -->
-    <Teleport to="body">
-      <div
-        v-if="selectedTrace"
-        class="modal-backdrop"
-        @click="selectedTrace = null"
-      ></div>
+    <DetailDrawer
+      :open="Boolean(selectedTrace)"
+      :title="selectedTrace ? `${selectedTrace.event_type} trace` : 'Trace detail'"
+      @close="selectedTrace = null"
+    >
+      <template #leading>
+        <span
+          v-if="selectedTrace"
+          style="width:10px; height:10px; border-radius:var(--r-pill); flex-shrink:0;"
+          :style="{ background: eventColor(selectedTrace.event_type) }"
+        />
+      </template>
 
-      <div v-if="selectedTrace" class="drawer-panel">
-        <div class="card-header">
-          <span
-            style="width:10px; height:10px; border-radius:var(--r-pill); flex-shrink:0;"
-            :style="{ background: eventColor(selectedTrace.event_type) }"
-          />
-          <h3>{{ selectedTrace.event_type }} trace</h3>
-          <button
-            class="btn btn-ghost btn-icon modal-close"
-            @click="selectedTrace = null"
-          >
-            <svg style="width:18px; height:18px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
-
-        <div class="card-body">
-          <div style="display:flex; flex-direction:column; gap:20px;">
+      <template v-if="selectedTrace">
+        <div style="display:flex; flex-direction:column; gap:20px;">
             <!-- Basic Info -->
             <div style="display:flex; flex-direction:column; gap:14px;">
               <div>
@@ -381,20 +368,20 @@
                 </div>
               </div>
             </div>
-          </div>
         </div>
+      </template>
 
-        <div class="modal-foot">
-          <router-link
-            :to="`/messages?partitionId=${selectedTrace.partition_id}&transactionId=${selectedTrace.transaction_id}`"
-            class="btn"
-            @click="selectedTrace = null"
-          >
-            View Full Message
-          </router-link>
-        </div>
-      </div>
-    </Teleport>
+      <template #footer>
+        <router-link
+          v-if="selectedTrace"
+          :to="`/messages?partitionId=${selectedTrace.partition_id}&transactionId=${selectedTrace.transaction_id}`"
+          class="btn"
+          @click="selectedTrace = null"
+        >
+          View Full Message
+        </router-link>
+      </template>
+    </DetailDrawer>
   </div>
 </template>
 
@@ -406,6 +393,7 @@ import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
 import { useRefresh } from '@/composables/useRefresh'
 import { stamp } from '@/composables/useStamp'
 import { useIdentity } from '@/stores/identity'
+import DetailDrawer from '@/components/DetailDrawer.vue'
 
 const { actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
 

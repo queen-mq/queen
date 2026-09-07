@@ -277,150 +277,81 @@
       </div>
     </div>
 
-    <!-- Message detail panel (teleported to body to avoid transform issues) -->
-    <Teleport to="body">
-      <!-- Backdrop before the panel, so DOM order matches paint order. -->
-      <div v-if="selectedMessage" class="modal-backdrop" @click="closePanel"></div>
+    <DetailDrawer
+      :open="Boolean(selectedMessage)"
+      title="Message Detail"
+      :subtitle="messageDetail?.transactionId || selectedMessage?.transactionId || ''"
+      wide
+      :split="Boolean(messageDetail)"
+      @close="closePanel"
+    >
+      <div v-if="detailLoading" style="text-align:center; padding:48px 0;">
+        <div class="spinner" style="margin:0 auto 12px;"></div>
+        <p style="color:var(--text-low);">Loading details...</p>
+      </div>
 
-      <div v-if="selectedMessage" class="drawer-panel">
-        <div class="card-header">
-          <h3>Message Details</h3>
-          <span v-if="messageDetail?.transactionId" class="card-sub font-mono">{{ messageDetail.transactionId }}</span>
-          <button
-            @click="closePanel"
-            class="btn btn-ghost btn-icon modal-close"
-          >
-            <svg style="width:18px; height:18px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
-      <div class="card-body">
-        <div v-if="detailLoading" style="text-align:center; padding:48px 0;">
-          <div class="spinner" style="margin:0 auto 12px;"></div>
-          <p style="color:var(--text-low);">Loading details...</p>
-        </div>
+      <div v-else-if="detailError" class="panel-err">
+        {{ detailError }}
+      </div>
 
-        <div v-else-if="detailError" class="panel-err">
-          {{ detailError }}
-        </div>
-
-        <template v-else-if="messageDetail">
-          <!-- Status -->
-          <div style="margin-bottom:24px;">
-            <div style="margin-bottom:20px;">
-              <span
-                class="chip"
-                style="font-size:12px;"
-                :class="{
-                  'chip-ice': messageDetail.status === 'pending',
-                  'chip-warn': messageDetail.status === 'processing',
-                  'chip-ok': messageDetail.status === 'completed',
-                  'chip-bad': messageDetail.status === 'dead_letter' || messageDetail.status === 'failed'
-                }"
-              >
-                {{ messageDetail.status }}
-              </span>
-            </div>
-
-            <div style="display:flex; flex-direction:column; gap:16px;">
-              <div>
-                <label class="label-xs" style="display:block; margin-bottom:6px;">Queue / Partition</label>
-                <p style="font-size:13px; font-weight:500; color:var(--text-hi);">
-                  {{ messageDetail.queue }} / {{ messageDetail.partition }}
-                </p>
-              </div>
-
-              <div>
-                <label class="label-xs" style="display:block; margin-bottom:6px;">Partition ID</label>
-                <p class="font-mono" style="font-size:11px; color:var(--text-mid); word-break:break-all;">{{ messageDetail.partitionId }}</p>
-              </div>
-
-              <div>
-                <label class="label-xs" style="display:block; margin-bottom:6px;">Transaction ID</label>
-                <p class="font-mono" style="font-size:11px; color:var(--text-mid); word-break:break-all;">{{ messageDetail.transactionId }}</p>
-              </div>
-
-              <div>
-                <label class="label-xs" style="display:block; margin-bottom:6px;">Created</label>
-                <p :title="formatTimestampUtc(messageDetail.createdAt)" style="font-size:13px; color:var(--text-mid);">{{ formatTimestamp(messageDetail.createdAt) }}</p>
-              </div>
-
-              <div v-if="messageDetail.traceId">
-                <label class="label-xs" style="display:block; margin-bottom:6px;">Trace ID</label>
-                <p class="font-mono" style="font-size:11px; color:var(--text-mid); word-break:break-all;">{{ messageDetail.traceId }}</p>
-              </div>
-
-              <div v-if="messageDetail.errorMessage">
-                <label class="label-xs" style="display:block; margin-bottom:6px;">Error Message</label>
-                <p style="font-size:13px; color:var(--ember-400);">{{ messageDetail.errorMessage }}</p>
-              </div>
-
-              <div v-if="messageDetail.retryCount">
-                <label class="label-xs" style="display:block; margin-bottom:6px;">Retry Count</label>
-                <p class="font-mono tabular-nums" style="font-size:13px; color:var(--text-mid);">{{ messageDetail.retryCount }}</p>
-              </div>
-            </div>
+      <template v-else-if="messageDetail">
+          <!-- Status and routing match the DLQ drawer: the same facts occupy
+               the same positions and identifiers are directly copyable. -->
+          <div class="detail-status-row">
+            <span
+              class="chip"
+              :class="{
+                'chip-ice': messageDetail.status === 'pending',
+                'chip-warn': messageDetail.status === 'processing',
+                'chip-ok': messageDetail.status === 'completed',
+                'chip-bad': messageDetail.status === 'dead_letter' || messageDetail.status === 'failed'
+              }"
+            >
+              {{ messageDetail.status }}
+            </span>
+            <span v-if="messageDetail.retryCount" class="chip chip-warn">
+              {{ messageDetail.retryCount }} retries
+            </span>
           </div>
+
+          <div class="detail-fields">
+            <DetailField label="Queue" :value="messageDetail.queue" tone="high" />
+            <DetailField label="Partition" :value="messageDetail.partition" mono copyable />
+            <DetailField label="Partition ID" :value="messageDetail.partitionId" mono copyable />
+            <DetailField label="Transaction ID" :value="messageDetail.transactionId" mono copyable />
+            <DetailField
+              label="Created"
+              :value="formatTimestamp(messageDetail.createdAt)"
+              :title="formatTimestampUtc(messageDetail.createdAt)"
+            />
+            <DetailField v-if="messageDetail.traceId" label="Trace ID" :value="messageDetail.traceId" mono copyable />
+          </div>
+
+          <DetailField
+            v-if="messageDetail.errorMessage"
+            class="detail-section"
+            label="Error"
+            :value="messageDetail.errorMessage"
+            mono
+            copyable
+            boxed
+            tone="danger"
+          />
 
           <!-- Queue Config -->
-          <div v-if="messageDetail.queueConfig" style="margin-bottom:24px;">
-            <h4 style="font-size:13px; font-weight:600; margin-bottom:12px; color:var(--text-hi);">Queue Config</h4>
-            <div class="card" style="padding:14px 16px;">
-              <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; font-size:13px;">
-                <div>
-                  <span style="color:var(--text-low);">Lease Time:</span>
-                  <span class="font-mono tabular-nums" style="font-weight:500; margin-left:4px; color:var(--text-hi);">{{ messageDetail.queueConfig.leaseTime }}s</span>
-                </div>
-                <div>
-                  <span style="color:var(--text-low);">TTL:</span>
-                  <span class="font-mono tabular-nums" style="font-weight:500; margin-left:4px; color:var(--text-hi);">{{ messageDetail.queueConfig.ttl }}s</span>
-                </div>
-                <div>
-                  <span style="color:var(--text-low);">Retry Limit:</span>
-                  <span class="font-mono tabular-nums" style="font-weight:500; margin-left:4px; color:var(--text-hi);">{{ messageDetail.queueConfig.retryLimit }}</span>
-                </div>
-                <div>
-                  <span style="color:var(--text-low);">Retry Delay:</span>
-                  <span class="font-mono tabular-nums" style="font-weight:500; margin-left:4px; color:var(--text-hi);">{{ messageDetail.queueConfig.retryDelay }}ms</span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Payload -->
-          <div style="margin-bottom:24px;">
-            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
-              <h4 style="font-size:13px; font-weight:600; color:var(--text-hi);">Payload</h4>
-              <button
-                v-if="payloadAvailable"
-                @click="copyPayload"
-                class="btn btn-ghost" style="padding:4px 8px; font-size:11px; gap:4px;"
-              >
-                <svg v-if="!payloadCopied" style="width:14px; height:14px;" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                </svg>
-                <svg v-else style="width:14px; height:14px; color:var(--ok-500);" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                </svg>
-                {{ payloadCopied ? 'Copied!' : 'Copy' }}
-              </button>
-            </div>
-            <!-- payloadAvailable:false means the segment is gone. An empty
-                 payload box would read as "this message carried nothing". -->
-            <div v-if="!payloadAvailable" class="card" style="padding:12px 14px;">
-              <p style="font-size:13px; color:var(--text-mid);">
-                Payload unavailable — the covering log segment was removed by retention.
-              </p>
-            </div>
-            <div v-else class="msg-code">
-              <pre class="font-mono" style="font-size:12px; white-space:pre-wrap; margin:0;" v-html="highlightJson(messageDetail.payload)"></pre>
+          <div v-if="messageDetail.queueConfig" class="detail-section">
+            <h4 class="detail-section-title">Queue Config</h4>
+            <div class="card detail-config-grid">
+              <div><span>Lease time</span><strong>{{ messageDetail.queueConfig.leaseTime }}s</strong></div>
+              <div><span>TTL</span><strong>{{ messageDetail.queueConfig.ttl }}s</strong></div>
+              <div><span>Retry limit</span><strong>{{ messageDetail.queueConfig.retryLimit }}</strong></div>
+              <div><span>Retry delay</span><strong>{{ messageDetail.queueConfig.retryDelay }}ms</strong></div>
             </div>
           </div>
 
           <!-- Consumer Groups -->
-          <div v-if="messageDetail.consumerGroups && messageDetail.consumerGroups.length > 0" style="margin-bottom:24px;">
-            <h4 style="font-size:13px; font-weight:600; margin-bottom:12px; color:var(--text-hi);">Consumer Groups</h4>
+          <div v-if="messageDetail.consumerGroups && messageDetail.consumerGroups.length > 0" class="detail-section">
+            <h4 class="detail-section-title">Consumer Groups</h4>
             <div style="display:flex; flex-direction:column; gap:8px;">
               <div
                 v-for="group in messageDetail.consumerGroups"
@@ -440,7 +371,7 @@
           </div>
 
           <!-- Actions -->
-          <div style="display:flex; flex-direction:column; gap:8px; padding-top:8px;">
+          <div class="detail-actions">
             <!-- Sits with the button that produced it: this drawer scrolls, and
                  a delete failure hoisted to the top would land off screen. -->
             <div v-if="actionError" class="panel-err">{{ actionError }}</div>
@@ -479,10 +410,31 @@
               re-routed from here. Only dead-lettered entries can be purged.
             </p>
           </div>
-        </template>
-      </div>
-      </div>
-    </Teleport>
+      </template>
+
+      <template #secondary>
+        <div v-if="messageDetail">
+          <div class="detail-section-header">
+            <label class="label-xs">Payload</label>
+            <button
+              v-if="payloadAvailable"
+              class="btn btn-ghost detail-copy-button"
+              @click="copyPayload"
+            >
+              {{ payloadCopied ? 'Copied!' : 'Copy' }}
+            </button>
+          </div>
+          <!-- payloadAvailable:false means the segment is gone. An empty
+               payload box would read as "this message carried nothing". -->
+          <div v-if="!payloadAvailable" class="card" style="padding:12px 14px;">
+            <p style="font-size:13px; color:var(--text-mid);">
+              Payload unavailable — the covering log segment was removed by retention.
+            </p>
+          </div>
+          <JsonViewer v-else :value="messageDetail.payload" />
+        </div>
+      </template>
+    </DetailDrawer>
   </div>
 </template>
 
@@ -497,10 +449,13 @@ import { stamp } from '@/composables/useStamp'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
 import Autocomplete from '@/components/Autocomplete.vue'
+import DetailDrawer from '@/components/DetailDrawer.vue'
+import DetailField from '@/components/DetailField.vue'
+import JsonViewer from '@/components/JsonViewer.vue'
 
 const route = useRoute()
 const { can, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
-const { notifySuccess } = useToast()
+const { notifySuccess, notifyError } = useToast()
 
 // State
 const paginationStalled = ref(false)
@@ -732,7 +687,7 @@ const deleteMessage = async () => {
 }
 
 const formatPayload = (payload) => {
-  if (!payload) return 'null'
+  if (payload === null || payload === undefined) return 'null'
   if (typeof payload === 'string') {
     try {
       return JSON.stringify(JSON.parse(payload), null, 2)
@@ -743,81 +698,8 @@ const formatPayload = (payload) => {
   return JSON.stringify(payload, null, 2)
 }
 
-const highlightJson = (payload) => {
-  const json = formatPayload(payload)
-
-  // Tokenize and highlight JSON properly
-  let result = ''
-  let i = 0
-
-  const escapeHtml = (str) => {
-    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  }
-
-  while (i < json.length) {
-    const char = json[i]
-
-    // String
-    if (char === '"') {
-      let str = '"'
-      i++
-      while (i < json.length && json[i] !== '"') {
-        if (json[i] === '\\' && i + 1 < json.length) {
-          str += json[i] + json[i + 1]
-          i += 2
-        } else {
-          str += json[i]
-          i++
-        }
-      }
-      str += '"'
-      i++
-      result += `<span style="color:var(--ok-500)">${escapeHtml(str)}</span>`
-    }
-    // Number
-    else if (char === '-' || (char >= '0' && char <= '9')) {
-      let num = ''
-      while (i < json.length && /[\d.eE+\-]/.test(json[i])) {
-        num += json[i]
-        i++
-      }
-      result += `<span style="color:var(--warn-400)">${num}</span>`
-    }
-    // true, false, null
-    else if (json.slice(i, i + 4) === 'true') {
-      result += '<span style="color:var(--ice-400)">true</span>'
-      i += 4
-    }
-    else if (json.slice(i, i + 5) === 'false') {
-      result += '<span style="color:var(--ice-400)">false</span>'
-      i += 5
-    }
-    else if (json.slice(i, i + 4) === 'null') {
-      result += '<span style="color:var(--ice-400)">null</span>'
-      i += 4
-    }
-    // Braces and brackets
-    else if (char === '{' || char === '}' || char === '[' || char === ']') {
-      result += `<span style="color:var(--text-low)">${char}</span>`
-      i++
-    }
-    // Colon
-    else if (char === ':') {
-      result += '<span style="color:var(--text-faint)">:</span>'
-      i++
-    }
-    // Everything else (whitespace, commas)
-    else {
-      result += escapeHtml(char)
-      i++
-    }
-  }
-
-  return result
-}
-
 const copyPayload = async () => {
-  if (!messageDetail.value?.payload) return
+  if (!messageDetail.value) return
 
   try {
     const text = formatPayload(messageDetail.value.payload)
@@ -826,8 +708,8 @@ const copyPayload = async () => {
     setTimeout(() => {
       payloadCopied.value = false
     }, 2000)
-  } catch (err) {
-    console.error('Failed to copy:', err)
+  } catch {
+    notifyError('Could not copy to the clipboard', 'Copy failed')
   }
 }
 
@@ -867,16 +749,3 @@ watch([filterQueue, filterPartition, filterStatus], () => {
   fetchMessages()
 })
 </script>
-
-<style scoped>
-/* The drawer shell (`.drawer-panel`) and its scrim (`.modal-backdrop`) are
-   shared rules in style.css now — every drawer in the app is the same 640px
-   panel over the same scrim. Only the payload box below is this view's own. */
-
-/* Payload: recessed against the drawer, hairline to close the box. */
-.msg-code {
-  border: 1px solid var(--bd); border-radius: var(--r-card);
-  padding: 14px 16px; overflow-x: auto;
-  background: var(--recessed);
-}
-</style>
