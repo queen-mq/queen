@@ -3,7 +3,7 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
-## Unreleased
+## 1.5.1 - 2026-09-07
 
 **Timers reach their consumer when they fire.** Two gaps, each worth up to 30 seconds with
 default settings, made a 2 second timer arrive after about 30 seconds on an idle broker,
