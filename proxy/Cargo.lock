@@ -913,7 +913,7 @@ dependencies = [
 
 [[package]]
 name = "queen-proxy"
-version = "1.5.1"
+version = "1.5.2"
 dependencies = [
  "axum",
  "base64",

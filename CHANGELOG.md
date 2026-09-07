@@ -3,6 +3,14 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## 1.5.2 - 2026-09-07
+
+**One detail drawer across the dashboard.** Messages, dead letter and traces now open the same
+drawer shell, so a payload, a transaction id and an error read the same wherever you land on
+them. Two columns at desktop width, payload beside metadata, falling back to a single column
+when the window is narrow. Each view keeps its own actions. Dashboard only: no server,
+protocol or client change.
+
 ## 1.5.1 - 2026-09-07
 
 **Timers reach their consumer when they fire.** Two gaps, each worth up to 30 seconds with
