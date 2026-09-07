@@ -42,6 +42,24 @@
         "PXDB_HOST=localhost PXDB_PORT=5456 PXDB_USER=postgres PXDB_PASSWORD=postgres PXDB_DB=queen_proxy QUEEN_PROXY_PORT=6711 QUEEN_PROXY_OPERATOR_ENABLED=true QUEEN_PROXY_JWT_SECRET=dev-only-secret-not-for-production QUEEN_PROXY_SPOOL_DIR=/private/tmp/claude-502/-Users-alice-Work-queen/14c49b73-9301-42e3-9611-3fbb256dfa6f/scratchpad/proxy-spool exec proxy/target/release/queen-proxy"
       ],
       "port": 6711
+    },
+    {
+      "name": "queen-broker-pr49",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "PG_HOST=localhost PG_PORT=5456 PG_USER=postgres PG_PASSWORD=postgres PG_DATABASE=queen_pr49 PORT=6645 QUEEN_APPLY_SCHEMA=1 DB_POOL_SIZE=8 exec server/target/release/queen"
+      ],
+      "port": 6645
+    },
+    {
+      "name": "queen-app",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "cd app && PATH=/Users/alice/.nvm/versions/node/v24.15.0/bin:$PATH QUEEN_DEV_UPSTREAM=http://localhost:6645 exec npm run dev"
+      ],
+      "port": 4000
     }
   ]
 }
