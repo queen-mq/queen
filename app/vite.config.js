@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import tailwindcss from '@tailwindcss/vite'
 import { fileURLToPath, URL } from 'node:url'
 
 // Local development points at the PROXY, not the broker: auth, tenancy, role
@@ -10,7 +11,7 @@ const UPSTREAM = process.env.QUEEN_DEV_UPSTREAM || 'http://localhost:6711'
 const upstream = { target: UPSTREAM, changeOrigin: true }
 
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [vue(), tailwindcss()],
   // Served at the origin root today; keep it a variable so the same bundle can
   // be mounted under a prefix the way the console is at /console/.
   base: process.env.QUEEN_APP_BASE || '/',

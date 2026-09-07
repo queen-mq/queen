@@ -22,7 +22,7 @@ A beautiful, modern dashboard for monitoring and managing Queen message queues.
 - **Tailwind CSS** - Utility-first CSS framework
 - **Chart.js** - Beautiful responsive charts
 - **Vue Router** - Client-side routing
-- **Axios** - HTTP client
+- **Ky** - Fetch-based HTTP client
 
 ## Getting Started
 
@@ -120,7 +120,7 @@ re-implement any of it.
 | Polling | `useAutoRefresh(cb)` from `@/composables/useRefresh` | a private `setInterval` |
 | Cell-level numbers | `operator.*` in `@/api`, and say "cell" on screen | present them as the tenant's |
 
-`x-queen-act-cluster` is attached by the axios request interceptor, once, for
+`x-queen-act-cluster` is attached by the shared HTTP request hook, once, for
 every `/api/v1/*` call. No view sends it.
 
 ## Project Structure
@@ -200,4 +200,3 @@ The app includes several reusable components:
 ## License
 
 Apache 2.0 — see [`../LICENSE.md`](../LICENSE.md).
-

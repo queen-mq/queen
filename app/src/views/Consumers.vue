@@ -512,7 +512,7 @@ import { useQueuesStore } from '@/stores/queuesStore'
 // mutating routes (delete / seek) are RouteClass::QueueAdmin at the proxy, so
 // their controls are shown only to a role that may actually use them.
 const { can, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
-// notifyWarn carries an outcome the interceptor cannot see: a 2xx that did
+// notifyWarn carries an outcome the shared HTTP client cannot see: a 2xx that did
 // nothing (no partition matched, nothing deleted) is a failure to the user.
 const { notifySuccess, notifyWarn } = useToast()
 const canAdmin = computed(() => can('queueAdmin'))
@@ -789,7 +789,7 @@ const moveToNow = async (g, label) => {
     )
     fetchConsumers()
   } catch {
-    // Already announced by the interceptor with the status and reason.
+    // Already announced by the shared HTTP client with the status and reason.
   }
 }
 
@@ -815,7 +815,7 @@ const skipPartition = async (p) => {
     notifySuccess(`Skipped ${p.partition_name} to the end`, `${p.queue_name} · ${p.consumer_group}`)
     await loadLaggingPartitions()
   } catch {
-    // Already announced by the interceptor.
+    // Already announced by the shared HTTP client.
   } finally {
     skippingPartition.value = null
   }

@@ -525,7 +525,7 @@ async function loadExampleTraceNames() {
       .slice(0, 8)
   } catch {
     // No suggestions rather than made-up ones; the failure is already reported
-    // by the interceptor and the search box still works.
+    // by the shared HTTP client and the search box still works.
     exampleTraceNames.value = []
   }
 }

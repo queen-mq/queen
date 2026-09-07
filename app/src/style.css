@@ -1,6 +1,12 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+/* Tailwind v4 is CSS-first. These are the only values from the former JS
+   config that the templates consume as utilities; the product palette itself
+   already lives below as semantic CSS custom properties. */
+@theme {
+  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+}
 
 /* ==========================================================================
    QUEEN DASHBOARD — docs palette, dashboard density
@@ -499,12 +505,12 @@
   .card-body { padding: 12px 14px; }
 
   /* --- Stat tiles --- */
-  .stat {
+  .stat, .metric-card {
     position: relative; padding: 12px 14px; border-radius: var(--r-card);
     border: 1px solid var(--bd); overflow: hidden; min-height: 0;
     display: flex; flex-direction: column; gap: 3px;
   }
-  .stat { background: var(--ink-2); }
+  .stat, .metric-card { background: var(--ink-2); }
 
   .stat .stat-label {
     font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase;
@@ -526,25 +532,17 @@
   .trend-flat { background: var(--ink-3);      color: var(--text-mid);  border-color: var(--bd); }
 
   /* --- Chips/Badges --- */
-  .chip { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: var(--r-chip); font-size: 10.5px; font-weight: 500; border: 1px solid transparent; letter-spacing: 0.01em; }
-  .chip .dot { width: 4px; height: 4px; border-radius: var(--r-pill); }
-  .chip-ok      { color: var(--ok-500); background: var(--ok-glow); border-color: color-mix(in srgb, var(--ok-500) 22%, transparent); }
-  .chip-ok .dot { background: var(--ok-500); }
-  .chip-warn      { color: var(--warn-400); background: var(--warn-glow); border-color: color-mix(in srgb, var(--warn-400) 22%, transparent); }
-  .chip-warn .dot { background: var(--warn-400); }
-  .chip-bad      { color: var(--ember-400); background: var(--ember-glow); border-color: color-mix(in srgb, var(--ember-500) 25%, transparent); }
-  .chip-bad .dot { background: var(--ember-400); }
-  .chip-ice      { color: var(--ice-400); background: var(--ice-glow); border-color: color-mix(in srgb, var(--ice-400) 22%, transparent); }
-  .chip-ice .dot { background: var(--ice-400); }
-  .chip-mute     { color: var(--text-mid); background: var(--ink-3); border-color: var(--bd); }
-
-  .badge { @apply chip; }
-  .badge-success { @apply chip-ok; }
-  .badge-warning { @apply chip-warn; }
-  .badge-danger  { @apply chip-bad; }
-  .badge-queen   { @apply chip-ice; }
-  .badge-cyber   { @apply chip-ice; }
-  .badge-crown   { @apply chip-warn; }
+  .chip, .badge { display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px; border-radius: var(--r-chip); font-size: 10.5px; font-weight: 500; border: 1px solid transparent; letter-spacing: 0.01em; }
+  .chip .dot, .badge .dot { width: 4px; height: 4px; border-radius: var(--r-pill); }
+  .chip-ok, .badge-success { color: var(--ok-500); background: var(--ok-glow); border-color: color-mix(in srgb, var(--ok-500) 22%, transparent); }
+  .chip-ok .dot, .badge-success .dot { background: var(--ok-500); }
+  .chip-warn, .badge-warning, .badge-crown { color: var(--warn-400); background: var(--warn-glow); border-color: color-mix(in srgb, var(--warn-400) 22%, transparent); }
+  .chip-warn .dot, .badge-warning .dot, .badge-crown .dot { background: var(--warn-400); }
+  .chip-bad, .badge-danger { color: var(--ember-400); background: var(--ember-glow); border-color: color-mix(in srgb, var(--ember-500) 25%, transparent); }
+  .chip-bad .dot, .badge-danger .dot { background: var(--ember-400); }
+  .chip-ice, .badge-queen, .badge-cyber { color: var(--ice-400); background: var(--ice-glow); border-color: color-mix(in srgb, var(--ice-400) 22%, transparent); }
+  .chip-ice .dot, .badge-queen .dot, .badge-cyber .dot { background: var(--ice-400); }
+  .chip-mute { color: var(--text-mid); background: var(--ink-3); border-color: var(--bd); }
 
   /* --- Buttons --- */
   .btn {
@@ -571,7 +569,7 @@
   .btn-danger { color: var(--ember-400) !important; border-color: var(--ember-bd) !important; }
 
   /* --- Tables --- */
-  .t { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .t, .table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   .t th {
     text-align: left; font-weight: 500; font-size: 10.5px;
     letter-spacing: .08em; text-transform: uppercase;
@@ -585,7 +583,6 @@
   .t td { padding: 7px 12px; border-bottom: 1px solid var(--bd-soft, var(--bd)); color: var(--text-hi); vertical-align: middle; }
   .t tr:last-child td { border-bottom: 0; }
   .t tr:hover td { background: color-mix(in srgb, var(--text-hi) 2.5%, transparent); }
-  .table { @apply t; }
   .table thead { background: transparent; }
   .table-container { overflow-x: auto; border-radius: var(--r-card); }
 
@@ -715,7 +712,6 @@
   .chart-bg { background-image: linear-gradient(to right, var(--bd) 1px, transparent 1px), linear-gradient(to bottom, var(--bd) 1px, transparent 1px); background-size: 48px 40px; }
 
   /* --- Compat aliases --- */
-  .metric-card { @apply stat; }
   .metric-value { font-size: 22px; font-weight: 600; letter-spacing: -0.015em; font-variant-numeric: tabular-nums; color: var(--text-hi); line-height: 1.15; margin-top: 0; }
   .metric-label { font-size: 11px; color: var(--text-low); }
   .metric-change { display: inline-flex; align-items: center; gap: 3px; font-size: 10.5px; font-weight: 500; }

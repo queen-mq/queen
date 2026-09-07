@@ -210,8 +210,8 @@ const loadMaintenanceStatus = async () => {
     failedMB.value = r.data.bufferStats?.failedFiles?.totalMB ?? 0
     maintenanceKnown.value = true
   } catch {
-    // The interceptor already surfaced the failure; here we only make sure the
-    // banners stop asserting a state we no longer know.
+    // The shared HTTP client already surfaced the failure; here we only make
+    // sure the banners stop asserting a state we no longer know.
     maintenanceKnown.value = false
   }
 }
