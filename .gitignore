@@ -52,3 +52,6 @@ my-docs
 
 # Python bytecode caches (compat lanes, harness scripts)
 __pycache__/
+
+.security*
+SECURITY-ASSESSMENT-*
