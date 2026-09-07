@@ -16,6 +16,7 @@ verifiedBy:
   - clients/client-js/test-v2/http-unit/retry429.test.js
   - clients/client-py/tests/http_unit/test_retry_429.py
   - clients/client-go/retry429_test.go
+# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 A plan is eleven numbers and a feature flag. This page is what each one does at
@@ -165,6 +166,12 @@ keeps the exact pairs it has admitted for the cluster in memory: a known pair is
 lookup with no database round trip, and a new one is evaluated under one lock and then
 recorded.
 
+Deleted queues stop consuming `max_queues` capacity without a proxy restart. The periodic
+inventory reconciliation prunes queue names and their partition sets, including when the broker
+confirms an empty inventory; a `queen_proxy_inval` notification clears the same cached registry
+after a delete performed elsewhere. An unreachable broker or an unreadable inventory never drives
+that pruning.
+
 The partition count used for the check is `max(pairs seen in this process, the last
 count read from the database) + 1`. The database side stores only a count, never
 partition names, so after a restart the count is a **floor**, which is exactly what
@@ -215,8 +222,8 @@ wrong.
 
 ## The storage quota
 
-`max_retained_bytes` is the only limit driven by data the broker reports rather than by
-the request itself.
+`max_retained_bytes` starts from data the broker reports, then closes the measurement gap with the
+payload bytes the proxy has accepted since that report changed.
 
 <Steps>
 
@@ -224,14 +231,21 @@ the request itself.
    `GET /api/v1/resources/queues` with that cluster's tenant header and sums the
    `retainedBytes` field across its queues.
 
-2. A cluster over the cap enters the over-storage set. It leaves only once retained
+2. The proxy publishes that measured total to a per-cluster storage account. Every accepted push
+   and every streaming sink emit immediately adds its raw JSON payload bytes to an in-flight
+   counter, so the admission estimate is `measured + in_flight` instead of a frozen ten-minute-old
+   number. The counter resets only when the broker's published total changes; repeating the same
+   value is not evidence that the broker's slow lane ran again. Raw bytes make this deliberately
+   conservative because the broker stores compressed payloads.
+
+3. A cluster whose measured total is over the cap enters the over-storage set. It leaves only once retained
    bytes fall back to **90% or less** of the cap. That band is hysteresis: without it a
    tenant parked on the boundary sees `403` and `201` alternating on identical pushes.
 
-3. A pump diffs that set every 10 seconds and sets or clears the cluster's push-block
-   flag, logging the transition.
+4. A pump diffs that set every `QUEEN_PROXY_STORAGE_REFRESH_MS` (10 s by default, with a
+   500 ms floor) and sets or clears the cluster's push-block flag, logging the transition.
 
-4. Produce requests for a blocked cluster answer
+5. Produce requests for a blocked cluster, or whose in-flight estimate has reached the cap, answer
    `403 {"code":"storage_quota_exceeded"}`. **Consumes stay allowed**: the way out of
    a storage block is to drain, so blocking consumption would be a trap. A streams
    cycle is refused whole under the same code only when its body carries sink
@@ -243,7 +257,9 @@ the request itself.
 If the broker's response carries no `retainedBytes` field, the quota is simply not
 evaluated that cycle: an existing decision is left alone rather than released on a
 phantom zero. A cluster already over the cap on the very first pass blocks immediately;
-the release band only ever delays the release side.
+the release band only ever delays the release side. The measured verdict blocks only when it is
+strictly above the cap; the pre-forward estimate blocks at the cap and therefore permits at most
+the one batch that crosses it.
 
 ## The monthly message quota
 

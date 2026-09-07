@@ -28,7 +28,7 @@
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { ROUTER_BUILDER, WEBDOC, cell, emitPartial, isCheck, repoRead, rustFiles, sliceBlock } from "./lib/source.mjs";
+import { ROUTER_BUILDER, WEBDOC, emitPartial, isCheck, repoRead, rustFiles, sliceBlock } from "./lib/source.mjs";
 
 const OUT = join(WEBDOC, "public", "openapi");
 const VERSION = "1.0.0";
@@ -627,7 +627,7 @@ function subRouter(file) {
   return parseRouterChain(body);
 }
 
-function proxySpec(handlers, structs) {
+function proxySpec() {
   const mainText = repoRead("proxy/src/main.rs");
   const chain = sliceBlock(mainText, ROUTER_BUILDER, ";");
   const own = parseRouterChain(chain);
@@ -759,7 +759,7 @@ function main() {
   const structs = indexStructs([...brokerFiles, ...proxyFiles]);
 
   const broker = brokerSpec(handlers, structs);
-  const proxy = proxySpec(handlers, structs);
+  const proxy = proxySpec();
   validate("broker", broker.doc);
   validate("proxy", proxy.doc);
 

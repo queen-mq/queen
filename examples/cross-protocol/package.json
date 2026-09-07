@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Produce over the Kafka wire protocol, consume over Queen's own API, against one set of rows.",
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=24.0.0"
   },
   "scripts": {
     "producer": "node producer.mjs",

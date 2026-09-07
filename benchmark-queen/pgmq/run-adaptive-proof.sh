@@ -10,7 +10,7 @@ IMG="${QUEEN_IMAGE:-queen-mq:arm64-local-0.15.2}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="results/adaptive-$STAMP"; mkdir -p "$OUT"
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
-load_node() { [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && nvm use 22 >/dev/null 2>&1; return 0; }
+load_node() { [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && nvm use 24 >/dev/null 2>&1; return 0; }
 
 # Run a producer-only measurement at a given concurrency; prints "msg/s p50 p99".
 run_point() {

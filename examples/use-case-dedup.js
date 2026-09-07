@@ -27,7 +27,7 @@
  *   - Throughput visible in the metrics.
  *
  * Run:
- *   nvm use 22 && node examples/use-case-dedup.js
+ *   nvm use 24 && node examples/use-case-dedup.js
  */
 
 import { Queen, Stream } from 'queen-mq'

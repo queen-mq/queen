@@ -58,7 +58,7 @@ The whole point of the comparison:
 ## Requirements
 
 - Docker + Docker Compose v2
-- Node 22 (the runner sources `nvm use 22`)
+- Node 24 (the runner sources `nvm use 24`)
 
 ## Quick start
 

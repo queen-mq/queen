@@ -1,53 +1,8 @@
-# Debt recorded by scripts/check-sourceoftruth.mjs, seeded 2026-08-17.
-#
-# Every line below is a page that names a file in its `sourceOfTruth` and has
-# not been touched since that file last changed. The gate exists to stop that
-# happening again, so the debt that already existed on the day it was turned on
-# is written down here rather than used as an argument against turning it on.
+# Exceptions for scripts/check-sourceoftruth.mjs.
 #
 # Format, one per line:
-#   <page, relative to webdoc/>                       exempt every finding on that page
 #   <page, relative to webdoc/> :: <path, relative to the repo root>
-# `#` starts a comment. Paths are copied verbatim out of a failure message.
 #
-# Prefer the pair form. A page-level line also hides the next thing that drifts
-# on that page, which is the failure this file exists to prevent.
-#
-# These entries are meant to be deleted. Re-read the named file against the
-# page, fix or confirm the prose, and remove the line: the checker prints any
-# entry that no longer matches a finding, so a stale exemption announces itself
-# instead of accumulating.
-#
-# ---------------------------------------------------------------------------
-# 2026-08-27: the seeded debt was cleared.
-#
-# 252 findings across 77 pages had accumulated behind the 1.0.3 through 1.2.1
-# waves (kv and timers, the maintenance scheduler, ephemeral queues, conflation,
-# pop autopilot, the retention O(deletable) rewrite, per-statement schema apply,
-# and the cloud must-builds). Every page was re-read against every file it names
-# and either corrected or confirmed, and every entry this file carried was
-# re-read with it. All but the block below are gone, because the entry the
-# re-read resolves is the entry that should not survive it.
-#
-# The one finding that argued hardest for deleting rather than keeping was an
-# exemption doing its job: `internals/mesh.mdx :: server/src/config.rs` had been
-# recorded in the 2026-08-17 block as "additive, nothing the page asserts was
-# touched", and while it sat here the mesh page missed QUEEN_MESH_BIND_ADDR and
-# QUEEN_MESH_ADVERTISE_HOST, both of which land in config.rs and belong to that
-# page's env table and nowhere else. A standing exemption on a high-churn file
-# does not filter noise, it spends the page's only alarm. Pairs that re-fire on
-# churn are meant to re-fire: re-read the page, confirm it, touch it.
-#
-# What remains is what a re-read could not close.
-
-# The docs rulebook predates check-markdown.mjs, check-brief.mjs and
-# check-prose.mjs, and it is short against the files below in three ways: the
-# component list misses Chart, Partition and Screenshot; the frontmatter
-# section documents five fields where src/content.config.ts declares seven
-# (`generated` and `digest` are unmentioned); and the checker inventory names
-# the three scripts only through the `verify` row. Re-read 2026-08-27 and left
-# standing: the page is being rewritten separately, and a partial patch here
-# would collide with that rewrite. Delete these three lines with it.
-src/content/docs/internals/contributing/docs.mdx :: webdoc/package.json
-src/content/docs/internals/contributing/docs.mdx :: webdoc/src/components.ts
-src/content/docs/internals/contributing/docs.mdx :: webdoc/src/content.config.ts
+# Keep this empty unless a source/page pair cannot be reconciled in the same
+# change, and explain why beside any temporary entry. The seeded debt was fully
+# cleared on 2026-09-04; permanent entries suppress the next useful alarm.

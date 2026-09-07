@@ -14,6 +14,7 @@ sourceOfTruth:
   - server/Cargo.toml
 verifiedBy:
   - server/tests/embedded_smoke.rs
+# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 The broker crate has a library target: `Broker::start` boots the same engine the standalone binary runs, inside your Rust process, against the PostgreSQL you point it at. Every operation on the handle invokes the same handler functions the HTTP router dispatches to, so behaviour, defaults and edge cases are the broker's by construction, at the same PostgreSQL cost, minus one network hop and one deployment unit.

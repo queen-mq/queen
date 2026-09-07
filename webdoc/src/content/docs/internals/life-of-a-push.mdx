@@ -12,6 +12,7 @@ sourceOfTruth:
   - server/sql/procedures/003_log_push.sql
 verifiedBy:
   - clients/client-js/test-v2/push.js
+# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 A push request is not a transaction. It is a set of frames handed to a background layer that

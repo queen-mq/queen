@@ -28,10 +28,11 @@ sourceOfTruth:
 verifiedBy:
   - clients/client-py/tests/test_push.py
   - clients/client-py/tests/test_pop.py
+# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 The PyPI package is `queen-mq`; the import name is `queen`. It is fully async, built on `httpx`,
-and ships a `py.typed` marker. Version 1.2.0, aligned with the broker's 1.2 line.
+and ships a `py.typed` marker. Version 1.3.0, aligned with the broker's 1.3 line.
 
 ```python
 from queen import Queen, Admin, Stream, token_bucket_gate, sliding_window_gate

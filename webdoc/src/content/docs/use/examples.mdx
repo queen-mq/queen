@@ -26,7 +26,7 @@ digest: >-
   offset. A nack charges one retry; at `retryLimit`, 3 by default, the message is snapshotted to
   the DLQ. An expired lease charges nothing, so a hung handler redelivers forever, never reaching
   it.
-# sourceOfTruth re-read 2026-08-27 (through a6cbac22 + working tree): page matches the code.
+# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 Six shapes, in the order they are worth reading, each one the smallest code that makes it work.

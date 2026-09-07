@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "node-rdkafka and @confluentinc/kafka-javascript against the queen-kafka compat rig (M6 client matrix)",
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "scripts": {
     "test": "./run.sh"
   },

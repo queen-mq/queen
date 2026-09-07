@@ -26,7 +26,7 @@ digest: >-
   slug. Both brokers sit behind one `queen` network alias, which is standby and not load
   spreading: the proxy pins to whichever it resolves and moves to the other when that one goes
   away. One PostgreSQL means this survives losing a broker, not losing the database.
-# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
+# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 Every other page in this section deploys one part. This one is the whole thing in a single file,

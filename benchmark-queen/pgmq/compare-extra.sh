@@ -14,7 +14,7 @@ QUEEN_IMAGE="${QUEEN_IMAGE:-queen-mq:arm64-local}"
 export QUEEN_IMAGE QUEEN_CPUS="${QUEEN_CPUS:-3}" QUEEN_NUM_WORKERS="${QUEEN_NUM_WORKERS:-2}" \
        QUEEN_SIDECAR_POOL_SIZE="${QUEEN_SIDECAR_POOL_SIZE:-150}" QUEEN_DB_POOL_SIZE="${QUEEN_DB_POOL_SIZE:-20}"
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
-load_node() { [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && nvm use 22 >/dev/null 2>&1; return 0; }
+load_node() { [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && nvm use 24 >/dev/null 2>&1; return 0; }
 
 if [ "$TEST" = "latency" ]; then
   DURATION="${DURATION:-60}"; PROD_CONNS=1; CONS_CONNS=1; MPP=1; RQTY=1; PROCESS_MS=0; RECORD_EMPTY=false; PGMQ_PGPORT=55432; NUMP=1000

@@ -152,6 +152,6 @@ published measurement.
 ## Requirements
 
 Docker with cgroup CPU counters readable inside the container (cgroup v2 `cpu.stat`, or v1
-`cpuacct.usage`; on Docker Desktop both live in the Linux VM and work), Node 18+ for the load
+`cpuacct.usage`; on Docker Desktop both live in the Linux VM and work), Node 24+ for the load
 generator, `curl`, `awk`. No repo build step: the scripts drive images you build yourself, which
 is what makes a before/after possible at all.

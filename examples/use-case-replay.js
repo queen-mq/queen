@@ -29,7 +29,7 @@
  *   - The two consumer groups have independent offsets.
  *
  * Run:
- *   nvm use 22 && node examples/use-case-replay.js
+ *   nvm use 24 && node examples/use-case-replay.js
  */
 
 import { Queen } from 'queen-mq'

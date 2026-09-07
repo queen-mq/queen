@@ -12,7 +12,7 @@ QUEEN_IMAGE="${QUEEN_IMAGE:-queen-mq:arm64-local}"
 PGMQ_DIR="results/sp-$STAMP-pgmq"; QUEEN_DIR="results/sp-$STAMP-queensp"
 mkdir -p "$PGMQ_DIR" "$QUEEN_DIR"
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
-load_node() { [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && nvm use 22 >/dev/null 2>&1; return 0; }
+load_node() { [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && nvm use 24 >/dev/null 2>&1; return 0; }
 
 echo "##### ENGINE-vs-ENGINE latency (direct libpq, concurrency=1, single msg, sync_commit=on)"
 docker compose -f queen-compose.yml down -v >/dev/null 2>&1 || true

@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "kafkajs against the queen-kafka compat rig (M6 client matrix)",
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "scripts": {
     "test": "node run.mjs all"
   },

@@ -9,7 +9,7 @@ sourceOfTruth:
   - server/src/retention.rs
   - server/sql/procedures/006_log_maintenance.sql
   - server/src/config.rs
-# sourceOfTruth re-read 2026-08-28 (through 696ccb39): page matches the code.
+# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 Retention deletes whole segments. It never deletes individual messages and never rewrites a blob. It

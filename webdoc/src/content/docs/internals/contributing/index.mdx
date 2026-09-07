@@ -19,7 +19,7 @@ sourceOfTruth:
   - proxy/scripts/dev-cell.sh
   - go.work
   - .gitignore
-# sourceOfTruth re-read 2026-08-28 (through da3507ba + the 1.3.0 client bump): the Cargo manifests moved only their version strings; this page quotes none.
+# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 Queen is one repository with two Rust binaries in it, a Vue dashboard that is compiled
@@ -78,7 +78,7 @@ project's is not. That is the main thing this page is for.
 | Path | What it is |
 | --- | --- |
 | `server/` | The broker. Crate `queen-engine`, import path `queen`, binary `queen`. Axum 0.7 + tokio + deadpool-postgres. |
-| `server/sql/` | `schema.sql` plus 31 `procedures/*.sql` files (001–031). All queue semantics live here, and all of it is embedded in the binary. |
+| `server/sql/` | `schema.sql` plus 33 `procedures/*.sql` files (001–033). All queue semantics live here, and all of it is embedded in the binary. |
 | `server/webapp/dist/` | The built dashboard the binary embeds. Gitignored, so a clean clone does not have it. |
 | `server/server.json` | Name and version. The single source of the version string. |
 | `proxy/` | The multi-tenant gateway, one per cell. Binary `queen-proxy`, its own PostgreSQL schema under `migrations/`. |

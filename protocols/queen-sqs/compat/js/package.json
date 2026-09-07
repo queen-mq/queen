@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "description": "@aws-sdk/client-sqs + @aws-sdk/client-sns + sqs-consumer against the queen-sqs compat rig",
-  "engines": { "node": ">=22" },
+  "engines": { "node": ">=24.0.0" },
   "scripts": {
     "test": "node run.mjs all",
     "offline": "node run.mjs vectors probe",

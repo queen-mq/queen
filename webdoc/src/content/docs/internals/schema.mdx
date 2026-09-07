@@ -21,10 +21,11 @@ sourceOfTruth:
   - server/sql/procedures/024_kv.sql
   - server/sql/procedures/025_log_timers.sql
   - server/src/schema.rs
+# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 Everything here lives in the PostgreSQL schema `queen`, created by `server/sql/schema.sql`. That
-file plus exactly 31 files under `server/sql/procedures/` (`001`–`031`) are embedded in the binary
+file plus exactly 33 files under `server/sql/procedures/` (`001`–`033`) are embedded in the binary
 with `include_str!` and applied at every boot in lexical order, one statement per transaction,
 under session advisory lock `778120010`. All of it is idempotent (`CREATE OR REPLACE`, `IF NOT EXISTS`,
 `ADD COLUMN IF NOT EXISTS`), so re-apply is a no-op, and `QUEEN_APPLY_SCHEMA=0` skips the
@@ -344,6 +345,7 @@ have no Rust call site: `get_queue_messages_v1`, `has_pending_messages` and
 | `get_analytics_v1(p_filters JSONB DEFAULT '{}') RETURNS JSONB` | the message-volume series, bucketing `log_segments` by `created_at` and attributing each segment's frame count to its creation bucket. Deliberately `O(segments in range)`, since it is a per-request dashboard read with a time filter, not the refresh loop |
 | `log_queue_message_stats_v1(p_queue TEXT, p_tenant UUID DEFAULT …) RETURNS TABLE (segments BIGINT, messages BIGINT)` | per-queue counters for queue detail: messages by watermark arithmetic, segments by an index-only count |
 | `log_queue_stats_all_v1(p_tenant UUID DEFAULT …) RETURNS TABLE (queue_name TEXT, partitions BIGINT, segments BIGINT, messages BIGINT)` | the same accounting broker-wide, for queue listing (the live view, since `queen.stats` can lag one refresh cadence). Segment counts are pre-aggregated per partition before the queue join, or the watermark row would fan out once per segment and over-count |
+| `log_queue_depth_v1(p_queue TEXT, p_group TEXT DEFAULT NULL, p_tenant UUID DEFAULT …) RETURNS JSONB` | live O(partitions) backlog for scaling: pending, live-lease processing, ready, their partition counts, and conflation-adjusted effective pending/ready, with no segment scan |
 
 ### 020_log_partition_counters.sql (triggers)
 

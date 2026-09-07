@@ -17,7 +17,7 @@ STAMP="$(date +%Y%m%d-%H%M%S)"
 PGMQ_DIR="results/soak-$STAMP-pgmq"; QUEEN_DIR="results/soak-$STAMP-queen"
 mkdir -p "$PGMQ_DIR" "$QUEEN_DIR"
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
-load_node() { [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && nvm use 22 >/dev/null 2>&1; return 0; }
+load_node() { [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && nvm use 24 >/dev/null 2>&1; return 0; }
 
 echo "##### SOAK ${DURATION}s each | prod=$PROD_CONNS cons=$CONS_CONNS msgs/push=$MSGS_PER_PUSH popBatch=$READ_QTY parts=$NUM_PARTITIONS"
 docker compose -f queen-compose.yml down -v >/dev/null 2>&1 || true

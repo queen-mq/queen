@@ -24,6 +24,8 @@ on:
       - "clients/client-js/test-v2/**"
       - "clients/client-py/tests/**"
       - "clients/client-go/tests/**"
+      - "clients/client-cpp/**"
+      - "clients/client-rust/tests/**"
       - "clients/client-php/**"
       - "supervisor/**"
       - "README.md"
@@ -43,6 +45,8 @@ on:
       - "clients/client-js/test-v2/**"
       - "clients/client-py/tests/**"
       - "clients/client-go/tests/**"
+      - "clients/client-cpp/**"
+      - "clients/client-rust/tests/**"
       - "clients/client-php/**"
       - "supervisor/**"
       - "README.md"
@@ -62,13 +66,17 @@ jobs:
       run:
         working-directory: webdoc
     steps:
+      # sourceOfTruth compares the last commit touching each page and source;
+      # a shallow checkout would turn every older path into "not yet in git".
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: pnpm/action-setup@v4
         with:
           version: 10
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
           cache-dependency-path: webdoc/pnpm-lock.yaml
 
@@ -98,6 +106,9 @@ jobs:
       - name: Generated content is current
         run: pnpm gen:check
 
+      - name: Typecheck
+        run: pnpm typecheck
+
       # Build before lint, not after: the `nimbus/internal-link` rule resolves
       # links against `.nimbus/routes.json`, which Astro materializes at
       # `astro:build:done`. Linting first checks links against a stale route
@@ -105,5 +116,17 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Markdown structure
+        run: pnpm check:markdown
+
+      - name: LLM brief
+        run: pnpm check:brief
+
       - name: Lint prose and MDX
         run: pnpm lint:docs
+
+      - name: Prose contract
+        run: pnpm check:prose
+
+      - name: Source-of-truth freshness
+        run: pnpm check:sourceoftruth

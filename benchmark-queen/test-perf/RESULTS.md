@@ -580,7 +580,7 @@ cd server && make build-only        # rebuild the binary from this branch
 
 # 2. Run the canonical 3-scenario campaign
 cd ..
-nvm use 22
+nvm use 24
 ./test-perf/scripts/run-all.sh
 
 # 3. Archive the result with a descriptive name

@@ -23,6 +23,7 @@ digest: >-
   by `keys`, `key_prefix` or `ripe_at_or_before`. `POST /streams/v1/cycle` commits `state_ops`,
   `push_items` and the ack in one transaction. All three are tenant-scoped: a foreign partition
   or query reads as missing.
+# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
 ---
 
 The whole streaming engine is three JSON POSTs. `/streams/v1` sits inside the versioned contract
