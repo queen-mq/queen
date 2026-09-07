@@ -11,7 +11,7 @@ sourceOfTruth:
   - server/src/main.rs
   - server/src/reconcile.rs
   - server/src/config.rs
-# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-07 (through 42bada8d + this patch): page matches the code.
 ---
 
 Queen runs one to three identical broker replicas over one PostgreSQL database. PostgreSQL is the
@@ -19,8 +19,8 @@ sole source of truth, so the replicas do not need to agree about anything: there
 protocol here, no leader for the data path, and no replicated state. The mesh exists only to make
 three things prompt that would otherwise be merely eventual:
 
-1. **Waking a parked pop.** A push commits on replica A; a long-poll parked on replica B should
-   re-poll now rather than at the end of its backoff interval.
+1. **Waking a parked pop.** A write lands frames on replica A; a long-poll parked on replica B
+   should re-poll now rather than at the end of its backoff interval.
 2. **Maintenance-mode flips**, so all replicas divert or pause together.
 3. **Queue-config invalidation**, so a peer drops its cached lease time and encryption flag after a
    `/configure`.
@@ -110,9 +110,10 @@ cap, so a multi-partition push meant one datagram per partition.
 | 41 | `POP_MAINTENANCE_MODE_SET` | `{enabled}` | flip the pop-maintenance atomic |
 
 Two of these are worth separating because they look redundant and are not.
-`MESSAGE_AVAILABLE` is a parked-pop wake, sent on every push. `HOTLIST_DIRTY_BATCH` marks a peer's
-candidate ring, and is sent only on a coalesced dirty transition: a partition pushed a thousand
-times in one flush window produces one hint. A dropped hint for a push is healed by
+`MESSAGE_AVAILABLE` is a parked-pop wake, sent by every commit that lands frames in the log: a
+push, a streams sink emit, a fired timer, a spool replay after an outage. `HOTLIST_DIRTY_BATCH`
+marks a peer's candidate ring, and is sent only on a coalesced dirty transition: a partition pushed
+a thousand times in one flush window produces one hint. A dropped hint for a landing write is healed by
 [the hot-list's](/internals/hotlist/) periodic reseed floor; a dropped wake is healed by the parked
 pop's own backoff. A dropped hint for a **cursor move** is healed by neither, because the reseed
 floor is bounded to recently written partitions and a seek writes nothing: that one has a durable

@@ -19,7 +19,7 @@ sourceOfTruth:
   - proxy/scripts/dev-cell.sh
   - go.work
   - .gitignore
-# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-07 (through 42bada8d + this patch): page matches the code.
 ---
 
 Queen is one repository with two Rust binaries in it, a Vue dashboard that is compiled
@@ -99,9 +99,10 @@ a new contributor to `DEVELOPING.md`. Treat all of them as history; this site an
 are current.
 
 <Aside type="caution">
-`helm/`, `helm_queen/`, `upgrade.sh` and `upgrade_queen.sh` appear in a local checkout but are
-listed in `.gitignore` and are not tracked by git. They are not shipped artifacts and nothing
-in CI reads them.
+`helm/`, `helm_queen/`, `helm_v1/`, `upgrade.sh` and `upgrade_queen.sh` appear in a local
+checkout but are listed in `.gitignore` and are not tracked by git. They are not shipped
+artifacts and nothing in CI reads them. `helm_v1/` is the one a live deployment uses, so the
+only copy of how this stack is deployed sits on a maintainer's machine.
 </Aside>
 
 ## The build order

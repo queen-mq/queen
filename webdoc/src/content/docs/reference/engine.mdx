@@ -13,7 +13,7 @@ sourceOfTruth:
   - crates/queen-protocol/src/lib.rs
 verifiedBy:
   - server/tests/embedded_smoke.rs
-# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-07 (through 42bada8d + this patch): page matches the code.
 ---
 
 The crates.io package is `queen-engine`; the library imports as `queen`. The public surface
@@ -86,7 +86,7 @@ below live in `queen::protocol`, except `DeleteQueueResult`, which the crate def
 | `ack(&AckRequest)` | `AckResult` | A rejected ack (expired lease, unknown message) is `Ok` with `success: false`, as over HTTP. `Err` means the request was malformed. |
 | `ack_batch(&AckBatchRequest)` | `Vec<AckResult>` | One consumer group per batch; per-item outcomes in order. |
 | `renew_lease(lease_id, seconds)` | `RenewLeaseResponse` | Best effort: an unknown or expired lease is `success: false`, not an `Err`. |
-| `transaction(&TransactionRequest)` | `TransactionResponse` | Atomic ack plus push. A rollback is `Ok` with `success: false` and the database's reason in `error`. |
+| `transaction(&TransactionRequest)` | `TransactionResponse` | Atomic ack plus push, with the request's `kv` and `timers` riders committing in the same transaction. A rollback is `Ok` with `success: false` and the database's reason in `error`. A `timers` rider commits but never fires in-process: see Not present. |
 
 ### Queues and DLQ
 
@@ -131,7 +131,11 @@ conformance and end-to-end tests exist to prevent; treat it as a bug.
 
 Consumer-group administration (list, details, lagging, seek, delete), queue and message
 listings, traces, the streams runner endpoints, maintenance-mode switches and the
-standalone identity routes have no embedded equivalent in the beta. The dashboard is not
+standalone identity routes have no embedded equivalent in the beta. Nor do the key/value and
+timer routes: there is no `kv` method and no `timers` method. The `kv` and `timers` riders on
+`TransactionRequest` are a half exception. They commit in the same database transaction as the
+bundle, but no sweeper runs in-process, so a timer scheduled embedded is a durable row that
+nothing ever fires. Schedule timers against a broker that serves HTTP. The dashboard is not
 served (build with `default-features = false`; the `server` feature exists for the binary).
 
 ## Same engine, other surfaces

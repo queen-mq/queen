@@ -14,7 +14,7 @@ sourceOfTruth:
   - server/src/db.rs
 verifiedBy:
   - clients/client-js/test-v2/pop.js
-# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-07 (through 42bada8d + this patch): page matches the code.
 ---
 
 A pop answers one question: *which offsets may this consumer group take from this partition
@@ -406,8 +406,11 @@ produce reset storms under empty-poll load, and clients read nothing from that b
 If the batch is empty, `wait=true`, and the deadline has not passed, the pop parks:
 
 - It releases the permit and the pooled connection first. A parked pop never pins a connection.
-- It waits on the queue's wake gate, which a local push, a peer's mesh hint, an ack-promote or
-  the background wheel tick can open.
+- It waits on the queue's wake gate, which a local write that landed frames, a peer's mesh hint,
+  an ack-promote or the background wheel tick can open. The landing writes are the push, a fired
+  timer, a streams sink emit and the disk spool replaying after an outage: all four announce after
+  their commit through the same function, so a fired timer reaches a parked consumer in the cycle
+  it fires rather than at the next reseed.
 - The wait is bounded by a backoff: `POP_WAIT_INITIAL_INTERVAL_MS` (100 ms) for the first
   `POP_WAIT_BACKOFF_THRESHOLD` (3) attempts, then `initial × attempt × POP_WAIT_BACKOFF_MULTIPLIER`
   capped at `POP_WAIT_MAX_INTERVAL_MS` (1000 ms). A successful wake resets the count. The backoff

@@ -15,6 +15,7 @@ sourceOfTruth:
   - app/src/views/DeadLetter.vue
   - proxy/src/webapp.rs
   - proxy/src/operator.rs
+# sourceOfTruth re-read 2026-09-07 (through 42bada8d + this patch): page matches the code.
 ---
 
 Every broker serves a dashboard on its own port, with nothing to deploy: the built single-page
@@ -48,8 +49,8 @@ Every view is tenant-scoped except System and Users, and both exceptions are lab
 - **Messages**, `/messages`: listing, single-message inspection, delete
 - **Traces**, `/traces`: the trace names that exist, and the timeline for one
 - **Analytics**, `/analytics`: status over time, lag and ops series, retention volume
-- **Dead Letter**, `/dlq`: the dead-letter listing, a failure breakdown that filters it, and
-  per-row purge
+- **Dead Letter**, `/dlq`: the dead-letter listing, a failure breakdown that filters it, per-row
+  purge, and a bulk purge of every record for one queue, optionally narrowed to one consumer group
 - **System**, `/system`: cell-level host CPU and memory, worker metrics, PostgreSQL internals,
   the disk spool, the maintenance switch
 - **Users**, `/users`: cell-level accounts for tenants represented on the selected cell, with
@@ -65,7 +66,9 @@ Three things to know before reading a number off this UI. System and Users cover
 and every tenant on it, so a cell figure or account list is not a tenant figure. The dead-letter view inspects and
 purges: replaying a dead-lettered message is a broker route,
 [`POST /api/v1/messages/:partitionId/:transactionId/retry`](/reference/http/messages-dlq), and
-this console does not call it yet, so purge is the only action on a row. And an unknown is not a
+this console does not call it yet, so purge is the only action on a row. The bulk purge takes its
+scope from the queue and consumer-group filters alone: the error breakdown narrows the table, not
+the cleanup, so a purge by criteria deletes every record for that queue and cannot be undone. And an unknown is not a
 zero: a failed call renders as a failure, and one shared ticker refreshes the page, so what you
 see is one moment.
 

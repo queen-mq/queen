@@ -12,7 +12,7 @@ sourceOfTruth:
   - server/src/fusion.rs
   - server/src/handlers/data.rs
   - server/sql/procedures/001_log_schema.sql
-# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-07 (through 42bada8d + this patch): page matches the code.
 ---
 
 Queen is one stateless Rust binary (crate `queen`, binary `queen`) and one
@@ -112,7 +112,7 @@ against old-image pods.
 | Retained-bytes lane | `RETAINED_BYTES_INTERVAL_MS`, 600000 ms | claim row `retained_bytes` + transaction lock `737003` as belt | recomputes `queen.stats.retained_bytes` from live segments ([Stats](/internals/stats)) |
 | Metrics collector | `METRICS_FLUSH_MS`, 60000 ms | none, by design | per-replica rows in `worker_metrics` and `system_metrics` |
 | Hot-list wheel tick | 50 ms | none | promotes due deferred and lease-parked ring entries |
-| Hot-list wake tick | 5 ms | none | one coalesced wake per queue that received pushes |
+| Hot-list wake tick | 5 ms | none | one coalesced wake per queue where a write landed frames |
 | Hot-list reseed floor | 2 s tick, per ring `QUEEN_HOTLIST_RESEED_MS` | none | re-derives ring contents from PostgreSQL, bounded to recently written partitions |
 | Hot-list full reseed | per ring, `QUEEN_HOTLIST_RESEED_FULL_MS`, 300000 ms | none | the same over every partition of the queue, the floor for pendingness no write explains |
 | Reconcile | `QUEEN_CACHE_REFRESH_INTERVAL_MS`, 60000 ms | none | re-reads maintenance flags, drops per-queue caches, applies the hot-list repair markers a seek or a group delete published |
@@ -133,7 +133,7 @@ surfaces it serves are on every replica; `QUEEN_SWEEPER=false` is the only thing
 ## The mesh
 
 With `QUEEN_MESH_PEERS` set, replicas form a full mesh over framed TCP. It carries wakes for
-parked pops when a push commits on another replica, hot-list pending marks, maintenance-mode
+parked pops when a write lands frames on another replica, hot-list pending marks, maintenance-mode
 flips, queue-config cache invalidation, and the admin fan-out for ephemeral queues (whose data
 verbs travel broker-to-broker over plain HTTP instead, to the owner the HELLO handshake
 advertised). Nothing it carries is authoritative: PostgreSQL
