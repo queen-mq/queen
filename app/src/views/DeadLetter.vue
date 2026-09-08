@@ -305,8 +305,6 @@
       :open="Boolean(selectedMsg)"
       title="DLQ Message Detail"
       :subtitle="selectedMsg?.transactionId || selectedMsg?.id || ''"
-      wide
-      split
       @close="closeDetail"
     >
       <template #actions>

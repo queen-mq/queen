@@ -5,7 +5,7 @@
     <aside
       v-if="open"
       class="drawer-panel"
-      :class="{ 'detail-drawer-wide': wide }"
+      :class="{ 'detail-drawer-wide': $slots.secondary }"
       role="dialog"
       aria-modal="true"
       :aria-label="title"
@@ -28,8 +28,10 @@
         </button>
       </div>
 
-      <div class="card-body" :class="{ 'detail-drawer-split': split }">
-        <template v-if="split">
+      <!-- A secondary slot is the layout contract: every drawer that supplies
+           one gets the same wide, two-column shell without caller flags. -->
+      <div class="card-body" :class="{ 'detail-drawer-split': $slots.secondary }">
+        <template v-if="$slots.secondary">
           <div class="detail-drawer-primary"><slot></slot></div>
           <div class="detail-drawer-secondary"><slot name="secondary"></slot></div>
         </template>
@@ -48,8 +50,6 @@ defineProps({
   open: { type: Boolean, required: true },
   title: { type: String, required: true },
   subtitle: { type: String, default: '' },
-  wide: { type: Boolean, default: false },
-  split: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['close'])

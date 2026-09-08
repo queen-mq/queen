@@ -281,8 +281,6 @@
       :open="Boolean(selectedMessage)"
       title="Message Detail"
       :subtitle="messageDetail?.transactionId || selectedMessage?.transactionId || ''"
-      wide
-      :split="Boolean(messageDetail)"
       @close="closePanel"
     >
       <div v-if="detailLoading" style="text-align:center; padding:48px 0;">
