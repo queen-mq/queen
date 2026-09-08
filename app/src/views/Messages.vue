@@ -32,22 +32,34 @@
       </span>
     </div>
 
-    <!-- Filters -->
-    <div class="card filters">
+    <!-- Filters. Two groups in one card, separated by a rule: WHAT to look
+         for on top, then the WINDOW to look in, with the actions on that
+         window's right edge. Every one of the nine controls wears its label
+         above it — four control shapes in a wrapping row only read as a grid
+         when their labels line up. -->
+    <div class="card filters msg-filters">
       <div class="card-body filter-rows">
+
         <!-- Entity filters -->
         <div class="filter-row">
-          <div class="filter-search">
-            <svg class="filter-search-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
-              <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
-            </svg>
-            <input
-              v-model="searchQuery"
-              type="text"
-              placeholder="Filter loaded rows — transaction or partition ID"
-              class="input"
-              title="Filters the rows already on this page. It is not a server-side transaction lookup."
-            />
+          <!-- Client-side only: this narrows the rows already on the page, it
+               is not a server-side transaction lookup. The label says so, so
+               the box beside four server-side fields cannot be read as one. -->
+          <div class="filter-field-col msg-field-search">
+            <label class="label-xs" for="msg-search-filter">Search loaded rows</label>
+            <div class="filter-search">
+              <svg class="filter-search-icon" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+              </svg>
+              <input
+                id="msg-search-filter"
+                v-model="searchQuery"
+                type="text"
+                placeholder="Transaction or partition ID"
+                class="input"
+                title="Filters the rows already on this page. It is not a server-side transaction lookup."
+              />
+            </div>
           </div>
 
           <!-- Free entry allowed: `queue` is a server-side parameter here, and a
@@ -67,8 +79,9 @@
           </div>
 
           <div class="filter-field-col">
-            <label class="label-xs">Partition name</label>
+            <label class="label-xs" for="msg-partition-filter">Partition name</label>
             <input
+              id="msg-partition-filter"
               v-model="filterPartition"
               type="text"
               placeholder="Filter by name..."
@@ -77,8 +90,8 @@
           </div>
 
           <div class="filter-field-col">
-            <label class="label-xs">Status</label>
-            <select v-model="filterStatus" class="input">
+            <label class="label-xs" for="msg-status-filter">Status</label>
+            <select id="msg-status-filter" v-model="filterStatus" class="input">
               <option value="">All Status</option>
               <option value="pending">Pending</option>
               <option value="processing">Processing</option>
@@ -88,8 +101,8 @@
           </div>
 
           <div class="filter-field-col">
-            <label class="label-xs">Limit</label>
-            <select v-model="limit" class="input">
+            <label class="label-xs" for="msg-limit-filter">Limit</label>
+            <select id="msg-limit-filter" v-model="limit" class="input">
               <option :value="50">50 messages</option>
               <option :value="100">100 messages</option>
               <option :value="200">200 messages</option>
@@ -98,30 +111,36 @@
           </div>
         </div>
 
-        <!-- Time window and actions. The 1h / 24h / 7d buttons only PREFILL the
-             two inputs — nothing is selected until Apply runs — so they stay
-             loose buttons under a "quick fill" label instead of becoming a
-             range picker with an active state the page has not chosen. -->
-        <div class="filter-row">
-          <div class="filter-field">
-            <span class="label-xs">From</span>
-            <input v-model="filterFrom" type="datetime-local" class="input" :title="formatTimestampUtc(filterFrom)" />
+        <!-- Time window and actions, under the rule: everything here is the
+             server-side window, and Apply is what sends it. The 1h / 24h / 7d
+             buttons only PREFILL the two inputs — nothing is selected until
+             Apply runs — so they stay loose buttons under a "quick fill"
+             label instead of becoming a range picker with an active state the
+             page has not chosen. -->
+        <div class="filter-row filter-row-sep">
+          <div class="filter-field-col msg-field-time">
+            <label class="label-xs" for="msg-from-filter">From</label>
+            <input id="msg-from-filter" v-model="filterFrom" type="datetime-local" class="input" :title="formatTimestampUtc(filterFrom)" />
           </div>
 
-          <div class="filter-field">
-            <span class="label-xs">To</span>
-            <input v-model="filterTo" type="datetime-local" class="input" :title="formatTimestampUtc(filterTo)" />
+          <div class="filter-field-col msg-field-time">
+            <label class="label-xs" for="msg-to-filter">To</label>
+            <input id="msg-to-filter" v-model="filterTo" type="datetime-local" class="input" :title="formatTimestampUtc(filterTo)" />
           </div>
 
-          <div class="filter-field">
+          <div class="filter-field-col msg-field-quick">
             <span class="label-xs">Quick fill</span>
-            <button class="btn btn-ghost" @click="setTimeRange(1)">1h</button>
-            <button class="btn btn-ghost" @click="setTimeRange(24)">24h</button>
-            <button class="btn btn-ghost" @click="setTimeRange(168)">7d</button>
+            <div class="msg-quick-row">
+              <button class="btn btn-ghost" @click="setTimeRange(1)">1h</button>
+              <button class="btn btn-ghost" @click="setTimeRange(24)">24h</button>
+              <button class="btn btn-ghost" @click="setTimeRange(168)">7d</button>
+            </div>
           </div>
 
-          <button class="btn btn-primary" @click="applyFilters">Apply</button>
-          <button v-if="hasActiveFilters" class="btn btn-ghost" @click="clearFilters">Clear</button>
+          <div class="filter-field-right msg-filter-actions">
+            <button class="btn btn-primary" @click="applyFilters">Apply</button>
+            <button v-if="hasActiveFilters" class="btn btn-ghost" @click="clearFilters">Clear</button>
+          </div>
         </div>
       </div>
     </div>
@@ -749,3 +768,43 @@ watch([filterQueue, filterPartition, filterStatus], () => {
   fetchMessages()
 })
 </script>
+
+<style scoped>
+/* --- Filter card ----------------------------------------------------------
+   Nine controls, more than any other filter card in the app carries, so the
+   per-field sizing is tuned HERE rather than by widening the shared
+   `.filter-field-col` that eleven other views also stand on. Only the widths
+   are local; the column, the rule and the right-edge slot are the shared
+   ones. Colours come from the tokens, so both schemes follow. */
+
+/* The search box is the row's subject and the widest thing in it, so it gets
+   first call on the slack. `.filter-search` is written for a flex ROW: inside
+   the column that now carries its label, its `flex: 1 1 220px` would become a
+   220px HEIGHT. */
+.msg-field-search { flex: 2 1 240px; max-width: 320px; }
+.msg-field-search > .filter-search {
+  flex: 0 0 auto; width: 100%; min-width: 0; max-width: none;
+}
+
+/* A datetime-local draws its own `YYYY-MM-DD, --:--` and is unreadable at the
+   shared 150px floor — it clips the time off the end. */
+.msg-field-time { flex: 0 1 200px; min-width: 196px; max-width: 210px; }
+
+/* Three loose buttons sized by their own content, wearing the same label
+   treatment as the fields beside them. */
+.msg-field-quick { flex: 0 0 auto; min-width: 0; max-width: none; }
+.msg-quick-row { display: flex; align-items: center; gap: 6px; }
+
+/* Apply/Clear ride the right edge of the time row (`.filter-field-right`) and
+   simply trail the quick-fill buttons once the row wraps. */
+.msg-filter-actions { display: flex; align-items: center; gap: 8px; }
+
+/* One control height across the card. Without it the row's `align-items:
+   flex-end` bottom-aligns controls of three different natural heights and the
+   labels above them come out ragged — which is most of what read as mess.
+   `:deep` is needed for the one control that lives in a child component
+   (Autocomplete's input). */
+.msg-filters :deep(.input),
+.msg-filters .btn { height: 28px; box-sizing: border-box; }
+.msg-filters :deep(select.input) { line-height: 1; }
+</style>
