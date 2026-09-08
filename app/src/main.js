@@ -2,13 +2,16 @@ import { createApp } from 'vue'
 import App from './App.vue'
 import router from './router'
 import './style.css'
-// Import for side-effect: forces dark mode and scrubs stale theme preferences.
-// Importing here (rather than only from chart components) guarantees the
-// side-effect runs on every route, including hard reloads of pages that don't
-// use charts (e.g. /messages).
-import './composables/useTheme'
+// Resolve the colour scheme before the first mount: stored choice, else the OS
+// asking for light, else dark. The inline script in index.html has already
+// painted the right one; this seeds the reactive ref the toggle reads and
+// attaches the OS listener. Called here rather than from a component so it
+// runs on every route, including hard reloads of pages with no chrome.
+import { initTheme } from './composables/useTheme'
 import { ensureIdentity } from './stores/identity'
 import { notifyError } from './stores/ui'
+
+initTheme()
 
 const app = createApp(App)
 

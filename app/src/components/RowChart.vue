@@ -63,7 +63,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
-import { chartTheme, semanticColors, chartPalette, chartColor, alpha } from '@/composables/useChartTheme'
+import { chartTheme, semanticColors, chartPalette, chartColor, alpha, themeVersion } from '@/composables/useChartTheme'
 import {
   Chart, LineController, CategoryScale, LinearScale,
   PointElement, LineElement, Filler, Tooltip,
@@ -372,6 +372,14 @@ const legendItems = computed(() => {
       color: s.color || palette.line,
     }
   })
+})
+
+// A theme change moves every colour in buildChartData()/buildOptions() at
+// once. Chart.js holds the resolved strings it was handed, so the instance has
+// to be rebuilt — the reactive palette alone repaints the HTML legend above,
+// not the canvas.
+watch(themeVersion, () => {
+  if (renderMode.value === 'chart') createChart()
 })
 
 watch(renderMode, (m) => {

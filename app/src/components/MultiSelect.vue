@@ -135,7 +135,7 @@ onUnmounted(() => document.removeEventListener('click', handleClickOutside, true
   position: absolute; z-index: 50; margin-top: 4px; width: 100%;
   border-radius: var(--r-card); border: 1px solid var(--bd-hi);
   background: var(--ink-3);
-  box-shadow: 0 12px 32px -8px rgba(0,0,0,.6);
+  box-shadow: var(--shadow-pop);
   overflow: hidden; transform-origin: top;
 }
 

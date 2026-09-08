@@ -36,6 +36,26 @@
       </div>
     </div>
 
+    <!-- Colour scheme. Icon-only, and it shows the scheme you would GET, not
+         the one you are in: a sun on the dark surface reads as "go light".
+         The label is on the title/aria so the control costs no topbar width,
+         which is the scarcest thing up here. -->
+    <button
+      class="top-btn"
+      @click="toggleTheme()"
+      :title="isDark ? 'Switch to light' : 'Switch to dark'"
+      :aria-label="isDark ? 'Switch to light theme' : 'Switch to dark theme'"
+      aria-live="polite"
+    >
+      <svg v-if="isDark" style="width:15px; height:15px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path stroke-linecap="round" d="M12 2.6v2.2M12 19.2v2.2M4.22 4.22l1.56 1.56M18.22 18.22l1.56 1.56M2.6 12h2.2M19.2 12h2.2M4.22 19.78l1.56-1.56M18.22 5.78l1.56-1.56"/>
+      </svg>
+      <svg v-else style="width:15px; height:15px;" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M20.4 13.9A8.6 8.6 0 1 1 10.1 3.6a6.9 6.9 0 0 0 10.3 10.3z"/>
+      </svg>
+    </button>
+
     <button class="top-btn" @click="handleRefresh" :disabled="isRefreshing" title="Refresh">
       <svg style="width:15px; height:15px;" :class="{ 'animate-spin': isRefreshing }" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.6"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"/></svg>
     </button>
@@ -102,6 +122,7 @@ import { queues as queuesApi, consumers as consumersApi, operator } from '@/api'
 import { formatNumber } from '@/composables/useApi'
 import { useIdentity } from '@/stores/identity'
 import { useToast } from '@/composables/useToast'
+import { isDark, toggleTheme } from '@/composables/useTheme'
 
 const route = useRoute()
 const router = useRouter()

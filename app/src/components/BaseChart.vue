@@ -6,7 +6,7 @@
 
 <script setup>
 import { ref, watch, onMounted, onUnmounted, nextTick } from 'vue'
-import { chartPalette, chartTheme } from '@/composables/useChartTheme'
+import { chartPalette, chartTheme, themeVersion } from '@/composables/useChartTheme'
 import {
   Chart, LineController, BarController, DoughnutController,
   CategoryScale, LinearScale, PointElement, LineElement,
@@ -128,6 +128,11 @@ watch(() => props.data, () => {
     createChart()
   }
 }, { deep: true })
+
+// Chart.js copies the colour strings into its own config at construction, so
+// nothing on the canvas follows a token change on its own: rebuild the whole
+// instance when the scheme flips. Cheap — it only fires on an operator click.
+watch(themeVersion, () => { if (chart) createChart() })
 
 onMounted(() => { nextTick(createChart) })
 onUnmounted(() => { if (chart) { chart.destroy(); chart = null } })

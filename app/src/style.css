@@ -134,10 +134,154 @@
     --shadow:    0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
     --shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.4), 0 2px 4px rgba(0, 0, 0, 0.2);
 
+    /* Things that FLOAT over a card — search dropdown, cluster menu, toast.
+       These were three hand-typed rgba() triples that differed by a couple of
+       px of blur and 0.05 of alpha, i.e. by nothing the eye resolves, and
+       being literals they were the one part of the chrome a theme could not
+       reach. One token, one shape. */
+    --shadow-pop: 0 12px 32px -8px rgba(0, 0, 0, 0.6);
+
+    /* Modal backdrop. Paired with a 4px blur at the call site. */
+    --scrim: rgba(0, 0, 0, 0.5);
+
     --font-mono: 'JetBrains Mono', ui-monospace, monospace;
 
     --ease: cubic-bezier(.2, .7, .2, 1);
     color-scheme: dark;
+  }
+
+  /* ========================================================================
+     LIGHT — the same ladder, read the other way round.
+
+     Ported from the documentation site's light mode (webdoc `:root`) exactly
+     as the dark set above was ported from its `[data-mode="dark"]`, so the two
+     surfaces still read as one product in either scheme. Chroma stays zero on
+     every neutral.
+
+     Two things are NOT a mechanical inversion, because inverting them would
+     break what they are for:
+
+     1. The status hues. #4ade80 on white is 1.7:1 — a green nobody can read.
+        Each hue is re-cut, not re-hued, to the darkest step that still reads
+        as ITSELF at 8px (a green-950 dot is just a dark dot). The set is
+        chosen so its luminance SPREAD matches the dark set's — 1.55 here
+        against 1.54 there — because the spread is what lets an operator rank
+        five states at a glance, in greyscale or with a colour deficiency.
+        Every one clears AA on the card: 4.70:1 at worst.
+
+     2. The token numbering. --ember-400 stays the step used for text and
+        --ember-600 the strongest, as in the dark set; the numbers track the
+        ROLE, not the Tailwind ramp position, which is already true above
+        (dark --ok-500 is Tailwind's green-400).
+
+     Everything else is a mirror: each grey below was solved for the same
+     contrast ratio its dark counterpart has against its own card, which is
+     why the chart ramp lands on the same 1.60–1.70x adjacent separation.
+     ======================================================================== */
+  html.light {
+    /* ---- Surfaces. Note the ladder inverts around the card: the page is
+           slightly grey, the card is pure white ABOVE it, and hover/active
+           step down into grey. That is the docs' light arrangement and the
+           only one where "elevated" still means "lighter". ------------- */
+    --ink-0: #fcfcfc;  /* page      — docs --nb-background  oklch(.99)     */
+    --ink-1: #f5f5f5;  /* sidebar   — docs --nb-muted       oklch(.967)    */
+    --ink-2: #ffffff;  /* card      — docs --nb-card        oklch(1)       */
+    --ink-3: #fafafa;  /* input / floating surface: recessed against the
+                          white card, and legible as a dropdown or a chart
+                          tooltip over it once --bd and --shadow-pop land. */
+    --ink-4: #f0f0f0;  /* hover                                           */
+    --ink-5: #e2e2e2;  /* active — docs --nb-selected       oklch(.89)     */
+
+    --recessed: var(--ink-1);
+    --card:     var(--ink-2);
+    --selected: var(--ink-5);
+
+    /* ---- Text — four steps, mirrored. --text-faint stays deliberately
+           sub-AA (2.52:1): it draws rules and glyphs, never text, exactly
+           as in the dark set. ------------------------------------------ */
+    --text-hi:    #171717;  /* 17.93:1 on card — docs --nb-foreground      */
+    --text-mid:   #525252;  /*  7.81:1                                     */
+    --text-low:   #737373;  /*  4.74:1 — clears AA, docs --nb-muted-fg     */
+    --text-faint: #a3a3a3;  /*  2.52:1 — rules and glyphs, never text      */
+    --text: var(--text-mid);
+
+    /* ---- Primary accent. Near-black, per the docs, and --on-accent
+           resolves through --ink-0 to near-white without restating. ---- */
+    --accent:     #0a0a0a;  /* docs --nb-primary       19.80:1 on card     */
+    --accent-dim: #404040;  /* docs --nb-primary-hover                     */
+    --on-accent:  var(--ink-0);
+
+    /* ---- Status — re-cut for a white card, ranked as in the dark set:
+           ok / ice / warn cluster at the prominent end, info and bad
+           trail. Glows are the same hue at 10% over white, which is what
+           the docs' *-muted tints amount to. ------------------------- */
+    --ok-500: #166534;                       /* healthy   7.13:1 on card   */
+    --ok-glow: rgba(22, 101, 52, 0.10);
+    --ok-bd:   rgba(22, 101, 52, 0.30);
+
+    --warn-400: #92400e;                     /* warning   7.09:1           */
+    --warn-500: #78350f;
+    --warn-glow: rgba(146, 64, 14, 0.10);
+    --warn-bd:   rgba(146, 64, 14, 0.30);
+    --amber: var(--warn-400);
+
+    --ember-400: #e11d48;                    /* danger    4.70:1           */
+    --ember-500: #be123c;
+    --ember-600: #9f1239;
+    --ember-glow: rgba(225, 29, 72, 0.10);
+    --ember-bd:   rgba(225, 29, 72, 0.30);
+
+    --ice-400: #155e75;                      /* idle      7.27:1           */
+    --ice-500: #164e63;
+    --ice-600: #083344;
+    --ice-glow: rgba(21, 94, 117, 0.10);
+    --ice-bd:   rgba(21, 94, 117, 0.30);
+
+    --info-400: #2563eb;                     /* FYI       5.17:1           */
+    --info-glow: rgba(37, 99, 235, 0.10);
+    --info-bd:   rgba(37, 99, 235, 0.30);
+
+    --crown-400: var(--accent);
+
+    /* ---- Chart series ramp, solved grey by grey for the same contrast
+           its dark counterpart has against the dark card. Adjacent slots
+           sorted by luminance step 1.60x / 1.70x / 1.60x / 1.63x — the
+           dark ramp's 1.59 / 1.72 / 1.59 / 1.64, to two decimals. ----- */
+    --series-1: #252525;   /* 15.33:1 on card (dark slot: 15.36:1)         */
+    --series-2: #676767;   /*  5.66:1              5.63:1                  */
+    --series-3: #888888;   /*  3.54:1              3.54:1                  */
+    --series-4: #454545;   /*  9.59:1              9.66:1                  */
+    --series-5: #b0b0b0;   /*  2.17:1              2.16:1                  */
+
+    /* ---- Borders. --bd-soft stays the FAINTER of the pair, as in dark:
+           there it is darker than --bd, here it is lighter. ----------- */
+    --bd:      #ebebeb;  /* docs --nb-border                              */
+    --bd-hi:   #d4d4d4;  /* docs --nb-border-strong                       */
+    --bd-soft: #f5f5f5;  /* interior rules inside a card                  */
+
+    --ring: rgba(10, 10, 10, 0.35);   /* docs: primary @35%              */
+
+    /* ---- Elevation. Here a black shadow finally does the work the
+           hairline does on the dark page, so these are real and soft —
+           the docs' light ladder, which is 4-8% where dark is 20-40%. -- */
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
+    --shadow:    0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+    --shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.08), 0 2px 4px rgba(0, 0, 0, 0.04);
+    --shadow-pop: 0 12px 28px -10px rgba(0, 0, 0, 0.18), 0 2px 6px -2px rgba(0, 0, 0, 0.08);
+
+    --scrim: rgba(23, 23, 23, 0.32);
+
+    color-scheme: light;
+  }
+
+  /* The mark is a single-colour white SVG, so on a light page it is a white
+     shape on a white page. It is monochrome, which makes invert() exact:
+     #ffffff becomes #000000, within a hair of --accent. Cheaper and far
+     safer than forking the brand asset into a second file that then has to
+     be kept in step with it. */
+  html.light .boot-mark,
+  html.light .brand-mark img {
+    filter: invert(1);
   }
 
   html, body, #app { height: 100%; margin: 0; }
@@ -466,7 +610,7 @@
   position: absolute; top: 100%; left: 0; right: 0; margin-top: 4px;
   border-radius: var(--r-card); overflow: hidden; border: 1px solid var(--bd-hi);
   z-index: 50; max-height: 320px; overflow-y: auto;
-  box-shadow: 0 12px 32px -8px rgba(0,0,0,.6);
+  box-shadow: var(--shadow-pop);
 }
 .search-dropdown { background: var(--ink-3); }
 .search-item {
@@ -948,7 +1092,7 @@
   .modal-backdrop {
     position: fixed; inset: 0; z-index: 50;
     display: flex; align-items: center; justify-content: center; padding: 20px;
-    background: rgba(0, 0, 0, .5);
+    background: var(--scrim);
     backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
   }
   .modal-card { width: 100%; max-width: 480px; max-height: 88vh; overflow-y: auto; }
@@ -1170,7 +1314,7 @@
 .cluster-menu {
   position: absolute; left: 8px; right: 8px; top: calc(100% - 2px); z-index: 60;
   border-radius: var(--r-card); border: 1px solid var(--bd-hi); background: var(--ink-3);
-  box-shadow: 0 14px 34px -10px rgba(0,0,0,.65); overflow: hidden;
+  box-shadow: var(--shadow-pop); overflow: hidden;
 }
 .cluster-menu-head {
   display: flex; align-items: center; justify-content: space-between;
@@ -1232,7 +1376,7 @@
   display: flex; align-items: flex-start; gap: 9px;
   padding: 9px 10px; border-radius: var(--r-card); cursor: pointer;
   border: 1px solid var(--bd-hi); background: var(--ink-3);
-  box-shadow: 0 14px 34px -14px rgba(0,0,0,.75);
+  box-shadow: var(--shadow-pop);
 }
 .toast-dot { width: 6px; height: 6px; border-radius: var(--r-pill); margin-top: 5px; flex-shrink: 0; background: var(--text-low); }
 .toast-error { border-color: var(--ember-600); }

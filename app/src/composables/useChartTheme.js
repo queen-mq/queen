@@ -7,13 +7,23 @@
 // series apart use the grey ramp below; the legend / tooltip carries the
 // rest of the meaning.
 //
-// Everything here RESOLVES FROM `:root` in style.css instead of restating
-// it. This file used to hold 39 colour literals and zero var() references,
-// which meant a palette change repainted the whole app except the charts —
-// and the charts paint most of the pixels on Analytics, Dashboard and
+// Everything here RESOLVES FROM the active token set in style.css instead of
+// restating it. This file used to hold 39 colour literals and zero var()
+// references, which meant a palette change repainted the whole app except the
+// charts — and the charts paint most of the pixels on Analytics, Dashboard and
 // QueueOperations. The literals below are fallbacks for the one case
 // getComputedStyle cannot serve (a chart built before the stylesheet
-// applies); keep them equal to the tokens they mirror.
+// applies); keep them equal to the dark tokens they mirror.
+//
+// There are two token sets now (`:root` and `html.light`), so resolution is no
+// longer a one-shot: every exported container is REACTIVE and refreshed in
+// place when the theme changes, and `themeVersion` ticks so the two components
+// that build a Chart.js instance imperatively (BaseChart, RowChart) can
+// rebuild it. Nothing here reads `theme` to branch on a colour — the branch
+// lives entirely in CSS.
+
+import { reactive, ref, watch } from 'vue'
+import { theme } from './useTheme.js'
 
 const FALLBACK = {
   '--text-hi': '#f5f5f5',
@@ -33,14 +43,13 @@ const FALLBACK = {
   '--series-5': '#4a4a4a',
 }
 
-// Resolved once. Chart.js option objects are rebuilt on every render, so a
-// per-call getComputedStyle would run hundreds of times a minute for values
-// that cannot change: the app is dark-only (useTheme.js pins `.dark`, there
-// is no toggle anywhere in the UI).
-let cache = null
-const tokens = () => {
-  if (cache) return cache
-  cache = {}
+// Resolved from the live document, then cached. Chart.js option objects are
+// rebuilt on every render, so a per-call getComputedStyle would run hundreds
+// of times a minute; the cache is invalidated on exactly one event, a theme
+// change, which is the only thing that can move these values.
+const cache = reactive({ ...FALLBACK })
+
+const readTokens = () => {
   let cs = null
   try {
     cs = typeof getComputedStyle === 'function' ? getComputedStyle(document.documentElement) : null
@@ -51,10 +60,14 @@ const tokens = () => {
     const v = cs ? cs.getPropertyValue(name).trim() : ''
     cache[name] = v || fb
   }
-  return cache
 }
 
-const t = (name) => tokens()[name]
+const t = (name) => cache[name]
+
+// Ticks on every theme change. Imperative Chart.js call sites watch this;
+// anything inside a computed() re-runs on its own, because `cache` is
+// reactive and every accessor below reads through it.
+export const themeVersion = ref(0)
 
 // `#rrggbb` → `rgba(r,g,b,a)`. Chart.js fills need an alpha channel and the
 // tokens are opaque hex, so the alpha ladder lives here once instead of as
@@ -73,24 +86,85 @@ export const alpha = (color, a) => {
 // or chartColors[i] for generic N-series charts where index has no health
 // meaning (per-replica, per-queue, push/pop/ack split, etc). The order
 // alternates light/dark on purpose so ADJACENT indices stay apart: sorted by
-// luminance the ramp steps 1.65×–2.10× between neighbours.
+// luminance the ramp steps 1.65×–2.10× between neighbours. In light mode the
+// ramp inverts (dark greys on a white card) and keeps the same separation.
 const SERIES = ['--series-1', '--series-2', '--series-3', '--series-4', '--series-5']
 
-export const chartPalette = SERIES.map((name, i) => {
-  const line = t(name)
-  // The darkest slot needs a heavier fill to read at all against the card.
-  return { line, fill: alpha(line, i === 4 ? 0.18 : 0.1) }
-})
+export const chartPalette = reactive(SERIES.map(() => ({ line: '', fill: '' })))
 
 // Semantic colors — call by name when the data itself carries a meaning.
 // Do not cycle through these; pick the one that matches what the series
 // represents (see stateColor() for label-driven lookup).
-export const semanticColors = {
-  ok: { line: t('--ok-500'), fill: alpha(t('--ok-500'), 0.12) },
-  warn: { line: t('--warn-400'), fill: alpha(t('--warn-400'), 0.12) },
-  bad: { line: t('--ember-400'), fill: alpha(t('--ember-400'), 0.12) },
-  badStrong: { line: t('--ember-500'), fill: alpha(t('--ember-500'), 0.18) },
+export const semanticColors = reactive({
+  ok: { line: '', fill: '' },
+  warn: { line: '', fill: '' },
+  bad: { line: '', fill: '' },
+  badStrong: { line: '', fill: '' },
+})
+
+// Grid / tick / tooltip / axis colors for Chart.js options. Every value is a
+// token, so the chart chrome is literally the same material as the panels
+// around it.
+export const chartTheme = reactive({
+  grid: '',
+  tick: '',
+  axisTitle: '',
+  tooltipBg: '',
+  tooltipBorder: '',
+  tooltipText: '',
+  tooltipBody: '',
+  fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+  fontFamilyUI: "'Inter', ui-sans-serif, system-ui, sans-serif",
+})
+
+// Shortcut palettes for common chart shapes (keep legacy call sites happy).
+// Mutated in place, never reassigned: call sites hold the array itself.
+export const chartColors = reactive([])
+export const chartFills = reactive([])
+
+/**
+ * Re-read every token from the document and repaint the exported containers
+ * in place. Safe to call at any time; called on boot and on theme change.
+ */
+export const refreshChartTheme = () => {
+  readTokens()
+
+  SERIES.forEach((name, i) => {
+    const line = t(name)
+    // The darkest slot needs a heavier fill to read at all against the card.
+    chartPalette[i].line = line
+    chartPalette[i].fill = alpha(line, i === 4 ? 0.18 : 0.1)
+  })
+
+  semanticColors.ok.line = t('--ok-500')
+  semanticColors.ok.fill = alpha(t('--ok-500'), 0.12)
+  semanticColors.warn.line = t('--warn-400')
+  semanticColors.warn.fill = alpha(t('--warn-400'), 0.12)
+  semanticColors.bad.line = t('--ember-400')
+  semanticColors.bad.fill = alpha(t('--ember-400'), 0.12)
+  semanticColors.badStrong.line = t('--ember-500')
+  semanticColors.badStrong.fill = alpha(t('--ember-500'), 0.18)
+
+  chartTheme.grid = t('--bd')
+  chartTheme.tick = t('--text-low')
+  chartTheme.axisTitle = t('--text-low')
+  chartTheme.tooltipBg = t('--ink-3')
+  chartTheme.tooltipBorder = t('--bd-hi')
+  chartTheme.tooltipText = t('--text-hi')
+  chartTheme.tooltipBody = t('--text-mid')
+
+  chartColors.splice(0, chartColors.length, ...chartPalette.map((c) => c.line))
+  chartFills.splice(0, chartFills.length, ...chartPalette.map((c) => c.fill))
+
+  themeVersion.value++
+  return themeVersion.value
 }
+
+refreshChartTheme()
+
+// The class on <html> is applied synchronously by setTheme() before this
+// watcher's callback runs, so getComputedStyle already sees the new set.
+watch(theme, () => { refreshChartTheme() })
 
 // Distribution / state color lookup by semantic label.
 // Use for doughnut/pie charts where each slice has a named meaning.
@@ -115,25 +189,6 @@ export const stateColor = (label) => {
 
 // Convenience accessors used throughout views / Chart.js configs.
 export const chartColor = (i) => chartPalette[i % chartPalette.length]
-
-// Grid / tick / tooltip / axis colors for Chart.js options. Every value is a
-// token, so the chart chrome is literally the same material as the panels
-// around it.
-export const chartTheme = {
-  grid: t('--bd'),
-  tick: t('--text-low'),
-  axisTitle: t('--text-low'),
-  tooltipBg: t('--ink-3'),
-  tooltipBorder: t('--bd-hi'),
-  tooltipText: t('--text-hi'),
-  tooltipBody: t('--text-mid'),
-  fontFamily: "'JetBrains Mono', ui-monospace, monospace",
-  fontFamilyUI: "'Inter', ui-sans-serif, system-ui, sans-serif",
-}
-
-// Shortcut palettes for common chart shapes (keep legacy call sites happy).
-export const chartColors = chartPalette.map((c) => c.line)
-export const chartFills = chartPalette.map((c) => c.fill)
 
 // Helper: build a backgroundColor array for bar/doughnut series by label.
 export const seriesBackgrounds = (labels, variant = 'fill') =>

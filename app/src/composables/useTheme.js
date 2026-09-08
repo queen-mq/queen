@@ -1,26 +1,119 @@
-// Theme bootstrap. The dashboard is dark-only: light mode has been retired,
-// there is no toggle anywhere in the UI, and no component branches on the
-// theme any more (chart colours resolve from :root via useChartTheme.js).
+// Theme. Two schemes — dark (the default and the one the product was designed
+// in) and light — selected in this order:
 //
-// What is left here is load-bearing and side-effect only: pin `.dark` on
-// <html> and neutralise a persisted `queen-theme=light` preference so a stale
-// cookie or localStorage value from the two-theme era cannot flip the app.
-// Imported for effect from main.js; there is nothing to export — the old
-// `isDark` ref and the inert toggleTheme/setTheme/initTheme had no call sites
-// left once the `isDark ? A : B` chart ternaries collapsed.
+//   1. an explicit choice the operator made here, in localStorage
+//   2. the OS preference, but only when it asks for LIGHT
+//   3. dark
+//
+// Step 2 is deliberately one-sided. `prefers-color-scheme` has three states
+// and `no-preference` is common on Linux and on locked-down corporate
+// profiles; treating "not light" as dark keeps every existing user on the
+// surface they already have and makes light strictly opt-in — by the OS
+// saying so, or by the toggle in the header.
+//
+// The OS preference is only consulted while nothing is stored. Once someone
+// picks a scheme it wins, on this device, until they pick the other one.
+//
+// The pre-paint script in index.html runs this same resolution before any
+// bundle loads, so the first frame is already correct; initTheme() re-runs it
+// to seed the reactive ref and attach the media listener.
 
-// Force dark class on <html>, clean up any lingering light class
-document.documentElement.classList.add('dark')
-document.documentElement.classList.remove('light')
+import { computed, ref } from 'vue'
 
-// Also scrub persisted "light" preference so it doesn't try to bite again
-try {
-  if (typeof localStorage !== 'undefined' && localStorage.getItem('queen-theme') === 'light') {
-    localStorage.setItem('queen-theme', 'dark')
+export const THEME_STORAGE_KEY = 'queen-theme'
+
+const THEMES = ['light', 'dark']
+
+// Pure. The whole policy above, with the two environment reads passed in, so
+// it is testable without a DOM and cannot drift from the inline script.
+export const resolveTheme = (stored, prefersLight) =>
+  THEMES.includes(stored) ? stored : (prefersLight ? 'light' : 'dark')
+
+export const theme = ref('dark')
+export const isDark = computed(() => theme.value === 'dark')
+export const isLight = computed(() => theme.value === 'light')
+
+const LIGHT_QUERY = '(prefers-color-scheme: light)'
+
+// Storage and matchMedia both throw rather than return null in hardened
+// contexts (Safari private mode, `storage-access` denied, SSR). A theme is
+// never worth an exception, so every environment read is total.
+const readStored = () => {
+  try {
+    return typeof localStorage !== 'undefined' ? localStorage.getItem(THEME_STORAGE_KEY) : null
+  } catch {
+    return null
   }
-  if (typeof document !== 'undefined') {
-    document.cookie = 'queen-theme=dark;path=/;SameSite=Lax;max-age=31536000'
-  }
-} catch {
-  // storage/cookies may be unavailable in SSR or strict contexts; ignore
 }
+
+const writeStored = (value) => {
+  try {
+    if (typeof localStorage !== 'undefined') localStorage.setItem(THEME_STORAGE_KEY, value)
+  } catch {
+    // Preference simply won't survive the reload; the app still works.
+  }
+}
+
+const mediaQuery = () => {
+  try {
+    return typeof matchMedia === 'function' ? matchMedia(LIGHT_QUERY) : null
+  } catch {
+    return null
+  }
+}
+
+const prefersLight = () => mediaQuery()?.matches === true
+
+// The only place that touches <html>. `color-scheme` is what makes the form
+// controls, the scrollbars and the caret flip — the CSS tokens alone leave
+// native widgets painted for the wrong scheme.
+const applyTheme = (value) => {
+  if (typeof document === 'undefined') return
+  const root = document.documentElement
+  root.classList.toggle('light', value === 'light')
+  root.classList.toggle('dark', value !== 'light')
+  root.style.colorScheme = value === 'light' ? 'light' : 'dark'
+}
+
+/** Set the scheme and remember it. Persisting is what makes it survive reload. */
+export const setTheme = (value) => {
+  const next = THEMES.includes(value) ? value : 'dark'
+  theme.value = next
+  applyTheme(next)
+  writeStored(next)
+  return next
+}
+
+export const toggleTheme = () => setTheme(theme.value === 'dark' ? 'light' : 'dark')
+
+let listening = false
+
+/**
+ * Resolve and apply the scheme. Idempotent; called once from main.js.
+ * Does NOT write to storage — an unstored preference must stay unstored so
+ * the app keeps following the OS until the operator picks a side.
+ */
+export const initTheme = () => {
+  const stored = readStored()
+  const next = resolveTheme(stored, prefersLight())
+  theme.value = next
+  applyTheme(next)
+
+  // Follow the OS live, but only while the choice is still the OS's to make.
+  if (!listening) {
+    const mq = mediaQuery()
+    if (mq?.addEventListener) {
+      mq.addEventListener('change', (e) => {
+        if (THEMES.includes(readStored())) return // operator has decided
+        const followed = e.matches ? 'light' : 'dark'
+        theme.value = followed
+        applyTheme(followed)
+      })
+      listening = true
+    }
+  }
+
+  return next
+}
+
+export default { theme, isDark, isLight, initTheme, setTheme, toggleTheme }

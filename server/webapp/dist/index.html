@@ -17,15 +17,29 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&family=JetBrains+Mono:wght@100..800&display=swap" rel="stylesheet">
     
     <!-- Theme initialization (prevent flash) -->
-    <!-- App is dark-only. Force dark before any bundle loads so SPA routes
-         that don't pull the chart chunk (e.g. /messages on hard reload) still
-         render correctly. -->
+    <!-- Same resolution as src/composables/useTheme.js resolveTheme(): stored
+         choice wins, else the OS but only when it asks for LIGHT, else dark.
+         It runs here, before any bundle, so the first painted frame is already
+         the right scheme — on every SPA route, including hard reloads of pages
+         that pull no chart chunk (e.g. /messages). Keep in sync with
+         useTheme.js; that module re-runs the same policy on boot. -->
     <script>
-      document.documentElement.classList.add('dark');
-      document.documentElement.classList.remove('light');
+      (function () {
+        var t = 'dark';
+        try {
+          var stored = localStorage.getItem('queen-theme');
+          if (stored === 'light' || stored === 'dark') t = stored;
+          else if (window.matchMedia('(prefers-color-scheme: light)').matches) t = 'light';
+        } catch (e) { /* storage or matchMedia unavailable: stay dark */ }
+        var root = document.documentElement;
+        root.classList.toggle('light', t === 'light');
+        root.classList.toggle('dark', t !== 'light');
+        root.style.colorScheme = t;
+      })();
     </script>
-    <script type="module" crossorigin src="/assets/index-BuadKsKZ.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-VA6hnoqi.css">
+    <script type="module" crossorigin src="/assets/index-CsF90384.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/runtime-core.esm-bundler-BoZcqG5E.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-BgkVSINz.css">
   </head>
   <body class="antialiased">
     <div id="app"></div>
