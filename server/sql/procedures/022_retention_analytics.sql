@@ -31,6 +31,13 @@ DECLARE
     v_bucket_minutes INTEGER;
     v_series JSONB;
     v_totals JSONB;
+    -- Optional `groupBy` (namespace | task | queue), validated by the handler
+    -- (handlers/analytics.rs) exactly like /analytics/workload: an unknown value
+    -- would otherwise fall through the CASE below to the namespace default and
+    -- answer 200 with a grouping nobody asked for. ABSENT => the payload is
+    -- byte-for-byte what it always was (no `rows` key at all).
+    v_group_by TEXT;
+    v_rows JSONB;
     -- Track B (§5): tenant travels in the filter JSON (`_tenant`). The log
     -- engine's retention/eviction steps (006_log_maintenance) write
     -- queen.retention_history, and
@@ -42,6 +49,7 @@ BEGIN
     v_from_ts := COALESCE((p_filters->>'from')::timestamptz, NOW() - INTERVAL '1 hour');
     v_to_ts := COALESCE((p_filters->>'to')::timestamptz, NOW());
     v_queue := p_filters->>'queue';
+    v_group_by := NULLIF(p_filters->>'groupBy', '');
 
     v_duration_minutes := EXTRACT(EPOCH FROM (v_to_ts - v_from_ts)) / 60;
     v_bucket_minutes := CASE
@@ -112,6 +120,75 @@ BEGIN
         )
     INTO v_series, v_totals
     FROM grouped;
+
+    -- `rows`: the same retention_history rows and the same window as `totals`,
+    -- rolled up per group instead of per bucket. Deliberately a SECOND pass over
+    -- the same source rather than a wider first statement: with groupBy absent
+    -- nothing above changes, so the historical payload is preserved exactly.
+    -- The join to queen.queues is INNER here (the "unresolvable partition" rows
+    -- the totals keep have no queue and therefore no group key to file under).
+    IF v_group_by IS NOT NULL THEN
+        WITH src AS (
+            SELECT rh.retention_type,
+                   rh.messages_deleted,
+                   q.id AS queue_id,
+                   CASE v_group_by
+                       WHEN 'queue' THEN q.name
+                       WHEN 'task'  THEN COALESCE(q.task, '')
+                       ELSE              COALESCE(q.namespace, '')
+                   END AS grp
+            FROM queen.retention_history rh
+            JOIN queen.log_partitions lp ON lp.id = rh.partition_id
+            JOIN queen.queues q ON q.id = lp.queue_id
+            WHERE rh.executed_at >= v_from_ts
+              AND rh.executed_at <= v_to_ts
+              AND rh.retention_type NOT LIKE '\_\_%\_\_' ESCAPE '\'
+              AND q.tenant_id = v_tenant
+              AND (v_queue IS NULL OR q.name = v_queue)
+        ),
+        per_group AS (
+            SELECT grp,
+                   COUNT(DISTINCT queue_id) AS queues,
+                   SUM(CASE WHEN retention_type = 'retention'
+                            THEN messages_deleted ELSE 0 END) AS retention_msgs,
+                   SUM(CASE WHEN retention_type = 'completed_retention'
+                            THEN messages_deleted ELSE 0 END) AS completed_retention_msgs,
+                   SUM(CASE WHEN retention_type = 'max_wait_time_eviction'
+                            THEN messages_deleted ELSE 0 END) AS eviction_msgs,
+                   SUM(messages_deleted) AS total_msgs,
+                   COUNT(*) AS event_count
+            FROM src
+            GROUP BY grp
+        )
+        SELECT COALESCE(jsonb_agg(
+                   jsonb_build_object(
+                       'key', grp,
+                       'queues', queues,
+                       'totals', jsonb_build_object(
+                           'retentionMsgs', retention_msgs,
+                           'completedRetentionMsgs', completed_retention_msgs,
+                           'evictionMsgs', eviction_msgs,
+                           'totalMsgs', total_msgs,
+                           'eventCount', event_count
+                       )
+                   ) ORDER BY total_msgs DESC, grp ASC
+               ), '[]'::jsonb)
+        INTO v_rows
+        FROM per_group;
+    END IF;
+
+    IF v_group_by IS NOT NULL THEN
+        RETURN jsonb_build_object(
+            'timeRange', jsonb_build_object(
+                'from', to_char(v_from_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+                'to',   to_char(v_to_ts AT TIME ZONE 'UTC',   'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+            ),
+            'bucketMinutes', v_bucket_minutes,
+            'series', COALESCE(v_series, '[]'::jsonb),
+            'totals', COALESCE(v_totals, '{}'::jsonb),
+            'rows', COALESCE(v_rows, '[]'::jsonb)
+        );
+    END IF;
 
     RETURN jsonb_build_object(
         'timeRange', jsonb_build_object(

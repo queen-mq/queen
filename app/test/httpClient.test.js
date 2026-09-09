@@ -188,3 +188,39 @@ test('HTTP client redirects once on 401 without settling the caller', async () =
   assert.equal(redirects, 1)
   assert.equal(failures, 0)
 })
+
+test('HTTP client keeps a probe\'s missing-route answers off the global surface', async () => {
+  let failures = 0
+  let status = 404
+  let html = false
+  const client = createApiClient({
+    apiBaseUrl: 'https://queen.test',
+    reportApiFailure: () => { failures += 1 },
+    fetch: async () => (html
+      ? new Response('<!doctype html>', { status: 200, headers: { 'content-type': 'text/html' } })
+      : jsonResponse({ error: 'Not Found' }, { status })),
+  })
+
+  // The stable "no such route here" answers are a probe's expected outcome.
+  await assert.rejects(
+    client.get('/api/v1/analytics/workload', { probe: true }),
+    error => error instanceof ApiError && error.status === 404,
+  )
+  html = true
+  await assert.rejects(
+    client.get('/api/v1/analytics/workload', { probe: true }),
+    error => error instanceof ApiError && error.code === 'not_an_api_response',
+  )
+  html = false
+  assert.equal(failures, 0)
+
+  // Anything else on a probe is still a failure worth surfacing.
+  status = 503
+  await assert.rejects(client.get('/api/v1/analytics/workload', { probe: true }), error => error.status === 503)
+  assert.equal(failures, 1)
+
+  // And the same 404 without the flag is reported as it always was.
+  status = 404
+  await assert.rejects(client.get('/api/v1/analytics/workload'), error => error.status === 404)
+  assert.equal(failures, 2)
+})

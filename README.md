@@ -16,7 +16,7 @@ defining abstraction is one logical ordered partition per application entity (a 
 account, a conversation, a device, a workflow, a session, a job), created by the first push that
 names it, never provisioned in advance.
 
-[Documentation](https://queenmq.com) · [Benchmarks](https://queenmq.com/benchmarks) · [Quickstart](https://queenmq.com/start/quickstart) · [Try it](https://queenmq.cloud) · Apache-2.0 · v1.5.2
+[Documentation](https://queenmq.com) · [Benchmarks](https://queenmq.com/benchmarks) · [Quickstart](https://queenmq.com/start/quickstart) · [Try it](https://queenmq.cloud) · Apache-2.0 · v1.5.3
 
 
 Queen speaks HTTP, but is also protocol-compatible with Kafka and SQS clients.

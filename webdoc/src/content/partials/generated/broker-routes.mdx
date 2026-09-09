@@ -11,7 +11,7 @@ description: "Every HTTP route the broker registers, with its access level and w
       - server/src/handlers/*.rs (Tenant extension)
 */}
 
-Queen's broker registers **87 method + path pairs**. Every row below is read out of the router and the authorization table at build time.
+Queen's broker registers **90 method + path pairs**. Every row below is read out of the router and the authorization table at build time.
 
 ### Message plane
 
@@ -71,6 +71,8 @@ Queen's broker registers **87 method + path pairs**. Every row below is read out
 
 | Method | Path | Access level | Tenant-scoped |
 | --- | --- | --- | --- |
+| `GET` | `/api/v1/analytics/dlq-signatures` | read-only | yes |
+| `GET` | `/api/v1/analytics/partition-liveness` | read-only | yes |
 | `GET` | `/api/v1/analytics/postgres-stats` | read-only | no |
 | `GET` | `/api/v1/analytics/queue-lag` | read-only | yes |
 | `GET` | `/api/v1/analytics/queue-ops` | read-only | yes |
@@ -78,6 +80,7 @@ Queen's broker registers **87 method + path pairs**. Every row below is read out
 | `GET` | `/api/v1/analytics/retention` | read-only | yes |
 | `GET` | `/api/v1/analytics/system-metrics` | read-only | no |
 | `GET` | `/api/v1/analytics/worker-metrics` | read-only | no |
+| `GET` | `/api/v1/analytics/workload` | read-only | yes |
 | `POST` | `/api/v1/stats/refresh` | admin | no |
 | `GET` | `/api/v1/status` | read-only | no |
 | `GET` | `/api/v1/status/analytics` | read-only | yes |
@@ -160,4 +163,4 @@ Queen's broker registers **87 method + path pairs**. Every row below is read out
 | `POST` | `/api/v1/fetch` | read-only | yes |
 | `POST` | `/api/v1/partitions/changed` | read-only | yes |
 
-63 of these handlers resolve a tenant from the request; 15 `/api/v1/*` routes do not and are therefore cell-wide reads or operator surfaces.
+66 of these handlers resolve a tenant from the request; 15 `/api/v1/*` routes do not and are therefore cell-wide reads or operator surfaces.

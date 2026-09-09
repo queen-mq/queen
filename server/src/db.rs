@@ -1366,6 +1366,19 @@ pub async fn get_queue_ops(
     Ok(row.get(0))
 }
 
+// get_workload_v1 — /api/v1/analytics/workload (namespace/task/queue rollup:
+// window counters + aligned per-bucket series + live `now` figures, plus the
+// whole-tenant aggregate the shares are computed against).
+pub async fn get_workload(
+    client: &deadpool_postgres::Client,
+    filters_json: &str,
+) -> Result<String, tokio_postgres::Error> {
+    let row = client
+        .query_one("SELECT (queen.get_workload_v1($1::text::jsonb))::text", &[&filters_json])
+        .await?;
+    Ok(row.get(0))
+}
+
 // get_queue_parked_per_replica_v1 — /api/v1/analytics/queue-parked-replicas.
 pub async fn get_queue_parked_replicas(
     client: &deadpool_postgres::Client,
@@ -1380,13 +1393,41 @@ pub async fn get_queue_parked_replicas(
     Ok(row.get(0))
 }
 
-// get_retention_timeseries_v1 — /api/v1/analytics/retention.
+// get_retention_timeseries_v1 — /api/v1/analytics/retention. With `groupBy` in
+// the filters the payload carries an extra top-level `rows` (per-group totals);
+// without it the answer is exactly what it has always been.
 pub async fn get_retention_ts(
     client: &deadpool_postgres::Client,
     filters_json: &str,
 ) -> Result<String, tokio_postgres::Error> {
     let row = client
         .query_one("SELECT (queen.get_retention_timeseries_v1($1::text::jsonb))::text", &[&filters_json])
+        .await?;
+    Ok(row.get(0))
+}
+
+// get_dlq_signatures_v1 — /api/v1/analytics/dlq-signatures (folded error
+// signatures + retry/group/day spread over the newest `limit` DLQ rows of one
+// queue). Payload bytes never leave the database: the SP reads octet_length only.
+pub async fn get_dlq_signatures(
+    client: &deadpool_postgres::Client,
+    filters_json: &str,
+) -> Result<String, tokio_postgres::Error> {
+    let row = client
+        .query_one("SELECT (queen.get_dlq_signatures_v1($1::text::jsonb))::text", &[&filters_json])
+        .await?;
+    Ok(row.get(0))
+}
+
+// get_partition_liveness_v1 — /api/v1/analytics/partition-liveness (per-queue
+// partition census: total vs written in the last 1h/24h/7d, aggregated in SQL —
+// no partition row crosses the wire).
+pub async fn get_partition_liveness(
+    client: &deadpool_postgres::Client,
+    filters_json: &str,
+) -> Result<String, tokio_postgres::Error> {
+    let row = client
+        .query_one("SELECT (queen.get_partition_liveness_v1($1::text::jsonb))::text", &[&filters_json])
         .await?;
     Ok(row.get(0))
 }

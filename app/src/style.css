@@ -105,6 +105,15 @@
     --series-3: #6a6a6a;
     --series-4: #b8b8b8;
     --series-5: #4a4a4a;
+    /* Categorical hues, for the charts that COMPARE entities (the namespaces
+       of a tenant, the tasks of a namespace): fixed order, never cycled, and
+       validated for CVD separation and contrast on this card surface. Status
+       stays with ok / warn / ember; none of these is ever read as a state. */
+    --cat-1: #3b82f6;  /* blue    */
+    --cat-2: #0d9488;  /* teal    */
+    --cat-3: #8b5cf6;  /* violet  */
+    --cat-4: #65a30d;  /* lime    */
+    --cat-5: #c026d3;  /* fuchsia */
 
     /* ---- Borders — the single biggest legibility win in the port. The
            old pair sat at 1.12:1 against a card: boxes had no edges. ---- */
@@ -252,6 +261,11 @@
     --series-3: #888888;   /*  3.54:1              3.54:1                  */
     --series-4: #454545;   /*  9.59:1              9.66:1                  */
     --series-5: #b0b0b0;   /*  2.17:1              2.16:1                  */
+    --cat-1: #2563eb;  /* the same five hues, stepped down for a white card */
+    --cat-2: #0f8f74;
+    --cat-3: #7c3aed;
+    --cat-4: #5a8a00;
+    --cat-5: #a21caf;
 
     /* ---- Borders. --bd-soft stays the FAINTER of the pair, as in dark:
            there it is darker than --bd, here it is lighter. ----------- */

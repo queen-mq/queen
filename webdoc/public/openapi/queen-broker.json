@@ -2762,6 +2762,56 @@
         "x-queen-note": "Query parameters are forwarded to a stored procedure without being read by name in Rust, so they are not recoverable from the handler. See the reference page for this route."
       }
     },
+    "/api/v1/analytics/workload": {
+      "get": {
+        "operationId": "workload",
+        "tags": [
+          "Status and metrics"
+        ],
+        "summary": "GET /api/v1/analytics/workload",
+        "parameters": [
+          {
+            "name": "groupBy",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/analytics.rs::handle_workload",
+        "x-queen-query-params": "adhoc",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/api/v1/analytics/queue-parked-replicas": {
       "get": {
         "operationId": "queue_parked_replicas",
@@ -2807,6 +2857,106 @@
         "summary": "GET /api/v1/analytics/retention",
         "parameters": [
           {
+            "name": "groupBy",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/analytics.rs::handle_retention",
+        "x-queen-query-params": "adhoc",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/analytics/dlq-signatures": {
+      "get": {
+        "operationId": "dlq_signatures",
+        "tags": [
+          "Status and metrics"
+        ],
+        "summary": "GET /api/v1/analytics/dlq-signatures",
+        "parameters": [
+          {
+            "name": "queue",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/analytics.rs::handle_dlq_signatures",
+        "x-queen-query-params": "adhoc",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/analytics/partition-liveness": {
+      "get": {
+        "operationId": "partition_liveness",
+        "tags": [
+          "Status and metrics"
+        ],
+        "summary": "GET /api/v1/analytics/partition-liveness",
+        "parameters": [
+          {
             "name": "x-queen-tenant",
             "in": "header",
             "required": false,
@@ -2824,7 +2974,7 @@
         },
         "x-queen-access-level": "read-only",
         "x-queen-tenant-scoped": true,
-        "x-queen-handler": "server/src/handlers/analytics.rs::handle_retention",
+        "x-queen-handler": "server/src/handlers/analytics.rs::handle_partition_liveness",
         "x-queen-query-params": "forwarded",
         "security": [
           {

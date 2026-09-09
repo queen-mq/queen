@@ -949,3 +949,96 @@ AS $$
 $$;
 
 GRANT EXECUTE ON FUNCTION queen.log_queue_depth_v1(TEXT, TEXT, UUID) TO PUBLIC;
+
+-- ============================================================================
+-- queen.get_partition_liveness_v1 — GET /api/v1/analytics/partition-liveness
+-- ============================================================================
+-- Per-queue partition census: how many partitions exist, how many were WRITTEN
+-- recently (1h / 24h / 7d) and how many are brand new. The point is the ratio:
+-- a queue with 40k partitions and 12 live ones is paying maintenance for a
+-- population that stopped existing (see PLAN_MAINT_V2.md — maintenance scales
+-- with PARTITIONS, not with messages).
+--
+-- Activity source is queen.log_partitions.last_write_at, which the push path
+-- keeps QUANTIZED (it is bumped on a coarse grid, not per message) — so
+-- "live1h" means "wrote inside the last hour, to within that quantum", never a
+-- per-message freshness.
+--
+-- Cost: O(partitions), aggregated INSIDE Postgres — one row per queue crosses
+-- the wire, never a partition row. queen.log_partitions plus queen.queues (name
+-- / namespace / task / tenant) plus queen.stats for `pending`, read exactly as
+-- queen.get_status_queues_v2 reads it (stat_type='queue' -> pending_messages).
+-- Partitions DELETED in a window are deliberately not here: that is
+-- partitionsDeleted in the /analytics/workload payload.
+-- ============================================================================
+CREATE OR REPLACE FUNCTION queen.get_partition_liveness_v1(p_filters JSONB DEFAULT '{}'::jsonb)
+RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_queue TEXT;
+    v_namespace TEXT;
+    v_task TEXT;
+    v_limit INTEGER;
+    v_now TIMESTAMPTZ := NOW();
+    -- Track B (§5): tenant travels in the filter JSON (`_tenant`); signature unchanged.
+    v_tenant UUID := COALESCE((p_filters->>'_tenant')::uuid, '00000000-0000-0000-0000-000000000001');
+    v_rows JSONB;
+BEGIN
+    v_queue     := p_filters->>'queue';
+    -- namespace / task compare through COALESCE(...,'') so an explicit empty
+    -- value selects the empty group instead of widening to every queue (the
+    -- handler forwards `namespace=` / `task=` verbatim, like handle_workload).
+    v_namespace := p_filters->>'namespace';
+    v_task      := p_filters->>'task';
+    v_limit     := LEAST(GREATEST(COALESCE((p_filters->>'limit')::integer, 20), 1), 200);
+
+    SELECT COALESCE(jsonb_agg(r.row_data ORDER BY r.partitions DESC, r.name ASC), '[]'::jsonb)
+    INTO v_rows
+    FROM (
+        SELECT q.name,
+               lp.partitions,
+               jsonb_build_object(
+                   'queue', q.name,
+                   'namespace', COALESCE(q.namespace, ''),
+                   'task', COALESCE(q.task, ''),
+                   'partitions', lp.partitions,
+                   'live1h',  lp.live1h,
+                   'live24h', lp.live24h,
+                   'live7d',  lp.live7d,
+                   'created24h', lp.created24h,
+                   'oldestWriteAt', CASE WHEN lp.oldest_write IS NULL THEN NULL
+                       ELSE to_char(lp.oldest_write AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') END,
+                   'newestWriteAt', CASE WHEN lp.newest_write IS NULL THEN NULL
+                       ELSE to_char(lp.newest_write AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') END,
+                   'pending', COALESCE(s.pending_messages, 0)
+               ) AS row_data
+        FROM queen.queues q
+        JOIN LATERAL (
+            SELECT COUNT(*)::bigint AS partitions,
+                   COUNT(*) FILTER (WHERE p.last_write_at > v_now - INTERVAL '1 hour')::bigint  AS live1h,
+                   COUNT(*) FILTER (WHERE p.last_write_at > v_now - INTERVAL '24 hours')::bigint AS live24h,
+                   COUNT(*) FILTER (WHERE p.last_write_at > v_now - INTERVAL '7 days')::bigint   AS live7d,
+                   COUNT(*) FILTER (WHERE p.created_at    > v_now - INTERVAL '24 hours')::bigint AS created24h,
+                   MIN(p.last_write_at) AS oldest_write,
+                   MAX(p.last_write_at) AS newest_write
+            FROM queen.log_partitions p
+            WHERE p.queue_id = q.id
+        ) lp ON TRUE
+        LEFT JOIN queen.stats s ON s.stat_type = 'queue' AND s.queue_id = q.id
+        WHERE q.tenant_id = v_tenant
+          AND (v_queue     IS NULL OR q.name                    = v_queue)
+          AND (v_namespace IS NULL OR COALESCE(q.namespace, '') = v_namespace)
+          AND (v_task      IS NULL OR COALESCE(q.task, '')      = v_task)
+        ORDER BY lp.partitions DESC, q.name ASC
+        LIMIT v_limit
+    ) r;
+
+    RETURN jsonb_build_object(
+        'capturedAt', to_char(v_now AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+        'rows', COALESCE(v_rows, '[]'::jsonb)
+    );
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION queen.get_partition_liveness_v1(JSONB) TO PUBLIC;

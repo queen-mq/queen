@@ -15,7 +15,7 @@ sourceOfTruth:
   - app/src/views/DeadLetter.vue
   - proxy/src/webapp.rs
   - proxy/src/operator.rs
-# sourceOfTruth re-read 2026-09-07 (through 5435e92b + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-09 (through 399019f6 + working tree): page matches the code.
 ---
 
 Every broker serves a dashboard on its own port, with nothing to deploy: the built single-page
@@ -49,6 +49,11 @@ Every view is tenant-scoped except System and Users, and both exceptions are lab
 - **Messages**, `/messages`: listing, single-message inspection, delete
 - **Traces**, `/traces`: the trace names that exist, and the timeline for one
 - **Analytics**, `/analytics`: status over time, lag and ops series, retention volume
+- **Workload**, `/workload`: who is doing the work, how much of it, and what is stuck, grouped
+  by namespace or by task rather than by queue, with a drill-down from a group to its queues
+  and their consumer groups. Every figure over the window states the range it covers and every
+  snapshot figure says `now`, because the two answer different questions and a page that mixes
+  them silently is a page that reads a backlog as a rate
 - **Dead Letter**, `/dlq`: the dead-letter listing, a failure breakdown that filters it, per-row
   purge, and a bulk purge of every record for one queue, optionally narrowed to one consumer group
 - **System**, `/system`: cell-level host CPU and memory, worker metrics, PostgreSQL internals,

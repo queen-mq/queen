@@ -1175,11 +1175,20 @@ async fn main() {
         )
         .route("/api/v1/analytics/queue-lag", get(handlers::handle_queue_lag))
         .route("/api/v1/analytics/queue-ops", get(handlers::handle_queue_ops))
+        .route("/api/v1/analytics/workload", get(handlers::handle_workload))
         .route(
             "/api/v1/analytics/queue-parked-replicas",
             get(handlers::handle_queue_parked_replicas),
         )
         .route("/api/v1/analytics/retention", get(handlers::handle_retention))
+        .route(
+            "/api/v1/analytics/dlq-signatures",
+            get(handlers::handle_dlq_signatures),
+        )
+        .route(
+            "/api/v1/analytics/partition-liveness",
+            get(handlers::handle_partition_liveness),
+        )
         .route(
             "/api/v1/analytics/postgres-stats",
             get(handlers::handle_postgres_stats),

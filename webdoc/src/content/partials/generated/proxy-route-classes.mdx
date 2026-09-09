@@ -63,10 +63,13 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 
 | Method | Path |
 | --- | --- |
+| `GET` | `/api/v1/analytics/dlq-signatures` |
+| `GET` | `/api/v1/analytics/partition-liveness` |
 | `GET` | `/api/v1/analytics/queue-lag` |
 | `GET` | `/api/v1/analytics/queue-ops` |
 | `GET` | `/api/v1/analytics/queue-parked-replicas` |
 | `GET` | `/api/v1/analytics/retention` |
+| `GET` | `/api/v1/analytics/workload` |
 | `GET` | `/api/v1/consumer-groups` |
 | `GET` | `/api/v1/consumer-groups/:group` |
 | `GET` | `/api/v1/consumer-groups/lagging` |
@@ -168,4 +171,4 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | `GET` | `/metrics` |
 | `GET` | `/status` |
 
-65 of the broker's 87 method + path pairs are reachable with a tenant credential; the rest are operator or blocked surfaces.
+68 of the broker's 90 method + path pairs are reachable with a tenant credential; the rest are operator or blocked surfaces.

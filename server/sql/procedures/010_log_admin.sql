@@ -1044,6 +1044,127 @@ END;
 $$;
 
 -- ============================================================================
+-- queen.get_dlq_signatures_v1 — GET /api/v1/analytics/dlq-signatures
+-- ============================================================================
+-- "Why is this queue's DLQ full?" in one round trip, without shipping a single
+-- payload. Same table, same tenant/queue joins as get_dlq_messages_v1 above;
+-- the payload column is touched ONLY through octet_length (a size, never the
+-- bytes), and the sample is the newest `limit` rows by failed_at DESC.
+--
+-- rowsNow is NOT the sample size: it is the queue's dead-letter depth exactly as
+-- queen.get_status_queues_v2 reports it (queen.stats.dead_letter_messages), so
+-- the caller can see how much of the DLQ the sample actually covers.
+--
+-- Signature folding (contract order, all case-insensitive): uuid -> <id>, long
+-- hex run -> <id>, date/timestamp -> <date>, standalone integer -> <n>, then
+-- whitespace collapse / trim / first 120 chars. This turns "job 8123 for
+-- 5f2c…-…: timeout after 30000ms" and its thousand siblings into ONE row.
+-- ============================================================================
+CREATE OR REPLACE FUNCTION queen.get_dlq_signatures_v1(p_filters JSONB DEFAULT '{}'::jsonb)
+RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_queue TEXT;
+    v_limit INTEGER;
+    -- Track B (§5): tenant travels in the filter JSON (`_tenant`); signature unchanged.
+    v_tenant UUID := COALESCE((p_filters->>'_tenant')::uuid, '00000000-0000-0000-0000-000000000001');
+    v_rows_now BIGINT;
+    v_result JSONB;
+BEGIN
+    v_queue := p_filters->>'queue';
+    -- The handler rejects a missing `queue` with 400; keep the SP honest anyway.
+    v_limit := LEAST(GREATEST(COALESCE((p_filters->>'limit')::integer, 200), 1), 1000);
+
+    SELECT COALESCE(SUM(COALESCE(s.dead_letter_messages, 0)), 0)
+    INTO v_rows_now
+    FROM queen.queues q
+    LEFT JOIN queen.stats s ON s.stat_type = 'queue' AND s.queue_id = q.id
+    WHERE q.tenant_id = v_tenant
+      AND q.name = v_queue;
+
+    WITH sample AS (
+        SELECT d.failed_at,
+               d.retry_count,
+               d.consumer_group,
+               -- LENGTH ONLY. jsonb has no octet_length, hence the ::text cast:
+               -- this is the size of the payload's text form, never its content.
+               octet_length(d.payload::text) AS bytes,
+               -- Fold in the contract's order; 'gi' throughout.
+               LEFT(
+                 BTRIM(
+                   regexp_replace(
+                     regexp_replace(
+                       regexp_replace(
+                         regexp_replace(
+                           regexp_replace(
+                             COALESCE(NULLIF(BTRIM(d.error), ''), '(no message)'),
+                             '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', '<id>', 'gi'),
+                           '\m[0-9a-f]{20,}\M', '<id>', 'gi'),
+                         '\d{4}-\d{2}-\d{2}(T[\d:.]+Z?)?', '<date>', 'gi'),
+                       '\m\d+\M', '<n>', 'gi'),
+                     '\s+', ' ', 'g')
+                 ), 120) AS sig
+        FROM queen.log_dlq d
+        JOIN queen.log_partitions p ON p.id = d.partition_id
+        -- Queue identity is the queen.queues id (same join as get_dlq_messages_v1).
+        JOIN queen.queues q ON q.id = p.queue_id
+        WHERE q.tenant_id = v_tenant
+          AND q.name = v_queue
+        ORDER BY d.failed_at DESC
+        LIMIT v_limit
+    ),
+    agg AS (
+        SELECT COUNT(*)::bigint AS n,
+               MIN(failed_at) AS oldest,
+               MAX(failed_at) AS newest,
+               COALESCE(ROUND(AVG(bytes))::bigint, 0) AS avg_bytes
+        FROM sample
+    ),
+    sigs AS (
+        SELECT sig, COUNT(*)::bigint AS n
+        FROM sample
+        GROUP BY sig
+        ORDER BY n DESC, sig ASC
+        LIMIT 8
+    ),
+    days AS (
+        SELECT to_char(failed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
+               COUNT(*)::bigint AS n
+        FROM sample
+        GROUP BY 1
+    )
+    SELECT jsonb_build_object(
+        'queue', v_queue,
+        'rowsNow', v_rows_now,
+        'sample', a.n,
+        'retryCounts', COALESCE((SELECT jsonb_agg(DISTINCT COALESCE(retry_count, 0) ORDER BY COALESCE(retry_count, 0) ASC)
+                                 FROM sample), '[]'::jsonb),
+        'groups', COALESCE((SELECT jsonb_agg(DISTINCT consumer_group ORDER BY consumer_group ASC)
+                            FROM sample), '[]'::jsonb),
+        'oldest', CASE WHEN a.n = 0 THEN NULL
+                       ELSE to_char(a.oldest AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') END,
+        'newest', CASE WHEN a.n = 0 THEN NULL
+                       ELSE to_char(a.newest AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') END,
+        'avgBytes', a.avg_bytes,
+        'signatures', COALESCE((SELECT jsonb_agg(jsonb_build_object(
+                                          'text', s.sig,
+                                          'n', s.n,
+                                          -- share of the SAMPLE, not of rowsNow.
+                                          'share', ROUND(s.n::numeric / NULLIF(a.n, 0), 3)
+                                      ) ORDER BY s.n DESC, s.sig ASC)
+                                FROM sigs s), '[]'::jsonb),
+        'byDay', COALESCE((SELECT jsonb_agg(jsonb_build_object('day', d.day, 'n', d.n) ORDER BY d.day ASC)
+                           FROM days d), '[]'::jsonb)
+    )
+    INTO v_result
+    FROM agg a;
+
+    RETURN v_result;
+END;
+$$;
+
+-- ============================================================================
 -- Traces glue (port of the retired seg_traces file — engine-agnostic trace
 -- recording).
 -- ============================================================================
@@ -1434,4 +1555,5 @@ GRANT EXECUTE ON FUNCTION queen.get_consumer_groups_v4(UUID) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.kv_qk_unescape(TEXT) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.list_messages_v1(JSONB) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.get_dlq_messages_v1(JSONB) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.get_dlq_signatures_v1(JSONB) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.record_trace_v1(JSONB) TO PUBLIC;

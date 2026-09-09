@@ -189,6 +189,7 @@ const icons = {
   messages: MessagesIcon,
   traces: TracesIcon,
   analytics: AnalyticsIcon,
+  workload: WorkloadIcon,
   dlq: DlqIcon,
   system: SystemIcon,
   users: UsersIcon,
@@ -203,6 +204,7 @@ function EphemeralIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24
 function ConsumersIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.6' }, [h('circle',{cx:'9',cy:'8',r:'3'}),h('circle',{cx:'17',cy:'10',r:'2.2'}),h('path',{d:'M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6M15 20c.2-2 1.6-3.5 3.3-3.9'})]) }
 function MessagesIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.6' }, [h('path',{d:'M4 6h16v10a2 2 0 01-2 2H9l-5 4V6Z'}),h('path',{d:'M8 11h8M8 14h5'})]) }
 function TracesIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.6' }, [h('path',{d:'M3 6h6M11 10h8M7 14h10M3 18h6'}),h('circle',{cx:'9',cy:'6',r:'1.6',fill:'currentColor'}),h('circle',{cx:'19',cy:'10',r:'1.6',fill:'currentColor'}),h('circle',{cx:'17',cy:'14',r:'1.6',fill:'currentColor'}),h('circle',{cx:'9',cy:'18',r:'1.6',fill:'currentColor'})]) }
+function WorkloadIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.6', 'stroke-linecap':'round' }, [h('rect',{x:'3',y:'4',width:'8',height:'6',rx:'1.5'}),h('rect',{x:'13',y:'4',width:'8',height:'11',rx:'1.5'}),h('rect',{x:'3',y:'14',width:'8',height:'6',rx:'1.5'}),h('path',{d:'M17 18v2'})]) }
 function AnalyticsIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.6' }, [h('path',{d:'M4 20V10M10 20V4M16 20v-8M22 20H2'})]) }
 function SystemIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.6' }, [h('rect',{x:'3',y:'4',width:'18',height:'6',rx:'1.6'}),h('rect',{x:'3',y:'14',width:'18',height:'6',rx:'1.6'}),h('circle',{cx:'7',cy:'7',r:'.9',fill:'currentColor'}),h('circle',{cx:'7',cy:'17',r:'.9',fill:'currentColor'})]) }
 function UsersIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.6', 'stroke-linecap':'round', 'stroke-linejoin':'round' }, [h('circle',{cx:'9',cy:'8',r:'3'}),h('path',{d:'M3.5 20c0-3.3 2.5-6 5.5-6s5.5 2.7 5.5 6'}),h('path',{d:'M17 8v6M14 11h6'})]) }

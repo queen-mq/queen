@@ -41,6 +41,11 @@ const FALLBACK = {
   '--series-3': '#6a6a6a',
   '--series-4': '#b8b8b8',
   '--series-5': '#4a4a4a',
+  '--cat-1': '#3b82f6',
+  '--cat-2': '#0d9488',
+  '--cat-3': '#8b5cf6',
+  '--cat-4': '#65a30d',
+  '--cat-5': '#c026d3',
 }
 
 // Resolved from the live document, then cached. Chart.js option objects are
@@ -92,6 +97,17 @@ const SERIES = ['--series-1', '--series-2', '--series-3', '--series-4', '--serie
 
 export const chartPalette = reactive(SERIES.map(() => ({ line: '', fill: '' })))
 
+// Categorical hues — the one place a colour is assigned by IDENTITY rather
+// than by status: charts that compare entities (the namespaces of a tenant,
+// the tasks of a namespace) across a stacked area, a bar chart and a heat map,
+// where a grey ramp cannot keep five series apart. Fixed order, never cycled:
+// a sixth entity is grey, and the caller owns the entity → slot map
+// (composables/useCategoryColors) so a colour follows its namespace, not its
+// rank. Both token sets pass the six data-viz checks on their card surface.
+const CATEGORY = ['--cat-1', '--cat-2', '--cat-3', '--cat-4', '--cat-5']
+
+export const categoryPalette = reactive(CATEGORY.map(() => ({ line: '', fill: '' })))
+
 // Semantic colors — call by name when the data itself carries a meaning.
 // Do not cycle through these; pick the one that matches what the series
 // represents (see stateColor() for label-driven lookup).
@@ -134,6 +150,11 @@ export const refreshChartTheme = () => {
     // The darkest slot needs a heavier fill to read at all against the card.
     chartPalette[i].line = line
     chartPalette[i].fill = alpha(line, i === 4 ? 0.18 : 0.1)
+  })
+
+  CATEGORY.forEach((name, i) => {
+    categoryPalette[i].line = t(name)
+    categoryPalette[i].fill = alpha(t(name), 0.35)
   })
 
   semanticColors.ok.line = t('--ok-500')

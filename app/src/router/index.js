@@ -115,6 +115,19 @@ const routes = [
     }
   },
   {
+    // Who is doing the work. Tenant-scoped: /api/v1/analytics/workload counts
+    // only this tenant's queues, and its `tenant` total is what every share on
+    // the page is computed against.
+    path: '/workload',
+    name: 'Workload',
+    component: () => import('@/views/Workload.vue'),
+    meta: {
+      title: 'Workload', subtitle: 'Who is doing the work, how much, and what is stuck',
+      requires: 'read', scope: 'tenant',
+      nav: { group: 'Observability', icon: 'workload', order: 3 },
+    }
+  },
+  {
     path: '/dlq',
     name: 'DeadLetter',
     component: () => import('@/views/DeadLetter.vue'),
@@ -123,7 +136,7 @@ const routes = [
       // subtitle promising one is the same lie as a button that cannot work.
       title: 'Dead Letter', subtitle: 'Inspect and purge failed messages',
       requires: 'read', scope: 'tenant',
-      nav: { group: 'Observability', icon: 'dlq', order: 3 },
+      nav: { group: 'Observability', icon: 'dlq', order: 4 },
     }
   },
   {

@@ -49,3 +49,17 @@ export function describeApiError(err) {
   if (err.isServerFault) return `Server error (HTTP ${err.status})`
   return err.message
 }
+
+/**
+ * The three answers that mean "this route does not exist here": a plain 404,
+ * the proxy's route_blocked, and the SPA fallback answering an API path
+ * (httpClient turns that 200 text/html into not_an_api_response). Each is a
+ * fact about the cell, not a fault of the caller, and asking again cannot
+ * change it. Probes (httpClient `probe: true`) and the route-support store
+ * both key off this one predicate.
+ */
+export function isMissingRouteError(err) {
+  return !!err && (
+    err.status === 404 || err.code === CODE_ROUTE_BLOCKED || err.code === 'not_an_api_response'
+  )
+}

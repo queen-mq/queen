@@ -1,0 +1,29 @@
+{
+  "_comment": "Hand-made: two queues with metrics over three 15-minute buckets, plus one queue (gamma.q3) that has no metrics row and no consumer group. Sums are asserted literally in workload.test.js.",
+  "ops": {
+    "timeRange": { "from": "2026-09-09T08:00:00.000Z", "to": "2026-09-09T08:45:00.000Z" },
+    "bucketMinutes": 15,
+    "queues": ["alpha.q1", "beta.q2"],
+    "series": [
+      { "bucket": "2026-09-09T08:00:00Z", "queueName": "alpha.q1", "pushRequests": 2, "pushMessages": 10, "popMessages": 20, "popEmpty": 5, "ackRequests": 4, "ackSuccess": 18, "ackFailed": 2, "transactions": 1, "partitionsCreated": 1, "partitionsDeleted": 0, "partitionCount": 4, "avgLagMs": 100, "maxLagMs": 500, "parkedCount": 4 },
+      { "bucket": "2026-09-09T08:15:00Z", "queueName": "alpha.q1", "pushRequests": 3, "pushMessages": 30, "popMessages": 10, "popEmpty": 0, "ackRequests": 2, "ackSuccess": 10, "ackFailed": 0, "transactions": 0, "partitionsCreated": 0, "partitionsDeleted": 2, "partitionCount": 4, "avgLagMs": 200, "maxLagMs": 900, "parkedCount": 6 },
+      { "bucket": "2026-09-09T08:00:00Z", "queueName": "beta.q2", "pushRequests": 5, "pushMessages": 5, "popMessages": 0, "popEmpty": 50, "ackRequests": 0, "ackSuccess": 0, "ackFailed": 0, "transactions": 0, "partitionsCreated": 0, "partitionsDeleted": 0, "partitionCount": 1, "avgLagMs": null, "maxLagMs": null, "parkedCount": 2 },
+      { "bucket": "2026-09-09T08:30:00Z", "queueName": "beta.q2", "pushRequests": 0, "pushMessages": 0, "popMessages": 40, "popEmpty": 1, "ackRequests": 1, "ackSuccess": 40, "ackFailed": 0, "transactions": 7, "partitionsCreated": 0, "partitionsDeleted": 0, "partitionCount": 1, "avgLagMs": 50, "maxLagMs": 60000, "parkedCount": 10 }
+    ]
+  },
+  "statusQueues": [
+    { "name": "alpha.q1", "partitions": 4, "messages": { "pending": 100, "processing": 5, "deadLetter": 3 } },
+    { "name": "beta.q2", "partitions": 1, "messages": { "pending": 0, "processing": 0, "deadLetter": 0 } },
+    { "name": "gamma.q3", "partitions": 2, "messages": { "pending": 7, "processing": 0, "deadLetter": 0 } }
+  ],
+  "resourceQueues": [
+    { "name": "alpha.q1", "namespace": "alpha", "task": "ingest", "partitions": 4, "retainedBytes": 1000, "messages": { "total": 50 } },
+    { "name": "beta.q2", "namespace": "beta", "task": "", "partitions": 1, "retainedBytes": 2000, "messages": { "total": 20 } },
+    { "name": "gamma.q3", "namespace": "gamma", "task": "", "partitions": 2, "retainedBytes": 4000, "messages": { "total": 7 } }
+  ],
+  "consumerGroups": [
+    { "name": "g1", "queueName": "alpha.q1", "state": "Active", "members": 4, "partitionsWithLag": 0, "totalLag": 0, "maxTimeLag": 0 },
+    { "name": "g2", "queueName": "alpha.q1", "state": "Lagging", "members": 4, "partitionsWithLag": 1, "totalLag": 12, "maxTimeLag": 120 },
+    { "name": "__QUEUE_MODE__", "queueName": "beta.q2", "state": "Active", "members": 1, "partitionsWithLag": 0, "totalLag": 0, "maxTimeLag": 0 }
+  ]
+}

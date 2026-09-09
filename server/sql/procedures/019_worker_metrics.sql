@@ -1617,6 +1617,337 @@ BEGIN
 END;
 $$;
 
+-- ============================================================================
+-- queen.get_workload_v1: workload rollup grouped by namespace / task / queue
+-- ============================================================================
+-- One call answers "who is doing the work right now, and who did it over the
+-- window": per-group window counters, an aligned per-bucket series, and the
+-- live `now` figures (stats counters + consumer-group coverage).
+--
+-- Bucketing and timestamp formats are get_queue_ops_v1's, so the two endpoints
+-- share a time axis. Three deliberate choices:
+--   * `buckets` comes from generate_series over the floored window, NOT from
+--     the rows: a group with no traffic in a bucket must render a GAP (null),
+--     which is not the same fact as a measured zero — the same reason
+--     get_queue_ops_v1 emits NULL lag for a bucket with no pops.
+--   * parked_count is a GAUGE: per queue we AVERAGE across time, then SUM
+--     across queues. Averaging the already-averaged bucket values would weight
+--     a sparse bucket like a full one, so the per-queue window average is
+--     re-derived from SUM(parked)/COUNT(rows), not from the bucket averages.
+--   * `tenant` aggregates EVERY queue of the tenant, ignoring the namespace /
+--     task / queue filters, so the caller can show a share against the whole
+--     tenant without a second round trip. It rides along as a second `scope`
+--     in the same CTE chain rather than a second pass over the same tables.
+-- ============================================================================
+CREATE OR REPLACE FUNCTION queen.get_workload_v1(
+    p_filters JSONB DEFAULT '{}'::jsonb
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_from_ts TIMESTAMPTZ;
+    v_to_ts TIMESTAMPTZ;
+    v_from_bucket TIMESTAMPTZ;
+    v_to_bucket TIMESTAMPTZ;
+    v_group_by TEXT;
+    v_namespace TEXT;
+    v_task TEXT;
+    v_queue TEXT;
+    v_duration_minutes INTEGER;
+    v_bucket_minutes INTEGER;
+    v_buckets JSONB;
+    v_rows JSONB;
+    v_tenant_row JSONB;
+    -- Track B (§5): tenant travels in the filter JSON (`_tenant`); signature unchanged.
+    v_tenant UUID := COALESCE((p_filters->>'_tenant')::uuid, '00000000-0000-0000-0000-000000000001');
+BEGIN
+    v_from_ts   := COALESCE((p_filters->>'from')::timestamptz, NOW() - INTERVAL '1 hour');
+    v_to_ts     := COALESCE((p_filters->>'to')::timestamptz,   NOW());
+    v_group_by  := COALESCE(NULLIF(p_filters->>'groupBy', ''), 'namespace');
+    v_namespace := p_filters->>'namespace';
+    v_task      := p_filters->>'task';
+    v_queue     := p_filters->>'queue';
+
+    v_duration_minutes := EXTRACT(EPOCH FROM (v_to_ts - v_from_ts)) / 60;
+    v_bucket_minutes := CASE
+        WHEN v_duration_minutes <= 60 THEN 1
+        WHEN v_duration_minutes <= 360 THEN 5
+        WHEN v_duration_minutes <= 1440 THEN 15
+        WHEN v_duration_minutes <= 10080 THEN 60
+        ELSE 360
+    END;
+
+    -- Same floor as the `bucket` expression in the rolled CTE below, applied to
+    -- the window edges so the axis covers the whole range even where no queue
+    -- reported anything.
+    v_from_bucket := date_trunc('minute', v_from_ts)
+        - (EXTRACT(minute FROM v_from_ts)::integer % v_bucket_minutes) * INTERVAL '1 minute';
+    v_to_bucket := date_trunc('minute', v_to_ts)
+        - (EXTRACT(minute FROM v_to_ts)::integer % v_bucket_minutes) * INTERVAL '1 minute';
+
+    SELECT COALESCE(jsonb_agg(
+               to_char(g AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') ORDER BY g
+           ), '[]'::jsonb)
+    INTO v_buckets
+    FROM generate_series(v_from_bucket, v_to_bucket,
+                         (v_bucket_minutes || ' minutes')::interval) AS g;
+
+    WITH q_all AS (
+        -- Every queue of the tenant, with its group key and whether the
+        -- request's filters keep it. Queue identity is the queen.queues id.
+        SELECT q.id,
+               q.name,
+               COALESCE(q.namespace, '') AS ns,
+               COALESCE(q.task, '')      AS tk,
+               CASE v_group_by
+                   WHEN 'queue' THEN q.name
+                   WHEN 'task'  THEN COALESCE(q.task, '')
+                   ELSE              COALESCE(q.namespace, '')
+               END AS grp,
+               (    (v_namespace IS NULL OR COALESCE(q.namespace, '') = v_namespace)
+                AND (v_task      IS NULL OR COALESCE(q.task, '')      = v_task)
+                AND (v_queue     IS NULL OR q.name                    = v_queue)
+               ) AS in_filter
+        FROM queen.queues q
+        WHERE q.tenant_id = v_tenant
+    ),
+    q_scoped AS (
+        -- 'row'    = the filtered groups the caller asked for.
+        -- 'tenant' = one synthetic group over every queue, filters ignored.
+        SELECT 'row'::text AS scope, grp AS gkey, id, ns, tk FROM q_all WHERE in_filter
+        UNION ALL
+        SELECT 'tenant'::text AS scope, ''::text AS gkey, id, ns, tk FROM q_all
+    ),
+    rolled AS (
+        SELECT
+            date_trunc('minute', qlm.bucket_time) -
+                (EXTRACT(minute FROM qlm.bucket_time)::integer % v_bucket_minutes) * INTERVAL '1 minute' AS bucket,
+            qlm.queue_id,
+            SUM(qlm.push_request_count) AS push_req,
+            SUM(qlm.push_message_count) AS push_msg,
+            SUM(qlm.pop_count)          AS pop_msg,
+            SUM(qlm.pop_empty_count)    AS pop_empty,
+            SUM(qlm.ack_request_count)  AS ack_req,
+            SUM(qlm.ack_success_count)  AS ack_ok,
+            SUM(qlm.ack_failed_count)   AS ack_fail,
+            SUM(qlm.transaction_count)  AS trx_cnt,
+            SUM(qlm.conflated_count)    AS conflated,
+            SUM(qlm.partitions_created) AS parts_created,
+            SUM(qlm.partitions_deleted) AS parts_deleted,
+            -- Gauge: keep sum and sample count separately so the window
+            -- average can be re-derived exactly (see header).
+            SUM(COALESCE(qlm.parked_count, 0))::numeric AS parked_sum,
+            COUNT(*)                                    AS parked_n,
+            -- Lag is sampled AT POP: weight by pop_count, and a bucket with no
+            -- pops carries no sample (NULL, never 0).
+            SUM(qlm.avg_lag_ms * qlm.pop_count)::numeric         AS lag_weight,
+            MAX(qlm.max_lag_ms) FILTER (WHERE qlm.pop_count > 0) AS max_lag
+        FROM queen.queue_lag_metrics qlm
+        JOIN queen.queues q ON q.id = qlm.queue_id
+        WHERE qlm.bucket_time >= v_from_ts
+          AND qlm.bucket_time <= v_to_ts
+          AND q.tenant_id = v_tenant
+        GROUP BY 1, 2
+    ),
+    sb AS (
+        -- scope × group × bucket: the series values, before axis alignment.
+        SELECT s.scope, s.gkey, r.bucket,
+               SUM(r.push_msg)                AS push,
+               SUM(r.pop_msg)                 AS pop,
+               SUM(r.pop_empty)               AS pop_empty,
+               SUM(r.ack_fail)                AS ack_fail,
+               SUM(r.parked_sum / r.parked_n) AS parked,
+               CASE WHEN SUM(r.pop_msg) > 0
+                    THEN SUM(r.lag_weight) / SUM(r.pop_msg) END AS avg_lag,
+               MAX(r.max_lag)                 AS max_lag
+        FROM q_scoped s
+        JOIN rolled r ON r.queue_id = s.id
+        GROUP BY 1, 2, 3
+    ),
+    gkeys AS (
+        SELECT DISTINCT scope, gkey FROM q_scoped
+    ),
+    bkts AS (
+        SELECT g AS bucket
+        FROM generate_series(v_from_bucket, v_to_bucket,
+                             (v_bucket_minutes || ' minutes')::interval) AS g
+    ),
+    ser AS (
+        -- CROSS JOIN the axis so an untouched bucket is a null hole, not a
+        -- missing element that would slide the rest of the series left.
+        SELECT k.scope, k.gkey,
+               jsonb_agg(sb.push               ORDER BY b.bucket) AS s_push,
+               jsonb_agg(sb.pop                ORDER BY b.bucket) AS s_pop,
+               jsonb_agg(sb.pop_empty          ORDER BY b.bucket) AS s_pop_empty,
+               jsonb_agg(sb.ack_fail           ORDER BY b.bucket) AS s_ack_fail,
+               jsonb_agg(ROUND(sb.parked, 2)   ORDER BY b.bucket) AS s_parked,
+               jsonb_agg(ROUND(sb.avg_lag)::bigint ORDER BY b.bucket) AS s_avg_lag,
+               jsonb_agg(sb.max_lag            ORDER BY b.bucket) AS s_max_lag
+        FROM gkeys k
+        CROSS JOIN bkts b
+        LEFT JOIN sb ON sb.scope = k.scope AND sb.gkey = k.gkey AND sb.bucket = b.bucket
+        GROUP BY 1, 2
+    ),
+    qwin AS (
+        -- scope × group × QUEUE window rollup. Per-queue is a required
+        -- intermediate: parkedAvg sums per-queue averages, and
+        -- queuesTouched / queuesActive count queues, not rows.
+        SELECT s.scope, s.gkey, s.id, s.ns, s.tk,
+               COALESCE(SUM(r.push_req), 0)      AS push_req,
+               COALESCE(SUM(r.push_msg), 0)      AS push_msg,
+               COALESCE(SUM(r.pop_msg), 0)       AS pop_msg,
+               COALESCE(SUM(r.pop_empty), 0)     AS pop_empty,
+               COALESCE(SUM(r.ack_req), 0)       AS ack_req,
+               COALESCE(SUM(r.ack_ok), 0)        AS ack_ok,
+               COALESCE(SUM(r.ack_fail), 0)      AS ack_fail,
+               COALESCE(SUM(r.trx_cnt), 0)       AS trx_cnt,
+               COALESCE(SUM(r.conflated), 0)     AS conflated,
+               COALESCE(SUM(r.parts_created), 0) AS parts_created,
+               COALESCE(SUM(r.parts_deleted), 0) AS parts_deleted,
+               SUM(r.parked_sum)                 AS parked_sum,
+               SUM(r.parked_n)                   AS parked_n,
+               COALESCE(SUM(r.lag_weight), 0)    AS lag_weight,
+               MAX(r.max_lag)                    AS max_lag,
+               COUNT(r.bucket)                   AS n_rows
+        FROM q_scoped s
+        LEFT JOIN rolled r ON r.queue_id = s.id
+        GROUP BY 1, 2, 3, 4, 5
+    ),
+    win AS (
+        SELECT scope, gkey,
+               MIN(ns) AS ns,
+               MIN(tk) AS tk,
+               COUNT(*)           AS queues,
+               SUM(push_req)      AS push_req,
+               SUM(push_msg)      AS push_msg,
+               SUM(pop_msg)       AS pop_msg,
+               SUM(pop_empty)     AS pop_empty,
+               SUM(ack_req)       AS ack_req,
+               SUM(ack_ok)        AS ack_ok,
+               SUM(ack_fail)      AS ack_fail,
+               SUM(trx_cnt)       AS trx_cnt,
+               SUM(conflated)     AS conflated,
+               SUM(parts_created) AS parts_created,
+               SUM(parts_deleted) AS parts_deleted,
+               COALESCE(SUM(parked_sum / NULLIF(parked_n, 0)), 0) AS parked_avg,
+               CASE WHEN SUM(pop_msg) > 0
+                    THEN SUM(lag_weight) / SUM(pop_msg) END AS avg_lag,
+               MAX(max_lag) AS max_lag,
+               COUNT(*) FILTER (WHERE n_rows > 0)             AS queues_touched,
+               COUNT(*) FILTER (WHERE push_msg + pop_msg > 0) AS queues_active
+        FROM qwin
+        GROUP BY 1, 2
+    ),
+    cg AS (
+        -- Queue-scoped group registrations only (partition_name = ''), the same
+        -- rows the `cgm` CTE of get_consumer_groups_v4 reads. Discovery rows
+        -- (queue_id NULL) name no queue and drop out of the join.
+        SELECT m.queue_id, COUNT(*) AS n
+        FROM queen.consumer_groups_metadata m
+        WHERE m.partition_name = ''
+        GROUP BY 1
+    ),
+    q_now AS (
+        SELECT s.scope, s.gkey, s.id,
+               COALESCE(st.pending_messages, 0)     AS pending,
+               COALESCE(st.processing_messages, 0)  AS processing,
+               COALESCE(st.dead_letter_messages, 0) AS dead_letter,
+               COALESCE(st.retained_bytes, 0)       AS retained_bytes,
+               COALESCE(st.child_count, 0)          AS partitions,
+               COALESCE(cg.n, 0)                    AS group_count
+        FROM q_scoped s
+        LEFT JOIN queen.stats st ON st.stat_type = 'queue' AND st.queue_id = s.id
+        LEFT JOIN cg ON cg.queue_id = s.id
+    ),
+    now_agg AS (
+        SELECT scope, gkey,
+               SUM(pending)        AS pending,
+               SUM(processing)     AS processing,
+               SUM(dead_letter)    AS dead_letter,
+               SUM(retained_bytes) AS retained_bytes,
+               SUM(partitions)     AS partitions,
+               SUM(group_count)    AS groups,
+               COUNT(*) FILTER (WHERE group_count = 0) AS queues_without_group,
+               COALESCE(SUM(pending) FILTER (WHERE group_count = 0), 0) AS pending_without_group
+        FROM q_now
+        GROUP BY 1, 2
+    ),
+    built AS (
+        SELECT w.scope, w.gkey, w.ns, w.tk,
+               jsonb_build_object(
+                   'queues', w.queues,
+                   'window', jsonb_build_object(
+                       'pushMessages',      w.push_msg,
+                       'pushRequests',      w.push_req,
+                       'popMessages',       w.pop_msg,
+                       'popEmpty',          w.pop_empty,
+                       'ackRequests',       w.ack_req,
+                       'ackSuccess',        w.ack_ok,
+                       'ackFailed',         w.ack_fail,
+                       'transactions',      w.trx_cnt,
+                       'conflated',         w.conflated,
+                       'partitionsCreated', w.parts_created,
+                       'partitionsDeleted', w.parts_deleted,
+                       'parkedAvg',         ROUND(w.parked_avg, 2),
+                       'avgLagMs',          ROUND(w.avg_lag)::bigint,
+                       'maxLagMs',          w.max_lag
+                   ),
+                   'series', jsonb_build_object(
+                       'push',     COALESCE(s.s_push,      '[]'::jsonb),
+                       'pop',      COALESCE(s.s_pop,       '[]'::jsonb),
+                       'popEmpty', COALESCE(s.s_pop_empty, '[]'::jsonb),
+                       'ackFailed',COALESCE(s.s_ack_fail,  '[]'::jsonb),
+                       'parked',   COALESCE(s.s_parked,    '[]'::jsonb),
+                       'avgLagMs', COALESCE(s.s_avg_lag,   '[]'::jsonb),
+                       'maxLagMs', COALESCE(s.s_max_lag,   '[]'::jsonb)
+                   ),
+                   'now', jsonb_build_object(
+                       'pending',             COALESCE(n.pending, 0),
+                       'processing',          COALESCE(n.processing, 0),
+                       'deadLetter',          COALESCE(n.dead_letter, 0),
+                       'retainedBytes',       COALESCE(n.retained_bytes, 0),
+                       'partitions',          COALESCE(n.partitions, 0),
+                       'groups',              COALESCE(n.groups, 0),
+                       'queuesWithoutGroup',  COALESCE(n.queues_without_group, 0),
+                       'pendingWithoutGroup', COALESCE(n.pending_without_group, 0),
+                       'queuesTouched',       w.queues_touched,
+                       'queuesActive',        w.queues_active
+                   )
+               ) AS base
+        FROM win w
+        LEFT JOIN ser     s ON s.scope = w.scope AND s.gkey = w.gkey
+        LEFT JOIN now_agg n ON n.scope = w.scope AND n.gkey = w.gkey
+    )
+    SELECT
+        COALESCE(jsonb_agg(
+            jsonb_build_object('key', gkey)
+            || base
+            -- namespace/task disambiguate a queue row; on a namespace or task
+            -- grouping they would only repeat `key`.
+            || CASE WHEN v_group_by = 'queue'
+                    THEN jsonb_build_object('namespace', ns, 'task', tk)
+                    ELSE '{}'::jsonb END
+            ORDER BY gkey
+        ) FILTER (WHERE scope = 'row'), '[]'::jsonb),
+        COALESCE((jsonb_agg(base) FILTER (WHERE scope = 'tenant'))->0, '{}'::jsonb)
+    INTO v_rows, v_tenant_row
+    FROM built;
+
+    RETURN jsonb_build_object(
+        'timeRange', jsonb_build_object(
+            'from', to_char(v_from_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+            'to',   to_char(v_to_ts AT TIME ZONE 'UTC',   'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+        ),
+        'bucketMinutes', v_bucket_minutes,
+        'groupBy',       v_group_by,
+        'buckets',       v_buckets,
+        'rows',          v_rows,
+        'tenant',        v_tenant_row
+    );
+END;
+$$;
+
 -- Grant permissions
 GRANT EXECUTE ON FUNCTION queen.get_worker_throughput_v1(TIMESTAMPTZ, TIMESTAMPTZ, INTEGER) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.get_queue_lag_v1(TIMESTAMPTZ, TIMESTAMPTZ, TEXT, UUID) TO PUBLIC;
@@ -1628,4 +1959,5 @@ GRANT EXECUTE ON FUNCTION queen.get_worker_metrics_timeseries_v1(JSONB) TO PUBLI
 GRANT EXECUTE ON FUNCTION queen.cleanup_worker_metrics_v1(INTEGER) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.get_queue_ops_v1(JSONB) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.get_queue_parked_per_replica_v1(JSONB) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.get_workload_v1(JSONB) TO PUBLIC;
 

@@ -60,6 +60,42 @@
         "cd app && PATH=/Users/alice/.nvm/versions/node/v24.15.0/bin:$PATH QUEEN_DEV_UPSTREAM=http://localhost:6645 exec npm run dev"
       ],
       "port": 4000
+    },
+    {
+      "name": "queen-app-stage",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "cd app && PATH=/Users/alice/.nvm/versions/node/v24.15.0/bin:$PATH QUEEN_DEV_UPSTREAM=http://localhost:16632 exec npx vite --port 4001 --strictPort"
+      ],
+      "port": 4001
+    },
+    {
+      "name": "queen-app-prod",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "cd app && PATH=/Users/alice/.nvm/versions/node/v24.15.0/bin:$PATH QUEEN_DEV_UPSTREAM=http://localhost:16633 exec npx vite --port 4002 --strictPort"
+      ],
+      "port": 4002
+    },
+    {
+      "name": "queen-broker-debug-workload",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "PG_HOST=localhost PG_PORT=5456 PG_USER=postgres PG_PASSWORD=postgres PG_DATABASE=postgres PORT=6646 QUEEN_APPLY_SCHEMA=1 DB_POOL_SIZE=8 exec server/target/debug/queen"
+      ],
+      "port": 6646
+    },
+    {
+      "name": "queen-app-local",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "cd app && PATH=/Users/alice/.nvm/versions/node/v24.15.0/bin:$PATH QUEEN_DEV_UPSTREAM=http://localhost:6646 exec npx vite --port 4003 --strictPort"
+      ],
+      "port": 4003
     }
   ]
 }

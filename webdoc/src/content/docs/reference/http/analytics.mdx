@@ -15,18 +15,20 @@ sourceOfTruth:
   - server/src/config.rs
   - server/sql/procedures/015_status.sql
   - server/sql/procedures/019_worker_metrics.sql
+  - server/sql/procedures/010_log_admin.sql
+  - server/sql/procedures/011_log_stats.sql
   - server/sql/procedures/021_postgres_stats.sql
   - server/sql/procedures/022_retention_analytics.sql
-# sourceOfTruth re-read 2026-09-07 (through 42bada8d + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-09 (through 399019f6 + working tree): page matches the code.
 ---
 
-Seven routes live under `/api/v1/analytics/`. All are `read-only`, all dispatch one
+Ten routes live under `/api/v1/analytics/`. All are `read-only`, all dispatch one
 stored procedure and serve its JSON verbatim. The handlers add no envelope. None
 of them compute anything live: they read tables the metrics collector fills every
 `METRICS_FLUSH_MS` (default `60000` ms) on every replica, which is why a freshly
 started broker answers with empty series for about a minute.
 
-Four are scoped to the caller's tenant. Three are **cell-wide**: they aggregate
+Seven are scoped to the caller's tenant. Three are **cell-wide**: they aggregate
 across every tenant on the broker and must not be exposed to a tenant.
 
 | Route | Scope | Backing table |
@@ -35,6 +37,9 @@ across every tenant on the broker and must not be exposed to a tenant.
 | `GET /api/v1/analytics/queue-ops` | tenant | `queen.queue_lag_metrics` |
 | `GET /api/v1/analytics/queue-parked-replicas` | tenant | `queen.queue_parked_replica` |
 | `GET /api/v1/analytics/retention` | tenant | `queen.retention_history` |
+| `GET /api/v1/analytics/workload` | tenant | `queen.queue_lag_metrics` + `queen.stats` |
+| `GET /api/v1/analytics/dlq-signatures` | tenant | `queen.log_dlq` |
+| `GET /api/v1/analytics/partition-liveness` | tenant | `queen.log_partitions` + `queen.stats` |
 | `GET /api/v1/analytics/system-metrics` | **cell-wide** | `queen.system_metrics` |
 | `GET /api/v1/analytics/worker-metrics` | **cell-wide** | `queen.worker_metrics` |
 | `GET /api/v1/analytics/postgres-stats` | **cell-wide** | `pg_stat_*` views |
@@ -196,6 +201,163 @@ dropped, so `totals` can exceed the sum of what the `queue` filter would show.
 `queen.retention_history` ages out with the other metrics tables at
 `METRICS_RETENTION_DAYS` (default `90`).
 
+### Grouping the retention totals
+
+`groupBy` (`namespace`, `task` or `queue`; anything else is a `400` with
+`{"error":"bad groupBy"}`) adds a `rows` array next to `series` and `totals`: one entry per
+group with `key` (the empty string for queues without a namespace or task), `queues` (the
+queues that had at least one retention event in the window) and the same five `totals`
+figures for that group, ordered by `totalMsgs` descending. `series` and `totals` are
+unchanged. This is what attributes an eviction to a queue instead of to the tenant.
+
+## GET /api/v1/analytics/workload
+
+Tenant-scoped. Filters: `from`, `to`, `groupBy`, `namespace`, `task`, `queue`. Who is
+doing the work, how much of it, and what is stuck right now, rolled up per namespace or
+per task rather than per queue. It is the one route here that answers with a group and
+its parts in the same payload.
+
+`groupBy` takes `namespace` (the default), `task` or `queue`. Any other value is a `400`
+with `{"error":"bad groupBy"}`; the route does not fall back to the default. The three
+name filters are exact matches on the queue's own columns and combine with `AND`. Bucket
+widths follow the same rule as the routes above.
+
+The example is trimmed: one row of many, two of its buckets, and the `tenant` block
+collapsed. Every row carries the same three blocks.
+
+```json
+{
+  "timeRange": { "from": "2026-09-08T09:44:00.000Z", "to": "2026-09-09T09:44:00.000Z" },
+  "bucketMinutes": 15,
+  "groupBy": "namespace",
+  "buckets": ["2026-09-08T09:45:00Z", "2026-09-08T10:00:00Z"],
+  "rows": [
+    {
+      "key": "smartchat",
+      "queues": 21,
+      "window": {
+        "pushMessages": 412000, "pushRequests": 4120,
+        "popMessages": 409800, "popEmpty": 310,
+        "ackRequests": 4020, "ackSuccess": 409700, "ackFailed": 100,
+        "transactions": 0, "conflated": 0,
+        "partitionsCreated": 0, "partitionsDeleted": 0,
+        "parkedAvg": 12.5, "avgLagMs": 18, "maxLagMs": 412
+      },
+      "series": {
+        "push": [41200, null], "pop": [40980, null], "popEmpty": [31, null],
+        "ackFailed": [10, null], "parked": [12.5, null],
+        "avgLagMs": [18, null], "maxLagMs": [412, null]
+      },
+      "now": {
+        "pending": 1204, "processing": 8, "deadLetter": 0,
+        "retainedBytes": 91230144, "partitions": 168,
+        "groups": 24, "queuesWithoutGroup": 2, "pendingWithoutGroup": 0,
+        "queuesTouched": 19, "queuesActive": 17
+      }
+    }
+  ],
+  "tenant": { "queues": 68, "window": {}, "series": {}, "now": {} }
+}
+```
+
+How the three blocks are built:
+
+- **`window` counters are summed** over every metrics row the group's queues wrote inside
+  `[from, to]`: `pushMessages`, `pushRequests`, `popMessages`, `popEmpty`, `ackRequests`,
+  `ackSuccess`, `ackFailed`, `transactions`, `conflated`, `partitionsCreated` and
+  `partitionsDeleted`.
+- **`window.avgLagMs` is pop-weighted**, `SUM(avg × pops) / SUM(pops)` over the rows that
+  hold a pop sample, and `null` when the group had no pops in the window. `maxLagMs` is
+  the maximum over those same rows, and `null` on the same condition. A busy window with
+  no pops is unmeasured, not zero.
+- **`window.parkedAvg` is a gauge, not a counter.** It is averaged per queue across the
+  window first, then summed across the group's queues, so it reads as "parked consumers
+  in this group" rather than as a total that grows with the number of buckets.
+- **`series` follows the `buckets` axis**, one value per bucket, with `push`, `pop`,
+  `popEmpty` and `ackFailed` summed, `parked` averaged per queue and then summed, and
+  `avgLagMs` pop-weighted within the bucket. A bucket where the group wrote no row is
+  `null` in every series, never `0`. `buckets` runs from the floored `from` to the floored
+  `to` whether or not each one has data, so the axis is complete even where the series
+  is not.
+- **`now` is a snapshot and says nothing about the window.** `pending`, `processing`,
+  `deadLetter`, `retainedBytes` and `partitions` are the per-queue figures from
+  `queen.stats` that the status routes report, summed over the group. `groups`,
+  `queuesWithoutGroup` and `pendingWithoutGroup` come from
+  `queen.consumer_groups_metadata`: a queue with no consumer group is a queue nobody is
+  reading, and its pending messages are counted separately for that reason.
+  `queuesTouched` and `queuesActive` are the only two that look at the window, counting
+  the group's queues that wrote any row and those that actually pushed or popped.
+- **`queues` counts the group, not the traffic**: every queue matching the filters,
+  whether or not it was touched in the window.
+- `namespace` and `task` appear on a row only when `groupBy` is `queue`. A queue with an
+  empty namespace or task groups under `""`, not under `null`.
+- **`tenant` ignores the `namespace`, `task` and `queue` filters** and aggregates every
+  queue of the tenant, so a row's share is always against the whole tenant and does not
+  move when you narrow the filters.
+
+Every number is a JSON number and never a string. `parkedAvg` is rounded to two decimals,
+`avgLagMs` is integer milliseconds.
+
+## GET /api/v1/analytics/dlq-signatures
+
+Tenant-scoped. Filters: `queue` (required; missing is a `400` with `{"error":"queue
+required"}`), `limit` (default 200, at most 1000). Why the messages of one queue are in
+its dead-letter queue, without transferring a single payload: the newest `limit` rows by
+`failedAt` are read, their error messages are folded, and the folded texts are counted.
+
+Folding replaces UUIDs and long hex runs with `<id>`, dates and timestamps with
+`<date>`, standalone integers with `<n>`, collapses whitespace and keeps the first 120
+characters, so "connection 3f2a... unresolvable" and "connection 9c1d... unresolvable"
+are one signature. `avgBytes` is the average payload length of the sample, measured
+server-side; the payload itself never leaves the database on this route.
+
+```json
+{
+  "queue": "channel.opsync_flush",
+  "rowsNow": 3205,
+  "sample": 150,
+  "retryCounts": [5],
+  "groups": ["channel.opsync_flush.worker"],
+  "oldest": "2026-09-02T12:32:01.813Z",
+  "newest": "2026-09-02T19:20:05.431Z",
+  "avgBytes": 187,
+  "signatures": [
+    { "text": "flush: resolve connection <id>: syncwire: connection <id> unresolvable", "n": 149, "share": 0.993 }
+  ],
+  "byDay": [ { "day": "2026-09-02", "n": 150 } ]
+}
+```
+
+`rowsNow` is the queue's dead-letter count as `/api/v1/status/queues` reports it, so it can
+exceed `sample`. Signatures are the top eight by count.
+
+## GET /api/v1/analytics/partition-liveness
+
+Tenant-scoped. Filters: `queue`, `namespace`, `task` (exact matches; an explicit empty
+`namespace=` selects the queues without one), `limit` (default 20, at most 200). How many of
+a queue's partitions are alive, counted from `last_write_at` in one pass over
+`queen.log_partitions`: no partition row crosses the wire, which is the difference from the
+queue detail route on a queue with twelve thousand partitions.
+
+```json
+{
+  "capturedAt": "2026-09-09T09:34:23.098Z",
+  "rows": [
+    {
+      "queue": "smartchat.router.history", "namespace": "smartchat", "task": "core",
+      "partitions": 12611, "live1h": 812, "live24h": 7252, "live7d": 12610,
+      "created24h": 4823,
+      "oldestWriteAt": "2026-09-02T08:41:00Z", "newestWriteAt": "2026-09-09T09:34:00Z",
+      "pending": 0
+    }
+  ]
+}
+```
+
+Rows are ordered by `partitions` descending. `pending` is the queue's figure from
+`queen.stats`, the same one `/api/v1/status/queues` serves. Partitions deleted in a window
+are not here: that is `partitionsDeleted` on the workload route.
+
 ## GET /api/v1/analytics/system-metrics
 
 **Cell-wide.** Filters: `from`, `to`, `hostname`, `workerId`. Host and process
@@ -278,6 +440,9 @@ interval.
 | `GET /api/v1/analytics/queue-ops` | read-only | yes |
 | `GET /api/v1/analytics/queue-parked-replicas` | read-only | yes |
 | `GET /api/v1/analytics/retention` | read-only | yes |
+| `GET /api/v1/analytics/workload` | read-only | yes |
+| `GET /api/v1/analytics/dlq-signatures` | read-only | yes |
+| `GET /api/v1/analytics/partition-liveness` | read-only | yes |
 | `GET /api/v1/analytics/system-metrics` | read-only | no |
 | `GET /api/v1/analytics/worker-metrics` | read-only | no |
 | `GET /api/v1/analytics/postgres-stats` | read-only | no |

@@ -3,6 +3,24 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## 1.5.3 - 2026-09-09
+
+**A Workload page, and the four reads behind it.** The dashboard gains an analytics page that
+answers who does the work and what it costs: deliveries over time, share, activity, backlog and
+efficiency per namespace, task or queue, plus the footprint of each group in partitions, queues,
+consumer groups and retained bytes. Any group drills down to its queues, any window can be
+compared with the previous period, yesterday or last week, and a findings list at the foot of
+the page says in words what the panels show.
+
+Four read paths are new on the broker, all tenant scoped and classified Read by the proxy:
+`GET /api/v1/analytics/workload` groups the metrics by namespace, task or queue and answers
+window totals, a bucketed series and the current gauges in one payload; `dlq-signatures` folds
+the error messages of the newest dead-letter rows into their shapes without reading a payload;
+`partition-liveness` counts partitions against those written to in the last day; and
+`/api/v1/analytics/retention` takes an optional `groupBy` that adds a per-queue split while its
+existing answer stays byte for byte the same. On a broker that lacks the workload route the page
+rolls the same figures up in the browser from queue-ops and the status reads, and says so.
+
 ## 1.5.2 - 2026-09-07
 
 **One detail drawer across the dashboard.** Messages, dead letter and traces now open the same

@@ -180,6 +180,25 @@ export const system = {
   getQueueParkedReplicas: (params, config) =>
     client.get('/api/v1/analytics/queue-parked-replicas', { params, ...config }),
   getRetention: (params, config) => client.get('/api/v1/analytics/retention', { params, ...config }),
+  // Who is doing the work, grouped by namespace / task / queue. TENANT-SCOPED
+  // like the rest of this object: the procedure filters every queue by the
+  // tenant the proxy injects, and `tenant` in the payload is this tenant's
+  // total, not the cell's — so a share computed against it is honest.
+  getWorkload: (params, config) => client.get('/api/v1/analytics/workload', { params, ...config }),
+  // The deeper layer of the Workload page. TENANT-SCOPED like the rest of this
+  // object — every queue is filtered by the tenant the proxy injects — and all
+  // three live under /api/v1/analytics/, so the proxy classifies them Read by
+  // prefix and no proxy change was needed to expose them.
+  //
+  // NEW ROUTES: a broker older than these answers 404, which is a state to
+  // render ("not available on this broker"), not a failure to retry. Nothing
+  // negotiates a version, so the first call is also the probe.
+  /** Why rows are in one queue's DLQ: folded error signatures over a sample. `queue` is required. */
+  getDlqSignatures: (params, config) =>
+    client.get('/api/v1/analytics/dlq-signatures', { params, ...config }),
+  /** Partitions per queue and how many were written to in the last 1h / 24h / 7d. */
+  getPartitionLiveness: (params, config) =>
+    client.get('/api/v1/analytics/partition-liveness', { params, ...config }),
 }
 
 // ============================================

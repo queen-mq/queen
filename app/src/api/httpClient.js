@@ -1,6 +1,6 @@
 import ky, { isHTTPError } from 'ky'
 
-import { ApiError } from './errors.js'
+import { ApiError, isMissingRouteError } from './errors.js'
 
 // Paths that answer JSON, never HTML. `/metrics/prometheus` is deliberately
 // out: it is the one gateway surface whose success body is text.
@@ -88,8 +88,12 @@ export function createApiClient({
     },
   })
 
-  function fail(err) {
-    reportApiFailure(err)
+  // A request sent with `probe: true` is asking whether the route exists on
+  // this cell. The answers that say "it does not" are its expected outcome,
+  // which the caller renders inline, so they stay off the global surface;
+  // anything else (5xx, offline, 429) is still a failure worth a toast.
+  function fail(err, probe = false) {
+    if (!(probe && isMissingRouteError(err))) reportApiFailure(err)
     return Promise.reject(err)
   }
 
@@ -102,6 +106,7 @@ export function createApiClient({
       params,
       responseType,
       data: configBody,
+      probe = false,
       ...requestOptions
     } = config || {}
 
@@ -127,7 +132,7 @@ export function createApiClient({
           status: response.status,
           code: 'not_an_api_response',
           path,
-        }))
+        }), probe)
       }
 
       const data = await responseData(response, responseType)
@@ -145,7 +150,7 @@ export function createApiClient({
 
       // Response validation already produced the public error contract; only
       // report it once.
-      if (error instanceof ApiError) return fail(error)
+      if (error instanceof ApiError) return fail(error, probe)
 
       const response = isHTTPError(error) ? error.response : null
       const status = response?.status ?? 0
@@ -171,7 +176,7 @@ export function createApiClient({
         return new Promise(() => {})
       }
 
-      return fail(apiErr)
+      return fail(apiErr, probe)
     }
   }
 
