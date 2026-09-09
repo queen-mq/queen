@@ -21,7 +21,7 @@ sourceOfTruth:
   - server/sql/procedures/024_kv.sql
   - server/sql/procedures/025_log_timers.sql
   - server/src/schema.rs
-# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-09 (through ff644495 + this patch): the two functions 1.5.3 adds to 010 and 011 are now in their tables; the file count is unchanged.
 ---
 
 Everything here lives in the PostgreSQL schema `queen`, created by `server/sql/schema.sql`. That
@@ -329,6 +329,7 @@ guard (it supplies namespace, task, priority and tenant scoping in the same touc
 | `record_trace_v1(p_data JSONB) RETURNS JSONB` | trace recording (this file owns the redefinition; `017_traces` no longer defines it) |
 | `get_lagging_partitions_v1(p_min_lag_seconds INTEGER DEFAULT 0, p_tenant UUID DEFAULT …) RETURNS JSONB` | lagging-partition report |
 | `get_consumer_group_details_v1(p_consumer_group TEXT, p_tenant UUID DEFAULT …) RETURNS JSONB` | per-group detail |
+| `get_dlq_signatures_v1(p_filters JSONB DEFAULT '{}') RETURNS JSONB` | fold the newest DLQ rows of one queue into error-message shapes: identifiers, dates and integers are replaced by placeholders and the result is truncated to 120 characters, so near-identical failures collapse into one row. Reads `error_message` only; the payload is touched by `octet_length` alone, never returned |
 
 Three procedures from the retired observability file were deliberately **not** ported, because they
 have no Rust call site: `get_queue_messages_v1`, `has_pending_messages` and
@@ -346,6 +347,7 @@ have no Rust call site: `get_queue_messages_v1`, `has_pending_messages` and
 | `log_queue_message_stats_v1(p_queue TEXT, p_tenant UUID DEFAULT …) RETURNS TABLE (segments BIGINT, messages BIGINT)` | per-queue counters for queue detail: messages by watermark arithmetic, segments by an index-only count |
 | `log_queue_stats_all_v1(p_tenant UUID DEFAULT …) RETURNS TABLE (queue_name TEXT, partitions BIGINT, segments BIGINT, messages BIGINT)` | the same accounting broker-wide, for queue listing (the live view, since `queen.stats` can lag one refresh cadence). Segment counts are pre-aggregated per partition before the queue join, or the watermark row would fan out once per segment and over-count |
 | `log_queue_depth_v1(p_queue TEXT, p_group TEXT DEFAULT NULL, p_tenant UUID DEFAULT …) RETURNS JSONB` | live O(partitions) backlog for scaling: pending, live-lease processing, ready, their partition counts, and conflation-adjusted effective pending/ready, with no segment scan |
+| `get_partition_liveness_v1(p_filters JSONB DEFAULT '{}') RETURNS JSONB` | per-queue partition counts: total against those written to within the window, from `log_partitions.last_write_at` and `created_at`, with pending read from `queen.stats`. Counts only, no partition rows leave the database |
 
 ### 020_log_partition_counters.sql (triggers)
 
