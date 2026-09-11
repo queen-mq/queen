@@ -19,7 +19,7 @@ sourceOfTruth:
   - proxy/scripts/dev-cell.sh
   - go.work
   - .gitignore
-# sourceOfTruth re-read 2026-09-09 (through ff644495): both manifests moved to 1.5.3, which is the bump this page describes, not a change to it.
+# sourceOfTruth re-read 2026-09-11 (through 02ced48f): both manifests moved to 1.6.0, a bump this page describes the mechanics of rather than quotes; dev-cell.sh gained the cell-side kv/timers grant, which the development-cell paragraph now names.
 ---
 
 Queen is one repository with two Rust binaries in it, a Vue dashboard that is compiled
@@ -219,7 +219,11 @@ For anything that involves authentication, tenancy, quotas or 429s, use the prox
 development cell instead. `proxy/scripts/dev-cell.sh up` builds both binaries in debug,
 starts two PostgreSQL containers (the proxy's own state database on 5465 and a cell database
 on 5466), starts the broker on 6710 with `QUEEN_TENANCY_HEADER=true`, starts the proxy on
-6711, and seeds a development tenant, cluster and API key. It writes logs and pid files under
+6711, and seeds a development tenant, cluster and API key. It also writes the cell-side grant
+the kv and timer routes need: with `QUEEN_TENANCY_HEADER` on, the absence of a
+`queen.kv_quota` row for the tenant is a denial rather than a default, so a cell seeded on a
+plan that grants those families still answered `403 feature_gated` on every one of their
+routes until the row existed. It writes logs and pid files under
 `proxy/.devcell/`, which is gitignored. Two defaults exist for the cell's own smoke tests:
 `shared.local` is configured as a shared host (`QUEEN_PROXY_SHARED_HOSTS`), the routing mode
 where the cluster comes from the API key rather than from the Host header, and the broker's

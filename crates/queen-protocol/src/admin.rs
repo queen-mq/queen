@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 
 /// Queue options accepted by `POST /api/v1/configure`.
 ///
-/// **`/configure` MERGES into the queue's current configuration** (broker
-/// >= 1.6.0). Every field is optional and omitted when `None`, and an omitted
+/// **`/configure` MERGES into the queue's current configuration** (broker 1.6.0
+/// and newer). Every field is optional and omitted when `None`, and an omitted
 /// field leaves the queue's stored value alone: reconfiguring with only
 /// `lease_time` changes the lease and nothing else.
 ///
