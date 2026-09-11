@@ -20,6 +20,7 @@ sourceOfTruth:
   - server/sql/procedures/021_postgres_stats.sql
   - server/sql/procedures/022_retention_analytics.sql
 # sourceOfTruth re-read 2026-09-09 (through 399019f6 + working tree): page matches the code.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): 011_log_stats changed only get_queue_v2, which is on the queues page; main.rs, auth.rs and db.rs gained the replay and KV console routes. Nothing this page describes moved.
 ---
 
 Ten routes live under `/api/v1/analytics/`. All are `read-only`, all dispatch one

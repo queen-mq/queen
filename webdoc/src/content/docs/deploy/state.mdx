@@ -14,6 +14,7 @@ sourceOfTruth:
   - proxy/src/routes.rs
   - proxy/src/registry.rs
 # sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): the storage-block sentence now names every route that grows stored bytes, the DLQ replay pair included; switches.rs and handlers/maintenance.rs changed only comments.
 ---
 
 [KV state](/use/kv) and [timers](/use/timers) are part of the engine. There is no environment variable
@@ -233,7 +234,9 @@ which is also the right place for a soft quota to land, because there the operat
 
 A shared cell is different, and the difference is one measurable gap rather than a judgement. The
 proxy's storage quota is real and already enforced: it blocks above the cap with hysteresis and answers
-`403 storage_quota_exceeded` on every produce route. What it measures is the sum of `retainedBytes` per
+`403 storage_quota_exceeded` on every route that can grow stored bytes. That is every produce route, the
+growing half of a gated family, and since 1.6.0 the two dead-letter replay routes, which write a frame
+into a live partition exactly as a push does. What it measures is the sum of `retainedBytes` per
 queue, and `queen.kv` and `queen.log_timers` have no queue. That is the only place in the product where
 a tenant could occupy disk that a live quota cannot see.
 

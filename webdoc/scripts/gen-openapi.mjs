@@ -383,6 +383,11 @@ function parseRouterChain(block) {
  * exactly as the Rust places it, so `GET /api/v1/dlq` stays read-only.
  * 2026-09-04: the partition-discovery arm (PLAN_S3_SINK.md §5.1), beside the
  * fetch arm it is the twin of and outside the GET block for the same reason.
+ * 2026-09-11: the console's KV page (PLAN_DASHBOARD_ACTIONS.md §2.5), beside
+ * those two and for the same reason. This one is not in the harmless direction
+ * of the gap above: the whole point of the Rust arm is that a READ-ONLY token
+ * can page through a namespace, so a spec that published `read-write` here
+ * would tell an SDK author the opposite of the rule the route exists for.
  */
 function accessLevel(method, path) {
   const m = method.toUpperCase();
@@ -412,6 +417,10 @@ function accessLevel(method, path) {
   // PLAN_S3_SINK.md §5.1: the fetch arm's twin, and read-only for the same
   // reason.
   if (m === "POST" && path === "/api/v1/partitions/changed") return "read-only";
+  // PLAN_DASHBOARD_ACTIONS.md §2.5: the console's keyset page over a KV
+  // namespace. A POST because its cursor is a key, read-only because it is a
+  // read; method- and path-exact, like the two arms above it.
+  if (m === "POST" && path === "/api/v1/resources/kv/list") return "read-only";
   if (path === "/streams/v1/state/get") return "read-only";
   if (path.startsWith("/streams/")) return "read-write";
   if (path === "/api/v1/push") return "write-only";
@@ -420,15 +429,38 @@ function accessLevel(method, path) {
   return "read-write";
 }
 
+// The SECOND grouping table in this repository, and the one that reaches an SDK
+// generator: gen-routes.mjs has the same list under the name GROUPS for the
+// reference page. They are separate because the tag NAMES are a published
+// interface here (they become the section headings of every generated client)
+// and prose headings there, but the PLACEMENT must be identical — a route in
+// "Queues" here and under the key/value heading there is one product describing
+// itself two ways, and the reader who notices has no way to tell which is the
+// mistake. Change one table, change the other.
 const TAGS = [
   ["Message plane", (p) => /^\/api\/v1\/(push|pop|ack|transaction|lease)/.test(p)],
-  ["Queues", (p) => /^\/api\/v1\/(configure|resources)/.test(p)],
+  // `/api/v1/resources/kv/` is carved out and claimed by the KV tag below, the
+  // same carve-out gen-routes.mjs makes and for the same reason: the console
+  // pair lives under /api/v1/resources so that the proxy classifies it as a read
+  // by prefix (PLAN_DASHBOARD_ACTIONS.md §2.5), which is a routing fact and not
+  // a statement about which family it belongs to. Someone reading a generated
+  // client for the key/value surface must find those two methods with the rest
+  // of it.
+  ["Queues", (p) =>
+    /^\/api\/v1\/(configure|resources)/.test(p) && !p.startsWith("/api/v1/resources/kv/")],
   ["Consumer groups", (p) => p.startsWith("/api/v1/consumer-groups")],
   ["Messages, DLQ and traces", (p) => /^\/api\/v1\/(messages|dlq|traces)/.test(p)],
   ["Status and metrics", (p) =>
     /^\/api\/v1\/(status|analytics|stats)/.test(p) ||
     ["/health", "/status", "/metrics", "/metrics/prometheus"].includes(p)],
   ["Streams", (p) => p.startsWith("/streams/")],
+  // The eight KV and timer routes plus the console's two. Without this entry
+  // they fall through to "Other", which is the tag for a route nobody has
+  // classified — a generated client would expose the whole key/value surface as
+  // uncategorised methods. Same predicate as gen-routes.mjs's group of the same
+  // name, down to the /resources/kv/ arm the Queues entry above gives up.
+  ["Key/value state and timers", (p) =>
+    /^\/api\/v1\/(kv|timers)(\/|$)/.test(p) || p.startsWith("/api/v1/resources/kv/")],
   // EPHEMERAL_QUEUES.md §3.1 — its own tag, not folded into the message plane:
   // the two families share no storage, no durability contract and no verbs.
   ["Ephemeral queues", (p) => /^\/api\/v1\/ephemeral(\/|$)/.test(p)],

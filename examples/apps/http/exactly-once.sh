@@ -207,8 +207,9 @@ request POST /api/v1/kv '{"operations":[{"op":"get","ns":"probe","key":"probe"}]
 # redelivered once the lease expires. retryLimit bounds how many times that can
 # happen before the message is dead-lettered instead.
 #
-# /configure is a full replace rather than a patch, so what is not named here is
-# reset to its default.
+# /configure merges rather than replacing, so an option not named here keeps
+# whatever the queue already has. This queue name is unique per run, so what is
+# not named lands on its default.
 # ---------------------------------------------------------------------------
 configure_body="$(jq -n --arg queue "$ORDERS" \
   '{queue: $queue, options: {leaseTime: 30, retryLimit: 5}}')"

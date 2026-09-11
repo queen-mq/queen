@@ -107,7 +107,13 @@ fn status_gate(ctx: &ClusterCtx) -> Option<Response> {
 /// push blocks. Extracted for the same reason as `status_gate` — one
 /// implementation, run in both orders, so a shared host cannot end up with a
 /// weaker gate than a per-cluster hostname.
-fn plan_gates(st: &St, ctx: &ClusterCtx, class: RouteClass) -> Option<Response> {
+fn plan_gates(
+    st: &St,
+    ctx: &ClusterCtx,
+    class: RouteClass,
+    method: &Method,
+    path: &str,
+) -> Option<Response> {
     if let RouteClass::Gated(f, op) = class {
         if !feature_enabled(f, &ctx.features) {
             return Some(errors::err_403(errors::CODE_FEATURE_GATED, "not in your plan"));
@@ -126,6 +132,30 @@ fn plan_gates(st: &St, ctx: &ClusterCtx, class: RouteClass) -> Option<Response> 
         }
     }
     if class == RouteClass::Produce {
+        if let Some(resp) = push_block_response(st, ctx) {
+            return Some(resp);
+        }
+    }
+    // PLAN_DASHBOARD_ACTIONS.md §2.0: a DLQ replay is a push wearing a
+    // `QueueAdmin` class. It writes a frame into a live partition — the same
+    // rows, the same retained bytes `/api/v1/push` writes — so the storage and
+    // monthly blocks have to see it, or a cluster blocked from pushing could
+    // keep growing one dead letter at a time, past the exact gate that was set
+    // to stop it. The CLASS stays `QueueAdmin` because that is the authority
+    // the route needs (it deletes the dead-letter row, irreversibly); whether
+    // the push half may proceed is a different question, and this is where
+    // every other quota answers it. The streams cycle makes the same split from
+    // the other direction: `Gated(_, Mixed)`, blocked by the body rather than
+    // by the class.
+    //
+    // Deliberately NOT symmetrical with `Produce` in one respect: a replay's
+    // bytes never reach `note_accepted_bytes`, because the proxy cannot see
+    // them. The payload is the broker's own dead-letter snapshot and the
+    // request body carries nothing but the optional target overrides, so the
+    // in-flight storage estimate learns about a replay only at the next
+    // retained-bytes computation. One message per call, at a button's pace: the
+    // window that leaves open is the one `publish_retained` closes on its own.
+    if is_dlq_replay(method, path) {
         if let Some(resp) = push_block_response(st, ctx) {
             return Some(resp);
         }
@@ -246,7 +276,7 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
 
     if !shielded {
         if let Some(ctx) = &fixed {
-            if let Some(resp) = plan_gates(&st, ctx, class) {
+            if let Some(resp) = plan_gates(&st, ctx, class, req.method(), req.uri().path()) {
                 return resp;
             }
         }
@@ -270,7 +300,7 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
                 if let Some(resp) = status_gate(&ctx) {
                     return resp;
                 }
-                if let Some(resp) = plan_gates(&st, &ctx, class) {
+                if let Some(resp) = plan_gates(&st, &ctx, class, req.method(), req.uri().path()) {
                     return resp;
                 }
             }
@@ -288,7 +318,7 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
             if let Some(resp) = status_gate(&ctx) {
                 return resp;
             }
-            if let Some(resp) = plan_gates(&st, &ctx, class) {
+            if let Some(resp) = plan_gates(&st, &ctx, class, req.method(), req.uri().path()) {
                 return resp;
             }
             (ctx, p)
@@ -365,6 +395,13 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
     // written, and only the request knows how many messages each one carried.
     let mut cycle_sinks = CycleSinks::default();
     let is_cycle = is_streams_cycle(&parts.method, &path_only);
+    // Read once here, used once at step 6. The request line is about to be
+    // consumed and the replay's message can only be counted off the RESPONSE
+    // (D4), so the predicate has to cross the pipeline the way `is_cycle` does.
+    let is_replay = is_dlq_replay(&parts.method, &path_only);
+    // ...and the narrower half of it, the only replay route whose body can name
+    // a destination to create. Step 4b buffers and admits on this one alone.
+    let names_a_dest = is_replay_with_dest(&parts.method, &path_only);
     let forward_body: Body = if class == RouteClass::Produce {
         // Body-total cap is the instance cap only; the per-item plan cap is
         // enforced per item inside enforce_produce (a batch of many small
@@ -395,6 +432,47 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
         // instead of the 0 that not-buffering used to imply.
         bytes_in = buffered.len() as u64;
         if let Err(resp) = enforce_configure(&st, &ctx, &buffered, &rid).await {
+            return resp;
+        }
+        Body::from(buffered)
+    } else if names_a_dest {
+        // 4b'''''. The OTHER QueueAdmin creation path, and the reason it is
+        // here rather than only in `plan_gates`: a replay whose body names
+        // `{queue, partition}` MOVES the dead letter somewhere else, and the
+        // SP provisions a destination this cluster does not carry yet exactly
+        // as a first-contact producer push does (`log_push_one_v1`, reached
+        // with `p_pid` NULL). Without this arm it is the one route in the proxy
+        // that creates a queue or a partition and answers no admission at all:
+        // a tenant at its `max_queues` is 403 `quota_exceeded` on push and on
+        // /configure, and creates queue 21 one dead letter at a time here.
+        //
+        // Same shape as 4b' above — bounded buffer, forwarded verbatim, the
+        // same `admit_pairs` and therefore the same 403 and the same canonical
+        // log line — because the two routes create the same rows and must not
+        // drift into two different caps for the same act.
+        //
+        // WHAT THIS CANNOT SEE, stated rather than implied: the proxy knows
+        // only the halves the REQUEST names, because an omitted half keeps the
+        // source row's and that row lives in the broker. So a HALF-named
+        // destination is not admissible here at all, and it is refused (400,
+        // `admit_replay_dest`) rather than forwarded: forwarding it is the
+        // bypass itself — one unadmitted partition per dead letter, repeatable.
+        // A body that names NEITHER half is a different case and travels on: it
+        // moves nothing, and the destination it resolves to is the source row's
+        // own pair, which the broker had to find (`db::dlq_row_for_move` joins
+        // log_partitions and queues) before it could read the row at all.
+        //
+        // The address-keyed retry route is deliberately NOT here: it replays in
+        // place and never reads its body, so there is no destination to admit
+        // and a body posted to it names nothing (`is_replay_with_dest`).
+        let buffered = match axum::body::to_bytes(body, st.cfg.max_body_bytes).await {
+            Ok(b) => b,
+            Err(_) => return errors::err_413("request body exceeds cap"),
+        };
+        // Buffered, so the ingress size is known and metered like every other
+        // buffered route (STEP 6) rather than the 0 not-buffering implied.
+        bytes_in = buffered.len() as u64;
+        if let Err(resp) = admit_replay_dest(&st, &ctx, &buffered, &rid).await {
             return resp;
         }
         Body::from(buffered)
@@ -846,6 +924,50 @@ pub async fn handle(State(st): State<St>, req: Request) -> Response {
         return finalize(rparts, Body::from(buffered), &rid);
     }
 
+    // DLQ replay: one message, billed only where the answer confirms it was
+    // written (D4). The cycle's two-sample shape, with the counting problem
+    // turned inside out — there the request knows the count and the response
+    // the verdict; here the count is ALWAYS one and only the verdict is in
+    // doubt, because the payload is the broker's own dead-letter snapshot and
+    // never crosses this proxy in either direction.
+    if is_replay && status.is_success() {
+        let (rparts, rbody) = resp.into_parts();
+        let buffered = match axum::body::to_bytes(Body::new(rbody), RESP_BUFFER_CAP).await {
+            Ok(b) => b,
+            Err(e) => {
+                // A body we could not read, which on this route is either the
+                // 64 MiB cap (unreachable in practice: a replay answers one
+                // small object naming the queue, the partition and the ids it
+                // wrote, never a message body) or the upstream dropping the
+                // connection mid-body. The MOVE IS ALREADY DONE either way —
+                // `log_dlq_move_v1` wrote the frame and deleted the dead-letter
+                // row in one transaction, and a second attempt answers `gone` —
+                // so the request is booked (`reqs: 1`) rather than vanishing
+                // from usage, the message is not (we never learned the
+                // verdict), and the 502 says what is actually known instead of
+                // asserting a cause this branch has not established.
+                for s in replay_samples(ctx.cluster_id, op, bytes_in, 0, false) {
+                    st.meter.record(s);
+                }
+                tracing::warn!(
+                    target: "meter", cluster = %ctx.slug, rid, error = %e,
+                    "replay response could not be buffered; msgs=0 (the move may have committed)"
+                );
+                return errors::err_502(
+                    "replay response could not be read; the move may have committed, so re-read the dead-letter row",
+                );
+            }
+        };
+        let stored = replay_stored_a_message(&buffered).unwrap_or_else(|| {
+            tracing::warn!(target: "meter", cluster = %ctx.slug, rid, "replay response parse failed; msgs=0");
+            false
+        });
+        for s in replay_samples(ctx.cluster_id, op, bytes_in, buffered.len() as u64, stored) {
+            st.meter.record(s);
+        }
+        return finalize(rparts, Body::from(buffered), &rid);
+    }
+
     // Configure / queue-admin, reads, acks/leases, gated: reqs-only, bytes_out
     // from Content-Length, NEVER buffered (streaming straight through).
     st.meter.record(Sample {
@@ -1161,10 +1283,221 @@ fn log_configure_deny(
     }
 }
 
-/// The one QueueAdmin route with a body worth parsing. `classify` maps this
-/// path to QueueAdmin for every method, so the method check lives here.
+/// The first QueueAdmin route with a body worth parsing (the row-id replay
+/// below is the other). `classify` maps this path to QueueAdmin for every
+/// method, so the method check lives here.
 fn is_configure(method: &Method, path: &str) -> bool {
     method == Method::POST && path == "/api/v1/configure"
+}
+
+/// STEP 4b for `POST /api/v1/dlq/:id/replay`: registry admission for the
+/// destination its body NAMES (`is_replay_with_dest` is the gate on the arm;
+/// the address-keyed replay reads no body and reaches this function never).
+///
+/// A replay with `{queue, partition}` is a MOVE, and the move provisions what
+/// it does not find — `queen.log_dlq_move_v1` calls `log_push_one_v1` with
+/// `p_pid` NULL, the branch whose own header says it "resolves — and PROVISIONS
+/// — queue and partition under p_tenant, exactly as a first-contact producer
+/// push does". So it answers the same caps, through the same `admit_pairs` and
+/// with the same 403 and log line: `enforce_configure`'s argument, one route
+/// over.
+///
+/// A destination is admitted as a PAIR or not at all:
+///
+///   both halves  the pair, so both caps (`admit_pairs`)
+///   one half     400. An omitted half keeps the source row's, and that name is
+///                in the broker's dead-letter row, not in this request — so
+///                neither cap can be answered for the pair that will actually
+///                be provisioned. A `{queue}`-only move into a queue the tenant
+///                already has creates a partition inside it whose name this
+///                proxy never sees, and a `{partition}`-only move creates one
+///                inside a queue it never sees: both are `max_partitions_per_queue`
+///                one dead letter at a time, repeatable, which is the hole this
+///                function exists to close. The caller loses nothing by naming
+///                both halves — an omitted half is the source row's, and the
+///                source row is on the caller's own screen — so the refusal
+///                names the missing one and says to send it.
+///   neither      nothing to admit, and nothing gets created: the destination
+///                is the source row's own pair, and the broker resolved that
+///                pair (queue JOIN partition, `db::dlq_row_for_move`) before it
+///                could read the row at all. A `{}` replay cannot provision.
+///
+/// Unparseable bodies are forwarded verbatim for the broker's own 400, the rule
+/// `enforce_configure` and `enforce_produce` already follow: no half-enforcement
+/// on a body this proxy could not read. The difference from a half-named one is
+/// the outcome upstream — a body the broker will 400 creates nothing, a
+/// half-named one succeeds and creates rows.
+async fn admit_replay_dest(
+    st: &St,
+    ctx: &ClusterCtx,
+    bytes: &Bytes,
+    rid: &str,
+) -> Result<(), Response> {
+    let (queue, partition) = match parse_replay_dest(bytes) {
+        Ok(d) => d,
+        Err(()) => {
+            tracing::warn!(
+                target: "limits", cluster = %ctx.slug, rid,
+                "replay body unparseable; forwarding without admin enforcement"
+            );
+            return Ok(());
+        }
+    };
+    match (queue.as_deref(), partition.as_deref()) {
+        (Some(q), Some(p)) => {
+            admit_pairs(&st.registry, st.limits.enforcing(), ctx, [(q, p)], rid).await
+        }
+        (Some(_), None) => half_named_dest(st, ctx, "partition", rid),
+        (None, Some(_)) => half_named_dest(st, ctx, "queue", rid),
+        (None, None) => Ok(()),
+    }
+}
+
+/// The refusal for a replay body that names ONE half of its destination:
+/// `missing` is the half it left out, which is the half the caller has to add.
+///
+/// 400 rather than 403: nothing is over its cap here — the request simply does
+/// not say what it will create, and the fix is in the caller's hands. The
+/// message is worded so the dashboard can file it under the Advanced input it
+/// is about (`useDlqReplay.js` reads "queue override" / "partition override"
+/// out of the text), and `invalid_request` is the 400 code the rest of this
+/// proxy already uses (console.rs, operator.rs, oauth.rs).
+///
+/// Shadow-aware like every other decision in this file: a cell configured to
+/// measure instead of enforce refuses nothing, and logs the same canonical
+/// `kind` + `would_block` line the cap denials log — ONE MESSAGE, written
+/// twice with `(shadow)` on the second, which is the shape
+/// `log_configure_deny` and `limits.rs::log_deny` already use. The shadow arm
+/// used to say the generic "shadow deny" instead, so the two halves of one
+/// refusal did not share a name: an operator grepping for the line they had
+/// seen enforcing found nothing in a shadow cell, and the line that WAS there
+/// sat in the pile every shadow deny in the proxy lands in.
+fn half_named_dest(st: &St, ctx: &ClusterCtx, missing: &str, rid: &str) -> Result<(), Response> {
+    if !st.limits.enforcing() {
+        tracing::warn!(
+            target: "limits", kind = "replay_dest", would_block = "replay_dest",
+            cluster = %ctx.slug, missing, rid, "replay destination named in half (shadow)"
+        );
+        return Ok(());
+    }
+    tracing::warn!(
+        target: "limits", kind = "replay_dest", cluster = %ctx.slug, missing,
+        blocked = true, rid, "replay destination named in half"
+    );
+    Err(errors::json_error(
+        StatusCode::BAD_REQUEST,
+        "invalid_request",
+        &format!(
+            "{missing} override missing: a replay that names a destination must name both \
+             `queue` and `partition`, so the pair can be admitted against this plan's caps. \
+             An omitted half is the dead-letter row's own value: send it explicitly"
+        ),
+    ))
+}
+
+/// The optional body of a replay, in the shape the handler's
+/// `parse_replay_overrides` accepts: absent, empty or `{}` names no
+/// destination, and either half may be present on its own (what that means for
+/// admission is `admit_replay_dest`'s decision, not this parser's). A present
+/// name comes back TRIMMED, the way the handler trims it, and a
+/// present-but-blank one is read as absent — the broker refuses that with a
+/// 400, and this function's job is to name what will be CREATED, not to validate.
+#[derive(Deserialize)]
+struct ReplayDest {
+    queue: Option<String>,
+    partition: Option<String>,
+}
+
+fn parse_replay_dest(bytes: &[u8]) -> Result<(Option<String>, Option<String>), ()> {
+    // The dashboard's plain "Replay" sends no body at all; a `{}` from a curl
+    // is the same request. Neither names a destination.
+    if bytes.iter().all(|b| b.is_ascii_whitespace()) {
+        return Ok((None, None));
+    }
+    let d: ReplayDest = serde_json::from_slice(bytes).map_err(|_| ())?;
+    // TRIMMED, because the handler trims: `parse_replay_overrides` is
+    // `b.queue.map(|q| q.trim().to_string())` (server/src/handlers/messages.rs),
+    // so the name that reaches `log_dlq_move_v1` — and the queue the SP
+    // PROVISIONS — is the trimmed one. `str::trim` on both sides, so the two
+    // agree on what whitespace is rather than on an ASCII rule here and a
+    // Unicode one there.
+    //
+    // Admitting the padded spelling instead would make the registry's count
+    // and the broker's rows two different sets, in both directions and
+    // permanently: `" orders"` is remembered (and persisted to
+    // queen_proxy.queues by `enqueue_persist`) as a queue that will never
+    // exist, spending a plan slot on a name nobody can address, while
+    // `orders` — the queue the move actually creates — is admitted by nobody
+    // and later counted a SECOND time by the first push that spells it
+    // plainly. One queue at the broker, two against the cap.
+    //
+    // The body still travels VERBATIM (§5, parse-only, no rewrite): the broker
+    // trims it again on arrival, which is exactly why trimming here is safe —
+    // this function reports what will be created, and the trim is what makes
+    // that report true.
+    let named = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    Ok((named(d.queue), named(d.partition)))
+}
+
+/// The two DLQ replay routes (PLAN_DASHBOARD_ACTIONS.md §2.0/§2.3): the
+/// address-keyed `POST /api/v1/messages/:pid/:txid/retry` the SDKs and
+/// `queenctl dlq retry` already call, and the row-id-keyed
+/// `POST /api/v1/dlq/:id/replay` the move primitive adds.
+///
+/// The other QueueAdmin route this file has an opinion about, and for the
+/// opposite reason to `is_configure`: that one needs a body, this one needs a
+/// GATE. `classify` answers `QueueAdmin` for both paths, which is the right
+/// authorization verdict and a silent one about quota — `plan_gates` runs the
+/// push blocks for `Produce` and `Gated(_, Grow)` only, so a class that is
+/// neither sails past them. A replay writes a frame into a live partition, so
+/// the blocks must see it; the class must stay `QueueAdmin`, so they cannot see
+/// it through the class. This predicate is what makes the two separable.
+///
+/// The method is checked here rather than inherited from `classify`'s
+/// method-exact arms, for the reason `is_configure` and `is_streams_cycle`
+/// state in their own words: a gate that trusts another function's method rule
+/// breaks quietly the day that rule moves, and this one stands in front of a
+/// quota.
+///
+/// The SHAPE is the same one `classify` matches, and for the same reason: a
+/// transaction id is arbitrary caller text, so `/api/v1/messages/:pid/retry` is
+/// the address of a message whose transaction id is `retry` rather than a
+/// replay of anything. Matching a suffix would gate — and, at step 4b, buffer
+/// and admit — a route that does not exist.
+fn is_dlq_replay(method: &Method, path: &str) -> bool {
+    if method != Method::POST {
+        return false;
+    }
+    let retry = path
+        .strip_prefix("/api/v1/messages/")
+        .and_then(|rest| rest.strip_suffix("/retry"))
+        .is_some_and(|mid| {
+            let mut seg = mid.split('/');
+            matches!(
+                (seg.next(), seg.next(), seg.next()),
+                (Some(pid), Some(txid), None) if !pid.is_empty() && !txid.is_empty()
+            )
+        });
+    retry || is_replay_with_dest(method, path)
+}
+
+/// The replay route that can NAME a destination: the row-id-keyed one.
+///
+/// Its sibling replays IN PLACE and reads no body at all
+/// (`handlers/messages.rs`: "This route replays IN PLACE. The destination
+/// override is the id-addressed route's affordance"), so there is nothing there
+/// to admit — and admitting one anyway would be worse than doing nothing:
+/// `Registry::admit` REMEMBERS the name it allows, so a `{"queue":"…"}` posted
+/// to the retry route would spend a plan slot on a queue the broker is never
+/// going to create, until the reconciler prunes it back to the broker's own
+/// inventory. The day that route learns the override, this predicate is what
+/// has to grow, and the admission follows it.
+fn is_replay_with_dest(method: &Method, path: &str) -> bool {
+    method == Method::POST
+        && path
+            .strip_prefix("/api/v1/dlq/")
+            .and_then(|rest| rest.strip_suffix("/replay"))
+            .is_some_and(|id| !id.is_empty() && !id.contains('/'))
 }
 
 /// Options that decide how long a queue keeps data: both are read by
@@ -1213,14 +1546,22 @@ fn parse_configure(bytes: &[u8]) -> Result<ConfigureInfo, ()> {
         let secs = v
             .as_i64()
             .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()));
-        // Non-positive (or absent) means that rule is DISABLED, i.e. data is
-        // kept forever — retention.rs gates on `retention_enabled AND
+        // A non-positive value means that rule is DISABLED, i.e. data is kept
+        // forever — retention.rs gates on `retention_enabled AND
         // retention_seconds > 0`. Unbounded is not "under the ceiling", but it
         // is also exactly what every client sends by default (the JS
         // QUEUE_DEFAULTS post retentionSeconds: 0), so refusing it would 403 an
         // out-of-the-box `.queue(x).create()`. Unbounded growth is the storage
         // quota's job (max_retained_bytes -> push blocked, §6.1); this ceiling
         // caps what a tenant explicitly asks to keep.
+        //
+        // An ABSENT key is a different thing and nothing to check: since 1.6.0
+        // /configure MERGES unless the body says `"mode":"replace"`, so a body
+        // that does not mention a retention option is not asking for anything —
+        // the queue keeps a window this gate already admitted. (The one gap that
+        // leaves is a tenant DOWNGRADED to a lower ceiling: their old window
+        // survives an unrelated edit, and it is the plan change, not this
+        // request, that has to bring it back into line.)
         if let Some(s) = secs.filter(|s| *s > 0) {
             retention.push((*key, s));
         }
@@ -1865,14 +2206,98 @@ fn is_pop_path(path: &str) -> bool {
     path.starts_with("/api/v1/pop/queue/") || path == EPH_POP_PATH
 }
 
+/// Did this replay response say a message was written?
+///
+/// PLAN_DASHBOARD_ACTIONS.md D4: a replay is billed as a push of ONE message,
+/// because that is what it is — one frame, in one partition, growing the
+/// retained bytes the storage block already treats it as growing. The count is
+/// not a function of (path, class), so it cannot live in `op_for`; it has to be
+/// read off the answer, exactly like the cycle's sink verdicts.
+///
+/// The two shapes this has to read, and they agree where it matters. BOTH
+/// routes answer `{success:true, result:"moved"|"duplicate", ...}` on every
+/// broker that carries the move primitive — they share one body builder
+/// (`handlers/messages.rs::move_response`) — and the verdict is the whole
+/// answer: `moved` wrote a frame, `duplicate` found the destination's dedup
+/// window already holding the deterministic id and wrote nothing.
+///
+/// The absent-`result` arm is BACKWARD COMPATIBILITY, not the current wire, and
+/// it has to stay while a proxy can stand in front of an older broker — which
+/// is the M0 ship order itself (W0 ships as 1.5.4 before the move primitive
+/// lands). A broker of 1.5.3 or earlier answers the address-keyed retry route
+/// `success:true` with no verdict field, and only once its push has been
+/// accepted, so an absent field is a write. Delete the arm as dead code and
+/// every replay served by such a broker stops being billed, silently.
+///
+/// Everything else is NOT BILLED. An unreadable body, a `success:false` (the
+/// "push rejected, still dead-lettered" answer), a `result` string this proxy
+/// has not been told about: charge nothing we cannot confirm, the stance the
+/// push and cycle arms take on a parse failure. Under-billing a shape we do not
+/// recognise beats billing a message that was never stored. `gone` never
+/// reaches here at all — it is a 404.
+fn replay_stored_a_message(body: &[u8]) -> Option<bool> {
+    let root: serde_json::Value = serde_json::from_slice(body).ok()?;
+    if !root.get("success")?.as_bool()? {
+        return Some(false);
+    }
+    Some(matches!(
+        root.get("result").and_then(|v| v.as_str()),
+        None | Some("moved")
+    ))
+}
+
+/// What one replay answer books on the meter (D4), as a value rather than as
+/// two `record` calls inside `handle`.
+///
+/// A pure function on purpose: the arm it came out of could be deleted whole
+/// and every proxy test still passed, because its decision was only ever
+/// expressed as side effects on a live `Meter`. The decision is the billing —
+/// under-count and the revenue is gone, over-count and a monthly-quota block
+/// trips on messages nobody wrote — so it is stated here, where a test can read
+/// it back.
+///
+/// Always exactly one `reqs`, on the route's own class (`op_for` -> `Configure`
+/// for a queue-admin replay): one HTTP request, booked once, in the bucket
+/// every other DLQ action lands in. The message rides a SECOND sample carrying
+/// only itself — `reqs: 0` because the first sample already counted the
+/// request, and no bytes for the same reason — under `OpClass::Push`, because a
+/// replayed frame is stored, retained and rolled up exactly like a pushed one,
+/// so it belongs in the `usage_days` row a push lands in and in the monthly
+/// total the `monthly_msgs_quota` block reads. `stored: false` books the
+/// request alone: a `duplicate`, a refusal, a verdict this proxy has not been
+/// told about, or an answer it never managed to read.
+fn replay_samples(
+    cluster_id: uuid::Uuid,
+    op: OpClass,
+    bytes_in: u64,
+    bytes_out: u64,
+    stored: bool,
+) -> Vec<Sample> {
+    let mut out = vec![Sample { cluster_id, op, reqs: 1, msgs: 0, bytes_in, bytes_out }];
+    if stored {
+        out.push(Sample {
+            cluster_id,
+            op: OpClass::Push,
+            reqs: 0,
+            msgs: 1,
+            bytes_in: 0,
+            bytes_out: 0,
+        });
+    }
+    out
+}
+
 /// Map a (path, class) to the metering op class. Consume that is not a pop
 /// (ack / lease) and Gated surfaces meter as reqs-only `Read` — see report.
 ///
-/// One gated surface bills messages WITHOUT changing class here: the streams
-/// cycle stays `Read` for its request, and `handle`'s cycle response arm
-/// records a SECOND `Push` sample for the sink items. It cannot be expressed as
-/// an arm below, because the count is not a function of (path, class): it needs
-/// the request's per-group item counts AND the response's per-group verdicts.
+/// TWO surfaces bill messages WITHOUT changing class here, and for the same
+/// reason: the count is not a function of (path, class). The streams cycle
+/// stays `Read` for its request while `handle`'s cycle arm records a SECOND
+/// `Push` sample for the sink items, which needs the request's per-group item
+/// counts AND the response's per-group verdicts. A DLQ replay stays
+/// `Configure` — the queue-admin authority it is classified for — while
+/// `handle`'s replay arm records one `Push` message when the answer says a
+/// frame was written (D4, `replay_stored_a_message`).
 fn op_for(path: &str, class: RouteClass) -> OpClass {
     match class {
         RouteClass::Produce if path == "/api/v1/push" => OpClass::Push,
@@ -3100,6 +3525,758 @@ mod tests {
             let before = classify(&m, p);
             assert_eq!(crate::s3_kv::effective_class(before, s3), before, "{m} {p}");
         }
+    }
+
+    // ---- PLAN_DASHBOARD_ACTIONS.md §1.4/§2.0: the DLQ replay gates --------
+    //
+    // The arms themselves are pinned in `routes.rs`. These are about what the
+    // classification DOES once it has happened, which is this file's property:
+    // `auth::authorize` (who may call it), `plan_gates` (whether a blocked
+    // cluster may) and the meter (what it costs). Each is exercised through the
+    // same function `handle` calls.
+
+    const RETRY_PATH: &str = "/api/v1/messages/P/T/retry";
+    const REPLAY_PATH: &str = "/api/v1/dlq/3f8a9c1e-0000-4000-8000-000000000000/replay";
+
+    fn user(role: crate::state::Role) -> crate::state::Principal {
+        crate::state::Principal::User { user_id: uuid::Uuid::nil(), role, operator: false }
+    }
+
+    fn key(scopes: crate::state::Scopes) -> crate::state::Principal {
+        crate::state::Principal::ApiKey { key_id: uuid::Uuid::nil(), scopes }
+    }
+
+    /// A whole `St` with no pxdb behind it — acting.rs's `st_with` twin, copied
+    /// rather than shared because that one lives inside its own test module.
+    /// Nothing here reaches the network: `plan_gates` asks `st.limits` and
+    /// nothing else.
+    fn gate_st() -> St {
+        gate_st_with(false)
+    }
+
+    /// The same, with the limits ENFORCING rather than shadowing: a registry
+    /// refusal is a 403 only when `st.limits.enforcing()`, and the admission
+    /// half of the replay gate has to be pinned on both sides of that flag.
+    fn gate_st_enforcing() -> St {
+        gate_st_with(true)
+    }
+
+    fn gate_st_with(enforce: bool) -> St {
+        let mut cfg = crate::config::test_config(&[]);
+        cfg.enforce = enforce;
+        let cache = crate::cache::ClusterCache::new(&cfg, None);
+        let limits = crate::limits::Limits::new(&cfg);
+        let meter = std::sync::Arc::new(crate::meter::Meter::new(&cfg));
+        let registry = crate::registry::Registry::new(None);
+        let keys = crate::auth::Keys::from_config(&cfg);
+        let mut connector = hyper_util::client::legacy::connect::HttpConnector::new();
+        connector.set_nodelay(true);
+        let upstream =
+            hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+                .build::<_, axum::body::Body>(connector);
+        std::sync::Arc::new(crate::state::AppState {
+            cfg,
+            db: None,
+            upstream,
+            cache,
+            limits,
+            meter,
+            registry,
+            keys,
+        })
+    }
+
+    /// THE finding (§1.4). Through the proxy a Viewer session — or a key with
+    /// nothing but the `read` scope — could replay a dead letter, because the
+    /// route fell through the `/api/v1/messages` reads prefix and `Read` is
+    /// true for every user role and for `scopes.read`. `QueueAdmin` is the
+    /// authority the irreversible half needs: Admin, or `scopes.admin`.
+    #[test]
+    fn a_viewer_cannot_replay_a_dead_letter() {
+        let viewer = user(crate::state::Role::Viewer);
+        let admin = user(crate::state::Role::Admin);
+        let read_only = key(crate::state::Scopes {
+            read: true,
+            produce: false,
+            consume: false,
+            admin: false,
+        });
+        let admin_key = key(crate::state::Scopes {
+            read: false,
+            produce: false,
+            consume: false,
+            admin: true,
+        });
+        for p in [RETRY_PATH, REPLAY_PATH] {
+            let class = classify(&Method::POST, p);
+            assert_eq!(class, RouteClass::QueueAdmin, "{p}");
+            let refused = crate::auth::authorize(&viewer, class).expect_err("a viewer may not replay");
+            assert_eq!(refused.status(), StatusCode::FORBIDDEN, "{p}");
+            assert!(crate::auth::authorize(&read_only, class).is_err(), "read-scoped key {p}");
+            // ...and the credentials that own the act still hold it: the fix
+            // must not close the route on the role the dashboard button is for.
+            assert!(crate::auth::authorize(&admin, class).is_ok(), "admin {p}");
+            assert!(crate::auth::authorize(&admin_key, class).is_ok(), "admin key {p}");
+        }
+        // The reads on the same prefix are untouched — a Viewer still sees the
+        // dead letters it may no longer replay, which is the whole point of the
+        // class split.
+        assert!(crate::auth::authorize(&viewer, classify(&Method::GET, "/api/v1/dlq")).is_ok());
+        assert!(crate::auth::authorize(&viewer, classify(&Method::GET, "/api/v1/messages/P/T")).is_ok());
+    }
+
+    /// The second half of the finding, and the reason `is_dlq_replay` exists: a
+    /// replay writes a frame, so a cluster that is blocked from pushing must be
+    /// refused one. `plan_gates` reads the CLASS for the push blocks, and
+    /// `QueueAdmin` is not a class it reads — without the predicate the replay
+    /// sails past a gate that was set to stop exactly this.
+    #[tokio::test]
+    async fn a_storage_blocked_tenant_cannot_replay_but_can_still_delete() {
+        let st = gate_st();
+        let mut ctx = cycle_ctx(None, None);
+        ctx.limits.max_retained_bytes = Some(1_000);
+        // The in-flight estimate the produce path keeps, over the cap. HARD,
+        // like the pump-set flag it backstops: `test_config` is shadow mode and
+        // a storage block does not care.
+        st.limits.note_accepted_bytes(ctx.cluster_id, 2_000);
+
+        for p in [RETRY_PATH, REPLAY_PATH] {
+            let refused = plan_gates(&st, &ctx, classify(&Method::POST, p), &Method::POST, p)
+                .expect("a replay into a storage-blocked cluster is refused");
+            assert_eq!(refused.status(), StatusCode::FORBIDDEN, "{p}");
+            let body = err_body(refused).await;
+            // The same code the equivalent push gets: one block, one answer, and
+            // a Track C client that already treats it as terminal.
+            assert_eq!(body["code"], errors::CODE_STORAGE_QUOTA, "{p}");
+        }
+        assert!(
+            plan_gates(&st, &ctx, RouteClass::Produce, &Method::POST, "/api/v1/push").is_some(),
+            "the push the replay is being held to"
+        );
+
+        // ...and PLAN_KV_TIMERS.md §9.5's rule holds: everything a blocked
+        // tenant needs to get back under its cap still passes. Purging dead
+        // letters, deleting a message, dropping a queue, shortening retention
+        // and every read are how the block is ESCAPED; refusing them would lock
+        // the tenant inside it.
+        for (m, p) in [
+            (Method::DELETE, "/api/v1/dlq"),
+            (Method::DELETE, "/api/v1/messages/P/T"),
+            (Method::DELETE, "/api/v1/resources/queues/orders"),
+            (Method::POST, "/api/v1/configure"),
+            (Method::GET, "/api/v1/dlq"),
+            (Method::GET, "/api/v1/messages"),
+        ] {
+            let class = classify(&m, p);
+            assert!(plan_gates(&st, &ctx, class, &m, p).is_none(), "{m} {p}");
+        }
+
+        // The billing hold is the third cause and answers its own code, so an
+        // operator reading a 403 can tell a full disk from an unpaid invoice.
+        let st = gate_st();
+        let mut held = cycle_ctx(None, None);
+        held.status = ClusterStatus::PushBlocked;
+        for p in [RETRY_PATH, REPLAY_PATH] {
+            let refused = plan_gates(&st, &held, classify(&Method::POST, p), &Method::POST, p)
+                .expect("a replay into a cluster on billing hold is refused");
+            let body = err_body(refused).await;
+            assert_eq!(body["code"], errors::CODE_PUSH_BLOCKED, "{p}");
+        }
+    }
+
+    /// The healthy path, pinned so a future gate cannot quietly take the button
+    /// away: an Admin acting on a cluster with nothing blocking replays.
+    #[test]
+    fn an_admin_on_a_healthy_tenant_replays() {
+        let st = gate_st();
+        let ctx = cycle_ctx(None, None);
+        let admin = user(crate::state::Role::Admin);
+        for p in [RETRY_PATH, REPLAY_PATH] {
+            let class = classify(&Method::POST, p);
+            assert!(crate::auth::authorize(&admin, class).is_ok(), "{p}");
+            assert!(
+                plan_gates(&st, &ctx, class, &Method::POST, p).is_none(),
+                "nothing is blocking, so nothing may refuse {p}"
+            );
+        }
+    }
+
+    /// D4: a replay is billed as a push of ONE message. Its class does not move
+    /// — the REQUEST is a queue-admin act and is booked in `Configure` — and
+    /// the message rides the second sample `handle` records off the verdict.
+    #[test]
+    fn a_replay_bills_one_message_without_changing_its_class() {
+        assert_eq!(op_for(RETRY_PATH, RouteClass::QueueAdmin), OpClass::Configure);
+        assert_eq!(op_for(REPLAY_PATH, RouteClass::QueueAdmin), OpClass::Configure);
+
+        // The move primitive's two verdicts (§2.3): `moved` wrote a frame,
+        // `duplicate` found the destination's dedup window already holding the
+        // deterministic id and wrote nothing.
+        assert_eq!(
+            replay_stored_a_message(br#"{"success":true,"result":"moved","queue":"orders"}"#),
+            Some(true)
+        );
+        assert_eq!(
+            replay_stored_a_message(br#"{"success":true,"result":"duplicate","queue":"orders"}"#),
+            Some(false)
+        );
+        // A broker older than the move primitive (1.5.3 and back, which this
+        // proxy ships in front of: W0 is 1.5.4 and M0 lands alone). Its
+        // address-keyed retry answers `success:true` with no verdict field, and
+        // only once its push has been accepted, so an absent field is a write.
+        // Both routes on a current broker answer through `move_response` and
+        // always carry `result` — this arm is the compatibility one, and
+        // deleting it would un-bill every replay served by an older broker.
+        assert_eq!(
+            replay_stored_a_message(
+                br#"{"success":true,"queue":"orders","partition":"Default",
+                     "replayedAs":{"transaction_id":"dlq:1"},"dlqRowRemoved":true}"#
+            ),
+            Some(true)
+        );
+        // Charge nothing we cannot confirm: the "push rejected, still
+        // dead-lettered" answer, a verdict word this proxy has not been told
+        // about, and every unreadable shape.
+        assert_eq!(
+            replay_stored_a_message(br#"{"success":false,"error":"push rejected"}"#),
+            Some(false)
+        );
+        assert_eq!(
+            replay_stored_a_message(br#"{"success":true,"result":"parked"}"#),
+            Some(false)
+        );
+        assert_eq!(replay_stored_a_message(b"not json"), None);
+        assert_eq!(replay_stored_a_message(br#"{"queue":"orders"}"#), None);
+        assert_eq!(replay_stored_a_message(b""), None);
+
+        // The predicate that arms all of it is method- and SHAPE-exact, so the
+        // neighbours on both prefixes keep their own answers — including the
+        // message whose transaction id is literally `retry` and the dead-letter
+        // row whose id is `replay`, which a suffix test would gate, buffer and
+        // admit as routes that do not exist.
+        assert!(is_dlq_replay(&Method::POST, RETRY_PATH));
+        assert!(is_dlq_replay(&Method::POST, REPLAY_PATH));
+        assert!(!is_dlq_replay(&Method::GET, RETRY_PATH));
+        assert!(!is_dlq_replay(&Method::DELETE, "/api/v1/messages/P/T"));
+        assert!(!is_dlq_replay(&Method::DELETE, "/api/v1/dlq"));
+        assert!(!is_dlq_replay(&Method::POST, "/api/v1/push"));
+        assert!(!is_dlq_replay(&Method::POST, "/api/v1/messages/P/retry"));
+        assert!(!is_dlq_replay(&Method::POST, "/api/v1/messages/P/T/U/retry"));
+        assert!(!is_dlq_replay(&Method::POST, "/api/v1/messages/P/T/retry/"));
+        assert!(!is_dlq_replay(&Method::POST, "/api/v1/dlq/replay"));
+        // `is_dlq_replay` and `classify` answer the same set, which is the
+        // property that keeps the gate and the class from drifting apart: a
+        // path either is this route (QueueAdmin, gated, admitted, billed) or it
+        // is not this route in both of them.
+        for p in [
+            RETRY_PATH,
+            REPLAY_PATH,
+            "/api/v1/messages/P/retry",
+            "/api/v1/messages/P/T/U/retry",
+            "/api/v1/messages/P/T/retry/",
+            "/api/v1/dlq/replay",
+            "/api/v1/push",
+        ] {
+            assert_eq!(
+                is_dlq_replay(&Method::POST, p),
+                classify(&Method::POST, p) == RouteClass::QueueAdmin
+                    && (p.ends_with("/retry") || p.ends_with("/replay")),
+                "{p}"
+            );
+        }
+        // ...and a replay is not a pop, so it neither debits the delivery
+        // bucket nor holds a parked slot.
+        assert!(!is_pop_path(RETRY_PATH));
+        assert!(!is_wait_pop(RETRY_PATH, Some("wait=true&timeout=30000")));
+    }
+
+    /// D4 as a VALUE, which is the half the arm in `handle` could not be tested
+    /// for: the two `record` calls were side effects on a live meter, so the
+    /// whole block could be deleted with every test still green. The billing is
+    /// the decision — under-count and the revenue is gone, over-count and a
+    /// monthly quota trips on messages nobody wrote — so it is asserted here.
+    #[test]
+    fn a_stored_replay_books_one_request_and_exactly_one_message() {
+        let cluster = uuid::Uuid::from_u128(42);
+
+        let stored = replay_samples(cluster, OpClass::Configure, 24, 310, true);
+        assert_eq!(stored.len(), 2, "the request and the message it wrote");
+        // The request, on the route's own class: the queue-admin bucket every
+        // other DLQ action lands in, carrying both byte counts.
+        assert_eq!(stored[0].op, OpClass::Configure);
+        assert_eq!((stored[0].reqs, stored[0].msgs), (1, 0));
+        assert_eq!((stored[0].bytes_in, stored[0].bytes_out), (24, 310));
+        // The message, on `Push`: a replayed frame is stored, retained and
+        // rolled up exactly like a pushed one, so it lands in the `usage_days`
+        // row a push lands in and in the monthly total the quota block reads.
+        assert_eq!(stored[1].op, OpClass::Push);
+        assert_eq!((stored[1].reqs, stored[1].msgs), (0, 1));
+        assert_eq!((stored[1].bytes_in, stored[1].bytes_out), (0, 0));
+
+        // A `duplicate`, a refusal, a verdict we do not know, a body we could
+        // not read: the request is still one request, and nothing was written.
+        let unstored = replay_samples(cluster, OpClass::Configure, 24, 310, false);
+        assert_eq!(unstored.len(), 1);
+        assert_eq!((unstored[0].reqs, unstored[0].msgs), (1, 0));
+
+        // The invariant both shapes share, and the one an over-count breaks:
+        // ONE HTTP request is booked once, whatever the verdict.
+        for samples in [&stored, &unstored] {
+            assert_eq!(samples.iter().map(|s| s.reqs).sum::<u64>(), 1);
+            assert!(samples.iter().map(|s| s.msgs).sum::<u64>() <= 1);
+            assert!(samples.iter().all(|s| s.cluster_id == cluster));
+        }
+    }
+
+    // ---- D4 through `handle` ------------------------------------------------
+    //
+    // The test above pins `replay_samples` as a VALUE, which leaves the half
+    // that value exists for untested: the arm in `handle` that calls it is two
+    // `record` side effects on a live meter, and deleting the whole block left
+    // every test in this file green while every replay on the cell silently
+    // stopped billing its message. So the test below drives the real pipeline —
+    // classify, gate, authorize, admit, forward, meter — against a stub broker.
+    //
+    // Reading the samples back is the awkward part and the reason this is the
+    // only test here shaped like an integration test: a `Meter` has exactly one
+    // exit that does not need a pxdb, its disk spool, which is where a flush
+    // against an unreachable database puts the rows. So the meter is given a
+    // pool nothing listens behind, and the failure is the readout.
+
+    /// A stub broker on a loopback port, answering every request with one
+    /// `move_response`-shaped verdict chosen by the dead-letter row id in the
+    /// path — which is the only thing the two requests below differ by.
+    async fn stub_broker() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let app = axum::Router::new().fallback(|req: Request| async move {
+            let verdict =
+                if req.uri().path().contains("/moved-row/") { "moved" } else { "duplicate" };
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(format!(
+                    r#"{{"success":true,"result":"{verdict}","queue":"orders","partition":"Default"}}"#
+                )))
+                .expect("stub response")
+        });
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), task)
+    }
+
+    /// An `St` wired end to end at a stub broker: dev-static names the cluster
+    /// (so `resolve_host` answers without a pxdb) and dev-insecure hands the
+    /// request a full-scope principal (so the test is about steps 4-6, not
+    /// about minting a credential). The flush interval is pushed out of the
+    /// way — the rows this test reads are the ones `drain()` writes.
+    fn replay_st(cell_url: &str, spool_dir: &str) -> St {
+        let mut cfg = crate::config::test_config(&[]);
+        cfg.dev_insecure = true;
+        cfg.dev_static = Some(crate::config::DevStaticCluster {
+            cell_url: cell_url.to_string(),
+            cell_token: None,
+            broker_tenant: crate::config::DEFAULT_TENANT_UUID.to_string(),
+        });
+        cfg.spool_dir = spool_dir.to_string();
+        cfg.meter_flush_ms = 600_000;
+        let cache = crate::cache::ClusterCache::new(&cfg, None);
+        let limits = crate::limits::Limits::new(&cfg);
+        let meter = std::sync::Arc::new(crate::meter::Meter::new(&cfg));
+        let registry = crate::registry::Registry::new(None);
+        let keys = crate::auth::Keys::from_config(&cfg);
+        let mut connector = hyper_util::client::legacy::connect::HttpConnector::new();
+        connector.set_nodelay(true);
+        let upstream =
+            hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+                .build::<_, axum::body::Body>(connector);
+        std::sync::Arc::new(crate::state::AppState {
+            cfg,
+            db: None,
+            upstream,
+            cache,
+            limits,
+            meter,
+            registry,
+            keys,
+        })
+    }
+
+    /// A pool nothing listens behind (registry.rs's `unreachable_pool` twin,
+    /// copied for the same reason `gate_st` is): every flush through it fails,
+    /// and a failed flush spools its rows to disk, which is this test's readout.
+    fn unreachable_pool() -> deadpool_postgres::Pool {
+        let mut pg = tokio_postgres::Config::new();
+        pg.host("127.0.0.1")
+            .port(1)
+            .user("x")
+            .dbname("x")
+            .connect_timeout(std::time::Duration::from_secs(2));
+        let mgr = deadpool_postgres::Manager::from_config(
+            pg,
+            tokio_postgres::NoTls,
+            deadpool_postgres::ManagerConfig {
+                recycling_method: deadpool_postgres::RecyclingMethod::Fast,
+            },
+        );
+        deadpool_postgres::Pool::builder(mgr)
+            .max_size(1)
+            .runtime(deadpool_postgres::Runtime::Tokio1)
+            .wait_timeout(Some(std::time::Duration::from_secs(2)))
+            .create_timeout(Some(std::time::Duration::from_secs(2)))
+            .build()
+            .expect("pool")
+    }
+
+    fn spooled_rows(dir: &str) -> Vec<crate::meter::UsageRow> {
+        let mut rows = Vec::new();
+        for entry in std::fs::read_dir(dir).expect("spool dir").flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("buf") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("spool file");
+            for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                rows.push(serde_json::from_str(line).expect("usage row"));
+            }
+        }
+        rows
+    }
+
+    /// D4, through `handle`: the request is booked once per call and the
+    /// MESSAGE only where the broker's answer says a frame was written. The two
+    /// calls differ by nothing but the dead-letter row id — same route, same
+    /// body, same everything — so the only thing that can move the second
+    /// sample is the verdict, which is the decision this arm exists to make.
+    #[tokio::test]
+    async fn the_replay_arm_bills_a_moved_message_and_not_a_duplicate() {
+        let dir = std::env::temp_dir().join(format!("queen-proxy-replay-{}", uuid::Uuid::new_v4()));
+        let dir = dir.to_str().expect("temp path").to_string();
+        let (cell, _broker) = stub_broker().await;
+        let st = replay_st(&cell, &dir);
+        // Sets the pool `drain()` writes through. Unreachable on purpose.
+        st.meter.spawn_flush(Some(unreachable_pool()));
+
+        for id in ["moved-row", "duplicate-row"] {
+            let resp = handle(
+                State(st.clone()),
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/v1/dlq/{id}/replay"))
+                    .header(header::HOST, "cell.test")
+                    // `{}` names no destination, so nothing is admitted and the
+                    // request reaches the broker exactly as the dashboard's
+                    // plain "Replay" button sends it.
+                    .body(Body::from("{}"))
+                    .expect("request"),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK, "{id}");
+            // The body is returned to the caller as well as read for the
+            // verdict: the arm BUFFERS the response, and a buffer that forgets
+            // to hand the bytes back would be a broken replay button.
+            let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.expect("body");
+            let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+            assert_eq!(body["success"], true, "{id}");
+        }
+
+        st.meter.drain().await;
+        let rows = spooled_rows(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!rows.is_empty(), "the drain spooled nothing: the readout itself is broken");
+        let totals = |op: &str| -> (u64, u64) {
+            rows.iter()
+                .filter(|r| r.op == op)
+                .fold((0, 0), |(reqs, msgs), r| (reqs + r.reqs, msgs + r.msgs))
+        };
+        // Two requests, on the route's own queue-admin class, carrying no
+        // messages: that half is the base sample every gated route records.
+        assert_eq!(totals("configure"), (2, 0));
+        // ...and the second sample, which is the whole of D4: ONE message,
+        // booked as a push, with `reqs: 0` so the HTTP request is not counted
+        // twice — and only for the reply that said a frame was written. Delete
+        // the arm in `handle` and this is `(0, 0)`.
+        assert_eq!(totals("push"), (0, 1));
+    }
+
+    /// The `{queue, partition}` override is a CREATION path — the SP provisions
+    /// a destination this cluster does not carry yet, exactly as a first-contact
+    /// push does — so it answers the plan caps through the same admission, with
+    /// the same code, as `/api/v1/push` and `/api/v1/configure`. Without this
+    /// the replay was the one route in the proxy that creates rows and is asked
+    /// nothing: a tenant at its queue cap, 403 on push and on configure, made
+    /// queue 21 one dead letter at a time.
+    #[tokio::test]
+    async fn a_replay_that_names_a_new_destination_answers_the_registry_caps() {
+        // One queue, one partition each.
+        let st = gate_st_enforcing();
+        let ctx = cycle_ctx(Some(1), Some(1));
+
+        // The first destination fits and is remembered.
+        assert!(admit_replay_dest(&st, &ctx, &Bytes::from_static(br#"{"queue":"orders","partition":"p"}"#), "rid")
+            .await
+            .is_ok());
+        // A second partition in it does not.
+        let refused = admit_replay_dest(
+            &st,
+            &ctx,
+            &Bytes::from_static(br#"{"queue":"orders","partition":"p2"}"#),
+            "rid",
+        )
+        .await
+        .expect_err("over the partition cap");
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+        let body = err_body(refused).await;
+        assert_eq!(body["code"], errors::CODE_QUOTA_EXCEEDED);
+        assert_eq!(body["error"], "partition limit reached (1)");
+
+        // ...and a second QUEUE does not either.
+        let refused = admit_replay_dest(
+            &st,
+            &ctx,
+            &Bytes::from_static(br#"{"queue":"orders-2","partition":"p"}"#),
+            "rid",
+        )
+        .await
+        .expect_err("over the queue cap");
+        let answer = err_body(refused).await;
+        assert_eq!(answer["code"], errors::CODE_QUOTA_EXCEEDED);
+        assert_eq!(answer["error"], "queue limit reached (1)");
+
+        // Only ONE of the two routes can name a destination, so only one is
+        // buffered and admitted. The address-keyed retry replays in place and
+        // never reads its body; admitting a queue it will not create would
+        // spend a plan slot on a name that never appears at the broker.
+        assert!(is_replay_with_dest(&Method::POST, REPLAY_PATH));
+        assert!(!is_replay_with_dest(&Method::POST, RETRY_PATH));
+        assert!(!is_replay_with_dest(&Method::GET, REPLAY_PATH));
+        assert!(is_dlq_replay(&Method::POST, RETRY_PATH), "still gated and billed");
+
+        // The bodies that name no destination, and the ones this proxy cannot
+        // read: nothing to admit, forwarded verbatim for the broker's own
+        // answer. Same rule as an unparseable produce batch or configure body —
+        // no half-enforcement on a body we did not understand. A body whose
+        // only name is BLANK names nothing either (the broker 400s it), so it
+        // is in this list and not in the half-named one below.
+        for body in [
+            br#"{}"#.as_slice(),
+            b"".as_slice(),
+            b"   ".as_slice(),
+            br#"{"queue":""}"#.as_slice(),
+            b"not json".as_slice(),
+        ] {
+            assert!(
+                admit_replay_dest(&st, &ctx, &Bytes::copy_from_slice(body), "rid").await.is_ok(),
+                "{}",
+                String::from_utf8_lossy(body)
+            );
+        }
+
+        // Shadow mode logs and admits, the posture every other cap in this file
+        // takes: the same over-cap destination travels on.
+        let shadow = gate_st();
+        let ctx = cycle_ctx(Some(1), Some(1));
+        assert!(admit_replay_dest(
+            &shadow,
+            &ctx,
+            &Bytes::from_static(br#"{"queue":"a","partition":"p"}"#),
+            "rid"
+        )
+        .await
+        .is_ok());
+        assert!(admit_replay_dest(
+            &shadow,
+            &ctx,
+            &Bytes::from_static(br#"{"queue":"b","partition":"p"}"#),
+            "rid"
+        )
+        .await
+        .is_ok());
+    }
+
+    /// The name ADMITTED is the name the broker will CREATE — padding removed.
+    /// `parse_replay_overrides` trims both halves before `log_dlq_move_v1`
+    /// provisions anything (server/src/handlers/messages.rs), so a proxy that
+    /// admitted the padded spelling would hold a plan slot for `" orders"`, a
+    /// queue that never exists anywhere, and leave the `orders` the move really
+    /// creates to be counted a SECOND time by the first push that spells it
+    /// plainly: one queue at the broker, two against the cap, for ever.
+    #[tokio::test]
+    async fn a_padded_destination_is_admitted_as_the_trimmed_name() {
+        // Room for exactly one queue with one partition in it: a cap is what
+        // makes "the same name" and "a second name" tell each other apart.
+        let st = gate_st_enforcing();
+        let ctx = cycle_ctx(Some(1), Some(1));
+
+        let padded = br#"{"queue":"  orders  ","partition":"  p  "}"#;
+        assert!(admit_replay_dest(&st, &ctx, &Bytes::copy_from_slice(padded), "rid").await.is_ok());
+        // The same pair, spelled the way the broker will store it. It is
+        // already known, so it takes neither a second queue slot nor a second
+        // partition slot — which is only true if the padded body registered the
+        // trimmed pair.
+        assert!(
+            admit_replay_dest(
+                &st,
+                &ctx,
+                &Bytes::from_static(br#"{"queue":"orders","partition":"p"}"#),
+                "rid"
+            )
+            .await
+            .is_ok(),
+            "the padded destination must have been remembered under its trimmed name"
+        );
+        // ...and the cap is still a cap: a genuinely different queue is refused,
+        // so the assertion above is about trimming and not about a cap that
+        // stopped firing.
+        let refused = admit_replay_dest(
+            &st,
+            &ctx,
+            &Bytes::from_static(br#"{"queue":"orders-2","partition":"p"}"#),
+            "rid",
+        )
+        .await
+        .expect_err("over the queue cap");
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// A destination named in HALF is refused, because no cap can answer it.
+    ///
+    /// This is the arm `admit_replay_dest` used to END with, `_ => Ok(())`, and
+    /// it was the hole the admission was added to close, one step further in:
+    /// `{"partition":"p-new"}` admitted nothing and travelled on, and
+    /// `queen.log_dlq_move_v1` then PROVISIONED that partition inside the
+    /// source row's queue (016_messages: the destination "may not exist yet and
+    /// is resolved — and PROVISIONED — inside log_push_one_v1 itself"). So a
+    /// tenant already refused `403 quota_exceeded` on `/api/v1/push` and
+    /// `/api/v1/configure` grew partition N+1 one dead letter at a time, and
+    /// partitions are the dimension broker maintenance CPU scales on.
+    /// `{"queue": ...}`-only was the same hole with the queue cap answered: the
+    /// partition it creates in that queue is the source row's own name, which
+    /// never reaches this proxy.
+    ///
+    /// The caller loses no expressiveness — an omitted half is the source row's
+    /// value, and the source row is the one the caller is looking at — so the
+    /// refusal names the half to add rather than guessing at it.
+    #[tokio::test]
+    async fn a_half_named_replay_destination_is_refused() {
+        // Caps with room to spare: this is not a cap verdict, it is the shape
+        // that makes a cap verdict impossible.
+        let st = gate_st_enforcing();
+        let ctx = cycle_ctx(Some(10), Some(10));
+
+        for (body, missing, other) in [
+            (br#"{"partition":"p-new"}"#.as_slice(), "queue", "partition"),
+            (br#"{"queue":"orders.retry"}"#.as_slice(), "partition", "queue"),
+        ] {
+            let refused = admit_replay_dest(&st, &ctx, &Bytes::copy_from_slice(body), "rid")
+                .await
+                .expect_err("half-named destination");
+            assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+            let answer = err_body(refused).await;
+            assert_eq!(answer["code"], "invalid_request");
+            let text = answer["error"].as_str().expect("error text");
+            // Names the MISSING half, and only that one: the dashboard renders
+            // the sentence under the Advanced input the operator has to fill in
+            // (app/src/composables/useDlqReplay.js reads "<half> override" out
+            // of this text), so naming both halves would file it under the
+            // wrong one.
+            assert!(text.starts_with(&format!("{missing} override missing")), "{text}");
+            assert!(!text.contains(&format!("{other} override")), "{text}");
+        }
+
+        // A refused name is not a remembered name: the queue in a half-named
+        // body is never created upstream, so it must not spend a plan slot here
+        // either (`Registry::admit*` REMEMBERS what it allows).
+        let tight = gate_st_enforcing();
+        let one = cycle_ctx(Some(1), Some(1));
+        assert!(
+            admit_replay_dest(&tight, &one, &Bytes::from_static(br#"{"queue":"ghost"}"#), "rid")
+                .await
+                .is_err()
+        );
+        assert!(
+            admit_replay_dest(
+                &tight,
+                &one,
+                &Bytes::from_static(br#"{"queue":"orders","partition":"p"}"#),
+                "rid"
+            )
+            .await
+            .is_ok(),
+            "the refused name must not have taken the single queue slot"
+        );
+
+        // Shadow mode refuses nothing — a cell configured to measure instead of
+        // enforce has no cap to bypass, and the posture of every other decision
+        // in this file is that the flag decides whether anything is refused.
+        let shadow = gate_st();
+        for body in [
+            br#"{"partition":"p-new"}"#.as_slice(),
+            br#"{"queue":"orders.retry"}"#.as_slice(),
+        ] {
+            assert!(
+                admit_replay_dest(&shadow, &ctx, &Bytes::copy_from_slice(body), "rid")
+                    .await
+                    .is_ok(),
+                "{}",
+                String::from_utf8_lossy(body)
+            );
+        }
+    }
+
+    /// What the body parser hands the admission, and the shapes that name
+    /// nothing. The handler's own `parse_replay_overrides` is the twin
+    /// (server/src/handlers/messages.rs): a present half must be a non-empty
+    /// name, an omitted one keeps the source row's.
+    #[test]
+    fn the_replay_body_names_zero_one_or_two_halves() {
+        let dest = |b: &[u8]| parse_replay_dest(b);
+        assert_eq!(dest(b""), Ok((None, None)));
+        assert_eq!(dest(b"  \n"), Ok((None, None)));
+        assert_eq!(dest(br#"{}"#), Ok((None, None)));
+        assert_eq!(
+            dest(br#"{"queue":"orders.retry"}"#),
+            Ok((Some("orders.retry".to_string()), None))
+        );
+        assert_eq!(dest(br#"{"partition":"eu-2"}"#), Ok((None, Some("eu-2".to_string()))));
+        assert_eq!(
+            dest(br#"{"queue":"orders.retry","partition":"eu-2"}"#),
+            Ok((Some("orders.retry".to_string()), Some("eu-2".to_string())))
+        );
+        // A blank name is not a name: the broker 400s it, and admitting one
+        // would burn a plan slot on a queue nobody can address.
+        assert_eq!(dest(br#"{"queue":"   ","partition":""}"#), Ok((None, None)));
+        // PADDED is the same name, because the handler trims before the SP
+        // sees it (`parse_replay_overrides`). What is admitted here has to be
+        // what gets created there, or the registry counts a queue the broker
+        // never makes and misses the one it does.
+        assert_eq!(
+            dest(br#"{"queue":"  orders.retry ","partition":"\t eu-2 \n"}"#),
+            Ok((Some("orders.retry".to_string()), Some("eu-2".to_string())))
+        );
+        // ...and a padded half is still a HALF: the trim must not turn
+        // `{"queue":" orders "}` into a body that names both, nor into one that
+        // names neither. `admit_replay_dest` still sees one name and refuses.
+        assert_eq!(dest(br#"{"queue":" orders "}"#), Ok((Some("orders".to_string()), None)));
+        // Fields this proxy does not know are the broker's business.
+        assert_eq!(
+            dest(br#"{"queue":"orders","reason":"manual"}"#),
+            Ok((Some("orders".to_string()), None))
+        );
+        // Unreadable: forwarded, never half-enforced.
+        assert_eq!(dest(b"not json"), Err(()));
+        assert_eq!(dest(br#"["orders"]"#), Err(()));
+        assert_eq!(dest(br#"{"queue":7}"#), Err(()));
+        // A two-element ARRAY is the same two halves, positionally: serde reads
+        // a struct from a sequence as well as from a map, and the handler's
+        // `ReplayBody` is derived the same way, so the broker provisions
+        // exactly what this admits. Pinned because it is surprising, and
+        // because the two parsers agreeing is the property that matters.
+        assert_eq!(
+            dest(br#"["orders","eu-2"]"#),
+            Ok((Some("orders".to_string()), Some("eu-2".to_string())))
+        );
     }
 
     #[test]

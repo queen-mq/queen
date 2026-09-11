@@ -54,6 +54,7 @@ verifiedBy:
   - clients/client-php/tests/SyncedFailedJobProviderLifecycleTest.php
   - clients/client-php/tests/LaravelDashboardTest.php
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): QUEUE_DEFAULTS is nine keys, the configure paragraph is rewritten for the merge rule, and retryMessage carries the move primitive's consequences.
 ---
 
 The Composer package is `queen-mq/php-client`, PSR-4 namespace `Queen\`. It requires PHP 8.3 or
@@ -172,13 +173,21 @@ Accepts a lease-id string, a message array, or an array of either. Posts to
 
 `OperationBuilder` exposes `onSuccess(Closure)`, `onError(Closure)` and `execute(): mixed`.
 
-`Defaults::QUEUE_DEFAULTS` carries `leaseTime`, `retryLimit`, `delayedProcessing`,
-`windowBuffer`, `retentionSeconds`, `completedRetentionSeconds` and `encryptionEnabled`, with
-the values listed under [Queue option defaults](/reference/defaults#queue-option-defaults).
+`Defaults::QUEUE_DEFAULTS` carries nine keys: `leaseTime`, `retryLimit`, `priority`,
+`delayedProcessing`, `windowBuffer`, `maxSize`, `retentionSeconds`, `completedRetentionSeconds`
+and `encryptionEnabled`, with the values listed under
+[Queue option defaults](/reference/defaults#queue-option-defaults).
 
 Extra keys you pass to `config()` are sent verbatim, so any option `/configure` accepts is
-reachable. **`/configure` is a full replace**, not a patch: send the complete intended
-configuration every time ([Queue options](/reference/queue-options/)).
+reachable.
+
+Since 1.6.0 `/configure` [merges](/reference/queue-options/): an option the body does not carry
+keeps the value the queue already has, and only `"mode": "replace"` resets what the body omits.
+This client sends no `mode`, so `create()` always merges. Because `config()` merges over
+`QUEUE_DEFAULTS`, those nine keys are on the wire whether you named them or not and land on the
+client's default rather than on the queue's stored value; the twelve options outside that array,
+`dedupWindowSeconds` and `retentionEnabled` among them, are the ones a partial call now leaves
+alone.
 
 ### Producing
 
@@ -317,6 +326,13 @@ silent loss.
 | `get(): array` | `['messages' => [...], 'total' => n]` |
 
 Read-only. Replay lives on the admin façade: `retryMessage(string $partitionId, string $transactionId)`.
+
+Since broker 1.6.0 that route runs on a **move**: one transaction claims the newest dead-letter
+row at the address, pushes it back into the log and deletes the row, and the replayed message
+carries the deterministic transaction id `dlq:<dead-letter row id>`. A second call for the same
+address answers `404` rather than replaying a second copy, only the addressed consumer group's
+record is removed, and a `result: "duplicate"` verdict means nothing was written and nothing was
+removed. See [Messages and dead letters](/reference/http/messages-dlq).
 
 ## `TransactionBuilder`
 

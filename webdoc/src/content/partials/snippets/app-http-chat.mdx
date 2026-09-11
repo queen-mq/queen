@@ -176,10 +176,11 @@ echo "broker $QUEEN_URL"
 # redelivered once the lease expires. retryLimit bounds how many times that can
 # happen before the message is dead-lettered instead.
 #
-# /configure is a full replace rather than a patch, so what is not named here is
-# reset to its default. That is deliberate: the option this program depends on
-# and does not send is dedupWindowSeconds, whose default of 3600 seconds is what
-# makes the resend below a duplicate.
+# /configure merges rather than replacing, so an option not named here keeps
+# whatever the queue already has. This queue name is unique per run, so what is
+# not named lands on its default: the option this program depends on and does
+# not send is dedupWindowSeconds, whose default of 3600 seconds is what makes
+# the resend below a duplicate.
 # ---------------------------------------------------------------------------
 configure_body="$(jq -n --arg queue "$MESSAGES" \
   '{queue: $queue, options: {leaseTime: 60, retryLimit: 3}}')"

@@ -35,6 +35,7 @@ digest: >-
   idempotency gate at 200, not a failure to retry. The proxy adds `code` and
   `Retry-After` in seconds on 429; SDKs retry only 429.
 # sourceOfTruth re-read 2026-09-07 (through 42bada8d + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): the proxy code list gains invalid_request, and the push-block family now names the two DLQ replay routes; auth.rs gained the KV console read arm.
 ---
 
 Most broker failures are one JSON object with one key:
@@ -228,8 +229,8 @@ error it generates itself:
 The codes are a stable contract that clients switch on: `unauthorized`,
 `forbidden`, `rate_limited`, `quota_exceeded`, `storage_quota_exceeded`,
 `cluster_suspended`, `push_blocked`, `feature_gated`, `route_blocked`,
-`cluster_unknown`, `scope_unknown`, `payload_too_large`, `bad_gateway`,
-`upstream_timeout`.
+`cluster_unknown`, `scope_unknown`, `payload_too_large`, `invalid_request`,
+`bad_gateway`, `upstream_timeout`.
 
 ### The 429 contract
 
@@ -247,8 +248,12 @@ not punished for having been throttled.
 
 `403` with `quota_exceeded`, `storage_quota_exceeded` or `push_blocked` is the
 other family a producer must handle: those are not retryable on a timescale that
-backoff can fix. `404` with `route_blocked` means the route is not exposed to
-tenant credentials at all. See
+backoff can fix. Note that those three now reach the two dead-letter replay
+routes as well, because a replay writes a message. `404` with `route_blocked`
+means the route is not exposed to tenant credentials at all, and `400` with
+`invalid_request` is the proxy refusing a body it read and understood: today the
+one data-plane case is a replay whose destination names one half of a
+`(queue, partition)` pair, where the message names the half to add. See
 [the endpoints a tenant can reach](/reference/multi-tenant/endpoints/).
 
 ### What the clients do with a 429

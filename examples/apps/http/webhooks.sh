@@ -150,8 +150,8 @@ echo "broker $QUEEN_URL"
 # it runs out. Without the second flag an exhausted message would simply be
 # marked failed and stay put; with it, the broker moves it to the dead-letter
 # table with the last error on the row. Both flags are sent explicitly because
-# /configure is a full replace: what you leave out is reset to its default, not
-# left as it was.
+# /configure merges: an option this body does not name keeps whatever the queue
+# already has, and depending on that is how a configuration drifts.
 #
 # leaseTime is the other half of the contract: it is how long the broker waits
 # for a sender that took a delivery and never came back before handing that

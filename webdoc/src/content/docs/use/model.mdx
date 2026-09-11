@@ -176,9 +176,9 @@ spends one and redelivers, `retry` redelivers without spending, `dlq` files the 
 When it runs out the head message is copied into a real dead-letter table with its payload and
 the reason, or dropped if you turned dead-lettering off.
 
-Dead-letter rows survive retention and leave one address at a time, by delete or by replay under
-a fresh transaction id, so an unattended one grows without bound
-([messages and DLQ](/reference/http/messages-dlq)).
+Dead-letter rows survive retention and leave one address at a time, by delete or by replay, which
+moves the row out under the derived transaction id `dlq:<row id>`, so an unattended one grows
+without bound ([messages and DLQ](/reference/http/messages-dlq)).
 
 ## Transactions
 
@@ -274,8 +274,10 @@ One option deletes data out from under a running worker: `maxWaitTimeSeconds` dr
 age alone, leased or not. Use it where staleness makes a message worthless, never as a backstop
 for slow consumers.
 
-`POST /api/v1/configure` is a full replace: every omitted key returns to its default, the
-deduplication window included. Send the whole set ([option table](/reference/queue-options)).
+`POST /api/v1/configure` merges: an option the body does not carry keeps the value the queue
+already has, an explicit `null` restores that option's default, and `"mode": "replace"` resets
+everything the body omits, the deduplication window included ([option
+table](/reference/queue-options)).
 
 ## Delivery guarantees
 

@@ -12,6 +12,7 @@ sourceOfTruth:
   - server/src/httpget.rs
   - server/src/main.rs
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): auth.rs gained one read-only arm and main.rs three routes; the claims, the role mapping and the token handling are unchanged.
 ---
 
 `JWT_ENABLED` defaults to `false`: off, the middleware stamps an empty identity

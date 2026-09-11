@@ -268,12 +268,15 @@ its worst case (an interleave it did not observe) degrades it to `-1`, which is 
 | `transactionId` re-pushed after the sidecar window elapsed | accepted as new; `log_txns` no longer holds the hash |
 | Same `transactionId` in a *different* partition | accepted: deduplication is per partition |
 | `dedupWindowSeconds: 0` | no probe; `log_txns` still written so acks still resolve |
-| `/configure` called without `dedupWindowSeconds` | the window is **reset to 3600**, because `/configure` is a full replace |
+| `/configure` called without `dedupWindowSeconds` | the window is **kept**, because `/configure` merges; it is reset to 3600 only on a create or under `"mode":"replace"` |
 | Duplicate inside `POST /api/v1/transaction` | the whole transaction rolls back (the wire raises `unique_violation`) |
 
-The `/configure` row is the one that catches people. Omitting a key does not leave it alone; it
-resets it to its default. A queue deliberately created with deduplication off will silently get a
-one-hour window back the next time someone calls `/configure` without naming it.
+The `/configure` row is the one that used to catch people, and it changed direction in 1.6.0.
+Until then omitting a key reset it, so a queue deliberately created with deduplication off got a
+one-hour window back the next time anyone called `/configure` without naming it. Now an omitted
+key is left alone. The reset survives in two places, both of them deliberate: a create, where
+there is nothing to keep, and a body carrying `"mode": "replace"`, which is what
+`queenctl apply -f` sends because a manifest means the whole configuration.
 
 ## The fire of a timer does not probe the window
 

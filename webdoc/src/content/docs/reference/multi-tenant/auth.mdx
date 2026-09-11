@@ -14,6 +14,7 @@ sourceOfTruth:
   - proxy/src/webapp.rs
   - proxy/migrations/001_init.sql
 # sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): the sentence saying a viewer writes nothing is now true, and says so: classify's messages arm was DELETE-only, so the retry POST inherited read. Both replay routes are queue admin.
 ---
 
 The proxy accepts exactly two kinds of credential, and they are not interchangeable.
@@ -269,6 +270,22 @@ Note the two asymmetries. An API key with only `produce` cannot touch the `read`
 not even a queue listing, while a `viewer` session can read everything on the cluster and
 write nothing. And `read` is open to every role because there is nothing tenant-external
 behind it: the read class is the tenant-scoped surface, by construction.
+
+<Aside type="caution">
+"A viewer writes nothing" became true in 1.5.4, and was not before it. `classify` had one arm
+for `/api/v1/messages/`, matching `DELETE` only, so every other method on that prefix fell
+through to the reads block. The one route of that family that writes,
+`POST /api/v1/messages/:partitionId/:transactionId/retry`, was therefore classified `read`,
+which is the class every role and a `read`-scoped key both hold. Through the proxy a Viewer
+session or a read-only key could replay a dead letter: a push into a live partition and the
+deletion of a dead-letter record, on a credential meant only to look. Broker-direct was never
+affected, because `auth::route_access_level` gives a `POST` its `read-write` default.
+
+Both replay routes are now `queue admin`, and the messages family is method-bounded: `GET` and
+`HEAD` are reads and every other method under the prefix is blocked rather than inheriting one.
+The published route table is generated from the same function, and its generator now refuses to
+build when a non-`GET` broker route classifies as `read` without a written reason.
+</Aside>
 
 Feature gating happens *before* authorization: a plan without `features.streams` gets
 `403 {"code":"feature_gated"}` regardless of the credential.

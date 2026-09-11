@@ -4,16 +4,46 @@ A beautiful, modern dashboard for monitoring and managing Queen message queues.
 
 ## Features
 
-- **Modern UI** — monochrome dark (light mode is retired)
-- **Real-time Charts** — Live throughput, latency, and resource monitoring
-- **Queue Management** — View, search, configure, and manage queues
-- **Queue Operations** — Push / pop / ack / transaction inspector (`QueueOperations.vue`)
-- **Message Browser** — Browse, search, retry, and manage messages
-- **Dead Letter Queue** — Dedicated DLQ inspector and re-queue tools
-- **Consumer Groups** — Monitor consumer health, lag, and subscriptions
-- **Message Tracing** — Cross-message trace timeline viewer
-- **Analytics** — Per-queue / per-cg performance insights
-- **System Monitoring** — cell-level server health, memory, CPU, worker status, PostgreSQL stats (operators only)
+Two themes, dark by default and light opt-in (`src/composables/useTheme.js`: an explicit
+choice wins, otherwise the OS preference is honoured only when it asks for light).
+
+- **Real-time charts** — throughput, lag and resource series, on a shared ticker
+- **Queues** — the list, **create a queue**, and a detail page that reads all 21 options and
+  edits the eighteen this broker enforces. An edit sends only the fields that changed
+  (`/configure` merges) and a cleared field sends `null`, which restores that option's
+  default. `ttl`, `maxSize` and `retryDelay` are shown read-only: the broker stores and
+  echoes them and reads them nowhere
+- **Messages** — browse, filter, inspect one message, delete a dead-letter record, and
+  **push**: one modal behind three entry points (the listing, a queue's detail page with the
+  queue fixed, and **Push a copy** in the message drawer). A copy is a new message, never a
+  retry; the original is untouched
+- **Dead Letter** — the listing with a failure breakdown, per-row **replay** and purge, and a
+  bulk purge by queue and consumer group. Replay runs on the broker's move primitive
+  (`POST /api/v1/dlq/:id/replay`): it moves exactly the record it addressed, leaves any
+  sibling consumer group's record alone, and the confirmation names the destination and the
+  `dlq:<row id>` transaction id the replayed message will carry. An Advanced fold retargets it
+  to another queue and partition, always as a whole pair
+- **KV** — a read-only browser over one namespace at a time: a prefix box, a keyset pager
+  rather than page numbers, and expired-but-unswept rows shown greyed rather than hidden. No
+  writes, by design
+- **Timers** — scheduled messages per queue: keyset list, exact count for a key prefix, a peek
+  drawer that decodes the payload in the browser, and cancel. No auto-refresh, because every
+  row is a database read on a metered route
+- **Queue Operations** — per-queue throughput, lag and consumer health over a time range
+  (`QueueOperations.vue`). It inspects; it does not push, pop or ack
+- **Consumer Groups** — health, lag, subscription changes, seek, delete
+- **Message Tracing** — cross-message trace timeline viewer
+- **Analytics** and **Workload** — per-queue and per-group performance, and who is doing the
+  work grouped by namespace or task
+- **Ephemeral** — the in-memory queue class, on its own page
+- **System** and **Users** — cell-level health, PostgreSQL internals, the maintenance switches
+  and account management (operators only; both say "cell" on screen)
+
+There is **no pop inspector**, and there will not be one: a pop from a console takes a lease,
+steals from a real consumer and burns a retry attempt with nobody to ack it.
+
+The sidebar groups the views the way the router does: Overview, Routing, **State** (KV and
+Timers, the two surfaces that read stored state belonging to no queue), Observability, Cell.
 
 ## Tech Stack
 
@@ -131,39 +161,57 @@ app/
 ├── src/
 │   ├── api/                      # API client and endpoints
 │   ├── components/               # Reusable Vue components
+│   │   ├── Autocomplete.vue      # opt-in commit-on-blur for write forms
 │   │   ├── BaseChart.vue
 │   │   ├── ConsumerHealthGrid.vue
 │   │   ├── DataTable.vue
+│   │   ├── DetailDrawer.vue
 │   │   ├── Header.vue
+│   │   ├── JsonViewer.vue
 │   │   ├── MetricCard.vue
 │   │   ├── MetricRow.vue
 │   │   ├── MultiSelect.vue
+│   │   ├── PushMessageModal.vue  # the one push form, three entry points
+│   │   ├── QueueConfigModal.vue  # create and edit, diffed against the echo
 │   │   ├── QueueHealthGrid.vue
 │   │   ├── RowChart.vue
 │   │   └── Sidebar.vue
-│   ├── composables/              # Vue composables
+│   ├── composables/              # Vue composables (pure rules live here)
 │   │   ├── useApi.js             # panel state: data/loading/error/lastUpdated
 │   │   ├── useChartTheme.js
 │   │   ├── useConflation.js      # last-value groups: log depth vs work depth
+│   │   ├── useDlqReplay.js       # replay request + the broker's verdict
+│   │   ├── useGatedVerdict.js    # absent / gated / paused / transient
+│   │   ├── useKeysetPager.js     # cursor stack: no page numbers, no totals
+│   │   ├── useKvView.js          # KV list body, expiry and state copy
+│   │   ├── usePushVerdict.js     # PushStatus -> what the modal says
+│   │   ├── useQueueConfig.js     # the 21-option catalogue, diff, validate
 │   │   ├── useRefresh.js         # shell refresh registry + shared ticker
-│   │   ├── useTheme.js
+│   │   ├── useTheme.js           # dark by default, light opt-in
+│   │   ├── useTimers.js          # broker instants, payload decode, verdicts
 │   │   └── useToast.js           # notifications
 │   ├── stores/                   # module singletons
 │   │   ├── identity.js           # /auth/me, roles, acting cluster
 │   │   ├── queuesStore.js        # tenant-keyed queue cache
+│   │   ├── routeSupport.js       # remembers a route this broker does not serve
 │   │   └── ui.js                 # global error / toast surface
-│   ├── router/                   # routes + role metadata + guard
+│   ├── router/                   # routes + nav groups + role metadata + guard
 │   ├── views/                    # Page components
 │   │   ├── Analytics.vue
 │   │   ├── Consumers.vue
 │   │   ├── Dashboard.vue
 │   │   ├── DeadLetter.vue
+│   │   ├── Ephemeral.vue
+│   │   ├── Kv.vue
 │   │   ├── Messages.vue
 │   │   ├── QueueDetail.vue
 │   │   ├── QueueOperations.vue
 │   │   ├── Queues.vue
 │   │   ├── System.vue
-│   │   └── Traces.vue
+│   │   ├── Timers.vue
+│   │   ├── Traces.vue
+│   │   ├── Users.vue
+│   │   └── Workload.vue
 │   ├── App.vue                   # Root component
 │   ├── main.js                   # Entry point
 │   └── style.css                 # Global styles & design system

@@ -103,7 +103,9 @@
 //!   nothing to add), at the database cost the windowing exists to avoid.
 //! * **Not exposed in v1**: consumer-group administration (list/seek/delete),
 //!   queue listings, traces and the streams surface — the DLQ is covered
-//!   ([`Broker::dlq`], [`Broker::retry_message`], [`Broker::delete_message`]).
+//!   ([`Broker::dlq`], [`Broker::retry_message`], [`Broker::dlq_replay`],
+//!   [`Broker::delete_message`]). Prefer [`Broker::dlq_replay`]: it addresses
+//!   the dead-letter ROW, which names exactly one consumer group's record.
 //! * Env tuning knobs (`QUEEN_*`, `PG_*`, `LOG_*`) are honoured exactly like
 //!   the binary; [`BrokerConfig`] fields win where both are set. Exceptions:
 //!   `QUEEN_TENANCY_HEADER` and `JWT_ENABLED` are ignored embedded (a warning
@@ -684,8 +686,20 @@ impl Broker {
         parse(&bytes)
     }
 
-    /// Replay a dead-lettered message: re-push its snapshot, then drop the DLQ
-    /// row. Returns the handler's document (`success`, the new push outcome).
+    /// Replay a dead-lettered message addressed by (partition, transaction id):
+    /// the newest dead-letter row at that address is MOVED back into the log —
+    /// claim under the row lock, push, delete, ONE transaction
+    /// (`queen.log_dlq_move_v1`).
+    ///
+    /// Returns the handler's document: `{success, result: "moved"|"duplicate",
+    /// queue, partition, consumerGroup, dlqId, originalTransactionId,
+    /// replayedAs:{index, message_id, transaction_id, queueName, status,
+    /// offset}, dlqRowRemoved}`. The replayed frame's transaction id is
+    /// `dlq:<row id>`, so a second call answers 404 (`gone`) rather than
+    /// appending a second copy, and only the addressed consumer group's record
+    /// is removed. `duplicate` means nothing was written AND nothing was
+    /// removed. `Err` for 404 (no dead-letter row at this address), 503 (push
+    /// maintenance is on) and the 500s.
     pub async fn retry_message(
         &self,
         partition_id: &str,
@@ -696,6 +710,64 @@ impl Broker {
             Extension(crate::auth::AuthedSub(None)),
             Extension(crate::tenant::Tenant::default_tenant()),
             Path((partition_id.to_string(), transaction_id.to_string())),
+        )
+        .await;
+        let (status, bytes) = read_response(resp).await;
+        if !status.is_success() {
+            return Err(error_from(status, &bytes));
+        }
+        parse(&bytes)
+    }
+
+    /// `POST /api/v1/dlq/:id/replay` — the same move, addressed by the
+    /// dead-letter ROW id (the `id` the DLQ listing returns).
+    ///
+    /// The form to prefer: an address can carry one row per consumer group,
+    /// while a row id names exactly one record, so this cannot remove another
+    /// group's. `queue` / `partition` override where the message lands (either
+    /// half, independently; an omitted half keeps the source row's), and a
+    /// destination this cluster does not carry yet is provisioned exactly as a
+    /// first-contact producer push provisions one. Same document as
+    /// `retry_message`; `Err` for 404 (`gone` — already replayed, purged, or
+    /// not a row id), 400 (a destination named as an empty string), 503 (push
+    /// maintenance) and the 500s.
+    pub async fn dlq_replay(
+        &self,
+        dlq_id: &str,
+        queue: Option<&str>,
+        partition: Option<&str>,
+    ) -> Result<serde_json::Value, Error> {
+        let mut body = serde_json::Map::new();
+        if let Some(q) = queue {
+            body.insert("queue".to_string(), serde_json::json!(q));
+        }
+        if let Some(p) = partition {
+            body.insert("partition".to_string(), serde_json::json!(p));
+        }
+        let resp = crate::handlers::handle_dlq_replay(
+            State(self.inner.st.clone()),
+            Extension(crate::tenant::Tenant::default_tenant()),
+            Path(dlq_id.to_string()),
+            Bytes::from(serde_json::Value::Object(body).to_string()),
+        )
+        .await;
+        let (status, bytes) = read_response(resp).await;
+        if !status.is_success() {
+            return Err(error_from(status, &bytes));
+        }
+        parse(&bytes)
+    }
+
+    /// `POST /api/v1/system/maintenance` — the PUSH maintenance switch.
+    ///
+    /// While it is on every push is diverted to the on-disk spool and nothing
+    /// reaches `queen.log_segments`; the replay routes, which cannot be
+    /// spooled, are refused with 503 instead. Returns the handler's document
+    /// (`maintenanceMode`, `bufferedMessages`, `bufferHealthy`, `message`).
+    pub async fn set_push_maintenance(&self, enabled: bool) -> Result<serde_json::Value, Error> {
+        let resp = crate::handlers::handle_set_maintenance(
+            State(self.inner.st.clone()),
+            Bytes::from(serde_json::json!({ "enabled": enabled }).to_string()),
         )
         .await;
         let (status, bytes) = read_response(resp).await;

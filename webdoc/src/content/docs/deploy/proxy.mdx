@@ -16,6 +16,7 @@ sourceOfTruth:
   - proxy/src/auth.rs
   - proxy/src/gateway.rs
 # sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): gateway.rs gained the DLQ replay gates, destination admission and metering; the configuration, timeouts and TLS behaviour this page documents are unchanged.
 ---
 
 `queen_proxy` is a second Rust binary that stands in front of a broker. It does two jobs, and

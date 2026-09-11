@@ -306,6 +306,9 @@ async fn embedded_end_to_end() {
             namespace: Some(ns.clone()),
             task: None,
             options: qp::QueueOptions::default(),
+            // No mode: the default is merge, which on a queue that does not
+            // exist yet is a plain create (PLAN_DASHBOARD_ACTIONS.md §2.2).
+            mode: None,
         })
         .await
         .expect("configure namespaced");

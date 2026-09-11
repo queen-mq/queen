@@ -13,6 +13,7 @@ sourceOfTruth:
   - server/sql/procedures/011_log_stats.sql
   - server/src/migrate.rs
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): get_queue_v2 gained an options object and schema.sql one comment about the lease default; the history this page records is unchanged.
 ---
 
 Open a Queen database with `psql` today and you find the log engine, the shared management tables,

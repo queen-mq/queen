@@ -472,6 +472,27 @@ pub fn route_access_level(method: &Method, path: &str) -> AccessLevel {
         return ReadOnly;
     }
 
+    // PLAN_DASHBOARD_ACTIONS.md §2.5 — the console's keyset page over a KV
+    // namespace. A pure read that cannot ride the `m == "GET"` block above for
+    // the same reason the two arms before it cannot: its request is a body. And
+    // the body is not a convenience here — the cursor IS a key, and a key in a
+    // query string is recorded by every access log between the browser and the
+    // database, which is the rule the KV path routes enforce by rejecting a
+    // query string outright.
+    //
+    // Without this arm the route reaches the ReadWrite fallthrough at the bottom
+    // of this function and a READ-ONLY JWT gets 403 for browsing broker-direct:
+    // the broker would be demanding write access to list keys. That is the exact
+    // trap the KV GET lines in the block above were written to close, reappearing
+    // on the one KV read that is a POST.
+    //
+    // The GET sibling needs no arm: `/api/v1/resources/kv/namespaces` is already
+    // covered by the `/api/v1/resources/` read inside the GET block. Method- and
+    // path-exact, so a future verb on this path does not inherit the level.
+    if m == "POST" && path == "/api/v1/resources/kv/list" {
+        return ReadOnly;
+    }
+
     // -------- Streams --------
     if path == "/streams/v1/state/get" {
         return ReadOnly;
@@ -836,6 +857,59 @@ mod tests {
         // ...and the arm is exact: no neighbouring path inherits it.
         assert_eq!(
             route_access_level(&post, "/api/v1/partitions"),
+            AccessLevel::ReadWrite
+        );
+    }
+
+    /// PLAN_DASHBOARD_ACTIONS.md §2.5. The console's KV list is a POST because
+    /// its cursor is a key, and a POST defaults to ReadWrite here — so without
+    /// its own arm the broker would demand write access to BROWSE, and a
+    /// read-only JWT (the dashboard's Viewer, broker-direct) would see a 403 on
+    /// the one page whose whole purpose is looking.
+    #[test]
+    fn the_console_kv_list_is_a_read_even_though_it_is_a_post() {
+        let post = Method::POST;
+        assert_eq!(
+            route_access_level(&post, "/api/v1/resources/kv/list"),
+            AccessLevel::ReadOnly
+        );
+        assert_eq!(
+            route_access_level(&post, "/api/v1/resources/kv/list"),
+            route_access_level(&post, "/api/v1/fetch"),
+            "the same reason as the fetch: a read whose request is a body"
+        );
+        // The arm is method- and path-exact. A future verb on the path, or a
+        // neighbouring path, does not inherit the level — which is the whole
+        // difference between a decision and a fallthrough.
+        assert_eq!(
+            route_access_level(&Method::DELETE, "/api/v1/resources/kv/list"),
+            AccessLevel::ReadWrite
+        );
+        assert_eq!(
+            route_access_level(&post, "/api/v1/resources/kv"),
+            AccessLevel::ReadWrite
+        );
+        // And POST /api/v1/kv — the batch that can write — is untouched by it.
+        assert_eq!(
+            route_access_level(&post, "/api/v1/kv"),
+            AccessLevel::ReadWrite
+        );
+    }
+
+    /// The GET sibling needs no arm of its own: it is already inside the
+    /// `/api/v1/resources/` read of the GET block. Pinned anyway, because "it
+    /// falls in an existing arm" is a claim that stops being true the day
+    /// somebody narrows that arm.
+    #[test]
+    fn the_console_kv_namespaces_get_is_read_only() {
+        assert_eq!(
+            route_access_level(&Method::GET, "/api/v1/resources/kv/namespaces"),
+            AccessLevel::ReadOnly
+        );
+        // Still a GET decision, not a path one: a write verb on the same path
+        // lands on the fallthrough, as it should.
+        assert_eq!(
+            route_access_level(&Method::POST, "/api/v1/resources/kv/namespaces"),
             AccessLevel::ReadWrite
         );
     }

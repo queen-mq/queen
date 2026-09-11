@@ -91,8 +91,17 @@ export function groupLag(groupsByQueue, keyOfQueue, key) {
 }
 
 /**
- * Severity of one enriched row. Ported verbatim from the mock: the rules are
- * additive and the worst one wins.
+ * Severity of one enriched row. The rules are additive and the worst one wins.
+ *
+ * Every rule here is already proportional — an age in seconds, an ack SUCCESS
+ * RATE with a floor of 20 acks under it, a lag in ms — which is why they all
+ * survived the colour policy. The one that did not was `deadLetter >= 1000`:
+ * a dead-letter queue is never emptied, so its depth is a permanent property
+ * of the row's history and an amber tied to it can never go out again. What
+ * would deserve attention is dead letters ARRIVING in the window, and the
+ * workload payload carries no such counter — so the row says nothing about it
+ * rather than saying something untrue. (The DLQ page itself, and the Errors
+ * row on the Dashboard, are where a reader goes for that.)
  *
  * @param {object} row an object from {@link enrichRows}
  * @returns {'bad'|'warn'|'ok'|'ice'|'mute'}
@@ -108,7 +117,6 @@ export function severity(row) {
   if (row.acks >= 20 && row.ackOk < 0.5) up('bad')
   else if (row.acks >= 20 && row.ackOk < 0.9) up('warn')
   if (w.maxLagMs !== null && w.maxLagMs >= 60000) up('warn')
-  if (n.deadLetter >= 1000) up('warn')
   if (sev === 'mute') {
     if (w.pushMessages + w.popMessages > 0) sev = 'ok'
     else if (w.popEmpty > 0 || w.parkedAvg > 0) sev = 'ice'

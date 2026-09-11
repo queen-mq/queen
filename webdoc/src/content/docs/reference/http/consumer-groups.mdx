@@ -18,6 +18,7 @@ verifiedBy:
   - clients/client-js/test-v2/watermark.js
   - test/runners/tenancy/tenancy-check.sh
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): main.rs, auth.rs and db.rs gained the replay and KV console routes; nothing this page describes moved.
 ---
 
 Consumption state on this engine is one cursor per (partition, consumer group):

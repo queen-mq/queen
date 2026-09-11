@@ -559,9 +559,45 @@ BEGIN
         RETURN jsonb_build_object('error', 'Queue not found');
     END IF;
 
+    -- `options` is the WHOLE configuration, all 21 keys `configure` accepts,
+    -- spelled exactly as configure_queue_v1 parses and echoes them
+    -- (012_configure.sql) — namespace and task included, even though they also
+    -- sit at the top level for the readers that have always found them there.
+    --
+    -- WHY ALL OF THEM. This is the read an editor prefills from, and /configure
+    -- merges: a form that shows a handful of fields and silently keeps the rest
+    -- is not an editor, it is a form that cannot tell you what the queue is.
+    -- The status detail row (get_queue_detail_v2's `config` above) keeps its own
+    -- six keys untouched — the dashboard reads them by those names.
+    --
+    -- retention_sink_hold is the sink NAME, not a secret: it is the middle
+    -- segment of a public KV key, and the dashboard already shows which queues
+    -- a sink is holding.
     SELECT jsonb_build_object(
         'id', q.id, 'name', q.name, 'namespace', q.namespace, 'task', q.task,
-        'createdAt', to_char(q.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+        'createdAt', to_char(q.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+        'options', jsonb_build_object(
+            'namespace', COALESCE(q.namespace, ''),
+            'task', COALESCE(q.task, ''),
+            'priority', q.priority,
+            'leaseTime', q.lease_time,
+            'retryLimit', q.retry_limit,
+            'retryDelay', q.retry_delay,
+            'maxSize', q.max_queue_size,
+            'ttl', q.ttl,
+            'deadLetterQueue', q.dead_letter_queue,
+            'dlqAfterMaxRetries', q.dlq_after_max_retries,
+            'delayedProcessing', q.delayed_processing,
+            'windowBuffer', q.window_buffer,
+            'retentionSeconds', q.retention_seconds,
+            'completedRetentionSeconds', q.completed_retention_seconds,
+            'retentionEnabled', q.retention_enabled,
+            'encryptionEnabled', q.encryption_enabled,
+            'maxWaitTimeSeconds', q.max_wait_time_seconds,
+            'minPopWaitTime', q.min_pop_wait_time,
+            'dedupWindowSeconds', q.dedup_window_seconds,
+            'retentionSinkHold', q.retention_sink_hold,
+            'retentionSinkHoldMaxSeconds', q.retention_sink_hold_max_seconds))
     INTO v_queue_info
     FROM queen.queues q WHERE q.id = v_queue_id;
 

@@ -36,6 +36,9 @@
       "name": "Streams"
     },
     {
+      "name": "Key/value state and timers"
+    },
+    {
       "name": "Ephemeral queues"
     },
     {
@@ -1324,10 +1327,10 @@
                   "queue": {
                     "description": "See the reference page for this route."
                   },
-                  "options": {
+                  "error": {
                     "description": "See the reference page for this route."
                   },
-                  "error": {
+                  "invalid": {
                     "description": "See the reference page for this route."
                   }
                 },
@@ -1736,6 +1739,130 @@
         ]
       }
     },
+    "/api/v1/resources/kv/namespaces": {
+      "get": {
+        "operationId": "kv_namespaces",
+        "tags": [
+          "Key/value state and timers"
+        ],
+        "summary": "GET /api/v1/resources/kv/namespaces",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/kv.rs::handle_kv_namespaces",
+        "x-queen-query-params": "rejected",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-queen-note": "This route takes no query parameters and refuses any query string outright, rather than ignoring one: a prefix or key in a URL is recorded by every access log, proxy sample and tracing span between the client and the database."
+      }
+    },
+    "/api/v1/resources/kv/list": {
+      "post": {
+        "operationId": "kv_list",
+        "tags": [
+          "Key/value state and timers"
+        ],
+        "summary": "POST /api/v1/resources/kv/list",
+        "parameters": [
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
+                }
+              }
+            },
+            "x-queen-schema": "opaque"
+          }
+        },
+        "x-queen-access-level": "read-only",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/kv.rs::handle_kv_list",
+        "x-queen-query-params": "rejected",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "namespace": {
+                    "type": "string"
+                  },
+                  "prefix": {
+                    "type": "string"
+                  },
+                  "after": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "format": "int64"
+                  },
+                  "keysOnly": {
+                    "type": "boolean"
+                  },
+                  "includeExpired": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "namespace"
+                ]
+              }
+            }
+          },
+          "x-queen-schema": "derived",
+          "x-queen-schema-source": "KvListBody"
+        },
+        "x-queen-note": "This route takes no query parameters and refuses any query string outright, rather than ignoring one: a prefix or key in a URL is recorded by every access log, proxy sample and tracing span between the client and the database."
+      }
+    },
     "/api/v1/messages": {
       "get": {
         "operationId": "list_messages",
@@ -1982,17 +2109,6 @@
           }
         ],
         "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "description": "Shape not derivable from a Rust type. See the route's page under /reference/http for the field-by-field contract."
-                }
-              }
-            },
-            "x-queen-schema": "opaque"
-          },
           "404": {
             "description": "Not found.",
             "content": {
@@ -2154,6 +2270,89 @@
             "bearerAuth": []
           }
         ]
+      }
+    },
+    "/api/v1/dlq/{id}/replay": {
+      "post": {
+        "operationId": "dlq_replay",
+        "tags": [
+          "Messages, DLQ and traces"
+        ],
+        "summary": "POST /api/v1/dlq/:id/replay",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "x-queen-tenant",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Tenant to scope this request to. Read only when QUEEN_TENANCY_HEADER is on; unauthenticated by design, so the broker must not be reachable directly by tenants."
+          }
+        ],
+        "responses": {
+          "400": {
+            "description": "Malformed request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-queen-access-level": "read-write",
+        "x-queen-tenant-scoped": true,
+        "x-queen-handler": "server/src/handlers/messages.rs::handle_dlq_replay",
+        "x-queen-query-params": "none",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          },
+          "x-queen-schema": "opaque",
+          "description": "The handler reads this body as a dynamic JSON document, so the exact shape is not recoverable from a type. The listed keys are the ones the handler reads by name."
+        }
       }
     },
     "/api/v1/traces": {
@@ -4653,7 +4852,7 @@
       "post": {
         "operationId": "kv_batch",
         "tags": [
-          "Other"
+          "Key/value state and timers"
         ],
         "summary": "POST /api/v1/kv",
         "parameters": [
@@ -4709,7 +4908,7 @@
       "get": {
         "operationId": "kv_get",
         "tags": [
-          "Other"
+          "Key/value state and timers"
         ],
         "summary": "GET /api/v1/kv/:ns/*key",
         "parameters": [
@@ -4760,7 +4959,7 @@
       "put": {
         "operationId": "kv_put",
         "tags": [
-          "Other"
+          "Key/value state and timers"
         ],
         "summary": "PUT /api/v1/kv/:ns/*key",
         "parameters": [
@@ -4824,7 +5023,7 @@
       "delete": {
         "operationId": "kv_delete",
         "tags": [
-          "Other"
+          "Key/value state and timers"
         ],
         "summary": "DELETE /api/v1/kv/:ns/*key",
         "parameters": [
@@ -5452,7 +5651,7 @@
       "post": {
         "operationId": "timers_batch",
         "tags": [
-          "Other"
+          "Key/value state and timers"
         ],
         "summary": "POST /api/v1/timers",
         "parameters": [
@@ -5508,7 +5707,7 @@
       "get": {
         "operationId": "timers_list",
         "tags": [
-          "Other"
+          "Key/value state and timers"
         ],
         "summary": "GET /api/v1/timers/:queue",
         "parameters": [
@@ -5591,7 +5790,7 @@
       "get": {
         "operationId": "timer_peek",
         "tags": [
-          "Other"
+          "Key/value state and timers"
         ],
         "summary": "GET /api/v1/timers/:queue/*timerKey",
         "parameters": [
@@ -5649,7 +5848,7 @@
       "delete": {
         "operationId": "timer_cancel",
         "tags": [
-          "Other"
+          "Key/value state and timers"
         ],
         "summary": "DELETE /api/v1/timers/:queue/*timerKey",
         "parameters": [

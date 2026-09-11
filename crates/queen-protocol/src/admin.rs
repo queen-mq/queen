@@ -6,22 +6,26 @@ use serde::{Deserialize, Serialize};
 
 /// Queue options accepted by `POST /api/v1/configure`.
 ///
-/// **`/configure` is a full replace, not a patch.** Every field is optional and
-/// omitted when `None`, but omitting one does *not* leave the queue's current
-/// value alone. `queen.configure_queue_v1` never reads the existing row: it
-/// `COALESCE`s each key to a hard-coded default and then writes *every* config
-/// column from `EXCLUDED` on `ON CONFLICT (tenant_id, name) DO UPDATE`. So a
-/// partial object resets each key it leaves out to that key's default —
-/// reconfiguring with only `lease_time` clears `retention_enabled` and puts
-/// `dedup_window_seconds` back to `3600`. Always send the complete option set
-/// the queue should end up with.
+/// **`/configure` MERGES into the queue's current configuration** (broker
+/// >= 1.6.0). Every field is optional and omitted when `None`, and an omitted
+/// field leaves the queue's stored value alone: reconfiguring with only
+/// `lease_time` changes the lease and nothing else.
 ///
-/// The corollary holds for anything else kept on the queue row: a value only
-/// survives a later `/configure` if that call sends it again.
+/// The full rule, which lives in `queen.configure_queue_v1` and is therefore the
+/// same for every client: a key that is **absent** keeps the queue's value, a
+/// key sent as **null** goes back to the default, a key with a **value** is
+/// written, and a body carrying `"mode":"replace"` parses every option as if the
+/// queue were new — the pre-1.6.0 behaviour, which is what a declarative caller
+/// wants (`queenctl apply -f` sends it) and which
+/// [`ConfigureRequest::replace`] spells on this type.
+///
+/// **Against a broker older than 1.6.0 every call still replaces**, so code that
+/// must run on both keeps sending the complete option set the queue should end
+/// up with.
 ///
 /// The documented default for each field below is the *SQL* default, which is
-/// the one that actually applies — and therefore also the value the queue
-/// reverts to whenever the key is omitted.
+/// the one that actually applies — and therefore the value an explicit `null`,
+/// a `replace`, and a create all land on.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct QueueOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -188,10 +192,12 @@ pub struct QueueOptions {
 /// nested under `options`; this type always sends the nested form, which is
 /// what every SDK does.
 ///
-/// `namespace` and `task` are part of the same full replace as the rest of
+/// `namespace` and `task` follow the same merge rule as the rest of
 /// [`QueueOptions`]: the handler folds these top-level fields into the options
-/// bag only when they are a non-empty string, and `configure_queue_v1` resets
-/// each to `""` when the key is absent. Resend them on every reconfigure.
+/// bag only when they are a non-empty string, `configure_queue_v1` keeps the
+/// queue's current value when the key is absent, and resets each to `""` on a
+/// `replace` (which is every call against a broker older than 1.6.0 — resend
+/// them on every reconfigure if you must run on one).
 ///
 /// An empty string is a valid queue name — the broker deliberately allows it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -205,6 +211,14 @@ pub struct ConfigureRequest {
     pub task: Option<String>,
 
     pub options: QueueOptions,
+
+    /// `"merge"` (the broker's default) or `"replace"`. `None` sends no `mode`
+    /// key at all, which keeps the request byte-identical to the one this type
+    /// has always produced — including against a broker old enough to replace
+    /// whatever it is told, where an explicit `"merge"` would be a promise the
+    /// wire cannot keep. Set it with [`ConfigureRequest::replace`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
 }
 
 impl ConfigureRequest {
@@ -214,11 +228,27 @@ impl ConfigureRequest {
             namespace: None,
             task: None,
             options: QueueOptions::default(),
+            mode: None,
         }
     }
 
     pub fn options(mut self, options: QueueOptions) -> Self {
         self.options = options;
+        self
+    }
+
+    /// Ask for `mode: "replace"` — every option this request does not carry
+    /// goes back to its default, which is what `/configure` did for every
+    /// caller before 1.6.0.
+    ///
+    /// Leave it alone to MERGE, which is what an edit wants: this type omits
+    /// every `None` field, so a request that sets one option would otherwise
+    /// reset the other twenty on its way past. Reach for `replace(true)` when
+    /// the request IS the whole configuration — a manifest, a reconciler
+    /// reading its desired state from a file — where an option the source does
+    /// not mention genuinely means "back to the default".
+    pub fn replace(mut self, enabled: bool) -> Self {
+        self.mode = enabled.then(|| "replace".to_string());
         self
     }
 }
@@ -689,6 +719,41 @@ mod tests {
         );
     }
 
+    /// The default request carries NO `mode` key: merge is the broker's own
+    /// default, and an explicit "merge" would be a promise an older broker
+    /// cannot keep. `replace(true)` is the only thing that puts a mode on the
+    /// wire, and it sits at the top level — inside `options` the handler
+    /// overwrites it, because `mode` is the request's directive and the options
+    /// bag is the queue's configuration.
+    #[test]
+    fn mode_is_sent_only_for_a_replace() {
+        let merge = serde_json::to_string(&ConfigureRequest::new("orders")).unwrap();
+        assert!(!merge.contains("mode"), "{merge}");
+        assert!(
+            !serde_json::to_string(&ConfigureRequest::new("orders").replace(false))
+                .unwrap()
+                .contains("mode")
+        );
+
+        let replace =
+            serde_json::to_string(&ConfigureRequest::new("orders").replace(true)).unwrap();
+        assert_eq!(
+            replace,
+            r#"{"queue":"orders","options":{},"mode":"replace"}"#
+        );
+
+        // ...and it round-trips, so a server-side decode of the same type sees
+        // the directive rather than dropping it into an unknown field.
+        let back: ConfigureRequest = serde_json::from_str(&replace).unwrap();
+        assert_eq!(back.mode.as_deref(), Some("replace"));
+        assert_eq!(
+            serde_json::from_str::<ConfigureRequest>(&merge)
+                .unwrap()
+                .mode,
+            None
+        );
+    }
+
     #[test]
     fn options_use_the_camel_case_keys_the_sql_reads() {
         let req = ConfigureRequest::new("orders").options(QueueOptions {
@@ -734,8 +799,9 @@ mod tests {
         // names a sink must not start sending one.
         let bare = serde_json::to_string(&ConfigureRequest::new("orders")).unwrap();
         assert!(!bare.contains("retentionSinkHold"));
-        // ...and an explicit "" is a legal, sent value, because that is how a
-        // full-replace /configure turns the hold OFF again.
+        // ...and an explicit "" is a legal, sent value, because under the merge
+        // rule it is the only way to turn the hold OFF again (an absent key now
+        // keeps the sink the queue already names).
         let off = ConfigureRequest::new("orders").options(QueueOptions {
             retention_sink_hold: Some(String::new()),
             ..Default::default()

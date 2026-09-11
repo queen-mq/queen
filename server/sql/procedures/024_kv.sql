@@ -605,6 +605,12 @@ DECLARE
     -- QUEEN_KV_PREFIX_LIMIT, QUEEN_KV_MAX_READ_BYTES, QUEEN_KV_MAX_OPS_PER_CALL,
     -- QUEEN_KV_MAX_KEYS_PER_CALL) are the broker-edge body guard; these are the
     -- floor nothing can get under.
+    --
+    -- TWIN: three of them — C_MAX_READ_BYTES, C_PREFIX_DEFAULT, C_PREFIX_CAP —
+    -- are duplicated in the DECLARE block of queen.kv_list_v1 at the bottom of
+    -- this file, because plpgsql has no way to share a DECLARE block and a
+    -- constants table for three integers would be a new pattern to keep aligned
+    -- rather than one. Whoever changes a number here changes it there too.
     C_MAX_VALUE_BYTES CONSTANT INT    := 65536;      -- QUEEN_KV_MAX_VALUE_BYTES
     C_MAX_READ_BYTES  CONSTANT BIGINT := 4194304;    -- QUEEN_KV_MAX_READ_BYTES, 4 MiB
     C_PREFIX_DEFAULT  CONSTANT INT    := 100;
@@ -1526,9 +1532,310 @@ BEGIN
 END;
 $$;
 
+
+-- ============================================================================
+-- queen.kv_list_v1(p_tenant, p_namespace, p_prefix, p_after, p_limit,
+--                  p_keys_only, p_include_expired) -> JSONB
+--
+-- PLAN_DASHBOARD_ACTIONS.md §2.5 — THE CONSOLE'S READ. The statement below is
+-- the getPrefix arm of kv_apply_v1 almost line for line, and it is still a
+-- different thing, for three reasons that would each be wrong on the wire:
+--
+--   * getPrefix REQUIRES a non-empty prefix, deliberately (§5.5: a namespace is
+--     not a table to enumerate). An operator who has just opened a namespace in
+--     the dashboard has nothing to type yet, and asking for a prefix first is
+--     asking them to guess the shape of somebody else's keys.
+--   * getPrefix NEVER returns an expired row (§5.7). That is the right answer
+--     for an application — an expired marker does not exist — and the wrong one
+--     for a console, whose header counts the rows the sweeper has not taken yet.
+--     Hide them and the page says 27k while the list shows fewer, which an
+--     operator correctly files as a bug. So the predicate is a PARAMETER here
+--     and a dead row comes back carrying `expired` instead of vanishing.
+--   * POST /api/v1/kv is `Gated(Kv, Mixed)` at the proxy, metered as a KV batch,
+--     and closed to a Viewer entirely. This one is a plain read.
+--
+-- WHAT IS COPIED VERBATIM FROM THE getPrefix ARM, and must stay copied: the
+-- prefix triple (the range bounds are ONLY the index driver, starts_with() is
+-- the semantics and knows no metacharacters, never a LIKE), the EXCLUSIVE
+-- keyset cursor on `key` under COLLATE "C", `LIMIT v_limit + 1` as the
+-- truncation probe, the aggregate byte budget, and the clamped limit. Page 135
+-- of 27k is one index-range read exactly like page 1 — which is why OFFSET was
+-- never an option and why `nextAfter` is a key and not a number.
+--
+-- THE EMPTY PREFIX NEEDS NO SPECIAL CASE, and that is worth writing down
+-- because the defensive-looking form is the worse one. `key >= ''` is true for
+-- every text and is still a legal lower bound on the index; kv_prefix_end_v1('')
+-- is NULL, so there is no upper bound; starts_with(key, '') is true. Listing the
+-- whole namespace therefore falls out of the same three lines. Wrapping them in
+-- `p_prefix <> '' OR (…)` would change no answer and would turn three Index
+-- Conds into an OR the planner cannot fold once plpgsql promotes this statement
+-- to a GENERIC plan — the exact trap queen.log_timers_count_v1
+-- (025_log_timers.sql) documents at length and splits into two statements to
+-- avoid. The expiry predicate is wrapped, because there the OR is the feature
+-- and it is a heap filter either way: no index carries expires_at for this
+-- table except the sweeper's partial one, which is keyed by shard.
+--
+-- THE THREE CONSTANTS ARE A DUPLICATE, deliberately. C_PREFIX_DEFAULT,
+-- C_PREFIX_CAP and C_MAX_READ_BYTES are DECLARE-local constants of
+-- queen.kv_apply_v1; plpgsql has no way to share a DECLARE block, this file has
+-- no constants table, and inventing one for three integers would be a new
+-- pattern to keep aligned rather than one. They are duplicated here and their
+-- twin in kv_apply_v1 carries a note naming this function: whoever changes one
+-- changes both, and QUEEN_KV_PREFIX_LIMIT / QUEEN_KV_MAX_READ_BYTES at the
+-- broker edge with them.
+--
+-- ISOLATION (§13.1): p_tenant is an ARGUMENT and part of the primary key, never
+-- a filter applied to an identifier the caller presented. p_namespace goes
+-- through kv_check_names_v1, because nothing registers a namespace and an
+-- unvalidated typo does not fail — it mints a phantom namespace that reads
+-- empty forever. p_prefix is FREE TEXT and is NOT a key: it may be empty, and a
+-- prefix longer than the 512-byte key ceiling is simply a range that matches
+-- nothing, so putting it through the key rules would refuse a question that has
+-- a perfectly good answer.
+--
+-- STABLE, not IMMUTABLE and not VOLATILE, like queen.log_timers_list_v1: it
+-- reads a table and writes nothing. No PARALLEL SAFE marking, for the same
+-- reason its two siblings in 025 carry none — the pure helpers of §6.1 are the
+-- only functions in this file that claim it.
+-- ============================================================================
+CREATE OR REPLACE FUNCTION queen.kv_list_v1(
+    p_tenant          UUID,
+    p_namespace       TEXT,
+    p_prefix          TEXT,
+    p_after           TEXT,
+    p_limit           INT,
+    p_keys_only       BOOLEAN,
+    p_include_expired BOOLEAN
+) RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    -- TWIN: queen.kv_apply_v1's DECLARE block (see the header). Change both.
+    C_PREFIX_DEFAULT  CONSTANT INT    := 100;
+    C_PREFIX_CAP      CONSTANT INT    := 1000;       -- QUEEN_KV_PREFIX_LIMIT
+    C_MAX_READ_BYTES  CONSTANT BIGINT := 4194304;    -- QUEEN_KV_MAX_READ_BYTES, 4 MiB
+
+    -- ONE instant for the whole call (§5.7), and it is now() and not
+    -- clock_timestamp(): the transaction timestamp, already in memory. Every row
+    -- of a page is therefore judged alive or expired against the SAME instant —
+    -- a page cannot show one key alive and the next dead by a few microseconds.
+    v_now       TIMESTAMPTZ := now();
+    v_prefix    TEXT        := COALESCE(p_prefix, '');
+    -- '' is not a cursor, it is "no cursor": the first page of a listing whose
+    -- caller zeroed the field rather than omitting it must not be the page after
+    -- the empty string, which under COLLATE "C" is every key.
+    v_after     TEXT        := NULLIF(p_after, '');
+    v_keys_only BOOLEAN     := COALESCE(p_keys_only, FALSE);
+    v_expired   BOOLEAN     := COALESCE(p_include_expired, FALSE);
+    -- CLAMPED, never rejected: a 400 on a too-high limit is an error the user
+    -- cannot fix without reading the server's configuration (§5.5).
+    v_limit     INT := LEAST(GREATEST(COALESCE(p_limit, C_PREFIX_DEFAULT), 1), C_PREFIX_CAP);
+    -- The whole budget belongs to this one page: unlike kv_apply_v1 there is no
+    -- batch to share it with, so there is nothing to subtract before the read.
+    v_read_left BIGINT := C_MAX_READ_BYTES;
+    v_end       TEXT;
+    v_rows      JSONB;
+    v_bytes     BIGINT;
+    v_kept      BIGINT;
+    v_total     BIGINT;
+    v_last      TEXT;
+    v_trunc     BOOLEAN;
+BEGIN
+    -- A NULL tenant would not raise: `tenant_id = NULL` is NULL, the WHERE is
+    -- never true and the caller gets an empty namespace back, which reads as
+    -- "this tenant has no keys". Direct SQL callers are part of the supported
+    -- deployment model (§13.1), so the mistake fails loudly here, the way
+    -- queen.log_timers_count_v1 makes it fail.
+    IF p_tenant IS NULL THEN
+        RAISE EXCEPTION 'kv_bad_request'
+            USING ERRCODE = '22023', DETAIL = 'kv_list_v1 needs a tenant';
+    END IF;
+
+    -- kv_check_names_v1 validates a (namespace, key) PAIR and has no
+    -- namespace-only form. The second argument is a constant that satisfies the
+    -- key rules by construction, so what this call asserts is the NAMESPACE
+    -- charset and nothing else. Deliberately not p_prefix: the prefix is free
+    -- text (see the header), and sending it through would make the empty
+    -- prefix — the console's ordinary case — raise kv_bad_key.
+    PERFORM queen.kv_check_names_v1(p_namespace, 'kv_list_v1');
+
+    v_end := queen.kv_prefix_end_v1(v_prefix);
+
+    WITH page AS (
+        SELECT k.key, k.value, k.version, k.expires_at, k.updated_at,
+               CASE WHEN v_keys_only THEN 0 ELSE octet_length(k.value::text) END AS blen,
+               row_number() OVER (ORDER BY k.key) AS rn
+          FROM queen.kv k
+         WHERE k.tenant_id = p_tenant
+           AND k.namespace = p_namespace
+           AND k.key >= v_prefix
+           AND (v_end IS NULL OR k.key < v_end)
+           AND starts_with(k.key, v_prefix)
+           AND (v_after IS NULL OR k.key > v_after)
+           -- The ONE place this function departs from its twin: the liveness
+           -- predicate is optional. It is still queen.kv_live_v1 and never a
+           -- hand-copied `expires_at > now()`, so reader and sweeper keep the
+           -- one boundary they agree on (§5.7).
+           AND (v_expired OR queen.kv_live_v1(k.expires_at, v_now))
+         ORDER BY k.key
+         LIMIT v_limit + 1
+    ),
+    acc AS (
+        SELECT p.*,
+               sum(p.blen) OVER (ORDER BY p.rn ROWS UNBOUNDED PRECEDING) - p.blen
+                   AS before_bytes
+          FROM page p
+    ),
+    kept AS (
+        -- A ceiling on the number of keys is not a ceiling on bytes: 1000 keys
+        -- of 64 KiB are 64 MB, and the real resource is the byte (§5.5). The row
+        -- that straddles the budget is included, then the page stops — so a
+        -- namespace of fat values still pages, one row at a time if it must,
+        -- instead of answering 413 forever.
+        SELECT * FROM acc WHERE rn <= v_limit AND before_bytes < v_read_left
+    )
+    -- BOTH STAMPS ARE RENDERED IN UTC, EXPLICITLY. Handing a timestamptz to
+    -- jsonb_build_object formats it through the session's TimeZone and
+    -- DateStyle GUCs — nothing in the broker pins either — so the same row
+    -- answers `…+00:00` here and `…+02:00` on a cell whose Postgres was
+    -- installed in Rome. `to_char(… AT TIME ZONE 'UTC', …"Z")` is the house
+    -- render (tests/procedures_timezone.rs, sixteen procedure files), and the
+    -- parenthesis-free form matters: AT TIME ZONE binds tighter than any
+    -- operator that could appear in the argument. NULL-safe by construction, so
+    -- a forever key stays `expiresAt: null` rather than becoming a string.
+    --
+    -- Its twin, the `getPrefix` arm above, still emits the raw timestamptz: that
+    -- is a SHIPPED wire shape with seven clients on it, and changing it is not
+    -- this workstream's to make. A new surface starts on the convention.
+    SELECT COALESCE(jsonb_agg(
+               CASE WHEN v_keys_only
+                    THEN jsonb_build_object(
+                             'key', kept.key, 'version', kept.version,
+                             'expiresAt', to_char(kept.expires_at AT TIME ZONE 'UTC',
+                                                  'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+                             'updatedAt', to_char(kept.updated_at AT TIME ZONE 'UTC',
+                                                  'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+                             'expired', NOT queen.kv_live_v1(kept.expires_at, v_now))
+                    ELSE jsonb_build_object(
+                             'key', kept.key, 'value', kept.value,
+                             'version', kept.version,
+                             'expiresAt', to_char(kept.expires_at AT TIME ZONE 'UTC',
+                                                  'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+                             'updatedAt', to_char(kept.updated_at AT TIME ZONE 'UTC',
+                                                  'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+                             'expired', NOT queen.kv_live_v1(kept.expires_at, v_now))
+               END ORDER BY kept.key), '[]'::jsonb),
+           COALESCE(sum(kept.blen), 0)::bigint,
+           count(*)::bigint,
+           max(kept.key),
+           (SELECT count(*) FROM acc)::bigint
+      INTO v_rows, v_bytes, v_kept, v_last, v_total
+      FROM kept;
+
+    v_trunc := v_kept < v_total;
+
+    -- `after` is an EXCLUSIVE keyset cursor, not an offset: stable under
+    -- COLLATE "C" and aligned with the index order, so no Sort node and no
+    -- rows re-read. Every page is its own READ COMMITTED snapshot — it is NOT a
+    -- snapshot of the namespace, and with `after` it may miss a key inserted
+    -- behind the cursor. Fine for browsing state, not for an exact count, which
+    -- is what the header's `≈` is for.
+    --
+    -- `bytes` is the VALUE bytes this page charged against the 4 MiB budget —
+    -- octet_length(value::text) summed over the rows — and it is therefore 0 on
+    -- a keysOnly page, which is exactly why a keysOnly page stops at the row
+    -- limit and nowhere else. It is returned rather than left to the client to
+    -- add up because the budget is a SERVER-side number the client cannot
+    -- reconstruct: jsonb's text form spaces its separators where JSON.stringify
+    -- does not, so a browser measuring the same rows is a byte or two under the
+    -- figure the budget was actually spent against.
+    RETURN jsonb_build_object(
+        'rows',      v_rows,
+        'truncated', v_trunc,
+        'nextAfter', CASE WHEN v_trunc THEN v_last ELSE NULL END,
+        'bytes',     v_bytes);
+END;
+$$;
+
+
+-- ============================================================================
+-- queen.kv_namespaces_v1(p_tenant) -> JSONB
+--
+-- [{"namespace": …, "keys": …}], ordered by namespace — byte order, because the
+-- column carries COLLATE "C" (§2.3), the same order every listing in this file
+-- comes back in.
+--
+-- The console's namespace selector, and the only place the product enumerates
+-- namespaces at all. Nothing registers one: a namespace exists if and only if a
+-- row exists, exactly like a queue (003_log_push.sql:96-126), so the list can
+-- only ever be DERIVED from the rows. That is also why the charset is validated
+-- on the write paths — without it a typo mints a phantom namespace that would
+-- show up in this very selector and read empty forever.
+--
+-- COST, stated here rather than discovered later: Θ(keys of the tenant), and
+-- the SHAPE of that scan depends on how selective the tenant is. On a cell with
+-- many tenants it is an index-only scan of the primary key grouping on its
+-- second column — no heap access, no detoast of a single value. On a cell where
+-- one tenant IS most of queen.kv, the planner picks a sequential scan of the
+-- table instead (measured on the rig: HashAggregate over Seq Scan), which is
+-- the same asymptotics and a different operational shape. Milliseconds either
+-- way at the tens of thousands of keys a cell holds today. If a tenant ever
+-- reaches millions, the answer is a NEW snapshot of this population, NOT an
+-- OFFSET and NOT a LIMIT here: a truncated namespace list is a selector that
+-- silently hides a namespace, which is worse than a slow one. It is also not
+-- queen.kv_usage — see the paragraph below, which is the whole reason that
+-- escape hatch is not one.
+--
+-- `keys` counts ROWS, including rows whose expiry has passed and whose sweep has
+-- not happened yet: an expired row is not a live key, but it is still an
+-- occupied one, and the console lists it greyed (§2.5 D5) rather than hiding it.
+--
+-- THIS IS NOT THE POPULATION queen.kv_usage MEASURES, and the dashboard renders
+-- both figures on one screen, so the difference is load-bearing.
+-- queen.kv_usage_step_v1 (026_kv_sweeper.sql) counts LIVE rows only, on a
+-- five-minute cadence, and above its sampling threshold it reads a subset of
+-- shards and multiplies by a scale factor. This function counts every row of
+-- one namespace, exactly, now. So the selector's per-namespace number can
+-- legitimately EXCEED the tenant-wide figure in the page header — which is why
+-- the header labels its own `≈` and this one is labelled exact. Adding a
+-- liveness filter here to make the two agree would break D5 and make the
+-- selector disagree with the page it fills instead.
+-- ============================================================================
+CREATE OR REPLACE FUNCTION queen.kv_namespaces_v1(p_tenant UUID)
+RETURNS JSONB
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+    v_out JSONB;
+BEGIN
+    -- Same reason as kv_list_v1: a NULL tenant reads as "no keys" instead of
+    -- failing, and this function's whole job is to say which namespaces exist.
+    IF p_tenant IS NULL THEN
+        RAISE EXCEPTION 'kv_bad_request'
+            USING ERRCODE = '22023', DETAIL = 'kv_namespaces_v1 needs a tenant';
+    END IF;
+
+    SELECT COALESCE(jsonb_agg(jsonb_build_object('namespace', g.namespace,
+                                                 'keys',      g.keys)
+                              ORDER BY g.namespace), '[]'::jsonb)
+      INTO v_out
+      FROM (SELECT k.namespace, count(*)::bigint AS keys
+              FROM queen.kv k
+             WHERE k.tenant_id = p_tenant
+             GROUP BY k.namespace) g;
+
+    RETURN v_out;
+END;
+$$;
+
+
 GRANT EXECUTE ON FUNCTION queen.kv_live_v1(TIMESTAMPTZ, TIMESTAMPTZ) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.kv_ver_v1(BIGINT, TIMESTAMPTZ, TIMESTAMPTZ) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.kv_num_v1(JSONB, TIMESTAMPTZ, TIMESTAMPTZ) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.kv_prefix_end_v1(TEXT) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.kv_check_names_v1(TEXT, TEXT) TO PUBLIC;
 GRANT EXECUTE ON FUNCTION queen.kv_apply_v1(JSONB, UUID, TIMESTAMPTZ, BOOLEAN) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.kv_list_v1(UUID, TEXT, TEXT, TEXT, INT, BOOLEAN, BOOLEAN) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION queen.kv_namespaces_v1(UUID) TO PUBLIC;

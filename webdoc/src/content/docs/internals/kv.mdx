@@ -11,6 +11,7 @@ sourceOfTruth:
   - server/src/handlers/kv.rs
   - server/src/config.rs
 # sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): kv_list_v1 and kv_namespaces_v1 are new console reads; the liveness section now names the one read that reports an expired row instead of hiding it, and the index section says why the whole-namespace listing needs no index of its own.
 ---
 
 `queen.kv` is one table, one sequence, two small side tables and a set of pure helpers. The product
@@ -130,6 +131,14 @@ anything has deleted it, so the prune is a disk-space job and never a correctnes
 one, is `0`. That is what lets `expect: 0` mean "must not exist" with no magic flag, and it is why a
 compare-and-set against a dead lineage cannot succeed.
 
+One read is allowed to see past it, and it says so on every row. `kv_list_v1`, the console's
+keyset page, takes the liveness filter as a parameter: with `includeExpired` it returns rows whose
+instant has passed and whose sweep has not happened yet, each carrying `expired: true`. That is not
+a second definition of existence, it is the first one reported instead of applied, because a console
+that hid those rows would disagree with the namespace count beside it, and an expired row is still
+an occupied one. No other read uses that mode: the batch route, the path routes and every
+precondition stay on the predicate.
+
 Both helpers take `now` as a **parameter** rather than calling `clock_timestamp()` inside themselves,
 so one call to `kv_apply_v1` uses one instant for its whole batch. A `getMany` can never see one key
 alive and the next dead a few microseconds later. For the same reason none of the pure helpers is
@@ -149,7 +158,10 @@ in it, and `shard` leads because the sweeper filters by shard and then range-sca
 
 Not created, with the reason recorded next to each: an index on `updated_at`, which `queen_streams.state`
 carries and no reader queries, and which would make every counter update non-HOT; and an index on
-`value`, which has no query to serve because the declared read boundary is keys and prefixes.
+`value`, which has no query to serve because the declared read boundary is keys and prefixes. The
+console's whole-namespace listing does not change that: its empty prefix is still a range on the
+primary key, and `kv_namespaces_v1` is a deliberate Theta(keys of the tenant) aggregate with no
+`OFFSET` and no index of its own.
 
 <Aside type="caution">
 `vacuum_truncate = off` on this table is not only the defence against the wobble class that

@@ -28,6 +28,7 @@ verifiedBy:
   - clients/client-js/test-v2/consume.js
   - clients/client-js/test-v2/transaction.js
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): QUEUE_DEFAULTS is nine keys, the configure bullets are rewritten for the merge rule, and retryMessage carries the move primitive's consequences.
 ---
 
 One npm package, `queen-mq`, carries both the broker client and the streaming SDK. It is
@@ -180,17 +181,23 @@ terminal methods are `push()`, `pop()`, `consume()`, `create()`, `delete()`, `dl
 | `create()` | `POST /api/v1/configure` | `OperationBuilder` |
 | `delete()` | `DELETE /api/v1/resources/queues/:queue` | `OperationBuilder`. Throws immediately if the builder has no queue name. |
 
-`QUEUE_DEFAULTS`, the object `config()` merges into, carries `leaseTime`, `retryLimit`,
-`delayedProcessing`, `windowBuffer`, `retentionSeconds`, `completedRetentionSeconds` and
-`encryptionEnabled`, with the values listed under
+`QUEUE_DEFAULTS`, the object `config()` merges into, carries nine keys: `leaseTime`,
+`retryLimit`, `priority`, `delayedProcessing`, `windowBuffer`, `maxSize`, `retentionSeconds`,
+`completedRetentionSeconds` and `encryptionEnabled`, with the values listed under
 [Queue option defaults](/reference/defaults#queue-option-defaults).
 
 Keys you add to `config()` are sent verbatim, so any option `/configure` accepts can be set
 even though it is not in the defaults object. Two things follow:
 
-- **`/configure` is a full replace**, not a patch: send the complete intended configuration
-  every time. The mechanics and the full option list are in
-  [Queue options](/reference/queue-options/).
+- **`/configure` merges** since 1.6.0: an option the body does not carry keeps the value the
+  queue already has, an explicit `null` restores that option's default, and top-level
+  `"mode": "replace"` puts back the pre-1.6.0 behaviour of resetting everything the body omits.
+  This client has no `mode` setter, so `create()` always merges. The mechanics and the full
+  option list are in [Queue options](/reference/queue-options/).
+- Because `config()` merges over `QUEUE_DEFAULTS`, those nine keys are on the wire whether you
+  named them or not, so they land on the client's default rather than on the queue's stored
+  value. The twelve options outside that object, `dedupWindowSeconds` and `retentionEnabled`
+  among them, are the ones a partial call now leaves alone.
 - Calling `create()` without `config()` sends `QUEUE_DEFAULTS` as-is, which means
   `leaseTime: 300`, whereas a queue created implicitly by a first push gets a 60-second lease.
 
@@ -374,6 +381,18 @@ disabling `handleSignals` without calling `close()` loses buffered messages on `
 
 The DLQ is read-only through this builder. Replay lives on the admin façade:
 `admin.retryMessage(partitionId, transactionId)`.
+
+Since 1.6.0 that route runs on a **move**: one transaction claims the newest
+dead-letter row at the address, pushes it back into the log and deletes the row,
+and the replayed message carries the deterministic transaction id
+`dlq:<dead-letter row id>`. Two consequences for a caller. A second call for the
+same address answers `404`, because the row is gone, so a retry after a lost
+response is safe rather than a second copy. And when the destination's dedup
+window already holds that transaction id the verdict is `result: "duplicate"`,
+which means nothing was written **and the dead-letter row was kept**
+(`dlqRowRemoved: false`). The shape of the 200 body is a superset of what this
+method has always returned, so nothing that parses `replayedAs` needs changing.
+See [Messages and dead letters](/reference/http/messages-dlq).
 
 ## `TransactionBuilder`
 

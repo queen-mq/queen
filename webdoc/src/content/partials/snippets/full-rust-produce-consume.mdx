@@ -80,9 +80,10 @@ async fn run() -> Result<usize, String> {
     // and this program owns its own shutdown.
     let queen = Queen::connect(Config::new(&url)).map_err(|e| e.to_string())?;
 
-    // configure() sends the whole configuration and is a full replace: keys you
-    // leave out go back to the broker's defaults rather than keeping a previous
-    // value.
+    // /configure merges: an option the body does not carry keeps the value the
+    // queue already has, and QueueOptions skips its None fields, so this call
+    // sends the two below and nothing else. The queue name is unique per run, so
+    // nothing is being kept here and the rest lands on its default.
     queen
         .queue(&queue)
         .configure(QueueOptions {

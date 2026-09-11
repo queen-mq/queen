@@ -468,7 +468,9 @@ runs (it has to) and `maxWaitTimeSeconds` still evicts if set. Every one of thos
 value the code applies when you omit it, is on [Queue options](/reference/queue-options/), and the
 operator's view of the same cycle is [Retention](/deploy/operations/).
 
-Remember that `/configure` is a full replace: omitting `retentionEnabled` resets it to its default.
+Since 1.6.0 `/configure` merges, so omitting `retentionEnabled` on an edit leaves it as it is.
+It still goes back to its default on a create, on an explicit `null`, and under
+`"mode": "replace"`, which is what a manifest applied with `queenctl apply -f` sends.
 
 Partition cleanup is the one phase that is **not** per-queue and not opt-in per queue: it is a broker-wide
 knob (`PARTITION_CLEANUP_DAYS`, off with `QUEEN_PARTITION_CLEANUP_ENABLED=false`), and it applies to every

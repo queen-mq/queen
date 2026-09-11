@@ -742,8 +742,11 @@ pub async fn transaction(
 // ---------------------------------------------------------------- configure
 // Create/update a queue's options via queen.configure_queue_v1 (012_configure).
 // `opts_json`
-// is the options object as JSON text. Returns the SP result JSON as text:
-// {configured, queueId, partitionId, queue, namespace, task, options:{all 15}}.
+// is the options object as JSON text, INCLUDING the `replace` directive the
+// handler derives from the body's `mode` (absent there means merge, so a caller
+// that builds this bag by hand merges too). Returns the SP result JSON as text:
+// {configured, queueId, partitionId, queue, namespace, task, options:{all 19}} —
+// the effective configuration, not the request.
 pub async fn configure_queue(
     client: &deadpool_postgres::Client,
     queue: &str,
@@ -1118,29 +1121,129 @@ pub async fn get_dlq_messages(
         .unwrap_or_else(|| "{\"messages\":[]}".to_string()))
 }
 
-// Resolve a dead-lettered address to (queue name, partition name, payload
-// snapshot JSON) — the three things a replay needs. Returns None when the
-// address has no queen.log_dlq row (a live message: its payload lives in an
-// immutable segment and there is nothing to replay).
-pub async fn dlq_row_for_replay(
+// ------------------------------------------------------------- dlq replay
+// One dead-letter row, as much of it as a MOVE needs: where it came from, the
+// snapshot to re-pack, and the identity it carried. `id` is the row's own
+// primary key — the address the move primitive takes, and the `id` the DLQ
+// listing already returns to the dashboard.
+//
+// `payload` is the snapshot VERBATIM, so on an encryption-enabled queue it is
+// the {encrypted,iv,authTag} envelope; decrypting is the caller's job (it holds
+// the key) and re-encrypting is decided by the DESTINATION queue, which the
+// caller may have overridden.
+pub struct DlqRow {
+    pub id: String,
+    pub queue: String,
+    pub partition: String,
+    pub payload: String,
+    pub transaction_id: Option<String>,
+    pub consumer_group: String,
+}
+
+// The SELECT list both loaders share. `d.id::text` because the broker holds no
+// uuid type (uuids cross this layer as TEXT and are cast in SQL).
+const DLQ_ROW_COLUMNS: &str = "d.id::text, q.name, p.name, \
+     COALESCE(d.payload, 'null'::jsonb)::text, d.transaction_id, d.consumer_group";
+
+fn dlq_row_from(r: &tokio_postgres::Row) -> DlqRow {
+    DlqRow {
+        id: r.get::<_, String>(0),
+        queue: r.get::<_, String>(1),
+        partition: r.get::<_, String>(2),
+        payload: r.get::<_, String>(3),
+        transaction_id: r.get::<_, Option<String>>(4),
+        consumer_group: r.get::<_, String>(5),
+    }
+}
+
+// Read ONE dead-letter row by its id, scoped to the tenant. The tenant join is
+// not decoration: the replay route is addressed by row id alone, so this query
+// is the boundary that keeps a foreign row's queue name and payload from ever
+// being read — the move SP repeats the same predicate under the lock, but by
+// then the broker would already have decrypted and re-packed the snapshot.
+// None = no such row for this tenant, which the route reports exactly as the SP
+// reports it: gone.
+pub async fn dlq_row_for_move(
     client: &deadpool_postgres::Client,
+    tenant: &str,
+    dlq_id: &str,
+) -> Result<Option<DlqRow>, tokio_postgres::Error> {
+    let stmt = format!(
+        "SELECT {DLQ_ROW_COLUMNS} \
+         FROM queen.log_dlq d \
+         JOIN queen.log_partitions p ON p.id = d.partition_id \
+         JOIN queen.queues q ON q.id = p.queue_id \
+         WHERE d.id = $1::text::uuid AND q.tenant_id = $2::text::uuid"
+    );
+    let rows = client.query(stmt.as_str(), &[&dlq_id, &tenant]).await?;
+    Ok(rows.first().map(dlq_row_from))
+}
+
+// Resolve a dead-lettered ADDRESS to the row the legacy retry route moves.
+//
+// (partition_id, transaction_id) can carry one row PER CONSUMER GROUP, and the
+// address alone does not say which one the caller meant. `ORDER BY failed_at
+// DESC LIMIT 1` is the choice the route has always made — the newest failure is
+// the one an operator is looking at — and the move then removes exactly that
+// row, which is the fix for the old replay deleting every group's record while
+// re-pushing a single snapshot.
+pub async fn dlq_newest_row_for_address(
+    client: &deadpool_postgres::Client,
+    tenant: &str,
     partition_id: &str,
     txn: &str,
-) -> Result<Option<(String, String, String)>, tokio_postgres::Error> {
-    let stmt = "SELECT q.name, p.name, COALESCE(d.payload, 'null'::jsonb)::text \
-                FROM queen.log_dlq d \
-                JOIN queen.log_partitions p ON p.id = d.partition_id \
-                JOIN queen.queues q ON q.id = p.queue_id \
-                WHERE d.partition_id = $1::text::uuid AND d.transaction_id = $2 \
-                ORDER BY d.failed_at DESC LIMIT 1";
-    let rows = client.query(stmt, &[&partition_id, &txn]).await?;
-    Ok(rows.first().map(|r| {
-        (
-            r.get::<_, String>(0),
-            r.get::<_, String>(1),
-            r.get::<_, String>(2),
+) -> Result<Option<DlqRow>, tokio_postgres::Error> {
+    let stmt = format!(
+        "SELECT {DLQ_ROW_COLUMNS} \
+         FROM queen.log_dlq d \
+         JOIN queen.log_partitions p ON p.id = d.partition_id \
+         JOIN queen.queues q ON q.id = p.queue_id \
+         WHERE d.partition_id = $1::text::uuid AND d.transaction_id = $2 \
+           AND q.tenant_id = $3::text::uuid \
+         ORDER BY d.failed_at DESC LIMIT 1"
+    );
+    let rows = client
+        .query(stmt.as_str(), &[&partition_id, &txn, &tenant])
+        .await?;
+    Ok(rows.first().map(dlq_row_from))
+}
+
+// Move one dead-letter row back into the log: claim it under a lock, push the
+// broker-packed one-frame segment through queen.log_push_one_v1, delete the
+// row — ONE transaction (016_messages). `hashes` is the frame's 16-byte
+// xxh3_128 txn fingerprint and `blob` is zstd(pack_frames([frame])), the same
+// recipe the fusion flush and the timer fire produce.
+//
+// Returns the SP verdict as text: {result: moved|duplicate, queue, partition,
+// offset, messageId, transactionId, consumerGroup}, or {result:'gone'} when the
+// row is not there under this tenant (already replayed, purged, or foreign).
+//
+// NO `admission::note_commit`, deliberately, for the reason the KV/timer calls
+// state: this is a rare operator action and feeding it into the arbiter's push
+// lane would skew the cadence estimate the push fusion sizes itself from,
+// without the arbiter ever being able to tell the two kinds of work apart.
+pub async fn log_dlq_move(
+    client: &deadpool_postgres::Client,
+    tenant: &str,
+    dlq_id: &str,
+    queue: &str,
+    partition: &str,
+    hashes: &[u8],
+    blob: &[u8],
+) -> Result<String, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached(
+            "SELECT (queen.log_dlq_move_v1($1::text::uuid, $2::text::uuid, $3, $4, \
+             $5::bytea, $6::bytea))::text",
         )
-    }))
+        .await?;
+    let row = client
+        .query_one(
+            &stmt,
+            &[&tenant, &dlq_id, &queue, &partition, &hashes, &blob],
+        )
+        .await?;
+    Ok(row.get(0))
 }
 
 // Delete a message addressed by (partition_id, transaction_id). The log engine
@@ -2495,6 +2598,77 @@ pub async fn kv_apply(
         )
         .await?;
     let row = client.query_one(&stmt, &[&ops_json, &tenant, &in_wire]).await?;
+    Ok(row.get(0))
+}
+
+// ------------------------------------------------------------- kv, the console
+// PLAN_DASHBOARD_ACTIONS.md §2.5 — the two reads the dashboard's KV browser is
+// built on. They are NOT `kv_apply` with a `getPrefix` op, and the difference is
+// the whole point of the workstream: `getPrefix` requires a prefix (§5.5), never
+// returns an expired row (§5.7), and reaches the cell as a `Gated(Kv, Mixed)`
+// batch the proxy closes to a Viewer. A console list is the other shape of the
+// same read — whole namespace, cursor-paged, expired rows visible and labelled,
+// classified `Read` by the proxy because it lives under `/api/v1/resources`.
+//
+// Both bind `p_tenant` here, in this file, for the reason the section header
+// above gives: there is no RLS on that table, the isolation IS the WHERE clause
+// inside the stored procedure, and `tests/kv_handler_isolation.rs` fails the
+// build the moment a handler writes its own SQL instead.
+
+/// One keyset page of one namespace. `after` is the EXCLUSIVE cursor — the last
+/// key of the previous page — and `None` asks for the first page; `limit` is
+/// `None` for the stored procedure's own default (100) and is CLAMPED there,
+/// never rejected, with `truncated` telling the truth.
+///
+/// `include_expired` is a CONSOLE decision, not a default anyone inherited: an
+/// expired row still occupies the tenant's key allowance and still shows in the
+/// sweeper's `kv_rows`, so a browser that hid it would report a number its own
+/// list contradicts. The row carries `expired` and the page greys it.
+#[allow(clippy::too_many_arguments)]
+pub async fn kv_list(
+    client: &deadpool_postgres::Client,
+    tenant: &str,
+    namespace: &str,
+    prefix: &str,
+    after: Option<&str>,
+    limit: Option<i32>,
+    keys_only: bool,
+    include_expired: bool,
+) -> Result<String, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached(
+            "SELECT (queen.kv_list_v1($1::text::uuid, $2, $3::text, $4::text, $5::int, \
+             $6::bool, $7::bool))::text",
+        )
+        .await?;
+    let row = client
+        .query_one(
+            &stmt,
+            &[&tenant, &namespace, &prefix, &after, &limit, &keys_only, &include_expired],
+        )
+        .await?;
+    Ok(row.get(0))
+}
+
+/// Every namespace of one tenant with its key count, ordered by namespace.
+///
+/// Θ(keys of the tenant), and that is written in the stored procedure's own
+/// header with the escape hatch beside it, so that nobody reaches for an OFFSET
+/// instead — a truncated namespace list is a selector that silently hides a
+/// namespace. The hatch is a NEW snapshot of this population, should a tenant
+/// ever reach millions of keys; explicitly NOT the sweeper's (026_kv_sweeper),
+/// which counts live rows only, sampled above its threshold, while this counts
+/// every row exactly and now. The two numbers are rendered on one screen and are
+/// allowed to disagree — see the header's last paragraph, which is the whole
+/// reason that snapshot is not the hatch.
+pub async fn kv_namespaces(
+    client: &deadpool_postgres::Client,
+    tenant: &str,
+) -> Result<String, tokio_postgres::Error> {
+    let stmt = client
+        .prepare_cached("SELECT (queen.kv_namespaces_v1($1::text::uuid))::text")
+        .await?;
+    let row = client.query_one(&stmt, &[&tenant]).await?;
     Ok(row.get(0))
 }
 

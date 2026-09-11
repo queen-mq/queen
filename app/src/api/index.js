@@ -1,4 +1,5 @@
 import client from './client'
+import { timerAddr, timerQueueAddr } from './timerPath'
 
 // ===========================================================================
 // TWO SURFACES, AND THE CALL SITE MUST SAY WHICH.
@@ -30,10 +31,25 @@ export const resources = {
 // ============================================
 // QUEUES API (tenant-scoped)
 // ============================================
+// A queue name is arbitrary caller text — the push path creates whatever name it
+// is given, and `/configure` accepts even '' — so it is ENCODED into every path
+// that addresses one. Unencoded, a name carrying '#', '?' or '/' silently
+// addresses a DIFFERENT queue (`/queues/a#b` resolves to `/queues/a`), which is
+// worse than a failure: the editor would prefill from one queue and save to
+// another.
 export const queues = {
   list: (params, config) => client.get('/api/v1/resources/queues', { params, ...config }),
-  get: (name, config) => client.get(`/api/v1/resources/queues/${name}`, config),
-  delete: (name, config) => client.delete(`/api/v1/resources/queues/${name}`, config),
+  get: (name, config) => client.get(`/api/v1/resources/queues/${encodeURIComponent(name)}`, config),
+  delete: (name, config) =>
+    client.delete(`/api/v1/resources/queues/${encodeURIComponent(name)}`, config),
+  /**
+   * Create or reconfigure a queue. `{queue, namespace?, task?, options:{...}, mode?}`.
+   * `mode` is 'merge' (default: an option the body does not mention keeps its
+   * current value, `null` restores the default) or 'replace' (every option is
+   * reset to its default unless given, the declarative form `queenctl apply`
+   * uses). PLAN_DASHBOARD_ACTIONS.md §2.2. QueueAdmin at the proxy.
+   */
+  configure: (body, config) => client.post('/api/v1/configure', body, config),
 }
 
 // ============================================
@@ -99,11 +115,10 @@ export const messages = {
     client.delete(addr(partitionId, transactionId), config),
   push: (data, config) => client.post('/api/v1/push', data, config),
 
-  // NO retry / move-to-DLQ here: the broker registers only GET and DELETE on
-  // /api/v1/messages/:pid/:txid (server/src/main.rs). A POST fell through to the
-  // static fallback, which answers 200 text/html to any method, so the caller
-  // reported a success that never happened. Restore these only together with the
-  // routes — a control that cannot verify its own outcome does not ship.
+  // No retry here on purpose. The broker's POST .../retry addresses a dead
+  // letter by (partition, transaction id), which can name one row per consumer
+  // group; the dashboard replays by DLQ row id instead (`dlq.replay`), so the
+  // control acts on exactly the row on screen. No move-to-DLQ: no such route.
 }
 
 // ============================================
@@ -122,8 +137,11 @@ export const traces = {
 // ============================================
 export const analytics = {
   getQueues: (params, config) => client.get('/api/v1/status/queues', { params, ...config }),
+  // Encoded for the same reason `queues.get` is: this is the read Queue Detail
+  // renders its numbers from, and a name with a '#' in it would quietly show
+  // another queue's.
   getQueueDetail: (name, params, config) =>
-    client.get(`/api/v1/status/queues/${name}`, { params, ...config }),
+    client.get(`/api/v1/status/queues/${encodeURIComponent(name)}`, { params, ...config }),
 }
 
 // ============================================
@@ -163,8 +181,84 @@ export const dlq = {
   /** Purge one DLQ entry. 200 {success:false} when nothing matched — check it. */
   delete: (partitionId, transactionId, config) =>
     client.delete(addr(partitionId, transactionId), config),
-  // No replay: the broker has no re-push route for a DLQ snapshot. See the note
-  // in `messages` — this used to POST a path that does not exist.
+  /**
+   * Replay ONE dead-letter row, addressed by its row id (the `id` the list
+   * returns), on the broker's move primitive: lock + push + delete in one
+   * transaction, deterministic transaction id `dlq:<id>`, so a second click
+   * answers 404 `gone` instead of pushing twice (PLAN_DASHBOARD_ACTIONS.md
+   * §2.3). Body `{}` replays to the origin queue/partition; `{queue, partition}`
+   * moves it elsewhere in the same tenant. QueueAdmin at the proxy, and
+   * push-blocked like a push because it grows retained bytes.
+   */
+  replay: (id, body = {}, config) =>
+    client.post(`/api/v1/dlq/${encodeURIComponent(id)}/replay`, body, config),
+}
+
+// ============================================
+// KV BROWSER API (tenant-scoped, read-only)
+// ============================================
+// The console's view of the KV store (PLAN_DASHBOARD_ACTIONS.md §2.5). NOT the
+// batch route `POST /api/v1/kv`: that one is Gated(Kv, Mixed) at the proxy, so a
+// Viewer cannot call it at all, it is metered as a KV batch, and `getPrefix`
+// requires a prefix. These two live under /api/v1/resources, which the proxy
+// classifies Read by prefix and method-agnostically — no feature gate, no quota.
+//
+// `list` is a POST because the cursor is a KEY. A key in a query string
+// (`?after=wh.deliver:promotion-publication:b15f…`) is exactly the leak
+// PLAN_KV_TIMERS.md §5.5 forbids, through four components' access logs.
+//
+// Keyset paging: `{rows, truncated, nextAfter}`. `after` is an EXCLUSIVE cursor
+// (the last key of the previous page), `limit` is clamped 1..1000 by the SP and
+// never rejected, and a byte budget can end a page early — `truncated` tells the
+// truth either way. Page 135 of 27k costs the same one index-range read as page 1.
+//
+// NEW ROUTES: a broker older than these answers 404 — a state to render, not a
+// failure to retry (stores/routeSupport.js owns that verdict).
+export const kv = {
+  /** `[{namespace, keys}]` for the acting tenant, exact and expired-inclusive.
+   *  Θ(keys of the tenant): an index-only scan of the primary key where the
+   *  tenant is a selective slice, a sequential scan where it is most of the
+   *  table. Milliseconds at the tens of thousands of keys a cell holds. */
+  namespaces: (config) => client.get('/api/v1/resources/kv/namespaces', config),
+  /** `{namespace, prefix?, after?, limit?, keysOnly?, includeExpired?}` → `{rows, truncated, nextAfter}`. */
+  list: (body, config) => client.post('/api/v1/resources/kv/list', body, config),
+}
+
+// ============================================
+// TIMERS API (tenant-scoped)
+// ============================================
+// The scheduled-message family (server/src/handlers/timers.rs). Every route
+// exists since 1.2; the dashboard simply never called them
+// (PLAN_DASHBOARD_ACTIONS.md §2.6). Gated(Timers, Read|Open) at the proxy, so a
+// cluster whose plan lacks the feature answers 403 feature_gated — a state to
+// render once, never to poll.
+//
+// THE OPERATOR'S SWITCH DOES NOT REACH THESE FOUR. switches.rs pins rung 1 to
+// `true` for `Surface::TimerRead` / `TimerCancel` and quota.rs hands them
+// `Verdict::Allow` (§9.6: a read that answered 503 would stop a caller finding
+// out whether a timer it can no longer cancel is still pending, and the stop
+// button must not switch itself off). So `timers_disabled` is reachable only on
+// `POST /api/v1/timers`, which nothing here calls, and the only 503 these
+// routes can mint is the handler's own `timers_unavailable` — a pool
+// exhaustion, a statement timeout or a dead connection.
+//
+// The key encoder lives in ./timerPath.js so `node --test` can reach it; see
+// that file for why the escaping is load-bearing and not uniform across the
+// clients.
+export const timers = {
+  /** Keyset page: `{after?, limit?}` → `{rows, truncated, nextAfter}`; `after` is exclusive on timerKey. */
+  list: (queue, params, config) => client.get(timerQueueAddr(queue), { params, ...config }),
+  /** Exact count under a NON-EMPTY prefix (the SP refuses a whole-queue count) → `{count}`. */
+  count: (queue, prefix, config) =>
+    client.get(timerQueueAddr(queue), { params: { mode: 'count', prefix }, ...config }),
+  /** One timer as stored: `{found:false}` is HTTP 200. `payload` is base64 of the
+   *  bytes AS STORED; `payloadZstd` and `encrypted` are booleans describing them
+   *  (025_log_timers.sql log_timers_peek_v1), and encryption is outermost. */
+  peek: (queue, timerKey, config) => client.get(timerAddr(queue, timerKey), config),
+  /** Cancel one timer; `{params:{txn}}` echoes the caller's txn back on `absent`.
+   *  Render the SP's verdict verbatim: `cancelled` | `too_late` | `absent`, all
+   *  HTTP 200, and `absent` leaves no tombstone. */
+  cancel: (queue, timerKey, config) => client.delete(timerAddr(queue, timerKey), config),
 }
 
 // ============================================
@@ -251,6 +345,8 @@ export default {
   analytics,
   consumers,
   dlq,
+  kv,
+  timers,
   system,
   operator,
 }

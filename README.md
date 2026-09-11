@@ -16,7 +16,7 @@ defining abstraction is one logical ordered partition per application entity (a 
 account, a conversation, a device, a workflow, a session, a job), created by the first push that
 names it, never provisioned in advance.
 
-[Documentation](https://queenmq.com) · [Benchmarks](https://queenmq.com/benchmarks) · [Quickstart](https://queenmq.com/start/quickstart) · [Try it](https://queenmq.cloud) · Apache-2.0 · v1.5.3
+[Documentation](https://queenmq.com) · [Benchmarks](https://queenmq.com/benchmarks) · [Quickstart](https://queenmq.com/start/quickstart) · [Try it](https://queenmq.cloud) · Apache-2.0 · v1.6.0
 
 
 Queen speaks HTTP, but is also protocol-compatible with Kafka and SQS clients.
@@ -72,11 +72,7 @@ fan-out and cache invalidation: the shapes that should not pay for replay and re
 existing client moves over by changing its connection URL. The supported
 surface, and every place behaviour differs from the real thing, are in
 [reference/kafka](https://queenmq.com/reference/kafka) and
-[reference/sqs](https://queenmq.com/reference/sqs). The two protocols share the rows rather than
-copying them, so a Kafka producer and a Queen consumer can read the same messages at the same
-time with no connector in between:
-[Kafka in, Queen out](https://queenmq.com/use/full-examples/cross-protocol)
-([code](examples/cross-protocol)).
+[reference/sqs](https://queenmq.com/reference/sqs). 
 
 **The log lands in your data lake.** Since 1.5.0 a sink connector ships in the same image: it reads
 a queue through the broker's own API and writes JSONL or Parquet into any S3-compatible bucket,
@@ -146,23 +142,6 @@ case that *is* exactly-once end to end is an effect written as a row in this Pos
 `kv` rider, where marker, effect, output and cursor advance become a single `COMMIT`.
 [Every rollback cause](https://queenmq.com/reference/http/transaction).
 
-## The mental model
-
-```text
-Application entity        the thing whose order matters
-    ▼  Partition key      your ordering boundary, chosen by you
-    ▼  Ordered stream     one row, created on demand, strict FIFO
-    ▼  Transaction        ack + state + output in one commit
-    ▼  PostgreSQL         the single source of truth
-    ▼  Stateless brokers  hold nothing durable; restart freely
-    ▼  Cell               one deployment, one failure domain
-    ▼  Region             where a cell physically lives
-```
-
-The top half is your application's shape, the bottom half is infrastructure, and Queen's bet is that
-the two scale independently: **millions of logical entity streams do not require millions of
-infrastructure objects.**
-
 ## Published benchmarks
 
 | Run | Result | The conditions that make it true |
@@ -178,28 +157,6 @@ PostgreSQL 18; the pipeline and multi-tenant runs predate the 1.0.0 tag.
 **What these do not establish.** Single-shape runs say nothing about *your* throughput, latency,
 sizing, disk or partition distribution: those follow from your workload, payloads and hardware. Read
 [method and rig](https://queenmq.com/benchmarks/method) before quoting a number.
-
-## Inside a cell
-
-A cell is PostgreSQL plus one or more stateless brokers, optionally fronted by Queen Proxy: at once
-the scaling boundary, the failure boundary and the unit of upgrade.
-
-**PostgreSQL is the source of truth, and brokers hold nothing authoritative.** Messages, offsets,
-leases, deduplication state, configuration and dead letters are all rows. That is why a broker can
-be restarted or rolled without a rebalance, and why deduplication stays exact across replicas with
-no coordination protocol at all. Brokers trade latency hints over a mesh port, but nothing on that
-wire is authoritative ([the mesh](https://queenmq.com/internals/mesh)).
-
-**Three axes, not interchangeable.** Partitions scale application cardinality, with nothing
-provisioned and no rebalance. Brokers scale availability inside a cell, and **three replicas is the
-designed ceiling**, because past that the bottleneck is PostgreSQL rather than the broker count.
-Cells scale the deployment, with no global cluster to join and no cross-cell coordination in the
-message path, which buys bounded failure domains and geographic placement but not cross-region
-replication or global ordering.
-
-**The failure domain is PostgreSQL.** Queen does not replicate itself. While the database is
-unreachable, pushes spool to a node-local disk buffer and replay later, and reads fail safely
-because an unacknowledged lease redelivers ([high availability](https://queenmq.com/deploy/ha)).
 
 ## Why PostgreSQL
 
@@ -226,17 +183,6 @@ physical stack it runs on. A cluster never spans two cells, which is why quota a
 in-process state with nothing to coordinate. Operators place clusters onto cells, so customers
 address a region and never a cell, and the control plane stays out of the message data path: its
 outage does not stop a cell that is already running.
-
-## Laravel queues and lightweight supervision
-
-The PHP package is a native Laravel queue driver with a portable PHP supervisor, and the separate
-[`queen-supervisor`](supervisor/README.md) binary provides the same orchestration with a low-memory
-Rust control plane. Both start ordinary `php artisan queue:work` children and scale pools from queue
-depth or from backlog multiplied by observed job duration. The topology is deliberately
-single-active, one supervisor replica per consumer group: a filesystem lock excludes a second local
-process, but there is no distributed fenced leader lease yet. Configuration, `pcntl` requirements
-and secret handling are in the [PHP/Laravel client
-guide](clients/client-php/README.md#supervisor).
 
 ## Quick start
 
@@ -288,3 +234,7 @@ guide](https://queenmq.com/internals/contributing). Benchmark claims need an arc
 
 Apache-2.0, see [LICENSE.md](LICENSE.md). Broker and proxy both, so the multi-tenant service is
 yours to run.
+
+---
+
+QueenMQ is built at [Smartness](https://www.smartness.com/en).

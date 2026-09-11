@@ -193,34 +193,43 @@ func (a *Admin) DeleteMessage(ctx context.Context, partitionID, transactionID st
 	return a.httpClient.Delete(ctx, path)
 }
 
-// RetryMessage replays a DEAD-LETTERED message: the broker re-pushes the
-// queen.log_dlq payload snapshot to its own queue and partition, then drops the
-// DLQ row once that push has been accepted. Only dead-lettered addresses can be
-// replayed; a live message 404s. The dashboard does not call this route (its
-// dead-letter view offers Purge only), so the admin SDKs and `queenctl dlq
-// retry` are its only callers.
+// RetryMessage replays a DEAD-LETTERED message: the broker MOVES the newest
+// queen.log_dlq snapshot at this address back into the log -- claim the row
+// under a lock, push the frame, delete the row, one transaction
+// (queen.log_dlq_move_v1). Only dead-lettered addresses can be replayed; a live
+// message 404s.
 //
-// NOT IDEMPOTENT. Calling it twice for one address can replay the message
-// twice, so it is sent with WithoutFailoverRetry and callers must not retry it
-// on failure without re-reading the DLQ first. Four independent reasons, all in
-// the current broker:
+// IDEMPOTENT BY ROW, which is what changed with the move primitive (broker
+// 1.6.0; the four defects this used to warn about were all in the two-statement
+// implementation it replaced):
 //
-//  1. The replay is minted with a FRESH transaction id (handlers/messages.rs)
-//     because reusing the original would be dropped by the dedup window. Two
-//     replays are therefore two distinct messages that nothing collapses.
-//  2. The read (db::dlq_row_for_replay, a plain SELECT with no FOR UPDATE) and
-//     the delete (queen.delete_message_v1) are separate statements outside any
-//     transaction, so two concurrent calls can both see the row and both push.
-//  3. When the push is accepted but the DLQ cleanup then fails, the broker
-//     answers 500 with {"replayed":true,"dlqRowRemoved":false} -- the message
-//     is now BOTH replayed and still dead-lettered, and the next call replays
-//     it again.
-//  4. queen.delete_message_v1 deletes every consumer group's snapshot for the
-//     address while the replay pushes only the most recent one, so on a
-//     multi-group address one call replays one payload and erases them all.
+//  1. The replayed frame carries a DETERMINISTIC transaction id, `dlq:<row
+//     id>`, so a second call cannot mint a second copy. In practice it does not
+//     get that far: the row was deleted in the same transaction as the push, so
+//     the second call answers 404.
+//  2. The row is claimed with FOR UPDATE, so two concurrent callers serialise
+//     and the loser is told the row is gone -- never a second push.
+//  3. There is no "replayed but still dead-lettered" state to report: the push
+//     and the delete commit together or not at all. A 500 carrying
+//     "dlqRowRemoved":false means the database refused and nothing happened; a
+//     500 whose "dlqRowRemoved" is null means the broker never learned the
+//     outcome, and the answer is to re-read the DLQ, not to resend blindly.
+//  4. Only the addressed consumer group's record is removed. An address can
+//     carry one row per group; this replays the most recent one and leaves the
+//     others exactly where they were.
 //
-// The replayed copy also lands at the partition tail with a new id, so it is
-// out of order with respect to its own key.
+// Answers 200 {success, result:"moved"|"duplicate", queue, partition,
+// consumerGroup, dlqId, originalTransactionId, replayedAs{...}, dlqRowRemoved}.
+// "duplicate" means nothing was written AND nothing was removed: something in
+// the destination's dedup window already carries that transaction id, and the
+// broker will not destroy a record it did not replay. 503 means push
+// maintenance is on -- a move cannot be spooled, so it is refused and the row
+// stays.
+//
+// Still sent with WithoutFailoverRetry: it is a write, and a blind resend by
+// the transport would hide a verdict the caller has to read. The replayed copy
+// lands at the partition TAIL with a new message id, so it is out of order with
+// respect to its own key, and its age clock restarts at the destination.
 func (a *Admin) RetryMessage(ctx context.Context, partitionID, transactionID string) (map[string]interface{}, error) {
 	path := fmt.Sprintf("/api/v1/messages/%s/%s/retry",
 		url.PathEscape(partitionID), url.PathEscape(transactionID))

@@ -1,6 +1,6 @@
 ---
 title: Messages and the dead-letter queue
-description: "Browsing messages, reading, deleting or replaying one by (partitionId, transactionId), and listing or purging the DLQ."
+description: "Browsing messages, reading or deleting one by (partitionId, transactionId), replaying a dead letter by address or by row id on the move primitive, and listing or purging the DLQ."
 type: reference
 tier: use
 sidebar:
@@ -21,6 +21,7 @@ verifiedBy:
   - clients/client-rust/tests/coverage.rs
   - proxy/scripts/isolation-smoke.sh
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): the retry section is rewritten for the move primitive (one transaction, deterministic dlq:<row id>, only the addressed record removed, the duplicate and maintenance verdicts) and POST /api/v1/dlq/:id/replay is documented beside it.
 ---
 
 These are inspection routes, not a consumption path. Live payloads live inside
@@ -213,60 +214,199 @@ ignores the body must not read a no-op as a deletion:
 
 ## POST /api/v1/messages/:partitionId/:transactionId/retry
 
-Access level `read-write`. Replays a dead-lettered message: re-pushes the
-`queen.log_dlq` payload snapshot to its own queue and partition, then drops the DLQ
-row. It works **only** for dead-lettered addresses; a live message has nothing to
-replay and returns the same `404` shape as `DELETE`.
+Access level `read-write`. Replays a dead-lettered message. It works **only** for
+dead-lettered addresses; a live message has nothing to replay and returns the
+same `404` shape as `DELETE`.
 
-Read it as four guarantees, each one a property of the handler rather than
+Since 1.6.0 the act underneath is a **move**, and the difference is the whole
+section. `queen.log_dlq_move_v1` claims the dead-letter row with
+`SELECT ... FOR UPDATE`, pushes one packed frame through the ordinary push
+allocator, and deletes the row, all in **one transaction**. The broker's half is
+what a transaction cannot do: decrypt the snapshot, pack the frame, and announce
+the landing afterwards so a parked long poll wakes on it. The implementation this
+replaced minted an id per attempt, read the row without a lock, deleted it in a
+second statement that could fail on its own, and removed every consumer group's
+record while replaying one of them. The dashboard had dropped its replay button
+for exactly those reasons, and it is back because the primitive can no longer do
+any of them.
+
+Read it as four guarantees, each one a property of the primitive rather than
 something the caller arranges:
 
-1. **A foreign partition cannot be replayed.** The ownership gate runs before the
-   DLQ row is read, so with `QUEEN_TENANCY_HEADER` enabled a partition belonging to
-   another tenant gets exactly the same `404` as an address that does not exist, and
-   no payload is touched on the way to that answer.
-2. **An encrypted snapshot is decrypted before it is re-pushed, never
-   double-encrypted.** The snapshot is stored verbatim, so on an encryption-enabled
-   queue it is the `{encrypted, iv, authTag}` envelope. The handler decrypts it and
-   hands the plaintext to the push path, which re-encrypts it with the current key.
-3. **The replay gets a fresh transaction id.** Reusing the original would be seen as
-   a duplicate by the dedup window and silently dropped, so the push path mints a
-   new one from the new message id. The replayed message is a new message; it will
-   not deduplicate against the original.
-4. **The DLQ row is deleted only after the push is accepted.** A rejected push
-   leaves the message dead-lettered rather than losing it.
+1. **One transaction, one row, one lock.** The push and the delete commit
+   together or not at all, so there is no "replayed but still dead-lettered"
+   state to recover from, and two concurrent callers serialise on the row lock:
+   the loser is told the row is gone rather than pushing a second copy.
+2. **A deterministic transaction id.** The replayed frame carries
+   `dlq:<dead-letter row id>`, derived from the row rather than minted per
+   attempt. In practice a second call never gets that far, because the row went
+   with the first move and the call answers `404`; the id is the belt to that
+   transaction's braces, and it is also what links a replayed message back to the
+   record it came from.
+3. **Only the addressed record is removed.** An address can carry one row per
+   consumer group. This route resolves it to the **newest** of them
+   (`failed_at DESC`) and moves that row id, so the other groups' dead-letter
+   records survive the replay. That is the one place it differs from
+   `DELETE /api/v1/messages/:partitionId/:transactionId`, which really does
+   delete every group's record for the address.
+4. **A foreign partition cannot be replayed.** The ownership gate runs before the
+   row is read, so with `QUEEN_TENANCY_HEADER` enabled a partition belonging to
+   another tenant gets exactly the same `404` as an address that does not exist,
+   and no payload is touched on the way to that answer. The move's own SQL
+   repeats the tenant predicate under the lock.
+
+Encryption is handled the way it always was, with one change of address: the
+snapshot is stored verbatim, so on an encryption-enabled queue it **is** the
+`{encrypted, iv, authTag}` envelope. The broker decrypts it and then asks whether
+the **destination** queue wants encryption, which is the same queue here and can
+be a different one on the row-id route below.
 
 ```json
 {
   "success": true,
+  "result": "moved",
   "queue": "orders",
   "partition": "eu-1",
+  "consumerGroup": "invoicer",
+  "dlqId": "0198...",
+  "originalTransactionId": "order-4471",
   "replayedAs": {
     "index": 0,
     "message_id": "0198...",
-    "transaction_id": "0198...",
+    "transaction_id": "dlq:0198...",
     "queueName": "orders",
-    "status": "queued"
+    "status": "queued",
+    "offset": 41902
   },
   "dlqRowRemoved": true
 }
 ```
 
-Failure modes are reported rather than swallowed. If the push is rejected the body
-carries `success: false` and `pushResult`, and says the message is still in the
-dead-letter queue. If the push succeeded but the DLQ cleanup failed, the body is
-`success: false` with `replayed: true` and `dlqRowRemoved: false`. The message now
-exists twice, once replayed and once still dead-lettered.
+`replayedAs` is still a push result, so the five SDK wrappers and `queenctl` keep
+parsing it; `offset` joined it because the move knows where the message landed
+and a caller that wants to read it back needs it. The four fields beside it are
+new: `result`, the verdict; `consumerGroup`, whose record was moved; `dlqId`, the
+row it was; and `originalTransactionId`, the id the dead-lettered message
+carried, which is the only link between that id and the `dlq:` one.
 
-The JavaScript, Go, Rust and Laravel admin clients wrap this route as `retryMessage`,
-and the Python one as `retry_message`. `queenctl dlq retry <partitionId> <transactionId>`
-wraps it too, and requires `--yes` because the route is not idempotent. One surface
-still predates it: the dashboard's dead-letter view offers purge only, so replay from
-there means calling the route over HTTP yourself.
+### The verdicts
 
-Because a resent request replays the message a second time, the Go client sends this
-one with `WithoutFailoverRetry()`, meaning exactly one attempt against one backend,
-rather than the default 5xx retry budget every other admin call uses.
+| Answer | What happened |
+| --- | --- |
+| `200` `result: "moved"` | The frame was written at `replayedAs.offset` and the dead-letter row is gone. `dlqRowRemoved` is `true`. |
+| `200` `result: "duplicate"` | **Nothing was written and nothing was removed.** `dlqRowRemoved` is `false`. |
+| `404` | No dead-letter row at this address: already replayed, purged, a live address, another tenant's, or a malformed `:partitionId`. |
+| `503` `result: "maintenance"` | Push maintenance is on. Nothing was written, the row is untouched. |
+| `500` `dlqRowRemoved: false` | The database refused the **move**. Every guard raises before the delete and one transaction rolls back whole, so nothing happened and retrying is safe. |
+| `500` `dlqRowRemoved: null` | The outcome is **not known**: a transport failure with no SQLSTATE, or a verdict the broker could not read. The statement returned, so it may have committed. Re-read the list; if the row is gone, the move happened. |
+| `500` `{"error":"dlq lookup failed: ..."}` | The **lookup** in front of the move failed, and this route answers it with no `dlqRowRemoved` key at all. Nothing was written: a SELECT that failed changed nothing, so read the missing key as `false`. |
+
+That last row is the one asymmetry between the two replay routes. On the row-id
+route below, a failed lookup is answered by the same builder as a failed move,
+so it carries `dlqRowRemoved: false` like every other refusal; here the arm
+returns a bare `{"error": ...}` instead. A client that reads the field rather
+than testing for it will see `undefined`, not `false`, and both mean the same
+thing.
+
+`duplicate` is the one that repays reading twice. It means the destination's
+dedup window already holds a frame under this replay's transaction id, so the
+push wrote nothing. The row is kept anyway, and deliberately: the dedup identity
+is the transaction id hash alone, and `dlq:<row id>` is derivable by anyone who
+can read the dead-letter listing, so deleting on that verdict would turn a
+producer credential into a way to destroy a dead-letter record without replaying
+it. `replayedAs.offset` names where the existing frame is, `replayedAs.status` is
+`duplicate`, and `replayedAs.message_id` is the all-zero UUID, the same "original
+unknown" sentinel a duplicate push uses: the copy already in the log carries its
+own id inside a segment blob this route does not read.
+
+The `503` is the one behaviour a move gives up compared with a push. A
+maintenance-mode push is answered `buffered` and replayed from the on-disk spool
+later; a move cannot be, because the spool carries frames and not the deletion of
+a row, and a spooled move would be exactly the state this primitive exists to
+make impossible. So it is refused instead, which costs nothing: the row is still
+there and the same replay works the moment the switch is off.
+
+Five admin clients wrap this route, spelling it the way their language does:
+`retryMessage` in JavaScript and PHP, `RetryMessage` in Go, `retry_message` in
+Rust and Python. Their paths and bodies are unchanged.
+`queenctl dlq retry <partitionId> <transactionId>` wraps it too and still requires
+`--yes`, now because it appends a message and removes a record rather than because
+it might do either twice. The Go client keeps sending it with
+`WithoutFailoverRetry()`: it is a write, and a blind resend by the transport would
+hide a verdict the caller has to read.
+
+## POST /api/v1/dlq/:id/replay
+
+Access level `read-write`. The same move, addressed by the **dead-letter row id**
+that `GET /api/v1/dlq` already returns in each row's `id`. This is the form the
+dashboard's Replay button uses, and the one a redrive wants: a row id names
+exactly one record, so a message dead-lettered under two consumer groups loses
+only the record that was replayed, with no "newest" rule to reason about.
+
+The body is optional. Absent, empty, whitespace, or `{}` replays in place. When
+it is present it may name a destination:
+
+```bash
+curl -sS -X POST \
+  http://localhost:6632/api/v1/dlq/0198abcd-0000-4000-8000-00000000cafe/replay \
+  -H 'Content-Type: application/json' \
+  -d '{"queue":"orders.retry","partition":"eu-2"}'
+```
+
+Both fields are optional and independent at the broker: an omitted half keeps the
+source row's own value, so `{"queue":"orders.retry"}` moves the message to another
+queue and keeps its partition name. Names are trimmed, and a present-but-blank
+one is a `400`, because the allocator provisions exactly the text it is given and
+a queue named `"  orders "` is one nobody can address. A destination that does
+not exist yet is created, queue and partition, by the same allocator a
+first-contact producer push goes through, under the caller's own tenant.
+
+<Aside type="caution">
+Through the multi-tenant proxy the destination is admitted **as a pair or not at
+all**: a body that names one half and not the other is refused `400`
+`invalid_request` naming the half to add, because the omitted half lives in the
+broker's dead-letter row and never reaches the proxy, so neither plan cap could
+be answered for the pair that would actually be created. Send both halves, or
+neither. Broker-direct, and on a proxy configured to measure rather than enforce,
+the independent behaviour above is what you get. The dashboard always sends the
+whole pair for this reason.
+</Aside>
+
+The `200` body is byte-identical to the retry route's, and so is the `503`. The
+two `500`s the move itself produces match as well; only a failure of the row
+lookup in front of it differs, which this route reports with
+`dlqRowRemoved: false` and the retry route as a bare
+`{"error":"dlq lookup failed: ..."}`. The `404` differs only in shape, carrying
+the verdict explicitly:
+
+```json
+{
+  "success": false,
+  "result": "gone",
+  "dlqId": "0198...",
+  "error": "Message not found"
+}
+```
+
+A `message` field carries the human sentence beside it, as on every other refusal
+on this page. Branch on `result`, not on the sentence.
+
+A malformed `:id` answers the same `404` rather than a `500`. Postgres is the
+decider: its UUID input accepts more spellings than a rule written in the broker
+would, so a guard there would answer `gone` to ids the database would have
+resolved.
+
+Three caveats belong to appending to a log rather than to this route, and they
+apply to both forms. The frame lands at the **tail** of the destination
+partition, so it is out of order with respect to its own key and the offset the
+original occupied stays committed: a move is a re-push, not a revival. Its
+`createdAt` is stamped at the destination, so the replayed message's lag clock
+starts at zero. And it is encrypted for the **destination** queue, which an
+override can change: a move out of an encrypted queue into a plaintext one stores
+plaintext.
+
+No SDK wraps this route yet. The five retry wrappers and `queenctl dlq retry`
+use the address-keyed form above, which reads no body.
 
 ## GET /api/v1/dlq
 
@@ -357,6 +497,12 @@ some other tenant, so it is deliberately not used. Confirmed ownership is cached
 memory, so repeated reads of your own partition skip the check round-trip. With
 tenancy off the gate is a no-op and costs no queries.
 
+`POST /api/v1/dlq/:id/replay` is addressed by a row id rather than a partition, so
+it is gated in SQL instead: the row lookup joins through `log_partitions` and
+`queues` under the request tenant, and the move repeats the identical predicate
+under the row lock. Another tenant's row is `gone`, the same `404` as a row that
+never existed, for the same reason.
+
 `GET /api/v1/messages` and `GET /api/v1/dlq` are name-addressed: the tenant travels
 into the stored procedure inside the filter JSON.
 
@@ -369,7 +515,14 @@ into the stored procedure inside the filter JSON.
 | `DELETE /api/v1/messages/:partitionId/:transactionId` | read-write |
 | `POST /api/v1/messages/:partitionId/:transactionId/retry` | read-write |
 | `GET /api/v1/dlq` | read-only |
+| `POST /api/v1/dlq/:id/replay` | read-write |
 | `DELETE /api/v1/dlq` | admin |
+
+Broker-direct, those are the levels `auth::route_access_level` applies. Through
+the multi-tenant proxy both replay routes are **queue admin**, which an API key
+gets from `scopes.admin` and a session from the Admin role only, and they answer
+the storage and monthly push blocks the way a push does. See
+[Endpoints and route classes](/reference/multi-tenant/endpoints).
 
 Related: [consumer groups](/reference/http/consumer-groups) for the cursors these
 statuses are computed against, and [traces](/reference/http/traces) for per-message

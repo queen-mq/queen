@@ -140,6 +140,16 @@
           <div class="filter-field-right msg-filter-actions">
             <button class="btn btn-primary" @click="applyFilters">Apply</button>
             <button v-if="hasActiveFilters" class="btn btn-ghost" @click="clearFilters">Clear</button>
+
+            <!-- The page's one WRITE, on the same right edge as the filter
+                 actions but behind a rule: "Apply" and "Push message" must not
+                 read as two halves of one group. `can('produce')` mirrors the
+                 proxy's RouteClass::Produce for /api/v1/push, so the button is
+                 absent rather than enabled-and-403. -->
+            <template v-if="canProduce">
+              <span class="msg-action-rule" aria-hidden="true"></span>
+              <button class="btn" @click="openPush">Push message</button>
+            </template>
           </div>
         </div>
       </div>
@@ -240,7 +250,7 @@
                       class="chip"
                       :class="{
                         'chip-ice': message.status === 'pending',
-                        'chip-warn': message.status === 'processing',
+                        'chip-mute': message.status === 'processing',
                         'chip-ok': message.status === 'completed',
                         'chip-bad': message.status === 'dead_letter' || message.status === 'failed'
                       }"
@@ -321,14 +331,17 @@
               class="chip"
               :class="{
                 'chip-ice': messageDetail.status === 'pending',
-                'chip-warn': messageDetail.status === 'processing',
+                'chip-mute': messageDetail.status === 'processing',
                 'chip-ok': messageDetail.status === 'completed',
                 'chip-bad': messageDetail.status === 'dead_letter' || messageDetail.status === 'failed'
               }"
             >
               {{ messageDetail.status }}
             </span>
-            <span v-if="messageDetail.retryCount" class="chip chip-warn">
+            <!-- A retry count is a count. The status chip beside it is where
+                 the verdict lives — a message that ran out of retries reads
+                 `dead_letter` there and is red on that word alone. -->
+            <span v-if="messageDetail.retryCount" class="chip chip-mute">
               {{ messageDetail.retryCount }} retries
             </span>
           </div>
@@ -424,10 +437,53 @@
               Purging a dead-letter entry needs the admin role on this cluster.
             </p>
 
+            <!-- What this drawer CANNOT do, and it has to stay true with "Push
+                 a copy" right underneath it: that button opens a form whose
+                 queue field is editable, so "re-routed from here" read as a
+                 flat contradiction of the control below it. A copy is not a
+                 re-route — the original is not moved, not re-delivered and not
+                 removed, wherever the copy is pushed — and saying so is what
+                 keeps the paragraph honest in both directions. -->
             <p v-else style="font-size:12px; color:var(--text-low);">
-              Live messages are stored in immutable log segments: they cannot be deleted, retried or
-              re-routed from here. Only dead-lettered entries can be purged.
+              Live messages are stored in immutable log segments: this one cannot be deleted or
+              retried from here, and nothing here moves it — a copy pushed to this queue or another
+              is a NEW message and leaves this one exactly where it is. Only dead-lettered entries
+              can be purged.
             </p>
+
+            <!-- A COPY, and the word retry is never used for it. The broker has
+                 no retry for a live message and the one it has for a dead
+                 letter is a different route with different hazards; this button
+                 opens the push form on this message's queue, partition and
+                 payload with an EMPTY transaction id, which is a new message at
+                 the tail of the partition. Needs the payload: a message whose
+                 covering segment retention removed has nothing to copy. -->
+            <template v-if="payloadAvailable && canProduce">
+              <p v-if="payloadIsEnvelope" style="font-size:12px; color:var(--text-low);">
+                This broker cannot decrypt this message — what it returned is the stored
+                <span class="font-mono">{encrypted, iv, authTag}</span> envelope, not the payload.
+                A copy would push the envelope itself, so it is not offered here. Push it from a
+                broker that carries the encryption key.
+              </p>
+              <template v-else>
+                <button class="btn" style="width:100%; justify-content:center;" @click="openPushCopy">
+                  Push a copy
+                </button>
+                <p style="font-size:12px; color:var(--text-low);">
+                  Push a copy: a new transaction id, appended at the tail, not deduplicated against
+                  the original.
+                </p>
+                <!-- On a dead letter the word "replay" is the one an operator
+                     expects, and this button is not it: the DLQ row stays, and
+                     a second click pushes a second copy. The Dead Letter page
+                     has the move primitive that does this exactly once. -->
+                <p v-if="isDeletable" style="font-size:12px; color:var(--text-low);">
+                  This is a copy, not a replay: the dead-letter entry stays where it is, and a
+                  second click pushes a second copy. Use Replay on the Dead Letter page to move
+                  the row instead.
+                </p>
+              </template>
+            </template>
           </div>
       </template>
 
@@ -454,6 +510,22 @@
         </div>
       </template>
     </DetailDrawer>
+
+    <!-- One component behind both entry points. `messages-link` is off here:
+         this IS the Messages list, and `pushed` puts the queue in the filter
+         and refetches, which is the same jump without a navigation that would
+         not re-read its own query. -->
+    <PushMessageModal
+      :open="pushOpen"
+      :queue="pushSeed.queue"
+      :partition="pushSeed.partition"
+      :payload="pushSeed.payload"
+      :transaction-id="pushSeed.transactionId"
+      :copy="pushSeed.copy"
+      :messages-link="false"
+      @close="pushOpen = false"
+      @pushed="onPushed"
+    />
   </div>
 </template>
 
@@ -462,6 +534,7 @@ import { ref, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { messages as messagesApi, queues as queuesApi, describeApiError } from '@/api'
 import { useApi, formatNumber, formatRelativeTime } from '@/composables/useApi'
+import { filtersForPushedMessage, isEncryptedEnvelope } from '@/composables/usePushVerdict'
 import { formatDateTimeLocal, formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
 import { useRefresh } from '@/composables/useRefresh'
 import { stamp } from '@/composables/useStamp'
@@ -471,6 +544,7 @@ import Autocomplete from '@/components/Autocomplete.vue'
 import DetailDrawer from '@/components/DetailDrawer.vue'
 import DetailField from '@/components/DetailField.vue'
 import JsonViewer from '@/components/JsonViewer.vue'
+import PushMessageModal from '@/components/PushMessageModal.vue'
 
 const route = useRoute()
 const { can, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
@@ -497,6 +571,13 @@ const detailError = ref(null)
 const actionLoading = ref(false)
 const actionError = ref(null)
 const payloadCopied = ref(false)
+
+// What the push form opens on. Held as one object rather than four refs so the
+// header's "push into the filtered queue" and the drawer's "copy of this
+// message" are two seeds of the same shape, and neither can leak a field of
+// the other into the next opening.
+const pushOpen = ref(false)
+const pushSeed = ref({ queue: '', partition: '', payload: undefined, transactionId: '', copy: false })
 
 // The list, its loading/error state and its "as of when" come from one place.
 // useApi also aborts on unmount and discards any response that belongs to a
@@ -536,6 +617,8 @@ const queueMode = computed(() => listData.value?.mode || null)
 
 // Permissions come from the identity store only — never from whether a call 403'd.
 const canAdmin = computed(() => can('queueAdmin'))
+// POST /api/v1/push is RouteClass::Produce at the proxy: admin or producer.
+const canProduce = computed(() => can('produce'))
 
 // Computed
 const filteredMessages = computed(() => {
@@ -578,6 +661,14 @@ const canPageForward = computed(
 
 const isDeletable = computed(() => messageDetail.value?.status === 'dead_letter')
 const payloadAvailable = computed(() => messageDetail.value?.payloadAvailable !== false)
+
+// The broker decrypts a stored envelope before answering — but only with the
+// right key configured (encryption.rs `decrypt_payload_bytes`), and hands the
+// raw {encrypted,iv,authTag} object over when it has none. Copying THAT would
+// push the envelope as a plaintext payload, which on an encrypted queue is
+// re-wrapped into an envelope of an envelope. So the copy is refused here, in
+// the only place that can tell the difference.
+const payloadIsEnvelope = computed(() => isEncryptedEnvelope(messageDetail.value?.payload))
 
 // 047 emits id/transactionId as NULL for log entries and the broker backfills
 // them from the frame — which it cannot do once retention removed the segment.
@@ -705,6 +796,75 @@ const deleteMessage = async () => {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Push
+// ---------------------------------------------------------------------------
+
+/** Header button: the queue the list is filtered to, or none if it shows all. */
+const openPush = () => {
+  pushSeed.value = {
+    queue: filterQueue.value,
+    partition: '',
+    payload: undefined,
+    transactionId: '',
+    copy: false,
+  }
+  pushOpen.value = true
+}
+
+/**
+ * Drawer button: this message's queue, partition and payload — and an EMPTY
+ * transaction id, which is what makes it a copy rather than a retry. Reusing
+ * the original's id would answer `duplicate` inside the dedup window and write
+ * nothing, i.e. a button that looks like it acted and did not.
+ */
+const openPushCopy = () => {
+  const detail = messageDetail.value
+  if (!detail) return
+  pushSeed.value = {
+    queue: detail.queue || '',
+    partition: detail.partition || '',
+    payload: detail.payload,
+    transactionId: '',
+    copy: true,
+  }
+  pushOpen.value = true
+}
+
+const onPushed = ({ queue, partition }) => {
+  // Land on rows that CAN contain what was just pushed: a refresh that answers
+  // a successful push with a table unable to show it reads as a push that did
+  // nothing. Which filters would hide the new row is the rule, and it lives in
+  // the composable so test/push.test.js holds it — the time window above all,
+  // which is pinned at page load and goes stale in under two minutes.
+  const next = filtersForPushedMessage(
+    {
+      to: filterTo.value,
+      status: filterStatus.value,
+      queue: filterQueue.value,
+      partition: filterPartition.value,
+    },
+    { queue, partition },
+    formatDateTimeLocal(new Date()),
+  )
+
+  // The three filters below are watched, and their watcher already resets the
+  // page and refetches; running applyFilters() as well would fetch twice.
+  const watched =
+    next.status !== filterStatus.value ||
+    next.queue !== filterQueue.value ||
+    next.partition !== filterPartition.value
+
+  filterTo.value = next.to
+  filterStatus.value = next.status
+  filterQueue.value = next.queue
+  filterPartition.value = next.partition
+
+  // The row sorts to the head of page 1 (ORDER BY created_at DESC), so a push
+  // made from page 3 must not refresh page 3.
+  if (!watched) applyFilters()
+}
+
 const formatPayload = (payload) => {
   if (payload === null || payload === undefined) return 'null'
   if (typeof payload === 'string') {
@@ -798,6 +958,11 @@ watch([filterQueue, filterPartition, filterStatus], () => {
 /* Apply/Clear ride the right edge of the time row (`.filter-field-right`) and
    simply trail the quick-fill buttons once the row wraps. */
 .msg-filter-actions { display: flex; align-items: center; gap: 8px; }
+
+/* The hairline between the filter actions and the one action that CHANGES
+   something. Two pixels of rule are what keep "Push message" from being read
+   as a third way of applying a filter. */
+.msg-action-rule { width: 1px; align-self: stretch; margin: 0 2px; background: var(--bd); }
 
 /* One control height across the card. Without it the row's `align-items:
    flex-end` bottom-aligns controls of three different natural heights and the

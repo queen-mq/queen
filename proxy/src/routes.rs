@@ -257,6 +257,91 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
     if p.starts_with("/api/v1/resources/queues/") && *m == Method::DELETE {
         return RouteClass::QueueAdmin;
     }
+    // THE DLQ REPLAY PAIR, and they sit ABOVE the `/api/v1/messages/` DELETE
+    // arm below on purpose — see the last paragraph.
+    //
+    // `POST /api/v1/messages/:pid/:txid/retry` re-pushes a dead-letter snapshot
+    // into its queue and then deletes the dead-letter row: a push and a
+    // `QueueAdmin` delete in one call. Until this arm existed it matched
+    // nothing here and fell through to the reads block at the bottom of this
+    // function, whose `/api/v1/messages` prefix was written for the LISTING and
+    // the single-message GET beside it — so the proxy answered `Read`, which is
+    // the one class EVERY user role has (`auth::authorize`) and which an api
+    // key gets from `scopes.read` alone. A Viewer session, or a read-scoped
+    // key, could therefore replay dead letters through the proxy: write
+    // authority handed out by a prefix, on the one route of the family that
+    // writes. `plan_gates` compounded it — the storage and monthly push blocks
+    // only ever look at `Produce` and `Gated(_, Grow)` — so the replay also
+    // pushed into a cluster that is blocked from pushing at all. Nothing
+    // broker-direct was ever affected: `auth::route_access_level` gives a POST
+    // its `ReadWrite` default.
+    //
+    // `QueueAdmin` is the authority of the half that cannot be undone — the
+    // dead-letter row goes away, exactly as it does under the single-row
+    // `DELETE` on this same prefix and the bulk purge below. The push half is
+    // not a class question but a QUOTA one, and it is answered where every
+    // other quota is: `gateway::plan_gates`, through `is_dlq_replay`.
+    //
+    // Method-exact and SHAPE-exact, the rule the fetch, kv, timer and ephemeral
+    // families state above: the broker registers exactly one method on this
+    // path (`main.rs`, `.route(".../retry", post(handle_retry_message))`), so
+    // every other spelling fails closed here instead of travelling to a 405.
+    // DELETE is the one that has to be seen HERE rather than by the
+    // `/api/v1/messages/` arm below, which would read a `.../retry` address as
+    // a message delete and forward a request the broker does not register; the
+    // plain `/api/v1/messages/:pid/:txid` address keeps that arm unchanged.
+    //
+    // "Shape" and not "ends with `/retry`", which is the neighbour this arm
+    // would otherwise swallow: a transaction id is arbitrary caller text
+    // (`delete_message_v1(p_partition_id UUID, p_transaction_id TEXT)`
+    // validates nothing), so `/api/v1/messages/:pid/retry` is the plain address
+    // of a message whose transaction id happens to be `retry` — and a suffix
+    // test would answer `Blocked` for its GET and its DELETE, taking a readable,
+    // deletable message away from the dashboard with a 404 `route_blocked`
+    // raised before the credential is even looked at. Two non-empty segments
+    // between the prefix and the suffix is the route; anything else is not, and
+    // a longer or shorter one falls through to the method-bounded messages arm
+    // in the reads section, which fails it closed for every method but GET.
+    if p
+        .strip_prefix("/api/v1/messages/")
+        .and_then(|rest| rest.strip_suffix("/retry"))
+        .is_some_and(|mid| {
+            let mut seg = mid.split('/');
+            matches!(
+                (seg.next(), seg.next(), seg.next()),
+                (Some(pid), Some(txid), None) if !pid.is_empty() && !txid.is_empty()
+            )
+        })
+    {
+        return if *m == Method::POST {
+            RouteClass::QueueAdmin
+        } else {
+            RouteClass::Blocked
+        };
+    }
+    // `POST /api/v1/dlq/:id/replay` — the same act keyed by the dead-letter row
+    // id instead of by the message address (PLAN_DASHBOARD_ACTIONS.md §2.3), so
+    // the same rule, for the same three reasons — the third being the shape:
+    // one non-empty segment between the prefix and the suffix, so a row id that
+    // is literally `replay` keeps whatever the arms below give it rather than
+    // being read as a replay of itself. `main.rs` registers this route (POST
+    // only, `handle_dlq_replay`); every other method on the path is `Blocked`
+    // here rather than left to travel to a 405, and an `/api/`-shaped path that
+    // matches no arm fails closed the same way — which is what keeps a route
+    // like this one from ever inheriting the `Read` its sibling wore before
+    // §1.4. `/api/v1/dlq` itself is untouched: the exact-path arms below still
+    // own the bulk purge and its listing.
+    if p
+        .strip_prefix("/api/v1/dlq/")
+        .and_then(|rest| rest.strip_suffix("/replay"))
+        .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+    {
+        return if *m == Method::POST {
+            RouteClass::QueueAdmin
+        } else {
+            RouteClass::Blocked
+        };
+    }
     if p.starts_with("/api/v1/messages/") && *m == Method::DELETE {
         return RouteClass::QueueAdmin;
     }
@@ -405,12 +490,43 @@ pub fn classify(method: &axum::http::Method, path: &str) -> RouteClass {
     }
 
     // --- reads ---
+    //
+    // The messages family is METHOD-BOUNDED, and it is the only one below that
+    // is. This is the root of the P0 the replay arms above fix (§1.4): a
+    // method-agnostic `Read` prefix in front of a family that contains WRITES
+    // hands write authority out by path shape, so the one route of the family
+    // that pushed a message and deleted a dead-letter row wore the class every
+    // user role has. The two known writes are classified above; this arm is
+    // what stops the NEXT one from inheriting `Read` before anyone notices.
+    // The broker registers exactly four things on this family (`main.rs`): the
+    // listing GET, the single-message GET, its DELETE and the retry POST — and
+    // the last two are taken above — so what is left here is a GET and nothing
+    // else changes today, while a new POST under the prefix fails closed
+    // instead of being silently readable by a Viewer.
+    //
+    // HEAD rides with GET because axum answers one from the other on a `get`
+    // route, so blocking it would refuse a request the broker serves.
+    //
+    // The prefixes below stay method-agnostic on purpose: they are read
+    // families with no write member, and one of them takes a POST that MUST be
+    // `Read` — the KV browser's `POST /api/v1/resources/kv/list`, whose cursor
+    // is a key and therefore cannot travel in a query string (§2.5, pinned by
+    // `the_kv_browser_routes_fall_through_to_read_on_purpose` below). The
+    // generator that publishes this table guards that choice from the other
+    // side: `webdoc/scripts/gen-proxy-routes.mjs` refuses to run when a broker
+    // route that is not a GET classifies as `read` without a written reason.
+    if p == "/api/v1/messages" || p.starts_with("/api/v1/messages/") {
+        return if *m == Method::GET || *m == Method::HEAD {
+            RouteClass::Read
+        } else {
+            RouteClass::Blocked
+        };
+    }
     if p.starts_with("/api/v1/resources")
         || p.starts_with("/api/v1/status")
         || p.starts_with("/api/v1/analytics")
         || p.starts_with("/api/v1/consumer-groups")
         || p == "/api/v1/dlq"
-        || p.starts_with("/api/v1/messages")
         || p.starts_with("/api/v1/traces")
     {
         return RouteClass::Read;
@@ -516,6 +632,134 @@ mod tests {
             RouteClass::Gated(Feature::Streams, GatedOp::Open)
         );
         assert_eq!(classify(&Method::GET, "/"), RouteClass::Read);
+    }
+
+    // ---- PLAN_DASHBOARD_ACTIONS.md §1.4/§2.0: the DLQ replay pair ----
+
+    /// The P0 these arms were added for. A replay re-pushes a dead-letter
+    /// snapshot and deletes the dead-letter row; with no arm of its own it fell
+    /// through the `/api/v1/messages` READS prefix and came back `Read` — the
+    /// one class every user role has (`auth::authorize`) and that an api key
+    /// gets from `scopes.read` alone. A Viewer session, or a read-scoped key,
+    /// could replay through the proxy. `QueueAdmin` is the authority of the
+    /// half that cannot be undone; the push half is a quota question and is
+    /// answered by `gateway::plan_gates` through `is_dlq_replay`.
+    #[test]
+    fn dlq_replay_is_queue_admin_and_post_only() {
+        let retry = "/api/v1/messages/P/T/retry";
+        // W3's route (§2.3), keyed by the `queen.log_dlq` row id the listing
+        // already returns. Classified before the handler exists so it cannot
+        // ship through a proxy that has never heard of it.
+        let replay = "/api/v1/dlq/3f8a9c1e-0000-4000-8000-000000000000/replay";
+        for p in [retry, replay] {
+            assert_eq!(classify(&Method::POST, p), RouteClass::QueueAdmin, "POST {p}");
+            // The regression, stated as the thing it must never be again.
+            assert_ne!(classify(&Method::POST, p), RouteClass::Read, "POST {p}");
+            // One method per path at the broker, so every other shape fails
+            // closed here instead of travelling to a 405 — DELETE included,
+            // which is why these arms sit ABOVE the `/api/v1/messages/` DELETE
+            // arm: that one would read a `.../retry` address as a message
+            // delete and forward a request the broker does not register.
+            for m in [Method::GET, Method::PUT, Method::DELETE, Method::PATCH] {
+                assert_eq!(classify(&m, p), RouteClass::Blocked, "{m} {p}");
+            }
+        }
+        // The plain message address keeps exactly the arms it always had.
+        assert_eq!(
+            classify(&Method::DELETE, "/api/v1/messages/P/T"),
+            RouteClass::QueueAdmin
+        );
+        assert_eq!(classify(&Method::GET, "/api/v1/messages/P/T"), RouteClass::Read);
+        assert_eq!(classify(&Method::GET, "/api/v1/messages"), RouteClass::Read);
+        // ...and so does the DLQ's own pair of exact-path arms.
+        assert_eq!(classify(&Method::DELETE, "/api/v1/dlq"), RouteClass::QueueAdmin);
+        assert_eq!(classify(&Method::GET, "/api/v1/dlq"), RouteClass::Read);
+        // Neither prefix swallows a neighbour that is not a replay: both arms
+        // are anchored at BOTH ends, so an address under them that the broker
+        // does not register stays the fail-closed `Blocked` it was.
+        assert_eq!(classify(&Method::POST, "/api/v1/dlq/3f8a/purge"), RouteClass::Blocked);
+        assert_eq!(classify(&Method::GET, "/api/v1/dlq/3f8a"), RouteClass::Blocked);
+    }
+
+    /// The two neighbours a prefix+suffix test would have swallowed, and the
+    /// spellings that must not creep back into `Read`.
+    ///
+    /// A transaction id is arbitrary caller text, so `/api/v1/messages/:pid/retry`
+    /// is the plain address of a message whose transaction id is `retry` — a
+    /// real, readable, deletable row. Matching the retry route by its suffix
+    /// alone answered `Blocked` for both of its methods, i.e. a 404
+    /// `route_blocked` from the proxy for a message the broker serves; the
+    /// arm matches the route's SHAPE instead, so the neighbour keeps its own
+    /// classes. Same for a dead-letter row whose id is `replay`.
+    #[test]
+    fn the_replay_arms_match_a_shape_not_a_suffix() {
+        // txid `retry`: the message read and the message delete, unchanged.
+        assert_eq!(classify(&Method::GET, "/api/v1/messages/P/retry"), RouteClass::Read);
+        assert_eq!(
+            classify(&Method::DELETE, "/api/v1/messages/P/retry"),
+            RouteClass::QueueAdmin
+        );
+        // ...and it is not a replay: the broker registers no POST on the
+        // two-segment address, so it fails closed rather than being forwarded.
+        assert_eq!(classify(&Method::POST, "/api/v1/messages/P/retry"), RouteClass::Blocked);
+        // A dlq row id of `replay` is a row id, not a route.
+        assert_eq!(classify(&Method::POST, "/api/v1/dlq/replay"), RouteClass::Blocked);
+
+        // THE OTHER HALF OF THE ROOT CAUSE (§1.4). The messages family used to
+        // answer `Read` for EVERY method that reached the reads block, so every
+        // near-miss spelling of the write route was readable by a Viewer and
+        // skipped the push blocks. The family is method-bounded now: GET (and
+        // the HEAD axum answers from it) is a read, everything else fails
+        // closed, and the two writes are classified above.
+        for p in [
+            "/api/v1/messages/P/T/retry/",  // one trailing slash
+            "/api/v1/messages/P/T/RETRY",   // the broker's router is case-sensitive
+            "/api/v1/messages/P/T/retrying",
+            "/api/v1/messages/P/T/U/retry", // one segment too many
+            "/api/v1/messages/P/T",         // the read address itself, wrong method
+        ] {
+            assert_eq!(classify(&Method::POST, p), RouteClass::Blocked, "POST {p}");
+            assert_eq!(classify(&Method::PUT, p), RouteClass::Blocked, "PUT {p}");
+        }
+        // The reads the family exists for keep every method it serves.
+        for p in ["/api/v1/messages", "/api/v1/messages/P/T", "/api/v1/messages/P/retry"] {
+            assert_eq!(classify(&Method::GET, p), RouteClass::Read, "GET {p}");
+            assert_eq!(classify(&Method::HEAD, p), RouteClass::Read, "HEAD {p}");
+        }
+        // The neighbouring read prefixes are NOT method-bounded, and one of
+        // them must not be: the KV browser's list is a `Read` POST (§2.5).
+        assert_eq!(
+            classify(&Method::POST, "/api/v1/resources/kv/list"),
+            RouteClass::Read
+        );
+    }
+
+    /// W4's KV browser (PLAN_DASHBOARD_ACTIONS.md §2.5) is pinned here so its
+    /// fall-through is a DECISION on the record rather than an omission the
+    /// next reader has to re-derive. Its two routes live under
+    /// `/api/v1/resources` on purpose: a console list is read-only,
+    /// viewer-visible and cursor-paged over a whole namespace, which is exactly
+    /// what the reads prefix already means — no proxy arm, no plan flag, no
+    /// quota interaction, where `POST /api/v1/kv` would be `Gated(Kv, Mixed)`
+    /// and invisible to the Viewer the page is for. The list is a POST because
+    /// its cursor IS a key, and a key in a query string is the leak §5.5
+    /// forbids; the reads prefix is method-agnostic, so that costs nothing.
+    #[test]
+    fn the_kv_browser_routes_fall_through_to_read_on_purpose() {
+        assert_eq!(
+            classify(&Method::POST, "/api/v1/resources/kv/list"),
+            RouteClass::Read
+        );
+        assert_eq!(
+            classify(&Method::GET, "/api/v1/resources/kv/namespaces"),
+            RouteClass::Read
+        );
+        // ...and they are NOT the gated KV family: a different prefix, which
+        // keeps its plan flag and its quota halves to itself.
+        assert_eq!(
+            classify(&Method::POST, "/api/v1/kv"),
+            RouteClass::Gated(Feature::Kv, GatedOp::Mixed)
+        );
     }
 
     // ---- PLAN_QUEEN_KAFKA.md C2: the batched read-from-offset ----

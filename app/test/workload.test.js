@@ -86,7 +86,11 @@ test('severity precedence: the worst rule wins, quiet rows are not alarming', ()
   assert.equal(severity(w({})), 'mute')
   assert.equal(severity(w({ window: { popEmpty: 40 } })), 'ice')
   assert.equal(severity(w({ window: { popMessages: 10 } })), 'ok')
-  assert.equal(severity(w({ now: { deadLetter: 1000 } })), 'warn')
+  // A dead-letter DEPTH is history, not news: nobody purges a DLQ, so the old
+  // `deadLetter >= 1000 → warn` rule painted a row amber forever over messages
+  // that failed once, months ago. Growth would be a signal; the payload has no
+  // counter for it.
+  assert.equal(severity(w({ now: { deadLetter: 1000 } })), 'mute')
   assert.equal(severity(w({ oldest: 61 })), 'warn')
   assert.equal(severity(w({ oldest: 300 })), 'bad')
   // A pending backlog nobody can consume outranks everything else, including

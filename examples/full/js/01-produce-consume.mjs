@@ -47,8 +47,10 @@ const queen = new Queen({ url: QUEEN_URL, handleSignals: false })
 try {
   console.log(`broker ${QUEEN_URL}`)
 
-  // create() sends the whole configuration and is a full replace: keys you leave
-  // out go back to the broker's defaults rather than keeping a previous value.
+  // /configure merges: an option the body does not carry keeps the value the
+  // queue already has, and an explicit null restores that one option's default.
+  // This client merges its own nine-key default bag into every config() call, so
+  // those nine are sent whether you name them or not.
   await queen.queue(QUEUE).config({
     // How long a popped message stays invisible to other consumers before the
     // broker assumes the consumer died and hands it to someone else.

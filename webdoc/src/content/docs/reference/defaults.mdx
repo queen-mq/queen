@@ -15,6 +15,7 @@ sourceOfTruth:
   - server/sql/procedures/012_configure.sql
   - server/sql/procedures/001_log_schema.sql
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): the queue-option defaults paragraph is rewritten for the merge rule; every default value is unchanged.
 ---
 
 A default reaches a message through one of three layers, and the layers are
@@ -120,16 +121,20 @@ each of them sits where it does.
 ## Queue option defaults
 
 Applied by `POST /api/v1/configure`, and by the column defaults for a queue
-created implicitly by a push. `/configure` is a **full replace**: an omitted key
-is reset to the value in this table, not left alone. See
+created implicitly by a push. Since 1.6.0 `/configure` **merges**: on an edit an
+omitted key keeps the value the queue already has, and the value in this table
+is what a create lands on, what an explicit `null` restores, and what
+`"mode": "replace"` puts back for every key the body omits. See
 [Queue options](/reference/queue-options) for what each one does.
 
 | Option | Default | Note |
 | --- | --- | --- |
 | `namespace` | `""` | For a push-created queue, derived from the queue name before the first `.`. |
 | `task` | `""` | For a push-created queue, derived from the name between the first and second `.`. |
+| `priority` | `0` | Stored and echoed; no pop, ack or maintenance path reads it. |
 | `leaseTime` | `300` (configure) / `60` (push-created) | Seconds. |
 | `retryLimit` | `3` | Explicit `failed` acks charged before dead-lettering. |
+| `maxSize` | `0` | Stored and echoed; there is no queue-depth cap behind it. |
 | `deadLetterQueue` | `true` | Dead-lettering is on for an unconfigured queue. |
 | `dlqAfterMaxRetries` | `true` | Combined with the previous flag by `OR`. Both must be `false` to disable dead-lettering. |
 | `delayedProcessing` | `0` | Seconds of visibility delay; 0 is off. |

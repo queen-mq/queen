@@ -21,6 +21,7 @@ sourceOfTruth:
 verifiedBy:
   - clients/client-js/test-v2/maintenance.js
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): push maintenance now also refuses a dead-letter replay with 503, stated under the maintenance route; maintenance.rs and switches.rs changed only comments otherwise.
 ---
 
 Everything on this page is an operator surface, not part of the client API. No SDK
@@ -110,6 +111,13 @@ PostgreSQL. Every item is written to the disk spool and reported with
 `status: "failed"` and the whole response becomes `500`. A push that omitted
 `transactionId` gets one minted at buffer time, so the buffered result and the replay
 dedup key are both well defined.
+
+**Effect on a dead-letter replay.** The two replay routes are refused instead, with
+`503` and `result: "maintenance"`. A replay is a move, and a move cannot be spooled:
+the spool carries frames, not the deletion of the dead-letter row, so a spooled one
+would land in exactly the pushed-but-still-dead-lettered state the move primitive
+exists to make impossible. Nothing is lost by refusing, because the dead-letter row
+stays where it is and the same replay works once the switch is off.
 
 <Aside type="caution">
 Buffered messages have no offset, no position and no ordering guarantee relative to

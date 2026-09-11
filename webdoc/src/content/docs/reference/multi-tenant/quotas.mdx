@@ -17,6 +17,11 @@ verifiedBy:
   - clients/client-py/tests/http_unit/test_retry_429.py
   - clients/client-go/retry429_test.go
 # sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree, PLAN_DASHBOARD_ACTIONS.md
+# §2.0): gateway.rs runs the two push blocks for a dead-letter replay and admits the row-id
+# route's destination as a whole pair, refusing a half-named one with 400 invalid_request. Both
+# are written down above; limits.rs, registry.rs and meter.rs changed nothing else this page
+# describes.
 ---
 
 A plan is eleven numbers and a feature flag. This page is what each one does at
@@ -49,7 +54,8 @@ Two families of limit are **hard regardless**:
 <Aside type="caution">
 This is the surprising part of shadow mode. A cell deployed with
 `QUEEN_PROXY_ENFORCE=false` still returns `413` on an oversized item and still `403`s
-every produce request for a cluster over its storage cap or its monthly message quota.
+every produce request, and every dead-letter replay, for a cluster over its storage cap
+or its monthly message quota.
 A mis-set `monthly_msgs_quota` stops production traffic on a proxy you believed was
 only observing.
 </Aside>
@@ -59,7 +65,8 @@ only observing.
 <Steps>
 
 1. Cluster status: suspended or deleting → `403`. Produce on a push-blocked cluster →
-   `403` with the code naming the cause.
+   `403` with the code naming the cause, and a dead-letter replay with it: replaying
+   writes a frame into a live partition, so it answers the push blocks like a push.
 
 2. Route class and feature gate.
 
@@ -72,7 +79,22 @@ only observing.
 
 6. `POST /api/v1/configure` only: the **retention ceiling**, then admission.
 
-7. Long-poll pop only: take a **parked slot**, held across the upstream call.
+7. `POST /api/v1/dlq/:id/replay` only: **admission** of the `{queue, partition}` its
+   body names. An override moves the message somewhere else, and the broker provisions a
+   destination it does not find, so the same caps apply. A destination is admitted as a
+   **pair**, or not named at all: a body that names one half and not the other is refused
+   `400 invalid_request`, naming the half to add, on a cell that enforces. An omitted half
+   stays the dead-letter row's own, and that name lives in the broker, so no cap could
+   answer for the pair that would actually be created. This refusal is not one of the two
+   hard families: in shadow mode it is computed and logged and not applied, so a cell with
+   `QUEEN_PROXY_ENFORCE=false` writes the `target: limits` line with `kind=replay_dest` and
+   a `would_block` field, then forwards the half-named body upstream. A body that names
+   neither half is forwarded and admitted against nothing, because it creates nothing:
+   its destination is the source row's own queue and partition, which the broker had to
+   resolve before it could read the row. The address-keyed replay reads no body and is in
+   the same position.
+
+8. Long-poll pop only: take a **parked slot**, held across the upstream call.
 
 </Steps>
 
@@ -250,7 +272,11 @@ payload bytes the proxy has accepted since that report changed.
    a storage block is to drain, so blocking consumption would be a trap. A streams
    cycle is refused whole under the same code only when its body carries sink
    `push_items`; an ack-only or state-only cycle passes, for the same drain reason,
-   so a blocked streaming worker can keep consuming its source.
+   so a blocked streaming worker can keep consuming its source. A dead-letter replay
+   is refused under the same code too, for the same reason a push is: it stores a
+   frame. Every other queue-admin route stays allowed, since purging dead letters,
+   deleting a message, dropping a queue and shortening retention are how a blocked
+   tenant gets back under the cap.
 
 </Steps>
 

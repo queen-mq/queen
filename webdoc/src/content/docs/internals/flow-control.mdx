@@ -17,6 +17,7 @@ sourceOfTruth:
 verifiedBy:
   - server/src/admission.rs
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): db.rs gained the DLQ move and KV console statements; no admission, pacing or pool behaviour moved.
 ---
 
 The broker does not let requests reach PostgreSQL as fast as they arrive. Every write transaction on

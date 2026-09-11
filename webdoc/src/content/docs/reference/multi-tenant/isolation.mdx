@@ -21,6 +21,7 @@ verifiedBy:
   - test/run.sh
   - server/tests/streams_tenant_isolation.rs
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): the two new dead-letter lookups repeat the tenant predicate in SQL and the move repeats it under the row lock, so a foreign row reads as gone; the isolation model is unchanged.
 ---
 
 Tenant isolation in Queen is split across two processes on purpose. The broker scopes

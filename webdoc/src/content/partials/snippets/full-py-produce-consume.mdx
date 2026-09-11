@@ -71,8 +71,11 @@ async def main():
         # ------------------------------------------------------------------
         # 1. Create the queue.
         # ------------------------------------------------------------------
-        # /api/v1/configure is a full replace: every key you leave out goes back
-        # to its default, so send the whole configuration you want every time.
+        # /api/v1/configure merges: an option the body does not carry keeps the
+        # value the queue already has, and an explicit None restores that one
+        # option's default. This client merges its own nine-key default bag into
+        # every .config() call, so those nine are sent whether you name them or
+        # not; dedup_window_seconds below is not one of them.
         created = await (
             client.queue(QUEUE)
             .config(

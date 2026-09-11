@@ -14,6 +14,7 @@ sourceOfTruth:
   - server/src/db.rs
   - server/sql/procedures/012_configure.sql
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): the configure warning is rewritten for the merge rule, and the write-path list gains the dead-letter move, which decrypts the stored snapshot and envelopes for the destination queue.
 ---
 
 Queen can encrypt message payloads with AES-256-GCM before they are written to
@@ -50,20 +51,44 @@ stores plaintext without raising an error.**
 
 </Steps>
 
-**`/configure` is a [full replace](/reference/queue-options): a later call that
-does not repeat `encryptionEnabled: true` turns encryption off for that queue, and
-subsequent pushes store plaintext.** Include every non-default option the queue
-should keep, not only the flag.
+Since 1.6.0 `/configure` [merges](/reference/queue-options), so a later call that does
+not repeat `encryptionEnabled: true` leaves the flag alone. Two ways to turn it off
+remain, and both are explicit: send `encryptionEnabled: false` (or `null`), or send the
+whole configuration with `"mode": "replace"`, where an omitted flag means the default,
+which is off.
+
+<Aside type="caution">
+A manifest is the case to watch. `queenctl apply -f` sends `"mode": "replace"` because a
+declarative source means the whole configuration, so a manifest that does not carry
+`encryptionEnabled: true` turns encryption off for that queue and subsequent pushes store
+plaintext. Keep the flag in the file, not only in the call that first set it. Against a broker
+older than 1.6.0 every caller replaces, so the same rule applies to every call.
+</Aside>
+
+The change takes effect on the next push everywhere: the handler drops the serving broker's
+cached encryption flag as well as its cached lease time, and broadcasts the same invalidation to
+mesh peers, so no node keeps enveloping for a queue the others treat as plaintext.
 
 ## What gets encrypted
 
 The flag lives on `queen.queues.encryption_enabled`, written by
 `configure_queue_v1`, and the broker caches the answer per tenant and queue.
-Encryption applies when the key is loaded **and** the flag is true, on all four
+Encryption applies when the key is loaded **and** the flag is true, on all five
 write paths: `POST /api/v1/push`, `POST /api/v1/transaction`, the stream emit
-path, and the disk spool the broker falls back to when PostgreSQL is unreachable,
+path, the disk spool the broker falls back to when PostgreSQL is unreachable,
 so a payload buffered to local disk during an outage is enveloped before it is
-written, not after it is replayed. A timer payload is enveloped too, at
+written rather than after it is replayed, and the dead-letter move behind the two
+replay routes. The move is the one that reads an envelope as well as writing
+one: the dead-letter snapshot is stored exactly as it was, so on an encrypted
+queue it **is** the envelope. The broker decrypts it, then asks the same question
+the push path asks about the **destination** queue, and envelopes for that answer.
+Two consequences worth stating. Replaying into a different queue re-encrypts for
+the destination, so a move out of an encrypted queue into a plaintext one stores
+plaintext, and the other way round stores an envelope. And the decryption step
+falls back to the stored bytes when it cannot read them, which is the normal path
+for a plaintext snapshot and the degraded one for an envelope whose key is gone
+or has changed: the same fallback the message reader uses, with the same
+consequence that what moves is the envelope rather than its contents. A timer payload is enveloped too, at
 **schedule** time rather than at fire, on the timers route and on a
 transaction's timer operations alike: the fire runs inside the sweeper,
 possibly days later, so a late envelope would leave the payload in cleartext at

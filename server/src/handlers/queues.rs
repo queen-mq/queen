@@ -34,6 +34,13 @@ use crate::util::uuidv7_bytes;
 // blob like every other option). The configure_queue_v1 JSON is returned
 // verbatim; the JS `configureQueue` test asserts res.configured===true and
 // round-trips every options[key], so we MUST NOT reshape it.
+//
+// `mode` is the one key of the body that is neither the queue nor an option:
+// "merge" (the default when it is absent) keeps every option the body does not
+// mention, "replace" re-parses the whole configuration from defaults. It is
+// translated here into the `replace` flag configure_queue_v1 reads out of the
+// options bag — see `configure_replace_flag` for why the flag never travels
+// from the caller untouched.
 pub async fn handle_configure(
     State(st): State<Arc<AppState>>,
     Extension(tenant): Extension<crate::tenant::Tenant>,
@@ -55,30 +62,21 @@ pub async fn handle_configure(
         }
     };
 
-    // Options: prefer a nested `options` object; otherwise treat the top-level
-    // body (minus the routing keys) as the options bag.
-    let mut opts: serde_json::Map<String, serde_json::Value> =
-        match root.get("options").and_then(|o| o.as_object()) {
-            Some(o) => o.clone(),
-            None => {
-                let mut m = root.as_object().cloned().unwrap_or_default();
-                m.remove("queue");
-                m.remove("options");
-                m
-            }
-        };
-    // Fold top-level namespace/task into options (configure_queue_v1 reads them
-    // from the options bag). Only when present as a non-empty string.
-    for key in ["namespace", "task"] {
-        if !opts.contains_key(key) {
-            if let Some(s) = root.get(key).and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
-                opts.insert(key.to_string(), serde_json::Value::String(s.to_string()));
-            }
+    // Merge or replace, decided before anything is read out of the body: a
+    // rejected `mode` must not configure the queue in the other one's meaning.
+    let replace = match configure_replace_flag(&root) {
+        Ok(r) => r,
+        Err(msg) => {
+            return json(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({ "error": msg }).to_string(),
+            )
         }
-    }
+    };
+
     // dedupWindowSeconds travels IN the options blob: configure_queue_v1
     // persists it to queen.queues.dedup_window_seconds (DDL default 3600).
-    let opts_json = serde_json::Value::Object(opts).to_string();
+    let opts_json = serde_json::Value::Object(configure_options_bag(&root, replace)).to_string();
 
     let client = match st.pool.get().await {
         Ok(c) => c,
@@ -97,23 +95,111 @@ pub async fn handle_configure(
 
     // RUSTFIX item 25: if the SP echo carries an {"error":...}, surface it as
     // 500/404 and short-circuit BEFORE the cache invalidations below.
+    //
+    // ...except for the SP's own OPTION REFUSALS, which carry `invalid` naming
+    // the option (012_configure.sql, the two sink-hold bounds). Those are a bad
+    // request, not a broken broker: sp_result_to_response would call them a 500,
+    // which reaches the operator as an outage toast beside the correct sentence
+    // and is metered by the cloud proxy as an unbilled upstream 5xx. The body is
+    // returned verbatim either way — only the status differs.
     if cfg_txt.contains("\"error\"") {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&cfg_txt) {
             if v.get("error").filter(|e| !e.is_null()).is_some() {
+                if v.get("invalid").and_then(|i| i.as_str()).is_some() {
+                    return json(StatusCode::BAD_REQUEST, cfg_txt);
+                }
                 return sp_result_to_response(cfg_txt);
             }
         }
     }
 
-    // Invalidate the cached lease so a leaseTime change is reflected on next pop.
-    // Track B (§5): the cache is keyed by (tenant, name) — invalidate this tenant's.
+    // Invalidate the cached lease so a leaseTime change is reflected on next pop,
+    // and the cached encryption flag so an encryptionEnabled change is reflected
+    // on the next push. Track B (§5): both caches are keyed by (tenant, name) —
+    // invalidate this tenant's. The pair is what `invalidate_queue_caches`
+    // (main.rs) drops on the PEERS from the frame below, and what the reconcile
+    // sweep clears wholesale every QUEEN_CACHE_REFRESH_INTERVAL_MS: dropping
+    // only the lease here left the broker that served the call pushing under the
+    // old encryption flag for up to a minute while its peers had already
+    // switched.
     let qkey = crate::handlers::tenant_queue_key(tenant.as_str(), &queue);
     st.lease_cache.lock().unwrap().remove(&qkey);
+    st.enc_cache.lock().unwrap().remove(&qkey);
     // Invalidate the same queue's config cache on peer replicas — the frame carries
     // the tenant, so a peer invalidates exactly this tenant's entry (§5).
     st.notifier.broadcast_queue_config_set(&qkey);
 
     json(StatusCode::OK, cfg_txt)
+}
+
+/// The options bag `configure_queue_v1` is handed, built from the request body
+/// and the already-decided `replace` flag.
+///
+/// Three rules live here, and each one is a way the wrong bag silently
+/// misconfigures a queue:
+///
+///   * the options are the nested `options` object when there is one, and the
+///     top-level body minus the routing keys otherwise (raw callers spread them
+///     out). `mode` is a routing key like `queue` and `options`: a top-level
+///     caller must not have it land in the bag as a 22nd option.
+///   * a top-level `namespace` / `task` is folded in, but only as a NON-EMPTY
+///     string and only when the bag does not already carry the key — the bag is
+///     where a caller can spell `""` or `null`, and that spelling wins.
+///   * `replace` is INSERTED last, so a `replace` the caller put in the options
+///     bag itself is OVERWRITTEN rather than honoured: `mode` is the single
+///     spelling of this decision on the wire and a body cannot carry two that
+///     disagree. The SP reads it out of the bag with `->>` and never stores or
+///     echoes it — see the parse-section header of 012_configure.sql.
+fn configure_options_bag(
+    root: &serde_json::Value,
+    replace: bool,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut opts: serde_json::Map<String, serde_json::Value> =
+        match root.get("options").and_then(|o| o.as_object()) {
+            Some(o) => o.clone(),
+            None => {
+                let mut m = root.as_object().cloned().unwrap_or_default();
+                m.remove("queue");
+                m.remove("options");
+                m.remove("mode");
+                m
+            }
+        };
+    for key in ["namespace", "task"] {
+        if !opts.contains_key(key) {
+            if let Some(s) = root
+                .get(key)
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                opts.insert(key.to_string(), serde_json::Value::String(s.to_string()));
+            }
+        }
+    }
+    opts.insert("replace".to_string(), serde_json::Value::Bool(replace));
+    opts
+}
+
+/// `mode` -> the `replace` flag `configure_queue_v1` reads, or the 400 message.
+///
+/// Absent is "merge" because that is the safe direction for the bodies already
+/// in flight: every SDK sends only the options its caller set, so reading an
+/// absent `mode` as "replace" would keep the very reset this feature exists to
+/// end. An UNKNOWN value is a 400 rather than a fallback to merge — "mode":
+/// "patch" is a caller who believes something about this call, and quietly
+/// doing the other thing to their queue's whole configuration is exactly the
+/// silent damage the merge rule is about. A non-string `mode` (say `true`) fails
+/// the same way, with the same message: the value is what is wrong, not the
+/// JSON type.
+fn configure_replace_flag(root: &serde_json::Value) -> Result<bool, String> {
+    match root.get("mode") {
+        None | Some(serde_json::Value::Null) => Ok(false),
+        Some(v) => match v.as_str() {
+            Some("merge") => Ok(false),
+            Some("replace") => Ok(true),
+            _ => Err(format!("mode must be \"merge\" or \"replace\", got {v}")),
+        },
+    }
 }
 
 // -------------------------------------------------------------- delete queue
@@ -144,8 +230,19 @@ pub async fn handle_delete_queue(
         }
     };
 
+    // Both caches, for the reason `handle_configure` above states: the frame
+    // below makes every PEER run `invalidate_queue_caches` (main.rs), which
+    // drops the lease AND the encryption flag, so dropping only the lease here
+    // left the broker that served the DELETE as the single node still holding an
+    // encryption flag for a queue that no longer exists — until the reconcile
+    // sweep cleared it, up to a QUEEN_CACHE_REFRESH_INTERVAL_MS later. It bites
+    // on the delete-then-create idiom the SDK cleanups are built on: recreate
+    // the queue with encryption off and this broker keeps encrypting its pushes
+    // while its peers do not, which is one queue whose messages some consumers
+    // cannot read. Same key on both (§5): (tenant, name).
     let qkey = crate::handlers::tenant_queue_key(tenant.as_str(), &queue);
     st.lease_cache.lock().unwrap().remove(&qkey);
+    st.enc_cache.lock().unwrap().remove(&qkey);
     // Invalidate the deleted queue's config cache on peer replicas.
     st.notifier.broadcast_queue_config_delete(&qkey);
 
@@ -437,3 +534,126 @@ pub async fn handle_list_tasks(
     }
 }
 
+#[cfg(test)]
+mod configure_mode {
+    use super::*;
+
+    fn flag(body: &str) -> Result<bool, String> {
+        configure_replace_flag(&serde_json::from_str(body).expect("test body is JSON"))
+    }
+
+    #[test]
+    fn an_absent_mode_merges() {
+        // The shape every SDK has always sent. It must NOT mean replace, or the
+        // upgrade silently keeps resetting the 18 options a partial body omits.
+        assert_eq!(flag(r#"{"queue":"orders"}"#), Ok(false));
+        assert_eq!(flag(r#"{"queue":"orders","mode":null}"#), Ok(false));
+        assert_eq!(
+            flag(r#"{"queue":"orders","options":{"leaseTime":60}}"#),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn the_two_spellings_are_the_whole_vocabulary() {
+        assert_eq!(flag(r#"{"queue":"o","mode":"merge"}"#), Ok(false));
+        assert_eq!(flag(r#"{"queue":"o","mode":"replace"}"#), Ok(true));
+    }
+
+    #[test]
+    fn anything_else_is_a_400_and_not_a_silent_merge() {
+        // A caller who wrote "patch" believes something about this call; doing
+        // the other thing to the queue's whole configuration is the damage the
+        // merge rule exists to prevent, so it is refused instead.
+        for body in [
+            r#"{"queue":"o","mode":"patch"}"#,
+            r#"{"queue":"o","mode":"Replace"}"#,
+            r#"{"queue":"o","mode":""}"#,
+            r#"{"queue":"o","mode":true}"#,
+            r#"{"queue":"o","mode":1}"#,
+        ] {
+            let err = flag(body).expect_err(body);
+            assert!(
+                err.starts_with("mode must be \"merge\" or \"replace\""),
+                "{body} -> {err}"
+            );
+        }
+    }
+
+    // ----------------------------------------------------------- the bag
+    // `mode` decides nothing on its own: it decides only through the `replace`
+    // key this function puts in the bag the SP reads. Deleting that one
+    // insertion used to leave every test in the repository green while
+    // `mode:"replace"` silently merged — i.e. while `queenctl apply -f` stopped
+    // being declarative and the product lost every reset path it has.
+
+    fn bag(body: &str, replace: bool) -> serde_json::Value {
+        serde_json::Value::Object(configure_options_bag(
+            &serde_json::from_str(body).expect("test body is JSON"),
+            replace,
+        ))
+    }
+
+    #[test]
+    fn the_replace_flag_is_what_reaches_the_sp() {
+        assert_eq!(
+            bag(r#"{"queue":"o","options":{"leaseTime":60}}"#, false),
+            serde_json::json!({ "leaseTime": 60, "replace": false })
+        );
+        assert_eq!(
+            bag(r#"{"queue":"o","options":{"leaseTime":60}}"#, true),
+            serde_json::json!({ "leaseTime": 60, "replace": true })
+        );
+    }
+
+    #[test]
+    fn a_caller_supplied_replace_is_overwritten_not_honoured() {
+        // `mode` is the one spelling of this decision on the wire. A bag that
+        // carries its own `replace` must not be able to reset a queue behind a
+        // merging request's back — nor to refuse a replace the caller asked for.
+        assert_eq!(
+            bag(
+                r#"{"queue":"o","options":{"replace":true,"retryLimit":7}}"#,
+                false
+            )["replace"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            bag(r#"{"queue":"o","options":{"replace":false}}"#, true)["replace"],
+            serde_json::json!(true)
+        );
+    }
+
+    #[test]
+    fn a_top_level_options_body_keeps_mode_out_of_the_bag() {
+        // Raw callers spread the options across the top level; `mode` is a
+        // routing key there, not a 22nd option the SP would ignore silently.
+        let got = bag(r#"{"queue":"o","leaseTime":60,"mode":"replace"}"#, true);
+        assert_eq!(got, serde_json::json!({ "leaseTime": 60, "replace": true }));
+    }
+
+    #[test]
+    fn a_top_level_namespace_is_folded_in_but_never_over_the_bag() {
+        // Non-empty only, and never over a value the bag already spells: `""`
+        // and `null` in the bag are how a caller clears the label, and a
+        // top-level fold would silently drop both.
+        assert_eq!(
+            bag(
+                r#"{"queue":"o","namespace":"billing","task":"ingest"}"#,
+                false
+            ),
+            serde_json::json!({ "namespace": "billing", "task": "ingest", "replace": false })
+        );
+        assert_eq!(
+            bag(r#"{"queue":"o","namespace":"","options":{}}"#, false),
+            serde_json::json!({ "replace": false })
+        );
+        assert_eq!(
+            bag(
+                r#"{"queue":"o","namespace":"billing","options":{"namespace":null}}"#,
+                false
+            ),
+            serde_json::json!({ "namespace": null, "replace": false })
+        );
+    }
+}

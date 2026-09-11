@@ -63,7 +63,34 @@ const MAIN = "server/src/main.rs";
 // deliberately NOT here: this table is keyed by (path, method), so a rule that
 // depends on a request body cannot be stated in it without publishing a
 // falsehood — the same reason `kafka_kv.rs` is absent.
-const CLASSIFY_FINGERPRINT = "a872cfb429591f4e";
+// 2026-09-11: `classify` grew TWO arms, for the DLQ replay pair
+// (PLAN_DASHBOARD_ACTIONS.md §1.4, §2.0) — `POST /api/v1/messages/:pid/:txid/retry`
+// and the move primitive's `POST /api/v1/dlq/:id/replay`. Both answer
+// `QueueAdmin`, and both are a FIX rather than a new surface: the retry route
+// matched no arm and fell through the `/api/v1/messages` reads prefix, so this
+// table published it as `read` — the class every user role has and that an api
+// key gets from `scopes.read` alone, which let a Viewer replay a dead letter
+// through the proxy. POST on the prefix+suffix pair only; every other method is
+// `Blocked`, DELETE included, which is why the two arms sit ABOVE the
+// `/api/v1/messages/` DELETE arm in the Rust and in the mirror below. The push
+// half of a replay is not visible in this table at all: it is a GATE, not a
+// class (`gateway::is_dlq_replay` runs the storage and monthly push blocks for
+// it), and it is stated in the class meaning instead. Re-read in full: nothing
+// else in the function moved, and `is_operator_route` is untouched.
+// 2026-09-11 (second pass, from the review of the above): the two new arms match
+// a SHAPE rather than a suffix — two non-empty segments between
+// `/api/v1/messages/` and `/retry`, one between `/api/v1/dlq/` and `/replay` —
+// because a transaction id is arbitrary caller text and `/api/v1/messages/:pid/retry`
+// is the plain address of a message whose transaction id is `retry`, whose GET
+// and DELETE a suffix test was taking away. And the `/api/v1/messages` READS
+// prefix, the root of the P0, is now METHOD-BOUNDED: GET (with the HEAD axum
+// answers from it) is a read and every other method under the family fails
+// closed, so the next write route registered there cannot inherit `Read` the
+// way the retry route did. The other four read prefixes stay method-agnostic —
+// one of them must, since the KV browser's list is a `Read` POST (§2.5).
+// Re-read in full: nothing else in the function moved, and `is_operator_route`
+// is untouched.
+const CLASSIFY_FINGERPRINT = "0737293f24981410";
 const OPERATOR_FINGERPRINT = "04d6dea7366b466d";
 
 // --- mirror of `is_operator_route` -----------------------------------------
@@ -82,6 +109,20 @@ const OPERATOR_ROUTES = new Set([
 ]);
 
 // --- mirror of `classify` --------------------------------------------------
+
+/**
+ * How many non-empty path segments sit between `prefix` and `suffix`, or -1
+ * when the path does not carry both. The Rust spells this inline with
+ * `strip_prefix` + `strip_suffix`; a route is matched by its SHAPE, so a
+ * transaction id or a row id that happens to read like a route suffix is not
+ * one.
+ */
+function segmentsBetween(p, prefix, suffix) {
+  if (!p.startsWith(prefix) || !p.endsWith(suffix)) return -1;
+  const mid = p.slice(prefix.length, p.length - suffix.length);
+  const parts = mid.split("/");
+  return parts.every((s) => s.length > 0) ? parts.length : -1;
+}
 
 function classify(m, p) {
   if (OPERATOR_ROUTES.has(p)) return "operator";
@@ -118,6 +159,23 @@ function classify(m, p) {
 
   if (p === "/api/v1/configure") return "queue admin";
   if (p.startsWith("/api/v1/resources/queues/") && m === "DELETE") return "queue admin";
+  // The DLQ replay pair, above the messages `DELETE` arm exactly as in the
+  // Rust: a replay deletes the dead-letter row it re-pushes, so it carries the
+  // queue-admin authority, and it is method- and SHAPE-exact so that a `DELETE`
+  // on a `.../retry` address is not read as a message delete. Everything else
+  // on these two shapes is `Blocked` rather than left to travel to a 405.
+  //
+  // Shape and not suffix: a transaction id is arbitrary caller text, so
+  // `/api/v1/messages/:pid/retry` is the plain address of a message whose
+  // transaction id is `retry`, and matching the tail alone would take its GET
+  // and its DELETE away. Two non-empty segments for the retry route, one for
+  // the row id of the replay.
+  if (segmentsBetween(p, "/api/v1/messages/", "/retry") === 2) {
+    return m === "POST" ? "queue admin" : "blocked";
+  }
+  if (segmentsBetween(p, "/api/v1/dlq/", "/replay") === 1) {
+    return m === "POST" ? "queue admin" : "blocked";
+  }
   if (p.startsWith("/api/v1/messages/") && m === "DELETE") return "queue admin";
   if (p === "/api/v1/dlq" && m === "DELETE") return "queue admin";
   if (p.startsWith("/api/v1/consumer-groups") && (m === "DELETE" || m === "POST")) return "queue admin";
@@ -170,13 +228,20 @@ function classify(m, p) {
     return "blocked";
   }
 
+  // The messages family is METHOD-BOUNDED, and it is the only read prefix that
+  // is: it contains writes (the DELETE and the retry POST, both classified
+  // above), and a method-agnostic `Read` in front of a family that writes is
+  // exactly what published the replay route as a read. GET — and the HEAD axum
+  // answers from it — is the read; everything else fails closed.
+  if (p === "/api/v1/messages" || p.startsWith("/api/v1/messages/")) {
+    return m === "GET" || m === "HEAD" ? "read" : "blocked";
+  }
   if (
     p.startsWith("/api/v1/resources") ||
     p.startsWith("/api/v1/status") ||
     p.startsWith("/api/v1/analytics") ||
     p.startsWith("/api/v1/consumer-groups") ||
     p === "/api/v1/dlq" ||
-    p.startsWith("/api/v1/messages") ||
     p.startsWith("/api/v1/traces")
   ) {
     return "read";
@@ -192,7 +257,10 @@ const CLASS_MEANING = [
     "consume",
     "Pop, ack, lease extension, the batched read-from-offset the Kafka facade consumes through, and the partition discovery the S3 sink maps a queue with. A `wait=true` pop also holds a parked-consumer slot; the fetch does not, since its long poll is a body field rather than a query flag. Both reads are classified for the authority they need rather than for what they write: they are non-destructive and never quota-blocked, but one hands out message payloads and the other the partition names and offsets to read them by, so they carry the authority of the pop they stand in for instead of the read level every user role already has.",
   ],
-  ["queue admin", "Configuration, deletions, seeks and subscription changes."],
+  [
+    "queue admin",
+    "Configuration, deletions, seeks, subscription changes and the dead-letter replay. The replay is the one route in this class that also WRITES a message: it re-pushes a dead-letter snapshot and drops the dead-letter record in the same act, so it carries the authority of the deletion and answers the storage and monthly push blocks like a push. Everything else here is never quota-blocked, since deleting and shortening retention are how a tenant that is over a quota gets back under it.",
+  ],
   ["read", "Listings, status, analytics, DLQ and message reads, all tenant-scoped."],
   [
     "gated (streams)",
@@ -249,6 +317,66 @@ function concrete(path) {
     .replace(/:traceName/g, "N");
 }
 
+/**
+ * Non-GET `/api/` routes that are `read` ON PURPOSE. One entry today, and every
+ * entry costs a sentence saying why the route writes nothing.
+ */
+const READ_WRITE_ALLOWED = new Map([
+  [
+    "POST /api/v1/resources/kv/list",
+    "the console's KV browser (PLAN_DASHBOARD_ACTIONS.md §2.5): a read-only, " +
+      "viewer-visible, cursor-paged list that is a POST only because its cursor is a " +
+      "KEY, and a key in a query string is written to every access log between the " +
+      "browser and the database",
+  ],
+]);
+
+/**
+ * The bug class §1.4 was, as a build failure.
+ *
+ * The reads block of `classify` matches by PREFIX. A prefix that covers a route
+ * family containing a write hands that write the class every user role has and
+ * that an api key gets from `scopes.read` alone, and the push blocks in
+ * `plan_gates` never see it: that is exactly how `POST /api/v1/messages/:pid/:txid/retry`
+ * came to be callable by a Viewer. The retry route is classified now, and the
+ * messages family is method-bounded, but nothing stopped the NEXT write route
+ * registered under `/api/v1/resources`, `/api/v1/status`, `/api/v1/analytics` or
+ * `/api/v1/traces` from inheriting the same `read`, silently, until someone read
+ * this table and noticed.
+ *
+ * So the join this script already computes answers it: a broker route that is
+ * not a GET (nor the HEAD axum answers from one) and classifies as `read` fails
+ * generation until someone either gives it an arm in `proxy/src/routes.rs` or
+ * writes down here why it reads nothing. Non-`/api/` paths are out of scope:
+ * they are the dashboard and static fallback, not a classified API surface.
+ */
+function assertNoWriteInheritsRead(routes) {
+  const offenders = routes.filter(
+    (r) =>
+      r.class === "read" &&
+      r.method !== "GET" &&
+      r.method !== "HEAD" &&
+      r.path.startsWith("/api/") &&
+      !READ_WRITE_ALLOWED.has(`${r.method} ${r.path}`),
+  );
+  if (!offenders.length) return;
+  throw new Error(
+    [
+      ``,
+      `DRIFT: ${offenders.length} broker route(s) classify as \`read\` on a method that is not GET:`,
+      ``,
+      ...offenders.map((r) => `  ${r.method} ${r.path}`),
+      ``,
+      `A read prefix in front of a route that writes is the P0 of`,
+      `PLAN_DASHBOARD_ACTIONS.md §1.4: \`read\` is the one class every user role has,`,
+      `an api key gets it from \`scopes.read\` alone, and \`plan_gates\` runs no push`,
+      `block for it. Give the route an arm of its own in ${PROXY_ROUTES}, or — if it`,
+      `really only reads — add it to READ_WRITE_ALLOWED in this script with the reason.`,
+      ``,
+    ].join("\n"),
+  );
+}
+
 function main() {
   const check = isCheck();
   const text = repoRead(PROXY_ROUTES);
@@ -257,6 +385,7 @@ function main() {
   assertFingerprint(`${PROXY_ROUTES} :: is_operator_route`, fnBody(text, "fn is_operator_route"), OPERATOR_FINGERPRINT);
 
   const routes = brokerRoutes().map((r) => ({ ...r, class: classify(r.method, concrete(r.path)) }));
+  assertNoWriteInheritsRead(routes);
 
   const lines = [];
   lines.push(

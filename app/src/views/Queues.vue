@@ -117,12 +117,23 @@
             <span class="ld" style="background:var(--ember-400);"></span> falling behind
           </span>
 
-          <!-- This page really does poll (`useAutoRefresh` below), so the tick
-               is a fact, not a label. -->
-          <span class="live-tick filter-field-right">
-            <span class="pulse" />
-            <span>live · {{ refreshAgo }}</span>
-          </span>
+          <div class="filter-field-right q-row-right">
+            <!-- This page really does poll (`useAutoRefresh` below), so the tick
+                 is a fact, not a label. -->
+            <span class="live-tick">
+              <span class="pulse" />
+              <span>live · {{ refreshAgo }}</span>
+            </span>
+
+            <!-- The page's one CREATE, behind a rule so it does not read as a
+                 third filter. `can('queueAdmin')` mirrors the proxy's
+                 RouteClass::QueueAdmin for /api/v1/configure, so the button is
+                 absent for a producer rather than enabled-and-403. -->
+            <template v-if="can('queueAdmin')">
+              <span class="q-action-rule" aria-hidden="true"></span>
+              <button class="btn" @click="showCreate = true">Create queue</button>
+            </template>
+          </div>
         </div>
       </div>
     </div>
@@ -155,6 +166,13 @@
           </svg>
           <h3>No queues found</h3>
           <p>{{ hasActiveFilter ? 'Try adjusting your filters' : 'Create a queue to get started' }}</p>
+          <!-- The same control as the header's, offered where the sentence
+               above asks for it. Not under a filter, though: the queues that
+               exist are simply not in this slice, and creating one more would
+               not answer that. -->
+          <button v-if="!hasActiveFilter && can('queueAdmin')" class="btn" @click="showCreate = true">
+            Create queue
+          </button>
         </div>
       </template>
     </QueueHealthGrid>
@@ -181,6 +199,16 @@
         </div>
       </div>
     </Teleport>
+
+    <!-- Create. The modal owns the option set and the merge rule; this page
+         only says when it is open and refetches once it saved, because the row
+         it added belongs to the broker's list and guessing it would drift. -->
+    <QueueConfigModal
+      :open="showCreate"
+      mode="create"
+      @close="showCreate = false"
+      @saved="refreshAll"
+    />
   </div>
 </template>
 
@@ -196,6 +224,7 @@ import { useToast } from '@/composables/useToast'
 import { useEphemeralStore } from '@/stores/ephemeralStore'
 import { useIdentity } from '@/stores/identity'
 import { useQueuesStore } from '@/stores/queuesStore'
+import QueueConfigModal from '@/components/QueueConfigModal.vue'
 import QueueHealthGrid from '@/components/QueueHealthGrid.vue'
 
 const router = useRouter()
@@ -242,6 +271,9 @@ const filterTask = ref(ALL)
 const sortBy = ref('health')
 
 // Modal state
+// The create form. It is not prefilled from anything on this page: a create
+// starts from the broker's defaults, which the modal states field by field.
+const showCreate = ref(false)
 const showDeleteModal = ref(false)
 const queueToDelete = ref(null)
 const deleteError = ref(null)
@@ -447,6 +479,13 @@ onMounted(() => {
    `.filters` / `.filter-row` / `.filter-search` / `.filter-search-icon`.
    `.view-banner` and `.qdel-error` are gone too — the first is hoisted
    verbatim, the second is the shared `.panel-err`. */
+
+/* The right edge of the filter row: the live tick, then the one control that
+   CHANGES something. The hairline is the same two pixels Messages puts between
+   its filter actions and "Push message" — it is what keeps "Create queue" from
+   being read as another way of narrowing the list. */
+.q-row-right { display: flex; align-items: center; gap: 8px; }
+.q-action-rule { width: 1px; align-self: stretch; margin: 0 2px; background: var(--bd); }
 
 .qhg-legend {
   display: inline-flex;

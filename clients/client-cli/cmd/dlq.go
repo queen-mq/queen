@@ -87,34 +87,39 @@ var dlqDescribeCmd = &cobra.Command{
 }
 
 // `dlq retry` wraps POST /api/v1/messages/:p/:tx/retry (registered in
-// server/src/main.rs). It is NOT idempotent, which is why it needs --yes and
-// why the SDK call underneath opts out of the client's 5xx retry loop -- the
-// reasoning is on Admin.RetryMessage and summarised in the Long help below.
+// server/src/main.rs). Since the move primitive it is idempotent BY ROW -- a
+// second run answers 404 rather than pushing a second copy -- but it is still a
+// write that removes a record, which is why it keeps --yes, and the SDK call
+// underneath still opts out of the client's 5xx retry loop so the caller reads
+// the verdict itself. The reasoning is on Admin.RetryMessage.
 var dlqRetryCmd = &cobra.Command{
 	Use:     "retry <partitionId> <transactionId>",
 	Aliases: []string{"requeue", "replay"},
 	Short:   "Replay one dead-lettered message back onto its queue",
-	Long: `Asks the broker to re-push the dead-letter snapshot for this address to
-its own queue and partition, then drop the DLQ row once the push has been
-accepted. This is the broker's own replay route; the dashboard's dead-letter
-view does not expose it (it offers Purge only), so queenctl and the admin
-SDKs are the only wrappers.
+	Long: `Asks the broker to MOVE the newest dead-letter snapshot at this address
+back into the log: claim the row under a lock, push the frame to its own
+queue and partition, delete the row -- one transaction. The dashboard's
+dead-letter view offers the same action per row; queenctl and the admin SDKs
+address it by (partitionId, transactionId) instead of by row id.
 
-NOT IDEMPOTENT. Run it once per address and read the result before
-re-running:
+It writes, and what it removes it removes for good, so read the result:
 
-  - The replay is a NEW message with a fresh transaction id, because the
-    original id would be swallowed by the dedup window. Two runs mean two
-    copies, and nothing on the broker collapses them.
-  - It lands at the tail of the partition, so it is out of order with
-    respect to its own key.
-  - If the push is accepted but the DLQ cleanup then fails, the broker
-    answers with an error saying the message was replayed AND is still
-    dead-lettered. Running the command again in that state replays it a
-    second time. queenctl does not resend it for you.
+  - The replayed frame carries the transaction id 'dlq:<row id>', which is
+    derived from the row and not minted per attempt: a second run of this
+    command answers 404 (the row is gone with the first move) instead of
+    appending a second copy.
+  - It lands at the TAIL of the partition, so it is out of order with
+    respect to its own key, and its age clock restarts at the destination.
+  - There is no "replayed but still dead-lettered" state: the push and the
+    delete commit together or not at all. A 500 that says
+    "dlqRowRemoved": false means nothing happened; one whose dlqRowRemoved
+    is null means the broker never learned the outcome -- re-read the DLQ
+    with 'dlq list' before doing anything else.
   - On an address dead-lettered by several consumer groups, the broker
-    replays the most recent snapshot and deletes every group's snapshot
-    for that address.
+    replays the most recent snapshot and removes ONLY that group's record.
+  - result "duplicate" means nothing was written and nothing was removed:
+    the destination already carries that transaction id, and the broker will
+    not destroy a record it did not replay.
 
 Use 'dlq list' to find addresses and 'dlq describe' to read one first.
 Pass --dry-run to print the address without sending anything.`,
@@ -125,7 +130,7 @@ Pass --dry-run to print the address without sending anything.`,
 			return nil
 		}
 		if !dlqYes {
-			return clierr.Userf("refusing to replay without --yes: retry is not idempotent (use --dry-run for a preview)")
+			return clierr.Userf("refusing to replay without --yes: it appends a message and removes the dead-letter record (use --dry-run for a preview)")
 		}
 		c, cleanup, err := newClient()
 		if err != nil {
@@ -134,23 +139,25 @@ Pass --dry-run to print the address without sending anything.`,
 		defer cleanup()
 		data, err := c.A.RetryMessage(context.Background(), args[0], args[1])
 		if err != nil {
-			// The 500 that means "replayed, but the DLQ row is still there"
-			// is the one an operator must not answer by re-running. Say so
-			// on the way out; the raw body follows in the error itself.
+			// The one 500 an operator must not answer by re-running blind: the
+			// broker did not learn whether the move committed, so the row may
+			// or may not be there. `dlqRowRemoved` is null in that body and
+			// false in the one that means "the database refused, nothing
+			// happened"; the raw body follows in the error itself.
 			var he *queen.HTTPError
-			if errors.As(err, &he) && strings.Contains(he.Body, `"replayed":true`) {
-				fmt.Fprintln(os.Stderr, "WARNING: the message was replayed but its DLQ row was NOT removed.")
-				fmt.Fprintln(os.Stderr, "Do not re-run this command for the same address: it would replay a second copy.")
-				fmt.Fprintln(os.Stderr, "Delete the row with 'queenctl messages delete' once you have confirmed the replay.")
+			if errors.As(err, &he) && strings.Contains(he.Body, `"dlqRowRemoved":null`) {
+				fmt.Fprintln(os.Stderr, "WARNING: the broker could not say whether this move was applied.")
+				fmt.Fprintln(os.Stderr, "Re-read the address with 'queenctl dlq list' before re-running: if the row is gone, the move happened.")
 			}
 			return clierr.Server(err)
 		}
-		// dlqRowRemoved:false on a SUCCESS means the row disappeared between
-		// the broker's read and its delete -- i.e. something else replayed or
-		// drained the same address concurrently, and the message may now exist
-		// twice on the queue.
+		// dlqRowRemoved:false on a SUCCESS is the `duplicate` verdict: the
+		// destination's dedup window already carries this replay's transaction
+		// id, so nothing was written -- and the broker will not delete a record
+		// it did not replay.
 		if removed, ok := data["dlqRowRemoved"].(bool); ok && !removed {
-			fmt.Fprintln(os.Stderr, "WARNING: replayed, but the DLQ row was already gone -- another retry or drain raced this one.")
+			fmt.Fprintln(os.Stderr, "WARNING: nothing was written and the dead-letter record was kept: the destination already carries this transaction id.")
+			fmt.Fprintln(os.Stderr, "Read what is at the reported offset, then replay elsewhere or purge the row.")
 		}
 		r, err := rendererFor(output.View{}, stdout())
 		if err != nil {

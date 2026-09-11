@@ -51,10 +51,14 @@
 //! WHY THERE IS NO PER-QUEUE FLAG (§12.1)
 //!
 //! The KV has no queue. Timers have a destination queue, but a per-queue flag
-//! would be a column on `queen.queues`, and `/configure` RESETS the columns
-//! (confirmed defect, 2026-08-05): the flag would switch itself off at the first
-//! reconfiguration, silently. A cell-wide switch that an operator can see is
-//! better than a per-queue one that lies.
+//! would be a column on `queen.queues`, and `/configure` resets every column a
+//! REPLACING body does not mention (`"mode":"replace"`, which is what
+//! `queenctl apply -f` sends, and what every call did before 1.6.0 — the
+//! confirmed defect of 2026-08-05): the flag would switch itself off at the
+//! first such reconfiguration, silently. Merge narrows the window; it does not
+//! close it, because a manifest legitimately means the whole configuration. A
+//! cell-wide switch that an operator can see is better than a per-queue one
+//! that lies.
 //!
 //! ---------------------------------------------------------------------------
 //! AN ABSENT ROW MEANS ON

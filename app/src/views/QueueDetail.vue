@@ -91,12 +91,16 @@
           </svg>
           Browse messages
         </button>
-        <button class="btn btn-ghost" @click="goDLQ" :class="{ 'btn-danger': totalMessages.deadLetter > 0 }">
+        <!-- Not red on a non-zero count: a dead-letter depth is a standing
+             to-do list, not something failing now (the colour policy); the
+             count beside the label is the signal. Purge and Delete keep red
+             because they destroy. -->
+        <button class="btn btn-ghost" @click="goDLQ">
           <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.8">
             <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
           </svg>
           DLQ
-          <span v-if="totalMessages.deadLetter > 0" class="qd-badge qd-badge-bad">{{ formatNumber(totalMessages.deadLetter) }}</span>
+          <span v-if="totalMessages.deadLetter > 0" class="qd-badge">{{ formatNumber(totalMessages.deadLetter) }}</span>
         </button>
         <button class="btn btn-ghost" @click="goTraces">
           <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.8">
@@ -107,8 +111,28 @@
 
         <span class="qd-actions-spacer" />
 
-        <!-- DELETE is RouteClass::QueueAdmin at the proxy; anyone else would
-             get a 403 from a button that looks perfectly enabled. -->
+        <!-- The writes, all of them to the right of the spacer. PUSH is
+             RouteClass::Produce (admin or producer); EDIT and DELETE are
+             RouteClass::QueueAdmin (admin only): mirroring the proxy's classes
+             here is what keeps a button from being enabled into a 403. -->
+        <button v-if="can('produce')" @click="pushOpen = true" class="btn">
+          <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.8">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 19V5m0 0l-6 6m6-6l6 6" />
+          </svg>
+          Push message
+        </button>
+
+        <!-- /api/v1/configure is RouteClass::QueueAdmin, the same class as the
+             delete beside it: admin only, and absent rather than 403 for
+             anyone else. -->
+        <button v-if="can('queueAdmin')" @click="configOpen = true" class="btn">
+          <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.8">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+          </svg>
+          Edit configuration
+        </button>
+
         <button v-if="can('queueAdmin')" @click="openDeleteModal" class="btn btn-danger">
           <svg width="13" height="13" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.8">
             <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -201,7 +225,7 @@
                Errors row two blocks down charts the queue's real ack failures. -->
           <span class="count-sep">·</span>
           <button class="count-item" @click="goDLQ">
-            <strong class="num" :class="{ bad: totalMessages.deadLetter > 0 }">{{ formatNumber(totalMessages.deadLetter) }}</strong>
+            <strong class="num">{{ formatNumber(totalMessages.deadLetter) }}</strong>
             <span>dlq</span>
           </button>
           <span class="count-sep">·</span>
@@ -426,27 +450,36 @@
               </span>
               <span class="qd-config-hint">how long a lease is held</span>
             </div>
-            <div class="qd-config">
+            <!-- The three the broker STORES and never READS (D2, re-confirmed
+                 against the procedures 2026-09-11: `ttl`, `max_queue_size` and
+                 `retry_delay` appear in 011_log_stats and 012_configure and in
+                 no push, pop, ack or maintenance path). They stay on this card
+                 because the values are really on the row — a queue configured
+                 with `maxSize: 1000` has that number, and hiding it would make
+                 the page disagree with the API — but they are dimmed and say so
+                 rather than describing an enforcement that does not happen. The
+                 editor omits them entirely. -->
+            <div class="qd-config qd-config-inert">
               <span class="label-xs">TTL</span>
               <span class="qd-config-val font-mono">
                 {{ queueData.config.ttl ? formatDuration(queueData.config.ttl * 1000) : '∞' }}
               </span>
-              <span class="qd-config-hint">message lifetime</span>
+              <span class="qd-config-hint">declared, not enforced by this broker</span>
             </div>
-            <div class="qd-config">
+            <div class="qd-config qd-config-inert">
               <span class="label-xs">Max queue size</span>
               <span class="qd-config-val font-mono">{{ queueData.config.maxQueueSize ? formatNumber(queueData.config.maxQueueSize) : '∞' }}</span>
-              <span class="qd-config-hint">push back-pressure cap</span>
+              <span class="qd-config-hint">declared, not enforced by this broker</span>
             </div>
             <div class="qd-config">
               <span class="label-xs">Retry limit</span>
               <span class="qd-config-val font-mono">{{ queueData.config.retryLimit || 0 }}</span>
               <span class="qd-config-hint">attempts before DLQ / drop</span>
             </div>
-            <div class="qd-config">
+            <div class="qd-config qd-config-inert">
               <span class="label-xs">Retry delay</span>
               <span class="qd-config-val font-mono">{{ queueData.config.retryDelay || 0 }} ms</span>
-              <span class="qd-config-hint">backoff between attempts</span>
+              <span class="qd-config-hint">declared, not enforced by this broker</span>
             </div>
             <div class="qd-config">
               <span class="label-xs">Dead-letter queue</span>
@@ -468,6 +501,21 @@
               <span class="qd-config-hint">{{ formatRelative(queueData.createdAt) }}</span>
             </div>
           </div>
+
+          <!-- This card shows what the STATUS route reports, which is six of
+               the twenty-one options a queue carries. The rest — retention,
+               encryption, the dedup window, the discovery labels — are read by
+               the editor, which is also the only place they can be changed. -->
+          <p class="qd-config-note">
+            The six options the status route reports, plus the queue's priority and age. The dimmed
+            three are stored on the row and read by no push, pop, ack or maintenance path on this
+            broker.
+            <template v-if="can('queueAdmin')">
+              <button class="qd-config-link" @click="configOpen = true">Edit configuration</button>
+              reads all twenty-one and offers the eighteen this broker acts on — the sixteen live
+              options, the namespace and the task. The dimmed three are not among them.
+            </template>
+          </p>
         </div>
       </div>
     </template>
@@ -497,6 +545,29 @@
       </div>
     </Teleport>
 
+    <!-- The queue is FIXED: this page is about one queue, and a picker here
+         would offer to push somewhere none of the numbers on screen describe. -->
+    <PushMessageModal
+      :open="pushOpen"
+      :queue="queueName"
+      queue-fixed
+      @close="pushOpen = false"
+      @pushed="fetchAll"
+    />
+
+    <!-- The editor reads the queue's full configuration itself when it opens —
+         this page deliberately does not keep it (see fetchQueueDetail). A save
+         refetches the page rather than patching anything locally: the status
+         route is the one that describes this queue, and two sources of the same
+         six numbers would drift. -->
+    <QueueConfigModal
+      :open="configOpen"
+      mode="edit"
+      :queue="queueName"
+      @close="configOpen = false"
+      @saved="fetchAll"
+    />
+
   </div>
 </template>
 
@@ -517,7 +588,12 @@ import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { useToast } from '@/composables/useToast'
 import { useIdentity } from '@/stores/identity'
 import { semanticColors } from '@/composables/useChartTheme'
+import {
+  ackFailureSeverity, backlogSeverity, numTone, pendingDriftSeverity, timeLagSeverity,
+} from '@/composables/useSeverity'
 import MetricRow from '@/components/MetricRow.vue'
+import PushMessageModal from '@/components/PushMessageModal.vue'
+import QueueConfigModal from '@/components/QueueConfigModal.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -545,6 +621,18 @@ const loadingOps = ref(true)
 const showDeleteModal = ref(false)
 const deleteError = ref(null)
 const deleting = ref(false)
+
+// The push form, opened on this page's queue. A queued push refetches the page
+// rather than incrementing anything locally: the totals and the partition rows
+// are the broker's, and guessing the new ones would drift from them.
+const pushOpen = ref(false)
+
+// The configuration editor. It fetches the queue's own 21-option echo when it
+// opens (/api/v1/resources/queues/:name) rather than reading this page's
+// `queueData.config`, which is the status route's six keys — an editor
+// prefilled from six and merging twenty-one would be an editor that cannot say
+// what the queue is.
+const configOpen = ref(false)
 
 const selectedRange = ref('1h')
 const timeRanges = [
@@ -737,13 +825,15 @@ const pendingDeltaContext = computed(() => {
   if (v > 0) return 'queue filling · push > pop'
   return 'queue draining · pop > push'
 })
-const pendingDeltaSeverity = computed(() => {
-  const v = pendingDeltaLatest.value
-  if (v > 100000) return 'bad'
-  if (v > 1000) return 'warn'
-  if (v < -1000) return 'ok'
-  return ''
-})
+// Judged as a share of what was pushed into this queue in the same window:
+// +1 000 is nothing on a queue that took half a million and a stall on one
+// that took two thousand. (Same rule as the Dashboard's Pending Δ row.)
+const pushedTotal = computed(() =>
+  history.value.reduce((s, x) => s + (toNum(x.pushMessages) || 0), 0)
+)
+const pendingDeltaSeverity = computed(() =>
+  pendingDriftSeverity({ delta: pendingDeltaLatest.value, pushed: pushedTotal.value })
+)
 
 // ---------------------------------------------------------------------------
 // Time lag row — avg / max from queue-ops series
@@ -776,13 +866,11 @@ const lagLatest = computed(() => {
     max: latestFinite(l.map(x => x.max)),
   }
 })
-const lagNumClass = (ms) => {
-  if (ms === null || ms === undefined) return ''
-  if (!ms || ms === 0) return ''
-  if (ms < 60_000) return ''
-  if (ms < 300_000) return 'warn'
-  return 'bad'
-}
+// An age is already proportional, so the thresholds are the app's, unchanged —
+// they just come from useSeverity now, in seconds, like everywhere else.
+const lagNumClass = (ms) => (
+  ms === null || ms === undefined ? '' : numTone(timeLagSeverity(ms / 1000))
+)
 // MetricRow.severity expects a key like 'warn' / 'bad'; map from the raw ms.
 const lagSeverityKey = computed(() => lagNumClass(lagLatest.value.max))
 const lagContext = computed(() => {
@@ -832,12 +920,10 @@ const fillContext = computed(() => {
   if (v < 30)  return 'low utilization · consumers mostly empty'
   return 'balanced · consumer pool sized OK'
 })
-const fillSeverityKey = computed(() => {
-  const v = fillLatest.value
-  if (v === null) return ''
-  if (v < 30) return 'warn'
-  return ''
-})
+// No tone: a low fill ratio means the consumers asked more often than there
+// was work, which is what an idle or over-provisioned pool looks like — a
+// sizing observation, not a degradation. The context line says it in words.
+const fillSeverityKey = computed(() => '')
 
 // ---------------------------------------------------------------------------
 // Errors row — ack failed in window for this queue
@@ -850,17 +936,23 @@ const errorsSeries = computed(() => {
 const errorsTotal = computed(() =>
   history.value.reduce((s, x) => s + (toNum(x.ackFailed) || 0), 0)
 )
+// The denominator is DELIVERIES, not acks: queue-ops reports `ackSuccess` only
+// at tenant scope, and every delivered message is a message somebody had to
+// ack, so pops are the population the failures are drawn from. Stated in the
+// context line so the number is never a share of something unnamed.
+const deliveredTotal = computed(() =>
+  history.value.reduce((s, x) => s + (toNum(x.popMessages) || 0), 0)
+)
 const errorsContext = computed(() => {
   const t = errorsTotal.value
   if (!t) return 'no ack failures in window'
-  return `${formatNumber(t)} ack failure${t === 1 ? '' : 's'}`
+  const delivered = deliveredTotal.value
+  if (!delivered) return `${formatNumber(t)} ack failure${t === 1 ? '' : 's'}`
+  return `${formatNumber(t)} of ${formatNumber(delivered)} delivered (${((t / delivered) * 100).toFixed(2)}%)`
 })
-const errorsSeverity = computed(() => {
-  const t = errorsTotal.value
-  if (t > 100) return 'bad'
-  if (t > 0) return 'warn'
-  return ''
-})
+const errorsSeverity = computed(() =>
+  ackFailureSeverity({ failed: errorsTotal.value, attempts: deliveredTotal.value })
+)
 
 // ---------------------------------------------------------------------------
 // Parked row — long-poll consumers waiting on this queue
@@ -963,20 +1055,25 @@ const probeGroupsIfDeep = () => {
 // ---------------------------------------------------------------------------
 const banners = computed(() => {
   const out = []
+  // Informational, not red: a dead-letter depth is a standing to-do list —
+  // nothing empties it — so it is a pointer to a page, not an event happening
+  // to this queue now.
   if (totalMessages.value.deadLetter > 0) {
     out.push({
-      tone: 'bad',
+      tone: 'info',
       title: 'Messages in DLQ',
       detail: `${formatNumber(totalMessages.value.deadLetter)} message${totalMessages.value.deadLetter === 1 ? '' : 's'} require investigation.`,
       cta: 'Open DLQ',
       action: goDLQ,
     })
   }
-  if (errorsTotal.value > 0) {
+  // Only when the RATE earned a tone. A banner that fires on the first failed
+  // ack of the day is a banner an operator learns to scroll past.
+  if (errorsSeverity.value) {
     out.push({
-      tone: errorsSeverity.value === 'bad' ? 'bad' : 'warn',
+      tone: errorsSeverity.value,
       title: 'Ack failures in window',
-      detail: `${formatNumber(errorsTotal.value)} ack failure${errorsTotal.value === 1 ? '' : 's'} across the last ${selectedRange.value}.`,
+      detail: `${formatNumber(errorsTotal.value)} ack failure${errorsTotal.value === 1 ? '' : 's'} across the last ${selectedRange.value}${deliveredTotal.value ? ` — ${((errorsTotal.value / deliveredTotal.value) * 100).toFixed(2)}% of deliveries` : ''}.`,
     })
   }
   // Four outcomes, not two: 'none' below the floor, 'hold' while the conflation
@@ -995,7 +1092,9 @@ const banners = computed(() => {
     })
   } else if (depthAdvisory.value === 'fire') {
     out.push({
-      tone: totalMessages.value.pending > 100000 ? 'bad' : 'warn',
+      // Attention, never red: a deep queue is a queue with work in it, and
+      // red is reserved for something that is failing.
+      tone: 'warn',
       title: 'High pending depth',
       detail: `${formatNumber(totalMessages.value.pending)} pending — consider scaling consumers or checking lag.`,
     })
@@ -1006,11 +1105,10 @@ const banners = computed(() => {
 // ---------------------------------------------------------------------------
 // Numeric tone for top-strip pending
 // ---------------------------------------------------------------------------
-const pendingNumClass = (n) => {
-  if (!n || n < 1000) return ''
-  if (n < 10000) return 'warn'
-  return 'bad'
-}
+// Seconds of work at the rate this queue is actually acking, not a raw depth:
+// 50 000 pending drains in four seconds at 12k/s and never drains at 0/s.
+const drainPerSec = computed(() => latestFinite(history.value.map(x => x.ackPerSecond)))
+const pendingNumClass = (n) => backlogSeverity({ pending: n, drainPerSec: drainPerSec.value })
 
 // ---------------------------------------------------------------------------
 // Formatters
@@ -1207,10 +1305,6 @@ onMounted(fetchAll)
   font-size: 10px; font-family: 'JetBrains Mono', monospace;
   margin-left: 4px;
 }
-.qd-badge-bad {
-  background: var(--ember-glow); color: var(--ember-400);
-  border: 1px solid color-mix(in srgb, var(--ember-500) 25%, transparent);
-}
 
 /* ---------------------------------------------------------------------------
    Advisory banners use the shared .status-banner / .banner-* / .view-banner
@@ -1267,6 +1361,24 @@ onMounted(fetchAll)
   font-size: 10.5px; color: var(--text-low);
   letter-spacing: .04em;
 }
+/* An option the broker stores and never reads. Dimmed to the hint's own
+   colour, so the figure still reads at a glance as a fact about the row while
+   it stops competing with the five values that actually govern behaviour. */
+.qd-config-inert .qd-config-val { color: var(--text-mid); font-weight: 500; }
+
+.qd-config-note {
+  margin: 12px 0 0; padding-top: 12px;
+  border-top: 1px solid var(--bd);
+  font-size: 11.5px; line-height: 1.5; color: var(--text-low);
+}
+/* A sentence with one control in it: the button has to sit on the baseline of
+   the prose, not on a button's own box. */
+.qd-config-link {
+  padding: 0; border: none; background: none; cursor: pointer;
+  font: inherit; color: var(--text-hi); text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.qd-config-link:hover { color: var(--accent); }
 
 /* The delete modal uses the shared shell — .modal-backdrop / .modal-card /
    .modal-foot — and the shared .panel-err for its form error, so it is not a

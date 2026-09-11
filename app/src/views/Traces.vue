@@ -20,9 +20,11 @@
         <strong>Could not load traces</strong> · {{ error }}<template v-if="traces.length"> · showing the last rows that loaded{{ lastGoodText ? ` (${lastGoodText})` : '' }}</template>
       </span>
     </div>
+    <!-- A broker capability, like the same note on the dead-letter page:
+         information, not a condition — so it is not amber. -->
     <div
       v-if="currentTraceName && traces.length > 0 && !serverPaginates"
-      class="status-banner banner-warn view-banner"
+      class="status-banner banner-info view-banner"
     >
       <span>This broker returned every trace in one response — the page controls would page nothing, so they are hidden.</span>
     </div>

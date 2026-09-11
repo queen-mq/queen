@@ -1129,13 +1129,38 @@ async fn main() {
             "/api/v1/resources/queues/:queue/depth",
             get(handlers::handle_queue_depth),
         )
+        // PLAN_DASHBOARD_ACTIONS.md §2.5 — the console's KV browser, and it is
+        // registered HERE, among the resource reads, rather than beside
+        // /api/v1/kv below, for a reason that is the whole design: the proxy
+        // classifies `/api/v1/resources` by prefix and method-agnostically as a
+        // READ, so this pair needs no proxy arm, no feature gate, no quota
+        // interaction and is visible to a Viewer — while POST /api/v1/kv is
+        // `Gated(Kv, Mixed)` there and closed to one. The kill switch and the
+        // per-tenant read rate still apply: both handlers open with the same
+        // `switches::decide` ladder every other KV read does.
+        //
+        // `/resources/kv/namespaces` is NOT the `/resources/namespaces` four
+        // lines up: that one lists QUEUE namespaces. Different populations,
+        // different tables, and the path segment is what keeps them apart.
+        //
+        // The list is a POST because its cursor is a KEY, and a key in a query
+        // string is written to the access log of every component between the
+        // browser and the database — the same rule that makes the KV path
+        // routes reject a query string outright.
+        .route(
+            "/api/v1/resources/kv/namespaces",
+            get(handlers::handle_kv_namespaces),
+        )
+        .route("/api/v1/resources/kv/list", post(handlers::handle_kv_list))
         // ---------------------------------------------------- management surface
         .route("/api/v1/messages", get(handlers::handle_list_messages))
         .route(
             "/api/v1/messages/:partitionId/:transactionId",
             get(handlers::handle_get_message).delete(handlers::handle_delete_message),
         )
-        // DLQ replay: re-push the dead-letter snapshot, then drop the DLQ row.
+        // DLQ replay, addressed the way this route always has been: the newest
+        // dead-letter row at (partitionId, transactionId) is MOVED back into the
+        // log — claim, push, delete, one transaction (queen.log_dlq_move_v1).
         .route(
             "/api/v1/messages/:partitionId/:transactionId/retry",
             post(handlers::handle_retry_message),
@@ -1144,6 +1169,13 @@ async fn main() {
             "/api/v1/dlq",
             get(handlers::handle_dlq).delete(handlers::handle_purge_dlq),
         )
+        // The same move, addressed by the dead-letter ROW id that GET
+        // /api/v1/dlq already returns. This is the form the dashboard uses and
+        // the one a redrive wants: a row id names exactly one record, so a
+        // message dead-lettered under two consumer groups loses only the record
+        // that was replayed. The optional {queue, partition} body moves it
+        // somewhere other than where it came from.
+        .route("/api/v1/dlq/:id/replay", post(handlers::handle_dlq_replay))
         .route("/api/v1/traces", post(handlers::handle_record_trace))
         .route("/api/v1/traces/names", get(handlers::handle_trace_names))
         .route(

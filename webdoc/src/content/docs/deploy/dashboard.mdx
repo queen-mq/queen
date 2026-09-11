@@ -15,7 +15,8 @@ sourceOfTruth:
   - app/src/views/DeadLetter.vue
   - proxy/src/webapp.rs
   - proxy/src/operator.rs
-# sourceOfTruth re-read 2026-09-09 (through 399019f6 + working tree): page matches the code.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): the views list gains Messages push, Queues create and edit, Dead Letter replay and the new Timers page, the State nav group is named, and the two dead-letter captions are marked as predating the Replay action (the screenshots themselves are unchanged).
+# EDITOR NOTE: app/src/views/Kv.vue and app/src/views/Timers.vue govern the State group described below and belong in the sourceOfTruth list above. They are untracked today, and a listed source with no commit behind it gives check-sourceoftruth.mjs no date to compare against, so add both entries in the same commit that first commits those two views.
 ---
 
 Every broker serves a dashboard on its own port, with nothing to deploy: the built single-page
@@ -39,14 +40,36 @@ so a missing path under `/api/` or `/auth/` still answers a JSON 404 instead of 
 ## The views
 
 Every view is tenant-scoped except System and Users, and both exceptions are labelled on screen.
+The sidebar groups them the way the router does: Overview, Routing, **State** (the key/value
+browser and the timers page, which read stored state that belongs to no queue), Observability and
+Cell.
 
 - **Dashboard**, `/`: the resource overview, namespaces and tasks
 - **Queue Operations**, `/operations`: per-queue throughput, lag and consumer health
-- **Queues**, `/queues` and `/queues/:queueName`: the list, one queue's configuration, delete
+- **Queues**, `/queues` and `/queues/:queueName`: the list, creating a queue, and one queue's
+  detail. The detail page reads the whole 21-option configuration and edits eighteen of it: three of
+  the four options this broker stores but enforces nowhere (`ttl`, `maxSize`, `retryDelay`) are shown
+  read-only and labelled as declared rather than enforced. The fourth, `priority`, is still in the
+  editor, described there as a label the engine does not act on. An edit sends only the fields that
+  changed, because `/configure` merges, and clearing a field sends `null`, which restores that one
+  option's default. Deleting a queue is here too
 - **Ephemeral**, `/ephemeral`: the [in-memory queue class](/use/ephemeral), a separate page
   because its rows have no pending, no retained bytes and no dead letters
 - **Consumer Groups**, `/consumers`: lag, the lagging list, subscription changes, seek, delete
-- **Messages**, `/messages`: listing, single-message inspection, delete
+- **Messages**, `/messages`: listing, single-message inspection, delete, and pushing a message.
+  The push form is one modal behind three entry points: a **Push message** button on the
+  listing, the same button on a queue's detail page with the queue fixed, and **Push a copy**
+  in the message drawer, which pre-fills the form with the inspected message's payload. A copy is a new
+  message with its own identity, not a retry: the original stays exactly where it is
+- **KV**, `/kv`: the [key/value store](/use/kv) as a browser, one namespace at a time, with a
+  prefix box and a keyset pager instead of page numbers. It reads and never writes. Keys whose
+  expiry has passed and whose sweep has not happened yet are listed greyed rather than hidden,
+  because they still occupy the namespace the count beside them measures
+- **Timers**, `/timers`: the [scheduled messages](/use/timers) waiting to fire for one queue,
+  with a keyset pager over the timer keys, an exact count for a key prefix, a peek drawer that
+  decodes the stored payload in the browser, and a cancel that renders the broker's own verdict.
+  There is no ticker: every row here is a database read, and a page that refetched under the
+  reader would move rows while they are being read
 - **Traces**, `/traces`: the trace names that exist, and the timeline for one
 - **Analytics**, `/analytics`: status over time, lag and ops series, retention volume
 - **Workload**, `/workload`: who is doing the work, how much of it, and what is stuck, grouped
@@ -55,7 +78,10 @@ Every view is tenant-scoped except System and Users, and both exceptions are lab
   snapshot figure says `now`, because the two answer different questions and a page that mixes
   them silently is a page that reads a backlog as a rate
 - **Dead Letter**, `/dlq`: the dead-letter listing, a failure breakdown that filters it, per-row
-  purge, and a bulk purge of every record for one queue, optionally narrowed to one consumer group
+  **replay** and purge, and a bulk purge of every record for one queue, optionally narrowed to one
+  consumer group. Replay opens a confirmation that names the destination and the transaction id
+  the replayed message will carry, with an Advanced fold for sending it to another queue or
+  partition instead
 - **System**, `/system`: cell-level host CPU and memory, worker metrics, PostgreSQL internals,
   the disk spool, the maintenance switch
 - **Users**, `/users`: cell-level accounts for tenants represented on the selected cell, with
@@ -67,15 +93,38 @@ Every view is tenant-scoped except System and Users, and both exceptions are lab
   caption="Five groups keeping pace and two that stopped, separated by the broker's own offsets rather than by inference. The two slow readers here are deliberate."
 />
 
+<Screenshot
+  src="dashboard-queue-detail-edit"
+  alt="The Edit configuration modal over a queue's detail page. Namespace and task sit at the top as two pickers, then the options one under the other: lease time, retry limit, the two dead-letter switches, the dedup window and delayed processing, each with its default printed on the right and a sentence underneath saying what the broker does with it."
+  caption="Every option names its default beside the field. Saving sends only what changed, because the broker merges; a cleared field sends null and restores that one default. The three options the broker stores but never reads are not here: the detail page shows them read-only."
+/>
+
+<Screenshot
+  src="dashboard-kv"
+  alt="The KV browser. A namespace selector reads channel with ten keys, beside a key prefix box and a page size. Below, a table of ten keys with size, version, expiry, update time and a live state chip, and a footer reading page one, ten rows, the byte total of the values, end of the namespace, with Previous and Next."
+  caption="One namespace at a time, walked with a cursor on the key rather than page numbers. The header count carries an approximation sign because it is the sweeper's snapshot; the count in the selector is exact and taken with the list."
+/>
+
+<Screenshot
+  src="dashboard-timers"
+  alt="The Timers page for the queue shop.orders. A queue picker, a page size and an exact-count box for a key prefix head the page; the count box reads three pending under escalate slash. Below, seven pending timers with their key, partition, delivery time as a relative and an absolute value, attempts, last error, state and creation time."
+  caption="Scheduled messages that have not fired yet; a fired timer leaves no row behind. The prefix count is exact and comes from the broker, while the tenant total in the header is the sweeper's snapshot."
+/>
+
 Three things to know before reading a number off this UI. System and Users cover the whole cell
-and every tenant on it, so a cell figure or account list is not a tenant figure. The dead-letter view inspects and
-purges: replaying a dead-lettered message is a broker route,
-[`POST /api/v1/messages/:partitionId/:transactionId/retry`](/reference/http/messages-dlq), and
-this console does not call it yet, so purge is the only action on a row. The bulk purge takes its
-scope from the queue and consumer-group filters alone: the error breakdown narrows the table, not
-the cleanup, so a purge by criteria deletes every record for that queue and cannot be undone. And an unknown is not a
-zero: a failed call renders as a failure, and one shared ticker refreshes the page, so what you
-see is one moment.
+and every tenant on it, so a cell figure or account list is not a tenant figure. The dead-letter
+view now acts as well as inspects: a row can be replayed as well as purged, through
+[`POST /api/v1/dlq/:id/replay`](/reference/http/messages-dlq), which moves exactly the record it
+addressed and leaves any sibling consumer group's record alone. The bulk purge is the one that
+still takes its scope from the queue and consumer-group filters alone: the error breakdown narrows
+the table, not the cleanup, so a purge by criteria deletes every record for that queue and cannot
+be undone. And an unknown is not a zero: a failed call renders as a failure, and one shared ticker
+refreshes the page, so what you see is one moment.
+
+Every one of the write actions above is gated the way the proxy classifies its route, never
+inferred from a refusal: pushing a message needs `produce`, and creating, editing, replaying and
+purging need queue admin, which through the proxy means the Admin role or an admin-scoped key. A
+Viewer sees the pages and none of the buttons.
 
 <Screenshot
   src="dashboard-system"
@@ -85,8 +134,8 @@ see is one moment.
 
 <Screenshot
   src="dashboard-dlq"
-  alt="The dead letter view. A failure breakdown heads the page: one thin bar divides the page's messages by error text, and under it two columns list each error with its count, beside a link to the ones past the top six. Below it a table lists each dead-lettered message with its queue, consumer group, error text, retry count, time of failure and a single Purge action."
-  caption="The breakdown is computed from the messages on this page, not from a broker-side total, and every row and bar segment narrows the table below it. Purge is the only action on a row."
+  alt="The dead letter view. A failure breakdown heads the page: one thin bar divides the page's six messages by error text, and under it the one error with its count. Below it a table lists each dead-lettered message with its queue, consumer group, error text, retry count, time of failure and two actions, Replay and Purge. Six rows share one queue and one error; four belong to consumer group billing-a and two to billing-b."
+  caption="The breakdown is computed from the messages on this page, not from a broker-side total, and every row and bar segment narrows the table below it. Replay sits beside Purge on each row and acts on that row alone: the same message dead-lettered under two consumer groups is two rows, and replaying one leaves the other."
 />
 
 ## The PostgreSQL panel

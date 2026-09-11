@@ -29,6 +29,7 @@ verifiedBy:
   - clients/client-py/tests/test_push.py
   - clients/client-py/tests/test_pop.py
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): QUEUE_DEFAULTS is nine keys, the configure paragraph is rewritten for the merge rule, and retry_message reaches the move primitive unchanged.
 ---
 
 The PyPI package is `queen-mq`; the import name is `queen`. It is fully async, built on `httpx`,
@@ -165,15 +166,22 @@ methods are `push()`, `pop()`, `consume()`, `create()`, `delete()`, `dlq()` and 
 | `create()` | `POST /api/v1/configure` | `OperationBuilder` |
 | `delete()` | `DELETE /api/v1/resources/queues/:queue` | `OperationBuilder`; raises `ValueError` with no queue name |
 
-`QUEUE_DEFAULTS` carries the same seven options as the other clients, with the values listed
-under [Queue option defaults](/reference/defaults#queue-option-defaults), as snake_case keys
-(`lease_time`, `retry_limit`, `delayed_processing`, `window_buffer`, `retention_seconds`,
-`completed_retention_seconds`, `encryption_enabled`) that the builder converts to the wire's
-camelCase before sending.
+`QUEUE_DEFAULTS` carries the same nine options as the JavaScript and PHP clients, with the
+values listed under [Queue option defaults](/reference/defaults#queue-option-defaults), as
+snake_case keys (`lease_time`, `retry_limit`, `priority`, `delayed_processing`,
+`window_buffer`, `max_size`, `retention_seconds`, `completed_retention_seconds`,
+`encryption_enabled`) that the builder converts to the wire's camelCase before sending.
 
 Any extra key you pass to `config()` is converted the same way and sent, so options absent from
-the defaults dict are still reachable. **`/configure` is a full replace**, not a patch: send the
-complete intended configuration every time ([Queue options](/reference/queue-options/)).
+the defaults dict are still reachable.
+
+Since 1.6.0 `/configure` [merges](/reference/queue-options/): an option the body does not carry
+keeps the value the queue already has, and only `"mode": "replace"` resets what the body omits.
+This client sends no `mode`, so `create()` always merges. Note what that leaves: because
+`config()` merges over `QUEUE_DEFAULTS`, those nine keys are on the wire whether you named them
+or not and land on the client's default rather than on the queue's stored value. The twelve
+options outside that dict, `dedup_window_seconds` and `retention_enabled` among them, are the
+ones a partial call now leaves alone.
 
 ### Producing
 

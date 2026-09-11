@@ -16,6 +16,7 @@ sourceOfTruth:
   - server/sql/schema.sql
   - server/sql/procedures/006_log_maintenance.sql
 # sourceOfTruth re-read 2026-09-07 (through 42bada8d + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): the retention paragraph is rewritten for the /configure merge rule; switches.rs and schema.sql changed only comments.
 ---
 
 The broker prints its rates and cache sizes on a timer, and exposes database-backed cluster totals
@@ -88,8 +89,11 @@ curl -s -X POST http://localhost:6632/api/v1/configure \
 
 `retentionSeconds` deletes on age alone, read or not. `completedRetentionSeconds` never passes the
 slowest group's cursor, so one abandoned group pins the history for every other. Deletion is
-whole-segment, so a window is a floor on what is kept, not a ceiling. `/configure` is a full
-replace: a later call that omits these keys turns retention back off, so send the whole set from
+whole-segment, so a window is a floor on what is kept, not a ceiling. Since 1.6.0 `/configure`
+merges, so a later call that omits these keys leaves retention exactly as it is; the two ways to
+turn it back off are both explicit: send `retentionEnabled: false` (or `null`, which restores the
+default), or send the whole configuration with `"mode": "replace"`, which is what
+`queenctl apply -f` does. See
 [queue options](/reference/queue-options).
 
 The sweep runs every `RETENTION_INTERVAL` ms, default 5000, on the one replica per cycle that wins

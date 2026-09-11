@@ -13,6 +13,7 @@ verifiedBy:
   - clients/client-cpp/test_client.cpp
   - clients/client-cpp/test_retry429.cpp
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): the configure paragraph is corrected for the merge rule and the DLQ paragraph names both replay routes; the header itself did not change.
 ---
 
 One header, `queen_client.hpp`, namespace `queen`. Everything is `inline`, so there is nothing to
@@ -171,8 +172,11 @@ onto the camelCase wire options via `to_json()`, with the values listed under
 `create()` always sends the complete set, so calling it without `config()` applies the struct's
 defaults, including `leaseTime: 300`, whereas a queue created implicitly by a first push gets a
 60-second lease. `to_json()` emits a fixed key set, so options outside that struct cannot be set
-through `config()`; post to `/api/v1/configure` yourself when you need one, remembering that
-**`/configure` is a full replace** ([Queue options](/reference/queue-options/)).
+through `config()`; post to `/api/v1/configure` yourself when you need one. Since 1.6.0 that
+route [merges](/reference/queue-options/), so a hand-written partial body edits what it names
+and leaves the rest alone, and `"mode": "replace"` is how you ask for the old
+reset-everything-else behaviour. This client sends no `mode` and a complete set either way, so
+its own `create()` behaves as it always has.
 
 ### Producing
 
@@ -319,7 +323,11 @@ lose it.
 | `get()` | `json`, shaped `{"messages": [...], "total": n}` |
 
 Read-only, and this client has no admin surface, so replay means reading the row and pushing the
-payload again, or calling `POST /api/v1/messages/{partitionId}/{transactionId}/retry` yourself.
+payload again, or calling one of the broker's own replay routes yourself:
+`POST /api/v1/messages/{partitionId}/{transactionId}/retry` by address, or
+`POST /api/v1/dlq/{id}/replay` by dead-letter row id, which is the one that can name a different
+destination. Both move the record rather than copying it, so re-pushing the payload by hand is the
+only one of the three that leaves the dead-letter row behind.
 
 ## `TransactionBuilder`
 

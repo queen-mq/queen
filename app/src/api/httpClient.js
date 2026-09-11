@@ -1,6 +1,6 @@
 import ky, { isHTTPError } from 'ky'
 
-import { ApiError, isMissingRouteError } from './errors.js'
+import { ApiError, isGatedVerdictError, isMissingRouteError } from './errors.js'
 
 // Paths that answer JSON, never HTML. `/metrics/prometheus` is deliberately
 // out: it is the one gateway surface whose success body is text.
@@ -88,12 +88,24 @@ export function createApiClient({
     },
   })
 
-  // A request sent with `probe: true` is asking whether the route exists on
-  // this cell. The answers that say "it does not" are its expected outcome,
-  // which the caller renders inline, so they stay off the global surface;
-  // anything else (5xx, offline, 429) is still a failure worth a toast.
+  // `probe: true` is a caller saying "I RENDER THESE VERDICTS MYSELF".
+  //
+  // Two classes of answer qualify, and both are facts about the cell rather
+  // than failures of it: "no such route here" (404 / route_blocked / the SPA
+  // fallback) and "this optional family is not yours to call right now" (403
+  // feature_gated, 503 kv_disabled / kv_unavailable / timers_unavailable /
+  // ephemeral_*). The pages that meet them — Kv, Timers, Ephemeral — answer
+  // with one quiet card, and a red toast on top of that card reports the same
+  // fact twice while implying something broke. Observed with the cell's kv
+  // switch off: the quiet panel AND a toast.
+  //
+  // Everything else on a probe still reaches the global surface: a 5xx that is
+  // not one of the switch codes, a 429, an unreachable proxy. Those ARE
+  // failures, and a page that quietly swallowed them would show stale rows with
+  // nothing anywhere saying why.
   function fail(err, probe = false) {
-    if (!(probe && isMissingRouteError(err))) reportApiFailure(err)
+    const rendersItself = isMissingRouteError(err) || isGatedVerdictError(err)
+    if (!(probe && rendersItself)) reportApiFailure(err)
     return Promise.reject(err)
   }
 

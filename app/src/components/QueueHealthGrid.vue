@@ -102,6 +102,7 @@
 import { computed } from 'vue'
 
 import { formatBytes } from '@/composables/useApi'
+import { keepUpSeverity, lagMsSeverity, laggingPartitionsSeverity } from '@/composables/useSeverity'
 
 const props = defineProps({
   /**
@@ -132,7 +133,10 @@ const props = defineProps({
 
 defineEmits(['select', 'delete'])
 
-/* ---------------- severity rules ---------------- */
+/* ---------------- severity rules ----------------
+ * The thresholds themselves live in @/composables/useSeverity, with the rest
+ * of the app's colour policy and a test file that pins them. What stays here
+ * is only the mapping from this grid's columns onto those rules. */
 const SEV_RANK = { ok: 0, ice: 0, mute: 1, warn: 2, bad: 3 }
 
 /* Density now means TOTAL messages per partition — a queue's lifetime
@@ -145,31 +149,22 @@ function densitySev(d) {
   return 'ice'
 }
 
+/* Hot partitions, as a SHARE of the queue's partitions. A count could not be
+ * a verdict on its own: 20 hot partitions is most of a 24-partition queue and
+ * a rounding error on a 4 000-partition one, and the old rule called both of
+ * them bad. */
 function hotSev(h, partitions) {
-  if (h === null || h === undefined) return 'mute'
-  if (h === 0) return 'mute'
-  const pct = partitions ? (h / partitions) * 100 : 0
-  if (h < 5 && pct < 0.5) return 'ice'
-  if (h < 20 && pct < 2) return 'warn'
-  return 'bad'
+  if (h === null || h === undefined || h === 0) return 'mute'
+  return laggingPartitionsSeverity({ behind: h, total: partitions })
 }
 
 /* Throughput is colored by pop/push ratio — i.e. is the queue keeping up? */
 function throughputSev(pop, push) {
-  if (!pop && !push) return 'mute'
-  const ratio = pop / Math.max(1, push)
-  if (ratio >= 1.0) return 'ok'
-  if (ratio >= 0.85) return 'mute'
-  if (ratio >= 0.65) return 'warn'
-  return 'bad'
+  return keepUpSeverity({ pop, push })
 }
 
 function lagSev(ms) {
-  if (!ms) return 'mute'
-  if (ms < 1000) return 'ok'
-  if (ms < 10_000) return 'mute'
-  if (ms < 60_000) return 'warn'
-  return 'bad'
+  return lagMsSeverity(ms)
 }
 
 /* Row-level severity describes whether the queue IS KEEPING UP — not just

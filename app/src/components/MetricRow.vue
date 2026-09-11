@@ -147,6 +147,11 @@ const dotClass = computed(() => {
   return 'mr-dot-mute'
 })
 
+// The sparkline is the row's state drawn wide: it takes the SAME tone the
+// number and the dot take, and 'mute' — the default when a row has no verdict
+// to report — is the achromatic ramp, not a status hue. A healthy row is
+// therefore grey end to end, and an amber line means the row beside it is
+// amber for a reason that useSeverity can name.
 const sparkTone = computed(() => props.sparklineTone || (props.severity || 'mute'))
 
 const formattedValue = computed(() => {
@@ -215,9 +220,11 @@ const onRowClick = () => {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* The cell chip is the app-wide `.cell-chip` (style.css) — one amber
+/* The cell chip is the app-wide `.cell-chip` (style.css) — one SCOPE
    vocabulary for "this figure covers the whole cell", shared with
-   Dashboard's counts strip and QueueOperations' card titles. The local
+   Dashboard's counts strip and QueueOperations' card titles, and drawn in
+   --scope-400 because scope is not a state. (It was amber until the colour
+   policy: a cell-scoped row read as a row in trouble.) The local
    `.mr-scope` copy it replaced differed only in margin-left. */
 
 .mr-na {

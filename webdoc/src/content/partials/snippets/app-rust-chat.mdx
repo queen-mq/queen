@@ -106,8 +106,9 @@ async fn run() -> Result<usize, String> {
     // Leases are what make a crashed worker safe: a message whose handler dies
     // is redelivered once the lease expires. retry_limit bounds how many times
     // that can happen before the message is dead-lettered instead. configure()
-    // is a full replace, so every key left out goes back to the broker's own
-    // default rather than keeping a previous value.
+    // merges, so an option left out keeps the value the queue already has; this
+    // queue name is unique per run, so the rest lands on the broker's own
+    // default.
     queen
         .queue(&messages)
         .configure(QueueOptions {

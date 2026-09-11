@@ -27,6 +27,7 @@ digest: >-
   broker that skips it and finds an older schema fails on the first request needing a missing
   object, not at boot.
 # sourceOfTruth re-read 2026-09-07 (through 42bada8d + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): main.rs registers three new routes and no wire-compatibility change; nothing this page describes moved.
 ---
 
 The current broker and proxy release is 1.5.3. The compatible JavaScript, Python, Go and Rust

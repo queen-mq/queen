@@ -14,7 +14,7 @@ sourceOfTruth:
 verifiedBy:
   - clients/client-js/test-v2/kv.js
   - clients/client-py/tests/test_kv.py
-# sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + this patch): the console list (PLAN_DASHBOARD_ACTIONS.md §2.5) is now in the reads section; the rest matches the code.
 ---
 
 `queen.kv` is a key/value store that lives in the same PostgreSQL as the log, and its value is not
@@ -190,6 +190,14 @@ inside the transaction that holds the outermost lock space and, downstream, part
 broker's access logs, the proxy's, the metering sample, the tracing span and any ingress in front, and
 a mitigation living in one component out of four is not a mitigation. It is available on
 `POST /api/v1/kv` and nowhere else, and it requires a prefix: a namespace is not a table to enumerate.
+
+The dashboard's KV browser is the one read that does enumerate one, and it is a different route for
+that reason: `POST /api/v1/resources/kv/list`, read-only and viewer-visible, whose page may take an
+empty prefix and whose rows include the keys whose expiry has passed but whose sweep has not happened
+yet, labelled `expired: true`, so the console can grey them instead of hiding rows that still occupy
+the namespace. It is a `POST` under the same privacy rule, applied to the one parameter that would
+otherwise have to travel in a URL: its cursor is a key. `GET /api/v1/resources/kv/namespaces` is its
+selector. [The KV routes](/reference/http/kv) has the field-by-field contract.
 
 Page limits are clamped rather than refused, and `truncated` tells the truth. There is a byte ceiling
 as well as a key ceiling, `QUEEN_KV_MAX_READ_BYTES` (4 MiB), because a thousand keys of 64 KiB is 64 MB

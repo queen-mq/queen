@@ -25,7 +25,9 @@
 
     <!-- A broker capability, not a data fact — and it belongs above the table,
          not inside the pager it disables. -->
-    <div v-if="!serverPaginates" class="status-banner banner-warn view-banner">
+    <!-- Informational: it describes what this broker CAN do, which is not a
+         condition of the system and never becomes untrue by itself. -->
+    <div v-if="!serverPaginates" class="status-banner banner-info view-banner">
       <span>This broker returns the whole dead-letter queue at once — paging is disabled</span>
     </div>
 
@@ -164,7 +166,7 @@
         <span class="chip chip-mute">page <span class="font-mono tabular-nums">{{ page }}</span></span>
         <!-- A narrowed table must say so where the row count is read, not only
              up in the breakdown that narrowed it. -->
-        <button v-if="errorFilter" type="button" class="chip chip-bad dlq-filter-chip" @click="errorFilter = null">
+        <button v-if="errorFilter" type="button" class="chip chip-mute dlq-filter-chip" @click="errorFilter = null">
           <span class="dlq-filter-chip-text">{{ formatNumber(messages.length) }} shown · {{ errorFilter }}</span>
           <span aria-hidden="true">×</span>
           <span class="sr-only">Clear the error filter</span>
@@ -201,27 +203,53 @@
             </template>
 
             <template v-else-if="messages.length">
+              <!--
+                EVERY row here is a failure — that is what the page is — so
+                nothing in a row is painted as one. A red dot, red error text
+                and an amber selection wash on all of them carried no
+                information beyond the table's own title, and left the page
+                with no way to say that something is failing RIGHT NOW. The
+                error text instead gets the page's strongest ink, because it
+                is the column the reader came for.
+              -->
               <tr
                 v-for="msg in messages"
-                :key="msgKey(msg)"
-                style="cursor:pointer;"
-                :style="selectedMsg && msgKey(selectedMsg) === msgKey(msg) ? 'background:var(--warn-glow)' : ''"
+                :key="rowKey(msg)"
+                class="dlq-row"
+                :class="{ 'dlq-row-on': selectedKey && rowKey(msg) === selectedKey }"
                 @click="selectMessage(msg)"
               >
                 <td>
                   <div style="display:flex; align-items:center; gap:6px;">
-                    <span class="pulse-ember" style="width:5px; height:5px;" />
+                    <span class="dlq-row-dot" />
                     <span class="font-mono" style="font-size:12px;">{{ (msg.transactionId || msg.id || '-').slice(0, 14) }}…</span>
                   </div>
                 </td>
                 <td style="font-weight:500;">{{ msg.queue || '-' }}</td>
                 <td class="font-mono" style="font-size:12px; color:var(--text-mid);">{{ msg.consumerGroup || '-' }}</td>
                 <td>
-                  <span class="font-mono" style="font-size:12px; color:var(--ember-400);">{{ truncateError(msg.errorMessage) }}</span>
+                  <span class="font-mono dlq-err-cell">{{ truncateError(msg.errorMessage) }}</span>
                 </td>
                 <td class="font-mono" style="font-size:12px;">{{ msg.retryCount ?? '—' }}</td>
                 <td class="font-mono" style="font-size:12px; color:var(--text-mid);">{{ formatRelativeTime(msg.failedAt) }}</td>
                 <td v-if="canAdmin" style="text-align:right; white-space:nowrap;" @click.stop>
+                  <!-- Replay before Purge: the recoverable action reads first,
+                       and the destructive one keeps the far-right position it
+                       has always had. A row whose listing carries no id cannot
+                       be addressed by the move route at all, so the button says
+                       why instead of disappearing. -->
+                  <button
+                    class="btn btn-ghost dlq-row-btn"
+                    :disabled="!msg.id || isReplaying(msg) || replayUnavailable"
+                    :title="replayUnavailable
+                      ? 'This cell does not serve the replay route — the broker predates it, or the proxy in front does not classify it'
+                      : (msg.id
+                        ? `Replay this message onto ${msg.queue || 'its queue'}`
+                        : 'This broker’s dead-letter list carries no row id, so a replay cannot address this row')"
+                    @click="openReplay(msg)"
+                  >
+                    {{ isReplaying(msg) ? '…' : 'Replay' }}
+                  </button>
                   <button class="btn btn-danger" style="padding:4px 10px; font-size:11px;" @click="purge(msg)" :disabled="isDeleting(msg)">
                     {{ isDeleting(msg) ? '…' : 'Purge' }}
                   </button>
@@ -301,6 +329,166 @@
       </div>
     </Teleport>
 
+    <!-- Replay. A confirm rather than a one-click action because a replay is a
+         WRITE: it appends a copy to a partition, it removes the dead-letter
+         record, and both are irreversible. So the modal names the target AND
+         the irreversible part before the click, the way the maintenance toggle
+         taught this dashboard to. -->
+    <Teleport to="body">
+      <div v-if="replayRow" class="modal-backdrop dlq-replay-over" @click.self="closeReplay">
+        <form class="card modal-card dlq-replay-card" @submit.prevent="submitReplay">
+          <div class="card-header">
+            <h3>{{ replayTarget.moved ? 'Move and replay' : 'Replay dead-letter message' }}</h3>
+            <span class="card-sub font-mono">{{ replayRow.consumerGroup || 'no consumer group' }}</span>
+          </div>
+
+          <div class="card-body dlq-replay-body">
+            <!-- The verdict, and the only thing on screen allowed to call a
+                 replay a success. It does not replace the form: a refusal or a
+                 broker fault leaves the destination fields exactly as they were
+                 so they can be corrected and sent again. A verdict that names a
+                 FIELD is not drawn here at all — it belongs under that field,
+                 which is where the correction is made. -->
+            <div
+              v-if="replayResult && !replayResult.field"
+              class="dlq-verdict"
+              :class="`dlq-verdict-${replayResult.kind}`"
+            >
+              <strong>{{ replayResult.title }}</strong>
+              <p>{{ replayResult.detail }}</p>
+              <!-- Only ever offered for the two answers that name a destination
+                   the message is actually in. -->
+              <router-link
+                v-if="replayResult.target"
+                class="btn btn-ghost dlq-verdict-link"
+                :to="{ path: '/messages', query: {
+                  queue: replayResult.target.queue,
+                  partition: replayResult.target.partition,
+                } }"
+              >
+                Open {{ replayResult.target.queue }} in Messages
+              </router-link>
+            </div>
+
+            <!-- Gone once the dead-letter row is verified gone: there is nothing
+                 left to replay, and a live form under a finished verdict invites
+                 a second attempt at a row that no longer exists. -->
+            <template v-if="!replayDone">
+              <p class="dlq-replay-lead">
+                This appends a new copy at the tail of
+                <strong class="font-mono">{{ replayTarget.queue }}</strong><span class="dlq-replay-sep">/</span><strong class="font-mono">{{ replayTarget.partition }}</strong>
+                with transaction id <strong class="font-mono">{{ replayTarget.transactionId }}</strong>.
+                <!-- Which of the two the request actually carries is not a
+                     detail here: a destination is admitted as one pair, so the
+                     button either names both halves or names neither, and the
+                     sentence says which of the two it is about to do. -->
+                <template v-if="replayTarget.namesDestination">
+                  The request carries that destination explicitly, queue and partition together:
+                  broker-direct, an omitted half falls back to this row's own value without
+                  saying so, and a cloud proxy refuses a half-named destination outright, so the
+                  whole pair is the one form that means the same thing in both.
+                </template>
+                <template v-else>
+                  No destination is sent: the broker replays onto the queue and partition the
+                  message failed on, which are the two named above.
+                </template>
+              </p>
+
+              <ul class="dlq-replay-facts">
+                <li>
+                  The dead-letter record is removed in the same transaction as the copy — one move,
+                  not a push followed by a cleanup that can fail on its own. If nothing is written
+                  (the destination already carries this transaction id), nothing is removed either.
+                </li>
+                <li>
+                  Records of other consumer groups for the same message are untouched: this replays
+                  <strong class="font-mono">{{ replayRow.consumerGroup || 'this group' }}</strong>’s row and only that one.
+                </li>
+                <li>
+                  Replay appends — it does not restore the message’s position in the partition, and its
+                  age clock restarts at the destination.
+                </li>
+                <li v-if="replayTarget.moved">
+                  This is a move, not a replay in place: the message failed on
+                  <strong class="font-mono">{{ replayRow.queue }}/{{ replayRow.partition }}</strong> and a destination this
+                  cluster does not carry yet is created by the replay, with the default options.
+                </li>
+              </ul>
+
+              <!-- The destination override the route has carried from day one.
+                   Behind a fold because replaying where the message failed is
+                   the answer nearly every time, and a target queue left over
+                   from a previous row is how a message lands in the wrong
+                   place. -->
+              <button type="button" class="dlq-toggle" @click="showReplayAdvanced = !showReplayAdvanced">
+                <span class="dlq-toggle-chev" :class="{ 'dlq-toggle-open': showReplayAdvanced }" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" />
+                  </svg>
+                </span>
+                Advanced — replay somewhere else
+                <span v-if="replayTarget.moved" class="chip chip-warn dlq-toggle-badge">destination changed</span>
+              </button>
+
+              <div v-if="showReplayAdvanced" class="dlq-replay-advanced">
+                <label class="dlq-replay-field">
+                  <span class="label-xs">Target queue</span>
+                  <Autocomplete
+                    v-model="replayForm.queue"
+                    :options="queueOptions"
+                    :loading="queuesLoading"
+                    label="Queue"
+                    :placeholder="replayRow.queue || 'Where it failed'"
+                    allow-custom
+                  />
+                  <span v-if="replayResult?.field === 'queue'" class="dlq-invalid">{{ replayResult.detail }}</span>
+                  <span v-else class="dlq-help">
+                    Blank replays onto <span class="font-mono">{{ replayRow.queue || 'the queue it failed on' }}</span>.
+                    Pick a name, or press Enter to accept one this cluster does not carry yet — the picker
+                    drops text it was never told to apply, and the sentence above always names the
+                    destination this button will write to.
+                  </span>
+                </label>
+
+                <label class="dlq-replay-field">
+                  <span class="label-xs">Target partition</span>
+                  <input
+                    v-model="replayForm.partition"
+                    class="input font-mono"
+                    autocomplete="off"
+                    spellcheck="false"
+                    :placeholder="replayRow.partition || 'Where it failed'"
+                  />
+                  <span v-if="replayResult?.field === 'partition'" class="dlq-invalid">{{ replayResult.detail }}</span>
+                  <span v-else class="dlq-help">
+                    Blank keeps <span class="font-mono">{{ replayRow.partition || 'the partition it failed on' }}</span>.
+                    Fill either field and the request names the whole pair. Broker-direct, a missing half
+                    would quietly fall back to this row's own value; a cloud proxy refuses a half-named
+                    destination instead, since it cannot see the half it was not given.
+                  </span>
+                </label>
+              </div>
+            </template>
+          </div>
+
+          <div class="modal-foot">
+            <template v-if="replayDone">
+              <button type="button" class="btn btn-primary" @click="closeReplay">Done</button>
+            </template>
+            <template v-else>
+              <button type="button" class="btn btn-ghost" :disabled="replaying" @click="closeReplay">Cancel</button>
+              <!-- Disabled in flight, and the row stays in the table behind it
+                   until the verdict arrives: the broker's answer is what removes
+                   a row here, never the click that asked for it. -->
+              <button type="submit" class="btn btn-primary" :disabled="replaying || !replayTarget.id">
+                {{ replaying ? 'Replaying…' : (replayTarget.moved ? 'Move and replay' : 'Replay message') }}
+              </button>
+            </template>
+          </div>
+        </form>
+      </div>
+    </Teleport>
+
     <DetailDrawer
       :open="Boolean(selectedMsg)"
       title="DLQ Message Detail"
@@ -322,7 +510,9 @@
       <template v-if="selectedMsg">
         <div class="detail-status-row">
           <span class="chip chip-bad">dead_letter</span>
-          <span v-if="selectedMsg.retryCount" class="chip chip-warn">
+          <!-- A retry count is a count: how hard the broker tried before it
+               gave up. The `dead_letter` chip beside it carries the verdict. -->
+          <span v-if="selectedMsg.retryCount" class="chip chip-mute">
             {{ selectedMsg.retryCount }} retries
           </span>
         </div>
@@ -365,10 +555,24 @@
           tone="danger"
         />
 
-        <!-- Actions. No "replay": the broker exposes no re-push route for a
-             DLQ snapshot, and a button that cannot verify its own outcome is
-             worse than no button. -->
+        <!-- Actions. Replay re-pushes this snapshot on the broker's move
+             primitive — lock, push, delete, one transaction — so the button can
+             state what happened to the row instead of guessing; purge is the
+             end of the line for a message nobody will process. -->
         <div v-if="canAdmin" class="detail-actions">
+          <button
+            class="btn btn-ghost"
+            style="width:100%; justify-content:center;"
+            :disabled="!selectedMsg.id || isReplaying(selectedMsg) || replayUnavailable"
+            :title="replayUnavailable
+              ? 'This cell does not serve the replay route — the broker predates it, or the proxy in front does not classify it'
+              : (selectedMsg.id
+                ? null
+                : 'This broker’s dead-letter list carries no row id, so a replay cannot address this row')"
+            @click="openReplay(selectedMsg)"
+          >
+            {{ isReplaying(selectedMsg) ? 'Replaying…' : 'Replay message' }}
+          </button>
           <button
             class="btn btn-danger"
             style="width:100%; justify-content:center;"
@@ -382,7 +586,7 @@
           </p>
         </div>
         <p v-else class="detail-actions detail-note">
-          Purging needs the admin role on this cluster.
+          Replaying and purging need the admin role on this cluster.
         </p>
       </template>
 
@@ -397,7 +601,8 @@
           <!-- The DLQ read path does no decryption: what follows is the stored
                envelope, not the message. Saying "payload" over ciphertext is
                how a debugger loses an hour. -->
-          <div v-if="encryptedPayload" class="status-banner banner-warn view-banner">
+          <!-- A fact about the payload, not a fault: information. -->
+          <div v-if="encryptedPayload" class="status-banner banner-info view-banner">
             <span>
               <strong>Encrypted envelope</strong> · this queue encrypts payloads and the DLQ endpoint
               returns them as stored. This is ciphertext, not the message body.
@@ -415,18 +620,20 @@ import { ref, computed, watch } from 'vue'
 import { dlq, queues as queuesApi, describeApiError } from '@/api'
 import { useApi, formatNumber, formatRelativeTime } from '@/composables/useApi'
 import { formatDlqMarkdown } from '@/composables/useDlqMarkdown'
+import { dlqRowKey, replayRequest, replayVerdict } from '@/composables/useDlqReplay'
 import { formatTimestamp, formatTimestampUtc } from '@/composables/useFormat'
 import { useRefresh } from '@/composables/useRefresh'
 import { stamp } from '@/composables/useStamp'
 import { useToast } from '@/composables/useToast'
-import { useIdentity } from '@/stores/identity'
+import { currentEpoch, useIdentity } from '@/stores/identity'
+import { routeSupport } from '@/stores/routeSupport'
 import Autocomplete from '@/components/Autocomplete.vue'
 import DetailDrawer from '@/components/DetailDrawer.vue'
 import DetailField from '@/components/DetailField.vue'
 import JsonViewer from '@/components/JsonViewer.vue'
 
-const { can, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
-const { notifySuccess, notifyError } = useToast()
+const { can, epoch, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
+const { notifySuccess, notifyInfo, notifyWarn, notifyError } = useToast()
 
 /** Error groups shown before the breakdown has to be expanded. Two columns, so
     an even number keeps the grid square. */
@@ -464,6 +671,65 @@ const bulkPurgeError = ref(null)
 // so a row that comes back is a row the broker still has.
 const purged = ref(new Set())
 
+// ---------------------------------------------------------------------------
+// Replay (PLAN_DASHBOARD_ACTIONS.md §2.3). One row at a time: the confirm modal
+// IS the in-flight state, so there is no per-row set to keep the way `deleting`
+// has to for a purge that fires straight off the row.
+// ---------------------------------------------------------------------------
+const replayRow = ref(null)
+const replayForm = ref({ queue: '', partition: '' })
+const showReplayAdvanced = ref(false)
+const replaying = ref(false)
+const replayResult = ref(null)
+// The request that is on the wire, captured at submit. While it is set it — and
+// not the live Advanced inputs — is what the modal names: the sentence and the
+// title must describe the destination this request is writing to, not the one
+// somebody is typing over it while it runs.
+const replayInFlight = ref(null)
+// §1.6 / §3 rule 5: a route family is probed ONCE per cluster epoch. The
+// verdict cannot be read off the status code here — `gone` is a 404 too — so it
+// comes from the body-based mapper (`unavailable`), and only that one answer
+// takes the affordance away.
+const REPLAY_ROUTE = 'dlq-replay'
+// Read through `epoch` so a cluster switch re-asks: the store keys its verdicts
+// by the epoch too, and a cell that lacks the route says nothing about the next
+// one. `replayProbed` is this component's re-render trigger — the store is a
+// plain Map and cannot be one.
+const replayProbed = ref(0)
+const replayUnavailable = computed(() => {
+  void replayProbed.value
+  void epoch.value
+  return Boolean(routeSupport.missing(REPLAY_ROUTE))
+})
+// Rows this session watched leave queen.log_dlq — moved, or found already gone.
+// NOT a `duplicate`: that verdict writes nothing and therefore removes nothing,
+// so the record is still dead-lettered and the row stays on screen. Cleared on
+// every reload like `purged`, so a row that comes back is a row the broker
+// still has.
+//
+// Keyed by the DLQ ROW ID, not by this page's `msgKey`. One transaction id can
+// carry a dead-letter row PER CONSUMER GROUP and the move removes exactly the
+// row it addressed, so dropping every row that shares the transaction id would
+// report the other groups' records as replayed as well — which is precisely
+// the defect the old retry route had (§1.3). `purged` can stay on `msgKey`
+// because `delete_message_v1` really does delete every row for the address.
+const replayed = ref(new Set())
+
+/**
+ * The identity of ONE dead-letter row — what the table keys, what the drawer
+ * selects, and what the replay path addresses. The rule and its fallback live
+ * in the composable, next to the route that takes the id (and its tests).
+ */
+const rowKey = dlqRowKey
+
+/**
+ * The MESSAGE's address, which is a DIFFERENT thing and names more rows: a
+ * transaction id carries one dead-letter record per consumer group, and
+ * `delete_message_v1` deletes all of them in one call. So this is kept for
+ * exactly the surfaces where those all-groups semantics are the truth — the
+ * purge's in-flight flag, its error line and its suppression set — and for
+ * nothing that has to name the one row an operator clicked.
+ */
 const msgKey = (msg) => msg.transactionId || msg.id
 
 // The list, its loading/error state and its "as of when" come from one place.
@@ -476,14 +742,15 @@ const listPanel = useApi((params, config) => dlq.list(params, config), {
     const rows = extractRows(payload)
     serverPaginates.value = rows.length <= pageSize.value
     purged.value = new Set()
+    replayed.value = new Set()
     rowErrors.value = new Map()
     // Drop a selection the new page cannot honour, so the table is never
     // narrowed by an error none of its rows carry.
     if (errorFilter.value && !rows.some(m => errorKey(m) === errorFilter.value)) {
       errorFilter.value = null
     }
-    // A detail panel over a message that is no longer listed is a stale fact.
-    if (selectedKey.value && !rows.some(m => msgKey(m) === selectedKey.value)) {
+    // A detail panel over a row that is no longer listed is a stale fact.
+    if (selectedKey.value && !rows.some(m => rowKey(m) === selectedKey.value)) {
       selectedKey.value = null
     }
   },
@@ -507,9 +774,11 @@ const {
 const extractRows = (payload) =>
   Array.isArray(payload?.messages) ? payload.messages : (Array.isArray(payload) ? payload : [])
 
-/** Everything the broker returned for this page, minus what this session purged. */
+/** Everything the broker returned for this page, minus the rows this session
+    watched leave the dead-letter queue — purged, or replayed out of it. */
 const pageMessages = computed(
-  () => extractRows(listData.value).filter(m => !purged.value.has(msgKey(m)))
+  () => extractRows(listData.value)
+    .filter(m => !purged.value.has(msgKey(m)) && !replayed.value.has(m.id))
 )
 /** What the table shows: the page, narrowed by the breakdown's error filter. */
 const messages = computed(() => (
@@ -528,18 +797,38 @@ const unlistedQueue = computed(
   () => Boolean(filterQueue.value) && queueOptions.value.length > 0 && !queueOptions.value.includes(filterQueue.value)
 )
 // Resolved against the whole page, not the filtered view: narrowing the table
-// must not empty a drawer the user already has open.
-const selectedMsg = computed(
-  () => pageMessages.value.find(m => msgKey(m) === selectedKey.value) || null
-)
+// must not empty a drawer the user already has open. By row identity, never by
+// the message address — two consumer groups' records for the same transaction
+// id are two rows on this page, and the drawer carries a Replay button that
+// moves whichever one it resolved.
+const selectedMsg = computed(() => (
+  selectedKey.value
+    ? pageMessages.value.find(m => rowKey(m) === selectedKey.value) || null
+    : null
+))
 
 /** Skeletons on the first paint only: a refresh leaves the rows on screen. */
 const firstLoad = computed(() => loading.value && !listData.value)
 
 const isDeleting = (msg) => deleting.value.has(msgKey(msg))
 const rowError = (msg) => rowErrors.value.get(msgKey(msg)) || null
+/** In flight for THIS row: the modal only ever holds one, and it is addressed
+    by the DLQ row id — two consumer groups' rows for the same transaction id
+    are two separate replays and only one of them is running. */
+const isReplaying = (msg) =>
+  replaying.value && Boolean(replayRow.value?.id) && replayRow.value.id === msg.id
 
 const canAdmin = computed(() => can('queueAdmin'))
+
+/** What the replay will send and where it will land, as the modal states it.
+    Derived from the row and the two override fields, never from either alone —
+    except while a request is in flight, when it IS that request. */
+const replayTarget = computed(
+  () => replayInFlight.value || replayRequest(replayRow.value || {}, replayForm.value)
+)
+/** The dead-letter row is verified gone, so there is nothing left to send. */
+const replayDone = computed(() => Boolean(replayResult.value?.removeRow))
+
 const bulkPurgeButtonTitle = computed(() => (
   filterGroup.value.trim()
     ? `Purge all DLQ records for ${filterQueue.value.trim()} and consumer group ${filterGroup.value.trim()}`
@@ -635,7 +924,8 @@ const truncateError = (err) => {
 }
 
 const selectMessage = (msg) => {
-  selectedKey.value = selectedKey.value === msgKey(msg) ? null : msgKey(msg)
+  const key = rowKey(msg)
+  selectedKey.value = key && selectedKey.value !== key ? key : null
   copied.value = false
   markdownCopied.value = false
 }
@@ -685,6 +975,11 @@ const fetchMessages = () => {
 
 const reload = () => {
   page.value = 1
+  // An operator reloading the page is an operator asking again: drop the
+  // remembered "no replay route here" so an upgraded cell is re-probed by the
+  // next click instead of staying greyed out until the tab is reopened.
+  routeSupport.forget(REPLAY_ROUTE)
+  replayProbed.value += 1
   fetchMessages()
 }
 
@@ -718,7 +1013,11 @@ const purge = async (msg) => {
       return
     }
     notifySuccess(`Purged ${key}`)
-    if (selectedKey.value === key) selectedKey.value = null
+    // The purge takes every consumer group's record under this address, so a
+    // drawer open on ANY of them is showing a row that no longer exists — which
+    // is why this one closes on the message address and not on the row
+    // identity. Read before `purged` swallows the rows it resolves from.
+    if (selectedMsg.value && msgKey(selectedMsg.value) === key) selectedKey.value = null
     purged.value.add(key)
   } catch (err) {
     rowErrors.value.set(key, describeApiError(err))
@@ -771,6 +1070,111 @@ const purgeByCriteria = async () => {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Replay — the move primitive, addressed by the DLQ row id
+// ---------------------------------------------------------------------------
+
+const openReplay = (msg) => {
+  // `id` is the address the move route takes. Without it there is nothing to
+  // replay, and the two buttons are disabled with a title that says why — as
+  // they are on a cell that does not serve the route at all.
+  if (!canAdmin.value || !msg?.id || replayUnavailable.value) return
+  replayRow.value = msg
+  // Every opening starts from the row, never from what the last one left
+  // behind: a target queue carried over from another message is how a replay
+  // lands somewhere nobody asked for.
+  replayForm.value = { queue: '', partition: '' }
+  showReplayAdvanced.value = false
+  replayResult.value = null
+}
+
+const closeReplay = () => {
+  if (replaying.value) return
+  replayRow.value = null
+  replayResult.value = null
+}
+
+/** Render one answer, and act on it exactly as far as it is verified. */
+const applyReplayVerdict = (rowId, verdict, epochAtStart) => {
+  // An answer that belongs to a cluster we have since left describes a row that
+  // is not on screen any more. Drop it, modal and all — reporting it here would
+  // attribute one tenant's outcome to another.
+  if (epochAtStart !== currentEpoch()) {
+    replayRow.value = null
+    replayResult.value = null
+    return
+  }
+
+  replayResult.value = verdict
+
+  // A refused destination renders under the field that caused it, so the fold
+  // holding that field has to be open for the sentence to be readable.
+  if (verdict.field) showReplayAdvanced.value = true
+
+  // The ONLY thing that removes a row: the broker having said the dead-letter
+  // record is gone (moved, duplicate, or already gone before we asked). A toast
+  // goes with it, because a row leaving the table is a thing the shell cannot
+  // see and the operator has to be able to read after the modal is closed.
+  // Nothing else toasts: the verdict block carries the sentence where the
+  // action was taken, and every non-2xx is already on the global surface.
+  if (verdict.removeRow) {
+    // Close the drawer BEFORE the row leaves the page, so the panel is not left
+    // resolving a row that `replayed` has just filtered away — with a live
+    // Replay/Purge pair still pointed at it. By row id, which is the identity
+    // the move addressed: a sibling group's record for the same transaction id
+    // is a different row and it is still dead-lettered.
+    if (selectedMsg.value?.id === rowId) selectedKey.value = null
+    replayed.value.add(rowId)
+    const where = verdict.target?.transactionId ? `Transaction ${verdict.target.transactionId}` : null
+    if (verdict.kind === 'success') notifySuccess(verdict.title, where)
+    else if (verdict.kind === 'info') notifyInfo(verdict.title, where)
+    else notifyWarn(verdict.title, 'The dead-letter list has been reloaded')
+  }
+
+  // Someone else changed this page under us (another operator, the sweeper), or
+  // we never learned the outcome. Either way what is on screen predates the
+  // answer, so re-read it rather than patching one row.
+  if (verdict.refresh) fetchMessages()
+}
+
+const submitReplay = async () => {
+  if (!replayRow.value || replaying.value) return
+  const request = replayTarget.value
+  if (!request.id) return
+
+  const epochAtStart = currentEpoch()
+  replaying.value = true
+  // Frozen for the duration: `replayTarget` reads this, so the modal keeps
+  // naming the destination this request carries even if the Advanced inputs
+  // are edited under it.
+  replayInFlight.value = request
+  replayResult.value = null
+  try {
+    // `probe: true` keeps the 404s off the global toast surface, and nothing
+    // else: the client suppresses the report only for the missing-route family
+    // (api/httpClient.js `fail`), which here is precisely the two answers this
+    // page renders itself — the row was already replayed or purged, and the
+    // route is not served on this cell. A 403, a 429 or a 5xx still toasts.
+    const res = await dlq.replay(request.id, request.body, { probe: true })
+    applyReplayVerdict(request.id, replayVerdict(res), epochAtStart)
+  } catch (err) {
+    const verdict = replayVerdict(err)
+    // The one stable "not here" answer, remembered for the cluster epoch so no
+    // other surface re-asks and the buttons stop offering what this cell cannot
+    // do. Deliberately NOT `routeSupport.guard`: it keys off any missing-route
+    // error, and an already-purged row's `gone` is a 404 — guarding the call
+    // would disable replay for the rest of the session after one stale row.
+    if (verdict.unavailable) {
+      routeSupport.remember(REPLAY_ROUTE, err)
+      replayProbed.value += 1
+    }
+    applyReplayVerdict(request.id, verdict, epochAtStart)
+  } finally {
+    replaying.value = false
+    replayInFlight.value = null
+  }
+}
+
 // One shared ticker for the whole app (paused while the tab is hidden) instead
 // of a private setInterval: under the proxy every poll is metered.
 useRefresh(fetchMessages, { auto: true })
@@ -797,13 +1201,17 @@ fetchMessages()
 .dlq-breakdown { display: flex; flex-direction: column; gap: 12px; }
 
 .dlq-dist { display: flex; align-items: stretch; gap: 2px; height: 6px; }
+/* The distribution of a failure list across its signatures: every segment is
+   a failure, so the bar is drawn in ink and the SELECTED segment is the only
+   one that stands out. Painting all of them red made the widest segment and
+   the narrowest one equally urgent. */
 .dlq-dist-seg {
   height: 100%; min-width: 3px; padding: 0; border: none; cursor: pointer;
-  border-radius: 2px; background: var(--ember-400);
-  transition: opacity .12s var(--ease), transform .12s var(--ease);
+  border-radius: 2px; background: var(--text-low);
+  transition: background .12s var(--ease), transform .12s var(--ease);
 }
-.dlq-dist-seg:hover { transform: scaleY(1.5); }
-.dlq-dist-seg-on { transform: scaleY(1.5); box-shadow: 0 0 0 1px var(--ember-bd); }
+.dlq-dist-seg:hover { background: var(--text-mid); transform: scaleY(1.5); }
+.dlq-dist-seg-on { background: var(--text-hi); transform: scaleY(1.5); box-shadow: 0 0 0 1px var(--bd-hi); }
 
 .dlq-err-grid {
   display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px 18px;
@@ -817,16 +1225,30 @@ fetchMessages()
   text-align: left; transition: background .12s var(--ease), border-color .12s var(--ease);
 }
 .dlq-err:hover { background: var(--ink-3); }
-.dlq-err-on { background: var(--ember-glow); border-color: var(--ember-bd); }
+/* Selected = selected, the app's own selected surface. It used to be a red
+   wash, which read as "this signature is the dangerous one". */
+.dlq-err-on { background: var(--ink-4); border-color: var(--bd-hi); }
 .dlq-err-count {
   min-width: 34px; text-align: right; flex-shrink: 0;
-  font-size: 13px; color: var(--ember-400);
+  font-size: 13px; color: var(--text-hi);
 }
 .dlq-err-text {
   flex: 1; min-width: 0;
   font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--text-hi);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+
+/* Row chrome. `cursor` and the selection wash used to be inline styles on the
+   <tr>; the wash is now the neutral selected surface, and the leading dot is
+   ink instead of a pulsing red one. */
+.dlq-row { cursor: pointer; }
+.dlq-row-on { background: var(--ink-4); }
+.dlq-row-dot {
+  width: 5px; height: 5px; border-radius: var(--r-pill);
+  background: var(--text-faint); flex-shrink: 0;
+}
+/* The error is the column the page exists for: strongest ink, no hue. */
+.dlq-err-cell { font-size: 12px; color: var(--text-hi); }
 
 .dlq-err-more { display: flex; }
 .dlq-link {
@@ -839,5 +1261,72 @@ fetchMessages()
    the freshness stamp off the header. */
 .dlq-filter-chip { cursor: pointer; max-width: 340px; }
 .dlq-filter-chip-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* --- Replay ----------------------------------------------------------------
+   Matched to the Purge button beside it — same padding, same type size — so the
+   pair reads as one control group and not as a primary next to an afterthought.
+   Ghost, because the destructive one is the only red on the row. */
+.dlq-row-btn { padding: 4px 10px; font-size: 11px; margin-right: 6px; }
+
+/* One of the two entry points is a button INSIDE the DLQ drawer, and the drawer
+   is `z-index: 51` while the shared `.modal-backdrop` is 50 — the confirm would
+   open behind the panel that raised it. 55 clears the drawer and still passes
+   under the Autocomplete's teleported menu (60), which has to open inside this
+   form. */
+.dlq-replay-over { z-index: 55; }
+/* Wider than the 480px shell: the destination is a dotted queue name plus a
+   partition plus a `dlq:<uuid>` transaction id, and all three are read here. */
+.dlq-replay-card { max-width: 560px; }
+
+.dlq-replay-body { display: grid; gap: 14px; }
+.dlq-replay-lead { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--text-mid); }
+.dlq-replay-lead strong { color: var(--text-hi); font-weight: 600; overflow-wrap: anywhere; }
+.dlq-replay-sep { padding: 0 2px; color: var(--text-low); }
+
+/* The three (sometimes four) facts a replay cannot be undone without. A list,
+   not a paragraph: each one is a separate consequence and they are checked
+   individually before the button is pressed. */
+.dlq-replay-facts {
+  margin: 0; padding: 10px 12px 10px 26px;
+  display: grid; gap: 6px;
+  font-size: 11.5px; line-height: 1.45; color: var(--text-mid);
+  border: 1px solid var(--bd); border-radius: var(--r-control);
+  background: var(--ink-3);
+}
+.dlq-replay-facts strong { color: var(--text-hi); font-weight: 500; overflow-wrap: anywhere; }
+
+.dlq-toggle {
+  display: flex; align-items: center; gap: 8px;
+  padding: 0; border: none; background: none; cursor: pointer;
+  font-size: 12px; font-weight: 600; color: var(--text-mid);
+}
+.dlq-toggle:hover { color: var(--text-hi); }
+.dlq-toggle-chev { display: inline-flex; width: 12px; height: 12px; transition: transform .15s var(--ease); }
+.dlq-toggle-chev svg { width: 12px; height: 12px; }
+.dlq-toggle-open { transform: rotate(90deg); }
+.dlq-toggle-badge { font-weight: 500; }
+
+.dlq-replay-advanced { display: grid; gap: 14px; }
+.dlq-replay-field { display: grid; gap: 6px; }
+.dlq-help { color: var(--text-low); font-size: 11.5px; line-height: 1.45; }
+.dlq-help .font-mono { color: var(--text-mid); overflow-wrap: anywhere; }
+.dlq-invalid { color: var(--ember-400); font-size: 11.5px; line-height: 1.45; }
+
+/* The verdict block. `.panel-err` is single-toned and `.status-banner` has no
+   success variant, so the four outcomes of a replay get one block with four
+   tones, built from the same tokens so both schemes follow. Info is the ice
+   hue: a duplicate wrote nothing, which is neither a success nor a warning. */
+.dlq-verdict {
+  padding: 10px 12px;
+  border: 1px solid; border-radius: var(--r-card);
+  font-size: 12.5px; line-height: 1.45;
+}
+.dlq-verdict strong { display: block; font-weight: 600; margin-bottom: 4px; }
+.dlq-verdict p { margin: 0; color: var(--text-mid); }
+.dlq-verdict-success { border-color: var(--ok-bd); background: var(--ok-glow); color: var(--ok-500); }
+.dlq-verdict-info { border-color: var(--ice-bd); background: var(--ice-glow); color: var(--ice-400); }
+.dlq-verdict-warning { border-color: var(--warn-bd); background: var(--warn-glow); color: var(--warn-400); }
+.dlq-verdict-error { border-color: var(--ember-bd); background: var(--ember-glow); color: var(--ember-400); }
+.dlq-verdict-link { margin-top: 10px; max-width: 100%; overflow-wrap: anywhere; }
 
 </style>

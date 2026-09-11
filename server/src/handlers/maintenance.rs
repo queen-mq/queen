@@ -205,9 +205,10 @@ pub async fn handle_shared_state(State(st): State<Arc<AppState>>) -> Response {
 // endpoint can.
 //
 // NO PER-QUEUE FLAG (§12.1): the KV has no queue, and a per-queue timer flag
-// would be a column on queen.queues, which `/configure` RESETS (confirmed defect
-// 2026-08-05) — the flag would switch itself back on at the first
-// reconfiguration, silently.
+// would be a column on queen.queues, which `/configure` resets whenever a body
+// asks to REPLACE rather than merge (`"mode":"replace"` — and every call did
+// before 1.6.0: confirmed defect 2026-08-05) — the flag would switch itself back
+// on at the first such reconfiguration, silently.
 
 /// GET /api/v1/system/kv-timers — the four rungs as an operator sees them, plus
 /// the freshness of the measurement the quota gate is enforcing against.

@@ -93,7 +93,56 @@ up() {
     echo "== seeding pxdb (dev tenant/cluster/key)"
     docker exec -i $PXPG psql -q -U postgres -d queen_proxy <"$PROXY_DIR/scripts/seed-dev.sql" || true
   fi
+  grant_kv
   status
+}
+
+# The CELL-side grant for the kv / timers / ephemeral families.
+#
+# Two gates stand in front of those routes and seed-dev.sql only opens the first
+# one. The proxy checks the PLAN (queen_proxy.plans.features) and lets the call
+# through; the broker then checks its OWN grant, and with QUEEN_TENANCY_HEADER
+# on -- which this cell sets -- the ABSENCE of a queen.kv_quota row for the
+# tenant is a denial, not a default (quota.rs `require_grant` -> NotGranted ->
+# 403 feature_gated, config.rs says the same in full). So a dev cell seeded on a
+# plan that grants kv and timers still answered 403 on every KV and timer route,
+# and the two dashboard pages rendered "not enabled for this cluster" forever:
+# empty by construction, with nothing anywhere saying which of the two gates was
+# shut.
+#
+# The tenant is READ, never hard-coded: queen_proxy.clusters.broker_tenant_uuid
+# is assigned by a column default (migrations/002_functions.sql) and is a fresh
+# uuid on every pxdb, so a literal here would grant a tenant that does not exist
+# on this cell and look exactly like no grant at all.
+#
+# Generous dev limits -- this is a laptop cell, and a cap that fires during a
+# demo teaches nothing about the product. The broker re-reads the table every
+# QUEEN_KV_QUOTA_REFRESH_MS (30s), so the grant lands within half a minute even
+# though the broker is already up by the time this runs.
+grant_kv() {
+  local tenant
+  tenant="$(docker exec $PXPG psql -U postgres -d queen_proxy -qtAc \
+    "SELECT broker_tenant_uuid FROM queen_proxy.clusters WHERE slug = 'dev'" 2>/dev/null | tr -d '[:space:]' || true)"
+  if [ -z "$tenant" ]; then
+    echo "== no cluster 'dev' in pxdb; skipping the cell-side kv/timers grant" >&2
+    return 0
+  fi
+  echo "== granting kv/timers on the cell for cluster dev (tenant $tenant)"
+  docker exec -i $CELLPG psql -q -U postgres -d queen -v tenant="$tenant" <<'SQL' || true
+INSERT INTO queen.kv_quota (tenant_id, enabled, max_rows, max_bytes,
+                            max_timers, max_timer_horizon_s,
+                            max_reads_per_sec, max_writes_per_sec)
+VALUES (:'tenant', TRUE, 100000, 104857600, 10000, 7776000, 200, 200)
+ON CONFLICT (tenant_id) DO UPDATE
+   SET enabled             = EXCLUDED.enabled,
+       max_rows            = EXCLUDED.max_rows,
+       max_bytes           = EXCLUDED.max_bytes,
+       max_timers          = EXCLUDED.max_timers,
+       max_timer_horizon_s = EXCLUDED.max_timer_horizon_s,
+       max_reads_per_sec   = EXCLUDED.max_reads_per_sec,
+       max_writes_per_sec  = EXCLUDED.max_writes_per_sec,
+       updated_at          = now();
+SQL
 }
 
 down() {

@@ -215,6 +215,14 @@ A bounded consume loop, stopping at a message limit or when the source goes idle
 
 `configure` reports a failure that the broker returns inside a 200 body as an `Err`.
 
+`QueueOptions` is all `Option` fields and skips every `None`, so a `configure` sends only what
+you set. Since 1.6.0 `/configure` [merges](/reference/queue-options/), which means such a call
+now edits what it names and keeps the rest, where it used to reset the other twenty options on
+its way past. When the request **is** the whole configuration, `ConfigureRequest::replace(true)`
+puts `"mode": "replace"` on the wire and every option the request does not carry goes back to
+its default; leaving it alone sends no `mode` key at all, so the request stays byte-identical to
+the one this crate has always produced, and an older broker replaces either way.
+
 The DLQ builder takes only `limit` and `offset` because those, plus `queue` and
 `consumerGroup`, are the only filters `GET /api/v1/dlq` reads. The other SDKs also send
 `partition`, `from` and `to`, which the broker drops.
@@ -258,8 +266,11 @@ contract are typed.
 
 `dlq` returns `DlqResponse` and `record_trace` returns `TraceResponse`.
 
-`retry_message` is a dead-letter replay: it re-pushes the DLQ snapshot and drops the DLQ row.
-It errors on a message that is not in the DLQ.
+`retry_message` is a dead-letter replay. Since broker 1.6.0 it MOVES the newest dead-letter row
+at the address: one transaction claims the row, pushes the snapshot back into the log and deletes
+it, and the replayed frame carries the derived transaction id `dlq:<row id>`, so a second call
+answers `404` rather than appending a second copy. Only the addressed consumer group's record is
+removed. It errors on a message that is not in the DLQ.
 
 ### Consumer groups
 

@@ -1,11 +1,26 @@
 #!/usr/bin/env bash
 #
-# The three F1 rows of PLAN_KV_TIMERS.md §15, in one command.
+# The rig suites that need a real Postgres, in one command.
+#
+# The three F1 rows of PLAN_KV_TIMERS.md §15:
 #
 #   1. Unit SQL of the pure helpers        -> server/tests/kv_sql_helpers.rs
 #   2. Boot idempotence (x2 virgin, x1 populated)
 #                                          -> server/tests/kv_timers_boot_idempotence.rs
 #   3. The 42P22 verification on the rig   -> server/tests/kv_collation_42p22.rs
+#
+# And the four PLAN_DASHBOARD_ACTIONS.md §6 rows, which are the same kind of
+# test and were reaching no runner at all (CI's `cargo test --locked` SKIPS an
+# `#[ignore]`, so the semantics of the merge and the move were verified by hand
+# or not at all):
+#
+#   4. /configure merge semantics          -> server/tests/configure_merge_semantics.rs
+#   5. The console's KV list, in SQL       -> server/tests/kv_console_list.rs
+#   6. The same two routes on the wire     -> server/tests/kv_console_routes.rs
+#   7. The DLQ move primitive              -> server/tests/dlq_move_semantics.rs
+#
+# Row 6 spawns the broker binary (CARGO_BIN_EXE_queen) and talks HTTP to it, so
+# it wants the same `cargo build` this script already does and no other setup.
 #
 # These are `#[ignore]` cargo integration tests, the convention every DB-backed
 # test in this repo already follows (embedded_smoke, hotlist_repairs,
@@ -39,7 +54,7 @@ OWN_PG=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --keep) KEEP=1; shift;;
-    -h|--help) sed -n '2,32p' "$0"; exit 0;;
+    -h|--help) sed -n '2,48p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -71,7 +86,8 @@ echo ">> cargo build (the SQL is include_str!-embedded; a stale binary lies)"
 ( cd "$SERVER_DIR" && cargo build --tests ) || { echo "build failed" >&2; exit 1; }
 
 rc=0
-for t in kv_sql_helpers kv_timers_boot_idempotence kv_collation_42p22; do
+for t in kv_sql_helpers kv_timers_boot_idempotence kv_collation_42p22 \
+         configure_merge_semantics kv_console_list kv_console_routes dlq_move_semantics; do
   echo
   echo "=============================== $t"
   ( cd "$SERVER_DIR" && cargo test --test "$t" -- --ignored --nocapture ) || rc=1
@@ -84,5 +100,5 @@ else
 fi
 
 echo
-[ "$rc" = 0 ] && echo "F1 test rows: GREEN" || echo "F1 test rows: RED (expected until 024_kv.sql / 025_log_timers.sql exist)"
+[ "$rc" = 0 ] && echo "rig suites: GREEN" || echo "rig suites: RED"
 exit "$rc"

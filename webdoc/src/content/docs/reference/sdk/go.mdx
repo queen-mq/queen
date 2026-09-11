@@ -31,6 +31,7 @@ verifiedBy:
   - clients/client-go/tests/pop_test.go
   - clients/client-go/tests/ack_commit_test.go
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): Replace and Option are documented, the configure caution is rewritten for the merge rule, and RetryMessage for the move primitive.
 ---
 
 Import path `github.com/smartpricing/queen/clients/client-go`, package name `queen`. Requires Go
@@ -178,10 +179,31 @@ other clients' defaults dicts do not carry: `RetentionEnabled`, `DeadLetterQueue
 
 <Aside type="caution">
 `Create` builds the options map by **omitting every zero-valued field**: an `int` at `0` and a
-`bool` at `false` are not sent at all, and the broker applies its own default for the missing
-key. `/configure` being [a full replace](/reference/queue-options/), the effective configuration
-is what you sent plus the broker's default for everything you did not.
+`bool` at `false` are not sent at all. What the broker then does with an absent key changed in
+1.6.0. `/configure` now [merges](/reference/queue-options/), so an omitted option keeps the
+value the queue already has: a `Config` that sets two fields edits two fields, where it used to
+reset the other nineteen on its way past. Under `Replace(true)` an omitted option still means
+"back to the default", which is what a manifest wants.
 </Aside>
+
+Two builder methods sit on `*OperationBuilder` for this:
+
+| Method | Effect |
+| --- | --- |
+| `Replace(enabled bool)` | `true` puts `"mode":"replace"` at the top level of the body. `false`, or never calling it, sends no `mode` key at all, so the request stays byte-identical to every released version of this SDK. Read only by the create path. |
+| `Option(key string, value any)` | Puts one option on the wire literally, applied after the `QueueConfig` bag and therefore winning over it. This is the only way to send an explicit `false` or `0`, which the omit-the-zero rule above cannot express, and `nil` sends JSON `null`, the broker's "restore this option's default". The spelling is the wire's camelCase and is not validated here. |
+
+```go
+_, err := client.Queue("orders").
+	Config(queen.QueueConfig{LeaseTime: 60}).
+	Option("deadLetterQueue", false). // an explicit false, unsendable from QueueConfig
+	Option("retentionSinkHold", nil). // null: back to the default
+	Create().
+	Execute(ctx)
+```
+
+A broker older than 1.6.0 ignores `mode` and replaces either way, which is what it has always
+done.
 
 ### Producing
 
@@ -319,12 +341,21 @@ not as silent loss.
 | `From(timestamp)` / `To(timestamp)` | Time filters. |
 | `Get(ctx) (*DLQResponse, error)` | `DLQResponse{Messages []Message, Total int}` |
 
-The listing is read-only, but `Admin.RetryMessage(ctx, partitionID, transactionID)` replays: the
-broker re-pushes the dead-letter payload snapshot to its own queue and partition and drops the DLQ
-row once that push is accepted. Only dead-lettered addresses replay, and a live one answers `404`.
-It is **not idempotent**, so the client sends it with failover retry disabled and a caller that
-sees a failure has to re-read the DLQ before trying again rather than repeating the call.
-`Admin.MoveMessageToDLQ` is still a stub, because the broker registers no force-move route.
+The listing is read-only, but `Admin.RetryMessage(ctx, partitionID, transactionID)` replays.
+Since broker 1.6.0 it runs on a **move**: one transaction claims the newest dead-letter row at
+the address under a row lock, pushes the snapshot back into the log and deletes that row. Only
+dead-lettered addresses replay, and a live one answers `404`.
+
+It is now **idempotent by row**. The replayed frame carries the deterministic transaction id
+`dlq:<dead-letter row id>`, a second call for the same address answers `404` because the row is
+gone, and two concurrent callers serialise on the lock so the loser is told the row is gone
+rather than pushing a second copy. Only the addressed consumer group's record is removed: an
+address can carry one row per group, and the others stay where they were. A `result:"duplicate"`
+verdict means nothing was written **and nothing was removed**, and a `503` means push
+maintenance is on, which refuses the move and leaves the row. The client still sends it with
+failover retry disabled, because it is a write and a blind resend by the transport would hide a
+verdict the caller has to read. `Admin.MoveMessageToDLQ` is still a stub, because the broker
+registers no force-move route.
 
 ## `*TransactionBuilder`
 

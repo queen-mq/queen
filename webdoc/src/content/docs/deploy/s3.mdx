@@ -24,6 +24,7 @@ sourceOfTruth:
   - Dockerfile
   - .github/workflows/tests.yml
 # sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): classify gained the two DLQ replay arms; the sink's own routes, classes and retention interaction are untouched.
 ---
 
 `queen-s3` is a separate binary that reads a queue's log through Queen's own HTTP API and writes

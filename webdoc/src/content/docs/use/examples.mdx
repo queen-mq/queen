@@ -27,6 +27,7 @@ digest: >-
   the DLQ. An expired lease charges nothing, so a hung handler redelivers forever, never reaching
   it.
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): the queue-options card description is corrected for the merge rule; the examples send complete option sets, so what they configure is unchanged.
 ---
 
 Six shapes, in the order they are worth reading, each one the smallest code that makes it work.
@@ -161,6 +162,6 @@ work, and an explicit `failed` when the message itself is wrong.
   <LinkCard
     href="/reference/queue-options"
     title="Queue options"
-    description="Every option a queue carries, its default, and what a full replace resets."
+    description="Every option a queue carries, its default, and what a merging or replacing configure does to it."
   />
 </CardGrid>

@@ -1,7 +1,7 @@
 <template>
   <div class="view-container">
     <div class="scope-strip scope-strip-cell">
-      <span class="chip chip-warn"><span class="dot"></span>cell · operator</span>
+      <span class="chip chip-scope"><span class="dot"></span>cell · operator</span>
       <span class="scope-text">
         user accounts and cluster access for <strong>cell {{ cellSlug }}</strong>
         <span class="scope-sep">·</span>
@@ -86,7 +86,8 @@
               <td><span class="font-mono">{{ user.tenant_slug }}</span></td>
               <td>
                 <span class="chip chip-mute">{{ user.has_local_password ? 'local' : 'OAuth' }}</span>
-                <span v-if="user.is_operator" class="chip chip-warn users-operator">operator</span>
+                <!-- A role, i.e. an identity: the scope hue, not a warning. -->
+                <span v-if="user.is_operator" class="chip chip-scope users-operator">operator</span>
               </td>
               <td>
                 <div v-if="user.roles.length" class="users-role-list">

@@ -31,9 +31,11 @@ CREATE TABLE IF NOT EXISTS queen.queues (
     -- 60, not 300 (2026-07-31, queue-identity merge): 60 is what an implicitly
     -- push-created queue has ALWAYS leased at — the pop path read it from
     -- log_queues (default 60) while this column's old 300 was only ever shown
-    -- by the config display, which therefore lied. /configure still writes an
-    -- explicit 300 when leaseTime is omitted, so configured queues are
-    -- unchanged. One column, one truth.
+    -- by the config display, which therefore lied. /configure writes an explicit
+    -- 300 when leaseTime is omitted on a CREATE or on a `mode:"replace"`; since
+    -- 1.6.0 a MERGE into an existing queue keeps whatever the column holds (60
+    -- for a push-created one), so this default is now reachable through a
+    -- configured queue too. One column, one truth.
     lease_time INTEGER DEFAULT 60,
     retry_limit INTEGER DEFAULT 3,
     retry_delay INTEGER DEFAULT 1000,

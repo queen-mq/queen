@@ -1,7 +1,10 @@
 -- ============================================================================
 -- Configure Queue Stored Procedure
 -- ============================================================================
--- Creates or updates queue configuration with all options
+-- Creates or updates queue configuration with all options. An update MERGES by
+-- default (an option the body does not mention keeps its stored value); a body
+-- carrying `replace: true` re-parses every option from defaults instead. The
+-- rule is written out in full at the top of the parse section below.
 -- ============================================================================
 
 -- Track B (§5): p_tenant scopes the config row's identity; the broker passes the
@@ -37,46 +40,134 @@ DECLARE
     v_retention_sink_hold TEXT;
     v_retention_sink_hold_max_seconds INTEGER;
     v_queue_id UUID;
+    -- The queue as it is RIGHT NOW, locked, or an all-NULL row on create. Every
+    -- "keep" below reads its columns; nothing else does.
+    v_cur queen.queues%ROWTYPE;
+    v_replace BOOLEAN;
+    v_keep BOOLEAN;
 BEGIN
+    -- An explicit NULL bag is the same statement as an empty one — every key is
+    -- absent — and must not read as "reset everything". The DEFAULT above only
+    -- covers an OMITTED argument, not a NULL one.
+    p_options := COALESCE(p_options, '{}'::jsonb);
+
+    -- ------------------------------------------------------------------ MERGE
+    -- THE RULE, stated once for all 21 options below — namespace and task, which
+    -- reach this SP through the same bag, included:
+    --
+    --   * key ABSENT          -> keep the queue's current value
+    --   * key present, null   -> the default on the right of its COALESCE
+    --   * key present, value  -> that value
+    --   * `replace: true`, or the queue does not exist yet -> every option is
+    --     parsed as if the queue were new, i.e. an absent key lands on its
+    --     default. That is what this SP did for EVERY call until 1.6.0, and it
+    --     is still what a declarative caller wants: a manifest means the whole
+    --     configuration, so anything it omits must go back to the default.
+    --
+    -- WHY THE DEFAULT FLIPPED. Every client marks its option fields optional and
+    -- sends only what the caller set (Go's `omitempty`, the CLI's flags, the
+    -- dashboard's edit form), so `queenctl queue configure orders --lease-time
+    -- 60` used to reset dedupWindowSeconds to 3600, retention to off and the
+    -- sink hold to off — silently, in one round trip, on a queue the operator
+    -- only meant to nudge. An editor built on that is a reset button with a
+    -- friendlier face.
+    --
+    -- `replace` is a DIRECTIVE, not an option: it is read here, never stored,
+    -- and never echoed (the echo below is built key by key from the effective
+    -- v_ variables, so it cannot leak back out as if it were configuration).
+    --
+    -- FOR UPDATE serialises concurrent edits of one queue: the second caller
+    -- blocks here and then merges onto the first one's result rather than onto
+    -- the stale row it would otherwise have read. Concurrent CREATES take no
+    -- lock (there is no row yet) and stay on the ON CONFLICT path they always
+    -- had. FOUND is the create/edit discriminator: a row-wise `v_cur IS NULL`
+    -- would say the same thing only by accident (all columns NULL), and would
+    -- start lying the day a NOT NULL column gains a NULL-able sibling.
+    v_replace := COALESCE((p_options->>'replace')::boolean, FALSE);
+    SELECT * INTO v_cur FROM queen.queues
+     WHERE tenant_id = p_tenant AND name = p_queue_name
+     FOR UPDATE;
+    v_keep := FOUND AND NOT v_replace;
+
     -- Parse options with defaults
-    v_namespace := COALESCE(p_options->>'namespace', '');
-    v_task := COALESCE(p_options->>'task', '');
-    v_priority := COALESCE((p_options->>'priority')::integer, 0);
-    v_lease_time := COALESCE((p_options->>'leaseTime')::integer, 300);
-    v_retry_limit := COALESCE((p_options->>'retryLimit')::integer, 3);
-    v_retry_delay := COALESCE((p_options->>'retryDelay')::integer, 1000);
-    v_max_size := COALESCE((p_options->>'maxSize')::integer, 0);
-    v_ttl := COALESCE((p_options->>'ttl')::integer, 3600);
+    -- namespace/task are the only two nullable columns in the set, and what a
+    -- merge KEEPS here is worth being exact about. A queue created by a push
+    -- has never been through this SP, but it is not blank: every implicit-create
+    -- path DERIVES the two labels from the dotted queue name
+    -- (`split_part(queue,'.',1)` / `split_part(queue,'.',2)` — 003_log_push,
+    -- 004_log_pop, 005_log_ack, 025_log_timers), so `orders.created` arrives
+    -- here holding namespace 'orders', task 'created'. Until 1.6.0 the first
+    -- /configure that did not resend them reset both to '' and the queue
+    -- silently stopped matching `/pop?namespace=orders&task=created`; now they
+    -- survive it like every other option. NULL is only reachable from a database
+    -- written before that derivation existed (or by hand), and since '' is what
+    -- this SP has always stored and every reader treats the two the same
+    -- (011_log_stats coalesces them), a kept NULL is normalised to '' rather
+    -- than handed back in an echo that has only ever carried strings.
+    v_namespace := CASE WHEN v_keep AND NOT p_options ? 'namespace' THEN COALESCE(v_cur.namespace, '')
+                        ELSE COALESCE(p_options->>'namespace', '') END;
+    v_task := CASE WHEN v_keep AND NOT p_options ? 'task' THEN COALESCE(v_cur.task, '')
+                   ELSE COALESCE(p_options->>'task', '') END;
+    v_priority := CASE WHEN v_keep AND NOT p_options ? 'priority' THEN v_cur.priority
+                       ELSE COALESCE((p_options->>'priority')::integer, 0) END;
+    v_lease_time := CASE WHEN v_keep AND NOT p_options ? 'leaseTime' THEN v_cur.lease_time
+                         ELSE COALESCE((p_options->>'leaseTime')::integer, 300) END;
+    v_retry_limit := CASE WHEN v_keep AND NOT p_options ? 'retryLimit' THEN v_cur.retry_limit
+                          ELSE COALESCE((p_options->>'retryLimit')::integer, 3) END;
+    v_retry_delay := CASE WHEN v_keep AND NOT p_options ? 'retryDelay' THEN v_cur.retry_delay
+                          ELSE COALESCE((p_options->>'retryDelay')::integer, 1000) END;
+    v_max_size := CASE WHEN v_keep AND NOT p_options ? 'maxSize' THEN v_cur.max_queue_size
+                       ELSE COALESCE((p_options->>'maxSize')::integer, 0) END;
+    v_ttl := CASE WHEN v_keep AND NOT p_options ? 'ttl' THEN v_cur.ttl
+                  ELSE COALESCE((p_options->>'ttl')::integer, 3600) END;
     -- RUSTFIX item 2: default TRUE when the option is OMITTED (JSON key absent →
     -- ->>'deadLetterQueue' is NULL). An explicit deadLetterQueue:false yields
     -- ('false')::boolean = false and is preserved — so a client can still disable it.
-    v_dead_letter_queue := COALESCE((p_options->>'deadLetterQueue')::boolean, true);
-    v_dlq_after_max_retries := COALESCE((p_options->>'dlqAfterMaxRetries')::boolean, true);
-    v_delayed_processing := COALESCE((p_options->>'delayedProcessing')::integer, 0);
-    v_window_buffer := COALESCE((p_options->>'windowBuffer')::integer, 0);
-    v_retention_seconds := COALESCE((p_options->>'retentionSeconds')::integer, 0);
-    v_completed_retention_seconds := COALESCE((p_options->>'completedRetentionSeconds')::integer, 0);
-    v_retention_enabled := COALESCE((p_options->>'retentionEnabled')::boolean, false);
-    v_encryption_enabled := COALESCE((p_options->>'encryptionEnabled')::boolean, false);
-    v_max_wait_time_seconds := COALESCE((p_options->>'maxWaitTimeSeconds')::integer, 0);
+    -- Under the merge rule that default is now reached only on create or on
+    -- `replace`; an edit that says nothing about the DLQ keeps whatever the
+    -- queue had, false included.
+    v_dead_letter_queue := CASE WHEN v_keep AND NOT p_options ? 'deadLetterQueue' THEN v_cur.dead_letter_queue
+                                ELSE COALESCE((p_options->>'deadLetterQueue')::boolean, true) END;
+    v_dlq_after_max_retries := CASE WHEN v_keep AND NOT p_options ? 'dlqAfterMaxRetries' THEN v_cur.dlq_after_max_retries
+                                    ELSE COALESCE((p_options->>'dlqAfterMaxRetries')::boolean, true) END;
+    v_delayed_processing := CASE WHEN v_keep AND NOT p_options ? 'delayedProcessing' THEN v_cur.delayed_processing
+                                 ELSE COALESCE((p_options->>'delayedProcessing')::integer, 0) END;
+    v_window_buffer := CASE WHEN v_keep AND NOT p_options ? 'windowBuffer' THEN v_cur.window_buffer
+                            ELSE COALESCE((p_options->>'windowBuffer')::integer, 0) END;
+    v_retention_seconds := CASE WHEN v_keep AND NOT p_options ? 'retentionSeconds' THEN v_cur.retention_seconds
+                                ELSE COALESCE((p_options->>'retentionSeconds')::integer, 0) END;
+    v_completed_retention_seconds := CASE WHEN v_keep AND NOT p_options ? 'completedRetentionSeconds' THEN v_cur.completed_retention_seconds
+                                          ELSE COALESCE((p_options->>'completedRetentionSeconds')::integer, 0) END;
+    v_retention_enabled := CASE WHEN v_keep AND NOT p_options ? 'retentionEnabled' THEN v_cur.retention_enabled
+                                ELSE COALESCE((p_options->>'retentionEnabled')::boolean, false) END;
+    v_encryption_enabled := CASE WHEN v_keep AND NOT p_options ? 'encryptionEnabled' THEN v_cur.encryption_enabled
+                                 ELSE COALESCE((p_options->>'encryptionEnabled')::boolean, false) END;
+    v_max_wait_time_seconds := CASE WHEN v_keep AND NOT p_options ? 'maxWaitTimeSeconds' THEN v_cur.max_wait_time_seconds
+                                    ELSE COALESCE((p_options->>'maxWaitTimeSeconds')::integer, 0) END;
     -- MINIMUM POP WAIT (TASK M): milliseconds a NON-EMPTY pop may hold an
     -- UNDER-FULL batch before claiming, so one commit carries more messages.
     -- Default 0 = OFF (byte-identical to every pre-feature deployment). Clamped
     -- to [0, 60000]: it is bounded independently by the caller's own long-poll
     -- deadline, so this only stops a typo (e.g. seconds passed as ms) from
-    -- parking a delivery for an absurd window.
-    v_min_pop_wait_time := LEAST(GREATEST(COALESCE((p_options->>'minPopWaitTime')::integer, 0), 0), 60000);
+    -- parking a delivery for an absurd window. The clamp sits on the PARSED
+    -- branch only: a kept value was clamped by the call that wrote it, and
+    -- re-clamping it would make "keep" quietly mean "keep, adjusted".
+    v_min_pop_wait_time := CASE WHEN v_keep AND NOT p_options ? 'minPopWaitTime' THEN v_cur.min_pop_wait_time
+                                ELSE LEAST(GREATEST(COALESCE((p_options->>'minPopWaitTime')::integer, 0), 0), 60000) END;
     -- Dedup window now lives on queen.queues (queue-identity merge): the SP is
     -- the single writer, replacing the handler's separate log-queue upsert.
     -- Default 3600 = the column default; clamped at 0 like the handler used to.
-    v_dedup_window_seconds := GREATEST(COALESCE((p_options->>'dedupWindowSeconds')::integer, 3600), 0);
+    v_dedup_window_seconds := CASE WHEN v_keep AND NOT p_options ? 'dedupWindowSeconds' THEN v_cur.dedup_window_seconds
+                                   ELSE GREATEST(COALESCE((p_options->>'dedupWindowSeconds')::integer, 3600), 0) END;
     -- RETENTION SINK HOLD (PLAN_S3_SINK.md §5.3, decision D5). Default '' = off
-    -- and 604800 = 7 days, i.e. the SQL defaults of the two columns, so the
-    -- full-replace rule of this SP leaves a queue that never mentions them
-    -- byte-identical to a pre-feature one.
-    v_retention_sink_hold := COALESCE(p_options->>'retentionSinkHold', '');
+    -- and 604800 = 7 days, i.e. the SQL defaults of the two columns, so a
+    -- `replace` call (and every call before 1.6.0) leaves a queue that never
+    -- mentions them byte-identical to a pre-feature one.
+    v_retention_sink_hold := CASE WHEN v_keep AND NOT p_options ? 'retentionSinkHold' THEN v_cur.retention_sink_hold
+                                  ELSE COALESCE(p_options->>'retentionSinkHold', '') END;
     v_retention_sink_hold_max_seconds :=
-        COALESCE((p_options->>'retentionSinkHoldMaxSeconds')::integer, 604800);
+        CASE WHEN v_keep AND NOT p_options ? 'retentionSinkHoldMaxSeconds' THEN v_cur.retention_sink_hold_max_seconds
+             ELSE COALESCE((p_options->>'retentionSinkHoldMaxSeconds')::integer, 604800) END;
 
     -- These two are REJECTED out of range, not clamped like minPopWaitTime and
     -- dedupWindowSeconds above, and the difference is deliberate. Those two are
@@ -95,10 +186,18 @@ BEGIN
     -- a name containing ':' composes the same key as a different (sink, queue)
     -- pair. It is the same set the sink's own escape() preserves
     -- (connectors/queen-s3/src/layout.rs), so a legal name is never rewritten.
+    --
+    -- `invalid` names the option that was refused and is what tells the handler
+    -- this is a BAD REQUEST rather than a broken broker: without it
+    -- sp_result_to_response maps any embedded {"error"} that does not say "not
+    -- found" to a 500, so a mistyped sink name reached the operator as an
+    -- outage (and the cloud proxy metered it as an unbilled upstream 5xx). The
+    -- `error` text is unchanged and stays the sentence every client renders.
     IF v_retention_sink_hold !~ '^[A-Za-z0-9._-]{0,64}$' THEN
         RETURN jsonb_build_object(
             'error', format('retentionSinkHold must match [A-Za-z0-9._-]{0,64}, got %L',
-                            v_retention_sink_hold));
+                            v_retention_sink_hold),
+            'invalid', 'retentionSinkHold');
     END IF;
     -- 60 s floor: below one retention cycle's own cadence the hold cannot mean
     -- anything. 31536000 = one year ceiling: past that the cap is
@@ -106,7 +205,8 @@ BEGIN
     IF v_retention_sink_hold_max_seconds < 60 OR v_retention_sink_hold_max_seconds > 31536000 THEN
         RETURN jsonb_build_object(
             'error', format('retentionSinkHoldMaxSeconds must be between 60 and 31536000, got %s',
-                            v_retention_sink_hold_max_seconds));
+                            v_retention_sink_hold_max_seconds),
+            'invalid', 'retentionSinkHoldMaxSeconds');
     END IF;
 
     -- Insert or update queue (Track B: identity is (tenant_id, name)).
@@ -151,6 +251,11 @@ BEGIN
     -- message plane: the log engine creates partitions lazily on the first push
     -- (queen.log_partitions), so /configure created a phantom row nothing read.
 
+    -- THE ECHO IS THE EFFECTIVE ROW, not the request: every value below is the
+    -- v_ variable the upsert just wrote, so a caller that sent three options
+    -- sees all 21 back and can render the queue's whole configuration without a
+    -- second read. It is built key by key, which is also why `replace` — a
+    -- directive that lives only in the request bag — never appears in it.
     RETURN jsonb_build_object(
         'configured', true,
         'queueId', v_queue_id,

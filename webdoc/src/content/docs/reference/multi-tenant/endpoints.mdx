@@ -11,6 +11,10 @@ sourceOfTruth:
   - proxy/src/gateway.rs
   - server/src/main.rs
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (with the DLQ replay gates, PLAN_DASHBOARD_ACTIONS.md §1.4/§2.0):
+# classify gained the two replay arms and the messages read prefix is now method-bounded, so
+# the generated table below moves the retry route from `read` to `queue admin`; gateway.rs runs
+# the push blocks and registry admission for it. Both are written down above.
 ---
 
 The gateway does not forward a request it cannot name. Every broker-bound path is
@@ -40,7 +44,10 @@ string, and it is written to fail closed.
    prefix, and for some routes by method: a `DELETE` under `/api/v1/resources/queues/`
    is queue admin, while a `GET` on the same prefix is a read. The gated families
    (streams, traces, kv, timers, ephemeral) are method-exact: a verb the broker does not
-   register for a path fails closed here rather than travelling upstream to a `405`.
+   register for a path fails closed here rather than travelling upstream to a `405`. So
+   is the `/api/v1/messages` family, because it contains writes: `GET` is a read, the
+   single-message `DELETE` and the retry `POST` are queue admin, and every other method
+   under the prefix is blocked instead of inheriting the read the listing needs.
 
 4. **Anything else under `/api/` is blocked.** An unrecognised API-shaped path is never
    forwarded, so a broker route added upstream does not become reachable by accident.
@@ -69,6 +76,21 @@ kv or timers batch is buffered only while its cluster is push-blocked, to refuse
 batch that grows stored state while letting cancels and deletes through. And
 `POST /api/v1/ephemeral/push` is buffered so its items debit the message bucket, the one
 limit that applies to the RAM class ([quotas](/reference/multi-tenant/quotas/)).
+
+**`queue admin`** carries one act that also writes a message: the dead-letter replay,
+`POST /api/v1/dlq/:id/replay` and the address-keyed
+`POST /api/v1/messages/:partitionId/:transactionId/retry`. It re-pushes a dead-letter
+snapshot and drops the dead-letter record in the same transaction, so it is classified
+for the authority of the deletion (Admin, or an admin-scoped key), and it is the one
+thing in this class that answers the storage and monthly push blocks, because it grows
+stored bytes exactly as a push does. The row-id form's body is buffered too: an optional
+`{queue, partition}` moves the message somewhere else, and the broker provisions a
+destination it does not find, so that pair passes the same registry admission
+`/configure` does. Through the proxy an override names **both** halves or neither: a body
+that names one is refused `400` naming the half to add, since the omitted half is a name
+only the broker holds and the pair could not be admitted. The address-keyed form always
+replays in place and reads no body. Everything else in the class is never quota-blocked,
+since deleting and shortening retention are how a tenant gets back under a quota.
 
 **`consume`** with `wait=true` holds a parked-consumer slot for the duration of the
 upstream call, and the long-poll timeout is recomputed as the client's requested wait,

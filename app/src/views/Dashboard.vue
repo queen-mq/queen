@@ -560,6 +560,10 @@ import {
 import { formatChartLabel } from '@/composables/useFormat'
 import { isConflating } from '@/composables/useConflation'
 import { semanticColors } from '@/composables/useChartTheme'
+import {
+  ackFailureSeverity, backlogSeverity, eventLoopSeverity, numTone,
+  pendingDriftSeverity, poolSeverity as poolSeverityOf, timeLagSeverity,
+} from '@/composables/useSeverity'
 import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { stamp } from '@/composables/useStamp'
@@ -807,14 +811,15 @@ const pendingDeltaContext = computed(() => {
   if (v > 0) return 'falling behind · push > ack'
   return 'catching up · ack > push'
 })
-const pendingDeltaSeverity = computed(() => {
-  const v = pendingDeltaLatest.value
-  if (v === null) return ''
-  if (v > 100000) return 'bad'
-  if (v > 1000)   return 'warn'
-  if (v < -1000)  return 'ok'
-  return ''
-})
+// The drift is judged against the work that arrived, not against a constant:
+// +1 000 is a rounding error on a window that pushed half a million and a
+// stall on one that pushed two thousand. useSeverity owns the shares.
+const pushedTotal = computed(() =>
+  history.value.reduce((s, x) => s + (toNum(x.pushMessages) || 0), 0)
+)
+const pendingDeltaSeverity = computed(() =>
+  pendingDriftSeverity({ delta: pendingDeltaLatest.value, pushed: pushedTotal.value })
+)
 
 // ---------------------------------------------------------------------------
 // Time lag row.
@@ -836,7 +841,10 @@ const lagSeriesData = computed(() => {
     { label: 'Max', data: h.map(x => toNum(x.maxLagMs)) },
   ]
 })
-const lagNumClass = (s) => !s || s === 0 ? '' : s < 60 ? '' : s < 300 ? 'warn' : 'bad'
+// An age is proportional by construction — "five minutes late" means the same
+// at 14 msg/s and at 140 000 — so this rule survives the rewrite unchanged; it
+// just lives in useSeverity now, with the grids that share it.
+const lagNumClass = (s) => numTone(timeLagSeverity(s))
 const lagSeverity = computed(() => lagNumClass(lagMaxSeconds.value || 0))
 const lagContext = computed(() => {
   const sampled = history.value.some(x => x.avgLagMs !== null)
@@ -861,15 +869,32 @@ const errorTotal = computed(() => ackFailedTotal.value)
 const errorContext = computed(() => {
   const dlq = dlqDepth.value
   const dlqText = dlq === null ? 'dlq —' : `dlq ${formatNumber(dlq)} now`
-  return `ack ${formatNumber(ackFailedTotal.value)} in window · ${dlqText}`
+  const acks = ackSuccessTotal.value + ackFailedTotal.value
+  // The rate is the verdict, so the rate is what the line says. Without it the
+  // reader cannot tell whether the tone was earned.
+  const rate = acks > 0
+    ? `${formatNumber(ackFailedTotal.value)} of ${formatNumber(acks)} acks (${((ackFailedTotal.value / acks) * 100).toFixed(2)}%)`
+    : `ack ${formatNumber(ackFailedTotal.value)} in window`
+  return `${rate} · ${dlqText}`
 })
-const errorSeverity = computed(() => {
-  const ack = ackFailedTotal.value
-  const dlq = dlqDepth.value || 0
-  if (ack > 100) return 'bad'
-  if (ack > 0 || dlq > 0) return 'warn'
-  return ''
-})
+// THE ROW THIS POLICY WAS WRITTEN FOR. The old rule was `ack > 0 || dlq > 0 →
+// amber`, so 90 failed acks in an hour on a cell doing ~14 msg/s — 0.18% of
+// ~50 000 acks, i.e. a healthy hour — painted the number and its sparkline
+// amber, and so did a DLQ that had held the same three messages since March.
+//
+// Now: the failures are read as a share of the acks ATTEMPTED in the same
+// window (success + failed, both already summed here), and the DLQ DEPTH is
+// context only. Depth is monotonic — nothing purges it — so it can never go
+// back to neutral and is worthless as a signal; DLQ GROWTH would be one, but
+// the tenant overview reports a snapshot and the window series carries no
+// dead-letter counter, so this row does not claim to know it.
+const ackSuccessTotal = computed(() =>
+  history.value.reduce((s, x) => s + (toNum(x.ackSuccess) || 0), 0)
+)
+const errorSeverity = computed(() => ackFailureSeverity({
+  failed: ackFailedTotal.value,
+  succeeded: ackSuccessTotal.value,
+}))
 
 // ---------------------------------------------------------------------------
 // Partitions row — admin events from the same queue-ops buckets.
@@ -955,14 +980,12 @@ const fillContext = computed(() => {
   return 'balanced · consumer pool sized OK'
 })
 
-// Only LOW fill is flagged — high fill is a positive signal on its own, and
-// becomes a problem only alongside rising lag, which has its own row.
-const fillSeverity = computed(() => {
-  const v = fillLatest.value
-  if (v === null) return ''
-  if (v < 30) return 'warn'
-  return ''
-})
+// No tone at all. Low fill means the consumers asked more often than there was
+// work — which is what an idle or over-provisioned pool looks like, and an
+// over-provisioned pool is a sizing observation, not a degradation. The
+// context line above already says which band the number is in, in words. High
+// fill only matters alongside rising lag, and lag has its own row.
+const fillSeverity = computed(() => '')
 
 // ---------------------------------------------------------------------------
 // Retention row.
@@ -985,7 +1008,10 @@ const retentionSeriesData = computed(() => {
   return [
     { label: 'Retention', data: rows.map(r => toNum(r.retentionMsgs)) },
     { label: 'Completed', data: rows.map(r => toNum(r.completedRetentionMsgs)) },
-    { label: 'Evicted',   data: rows.map(r => toNum(r.evictionMsgs)), color: semanticColors.warn.line },
+    // No status hue: retention deleting messages is retention working. The
+    // series is one of three on the same chart and is told apart by the
+    // legend, which is what the grey ramp is for.
+    { label: 'Evicted',   data: rows.map(r => toNum(r.evictionMsgs)) },
   ]
 })
 const retentionLabels = computed(() =>
@@ -1056,7 +1082,9 @@ const elSeriesData = computed(() => {
     { label: 'Max', data: h.map(x => toNum(x.maxEventLoopLagMs)) },
   ]
 })
-const elNumClass = (ms) => !ms || ms === 0 ? '' : ms < 50 ? '' : ms < 100 ? 'warn' : 'bad'
+// Kept: an event loop that is 100 ms behind is degradation of the broker
+// itself, at any message rate.
+const elNumClass = (ms) => eventLoopSeverity(ms)
 const eventLoopContext = computed(() => {
   const n = workerCount.value
   if (!n) return 'no workers reporting on this cell'
@@ -1151,13 +1179,9 @@ const poolSeriesData = computed(() => {
     { label: 'Idle',   data: h.map(x => toNum(x.dbPoolIdle)) },
   ]
 })
-const poolSeverity = computed(() => {
-  const p = poolLatest.value
-  if (!p || !p.size || p.active === null) return ''
-  if (p.active >= p.size) return 'bad'
-  if (p.active / p.size > 0.8) return 'warn'
-  return ''
-})
+// Kept: saturation is a ratio already, and a full pool means queries are
+// waiting for a connection.
+const poolSeverity = computed(() => poolSeverityOf(poolLatest.value || {}))
 const poolContext = computed(() => {
   const p = poolLatest.value
   if (!p) return 'no pool samples for this cell'
@@ -1175,9 +1199,17 @@ const batchEfficiency = computed(() => {
 })
 
 // ---------------------------------------------------------------------------
-// Counts strip — pending tone (only number that gets thresholded inline)
+// Counts strip — pending tone (the only number thresholded inline).
+//
+// A depth has no verdict in it: 50 000 pending drains in four seconds at
+// 12k/s and never drains at 0/s. The tone is therefore computed in SECONDS OF
+// WORK at the ack rate this window actually measured, and stays neutral when
+// there is no drain rate to divide by — a stalled queue is the Time lag row's
+// story, told as an age, and telling it twice in two colours is not telling it
+// better.
 // ---------------------------------------------------------------------------
-const pendingNumClass = (n) => !n || n < 1000 ? '' : n < 10000 ? 'warn' : 'bad'
+const drainPerSec = computed(() => latestFinite(history.value.map(x => x.ackPerSecond)))
+const pendingNumClass = (n) => backlogSeverity({ pending: n, drainPerSec: drainPerSec.value })
 
 // ---------------------------------------------------------------------------
 // Bottom panels — Top queues by pending + Consumer groups by lag.
@@ -1206,9 +1238,15 @@ const enrichedQueues = computed(() => {
     .map(q => {
       const lag = queueLagMap.value[q.name] || 0
       const depth = q._pending ?? 0
+      // Depth RANK used to drive this: `depth / maxPending > 0.8` is true of
+      // the biggest queue in the tenant by definition, so the top row of the
+      // panel was painted red on every cell, including one holding three
+      // messages. The bar below still shows the rank — that is what a bar is
+      // for — but the verdict comes from the lag, which is a measurement and
+      // not an ordering.
       const status =
-        lag >= 300 || (depth / maxPending) > 0.8 ? 'degraded'
-      : lag >= 60  || (depth / maxPending) > 0.5 ? 'watch'
+        lag >= 300 ? 'degraded'
+      : lag >= 60  ? 'watch'
       : 'healthy'
       return {
         ...q,
@@ -1236,10 +1274,14 @@ const statusDotClass = (s) =>
 : s === 'watch'    ? 'status-dot-warning'
                    : 'status-dot-success'
 
+// A consumer group that is behind is a real state, so this keeps its colour —
+// but `partitionsWithLag > 0` no longer qualifies on its own: on a busy queue
+// some partition is momentarily behind at every sample, which is what working
+// looks like. The escalation is the AGE, as everywhere else.
 const cgStatus = (g) => {
   const lag = g.maxTimeLag || 0
   if (lag >= 300) return 'stuck'
-  if (lag >= 60 || (g.partitionsWithLag || 0) > 0) return 'lag'
+  if (lag >= 60) return 'lag'
   return 'healthy'
 }
 const cgDotClass = (g) => {

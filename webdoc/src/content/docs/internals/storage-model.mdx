@@ -14,6 +14,7 @@ sourceOfTruth:
   - server/src/frames.rs
   - server/src/util.rs
 # sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): the dead-letter removal sentence is rewritten for the move primitive, which deletes the row in the same transaction as the push; schema.sql changed one comment.
 ---
 
 A message's address in Queen is one number: a `BIGINT` offset, monotone within its partition.
@@ -262,8 +263,9 @@ row. Partition cleanup takes the opposite route and declines to delete at all. T
 predicate `log_partition_dead_v1` vetoes on `EXISTS (SELECT 1 FROM queen.log_dlq ...)`, so an empty,
 long-inactive partition that still holds a dead letter is not empty and stays. Nothing removes a row
 on a timer: retention never touches this table, and the only removals are
-`DELETE /api/v1/messages/:partitionId/:transactionId` and the retry route, which re-pushes the
-snapshot and then drops the row.
+`DELETE /api/v1/messages/:partitionId/:transactionId`, which removes every consumer group's row
+for that address, and the two replay routes, which move exactly one row back into the log and
+delete it in the same transaction as the push.
 
 ### The helper
 

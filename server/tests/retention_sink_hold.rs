@@ -444,8 +444,9 @@ async fn retention_holds_at_what_the_sink_has_committed() {
         assert_eq!(row.get::<_, String>(0), "lake-1");
         assert_eq!(row.get::<_, i32>(1), 120);
 
-        // OFF is the default, and it is what a queue that never mentions the
-        // options gets — the byte-identical pre-feature answer.
+        // OFF is the default, and it is what a NEW queue that never mentions
+        // the options gets — the byte-identical pre-feature answer. (On an
+        // existing queue the same bag means "change nothing"; see q_virgin.)
         let bare = configure(&c, &unique("cfg-bare"), json!({})).await;
         assert_eq!(bare["options"]["retentionSinkHold"], json!(""));
         assert_eq!(
@@ -500,7 +501,9 @@ async fn retention_holds_at_what_the_sink_has_committed() {
                 "{r}"
             );
         }
-        // '' is legal and is how a full-replace /configure turns the hold OFF.
+        // '' is legal and is how /configure turns the hold OFF. Since the SP
+        // merges it is also the ONLY way: omitting the key keeps the hold (the
+        // other half of that rule is exercised on q_virgin below).
         let off = configure(&c, &q, json!({"retentionSinkHold": ""})).await;
         assert_eq!(off["options"]["retentionSinkHold"], json!(""));
     }
@@ -689,11 +692,33 @@ async fn retention_holds_at_what_the_sink_has_committed() {
         "the floor must follow the pointer forward on the very next cycle"
     );
 
-    // ...and turning the hold OFF returns the queue to plain retention.
-    let cfg = configure(
+    // ...and turning the hold OFF returns the queue to plain retention — by
+    // SENDING THE EMPTY NAME, not by leaving the key out. /configure merges
+    // (012_configure.sql): an edit that never mentions retentionSinkHold keeps
+    // whatever the queue had, so both halves of that contract are asserted
+    // here, which is where this option is documented in code.
+    let kept = configure(
         &c,
         &q_virgin,
         json!({"retentionEnabled": true, "retentionSeconds": 1}),
+    )
+    .await;
+    assert_eq!(
+        kept["options"]["retentionSinkHold"],
+        json!(SINK),
+        "an edit that omits retentionSinkHold must KEEP the hold"
+    );
+    one_cycle(&c, "retention").await;
+    assert_eq!(
+        segment_count(&c, &p_virgin).await,
+        1,
+        "a kept hold must go on flooring the sweep"
+    );
+
+    let cfg = configure(
+        &c,
+        &q_virgin,
+        json!({"retentionEnabled": true, "retentionSeconds": 1, "retentionSinkHold": ""}),
     )
     .await;
     assert_eq!(cfg["options"]["retentionSinkHold"], json!(""));

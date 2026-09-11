@@ -49,6 +49,7 @@ use axum::body::Bytes;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
+use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use super::{json, AppState};
@@ -811,20 +812,25 @@ pub async fn handle_kv_batch(
 // batch (§8.1).
 // ---------------------------------------------------------------------------
 
-/// Guard the privacy rule structurally (§5.5, §13.5). This route reads no query
-/// parameters at all, so ignoring them would be harmless for behaviour and
+/// Guard the privacy rule structurally (§5.5, §13.5). No route on this surface
+/// reads a query parameter, so ignoring one would be harmless for behaviour and
 /// harmful in practice: `?prefix=quota:acme:` sent here would still be recorded
 /// by every access log, proxy sample and tracing span on the way in. Rejecting
 /// makes the rule enforceable instead of documentary.
+///
+/// Used by the three path routes, by the console list — the one route whose
+/// entire reason to be a POST is this rule: its cursor is a key — and by the
+/// namespace selector, which reads no parameter at all and refuses one anyway so
+/// that the surface says ONE thing about KV URLs rather than four-out-of-five.
 fn reject_query(q: &HashMap<String, String>) -> Option<Response> {
     if q.is_empty() {
         return None;
     }
     Some(bad_request(
         "kv_no_query_string",
-        "the KV path routes take no query parameters; prefix reads live only in \
-         the POST /api/v1/kv body, because a prefix in a URL is recorded by every \
-         access log between the client and the database",
+        "the KV routes take no query parameters; a prefix or a cursor lives only \
+         in a POST body, because a key in a URL is recorded by every access log \
+         between the client and the database",
     ))
 }
 
@@ -984,6 +990,262 @@ fn get_response(results: Vec<Value>) -> Response {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The console reads — PLAN_DASHBOARD_ACTIONS.md §2.5.
+//
+// `GET /api/v1/resources/kv/namespaces` and `POST /api/v1/resources/kv/list`.
+// Two things about them are decisions rather than accidents:
+//
+// WHY THEY ARE NOT `POST /api/v1/kv` WITH A `getPrefix` OP. That route is
+// `Gated(Kv, Mixed)` at the proxy, which means a Viewer cannot call it at all
+// and every call is metered as a KV batch; and `getPrefix` requires a prefix
+// (§5.5) and never returns an expired row (§5.7). A console list is the other
+// shape of the same read: read-only, viewer-visible, whole-namespace,
+// cursor-paged, with the rows the sweeper has not taken yet SHOWN and labelled.
+//
+// WHY THEY LIVE UNDER `/api/v1/resources`. The proxy classifies that prefix
+// method-agnostically as `RouteClass::Read` — no feature gate, no quota, no
+// buffered body — so this pair needs no proxy change at all. That is a
+// fall-through and it is pinned by a classify test on the proxy side rather
+// than left as an accident.
+//
+// WHY THE LIST IS A POST. Its cursor is a KEY. `?after=wh.deliver:promo:b15f…`
+// in a query string is recorded by the access log of every component between the
+// browser and the database — the same rule that makes the path routes above
+// reject a query string outright, applied to the one parameter that would
+// otherwise have to travel in a URL.
+//
+// NO PER-OP METRIC on either. `KvOp` is the closed set of the seven wire
+// operations (§14.2) and neither of these is one of them; recording a console
+// page as `getPrefix` would make one series mean two different statements
+// against two different routes. The ladder's reject counter still fires through
+// `gated`, which is the series the kill switch and the rate limit are read on.
+// When this surface earns its own series it earns its own variant, in
+// `metrics.rs`, deliberately.
+// ---------------------------------------------------------------------------
+
+/// The list body. Every field but `namespace` is optional, and every default is
+/// the STORED PROCEDURE's: this struct resolves nothing the SQL already decides,
+/// so the console's own choices (`includeExpired`, the page size) travel on the
+/// wire where they can be read in a request log, rather than being implied by a
+/// default that a second caller would inherit without asking.
+///
+/// Parsed with `serde_json::from_slice` into a named struct, not read key by key
+/// out of a `Value`, because that is the construct `webdoc/scripts/gen-openapi.mjs`
+/// derives a request schema from: a handler that inspects a dynamic document
+/// publishes an open object and the field names reach the site only as prose.
+#[derive(Deserialize)]
+struct KvListBody {
+    /// Validated in SQL (charset, ≤ 64 bytes) and nowhere else, so the rule has
+    /// one home: an unknown namespace is an empty page, a MALFORMED one is a
+    /// 400 — without that, a typo mints a phantom namespace that reads empty
+    /// forever and the operator concludes their data is gone.
+    namespace: String,
+    /// FREE TEXT, not a key: absent or empty lists the whole namespace, which is
+    /// what an operator who has just opened a namespace needs. `%` and `_` are
+    /// ordinary bytes — the SQL predicate is `starts_with`, never a LIKE.
+    #[serde(default)]
+    prefix: Option<String>,
+    /// The EXCLUSIVE keyset cursor: the last key of the previous page. Absent
+    /// asks for the first page. Not an offset — page 135 of 27k costs exactly
+    /// what page 1 costs.
+    #[serde(default)]
+    after: Option<String>,
+    /// Clamped to 1..=1000 by the stored procedure, defaulting to 100 there and
+    /// not here, so the number has one home. Never rejected: a 400 on a
+    /// too-high limit is an error the caller cannot fix without reading the
+    /// server's configuration.
+    ///
+    /// `i64` and not `i32` so that "never rejected" survives the DESERIALIZER.
+    /// The bind is an `int4`, so an `Option<i32>` here would make
+    /// `{"limit":5000000000}` a 400 `kv_bad_body` from serde, before the
+    /// sentence above ever runs — handing the one caller who most obviously
+    /// asked for too much exactly the error this field promises never to give.
+    /// It is saturated into i32 range in `limit()` and clamped in SQL.
+    #[serde(default)]
+    limit: Option<i64>,
+    /// Omit the values. The key/version/expiry columns alone are what a browser
+    /// needs to render a page, and on a namespace of fat values it is the
+    /// difference between one row and a thousand fitting under the byte budget.
+    #[serde(rename = "keysOnly", default)]
+    keys_only: Option<bool>,
+    /// Absent means FALSE, the same default the stored procedure applies and the
+    /// same answer every other read on this surface gives: §5.7 says an expired
+    /// row is gone, and a caller who did not ask for the exception must not be
+    /// handed markers that every `get` on the same cell treats as absent.
+    ///
+    /// The CONSOLE asks for the exception, on every page, explicitly (§2.5 D5):
+    /// an expired row still occupies the namespace and still counts in the
+    /// selector's exact per-namespace figure, so a browser that hid it would
+    /// print a count its own list contradicts and an operator would file that as
+    /// a bug. Those rows come back carrying `expired: true` and the page greys
+    /// them. That is a decision of the page, sent on the wire — not a default
+    /// inherited by every third party that omits the field.
+    #[serde(rename = "includeExpired", default)]
+    include_expired: Option<bool>,
+}
+
+impl KvListBody {
+    fn prefix(&self) -> &str {
+        self.prefix.as_deref().unwrap_or("")
+    }
+    /// `""` is not a cursor, it is the absence of one: a caller that zeroes the
+    /// field rather than omitting it must get the FIRST page, not the page after
+    /// the empty string — which under `COLLATE "C"` is every key there is.
+    fn after(&self) -> Option<&str> {
+        self.after.as_deref().filter(|s| !s.is_empty())
+    }
+    /// `None` reaches SQL as NULL and the stored procedure applies its own
+    /// default. Resolving it here would be a second place for the number to live.
+    ///
+    /// SATURATED, not clamped: the only number this function knows is the width
+    /// of the column it binds into, and anything that survives the saturation is
+    /// still clamped to 1..=1000 by the stored procedure. So `5_000_000_000`
+    /// behaves like `5000` — a limit that is too high, answered with the maximum
+    /// page — instead of like a malformed body.
+    fn limit(&self) -> Option<i32> {
+        self.limit
+            .map(|n| n.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
+    }
+    fn keys_only(&self) -> bool {
+        self.keys_only.unwrap_or(false)
+    }
+    fn include_expired(&self) -> bool {
+        self.include_expired.unwrap_or(false)
+    }
+}
+
+/// Take a connection from the KV pool, or render the cell's own refusal.
+///
+/// Shared by the two console reads because the bookkeeping is three lines that
+/// are all easy to forget one of: the db-error metric, the `pool` reject reason
+/// (a cell condition, not the tenant's doing) and `note_pool`, which is what
+/// feeds rung 5 — the streak that sheds standalone writes while keeping the
+/// transaction wire working. A read that quietly skipped `note_pool` would make
+/// that streak undercount exactly when the database is slow.
+async fn console_client(st: &AppState) -> Result<deadpool_postgres::Client, Response> {
+    match kv_pool(st).get().await {
+        Ok(c) => {
+            note_pool(st, true);
+            Ok(c)
+        }
+        Err(_) => {
+            st.metrics.record_db_error();
+            st.metrics.kvt.kv_read_rejected(crate::metrics::KvReject::Pool);
+            note_pool(st, false);
+            Err(unavailable("kv_pool_exhausted"))
+        }
+    }
+}
+
+pub async fn handle_kv_namespaces(
+    State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<Tenant>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    // The same refusal its four siblings open with, and it belongs here for the
+    // rule rather than for this route's own parameters: the selector reads none,
+    // so ignoring a query string would never change an answer — it would only
+    // make the surface answer TWO ways about whether a KV URL may carry one.
+    // `reference/http/kv.mdx` states the boundary route-wide ("a query string on
+    // any route but the batch" is a 400), and a surface where four routes refuse
+    // and the fifth quietly serves teaches a caller that the rule is advisory —
+    // which is exactly how `?prefix=quota:acme:` ends up in four access logs on
+    // the route where it DOES leak a key. Cheap to hold: nothing in the product
+    // appends a query string here, so the guard costs a caller nothing.
+    //
+    // First, like on the siblings: it reads no state and spends no connection,
+    // so a rejected request never touches the ladder or the pool.
+    if let Some(r) = reject_query(&q) {
+        return r;
+    }
+    // The ladder next, before a connection is spent (§8.4 point 3). A read
+    // passes rows and bytes 0: occupancy never refuses a read (§9.5), and this
+    // call adds neither.
+    if let Some(resp) = gated(&st, tenant.as_str(), Surface::KvRead, 0, 0) {
+        return resp;
+    }
+
+    let client = match console_client(&st).await {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    let cancel = client.cancel_token();
+    let res = tokio::time::timeout(st.stmt_timeout, db::kv_namespaces(&client, tenant.as_str())).await;
+    match resolve_db(res, client, cancel, "kv_namespaces", &st.metrics) {
+        // The stored procedure returns the bare array; the route wraps it, the
+        // same way `batch_response` wraps the batch's. An object leaves room for
+        // the call-level fields a console will want (a truncation flag the day a
+        // tenant's namespace count needs one, the snapshot's age when this moves
+        // onto the sweeper's figures) without a second shape change on a page
+        // that is already shipped.
+        Ok(txt) => json(StatusCode::OK, format!("{{\"namespaces\":{txt}}}")),
+        Err(Some(e)) => db_error_response(&st, &e),
+        Err(None) => unavailable("kv_timeout"),
+    }
+}
+
+pub async fn handle_kv_list(
+    State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<Tenant>,
+    Query(q): Query<HashMap<String, String>>,
+    body: Bytes,
+) -> Response {
+    // The same guard the three path routes open with, on the one route that was
+    // CREATED to carry the rule (see the section header): a cursor is a key, and
+    // `?after=wh.deliver:acme:b15f…` on this path would be written to the access
+    // log of the browser's proxy, the ingress, the queen proxy and the broker —
+    // the four-component leak §5.5 forbids — while the handler answered 200 and
+    // said nothing. Nothing in the product appends a query string to this POST,
+    // so the guard costs a caller nothing and makes the rule structural instead
+    // of documentary. First, like its siblings: it reads no state and spends no
+    // connection, and everything that touches Postgres is still behind the
+    // ladder below.
+    if let Some(r) = reject_query(&q) {
+        return r;
+    }
+    if let Some(resp) = gated(&st, tenant.as_str(), Surface::KvRead, 0, 0) {
+        return resp;
+    }
+    let req: KvListBody = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return bad_request("kv_bad_body", &e.to_string()),
+    };
+
+    let client = match console_client(&st).await {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+    // Captured BEFORE the query: on a broker-side timeout the still-running
+    // statement is cancelled server-side and the connection is quarantined
+    // rather than abandoned (§8.4 point 4). A namespace listing is the one read
+    // here whose cost the caller does not bound a priori, so this is not
+    // ceremony.
+    let cancel = client.cancel_token();
+    let res = tokio::time::timeout(
+        st.stmt_timeout,
+        db::kv_list(
+            &client,
+            tenant.as_str(),
+            &req.namespace,
+            req.prefix(),
+            req.after(),
+            req.limit(),
+            req.keys_only(),
+            req.include_expired(),
+        ),
+    )
+    .await;
+    match resolve_db(res, client, cancel, "kv_list", &st.metrics) {
+        // Passed through verbatim: `{rows, truncated, nextAfter, bytes}` is
+        // built in SQL, in one place, for the same reason every other shape on
+        // this surface is (§9.2).
+        Ok(txt) => json(StatusCode::OK, txt),
+        Err(Some(e)) => db_error_response(&st, &e),
+        Err(None) => unavailable("kv_timeout"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1006,6 +1268,114 @@ mod tests {
         q.insert("prefix".to_string(), "quota:acme:".to_string());
         assert!(reject_query(&q).is_some());
         assert!(reject_query(&HashMap::new()).is_none());
+    }
+
+    /// The console list body: what a minimal request means, which is entirely a
+    /// question of the defaults, and one of them is not the obvious one.
+    #[test]
+    fn the_console_list_body_carries_the_console_defaults() {
+        let b: KvListBody = serde_json::from_slice(br#"{"namespace":"orders"}"#).expect("parse");
+        assert_eq!(b.namespace, "orders");
+        assert_eq!(b.prefix(), "", "an absent prefix lists the whole namespace");
+        assert_eq!(b.after(), None, "no cursor is the first page");
+        assert_eq!(b.limit(), None, "the limit's one home is the stored procedure");
+        assert!(!b.keys_only(), "values come back unless the caller opts out");
+        assert!(
+            !b.include_expired(),
+            "§5.7 holds for anyone who did not ask otherwise: an expired row is \
+             absent from every other read on this surface, and the stored \
+             procedure defaults the same parameter to FALSE. The CONSOLE asks \
+             for them explicitly on every page (§2.5 D5) — see the test below."
+        );
+    }
+
+    /// The console's own body, which is the one that carries the exception.
+    ///
+    /// D5 is a property of the PAGE, not of the route: the dashboard sends
+    /// `includeExpired: true` on every request (app/src/composables/useKvView.js,
+    /// pinned by app/test/kv-page.test.js) because an expired row still counts in
+    /// the namespace figure beside the list. This asserts the wire spelling that
+    /// carries it, so a rename on either side fails here rather than by quietly
+    /// dropping the greyed rows off a page whose header still counts them.
+    #[test]
+    fn the_console_asks_for_expired_rows_explicitly() {
+        let b: KvListBody =
+            serde_json::from_slice(br#"{"namespace":"orders","includeExpired":true}"#)
+                .expect("parse");
+        assert!(b.include_expired());
+    }
+
+    /// "Clamped, never rejected" has to survive the DESERIALIZER, or the promise
+    /// is only kept for callers who were never going to break it.
+    ///
+    /// A page size is bound as an `int4`, so the obvious field type is `i32` —
+    /// and with it `{"limit":5000000000}` is a 400 `kv_bad_body` from serde,
+    /// which is precisely the error the field's contract says a too-high limit
+    /// must never get. The field is `i64` and saturates instead; the stored
+    /// procedure clamps whatever arrives to 1..=1000, and remains the only place
+    /// those two numbers are written.
+    #[test]
+    fn an_absurd_limit_is_saturated_and_not_refused() {
+        let b: KvListBody =
+            serde_json::from_slice(br#"{"namespace":"n","limit":5000000000}"#).expect("parse");
+        assert_eq!(b.limit(), Some(i32::MAX));
+        let neg: KvListBody =
+            serde_json::from_slice(br#"{"namespace":"n","limit":-9000000000}"#).expect("parse");
+        assert_eq!(neg.limit(), Some(i32::MIN), "the SP clamps up to 1 from here");
+        // Still a body-shape error, and correctly so: a page size is a whole
+        // number, and `1e9` is a JSON float. The contract is about a limit that
+        // is too HIGH, not about a value that is not a limit at all.
+        assert!(serde_json::from_slice::<KvListBody>(br#"{"namespace":"n","limit":1e9}"#).is_err());
+    }
+
+    /// Every optional field on the wire, in the camelCase the rest of this
+    /// product speaks, and ONE spelling each: `keys_only` is not a hidden alias
+    /// for `keysOnly`.
+    ///
+    /// What the parse does with it is the forward-compatible thing and not the
+    /// strict one — an unknown field is ignored, so a newer dashboard served by
+    /// a proxy can send a field an older cell has never heard of and still get
+    /// its page. The cost is the mirror image: a caller who MISSPELLS a field
+    /// gets the default for it and no signal. That trade is deliberate here and
+    /// the opposite of the path routes' `reject_path_shadowing`, which refuses
+    /// the specific fields the URL already names because there the body and the
+    /// path would be saying two different things about the same key.
+    #[test]
+    fn the_console_list_body_is_camel_case_on_the_wire() {
+        let b: KvListBody = serde_json::from_slice(
+            br#"{"namespace":"n","prefix":"wh.","after":"wh.a","limit":7,
+                 "keysOnly":true,"includeExpired":false}"#,
+        )
+        .expect("parse");
+        assert_eq!(b.prefix(), "wh.");
+        assert_eq!(b.after(), Some("wh.a"));
+        assert_eq!(b.limit(), Some(7));
+        assert!(b.keys_only());
+        assert!(!b.include_expired());
+
+        let snake: KvListBody =
+            serde_json::from_slice(br#"{"namespace":"n","keys_only":true}"#).expect("parse");
+        assert!(!snake.keys_only(), "keys_only is not an alias for keysOnly");
+    }
+
+    /// `""` is the absence of a cursor, not a cursor. Under `COLLATE "C"` the
+    /// empty string sorts before every key, so treating it as one would answer
+    /// the page after "nothing" — which is the first page by luck today and a
+    /// silently dropped first row the moment the predicate changes.
+    #[test]
+    fn an_empty_cursor_is_not_a_cursor() {
+        let b: KvListBody =
+            serde_json::from_slice(br#"{"namespace":"n","after":""}"#).expect("parse");
+        assert_eq!(b.after(), None);
+    }
+
+    /// The namespace is the one mandatory field: there is no tenant-wide key
+    /// list, for the reason there is no tenant-wide timer list — it is a scan
+    /// whose cost nobody bounded.
+    #[test]
+    fn the_console_list_body_requires_a_namespace() {
+        let r = serde_json::from_slice::<KvListBody>(br#"{"prefix":"wh."}"#);
+        assert!(r.is_err(), "a body without a namespace must not parse");
     }
 
     // A truncated DETAIL must degrade to the bare verdict, never to a 500: the
@@ -1041,6 +1411,28 @@ mod tests {
                 "/api/v1/kv/:ns/*key",
                 get(handle_kv_get).put(handle_kv_put).delete(handle_kv_delete),
             );
+    }
+
+    /// The two console routes of PLAN_DASHBOARD_ACTIONS.md §2.5, built exactly
+    /// as main.rs must build them, and here for the same reason the four above
+    /// are: `gen-routes.mjs` derives the published route table by regexing
+    /// main.rs's builder chain, so nothing may be merged in from a sub-router —
+    /// which leaves main.rs owning the registration and this file owning the
+    /// proof that these signatures satisfy axum's `Handler`.
+    ///
+    /// The static `/kv/namespaces` and `/kv/list` sit under `/api/v1/resources`
+    /// beside a `:queue` param route; building the router is also what proves
+    /// they do not collide with it.
+    #[test]
+    fn the_two_console_routes_accept_these_handlers() {
+        use axum::routing::{get, post};
+        let _: axum::Router<Arc<AppState>> = axum::Router::new()
+            .route(
+                "/api/v1/resources/kv/namespaces",
+                get(handle_kv_namespaces),
+            )
+            .route("/api/v1/resources/kv/list", post(handle_kv_list))
+            .route("/api/v1/resources/queues/:queue", get(handle_kv_namespaces));
     }
 
     /// WHAT THE CATCH-ALL ACTUALLY HANDS THE HANDLER.

@@ -64,18 +64,28 @@
            ok/warn/bad/idle are five distinguishable states an operator
            reads off 8px dots and 2px strokes, and they separate 1.63:1 by
            luminance where the docs' four separate 1.13:1. Re-tinted for
-           the darker card, not re-hued. --------------------------------- */
+           the darker card, not re-hued.
+
+           STATE ONLY, and the rule takes no exceptions. --warn-* means
+           "attention: this is degrading"; --ember-* means "failing, broken,
+           or about to destroy something". Neither is ever spent on scope, on
+           identity, on emphasis, or on "this is information". Amber used to
+           double as the CELL-scope mark, which cost twice over: a healthy
+           cell carried the amber vocabulary at four scales at once and read
+           as a system in trouble, and a real warning arriving among them
+           read as one more label. Scope now has --scope-* below;
+           information has --info-*. ------------------------------------- */
     --ok-500: #4ade80;                       /* healthy  11.00:1 on card   */
     --ok-glow: rgba(74, 222, 128, 0.12);
     --ok-bd:   rgba(74, 222, 128, 0.28);
 
-    --warn-400: #e6b450;                     /* warning / cell scope       */
+    --warn-400: #e6b450;                     /* attention  10.05:1 on card */
     --warn-500: #d9a03d;
     --warn-glow: rgba(230, 180, 80, 0.12);
     --warn-bd:   rgba(230, 180, 80, 0.28);
     --amber: var(--warn-400);                /* legacy alias               */
 
-    --ember-400: #fb7185;                    /* danger / DLQ — logo pink   */
+    --ember-400: #fb7185;                    /* failing  7.13:1 — logo pink */
     --ember-500: #f43f5e;
     --ember-600: #e11d48;
     --ember-glow: rgba(244, 63, 94, 0.12);
@@ -92,6 +102,20 @@
     --info-400: #79b1f9;    /* docs --nb-info              oklch(.75 .12 255) */
     --info-glow: rgba(121, 177, 249, 0.12);
     --info-bd:   rgba(121, 177, 249, 0.28);
+
+    /* ---- Scope — WHOSE numbers these are, never how they are doing. Every
+           CELL mark (the chip on a row, the CELL · OPERATOR band, the tag,
+           the strip's inset rule, the maintenance pill, the operator nav
+           group) is drawn in this one hue. It is the informational blue
+           above, kept one alias away so the two roles can diverge later
+           without a sweep. Two properties matter and are why it is not just
+           grey: it must be unmistakably NOT amber and NOT red, and it must
+           still catch the eye — a cell-wide figure read as a tenant figure
+           is the specific lie the mark exists to prevent. 8.65:1 on the
+           card, which is brighter than the label ink beside it. --------- */
+    --scope-400: var(--info-400);            /* cell scope  8.65:1 on card */
+    --scope-glow: var(--info-glow);
+    --scope-bd:   var(--info-bd);
 
     --crown-400: var(--accent);              /* legacy aliases             */
 
@@ -228,13 +252,13 @@
     --ok-glow: rgba(22, 101, 52, 0.10);
     --ok-bd:   rgba(22, 101, 52, 0.30);
 
-    --warn-400: #92400e;                     /* warning   7.09:1           */
+    --warn-400: #92400e;                     /* attention 7.09:1           */
     --warn-500: #78350f;
     --warn-glow: rgba(146, 64, 14, 0.10);
     --warn-bd:   rgba(146, 64, 14, 0.30);
     --amber: var(--warn-400);
 
-    --ember-400: #e11d48;                    /* danger    4.70:1           */
+    --ember-400: #e11d48;                    /* failing   4.70:1           */
     --ember-500: #be123c;
     --ember-600: #9f1239;
     --ember-glow: rgba(225, 29, 72, 0.10);
@@ -249,6 +273,13 @@
     --info-400: #2563eb;                     /* FYI       5.17:1           */
     --info-glow: rgba(37, 99, 235, 0.10);
     --info-bd:   rgba(37, 99, 235, 0.30);
+
+    /* Scope, same alias as the dark set. 5.17:1 on the white card: it clears
+       AA as body text and reads as blue rather than as ink, which is what a
+       9px CELL chip needs to survive being 9px. */
+    --scope-400: var(--info-400);            /* cell scope 5.17:1 on card  */
+    --scope-glow: var(--info-glow);
+    --scope-bd:   var(--info-bd);
 
     --crown-400: var(--accent);
 
@@ -562,11 +593,13 @@
 }
 
 /* Maintenance is cell-wide: the badge says so at the control itself, so the
-   scope is never inferred from where the button happens to sit. */
+   scope is never inferred from where the button happens to sit. Scope hue,
+   not amber — the pill states WHO the switch affects, and it says that while
+   maintenance is off. The amber below is the switch's own state. */
 .maint-scope {
   font-size: 9px; font-weight: 700; letter-spacing: .08em;
   padding: 0 6px; align-self: stretch; display: flex; align-items: center;
-  color: var(--warn-400); background: var(--warn-glow);
+  color: var(--scope-400); background: var(--scope-glow);
   border-right: 1px solid var(--bd);
 }
 
@@ -694,12 +727,23 @@
   .chip .dot, .badge .dot { width: 4px; height: 4px; border-radius: var(--r-pill); }
   .chip-ok, .badge-success { color: var(--ok-500); background: var(--ok-glow); border-color: color-mix(in srgb, var(--ok-500) 22%, transparent); }
   .chip-ok .dot, .badge-success .dot { background: var(--ok-500); }
-  .chip-warn, .badge-warning, .badge-crown { color: var(--warn-400); background: var(--warn-glow); border-color: color-mix(in srgb, var(--warn-400) 22%, transparent); }
-  .chip-warn .dot, .badge-warning .dot, .badge-crown .dot { background: var(--warn-400); }
+  .chip-warn, .badge-warning { color: var(--warn-400); background: var(--warn-glow); border-color: color-mix(in srgb, var(--warn-400) 22%, transparent); }
+  .chip-warn .dot, .badge-warning .dot { background: var(--warn-400); }
+  /* The crown is an OPERATOR mark — "this covers the whole cell" — so it
+     leaves the warn group it used to share and joins the scope family. */
+  .badge-crown { color: var(--scope-400); background: var(--scope-glow); border-color: color-mix(in srgb, var(--scope-400) 22%, transparent); }
+  .badge-crown .dot { background: var(--scope-400); }
   .chip-bad, .badge-danger { color: var(--ember-400); background: var(--ember-glow); border-color: color-mix(in srgb, var(--ember-500) 25%, transparent); }
   .chip-bad .dot, .badge-danger .dot { background: var(--ember-400); }
   .chip-ice, .badge-queen, .badge-cyber { color: var(--ice-400); background: var(--ice-glow); border-color: color-mix(in srgb, var(--ice-400) 22%, transparent); }
   .chip-ice .dot, .badge-queen .dot, .badge-cyber .dot { background: var(--ice-400); }
+  /* "cell · operator", "operator" — WHOSE these numbers are and who may act on
+     them. Chip-shaped member of the .cell-chip / .cell-tag family, and the
+     reason it exists: these labels were .chip-warn, so every operator page
+     opened with an amber chip in the top-left corner announcing a problem that
+     was never there. */
+  .chip-scope { color: var(--scope-400); background: var(--scope-glow); border-color: color-mix(in srgb, var(--scope-400) 22%, transparent); }
+  .chip-scope .dot { background: var(--scope-400); }
   .chip-mute { color: var(--text-mid); background: var(--ink-3); border-color: var(--bd); }
 
   /* --- Buttons --- */
@@ -930,9 +974,9 @@
     background: var(--ink-2);
     font-size: 11.5px; color: var(--text-mid);
   }
-  /* Amber is the CELL-scope signal, not a warning: the inset rule says
-     "these numbers are the whole cell's". */
-  .scope-strip-cell { border-color: var(--warn-bd); box-shadow: inset 3px 0 0 var(--warn-400); }
+  /* The inset rule says "these numbers are the whole cell's" — a scope, not
+     a state, so it is drawn in the scope hue and never in amber. */
+  .scope-strip-cell { border-color: var(--scope-bd); box-shadow: inset 3px 0 0 var(--scope-400); }
   .scope-text { font-family: var(--font-mono); color: var(--text-mid); }
   .scope-text strong { color: var(--text-hi); font-weight: 600; }
   /* System's cell strip is a sentence, not a slug triple — three lines of
@@ -943,15 +987,18 @@
   .scope-meta { font-family: var(--font-mono); font-size: 11px; color: var(--text-low); }
 
   /* --- Cell / operator vocabulary ---------------------------------------
-     Three amber marks, three scales, one meaning: "this covers every tenant
-     on the cell, not just yours". Amber is never a failure here. */
+     Three marks, three scales, one meaning: "this covers every tenant on the
+     cell, not just yours". They are drawn in --scope-400, the informational
+     blue, because they report SCOPE and a scope is never a state: an operator
+     scanning a healthy cell for trouble used to find this vocabulary in amber
+     at four sizes and read the cell as degraded. */
   .cell-section {
     display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
     padding: 10px 14px; margin: 24px 0 14px;
     font-size: 12px; color: var(--text-low);
-    border: 1px solid var(--bd); border-left: 3px solid var(--warn-400);
+    border: 1px solid var(--bd); border-left: 3px solid var(--scope-400);
     border-radius: var(--r-card);
-    background: color-mix(in srgb, var(--warn-400) 5%, transparent);
+    background: color-mix(in srgb, var(--scope-400) 5%, transparent);
   }
   /* Same band squeezed into a table body (Dashboard's metric table): rules
      instead of a rounded panel, because a card inside a table reads as a
@@ -964,7 +1011,7 @@
   }
   .cell-tag {
     font-size: 9.5px; font-weight: 600; letter-spacing: .12em;
-    color: var(--warn-400); border: 1px solid var(--warn-400);
+    color: var(--scope-400); border: 1px solid var(--scope-400);
     border-radius: var(--r-chip); padding: 1px 5px; white-space: nowrap;
   }
   /* `font-style: normal` is load-bearing: two call sites are <i> elements
@@ -972,9 +1019,9 @@
   .cell-chip {
     font-style: normal;
     font-size: 9px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase;
-    color: var(--warn-400); border: 1px solid var(--warn-400);
+    color: var(--scope-400); border: 1px solid var(--scope-400);
     border-radius: var(--r-chip); padding: 0 3px;
-    margin-left: 5px; vertical-align: 1px; opacity: .8;
+    margin-left: 5px; vertical-align: 1px; opacity: .85;
   }
 
   /* --- Filter card ------------------------------------------------------
@@ -995,6 +1042,12 @@
   .filter-field-col > .input { width: 100%; }
   .filter-field-right { margin-left: auto; }
   .filter-hint { font-size: 11px; color: var(--text-low); }
+  /* A line of hints UNDER a filter row. A hint inside a column is the trap the
+     KV and Timers cards fell into: `.filter-row` aligns its columns at the
+     bottom, so a one-line hint beside a two-line one (or none) lifts each
+     label and input by a different amount, and the card reads as two rows.
+     Below the row a hint can be any length and the row above stays one line. */
+  .filter-foot { display: flex; flex-wrap: wrap; gap: 4px 18px; margin-top: -4px; }
   .filter-invalid { font-size: 11.5px; color: var(--ember-400); }
   .filter-check {
     display: inline-flex; align-items: center; gap: 6px;
@@ -1047,7 +1100,11 @@
   /* --- Unknown / not-recorded / empty: three looks, three meanings -------
      Failure and emptiness must not look alike: one is "we do not know", the
      other is "we know, and it is nothing". A third case — "the engine does
-     not record it" — is neither, and owns the dashed amber alone. */
+     not record it" — is neither, and owns the DASHED border alone: dashed
+     where the others are solid or plain, and neutral in colour, because a
+     missing measurement is information about the product, not a condition of
+     the system. It used to be dashed amber, which reported a broker that has
+     never implemented a counter as something degrading right now. */
 
   /* 1. We could not ask. */
   .panel-err {
@@ -1061,7 +1118,7 @@
   /* 2. We asked; the engine does not record it. */
   .panel-na {
     padding: 16px 14px;
-    border: 1px dashed var(--warn-400); border-radius: var(--r-card);
+    border: 1px dashed var(--bd-hi); border-radius: var(--r-card);
     font-size: 12.5px; font-style: italic; text-align: center; color: var(--text-mid);
   }
 
@@ -1356,19 +1413,24 @@
 .cluster-status { font-size: 9.5px; color: var(--warn-400); text-transform: uppercase; }
 .cluster-empty { padding: 10px; font-size: 12px; color: var(--text-low); text-align: center; }
 
-/* --- operator nav group: cell-level, and it has to look it --------------- */
+/* --- operator nav group: cell-level, and it has to look it ---------------
+   The badge carries the scope hue at full strength; the items under it keep
+   the ordinary nav ink. Five amber links used to say "danger" five times for
+   one fact, and the fact is stated once, at the group label. */
 .nav-group-label { display: flex; align-items: center; gap: 6px; }
 .nav-scope-badge {
   font-size: 8.5px; letter-spacing: .1em; text-transform: uppercase;
-  color: var(--warn-400); border: 1px solid var(--warn-400); border-radius: var(--r-chip);
-  padding: 0 3px; opacity: .8;
+  color: var(--scope-400); border: 1px solid var(--scope-400); border-radius: var(--r-chip);
+  padding: 0 3px; opacity: .9;
 }
 .nav-group-operator {
   margin-top: 14px; padding-top: 8px; border-top: 1px dashed var(--bd-hi);
 }
-.nav-group-operator .nav-item { color: var(--warn-400); opacity: .92; }
-.nav-group-operator .nav-item:hover { color: var(--warn-400); opacity: 1; }
-.nav-group-operator .nav-item-active { color: var(--warn-400) !important; }
+/* The group's own marker: one hairline down the left of the whole block, the
+   same idiom .scope-strip-cell uses, so "cell scope" looks the same in the
+   sidebar as it does on a page. */
+.nav-group-operator .nav-item { box-shadow: inset 2px 0 0 color-mix(in srgb, var(--scope-400) 55%, transparent); }
+.nav-group-operator .nav-item-active { box-shadow: inset 2px 0 0 var(--scope-400); }
 
 /* --- sidebar footer ------------------------------------------------------ */
 .user-email {

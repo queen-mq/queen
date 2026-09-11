@@ -11,6 +11,7 @@ sidebar:
   order: 17
   label: PostgreSQL TLS
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): db.rs gained the DLQ move and KV console statements; no connection, TLS or certificate behaviour moved.
 ---
 
 Every message Queen stores travels over the connection between the broker and

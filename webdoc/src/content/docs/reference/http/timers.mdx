@@ -15,6 +15,7 @@ verifiedBy:
   - server/tests/timers_fault_injection.rs
   - server/tests/timers_tenant_isolation.rs
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): a From the console section is added for the dashboard's Timers page; switches.rs changed only a comment and main.rs's new routes are documented elsewhere.
 ---
 
 A timer is a message that is not in the log yet. Scheduling one promises a frame in a queue at a
@@ -245,6 +246,25 @@ that literal prefix. The prefix is required, non-empty, at most 128 UTF-8 bytes,
 NUL; `%` and `_` have no wildcard meaning. Count mode rejects `after` and `limit`, so an accidental
 whole-queue count or a response mistaken for a list fails loudly. Omitting `mode`, or sending
 `mode=list`, keeps the list contract above.
+
+### From the console
+
+The dashboard's **Timers** page (`/timers`, under the State group) is these four routes and nothing
+else: a queue picker, the keyset list with Previous and Next, the exact prefix count, a peek drawer
+and a cancel. Three things it does that a reader of this page may want to copy.
+
+It decodes the payload in the browser rather than asking the broker to: the bytes arrive base64 as
+stored, so the page base64-decodes them and then runs zstd only when `payloadZstd` is `true`. An
+`encrypted: true` row short-circuits before any of that, and says so, because encryption is
+outermost and applied at schedule, so there is nothing a console could usefully unwrap.
+
+It refuses a frame that declares more output, or a larger decompression window, than its own budget
+allows, and calls that a size verdict rather than an error: the frame is fine and the consumer still
+receives it whole.
+
+And it has no auto-refresh. Every row is a database read on a metered route, and a keyset page that
+refetched under the reader would move rows while they are being read, so the page reloads on the
+shell's Refresh and on a cluster switch and at no other time.
 
 ## Status codes
 

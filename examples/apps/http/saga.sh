@@ -223,8 +223,9 @@ request GET "/api/v1/timers/$EXPIRIES?limit=1"
 [ "$STATUS" = 200 ] \
   || fail "the timers probe returned HTTP $STATUS: $(cat "$OUT") (503 is an operator's kill switch, 403 a quota; see /deploy/state)"
 
-# /configure is a full replace rather than a patch, so what is not named here is
-# reset to its default.
+# /configure merges rather than replacing, so an option not named here keeps
+# whatever the queue already has. These three names are unique per run, so what
+# is not named lands on its default.
 for queue in "$BOOKINGS" "$PAYMENTS" "$EXPIRIES"; do
   body="$(jq -n --arg queue "$queue" '{queue: $queue, options: {leaseTime: 30, retryLimit: 3}}')"
   request POST /api/v1/configure "$body"

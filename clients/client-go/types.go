@@ -125,36 +125,44 @@ type Retry429Config struct {
 }
 
 // QueueConfig contains configuration for queue creation.
+//
+// The `yaml` tags are not decoration: `queenctl apply -f` decodes a manifest's
+// `config:` block straight into this struct with gopkg.in/yaml.v3, which without
+// a tag binds the LOWERCASED field name (`leasetime`). Every example in that
+// command's help, and every manifest anyone has written from it, spells the keys
+// the way the wire does — so an untagged field silently bound nothing, and
+// `apply` (which sends `mode: replace`) would put the whole block back to its
+// defaults while reporting success. One spelling, camelCase, in both formats.
 type QueueConfig struct {
 	// LeaseTime is the lease duration in seconds
-	LeaseTime int `json:"leaseTime,omitempty"`
+	LeaseTime int `json:"leaseTime,omitempty" yaml:"leaseTime,omitempty"`
 	// RetryLimit is the maximum number of retries before moving to DLQ
-	RetryLimit int `json:"retryLimit,omitempty"`
+	RetryLimit int `json:"retryLimit,omitempty" yaml:"retryLimit,omitempty"`
 	// Priority is the queue priority (higher = processed first)
-	Priority int `json:"priority,omitempty"`
+	Priority int `json:"priority,omitempty" yaml:"priority,omitempty"`
 	// DelayedProcessing is the delay in seconds before messages are available
-	DelayedProcessing int `json:"delayedProcessing,omitempty"`
+	DelayedProcessing int `json:"delayedProcessing,omitempty" yaml:"delayedProcessing,omitempty"`
 	// WindowBuffer is the window buffer in seconds
-	WindowBuffer int `json:"windowBuffer,omitempty"`
+	WindowBuffer int `json:"windowBuffer,omitempty" yaml:"windowBuffer,omitempty"`
 	// MaxSize is the maximum number of messages in the queue (0 = unlimited)
-	MaxSize int `json:"maxSize,omitempty"`
+	MaxSize int `json:"maxSize,omitempty" yaml:"maxSize,omitempty"`
 	// RetentionSeconds is the retention period for pending messages (0 = forever)
-	RetentionSeconds int `json:"retentionSeconds,omitempty"`
+	RetentionSeconds int `json:"retentionSeconds,omitempty" yaml:"retentionSeconds,omitempty"`
 	// CompletedRetentionSeconds is the retention period for completed messages
-	CompletedRetentionSeconds int `json:"completedRetentionSeconds,omitempty"`
+	CompletedRetentionSeconds int `json:"completedRetentionSeconds,omitempty" yaml:"completedRetentionSeconds,omitempty"`
 	// RetentionEnabled turns on retention/cleanup for the queue. The server only
 	// runs the retention service on queues with this flag set, so RetentionSeconds
 	// and CompletedRetentionSeconds have no effect unless RetentionEnabled is true.
-	RetentionEnabled bool `json:"retentionEnabled,omitempty"`
+	RetentionEnabled bool `json:"retentionEnabled,omitempty" yaml:"retentionEnabled,omitempty"`
 	// DeadLetterQueue routes messages that exhaust RetryLimit to the dead-letter
 	// queue instead of dropping them. The server only dead-letters poison messages
 	// when this (or DlqAfterMaxRetries) is set.
-	DeadLetterQueue bool `json:"deadLetterQueue,omitempty"`
+	DeadLetterQueue bool `json:"deadLetterQueue,omitempty" yaml:"deadLetterQueue,omitempty"`
 	// DlqAfterMaxRetries is the retry-exhaustion trigger for dead-lettering; the
 	// server treats it as equivalent to DeadLetterQueue for the DLQ hand-off.
-	DlqAfterMaxRetries bool `json:"dlqAfterMaxRetries,omitempty"`
+	DlqAfterMaxRetries bool `json:"dlqAfterMaxRetries,omitempty" yaml:"dlqAfterMaxRetries,omitempty"`
 	// EncryptionEnabled enables payload encryption
-	EncryptionEnabled bool `json:"encryptionEnabled,omitempty"`
+	EncryptionEnabled bool `json:"encryptionEnabled,omitempty" yaml:"encryptionEnabled,omitempty"`
 }
 
 // BufferConfig contains configuration for client-side message buffering.
@@ -486,6 +494,11 @@ type configureRequest struct {
 	Namespace string                 `json:"namespace,omitempty"`
 	Task      string                 `json:"task,omitempty"`
 	Options   map[string]interface{} `json:"options,omitempty"`
+	// Mode is "replace" or empty. Empty means merge, which is the broker's own
+	// default, so an omitted key keeps the request byte-identical to the one
+	// this SDK sent before the option existed — including against a broker old
+	// enough to replace whatever it is told.
+	Mode string `json:"mode,omitempty"`
 }
 
 // traceRequest is the internal request structure for trace operations.

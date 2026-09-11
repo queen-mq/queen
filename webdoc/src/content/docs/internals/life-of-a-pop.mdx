@@ -15,6 +15,7 @@ sourceOfTruth:
 verifiedBy:
   - clients/client-js/test-v2/pop.js
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): db.rs gained the DLQ move and KV console statements; the pop path is untouched, and a moved frame announces its landing exactly as a push does.
 ---
 
 A pop answers one question: *which offsets may this consumer group take from this partition

@@ -13,6 +13,7 @@ sourceOfTruth:
   - proxy/migrations/001_init.sql
   - proxy/migrations/004_lifecycle.sql
 # sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): gateway.rs gained the DLQ replay push blocks, destination admission and a second metering sample; the summary here still holds, and the detail is on the endpoints, quotas and metering pages.
 ---
 
 `queen_proxy` is a second Rust binary that stands in front of a broker and turns it into

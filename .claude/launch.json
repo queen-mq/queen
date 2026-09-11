@@ -96,6 +96,15 @@
         "cd app && PATH=/Users/alice/.nvm/versions/node/v24.15.0/bin:$PATH QUEEN_DEV_UPSTREAM=http://localhost:6646 exec npx vite --port 4003 --strictPort"
       ],
       "port": 4003
+    },
+    {
+      "name": "queen-app-devcell",
+      "runtimeExecutable": "/bin/sh",
+      "runtimeArgs": [
+        "-c",
+        "cd app && PATH=/Users/alice/.nvm/versions/node/v24.15.0/bin:$PATH QUEEN_DEV_UPSTREAM=http://localhost:6711 exec npx vite --port 4004 --strictPort"
+      ],
+      "port": 4004
     }
   ]
 }

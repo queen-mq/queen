@@ -483,7 +483,7 @@
             <div class="card" style="margin-bottom:16px;">
               <div class="card-header">
                 <h3>Errors <span class="cell-chip">cell</span></h3>
-                <span v-if="totalErrors > 0" class="chip chip-bad">{{ totalErrors }} in period</span>
+                <span v-if="totalErrors > 0" class="chip" :class="errorChipClass">{{ totalErrors }} in period</span>
                 <span class="muted">{{ stamp(workerPanel) }}</span>
               </div>
               <div class="card-body">
@@ -520,7 +520,7 @@
               <div class="card-header">
                 <h3>Dead Letter Queue <span class="cell-chip">cell</span></h3>
                 <span class="card-sub">messages moved to DLQ</span>
-                <span v-if="dlqTotal > 0" class="chip chip-bad">{{ formatNumber(dlqTotal) }} in period</span>
+                <span v-if="dlqTotal > 0" class="chip" :class="dlqChipClass">{{ formatNumber(dlqTotal) }} in period</span>
                 <span class="muted">{{ stamp(workerPanel) }}</span>
               </div>
               <div class="card-body">
@@ -602,7 +602,8 @@ import { useAutoRefresh } from '@/composables/useRefresh'
 import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { stamp } from '@/composables/useStamp'
 import { useIdentity } from '@/stores/identity'
-import { chartColor, chartTheme, semanticColors, alpha } from '@/composables/useChartTheme'
+import { chartColor, chartTheme, alpha } from '@/composables/useChartTheme'
+import { ackFailureSeverity, dlqGrowthSeverity } from '@/composables/useSeverity'
 import BaseChart from '@/components/BaseChart.vue'
 import MultiSelect from '@/components/MultiSelect.vue'
 
@@ -776,9 +777,12 @@ const throughputMetrics = [
 const selectedThroughputMetrics = reactive({ push: true, pop: true, ack: true })
 const toggleThroughputMetric = (key) => { selectedThroughputMetrics[key] = !selectedThroughputMetrics[key] }
 
+// The dot quotes the colour its SERIES is drawn in — nothing more. `max` used
+// to be red here while the chart drew it in the grey ramp, so the legend was
+// both alarming and wrong about its own chart.
 const eventLoopMetrics = [
   { key: 'avg', label: 'Avg Event Loop', activeDot: 'var(--series-1)' },
-  { key: 'max', label: 'Max Event Loop', activeDot: 'var(--ember-400)' },
+  { key: 'max', label: 'Max Event Loop', activeDot: 'var(--series-2)' },
 ]
 const selectedEventLoopMetrics = reactive({ avg: true, max: true })
 const toggleEventLoopMetric = (key) => { selectedEventLoopMetrics[key] = !selectedEventLoopMetrics[key] }
@@ -786,9 +790,13 @@ const toggleEventLoopMetric = (key) => { selectedEventLoopMetrics[key] = !select
 // No `dbErrors` entry: server/src/metrics.rs declares the counter and
 // db.rs writes it, but nothing in the broker ever increments it — the series
 // was a guaranteed zero wearing the name of a real failure mode.
+// Same here: amber and red for two series that the chart itself draws in
+// chartColor(1) and chartColor(0). A series is told apart by its slot in the
+// ramp; whether the numbers are BAD is the chip in the header, which now
+// computes a rate instead of testing a count against zero.
 const errorMetrics = [
-  { key: 'ackFailed', label: 'Ack Failed', activeDot: 'var(--warn-400)' },
-  { key: 'dlq',       label: 'DLQ',        activeDot: 'var(--ember-400)' },
+  { key: 'ackFailed', label: 'Ack Failed', activeDot: 'var(--series-2)' },
+  { key: 'dlq',       label: 'DLQ',        activeDot: 'var(--series-1)' },
 ]
 const selectedErrorMetrics = reactive({ ackFailed: true, dlq: true })
 const toggleErrorMetric = (key) => { selectedErrorMetrics[key] = !selectedErrorMetrics[key] }
@@ -886,7 +894,7 @@ const queueOpTabs = [
     },
     yLabel: 'Fill %', kind: 'percent' },
   // Signed push − pop rate: positive = backlog growing, negative = draining.
-  { key: 'delta',  label: 'Push−Pop Δ', activeDot: 'var(--warn-400)',
+  { key: 'delta',  label: 'Push−Pop Δ', activeDot: 'var(--series-2)',
     field: (e) => {
       const push = toNum(e.pushPerSecond)
       const pop  = toNum(e.popPerSecond)
@@ -894,7 +902,8 @@ const queueOpTabs = [
       return Math.round(((push || 0) - (pop || 0)) * 100) / 100
     },
     yLabel: 'Push − Pop (msgs/s)', kind: 'rate-signed' },
-  { key: 'trx',    label: 'Trx',     activeDot: 'var(--warn-400)', field: 'transactions',   yLabel: 'Transactions', kind: 'count' },
+  // A transaction count is not a warning in any quantity: neutral ramp.
+  { key: 'trx',    label: 'Trx',     activeDot: 'var(--series-3)', field: 'transactions',   yLabel: 'Transactions', kind: 'count' },
   // The parked dot was a hand-picked blue — the app's only chip hue with no
   // token behind it. --info-400 is the slot the palette added for exactly
   // this ("FYI", not a health state), and is the same blue to within 2%.
@@ -1035,6 +1044,39 @@ const perQueueLagOptions = computed(() => ({
 // ---------------------------------------------------------------------------
 // Computed: derived metrics + chart datasets
 // ---------------------------------------------------------------------------
+// How much work the window actually contained, so the error counts below can
+// be read as a SHARE of it rather than against zero. The series carries ack as
+// a rate and failures as a count, so the rate is integrated over the bucket
+// width, taken from the timestamps themselves (the worker-metrics payload does
+// not declare one). Null when there is nothing to integrate — and a null
+// denominator makes the verdict fall back to absolutes, by design.
+const workerBucketSeconds = computed(() => {
+  const ts = workerData.value?.timeSeries || []
+  if (ts.length < 2) return null
+  const a = new Date(ts[0].timestamp).getTime()
+  const b = new Date(ts[1].timestamp).getTime()
+  const seconds = Math.abs(a - b) / 1000
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : null
+})
+const ackAttempts = computed(() => {
+  const ts = workerData.value?.timeSeries || []
+  const width = workerBucketSeconds.value
+  if (!ts.length || !width) return null
+  const acked = ts.reduce((sum, t) => sum + (toNum(t.ackPerSecond) || 0) * width, 0)
+  const failed = ts.reduce((sum, t) => sum + (toNum(t.ackFailed) || 0), 0)
+  return acked + failed
+})
+const ackFailedTotal = computed(() => {
+  if (!workerData.value?.timeSeries?.length) return 0
+  return workerData.value.timeSeries.reduce((sum, t) => sum + (toNum(t.ackFailed) || 0), 0)
+})
+// The chip reports the period's error count; its TONE reports the rate. A cell
+// that acked two million messages and failed forty of them shows the forty in
+// plain ink, because forty is what it is and 0.002% is not an incident.
+const errorChipClass = computed(() => {
+  const sev = ackFailureSeverity({ failed: ackFailedTotal.value, attempts: ackAttempts.value })
+  return sev === 'bad' ? 'chip-bad' : sev === 'warn' ? 'chip-warn' : 'chip-mute'
+})
 const totalErrors = computed(() => {
   if (!workerData.value?.timeSeries?.length) return 0
   return workerData.value.timeSeries.reduce((sum, t) => {
@@ -1155,10 +1197,14 @@ const dlqChartData = computed(() => {
   const labels = ts.map(t => formatChartLabel(new Date(t.timestamp), multiDay))
   return {
     labels,
+    // One series, on a card titled "Dead Letter Queue": painting it red adds
+    // no information the title does not already carry, and spends the hue that
+    // is supposed to mean "this is failing right now". The header chip carries
+    // the verdict; the bars carry the shape.
     datasets: [{
       label: 'DLQ', data,
-      backgroundColor: alpha(semanticColors.badStrong.line, 0.6),
-      borderColor: semanticColors.badStrong.line, borderWidth: 1
+      backgroundColor: alpha(chartColor(0).line, 0.6),
+      borderColor: chartColor(0).line, borderWidth: 1
     }]
   }
 })
@@ -1167,6 +1213,14 @@ const dlqTotal = computed(() => {
   if (!workerData.value?.timeSeries?.length) return 0
   return workerData.value.timeSeries.reduce((sum, t) => sum + (toNum(t.dlqCount) || 0), 0)
 })
+// Unlike the Dashboard's depth snapshot, this IS growth — dead letters that
+// arrived inside the window — so it can carry a tone. Never red: a dead letter
+// is a message the broker has already given up on and parked safely.
+const dlqChipClass = computed(() =>
+  dlqGrowthSeverity({ added: dlqTotal.value, attempts: ackAttempts.value }) === 'warn'
+    ? 'chip-warn'
+    : 'chip-mute'
+)
 
 // Retention / eviction time series
 const retentionTotals = computed(() => retentionData.value?.totals || null)
@@ -1183,10 +1237,11 @@ const retentionChartData = computed(() => {
         backgroundColor: alpha(chartColor(0).line, 0.6), borderColor: chartColor(0).line, borderWidth: 1 },
       { label: 'Completed retention', data: rows.map(r => toNum(r.completedRetentionMsgs)),
         backgroundColor: alpha(chartColor(1).line, 0.6), borderColor: chartColor(1).line, borderWidth: 1 },
-      // Eviction is the one series here that carries a warning, not just a
-      // third slot in the ramp — it keeps the warn hue.
+      // Eviction used to be amber here. Retention deleting messages is
+      // retention doing its job, at whatever volume the policy implies, so it
+      // takes the third slot in the ramp like the two series beside it.
       { label: 'Eviction',            data: rows.map(r => toNum(r.evictionMsgs)),
-        backgroundColor: alpha(semanticColors.warn.line, 0.5), borderColor: semanticColors.warn.line, borderWidth: 1 },
+        backgroundColor: alpha(chartColor(2).line, 0.6), borderColor: chartColor(2).line, borderWidth: 1 },
     ]
   }
 })

@@ -12,13 +12,13 @@ import (
 // wire_capture_test.go). Two things are under test and they are different
 // kinds of thing: the request SHAPE, and the number of times it is sent.
 //
-// The count is the load-bearing one. The broker's retry route is not
-// idempotent -- see the notes on Admin.RetryMessage -- and its worst failure
-// mode is the one that looks most retryable from here: the replay push is
-// accepted, the DLQ cleanup then fails, and the broker answers 500 with
-// {"replayed":true,"dlqRowRemoved":false}. The row is still dead-lettered, so
-// a resent POST replays the message a SECOND time. With the default
-// RetryAttempts=3 that is one operator command producing four copies.
+// The count is the load-bearing one. The route is a WRITE that also removes a
+// record, and its worst failure mode is the one that looks most retryable from
+// here: a 500 whose "dlqRowRemoved" is null, which is the broker saying it
+// never learned whether the move committed. A transport that resent that by
+// itself would turn "I do not know" into a second attempt nobody read the
+// verdict of; with the default RetryAttempts=3 it would be four. The verdict
+// belongs to the caller, so the request opts out of the retry loop.
 
 // newRetryingWireClient builds a client with the DEFAULT retry budget
 // (RetryAttempts=3, so four attempts) and a 1ms backoff. The point of the
@@ -80,10 +80,9 @@ func TestRetryMessage_EscapesPathSegments(t *testing.T) {
 	}
 }
 
-// The guarantee: exactly one attempt, even on the 500 that says the replay
-// already happened.
+// The guarantee: exactly one attempt, even on the 500 whose outcome is unknown.
 func TestRetryMessage_NotRetriedOnServerError(t *testing.T) {
-	body := `{"success":false,"replayed":true,"dlqRowRemoved":false,"error":"dlq cleanup failed"}`
+	body := `{"success":false,"dlqRowRemoved":null,"error":"dlq move failed: connection closed"}`
 	cs := newCaptureServer(t,
 		cannedResponse{status: http.StatusInternalServerError, body: body},
 		cannedResponse{status: http.StatusInternalServerError, body: body},
@@ -96,20 +95,20 @@ func TestRetryMessage_NotRetriedOnServerError(t *testing.T) {
 	if err == nil {
 		t.Fatal("RetryMessage returned nil error on a 500")
 	}
-	// queenctl reads the body off this error to warn that the message was
-	// replayed but not de-DLQ'd, so the HTTPError has to survive the wrapping
-	// doRequestRaw applies on its way out.
+	// queenctl reads the body off this error to warn that the outcome is
+	// unknown (`"dlqRowRemoved":null`), so the HTTPError has to survive the
+	// wrapping doRequestRaw applies on its way out.
 	var he *HTTPError
 	if !errors.As(err, &he) {
 		t.Fatalf("error does not unwrap to *HTTPError: %v", err)
 	}
-	if he.StatusCode != http.StatusInternalServerError || !strings.Contains(he.Body, `"replayed":true`) {
+	if he.StatusCode != http.StatusInternalServerError || !strings.Contains(he.Body, `"dlqRowRemoved":null`) {
 		t.Errorf("HTTPError lost the broker's body: %d %s", he.StatusCode, he.Body)
 	}
 
 	if n := len(cs.requests()); n != 1 {
-		t.Fatalf("RetryMessage sent %d requests on a 500, want exactly 1: each "+
-			"resend replays the dead-lettered message again", n)
+		t.Fatalf("RetryMessage sent %d requests on a 500, want exactly 1: the "+
+			"caller has to read a verdict the transport cannot", n)
 	}
 }
 

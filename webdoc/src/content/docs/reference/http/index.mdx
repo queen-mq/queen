@@ -27,6 +27,7 @@ digest: >-
   repeat; and a kv incr never is, because it has no precondition and counts twice. Every 204 has
   no body at all, deliberately.
 # sourceOfTruth re-read 2026-09-09 (through ff644495): the three analytics routes 1.5.3 adds are already in the generated table; the conventions are unchanged.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): auth.rs gained one explicit read-only arm, POST /api/v1/resources/kv/list, because a read whose cursor is a key has to travel in a body; the level matrix and the write-only set are unchanged.
 ---
 
 Queen's broker speaks plain HTTP/1.1 with JSON bodies. There is no binary protocol, no

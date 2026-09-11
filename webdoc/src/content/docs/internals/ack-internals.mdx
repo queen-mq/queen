@@ -154,11 +154,16 @@ The DLQ row stores a payload **snapshot** rather than a reference, and carries n
 when the source row was retained away.
 
 <Aside type="note">
-Replay is a re-push, not a revival. `POST /api/v1/messages/:partitionId/:transactionId/retry`
-pushes the stored payload back into its queue under a fresh identity and then drops the DLQ
-row, so the replayed message lands at the tail of the partition and the offset the original
-occupied stays committed. `GET /api/v1/dlq` lists rows and
-`DELETE /api/v1/messages/:partitionId/:transactionId` removes one. All three are on
+Replay is a re-push, not a revival, and since 1.6.0 it is a **move**: one transaction claims the
+dead-letter row under a lock, pushes the stored payload back into the log and deletes the row.
+Two routes address it, `POST /api/v1/messages/:partitionId/:transactionId/retry` by message
+address and `POST /api/v1/dlq/:id/replay` by dead-letter row id, and the second one can name a
+different destination. The frame carries a fresh message id but a **derived** transaction id,
+`dlq:<row id>`, so a second attempt cannot mint a second copy. It lands at the tail of the
+partition and the offset the original occupied stays committed, which is what makes this a
+re-push. `GET /api/v1/dlq` lists rows and
+`DELETE /api/v1/messages/:partitionId/:transactionId` removes every group's record for one
+address, where a replay removes only the record it moved. All of them are on
 [Messages and the dead-letter queue](/reference/http/messages-dlq/).
 </Aside>
 

@@ -31,6 +31,7 @@ digest: >-
   `x-queen-tenant` is checked for shape, never authority, and `QUEEN_TENANCY_HEADER=1` refuses to
   boot unless `QUEEN_KV_TRUSTED_PROXY=1` is set with it.
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): main.rs's three new routes, auth.rs's explicit read-only arm for POST /api/v1/resources/kv/list, and the proxy's reclassification of the two replay routes to queue admin. This page states no route classes, so nothing on it moved.
 ---
 
 The broker is one process with one plaintext listener. It binds `PORT` on `QUEEN_BIND_ADDR`, which

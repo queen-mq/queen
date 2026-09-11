@@ -139,6 +139,7 @@
 import { computed } from 'vue'
 
 import { isConflating } from '@/composables/useConflation'
+import { consumerGroupSeverity, laggingPartitionsSeverity, timeLagSeverity } from '@/composables/useSeverity'
 
 const props = defineProps({
   /**
@@ -166,34 +167,27 @@ const props = defineProps({
 defineEmits(['select', 'view', 'move-now', 'seek', 'delete'])
 
 /* ---------------- severity rules ----------------
- * cardSev drives the leading status stripe + dot. We combine the API
- * `state` field with the actual `maxTimeLag` so a "Lagging" row escalates
- * from warn to bad once it crosses the 5-minute threshold. Dead groups
- * are mute (informational, not an active alert). */
+ * A consumer group that is behind is a real state and keeps its colours — the
+ * thresholds are in @/composables/useSeverity with the rest of the policy, and
+ * this file only maps this grid's columns onto them.
+ *
+ * One rule did change. `partitionsWithLag > 0` used to be enough to paint a
+ * whole row amber, and on a busy queue some partition is a second behind at
+ * every sample: that is not a group falling behind, it is a group working.
+ * Lag is now judged by its AGE, and the partition count by its SHARE of the
+ * group's partitions. Dead groups stay mute — informational, not an alert. */
 const SEV_RANK = { ok: 0, ice: 0, mute: 1, warn: 2, bad: 3 }
 
 function cardSev(g) {
-  const state = g.state
-  const lag = g.maxTimeLag || 0
-  const hasLag = lag >= 60 || (g.partitionsWithLag || 0) > 0
-  if (state === 'Dead') return 'mute'
-  if (state === 'Lagging' && lag >= 300) return 'bad'
-  if (state === 'Lagging' || hasLag) return 'warn'
-  return 'ok'  // Stable
+  return consumerGroupSeverity({ state: g.state, maxTimeLag: g.maxTimeLag })
 }
 
 function timeLagSev(seconds) {
-  if (!seconds) return 'mute'
-  if (seconds < 60) return 'ok'
-  if (seconds < 300) return 'warn'
-  return 'bad'
+  return timeLagSeverity(seconds)
 }
 
 function lagPartsSev(g) {
-  const n = g.partitionsWithLag || 0
-  if (n === 0) return 'mute'
-  if (n < 3) return 'warn'
-  return 'bad'
+  return laggingPartitionsSeverity({ behind: g.partitionsWithLag, total: g.members })
 }
 
 /* ---------------- naming -----------------

@@ -89,9 +89,37 @@ const routes = [
     name: 'Messages',
     component: () => import('@/views/Messages.vue'),
     meta: {
-      title: 'Messages', subtitle: 'Browse and inspect messages',
+      title: 'Messages', subtitle: 'Browse, inspect and push messages',
       requires: 'read', scope: 'tenant',
       nav: { group: 'Routing', icon: 'messages', order: 4 },
+    }
+  },
+  {
+    // State, not Routing: the KV store holds what a tenant has PUT somewhere,
+    // not what is travelling. Read-class and tenant-scoped — the console list
+    // is `Read` at the proxy by prefix (/api/v1/resources), so a Viewer may
+    // browse it, which the batch route /api/v1/kv would never allow.
+    path: '/kv',
+    name: 'Kv',
+    component: () => import('@/views/Kv.vue'),
+    meta: {
+      title: 'KV', subtitle: 'Browse the key-value store, namespace by namespace',
+      requires: 'read', scope: 'tenant',
+      nav: { group: 'State', icon: 'kv', order: 1 },
+    }
+  },
+  {
+    // Scheduled messages that have not fired yet. 'read' because the list, the
+    // count and the peek are Gated(Timers, Read) at the proxy — the CANCEL on
+    // this page is gated separately, on the rule Ephemeral.vue already uses
+    // for a gated write (produce ‖ consume, i.e. not a Viewer).
+    path: '/timers',
+    name: 'Timers',
+    component: () => import('@/views/Timers.vue'),
+    meta: {
+      title: 'Timers', subtitle: 'Scheduled messages waiting to fire, per queue',
+      requires: 'read', scope: 'tenant',
+      nav: { group: 'State', icon: 'timers', order: 2 },
     }
   },
   {
@@ -132,9 +160,7 @@ const routes = [
     name: 'DeadLetter',
     component: () => import('@/views/DeadLetter.vue'),
     meta: {
-      // No "replay": the broker has no re-push route for a DLQ snapshot, and a
-      // subtitle promising one is the same lie as a button that cannot work.
-      title: 'Dead Letter', subtitle: 'Inspect and purge failed messages',
+      title: 'Dead Letter', subtitle: 'Inspect, replay and purge failed messages',
       requires: 'read', scope: 'tenant',
       nav: { group: 'Observability', icon: 'dlq', order: 4 },
     }

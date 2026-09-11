@@ -29,6 +29,7 @@ verifiedBy:
   - clients/client-js/test-v2/retention.js
   - test/runners/tenancy/tenancy-check.sh
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): the configure section is rewritten for the merge rule, the mode key and the 400s; the detail route now carries a 21-key options object, and the handler drops the cached encryption flag as well as the lease.
 ---
 
 A queue does not have to be created before it is used: the first push to a queue
@@ -54,7 +55,9 @@ is a read at the `read-only` access level.
 `queue` is the only required field. Options may be nested under `options` or sent
 at the top level; the broker normalises them into one bag before calling
 `queen.configure_queue_v1`. Top-level `namespace` and `task` are folded into the
-options when they are non-empty strings.
+options when they are non-empty strings. Two other top-level keys are routing,
+not configuration: `options` itself, and `mode`, which decides whether the call
+merges or replaces.
 
 ```json
 {
@@ -73,23 +76,63 @@ An empty string is a valid queue name: `queen.configure_queue_v1` creates a row
 named `''`, and the JavaScript client's own load test relies on it. A missing or
 non-string `queue` is a `400`.
 
-### Configure is a full replace
+### Configure merges, unless you ask it to replace
 
-Every call rewrites the whole configuration row. Keys you omit are **reset to
-their defaults**, not left as they were.
+An edit to an existing queue keeps every option the body does not mention. Four
+rules cover all 21 options, `namespace` and `task` included, and
+`queen.configure_queue_v1` applies them one option at a time:
 
-<Aside type="danger">
-`/configure` is not a patch. A queue configured with `retentionEnabled: true`
-and then reconfigured with only `leaseTime` loses retention. The same applies to
-`dedupWindowSeconds`, which falls back to **3600**. Omitting it on a queue that
-had dedup disabled silently re-enables a one-hour dedup window. Always send the
-complete option set you want the queue to have.
+| In the body | What the queue ends up with |
+| --- | --- |
+| the key is absent | the value the queue already had |
+| the key is present with `null` | that option's default |
+| the key is present with a value | that value |
+| top-level `"mode": "replace"` | every option re-parsed from defaults, so anything the body omits goes back to the default |
+
+A queue that does not exist yet is created from defaults whichever mode you
+send: there is nothing to keep. So on a create the two modes are the same call,
+and on an edit they are opposites.
+
+<Aside type="note">
+`mode` is the only spelling of this decision on the wire. It is `"merge"`
+(the default when the key is absent or `null`) or `"replace"`; anything else,
+including `"Replace"`, `""`, `true` and `1`, is a `400`
+`{"error":"mode must be \"merge\" or \"replace\", got ..."}` and nothing is
+written. A `replace` key inside `options` is ignored: the handler overwrites it
+from `mode`, so one body can never carry two answers that disagree.
 </Aside>
 
-The reset is structural: `configure_queue_v1` parses each option with
-`COALESCE(p_options->>'key', <default>)` and writes every column on
-`ON CONFLICT DO UPDATE`, so an absent key becomes the default value rather than
-being skipped.
+Merge is the default because every client sends only the options its caller set.
+Before 1.6.0 every call replaced, so `queenctl queue configure orders
+--lease-time 60` reset `dedupWindowSeconds` to 3600, retention to off and the
+sink hold to off, silently, on a queue the operator meant only to nudge. An
+editor built on that is a reset button with a friendlier face. What changed is
+the default, not the capability: `"mode": "replace"` is the old behaviour, and
+it is what `queenctl apply -f` sends, because a manifest means the whole
+configuration and anything it leaves out should go back to the default.
+
+Concurrent edits of one queue serialise: the stored procedure takes
+`SELECT ... FOR UPDATE` on the queue row first, so the second caller merges onto
+the first one's result rather than onto the row it read before waiting.
+Concurrent creates take no lock (there is no row yet) and stay on the
+`ON CONFLICT` path they always had.
+
+<Aside type="caution">
+The direction of the surprise moved with the default. A caller that relied on an
+omitted key resetting a queue now keeps it: send `"mode": "replace"`, or send
+the key explicitly as `null`, which restores that one option's default and
+leaves the rest alone.
+
+How much a given SDK is affected depends on what it puts on the wire. Go, Rust
+and `queenctl queue configure` send only the options the caller set, so their
+partial calls now keep all the rest. JavaScript, Python and PHP merge a
+nine-option client-side default bag into every `.config()` call (`leaseTime`,
+`retryLimit`, `priority`, `delayedProcessing`, `windowBuffer`, `maxSize`,
+`retentionSeconds`, `completedRetentionSeconds`, `encryptionEnabled`), so those
+nine are always sent and always land on the client's default when the caller
+does not name them, in either mode; the other twelve now survive a partial call
+where they used to reset.
+</Aside>
 
 ### Enforced options
 
@@ -120,11 +163,19 @@ Values are stored as given. The broker does not validate ranges, apart from the
 SQL clamp on `minPopWaitTime`, a `max(0)` floor on `dedupWindowSeconds`, and the
 two sink-hold options, which are **rejected** rather than clamped.
 
+Seventeen rows for twenty-one keys. The four this table leaves out, `priority`,
+`ttl`, `maxSize` and `retryDelay`, are stored, echoed back and enforced by
+nothing at all: no push, pop, ack or maintenance path reads any of them. They are
+listed with what does read them, which is only ever an echo, under
+[Queue options](/reference/queue-options).
+
 <Aside type="note">
 The effective `leaseTime` depends on how the queue came to exist. A queue created
 implicitly by a push or a pop gets the `queen.queues` column default, **60 seconds**.
-A queue that has been through `/configure` at least once gets the option's default,
-**300 seconds** (`/configure` writes an explicit 300 when `leaseTime` is omitted).
+A queue created by `/configure`, or reconfigured with `"mode": "replace"`, gets the
+option's default, **300 seconds**, when `leaseTime` is omitted. Since 1.6.0 a
+merging edit that does not mention `leaseTime` keeps whatever the column holds,
+so a push-created queue nudged through `/configure` stays at 60.
 Both are overridable per request with `?leaseSeconds=`. Because there is a single
 `lease_time` column, the value the queue detail endpoint displays is the value the
 pop path leases with. Before 2026-07-31 the display could say 300 on an
@@ -156,8 +207,14 @@ the intent.
 
 `retentionSinkHold` and `retentionSinkHoldMaxSeconds` are the only two options
 `012_configure.sql` refuses. A name outside `[A-Za-z0-9._-]{0,64}`, or a cap
-outside 60 to 31,536,000 seconds, answers an error and **the queue keeps the
-configuration it had**; nothing partial is written. The difference from the
+outside 60 to 31,536,000 seconds, answers `400` with
+`{"error":"...","invalid":"<the option>"}` and **the queue keeps the
+configuration it had**; nothing partial is written. `invalid` is what tells the
+handler this is a bad request rather than a broken broker: without it the
+envelope would take the stored-procedure error path below and arrive as a `500`,
+which reaches an operator as an outage and a metering proxy as an unbilled
+upstream failure. It is a key of the error envelope only, never of a successful
+echo. The difference from the
 clamps above is deliberate, because these two govern *deletion*: a silently
 clamped `0` would floor the hold at a minute ago and hand the lake a hole, and a
 silently clamped `999999999` would park retention for thirty-one years. The
@@ -213,20 +270,30 @@ a `Default` partition the engine never used, and it was removed on 2026-07-30 al
 the rows-engine table that held it. The key itself is kept so the response shape does not
 change.
 
-The `options` object echoes the resolved configuration: the values actually
-stored, after defaulting, `dedupWindowSeconds` included. Clients assert on
-`configured === true` and round-trip the option keys, so the body is never
-reshaped by the broker.
+The `options` object echoes the **effective row**, not the request: all 19
+option keys, built from the values the upsert has just written. A caller that
+sent three options gets all nineteen back and needs no second read to render the
+queue's whole configuration, which is exactly what makes a merging edit safe to
+build a form on. `namespace` and `task` stay top level, where they have always
+been. There is no `replace` key anywhere in the response: the flag is a
+directive of the request, read once and never stored.
 
 `queen.configure_queue_v1` owns every configuration write: one row,
 `queen.queues`, carries the whole configuration including `lease_time` and
-`dedup_window_seconds`. After the stored procedure returns, the handler does one
-more thing: it drops this queue's cached lease time (locally, and on mesh peers
-via a `QUEUE_CONFIG_SET` frame), so a `leaseTime` change is visible on the next
-pop. If the stored procedure returns a body carrying an `error` key, the handler
-short-circuits before that invalidation.
+`dedup_window_seconds`. After the stored procedure returns, the handler drops
+this queue's cached lease time **and its cached encryption flag**, locally and on
+mesh peers via a `QUEUE_CONFIG_SET` frame, so both a `leaseTime` and an
+`encryptionEnabled` change are visible on the next pop and the next push. If the
+stored procedure returns a body carrying an `error` key, the handler
+short-circuits before those invalidations.
 
-Failures are `500` with `{"error":"configure failed: ..."}`.
+Four failure shapes, and the status is the difference between them. A malformed
+body, a missing or non-string `queue`, and an unrecognised `mode` are `400`, and
+nothing is written. The two sink-hold option refusals are `400` as well, marked
+with `invalid`, described above. Any other error the stored procedure reports is
+passed back verbatim at `500`, or at `404` when its message contains "not found".
+And a failure of the call itself rather than a verdict inside it, an exhausted
+pool or a database error, is `500` with `{"error":"configure failed: ..."}`.
 
 ## GET /api/v1/resources/queues
 
@@ -283,7 +350,8 @@ the tenant. Filter client-side, or use `GET /api/v1/status/queues`, which does a
 
 ## GET /api/v1/resources/queues/:queue
 
-One queue in detail: identity, per-partition stats, and totals.
+One queue in detail: identity, its whole configuration, per-partition stats, and
+totals.
 
 ```json
 {
@@ -292,6 +360,29 @@ One queue in detail: identity, per-partition stats, and totals.
   "namespace": "billing",
   "task": "invoice",
   "createdAt": "2026-07-30T09:12:44.011Z",
+  "options": {
+    "namespace": "billing",
+    "task": "invoice",
+    "priority": 0,
+    "leaseTime": 120,
+    "retryLimit": 5,
+    "retryDelay": 1000,
+    "maxSize": 0,
+    "ttl": 3600,
+    "deadLetterQueue": true,
+    "dlqAfterMaxRetries": true,
+    "delayedProcessing": 0,
+    "windowBuffer": 0,
+    "retentionSeconds": 0,
+    "completedRetentionSeconds": 0,
+    "retentionEnabled": false,
+    "encryptionEnabled": false,
+    "maxWaitTimeSeconds": 0,
+    "minPopWaitTime": 0,
+    "dedupWindowSeconds": 600,
+    "retentionSinkHold": "",
+    "retentionSinkHoldMaxSeconds": 604800
+  },
   "partitions": [
     {
       "id": "0198...",
@@ -310,6 +401,16 @@ One queue in detail: identity, per-partition stats, and totals.
   "segments": { "segments": 41, "messages": 12904 }
 }
 ```
+
+`options` carries **all 21 keys** `/configure` accepts, spelled exactly as
+`configure_queue_v1` parses and echoes them, so a `GET`, an edit and a `POST`
+round-trip without a mapping table. `namespace` and `task` appear inside it as
+well as at the top level, where readers have always found them. This is the read
+an editor prefills from, and the reason it is the whole set rather than a
+selection is the merge rule above: a form that shows some options and silently
+keeps the rest cannot tell you what the queue is. The narrower six-key `config`
+block on `GET /api/v1/status/queues/:name` is unchanged and is a different
+object.
 
 Notes that follow from the log engine: `pending` is measured against the **worst**
 (lowest) committed cursor across the queue's consumer groups, so a single lagging

@@ -1,11 +1,17 @@
 // Chart theme — single source of truth for all Chart.js colors.
 //
 // Philosophy: monochrome by default. Red / green / yellow are reserved for
-// status: error / failure / DLQ → red, healthy / success / completed →
-// green, warning / threshold-breach → yellow. They are NEVER assigned by
-// series index, only by data semantics. Charts that just need to tell N
-// series apart use the grey ramp below; the legend / tooltip carries the
-// rest of the meaning.
+// status: failing → red, healthy / success / completed → green, degrading →
+// yellow. They are NEVER assigned by series index, and never by what a series
+// is CALLED — a series named "DLQ", "errors" or "evicted" is not red for being
+// named that. Charts that just need to tell N series apart use the grey ramp
+// below; the legend / tooltip carries the rest of the meaning.
+//
+// A chart's tone comes from the same place a number's does: the rules in
+// composables/useSeverity, which judge a rate against the work in the window
+// rather than a count against zero. So a row whose value is plain ink draws a
+// plain grey sparkline, and amber in a chart means the same thing amber means
+// everywhere else on the page.
 //
 // Everything here RESOLVES FROM the active token set in style.css instead of
 // restating it. This file used to hold 39 colour literals and zero var()
@@ -108,9 +114,12 @@ const CATEGORY = ['--cat-1', '--cat-2', '--cat-3', '--cat-4', '--cat-5']
 
 export const categoryPalette = reactive(CATEGORY.map(() => ({ line: '', fill: '' })))
 
-// Semantic colors — call by name when the data itself carries a meaning.
-// Do not cycle through these; pick the one that matches what the series
-// represents (see stateColor() for label-driven lookup).
+// Semantic colors — call by name when the data itself carries a VERDICT.
+// Do not cycle through these, and do not reach for one because a series sounds
+// alarming: they encode "this is degrading" and "this is failing", so a series
+// that is merely about errors, evictions or dead letters takes the grey ramp
+// like any other. (See stateColor() for label-driven lookup, and useSeverity
+// for the rules that decide when a row has earned one of these.)
 export const semanticColors = reactive({
   ok: { line: '', fill: '' },
   warn: { line: '', fill: '' },
@@ -199,7 +208,9 @@ export const stateColor = (label) => {
     return slice(t('--ok-500'))
   if (key.includes('dlq') || key.includes('dead') || key.includes('fail') || key === 'error' || key === 'bad' || key === 'stuck')
     return slice(t('--ember-400'))
-  if (key === 'warn' || key === 'warning' || key === 'lag' || key === 'lagging' || key === 'evicted' || key === 'eviction')
+  // 'evicted' / 'eviction' used to live on this line. Retention deleting what
+  // its policy says to delete is the system working, at any volume.
+  if (key === 'warn' || key === 'warning' || key === 'lag' || key === 'lagging')
     return slice(t('--warn-400'))
   if (key === 'pending' || key.includes('queue') || key === 'ingested' || key === 'push' || key.includes('produc'))
     return slice(t('--series-1'), 0.8) // primary grey

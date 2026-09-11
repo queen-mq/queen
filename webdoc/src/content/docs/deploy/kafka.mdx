@@ -24,6 +24,7 @@ sourceOfTruth:
   - Dockerfile
   - .github/workflows/docker-build.yml
 # sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): classify gained the two DLQ replay arms and the messages family is now method-bounded; the facade's own route classes and the offset-commit note are unchanged.
 ---
 
 `queen-kafka` is a separate binary that speaks the Kafka wire protocol on one port and plain

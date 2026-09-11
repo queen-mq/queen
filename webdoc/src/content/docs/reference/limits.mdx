@@ -36,6 +36,7 @@ digest: >-
   recurrence, and a cancel after the fire answers absent, meaning no longer pending and never not
   delivered.
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): the configure section is rewritten for the merge rule and the dead-letter section for the move primitive; gateway.rs's new replay gates are on the quotas page.
 ---
 
 This page states Queen's opinions in one place: the design decisions, how to
@@ -186,24 +187,33 @@ retention window, not the completed-retention window, not
 deleting the queue, which deletes its dead-letter rows explicitly (the table has
 no foreign key, so nothing cascades).
 
-What you get for working through it is `GET /api/v1/dlq` to read, and per-address
-routes to act on one message. A replay re-pushes the stored snapshot as a **new
-message with a new identity at the tail of the partition**, then drops the
-dead-letter row. It does not reinsert the message at its original position, and
-redrive is per address, so reprocessing a large dead-letter backlog is a loop you
-write, and a dead-letter table nobody works through keeps occupying disk.
+What you get for working through it is `GET /api/v1/dlq` to read, and two routes
+to act on one record: by address, and by dead-letter row id. A replay **moves**
+the record: one transaction pushes the stored snapshot back into the log and
+deletes the row it came from. The snapshot lands as a new message **at the tail
+of the partition**, with a fresh message id and the derived transaction id
+`dlq:<row id>`, so it is not reinserted at the position it originally held and
+its age clock restarts. Redrive is still one record at a time, so reprocessing a
+large dead-letter backlog is a loop you write, and a dead-letter table nobody
+works through keeps occupying disk.
 
-## `/configure` is a full replace
+## `/configure` merges, and a manifest replaces
 
-`POST /api/v1/configure` writes every queue option from the body it receives, and
-any option you omit is written back at its default. It is not a patch. Sending
-`{"queue":"orders","options":{"leaseTime":600}}` to a queue that already had
-retention configured switches retention off, and resets `dedupWindowSeconds` to
-3600.
+`POST /api/v1/configure` merges since 1.6.0: an option the body does not carry
+keeps the value the queue already has, an explicit `null` restores that option's
+default, and top-level `"mode": "replace"` re-parses the whole configuration from
+defaults. Sending `{"queue":"orders","options":{"leaseTime":600}}` to a queue
+that already had retention configured now changes the lease and nothing else;
+the same body with `"mode": "replace"` switches retention off and puts
+`dedupWindowSeconds` back to 3600.
 
-Always send the complete intended configuration. Related, because two defaults
-circulate: `leaseTime` is 60 seconds on a queue created implicitly by a push, and
-300 seconds once you have called `/configure` without overriding it.
+The limit to hold on to is that the two modes are not interchangeable and
+nothing infers which one you meant. A nudge merges; a desired-state document
+replaces, which is why `queenctl apply -f` sends `replace` and refuses a manifest
+key it cannot bind rather than silently resetting the option behind it. Related,
+because two defaults circulate: `leaseTime` is 60 seconds on a queue created
+implicitly by a push, and 300 seconds on one created by `/configure` without
+overriding it.
 
 ## Transactions are one database transaction, not exactly-once
 

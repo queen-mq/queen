@@ -17,11 +17,13 @@
 
     <template v-else>
       <!-- SCOPE STRIP. Cell variant: same container as every other view's
-           strip, amber because the scope differs — not because anything is
-           wrong. Built from useIdentity(), so it renders while loading, on a
-           failed fetch and on an empty page. -->
+           strip, drawn in the scope hue because the SCOPE differs — not
+           because anything is wrong. (It was amber until the colour policy:
+           this page opened with a warning chip on a healthy cell.) Built from
+           useIdentity(), so it renders while loading, on a failed fetch and on
+           an empty page. -->
       <div class="scope-strip scope-strip-cell">
-        <span class="chip chip-warn"><span class="dot"></span>cell · operator</span>
+        <span class="chip chip-scope"><span class="dot"></span>cell · operator</span>
         <span class="scope-text">
           host resources, the disk spool and Postgres internals for
           <strong>cell {{ actingCellSlug || 'unknown' }}</strong>
@@ -519,7 +521,10 @@
                 <div class="card-header">
                   <h3>Dead tuples</h3>
                   <span class="card-sub">tables needing vacuum</span>
-                  <span v-if="postgresData.deadTuples?.length" class="chip chip-warn">
+                  <!-- A count of tables carrying dead tuples is what a busy
+                       Postgres looks like between vacuums: a number, not a
+                       verdict. The table below ranks them; the reader decides. -->
+                  <span v-if="postgresData.deadTuples?.length" class="chip chip-mute">
                     {{ postgresData.deadTuples.length }} tables
                   </span>
                   <span class="muted">{{ stamp(pg) }}</span>
@@ -593,7 +598,10 @@
               <div class="card-header">
                 <h3>Active queries</h3>
                 <span class="card-sub">queries running longer than 1s</span>
-                <span v-if="postgresData.activeQueries?.length" class="chip chip-bad">
+                <!-- Attention, not failure: a query over a second is worth a
+                     look — a maintenance walk or an analytics scan is often
+                     exactly that — and red belongs to the broker being down. -->
+                <span v-if="postgresData.activeQueries?.length" class="chip chip-warn">
                   {{ postgresData.activeQueries.length }} slow
                 </span>
                 <span class="muted">{{ stamp(pg) }}</span>
@@ -624,7 +632,8 @@
             <div v-if="postgresData.autovacuumStatus?.length" class="card">
               <div class="card-header">
                 <h3>Autovacuum status</h3>
-                <span class="chip chip-warn">{{ postgresData.autovacuumStatus.length }} pending</span>
+                <!-- Autovacuum having work queued is autovacuum working. -->
+                <span class="chip chip-mute">{{ postgresData.autovacuumStatus.length }} pending</span>
                 <span class="muted">{{ stamp(pg) }}</span>
               </div>
               <div class="card-body">

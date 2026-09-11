@@ -14,6 +14,7 @@ sourceOfTruth:
   - server/src/sweeper.rs
   - server/sql/procedures/023_prometheus.sql
 # sourceOfTruth re-read 2026-09-07 (through 42bada8d + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): auth.rs gained one read-only arm; the exposition, its families and its access rules are unchanged.
 ---
 
 `GET /metrics/prometheus` returns exposition text with content type

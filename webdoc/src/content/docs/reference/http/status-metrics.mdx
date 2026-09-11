@@ -22,6 +22,7 @@ sourceOfTruth:
   - server/sql/procedures/023_prometheus.sql
   - server/sql/procedures/011_log_stats.sql
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds analytics reads over the same metrics tables; the status family this page documents is unchanged.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): 011_log_stats changed only get_queue_v2, which is on the queues page; main.rs, auth.rs and db.rs gained the replay and KV console routes. Nothing this page describes moved.
 ---
 
 Four different things are called "status" on this broker, and they answer different

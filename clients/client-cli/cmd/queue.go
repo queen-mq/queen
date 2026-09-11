@@ -122,12 +122,19 @@ var queueDescribeCmd = &cobra.Command{
 var queueConfigureCmd = &cobra.Command{
 	Use:   "configure <queue>",
 	Short: "Create or reconfigure a queue (POST /api/v1/configure)",
-	Long: `Idempotent. Reuses 'queenctl apply' under the hood for declarative
-flow, but exposes a flag-driven shortcut for one-off scripting.
+	Long: `Idempotent, and a MERGE: only the flags you actually type are sent, and
+every other option keeps the value the queue already has. Use 'queenctl apply -f'
+when the whole configuration should come from a document instead — a manifest
+resets what it does not mention.
+
+  queenctl queue configure orders --lease-time 60     # the lease, nothing else
+  queenctl queue configure orders --dlq=false         # stop dead-lettering
+  queenctl queue configure orders --dlq               # start again
 
 With -o {json|yaml} the full server response is rendered (including the
 'options' echo block useful for asserting the broker accepted the config
-in tests).`,
+in tests). Against a broker older than 1.6.0 every call still REPLACES, so a
+partial configure there resets the options it omits.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		c, cleanup, err := newClient()
@@ -153,13 +160,26 @@ in tests).`,
 			CompletedRetentionSeconds: queueCfgCompletedRetentionSeconds,
 			// The retention service only sweeps queues with retentionEnabled set,
 			// so a retention/completed-retention window implies enabling retention.
-			RetentionEnabled:   queueCfgRetentionSeconds > 0 || queueCfgCompletedRetentionSeconds > 0,
-			DeadLetterQueue:    queueCfgDLQ,
-			DlqAfterMaxRetries: queueCfgDLQ,
-			EncryptionEnabled:  queueCfgEncryption,
+			RetentionEnabled: queueCfgRetentionSeconds > 0 || queueCfgCompletedRetentionSeconds > 0,
 		}
-		qb = qb.Config(cfg)
-		resp, err := qb.Create().Execute(context.Background())
+		op := qb.Config(cfg).Create()
+		// ONLY THE FLAGS THAT WERE TYPED. /configure merges since 1.6.0, so an
+		// option this command does not send keeps the value the queue has — which
+		// is the whole point of the flag-driven shortcut ("nudge the lease, touch
+		// nothing else"). --dlq defaults to TRUE, so populating it unconditionally
+		// meant `queenctl queue configure orders --lease-time 60` silently
+		// re-enabled dead-lettering on a queue somebody had deliberately set to
+		// drop. Option() rather than the struct because a false is a zero value:
+		// the SDK omits it, and --dlq=false has to reach the wire as a literal
+		// false or the flag can turn the policy on and never off.
+		if cmd.Flags().Changed("dlq") {
+			op = op.Option("deadLetterQueue", queueCfgDLQ).
+				Option("dlqAfterMaxRetries", queueCfgDLQ)
+		}
+		if cmd.Flags().Changed("encrypt") {
+			op = op.Option("encryptionEnabled", queueCfgEncryption)
+		}
+		resp, err := op.Execute(context.Background())
 		if err != nil {
 			return clierr.Server(err)
 		}

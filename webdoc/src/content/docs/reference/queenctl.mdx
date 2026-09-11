@@ -56,10 +56,12 @@ digest: >-
   `json` on a pipe. Exit codes: `0` success, `1` user error, `2` server error or unreachable, `3`
   auth, `4` no-op (an empty pop). `pop --auto-ack` commits inside the pop transaction, so messages
   lost after the pop are never redelivered. `tail` without `--cg` advances the real
-  `queenctl-tail` group. `queue configure` drops zero-valued flags, so `--dlq=false` cannot
-  disable dead-lettering; `/configure` is a full replace. `dlq drain` deletes, while `dlq retry`
-  replays one address and requires `--yes`; `partition seek` is end only.
+  `queenctl-tail` group. `queue configure` MERGES and sends only typed flags, so `--dlq=false`
+  disables dead-lettering; `apply -f` sends `mode: replace` and refuses unknown keys.
+  `dlq drain` deletes, `dlq retry` MOVES one address (second run 404) and requires `--yes`;
+  `partition seek` is end only.
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): queue configure now merges and sends only the flags that were typed (so --dlq=false disables dead-lettering), apply -f sends mode replace, refuses a manifest key it cannot bind, and now puts every key the manifest writes on the wire with the value it wrote (an explicit false and an explicit zero included), and dlq retry runs on the move primitive.
 ---
 
 `queenctl` is a single static Go binary built on the [Go client](/reference/sdk/go). It exposes the
@@ -403,19 +405,30 @@ one is real.
 A positive `--retention` or `--completed-retention` sets `retentionEnabled: true` automatically,
 because the broker's retention service only sweeps queues with that flag set.
 
-<Aside type="danger">
-Two traps here, both from the same cause. The Go SDK builds the options map by omitting every
-zero-valued field, so a flag left at its zero value sends nothing and the broker applies its own
-`/configure` default rather than the zero you might expect. Concretely:
+`configure` **merges**: only the flags you actually typed go on the wire, and every option the
+command does not send keeps the value the queue already has. That is what makes the flag-driven
+shortcut safe to reach for, and it is the difference from `queenctl apply -f`, which sends
+`mode: replace` because a manifest is the whole configuration.
 
-- **`--dlq=false` does not disable dead-lettering.** `false` is the zero value, so the key is
-  omitted, and `/configure` defaults both `deadLetterQueue` and `dlqAfterMaxRetries` to *true* when
-  absent. The flag can only turn the behaviour on, never off.
-- `--lease-time 0` and `--retry-limit 0` likewise mean "don't send", not "set to zero".
+```bash
+queenctl queue configure orders --lease-time 60     # the lease, nothing else
+queenctl queue configure orders --dlq=false         # stop dead-lettering
+queenctl queue configure orders --dlq               # start again
+```
 
-And `/configure` is a full replace: every key you did not send resets to the broker's default, not
-to the queue's previous value. Reconfiguring one option through this command silently resets the
-others. Use `queenctl apply` with a complete manifest when a queue's configuration matters.
+`--dlq` and `--encrypt` are sent only when you type them, and they are sent as literal values, so
+`--dlq=false` really does disable dead-lettering. That was not true before 1.6.0: the two flags
+were populated on every call from `--dlq`'s default of `true`, so nudging an unrelated option
+silently switched dead-lettering back on for a queue somebody had deliberately set to drop.
+
+<Aside type="caution">
+The Go SDK still builds the rest of the options map by omitting every zero-valued field, so
+`--lease-time 0` and `--retry-limit 0` mean "do not send" rather than "set to zero". Under merge
+that reads as "leave it alone", which is usually what you wanted; if you need a literal zero,
+put the queue's configuration in a manifest and `apply` it.
+
+And against a broker older than 1.6.0 every call still **replaces**, whatever this one sends, so a
+partial configure there resets the options it omits.
 </Aside>
 
 With `-o json` or `-o yaml`, `configure` renders the full response including the echoed `options`
@@ -523,22 +536,32 @@ replay.**
 
 `retry` is the replay, one address at a time. It wraps
 [`POST /api/v1/messages/:partitionId/:transactionId/retry`](/reference/http/messages-dlq), which
-re-pushes the dead-letter snapshot to its own queue and partition and drops the DLQ row only once
-that push has been accepted.
+since 1.6.0 **moves** the newest dead-letter snapshot at that address: claim the row under a lock,
+push the frame to its own queue and partition, delete the row, one transaction.
 
-<Aside type="danger">
-`dlq retry` is not idempotent, which is why it is one address per invocation and why there is no
-bulk replay. The broker mints a **fresh transaction id** for the replayed message, because the
-original would be dropped by the dedup window, so a second run puts a second copy on the queue and
-nothing collapses them. The replay also lands at the tail of the partition, out of order for its
-key. If the push is accepted but the DLQ cleanup then fails, the command reports that the message
-was replayed **and** is still dead-lettered: delete the row with `messages delete` rather than
-running `retry` again. `queenctl` sends this request exactly once and never resends it on a 5xx.
-</Aside>
+It still requires `--yes`, and the reason changed. It is now idempotent by row: the replayed frame
+carries the derived transaction id `dlq:<row id>`, and a second run answers `404` because the row
+went with the first move. What `--yes` guards is that the command appends a message and removes a
+record, both of which someone has to mean.
 
-<Aside type="caution">
+Three results are worth recognising at the prompt:
+
+- **`dlqRowRemoved: false` on a success** is the `duplicate` verdict: the destination already
+  carries that transaction id, so nothing was written **and** nothing was removed. The command
+  says so and names the offset to read. Replay elsewhere, or purge the row.
+- **A `500` whose `dlqRowRemoved` is `null`** means the broker never learned whether the move
+  committed. The command prints a warning telling you to re-read the address with `dlq list`
+  first: if the row is gone, the move happened.
+- **A `503`** is push maintenance. A move cannot be spooled, so it is refused and the row stays.
+
+The replay lands at the tail of the partition, out of order for its key, and its age clock restarts
+at the destination. `queenctl` sends the request exactly once and never resends it on a 5xx, so the
+verdict you read is the one that happened.
+
+<Aside type="note">
 On an address dead-lettered by several consumer groups, the broker replays the most recent snapshot
-but deletes every group's snapshot for that address.
+and removes **only that group's record**. The other groups' records survive. That is the difference
+from `messages delete`, which removes every group's record for the address.
 </Aside>
 
 ### `queenctl traces`
@@ -640,6 +663,7 @@ task: ingest
 config:
   leaseTime: 60
   retryLimit: 5
+  deadLetterQueue: false
 ---
 kind: ConsumerGroup
 name: analyzer
@@ -652,9 +676,34 @@ seek-to: beginning
 `seek-to`, which takes the same forms as `replay --to`; a `ConsumerGroup` with no `seek-to` has
 nothing to apply and is reported as skipped. Applying nothing exits `4`.
 
-The zero-value omission described under `queue configure` applies to the `config` block too: a key
-you set to `0` or `false` is not sent, and `/configure` replaces the whole configuration. Spell out
-every option you care about with a non-zero value.
+`apply` sends `mode: replace`, and that is the point of a manifest: the document is the whole
+desired configuration of the queue it names, so an option it does not mention goes back to its
+default even if a previous apply or a `queue configure` had set it. Applying the same file twice,
+or applying it after someone nudged an option by hand, converges on the file. Reach for
+`queenctl queue configure` instead when you mean to nudge one option and leave the rest alone.
+
+<Aside type="caution">
+Because a key this command cannot bind would be an option silently reset, `apply` **refuses a
+manifest key it does not know** rather than ignoring it. A misspelling, an option that does not
+exist, or an unknown top-level field is a parse error naming the spelling the API uses. Which
+spelling binds changed with it. The `config` keys carry explicit YAML names now; until this release
+they had none, so the decoder matched the lowercased field name and `leasetime:` bound while
+`leaseTime:`, the spelling this command's own help prints, bound nothing at all and left the option
+behind it to be reset by `replace`. The API's spelling is the one that binds now, and the
+all-lowercase one is refused.
+
+The zero-value omission described under `queue configure` no longer reaches the `config` block. A
+key you write is a key that is sent, carrying the value you wrote: `deadLetterQueue: false`
+disables dead-lettering and `leaseTime: 0` sets a zero lease, instead of dropping out of the
+request and landing on the broker's default under `replace`. Until this release the opposite was
+true, because the block decoded into the Go SDK's `QueueConfig`, whose plain `int` and `bool`
+fields cannot tell a written `false` from a key nobody wrote, and the SDK omits every zero-valued
+field on its way to the wire. The line that reads as the clearest statement of intent in a manifest
+was the one guaranteed not to survive it. `apply` now reads the YAML mapping key by key and sends
+each option explicitly, so absence in the file is the only thing `replace` acts on. An explicit
+`null` is accepted too and asks for that option's default, which is what leaving the key out
+already means.
+</Aside>
 
 ### `queenctl maintenance` (alias `maint`)
 

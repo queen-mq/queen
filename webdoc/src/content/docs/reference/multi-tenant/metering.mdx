@@ -14,6 +14,11 @@ sourceOfTruth:
   - proxy/migrations/004_lifecycle.sql
   - proxy/migrations/005_usage_prune.sql
 # sourceOfTruth re-read 2026-09-04 (through 53a48899 + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): gateway.rs grew a third
+# source of `push` messages, a replay that moved one, booked on a second sample with reqs = 0;
+# the row-id replay's request is now buffered for its destination override and the address-keyed
+# one is not, which the request-bytes paragraph now says. Both are written down above; nothing
+# else in meter.rs, spool.rs or the migrations moved.
 ---
 
 Usage is counted **after** the response, from what the broker actually did, not from
@@ -42,7 +47,7 @@ belong in aggregated blocks, not per-message lines.
 
 | Class | Which requests |
 | --- | --- |
-| `push` | `POST /api/v1/push`, and the accepted sink messages of a streams cycle (as messages only, on a second sample; see below) |
+| `push` | `POST /api/v1/push`, the accepted sink messages of a streams cycle, and a dead-letter replay that moved a message (the last two as messages only, on a second sample; see below) |
 | `txn` | `POST /api/v1/transaction` |
 | `delivery` | Pop routes (`/api/v1/pop/queue/…`) |
 | `configure` | The queue-admin class: `/configure`, deletes, seeks, subscription changes |
@@ -132,6 +137,35 @@ Nothing else in a cycle is a billable message. The source pop was already metere
 `delivery` on its own request, and the ack advances a cursor, keeping the reqs-only
 posture `/api/v1/ack` has. An idle-flush or state-only cycle therefore meters as one
 `read` request and nothing more.
+
+</AccordionContent>
+</Accordion>
+
+<Accordion>
+<AccordionTrigger>Dead-letter replay: one message when it moved</AccordionTrigger>
+<AccordionContent>
+
+The two replay routes, `POST /api/v1/dlq/:id/replay` and the address-keyed
+`POST /api/v1/messages/:partitionId/:transactionId/retry`, are `queue admin`, so the
+request itself books one `configure` sample (`reqs = 1`, `msgs = 0`). A replay also
+writes a frame into a live partition, and that message bills as `push` on a second
+sample with `reqs = 0`, exactly like a cycle's sink emits: it is stored, retained and
+rolled up like any pushed message, so it belongs in the same `usage_days` row and under
+the same monthly quota.
+
+The response decides. A 2xx whose body says `result: "moved"` wrote a frame and bills one
+message. Not billed: `result: "duplicate"` (the destination's dedup window already held
+the deterministic transaction id, so nothing was stored), a body saying `success: false`,
+a verdict word the proxy does not recognise, and a response it cannot parse (`msgs = 0`
+with a warning). A `404` on a row that was already replayed or purged never reaches this
+path at all.
+
+Request bytes are small but real on the row-id route: its body is buffered on the way
+in, because a `{queue, partition}` override provisions a destination and has to pass the
+same registry admission `/configure` does. The address-keyed route reads no body and
+buffers none, so its `bytes_in` stays `0`. The message payload itself is the broker's own
+dead-letter snapshot and never crosses the proxy in either direction, so the in-flight
+storage estimate learns about a replay only at the next retained-bytes computation.
 
 </AccordionContent>
 </Accordion>

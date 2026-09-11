@@ -17,8 +17,8 @@ sourceOfTruth:
   - server/src/retention.rs
   - server/src/hotlist.rs
 digest: >-
-  `POST /api/v1/configure` is a full replace, not a patch: every omitted key resets to its
-  default. Integer seconds: `leaseTime` 300 from `/configure`, 60 for a push-created queue,
+  `POST /api/v1/configure` MERGES: omitted keys are kept, `null` restores a default,
+  `"mode":"replace"` resets the rest. Integer seconds: `leaseTime` 300 from `/configure`, 60 for a push-created queue,
   `delayedProcessing` 0, `windowBuffer` 0, `retentionSeconds` 0, `completedRetentionSeconds` 0,
   `maxWaitTimeSeconds` 0, `dedupWindowSeconds` 3600 (off only at `0`). `minPopWaitTime` 0 ms,
   clamped 0 to 60000. `retryLimit` 3 (a count), charged only by explicit `failed` acks. Strings
@@ -29,22 +29,41 @@ digest: >-
   `QUEEN_ENCRYPTION_KEY`. `maxWaitTimeSeconds` deletes whole segments including in-flight leases,
   ignoring `retentionEnabled`.
 # sourceOfTruth re-read 2026-09-07 (through 42bada8d + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): the opening and the danger Aside are rewritten for the merge rule, and a Declared, not enforced section names priority, ttl, maxSize and retryDelay.
 ---
 
-`POST /api/v1/configure` creates or updates a queue's configuration. It is a
-**full replace**, not a patch.
+`POST /api/v1/configure` creates or updates a queue's configuration. An update
+**merges**: an option the body does not mention keeps the value the queue
+already has.
 
-<Aside type="danger">
-Every key you omit is reset to its default. Configuring `retentionEnabled` on a
-queue that already had `dedupWindowSeconds: 300` silently puts the deduplication
-window back to 3600. Always send the complete set of options you want the queue
-to have, and keep it in version control rather than reconstructing it from
-memory.
+Four rules cover every option on this page:
+
+| In the body | What the queue ends up with |
+| --- | --- |
+| the key is absent | the value the queue already had |
+| the key is present with `null` | the default in the table below |
+| the key is present with a value | that value |
+| top-level `"mode": "replace"` | every option re-parsed from defaults, so anything the body omits goes back to its default |
+
+<Aside type="caution">
+Before 1.6.0 every call replaced, which is why so much of this site used to tell
+you to send the complete option set. That advice is now the opposite of the
+truth for an edit, and it is still exactly right for a manifest: a declarative
+source means the whole configuration, so `queenctl apply -f` sends
+`"mode": "replace"` and anything the file leaves out goes back to the default.
+Pick the mode from what the caller is: a nudge merges, a desired-state document
+replaces.
 </Aside>
+
+Two consequences worth holding on to. Restoring one option's default no longer
+means resending the other twenty: send that key as `null`. And a create is the
+same call in either mode, because a queue that does not exist yet has nothing to
+keep.
 
 A queue does not need to be configured at all: the first push creates it, with
 every column at its default except `namespace` and `task`, which are derived
-from the queue name. `/configure` is how you move off those defaults.
+from the queue name. `/configure` is how you move off those defaults, and since
+1.6.0 a partial `/configure` no longer flattens the derived labels back to `""`.
 
 ## Sending it
 
@@ -58,12 +77,19 @@ top-level:
 Only `queue` is required, and it must be a string. An empty string is a valid
 queue name. `namespace` and `task` are read from the options object, and are also
 accepted at the top level. Anything else at the top level is treated as an option
-when no `options` object is present.
+when no `options` object is present, apart from `mode`, which is routing rather
+than configuration: it is `"merge"` (the default) or `"replace"`, and any other
+value is a `400` that writes nothing.
 
 The response is HTTP 200 with `configured: true`, the queue id (`partitionId` is
 always `null`: configuring creates no partition, the first push does), the queue
-name, its namespace and task, and an `options` object echoing the resolved
-values, `dedupWindowSeconds` included.
+name, its namespace and task, and an `options` object echoing the **effective**
+row: all nineteen option keys as they now stand, whether the request carried
+three of them or all of them. So a merging edit reports back the whole
+configuration without a second read, and a clamped value is reported as what the
+queue now holds. To read a queue's configuration without writing to it, use
+`GET /api/v1/resources/queues/:queue`, whose `options` object carries all 21
+keys, `namespace` and `task` included, in these same spellings.
 
 ## Where the values live
 
@@ -75,8 +101,34 @@ service for the retention cutoffs, all joined by the queue's id.
 
 The one asymmetry left is the lease default: the column default is **60**, which
 is what a queue created implicitly by a push gets, while `/configure` writes an
-explicit **300** whenever `leaseTime` is omitted. That is why the lease in
-effect depends on how the queue was created.
+explicit **300** when `leaseTime` is omitted on a create or on a replacing call.
+A merging edit keeps whatever the column holds, so a push-created queue that is
+nudged through `/configure` stays at 60. That is why the lease in effect depends
+on how the queue was created.
+
+## Declared, not enforced
+
+Four options `/configure` accepts are stored, echoed back, and enforced by
+nothing:
+
+| Option | Type | Default | What reads it |
+| --- | --- | --- | --- |
+| `priority` | integer | `0` | Echoes only: `GET /api/v1/resources/queues/:queue` and `GET /api/v1/status/queues/:queue` carry it as `priority`, a row of the message listing as `queuePriority`, and the message detail inside `queueConfig`. The log engine claims one partition at a time and reads no priority anywhere on the push, pop, ack or maintenance path, so nothing is served ahead of anything else because of it. |
+| `ttl` | integer (s) | `3600` | The message-detail echo only. It expires nothing: age eviction is `maxWaitTimeSeconds`, and segment deletion is retention. |
+| `maxSize` | integer | `0` | Nothing. There is no queue-depth cap and no push back pressure behind this number. |
+| `retryDelay` | integer (ms) | `1000` | The message-detail echo only. A failed ack redelivers on the next pop of the partition; nothing waits this long first. |
+
+They are kept because they are on the wire and every SDK's option type carries
+them. Setting one changes a stored value and nothing else, which is worth
+knowing before you reach for `maxSize` expecting back pressure, or for
+`priority` expecting one queue to be drained ahead of another.
+
+The dashboard draws the line in two places rather than one. `ttl`, `maxSize` and
+`retryDelay` are left out of its editor entirely and shown on the queue detail
+page dimmed and labelled as declared rather than enforced. `priority` is still
+offered in the editor, worded there as a label carried on the queue's message
+rows and listings that the engine does not act on, so an operator who sets it
+reads what it is for at the moment of setting it.
 
 ## At a glance
 

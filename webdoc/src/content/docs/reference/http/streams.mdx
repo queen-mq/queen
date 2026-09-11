@@ -24,6 +24,7 @@ digest: >-
   `push_items` and the ack in one transaction. All three are tenant-scoped: a foreign partition
   or query reads as missing.
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): main.rs registers three new routes, none of them a streams route; nothing this page describes moved.
 ---
 
 The whole streaming engine is three JSON POSTs. `/streams/v1` sits inside the versioned contract

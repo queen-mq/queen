@@ -17,8 +17,8 @@ use serde_json::value::RawValue;
 
 use crate::db;
 use crate::frames::{
-    pack_frames, unpack_frames, uuid_bytes_to_string, uuid_string_to_bytes, zstd_compress,
-    zstd_decompress, FrameIn,
+    pack_frames, pack_segment, unpack_frames, uuid_bytes_to_string, uuid_string_to_bytes,
+    zstd_compress, zstd_decompress, FrameIn,
 };
 use crate::fusion::{json_escape_into, AddMsg, Fusion, ItemResult, OwnedFrame, PushState};
 use crate::metrics::Metrics;
@@ -262,25 +262,546 @@ pub async fn handle_delete_message(
     }
 }
 
-// ------------------------------------- POST /api/v1/messages/:pid/:txn/retry
-// Replay a dead-lettered message: re-push the queen.log_dlq payload snapshot to
-// its own queue/partition, then drop the DLQ row. This is the DLQ's replay
-// action; it exists ONLY for dead-lettered addresses — a live message has
-// nothing to replay and 404s. NOT reached from the console: app/'s DeadLetter
-// view offers Purge only. Its callers are the admin SDKs and `queenctl dlq
-// retry`.
+// ============================== DLQ replay, on the move primitive ===========
 //
-// The replayed frame gets a FRESH transaction id (the push path mints one from
-// the new message id): reusing the original would be seen by the dedup window
-// as a duplicate and silently dropped. The DLQ row is deleted only AFTER the
-// push is accepted, so a failure leaves the message in the DLQ rather than
-// losing it.
+// Both replay routes are the same operation with two ways of naming the row:
+// `POST /api/v1/dlq/:id/replay` takes the row id the DLQ listing already
+// returns, and `POST /api/v1/messages/:pid/:txn/retry` resolves its address to
+// the newest row and then moves THAT id. Everything below the naming is shared,
+// because the four defects the old replay had were all in the shared part: it
+// minted a fresh transaction id per attempt, read the row without a lock,
+// deleted it in a second statement that could fail on its own, and addressed a
+// (partition, txn) pair that can carry one row per consumer group while
+// deleting every one of them. The dashboard dropped its replay button for
+// exactly those reasons (8d357fa4); a button is a double click away, so it only
+// comes back on a primitive that cannot do any of the four.
+//
+// The primitive is `queen.log_dlq_move_v1` (016_messages): claim under the row
+// lock, push, delete, ONE transaction. The broker's half is to pack the frame —
+// outside that transaction, the same recipe the fusion flush and the timer fire
+// use — and to announce the landing afterwards.
+//
+// One deliberate difference from the push path: PUSH MAINTENANCE REFUSES A
+// MOVE, it does not divert it. A maintenance-mode push is answered `buffered`
+// and replayed from the disk spool later, which a move cannot be — the spool
+// carries frames, not the deletion of the dead-letter row, so a spooled move
+// would be exactly the "pushed but still dead-lettered" state this replaces.
+// Nor may it write: the switch's whole guarantee is that nothing reaches
+// queen.log_segments while it is on, and this route would reach it through
+// log_push_one_v1 (a new queue and partition included). So both routes answer
+// 503 while the switch is on (`move_maintenance_response`), which loses
+// nothing: the dead-letter row stays exactly where it was and the same replay
+// works once maintenance is off. A move therefore either commits against the
+// database or fails, and a failure leaves the row.
+
+/// Where a move lands. Defaults to the source row's own queue and partition;
+/// the replay route lets a caller override either half, which is what makes
+/// this a move rather than a replay-in-place (same tenant by construction — the
+/// row was read under it and the SP resolves the destination under it too).
+struct MoveDest {
+    queue: String,
+    partition: String,
+}
+
+/// What a completed move tells the caller. `offset` is where the message is in
+/// the destination partition: the allocated offset for `moved`, and the
+/// PRE-EXISTING occurrence's offset for `duplicate`.
+struct Moved {
+    result: &'static str,
+    queue: String,
+    partition: String,
+    offset: Option<i64>,
+    message_id: String,
+    transaction_id: String,
+    consumer_group: String,
+    /// The transaction id the DEAD-LETTERED message carried. Echoed because the
+    /// replayed frame deliberately does not reuse it (that is defect 1), so
+    /// without it the caller holds two ids and no link between them. Nullable in
+    /// the column, and therefore here.
+    original_transaction_id: Option<String>,
+}
+
+/// Why a move produced no message.
+#[derive(Debug)]
+enum MoveFailure {
+    /// The row is not there: already replayed, purged, another tenant's, a
+    /// concurrent caller took the row lock first and moved it, or the id is not
+    /// a uuid at all. All of them are one answer on purpose — see the SP's
+    /// header for why the tenant case is not a distinct one.
+    Gone,
+    /// The DATABASE refused the statement: a `tokio_postgres` error carrying a
+    /// SQLSTATE, which is the broker having watched the SP raise. Every guard
+    /// in `log_dlq_move_v1` raises before the DELETE, so this one really is
+    /// "nothing happened" — the whole transaction rolled back and the
+    /// dead-letter row is where it was.
+    Broken(String),
+    /// The move's outcome is NOT KNOWN here. Two ways in, and neither can be
+    /// reported as "nothing happened": a transport error with no SQLSTATE (the
+    /// connection can be lost AFTER a single-statement transaction committed),
+    /// and a verdict the broker cannot read (a verdict came back at all, so the
+    /// statement ran and its DELETE ran with it). Answered with
+    /// `dlqRowRemoved: null` rather than `false`.
+    Unknown(String),
+}
+
+/// The transaction id a moved frame carries, and the reason a second move of
+/// the same row is a `duplicate` instead of a second copy: it is DERIVED from
+/// the source row's id, not minted per attempt. (The row is deleted in the same
+/// transaction, so in practice the second call sees `gone` first — the
+/// deterministic id is the belt to that transaction's braces, and it is also
+/// what makes a replayed message traceable back to the dead-letter record it
+/// came from.)
+fn move_transaction_id(dlq_id: &str) -> String {
+    format!("dlq:{dlq_id}")
+}
+
+/// Parse the SP's verdict into (result, offset). A verdict the broker does not
+/// recognise is `Unknown`, never silently treated as success: the statement
+/// RETURNED, so it committed — and on a `moved` it committed the DELETE too —
+/// which is exactly the case where "I do not know what happened" must not be
+/// rendered as either "replayed" or "nothing happened".
+fn parse_move_verdict(txt: &str) -> Result<(&'static str, Option<i64>), MoveFailure> {
+    let v: serde_json::Value = serde_json::from_str(txt)
+        .map_err(|e| MoveFailure::Unknown(format!("dlq move returned no JSON: {e}")))?;
+    let off = v.get("offset").and_then(|x| x.as_i64());
+    match v.get("result").and_then(|x| x.as_str()) {
+        Some("moved") => Ok(("moved", off)),
+        Some("duplicate") => Ok(("duplicate", off)),
+        Some("gone") => Err(MoveFailure::Gone),
+        _ => Err(MoveFailure::Unknown(format!(
+            "dlq move returned an unknown verdict: {txt}"
+        ))),
+    }
+}
+
+/// The two ways a `tokio_postgres` failure can be read, and they are not the
+/// same fact.
+///
+/// A SQLSTATE means the DATABASE answered: it parsed the statement, ran it, and
+/// raised. `log_dlq_move_v1` raises only from its guards and from
+/// `log_push_one_v1`, all of which are before the DELETE, so the transaction
+/// rolled back whole and `dlqRowRemoved: false` is a fact. No SQLSTATE means
+/// the connection itself failed, and a single-statement transaction can commit
+/// and still lose its answer — so the outcome is unknown, which is a different
+/// sentence for the operator (`move_unknown_response`).
+fn move_failure_from_db(prefix: &str, e: &tokio_postgres::Error) -> MoveFailure {
+    match e.as_db_error() {
+        Some(_) => MoveFailure::Broken(format!("{prefix}{e}")),
+        None => MoveFailure::Unknown(format!("{prefix}{e}")),
+    }
+}
+
+/// 22P02, `invalid_text_representation`. Read at the two ROW LOOKUPS and nowhere
+/// else — the id-addressed one and the (partitionId, transactionId) one — where
+/// the only caller text that is cast is the address out of the path, so the code
+/// can only mean "that is not a uuid" and therefore "that is not a row". (The
+/// tenant those statements also cast arrives from the auth layer already
+/// validated; a broker whose own tenant were malformed would fail every read,
+/// not this one.) Deliberately not folded into `move_failure_from_db`: the move
+/// statement casts other things too (the SP reads its own offsets), and
+/// answering `gone` to one of those would tell an operator a row is gone while
+/// it is still there.
+fn is_not_a_uuid(e: &tokio_postgres::Error) -> bool {
+    e.as_db_error()
+        .is_some_and(|db| db.code().code() == "22P02")
+}
+
+/// Move one dead-letter row into the log. The whole broker-side half:
+/// decrypt the snapshot, pack one frame, call the SP, announce.
+async fn move_dlq_row(
+    st: &Arc<AppState>,
+    client: &deadpool_postgres::Client,
+    tenant: &str,
+    row: &db::DlqRow,
+    dest: &MoveDest,
+) -> Result<Moved, MoveFailure> {
+    // The snapshot is stored VERBATIM, so on an encryption-enabled queue it is
+    // the {encrypted,iv,authTag} envelope. Re-packing that as a payload would
+    // double-encrypt it; move the PLAINTEXT and let the pack below decide
+    // encryption again — for the DESTINATION, which may be a different queue
+    // with a different answer.
+    let plaintext: Vec<u8> = match st.encryption.decrypt_payload_bytes(row.payload.as_bytes()) {
+        Some(pt) => pt,
+        None => row.payload.clone().into_bytes(),
+    };
+
+    let mid = uuidv7_bytes();
+    let mid_str = uuid_bytes_to_string(&mid);
+    let txn = move_transaction_id(&row.id);
+
+    // The same decision the push path makes, through the same memoized helper:
+    // encryption is a property of the queue the frame LANDS in.
+    let enc_on = st.encryption.is_enabled() && st.encryption_enabled_for(&dest.queue, tenant).await;
+    let (payload, encrypted) = if enc_on {
+        match st.encryption.encrypt(&plaintext) {
+            Some(env) => (env, true),
+            None => {
+                // Parity with the push path: warn and store plaintext rather
+                // than fail. Unsampled because a move is an operator action,
+                // not an ingest rate.
+                tracing::warn!(target: "dlq", queue = %dest.queue, "encryption failed; moved plaintext");
+                (plaintext, false)
+            }
+        }
+    } else {
+        (plaintext, false)
+    };
+
+    // ONE frame, packed with `frames::pack_segment` — the same recipe the timer
+    // fire (sweeper::pack_one) and the fusion flush use, which matters because
+    // the bytes land in the same queen.log_segments.blob column and are read
+    // back by the same pop. No trace id: the dead-letter record carries none,
+    // and the replaying operator's request is not the message's trace. No
+    // producer sub either: the DLQ snapshot does not keep the original
+    // producer's identity (010_log_admin emits `producerSub: null` for every
+    // row), and stamping the operator who pressed replay would attribute the
+    // message to somebody who did not produce it.
+    let seg = pack_segment(
+        &[FrameIn {
+            message_id: mid,
+            txn: &txn,
+            trace_id: None,
+            producer_sub: None,
+            payload: &payload,
+            encrypted,
+        }],
+        st.zstd_level,
+    );
+
+    let txt = db::log_dlq_move(
+        client,
+        tenant,
+        &row.id,
+        &dest.queue,
+        &dest.partition,
+        &seg.hashes,
+        &seg.blob,
+    )
+    .await
+    .map_err(|e| move_failure_from_db("dlq move failed: ", &e))?;
+
+    let (result, offset) = parse_move_verdict(&txt)?;
+
+    // The counters `handle_push` records for a pushed frame (handlers/data.rs),
+    // recorded here for the same reason: a moved frame IS in queen.log_segments
+    // and will be popped from there, so a per-queue push rate that skipped it
+    // would show the destination queue consuming messages nobody pushed — on
+    // the very Workload page this dashboard renders. Only on `moved`:
+    // `duplicate` wrote nothing, and counting it would inflate the rate with
+    // frames that do not exist. The PROCESS-wide `metrics.push.record_request`
+    // is deliberately left alone — that one counts push REQUESTS, and the
+    // fusion sizes its cadence from it (the same reason `db::log_dlq_move`
+    // skips `admission::note_commit`); a button press is not ingest.
+    if result == "moved" {
+        st.metrics.per_queue.add_push(tenant, &dest.queue, 1);
+    }
+
+    // MANDATORY, and the reason it is spelled here rather than left to the next
+    // reseed: the frame is in a partition no pop is watching until somebody
+    // says so. `handlers::announce_landed` is the one function every landing
+    // path goes through, and the fire and the spool replay forgetting it is
+    // exactly the 1.0.3-through-1.5.1 bug the 1.5.1 timer fix closed. A
+    // `duplicate` announces too: nothing was written, so the mark is a harmless
+    // false positive (the pop finds nothing and the entry clears) and the
+    // alternative is a branch that can rot into the same omission.
+    announce_landed(
+        &st.hotlist,
+        &st.notifier,
+        &[(
+            tenant_queue_key(tenant, &dest.queue),
+            dest.partition.clone(),
+            1,
+        )],
+    );
+
+    Ok(Moved {
+        result,
+        queue: dest.queue.clone(),
+        partition: dest.partition.clone(),
+        offset,
+        message_id: mid_str,
+        transaction_id: txn,
+        consumer_group: row.consumer_group.clone(),
+        original_transaction_id: row.transaction_id.clone(),
+    })
+}
+
+/// The 200 body both routes answer with. `replayedAs` keeps the key list the
+/// five SDK wrappers and `queenctl dlq retry` already read off the old retry
+/// route (a `queen_protocol::PushResult`: index, message_id, transaction_id,
+/// queueName, status), so re-implementing the route on the move primitive is
+/// not a wire change for them; `offset` joins it because the move knows the
+/// position and a caller that wants to read the message back needs it.
+///
+/// On `duplicate` the frame was NOT written, so `replayedAs.message_id` is the
+/// all-zero uuid — `fusion.rs::resolve_dup_mids`' "original unknown" sentinel,
+/// used there for exactly this: a duplicate whose pre-existing message id the
+/// broker cannot resolve. `queen_protocol::PushStatus::Duplicate` documents
+/// that field as the PRE-EXISTING message's id, so the id this handler minted
+/// for a frame the SP refused to store must never travel under it; the copy
+/// already in the log at `offset` carries its own id inside a segment blob this
+/// route does not read. The field stays a string rather than becoming null so
+/// every SDK that parses `replayedAs` as a push result keeps parsing it.
+///
+/// `dlqRowRemoved` follows the verdict, because the SP does: `moved` deleted
+/// the source row in the same transaction, `duplicate` wrote nothing and
+/// therefore removed nothing (016_messages' duplicate branch says why).
+fn move_response(m: &Moved, dlq_id: &str) -> Response {
+    json(StatusCode::OK, move_body(m, dlq_id).to_string())
+}
+
+/// The body itself, as a value: `move_response` only wraps it. Split out so the
+/// two verdicts' shapes — which the five SDK wrappers parse and the dashboard
+/// renders — are pinned by a unit test instead of by a rig run.
+fn move_body(m: &Moved, dlq_id: &str) -> serde_json::Value {
+    let moved = m.result == "moved";
+    serde_json::json!({
+        "success": true,
+        "result": m.result,
+        "queue": m.queue,
+        "partition": m.partition,
+        "consumerGroup": m.consumer_group,
+        "dlqId": dlq_id,
+        "originalTransactionId": m.original_transaction_id,
+        "replayedAs": {
+            "index": 0,
+            "message_id": if moved {
+                m.message_id.clone()
+            } else {
+                uuid_bytes_to_string(&[0u8; 16])
+            },
+            "transaction_id": m.transaction_id,
+            "queueName": m.queue,
+            "status": if moved { "queued" } else { "duplicate" },
+            "offset": m.offset,
+        },
+        "dlqRowRemoved": moved,
+    })
+}
+
+/// The 500 body for a move the DATABASE refused. `dlqRowRemoved: false` is a
+/// fact, not a hedge: the SP raised, every one of its guards raises before the
+/// DELETE, and one transaction rolls back whole — so the dead-letter row is
+/// untouched and the caller may try again without duplicating anything.
+fn move_failed_response(detail: &str) -> Response {
+    json(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        serde_json::json!({
+            "success": false,
+            "error": detail,
+            "dlqRowRemoved": false,
+            "message": "Nothing was replayed — the dead-letter row is untouched",
+        })
+        .to_string(),
+    )
+}
+
+/// The 500 body for a move whose outcome the broker did not learn: a transport
+/// failure with no SQLSTATE, or a verdict it cannot read. Both mean the
+/// statement may have committed — and a committed move deleted the row — so
+/// `dlqRowRemoved` is `null` and the sentence says what to do about it rather
+/// than asserting a state. The same honesty the client already applies to a
+/// request that got no answer at all.
+fn move_unknown_response(detail: &str) -> Response {
+    json(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        serde_json::json!({
+            "success": false,
+            "error": detail,
+            "dlqRowRemoved": serde_json::Value::Null,
+            "message": "The outcome of this replay is unknown — re-read the dead-letter list: if the row is gone, the move happened",
+        })
+        .to_string(),
+    )
+}
+
+/// The 503 both routes answer while PUSH MAINTENANCE is on.
+///
+/// A maintenance-mode push is diverted to the on-disk spool
+/// (`handlers/data.rs`, "nothing reaches queen.log_segments"), and a move
+/// cannot be: the spool carries frames, not the deletion of the dead-letter
+/// row, so a spooled move would be exactly the "pushed but still
+/// dead-lettered" state this primitive exists to make impossible. Writing
+/// anyway would break the switch's one guarantee — an operator turns it on
+/// precisely so nothing new reaches the log — so the move is REFUSED instead,
+/// which costs nothing: the row is still there and the same replay works the
+/// moment the switch is off.
+fn move_maintenance_response() -> Response {
+    json(
+        StatusCode::SERVICE_UNAVAILABLE,
+        serde_json::json!({
+            "success": false,
+            "result": "maintenance",
+            "error": "push maintenance is on",
+            "dlqRowRemoved": false,
+            "message": "Push maintenance is on, so nothing may be written to the log. The dead-letter row is untouched; replay it once maintenance is off",
+        })
+        .to_string(),
+    )
+}
+
+// Optional body of the replay route: `{}` (or nothing at all) replays to the
+// row's own queue and partition; either half can be overridden to move the
+// message somewhere else. A present field must name something once TRIMMED —
+// an empty destination name is refused here AND in the SP, because it would
+// otherwise provision a queue nobody can name, and a padded one (`"  orders "`)
+// is the same defect one space away: `log_push_one_v1` provisions exactly the
+// text it is given, so the value that is validated has to be the value that is
+// written.
+#[derive(Deserialize)]
+struct ReplayBody {
+    queue: Option<String>,
+    partition: Option<String>,
+}
+
+fn parse_replay_overrides(
+    body: &Bytes,
+) -> Result<(Option<String>, Option<String>), &'static str> {
+    // The dashboard's plain "Replay" sends no body at all, and a `{}` from a
+    // curl is the same request: neither is a 400.
+    if body.iter().all(|b| b.is_ascii_whitespace()) {
+        return Ok((None, None));
+    }
+    let b: ReplayBody = serde_json::from_slice(body)
+        .map_err(|_| "bad body: expected {} or {\"queue\":\"...\",\"partition\":\"...\"}")?;
+    let queue = b.queue.map(|q| q.trim().to_string());
+    let partition = b.partition.map(|p| p.trim().to_string());
+    if queue.as_deref().is_some_and(str::is_empty) {
+        return Err("queue override must be a non-empty name");
+    }
+    if partition.as_deref().is_some_and(str::is_empty) {
+        return Err("partition override must be a non-empty name");
+    }
+    Ok((queue, partition))
+}
+
+// ------------------------------------------- POST /api/v1/dlq/:id/replay
+// Replay (or move) ONE dead-letter row, addressed by the row id `GET
+// /api/v1/dlq` returns. Body `{}` — or none — replays to the row's own
+// queue/partition; `{"queue":...,"partition":...}` overrides either half, and an
+// overridden destination that does not exist yet is provisioned by
+// `queen.log_push_one_v1` exactly as a first-contact producer push provisions
+// one (003_log_push's missing-branch INSERTs, which the SP reaches with
+// p_pid/p_window NULL).
+//
+// Tenancy: the row is read under the request tenant and the SP repeats the
+// predicate under the lock, so another tenant's row is `gone` — the same 404 as
+// a row that never existed, for the same reason the pid-addressed routes never
+// answer 403 (a distinct status confirms existence across the boundary).
+pub async fn handle_dlq_replay(
+    State(st): State<Arc<AppState>>,
+    Extension(tenant): Extension<crate::tenant::Tenant>,
+    Path(dlq_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let (queue_override, partition_override) = match parse_replay_overrides(&body) {
+        Ok(v) => v,
+        // The `{success:false, error, message}` shape the rest of this file uses
+        // for a refused request (handle_purge_dlq's missing queue), so a client
+        // reads every non-2xx here the same way.
+        Err(e) => {
+            return json(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({
+                    "success": false,
+                    "error": e,
+                    "message": "The replay body is optional; when present it may name a queue and/or a partition to move the message to",
+                })
+                .to_string(),
+            )
+        }
+    };
+
+    let gone = || {
+        json(
+            StatusCode::NOT_FOUND,
+            serde_json::json!({
+                "success": false,
+                "result": "gone",
+                "dlqId": dlq_id,
+                "error": "Message not found",
+                "message": "No dead-letter row with this id — it was already replayed or purged",
+            })
+            .to_string(),
+        )
+    };
+
+    // Refused, not written, while the push switch is on — see the section
+    // header. Before the pool is taken: a refusal that reads no row is also the
+    // cheapest one.
+    if st.maintenance.load(Ordering::Relaxed) {
+        return move_maintenance_response();
+    }
+
+    let client = match st.pool.get().await {
+        Ok(c) => c,
+        Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
+    };
+
+    // A malformed id is not a row, and it gets the same `gone` as a row that is
+    // no longer there — never a 500 from the `::text::uuid` cast, which is what
+    // the dashboard would render as "the replay failed".
+    //
+    // The DECIDER IS POSTGRES, deliberately, and not a parser here: its uuid
+    // input accepts more spellings than a 32-nibble-with-optional-dashes rule
+    // does (braces, and a hyphen after any group of four), so a guard written
+    // in Rust would have to either mirror that exactly or answer `gone` to ids
+    // this database would have resolved. `move_failure_from_db` maps the cast's
+    // own 22P02 to `Gone`, which is one definition of "not a row id" instead of
+    // two that can drift apart.
+    let row = match db::dlq_row_for_move(&client, tenant.as_str(), &dlq_id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return gone(),
+        Err(e) if is_not_a_uuid(&e) => return gone(),
+        // Any other lookup failure: nothing was written either way — a SELECT
+        // that failed changed nothing — so this is the categorical answer, not
+        // the unknown one.
+        Err(e) => return move_failed_response(&format!("dlq lookup failed: {e}")),
+    };
+
+    // An omitted half keeps the source's: "move this to queue X" must not also
+    // silently re-partition the message, and vice versa.
+    let dest = MoveDest {
+        queue: queue_override.unwrap_or_else(|| row.queue.clone()),
+        partition: partition_override.unwrap_or_else(|| row.partition.clone()),
+    };
+
+    match move_dlq_row(&st, &client, tenant.as_str(), &row, &dest).await {
+        Ok(m) => move_response(&m, &row.id),
+        Err(MoveFailure::Gone) => gone(),
+        Err(MoveFailure::Broken(detail)) => move_failed_response(&detail),
+        Err(MoveFailure::Unknown(detail)) => move_unknown_response(&detail),
+    }
+}
+
+// ------------------------------------- POST /api/v1/messages/:pid/:txn/retry
+// The same move, addressed the way this route always has been. It exists ONLY
+// for dead-lettered addresses — a live message has nothing to replay and 404s —
+// and its callers are the five admin SDKs, `queenctl dlq retry` and now the
+// dashboard's new replay action (which prefers the id-addressed route above).
+//
+// (partition_id, transaction_id) can match one row PER CONSUMER GROUP. The
+// address resolves to the NEWEST of them (`failed_at DESC LIMIT 1`, the choice
+// this route has always made) and the move removes exactly that row: the other
+// groups' dead-letter records survive a replay, where the old implementation
+// deleted all of them while re-pushing one snapshot.
 pub async fn handle_retry_message(
     State(st): State<Arc<AppState>>,
-    Extension(authed): Extension<crate::auth::AuthedSub>,
+    // The auth layer stamps this on every request and the embedded facade passes
+    // it too. It is unused here on purpose: the move stamps no producer identity
+    // on the frame (see `move_dlq_row`), and the extractor stays so the handler
+    // signature — which `embedded::Broker::retry_message` calls directly — does
+    // not change under the facade.
+    Extension(_authed): Extension<crate::auth::AuthedSub>,
     Extension(tenant): Extension<crate::tenant::Tenant>,
     Path((partition_id, transaction_id)): Path<(String, String)>,
 ) -> Response {
+    // Refused, not written, while the push switch is on — the section header
+    // says why a move may neither be spooled nor write past it. Before the pool
+    // is taken, exactly as on the id-addressed route.
+    if st.maintenance.load(Ordering::Relaxed) {
+        return move_maintenance_response();
+    }
     let client = match st.pool.get().await {
         Ok(c) => c,
         Err(_) => return json(StatusCode::INTERNAL_SERVER_ERROR, "{\"error\":\"pool\"}".to_string()),
@@ -304,144 +825,49 @@ pub async fn handle_retry_message(
         return not_found();
     }
 
-    let (queue, partition, payload_txt) =
-        match db::dlq_row_for_replay(&client, &partition_id, &transaction_id).await {
-            Ok(Some(v)) => v,
-            Ok(None) => return not_found(),
-            Err(e) => {
-                return json(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    json_err("dlq lookup failed: ", &e),
-                )
-            }
-        };
-
-    // The snapshot is stored verbatim, so on an encryption-enabled queue it is
-    // the {encrypted,iv,authTag} envelope. Re-pushing that as the payload would
-    // double-encrypt it; replay the PLAINTEXT and let the push path re-encrypt.
-    let payload_txt = match st.encryption.decrypt_payload_bytes(payload_txt.as_bytes()) {
-        Some(pt) => String::from_utf8_lossy(&pt).into_owned(),
-        None => payload_txt,
-    };
-
-    // Make the freshness contract explicit instead of relying on handle_push's
-    // missing-transactionId fallback. Besides documenting the security-sensitive
-    // dedup boundary at the call site, this lets us reject an impossible UUID
-    // collision before a replay can be mistaken for the quarantined frame.
-    let replay_transaction_id = fresh_replay_transaction_id(&transaction_id);
-    let push_body = serde_json::json!({
-        "items": [{
-            "queue": queue,
-            "partition": partition,
-            "payload": serde_json::from_str::<serde_json::Value>(&payload_txt)
-                .unwrap_or(serde_json::Value::Null),
-            "transactionId": replay_transaction_id,
-        }]
-    })
-    .to_string();
-
-    let resp = super::data::handle_push(
-        State(st.clone()),
-        Extension(authed),
-        Extension(tenant),
-        Bytes::from(push_body),
+    let row = match db::dlq_newest_row_for_address(
+        &client,
+        tenant.as_str(),
+        &partition_id,
+        &transaction_id,
     )
-    .await;
-    let status = resp.status();
-    let body = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
-        .await
-        .unwrap_or_default();
-    if !status.is_success() {
-        return json(
-            status,
-            serde_json::json!({
-                "success": false,
-                "error": "Replay push failed — the message is still in the dead-letter queue",
-                "pushStatus": status.as_u16(),
-                "pushResult": serde_json::from_slice::<serde_json::Value>(&body)
-                    .unwrap_or(serde_json::Value::Null),
-            })
-            .to_string(),
-        );
-    }
-    let first = match accepted_replay_push_result(&body, &transaction_id) {
-        Some(result) => result,
-        None => {
-            let pushed = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return not_found(),
+        // A malformed `:partitionId` is not an address, and it gets the same 404
+        // as an address that holds no dead-letter row — never a 500 from the
+        // `::text::uuid` cast in the lookup. The same reasoning as on the
+        // id-addressed route, and the same decider: Postgres, whose uuid input
+        // accepts more spellings than any rule written here would, so a Rust
+        // pre-parse would 404 ids this database would have resolved. Note that
+        // WITH tenancy on this path already answered 404 — the ownership gate
+        // above asks Postgres first and reads its failure as "not owned" — so
+        // this arm is also what keeps the two deployments answering alike
+        // instead of the answer depending on QUEEN_TENANCY_HEADER.
+        Err(e) if is_not_a_uuid(&e) => return not_found(),
+        Err(e) => {
             return json(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                serde_json::json!({
-                    "success": false,
-                    "error": "Replay push was rejected — the message is still in the dead-letter queue",
-                    "pushResult": pushed,
-                })
-                .to_string(),
-            );
+                json_err("dlq lookup failed: ", &e),
+            )
         }
     };
 
-    // Push accepted: drop the DLQ row. A failure here is reported (the message
-    // now exists twice: replayed AND still dead-lettered) rather than swallowed.
-    match db::delete_message(&client, &partition_id, &transaction_id).await {
-        Ok(removed) => json(
-            StatusCode::OK,
-            serde_json::json!({
-                "success": true,
-                "queue": queue,
-                "partition": partition,
-                "replayedAs": first,
-                "dlqRowRemoved": removed,
-            })
-            .to_string(),
-        ),
-        Err(e) => json(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({
-                "success": false,
-                "replayed": true,
-                "dlqRowRemoved": false,
-                "error": format!("dlq cleanup failed: {e}"),
-            })
-            .to_string(),
-        ),
-    }
-}
+    // This route replays IN PLACE. The destination override is the id-addressed
+    // route's affordance; keeping it out of here preserves the shape every SDK
+    // wrapper posts with an empty body.
+    let dest = MoveDest {
+        queue: row.queue.clone(),
+        partition: row.partition.clone(),
+    };
 
-// A retry submits exactly one snapshot. Deleting its DLQ row is therefore safe
-// only when the push response contains exactly one result and that result is a
-// durable acceptance. Be deliberately fail-closed: `duplicate` is not enough
-// here because the retry uses a fresh transaction id, while every failure,
-// unknown status, extra result or malformed body must leave the snapshot in the
-// DLQ for another operator attempt.
-fn fresh_replay_transaction_id(original_transaction_id: &str) -> String {
-    loop {
-        let candidate = uuid_bytes_to_string(&uuidv7_bytes());
-        if candidate != original_transaction_id {
-            return candidate;
-        }
+    match move_dlq_row(&st, &client, tenant.as_str(), &row, &dest).await {
+        Ok(m) => move_response(&m, &row.id),
+        Err(MoveFailure::Gone) => not_found(),
+        Err(MoveFailure::Broken(detail)) => move_failed_response(&detail),
+        Err(MoveFailure::Unknown(detail)) => move_unknown_response(&detail),
     }
-}
-
-fn accepted_replay_push_result(
-    body: &[u8],
-    original_transaction_id: &str,
-) -> Option<serde_json::Value> {
-    let mut results: Vec<serde_json::Value> = serde_json::from_slice(body).ok()?;
-    if results.len() != 1 {
-        return None;
-    }
-    let result = results.pop()?;
-    let parsed: queen_protocol::PushResult = serde_json::from_value(result.clone()).ok()?;
-    (parsed.index == 0
-        && !parsed.message_id.is_empty()
-        && !parsed.transaction_id.is_empty()
-        && parsed.transaction_id != original_transaction_id
-        && !parsed.queue_name.is_empty()
-        && matches!(
-            parsed.status,
-            queen_protocol::PushStatus::Queued | queen_protocol::PushStatus::Buffered
-        ))
-    .then_some(result)
 }
 
 // Enrich a list_messages_v1 result: log-queue entries come back with
@@ -708,55 +1134,172 @@ fn decrypt_dlq_payloads(enc: &crate::encryption::Encryption, v: &mut serde_json:
 
 #[cfg(test)]
 mod tests {
-    use super::{accepted_replay_push_result, fresh_replay_transaction_id};
+    use super::{
+        move_body, move_transaction_id, parse_move_verdict, parse_replay_overrides, MoveFailure,
+        Moved,
+    };
+    use axum::body::Bytes;
 
+    // The scheme IS the fix for defect 1 (a fresh id per attempt made every
+    // double click a second copy), so it is pinned here rather than left to the
+    // rig: the rig proves the SP's behaviour given this id, this proves the id.
     #[test]
-    fn dlq_replay_mints_a_transaction_id_different_from_the_original() {
-        let original = "01a04f39-7c33-7000-985d-707a8e01e44f";
-        let replay = fresh_replay_transaction_id(original);
-
-        assert_ne!(replay, original);
-        assert_eq!(replay.len(), 36, "replay id must retain UUID wire shape");
+    fn a_moved_frame_carries_the_dlq_row_id_as_its_transaction_id() {
+        let row = "0198f3b1-4c2a-7c31-9d0e-6f2b8a1c4d55";
+        assert_eq!(move_transaction_id(row), format!("dlq:{row}"));
+        assert_eq!(
+            move_transaction_id(row),
+            move_transaction_id(row),
+            "two replays of one row must address the same message, or the dedup \
+             window cannot recognise the second"
+        );
     }
 
     #[test]
-    fn dlq_replay_accepts_exactly_one_durable_push_result() {
-        for status in ["queued", "buffered"] {
-            let body = format!(
-                r#"[{{"index":0,"message_id":"m1","transaction_id":"t1","queueName":"q","status":"{status}"}}]"#
-            );
-            let accepted = accepted_replay_push_result(body.as_bytes(), "original-txn")
-                .expect("queued and buffered are durable replay outcomes");
-            assert_eq!(accepted["status"], status);
+    fn an_absent_or_empty_body_replays_in_place() {
+        for body in ["", "{}", "  \n\t ", "{ }"] {
+            let parsed = parse_replay_overrides(&Bytes::from(body))
+                .unwrap_or_else(|e| panic!("{body:?} must be accepted, got {e}"));
+            assert_eq!(parsed, (None, None), "{body:?} must not override anything");
         }
     }
 
     #[test]
-    fn dlq_replay_rejects_non_accepted_and_malformed_push_results() {
+    fn overrides_are_taken_one_half_at_a_time() {
+        let q = parse_replay_overrides(&Bytes::from(r#"{"queue":"orders.retry"}"#)).unwrap();
+        assert_eq!(q, (Some("orders.retry".to_string()), None));
+
+        // The value that is VALIDATED has to be the value that is written:
+        // log_push_one_v1 provisions the name it is given, so a padded one
+        // would create a queue nobody addressing `orders.retry` can reach.
+        let padded = parse_replay_overrides(&Bytes::from(
+            "{\"queue\":\"  orders.retry \",\"partition\":\"\\teu-2\\n\"}",
+        ))
+        .unwrap();
+        assert_eq!(
+            padded,
+            (Some("orders.retry".to_string()), Some("eu-2".to_string())),
+            "a destination name must reach the SP trimmed"
+        );
+
+        let p = parse_replay_overrides(&Bytes::from(r#"{"partition":"eu-2"}"#)).unwrap();
+        assert_eq!(p, (None, Some("eu-2".to_string())));
+
+        let both =
+            parse_replay_overrides(&Bytes::from(r#"{"queue":"orders.retry","partition":"eu-2"}"#))
+                .unwrap();
+        assert_eq!(
+            both,
+            (Some("orders.retry".to_string()), Some("eu-2".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_blank_or_malformed_override_is_refused() {
         for body in [
-            r#"[{"index":0,"message_id":"m1","transaction_id":"t1","queueName":"q","status":"failed"}]"#,
-            r#"[{"index":0,"message_id":"m1","transaction_id":"t1","queueName":"q","status":"duplicate"}]"#,
-            r#"[{"index":0,"message_id":"m1","transaction_id":"t1","queueName":"q","status":"error"}]"#,
-            r#"[{"index":0,"message_id":"m1","transaction_id":"t1","queueName":"q","status":"unknown"}]"#,
-            r#"[{"index":0,"message_id":"m1","transaction_id":"t1","queueName":"q","status":"QUEUED"}]"#,
-            r#"[{"index":0,"message_id":"m1","transaction_id":"t1","queueName":"q","status":null}]"#,
-            r#"[{"index":0,"message_id":"m1","transaction_id":"original-txn","queueName":"q","status":"queued"}]"#,
-            r#"[{"index":1,"message_id":"m1","transaction_id":"t1","queueName":"q","status":"queued"}]"#,
-            r#"[{"index":0,"message_id":"","transaction_id":"t1","queueName":"q","status":"queued"}]"#,
-            r#"[{"index":0,"message_id":"m1","transaction_id":"","queueName":"q","status":"queued"}]"#,
-            r#"[{"index":0,"message_id":"m1","transaction_id":"t1","queueName":"","status":"queued"}]"#,
-            r#"[{"status":"queued"}]"#,
-            r#"[{}]"#,
-            r#"[]"#,
-            r#"[{"index":0,"message_id":"m1","transaction_id":"t1","queueName":"q","status":"queued"},{"index":1,"message_id":"m2","transaction_id":"t2","queueName":"q","status":"buffered"}]"#,
-            r#"{"status":"queued"}"#,
-            r#"["queued"]"#,
-            r#"not-json"#,
+            r#"{"queue":""}"#,
+            r#"{"queue":"   "}"#,
+            r#"{"partition":""}"#,
+            r#"{"queue":"orders","partition":"\t"}"#,
+            r#"{"queue":42}"#,
+            r#"["orders"]"#,
+            "null",
+            "not-json",
         ] {
             assert!(
-                accepted_replay_push_result(body.as_bytes(), "original-txn").is_none(),
-                "replay result must be rejected: {body}"
+                parse_replay_overrides(&Bytes::from(body)).is_err(),
+                "must be a 400: {body}"
             );
         }
+    }
+
+    #[test]
+    fn the_two_success_verdicts_carry_a_position() {
+        let moved = parse_move_verdict(
+            r#"{"result":"moved","queue":"orders","partition":"eu-1","offset":41}"#,
+        )
+        .expect("moved is a success verdict");
+        assert_eq!(moved, ("moved", Some(41)));
+
+        let dup = parse_move_verdict(
+            r#"{"result":"duplicate","queue":"orders","partition":"eu-1","offset":7}"#,
+        )
+        .expect("duplicate is a success verdict");
+        assert_eq!(
+            dup,
+            ("duplicate", Some(7)),
+            "a duplicate reports the PRE-EXISTING occurrence's offset"
+        );
+    }
+
+    #[test]
+    fn gone_is_not_an_error_and_everything_unknown_is() {
+        assert!(matches!(
+            parse_move_verdict(r#"{"result":"gone"}"#),
+            Err(MoveFailure::Gone)
+        ));
+        // A verdict the broker cannot read must never render as "replayed" —
+        // nor as "nothing happened". The statement RETURNED, so it committed,
+        // and on a `moved` its DELETE committed with it: `Unknown` is the arm
+        // that answers `dlqRowRemoved: null` instead of asserting a state.
+        for txt in [
+            r#"{"result":"queued"}"#,
+            r#"{"result":null}"#,
+            r#"{"status":"moved"}"#,
+            "{}",
+            "[]",
+            "",
+        ] {
+            assert!(
+                matches!(parse_move_verdict(txt), Err(MoveFailure::Unknown(_))),
+                "must be a 500 of unknown outcome: {txt}"
+            );
+        }
+    }
+
+    fn moved(result: &'static str) -> Moved {
+        Moved {
+            result,
+            queue: "orders".to_string(),
+            partition: "eu-1".to_string(),
+            offset: Some(7),
+            message_id: "0198f3b1-4c2a-7c31-9d0e-6f2b8a1c4d55".to_string(),
+            transaction_id: "dlq:0198f3b1-0000-7c31-9d0e-6f2b8a1c4d55".to_string(),
+            consumer_group: "movers".to_string(),
+            original_transaction_id: Some("order-4471".to_string()),
+        }
+    }
+
+    /// The two 200 bodies, pinned: they are what the five SDK wrappers parse as
+    /// a `PushResult` and what the dashboard renders a verdict from.
+    #[test]
+    fn a_move_reports_the_row_gone_and_a_duplicate_reports_it_kept() {
+        let body = move_body(&moved("moved"), "0198f3b1-0000-7c31-9d0e-6f2b8a1c4d55");
+        assert_eq!(body["dlqRowRemoved"], serde_json::json!(true));
+        assert_eq!(body["replayedAs"]["status"], serde_json::json!("queued"));
+        assert_eq!(
+            body["replayedAs"]["message_id"],
+            serde_json::json!("0198f3b1-4c2a-7c31-9d0e-6f2b8a1c4d55"),
+            "a written frame carries the id it was written under"
+        );
+
+        let dup = move_body(&moved("duplicate"), "0198f3b1-0000-7c31-9d0e-6f2b8a1c4d55");
+        // 016_messages' duplicate branch writes nothing and therefore deletes
+        // nothing — the row is still dead-lettered and the list must keep it.
+        assert_eq!(dup["dlqRowRemoved"], serde_json::json!(false));
+        assert_eq!(dup["replayedAs"]["status"], serde_json::json!("duplicate"));
+        // `PushStatus::Duplicate` documents message_id as the PRE-EXISTING
+        // message's id. This route cannot read it (it is inside a segment
+        // blob), so it answers the zero-uuid sentinel fusion.rs uses for the
+        // same unknown — never the id it minted for a frame that was refused.
+        assert_eq!(
+            dup["replayedAs"]["message_id"],
+            serde_json::json!("00000000-0000-0000-0000-000000000000")
+        );
+        assert_eq!(
+            dup["replayedAs"]["offset"],
+            serde_json::json!(7),
+            "the duplicate's offset is where the pre-existing occurrence lives"
+        );
     }
 }

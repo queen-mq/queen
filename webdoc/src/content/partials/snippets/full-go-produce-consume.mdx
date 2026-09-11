@@ -69,8 +69,10 @@ func run(ctx context.Context) error {
 
 	fmt.Printf("broker: %s\n", brokerURL)
 
-	// Creating a queue is a full replace of its configuration: every option you
-	// leave out returns to the broker default, so send what you actually want.
+	// /configure merges: an option the body does not carry keeps the value the
+	// queue already has, and this client sends only the non-zero fields of
+	// QueueConfig. The queue name is unique per run, so nothing is being kept
+	// here and every option left out lands on its default.
 	if _, err := client.Queue(queueName).Config(queen.QueueConfig{
 		LeaseTime:  60, // seconds a popped message stays hidden from other consumers
 		RetryLimit: 3,  // failed deliveries tolerated before the message is dead lettered

@@ -190,7 +190,11 @@ const fetchQueues = async ({ force = false, probe = false, ttlMs = DEFAULT_TTL_M
 
   inflight = (async () => {
     try {
-      const r = await ephemeralApi.queues()
+      // `probe: true` on the TRANSPORT (not this function's `probe` argument,
+      // which is about clearing a remembered verdict): the stable answers below
+      // are rendered by views/Ephemeral.vue as one quiet card, so the global
+      // toast must not report the same fact a second time.
+      const r = await ephemeralApi.queues({ probe: true })
       // Switched cluster mid-flight: these rows are the tenant we left.
       if (epochAtStart !== currentEpoch()) return queues.value
       const rows = r.data?.queues || (Array.isArray(r.data) ? r.data : [])
@@ -231,7 +235,7 @@ const fetchQueues = async ({ force = false, probe = false, ttlMs = DEFAULT_TTL_M
  */
 const fetchDepth = async (name, config) => {
   try {
-    const r = await ephemeralApi.depth(name, config)
+    const r = await ephemeralApi.depth(name, { ...config, probe: true })
     return normalizeEphemeralQueue(r.data, name)
   } catch (err) {
     const verdict = verdictFor(err)

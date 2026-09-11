@@ -110,11 +110,13 @@
             <span class="count-sep">·</span>
             <span class="count-item count-static"><strong>{{ fmt.n(tenant.now.partitions) }}</strong><span>partitions</span></span>
             <span class="count-sep">·</span>
-            <span class="count-item count-static"><strong :class="toneClass(tenant.now.pending >= 10000 ? 'bad' : tenant.now.pending >= 1000 ? 'warn' : '')">{{ fmt.n(tenant.now.pending) }}</strong><span>pending</span></span>
+            <span class="count-item count-static"><strong :class="pendingTone">{{ fmt.n(tenant.now.pending) }}</strong><span>pending</span></span>
             <span class="count-sep">·</span>
             <span class="count-item count-static"><strong>{{ fmt.n(tenant.now.processing) }}</strong><span>in flight</span></span>
             <span class="count-sep">·</span>
-            <span class="count-item count-static"><strong :class="toneClass(tenant.now.deadLetter > 0 ? 'warn' : '')">{{ fmt.n(tenant.now.deadLetter) }}</strong><span>in DLQ</span></span>
+            <span class="count-item count-static"><!-- Depth, not growth: nothing purges a dead-letter queue, so `> 0` is
+                 permanent and says nothing about this window. -->
+            <strong>{{ fmt.n(tenant.now.deadLetter) }}</strong><span>in DLQ</span></span>
             <span class="count-sep">·</span>
             <span class="count-item count-static"><strong>{{ fmt.bytes(tenant.now.retainedBytes) }}</strong><span>retained</span></span>
           </div>
@@ -126,7 +128,7 @@
             <span class="count-sep">·</span>
             <span class="count-item count-static"><strong>{{ fmt.n(tenant.window.ackSuccess) }}</strong><span>acked</span><em v-if="deltas" class="count-delta">{{ fmt.delta(deltas.ackSuccess.pct) }}</em></span>
             <span class="count-sep">·</span>
-            <span class="count-item count-static"><strong :class="toneClass(tenant.window.ackFailed > 0 ? 'warn' : '')">{{ fmt.n(tenant.window.ackFailed) }}</strong><span>ack failures</span><em v-if="deltas" class="count-delta" :class="toneClass(deltas.ackFailed.abs > 0 ? 'warn' : '')">{{ fmt.delta(deltas.ackFailed.pct) }}</em></span>
+            <span class="count-item count-static"><strong :class="ackFailedTone">{{ fmt.n(tenant.window.ackFailed) }}</strong><span>ack failures</span><em v-if="deltas" class="count-delta">{{ fmt.delta(deltas.ackFailed.pct) }}</em></span>
             <span class="count-sep">·</span>
             <span class="count-item count-static"><strong>{{ fmt.n(tenant.window.popEmpty) }}</strong><span>empty polls</span><em v-if="deltas" class="count-delta">{{ fmt.delta(deltas.popEmpty.pct) }}</em></span>
             <span class="count-sep">·</span>
@@ -656,6 +658,7 @@ import { analytics, consumers, describeApiError, system } from '@/api'
 import { useApi } from '@/composables/useApi'
 import { categorySlot } from '@/composables/useCategoryColors'
 import { alpha, categoryPalette, chartPalette, chartTheme, semanticColors, themeVersion } from '@/composables/useChartTheme'
+import { ackFailureSeverity, backlogSeverity } from '@/composables/useSeverity'
 import {
   formatDateTimeLocal, formatTimestampRange, formatTimestampRangeUtc, formatTimestampUtc,
   validateRange,
@@ -1206,6 +1209,38 @@ const groupsSub = computed(() => {
 })
 
 const toneClass = (t) => (t ? `wl-${t}` : '')
+
+// ---------------------------------------------------------------------------
+// Counts-strip tones.
+//
+// The strip used to test three counts against constants — pending >= 1000,
+// deadLetter > 0, ackFailed > 0 — and a tenant doing ordinary work tripped all
+// three. Each is now read against the work the window actually contains.
+// ---------------------------------------------------------------------------
+const windowSeconds = computed(() => {
+  if (customMode.value && appliedCustom.value) {
+    const { from, to } = appliedCustom.value
+    const s = (new Date(to).getTime() - new Date(from).getTime()) / 1000
+    return Number.isFinite(s) && s > 0 ? s : null
+  }
+  const minutes = QUICK_MINUTES[selectedRange.value]
+  return minutes ? minutes * 60 : null
+})
+// Acks per second across the window: the rate a backlog would drain at.
+const tenantDrainPerSec = computed(() => {
+  const acked = tenant.value?.window?.ackSuccess
+  const seconds = windowSeconds.value
+  if (acked === null || acked === undefined || !seconds) return null
+  return acked / seconds
+})
+const pendingTone = computed(() => toneClass(backlogSeverity({
+  pending: tenant.value?.now?.pending,
+  drainPerSec: tenantDrainPerSec.value,
+})))
+const ackFailedTone = computed(() => toneClass(ackFailureSeverity({
+  failed: tenant.value?.window?.ackFailed,
+  succeeded: tenant.value?.window?.ackSuccess,
+})))
 
 // ---------------------------------------------------------------------------
 // Drill-down

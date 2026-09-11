@@ -28,6 +28,7 @@ digest: >-
   on by default, exact, per partition, keyed on `transactionId` within the queue's
   `dedupWindowSeconds` (default 3600, `0` disables).
 # sourceOfTruth re-read 2026-09-07 (through 42bada8d + this patch): page matches the code.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): the two /configure sentences are rewritten for the merge rule; the push path itself is unchanged.
 ---
 
 One call writes one or more messages to one or more queues. Access level **write-only**, which
@@ -202,9 +203,10 @@ the id comes back as the all-zeros UUID `00000000-0000-0000-0000-000000000000`, 
 <Aside type="note">
 Deduplication is what makes a push retry safe. The window is a time bound, not a memory of
 everything ever written: a retry that arrives after `dedupWindowSeconds` will be accepted as a
-new message. Choose the window to cover your worst-case retry horizon, and remember that
-`/api/v1/configure` is a **full replace**: omitting `dedupWindowSeconds` on a later configure
-call resets it to 3600.
+new message. Choose the window to cover your worst-case retry horizon. Since 1.6.0
+`/api/v1/configure` merges, so omitting `dedupWindowSeconds` on a later call leaves the window
+where it is; it goes back to 3600 on a create, on an explicit `null`, and under
+`"mode": "replace"`.
 </Aside>
 
 ## Delayed delivery
@@ -226,8 +228,9 @@ their neighbours: the same messages come out in the same order, later. The in-fl
 delay creates is bounded by push rate times the delay.
 
 Changing the option applies to messages that are already stored: raising it hides messages that
-were visible a moment ago, and lowering it exposes them. Remember that `/api/v1/configure` is a
-full replace, so omitting `delayedProcessing` on a later call resets it to `0`.
+were visible a moment ago, and lowering it exposes them. `/api/v1/configure` merges, so omitting
+`delayedProcessing` on a later call leaves it alone; send it as `null`, or send the whole
+configuration with `"mode": "replace"`, to put it back to `0`.
 
 ## Examples
 

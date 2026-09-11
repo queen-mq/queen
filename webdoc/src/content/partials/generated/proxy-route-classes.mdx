@@ -16,7 +16,7 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | --- | --- |
 | produce | Counted against the message quota. May create queues and partitions implicitly. |
 | consume | Pop, ack, lease extension, the batched read-from-offset the Kafka facade consumes through, and the partition discovery the S3 sink maps a queue with. A `wait=true` pop also holds a parked-consumer slot; the fetch does not, since its long poll is a body field rather than a query flag. Both reads are classified for the authority they need rather than for what they write: they are non-destructive and never quota-blocked, but one hands out message payloads and the other the partition names and offsets to read them by, so they carry the authority of the pop they stand in for instead of the read level every user role already has. |
-| queue admin | Configuration, deletions, seeks and subscription changes. |
+| queue admin | Configuration, deletions, seeks, subscription changes and the dead-letter replay. The replay is the one route in this class that also WRITES a message: it re-pushes a dead-letter snapshot and drops the dead-letter record in the same act, so it carries the authority of the deletion and answers the storage and monthly push blocks like a push. Everything else here is never quota-blocked, since deleting and shortening retention are how a tenant that is over a quota gets back under it. |
 | read | Listings, status, analytics, DLQ and message reads, all tenant-scoped. |
 | gated (streams) | Available when the plan enables the streams feature. Registration and the state read are never quota-blocked. The cycle is the produce half of the family: a cycle whose body carries sink `push_items` answers the storage and monthly blocks (refused whole, with the same code the equivalent push would get), its sink queues and partitions pass registry admission, its items answer the per-item payload cap, and its accepted sink messages are billed as push. An ack-only or state-only cycle always passes, so a blocked tenant can keep draining its source. |
 | gated (traces) | Writing a trace is available when the plan enables the traces feature. |
@@ -56,7 +56,9 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | `POST` | `/api/v1/consumer-groups/:group/queues/:queue/seek` |
 | `POST` | `/api/v1/consumer-groups/:group/subscription` |
 | `DELETE` | `/api/v1/dlq` |
+| `POST` | `/api/v1/dlq/:id/replay` |
 | `DELETE` | `/api/v1/messages/:partitionId/:transactionId` |
+| `POST` | `/api/v1/messages/:partitionId/:transactionId/retry` |
 | `DELETE` | `/api/v1/resources/queues/:queue` |
 
 ### read
@@ -76,7 +78,8 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | `GET` | `/api/v1/dlq` |
 | `GET` | `/api/v1/messages` |
 | `GET` | `/api/v1/messages/:partitionId/:transactionId` |
-| `POST` | `/api/v1/messages/:partitionId/:transactionId/retry` |
+| `POST` | `/api/v1/resources/kv/list` |
+| `GET` | `/api/v1/resources/kv/namespaces` |
 | `GET` | `/api/v1/resources/namespaces` |
 | `GET` | `/api/v1/resources/overview` |
 | `GET` | `/api/v1/resources/queues` |
@@ -171,4 +174,4 @@ The proxy classifies every broker-bound request into exactly one class, and anyt
 | `GET` | `/metrics` |
 | `GET` | `/status` |
 
-68 of the broker's 90 method + path pairs are reachable with a tenant credential; the rest are operator or blocked surfaces.
+71 of the broker's 93 method + path pairs are reachable with a tenant credential; the rest are operator or blocked surfaces.

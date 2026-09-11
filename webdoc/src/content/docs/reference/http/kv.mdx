@@ -1,6 +1,6 @@
 ---
 title: "KV routes"
-description: "The five key/value routes, the closed reason taxonomy every write returns, and the one rule that decides every status code on this surface."
+description: "The six key/value routes, the closed reason taxonomy every write returns, and the one rule that decides every status code on this surface."
 type: reference
 sidebar:
   order: 17
@@ -14,17 +14,20 @@ sourceOfTruth:
 verifiedBy:
   - server/tests/kv_semantics.rs
   - server/tests/kv_handler_isolation.rs
-# sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): 1.6.0 adds the two console read routes, documented below; the query-string rule now covers the namespaces selector too, and the console's explicit includeExpired is stated against the wire default of false.
 ---
 
-Five routes, one namespace-scoped key/value store, and one stored procedure behind all of them.
-`POST /api/v1/kv` is the complete surface; the three path routes are sugar for the cases people
-write by hand.
+Six routes and one namespace-scoped key/value store. `POST /api/v1/kv` is the complete surface and
+one stored procedure answers it; the three path routes are sugar for the cases people write by hand;
+the two under `/api/v1/resources/kv` are a read-only listing for a console, which exists because the
+batch route deliberately cannot do what a browser needs.
 
 <Aside type="note">
-Every broker registers these routes. There is no variable that turns them on, and a `404` here means
-the path is wrong, never that the cell lacks the surface. See [limits](/reference/limits) for what is
-deliberately not here.
+Every broker registers the four routes above the line. There is no variable that turns them on, and a
+`404` on one of them means the path is wrong, never that the cell lacks the surface. The two console
+routes are the exception, and the only one: they arrived in 1.6.0, so a `404` there can also mean an
+older broker. That is the state the dashboard renders as "not available on this broker" rather than
+as an error. See [limits](/reference/limits) for what is deliberately not here.
 </Aside>
 
 ## The routes
@@ -35,8 +38,10 @@ deliberately not here.
 | `GET` | `/api/v1/kv/:ns/*key` | read-only | one key, with `ETag: "<version>"` when found |
 | `PUT` | `/api/v1/kv/:ns/*key` | read-write | one `put`, with an optional `expect` |
 | `DELETE` | `/api/v1/kv/:ns/*key` | read-write | one `delete`, with an optional `expect` |
+| `GET` | `/api/v1/resources/kv/namespaces` | read-only | every namespace of the tenant with its exact key count |
+| `POST` | `/api/v1/resources/kv/list` | read-only | one keyset page of one namespace |
 
-The fifth entry point is not a route of its own: the same operations travel as a top-level `kv`
+The last entry point is not a route of its own: the same operations travel as a top-level `kv`
 array on [`POST /api/v1/transaction`](/reference/http/transaction), which is the only place where
 a KV precondition can gate an ack.
 
@@ -45,11 +50,14 @@ slash is written `%2F`. Nothing may ever be added as a literal segment under `/a
 because it would make every key named after it unaddressable. That is also why `incr` exists only
 on the batch route.
 
-The three path routes **refuse any query string**, rather than ignoring one. This is a privacy
-boundary and not a parsing preference: `?prefix=quota:acme:` is recorded by the broker's access
-log, the proxy's, the metering sample, the per-request-id tracing span and any ingress in front,
-and a mitigation living in one component out of five is not a mitigation. Prefix reads exist only
-inside the `POST` body.
+Every route on this page except the batch **refuses any query string**, rather than ignoring one:
+the three path routes, and both halves of the console pair, including the selector that reads no
+parameters at all. A surface where four routes refuse and the fifth quietly serves teaches a caller
+that the rule is advisory, which is how a prefix ends up in an access log on the route where it does
+leak. This is a privacy boundary and not a parsing preference: `?prefix=quota:acme:` is recorded by
+the broker's access log, the proxy's, the metering sample, the per-request-id tracing span and any
+ingress in front, and a mitigation living in one component out of five is not a mitigation. Prefix
+reads exist only inside a `POST` body, and so do cursors, which are keys.
 
 A path route also refuses a body carrying `op`, `ns`, `namespace` or `key`: the URL already names
 those, and silently preferring one over the other is the class of quiet override this API refuses
@@ -134,6 +142,78 @@ bytes and a thousand 64 KiB values are 64 MB.
 so it is **not** a snapshot of the namespace: with `after`, a key inserted behind the cursor is not
 seen. Good for compacting state, wrong for an exact count.
 
+## The console listing
+
+`GET /api/v1/resources/kv/namespaces` and `POST /api/v1/resources/kv/list` are a pair, and they are
+not `getPrefix` under another name. `getPrefix` requires a prefix, never returns an expired row, and
+reaches a cell through the proxy as a gated KV batch that a Viewer cannot call at all. A console
+needs the other shape of the same read: the whole namespace, cursor-paged, visible to a read-only
+identity, with the rows the sweeper has not collected yet **shown and labelled**.
+
+The selector answers `{"namespaces": [{"namespace": "orders", "keys": 27413}]}`, ordered by
+namespace in byte order. `keys` counts every row of the namespace exactly, expired ones included: an
+expired row is not a live key, but it is still an occupied one. That is a different population from
+the `kvRows` figure on [the queue listing](/reference/http/queues), which the sweeper computes over
+live rows only, every five minutes, sampled above its threshold. So the per-namespace count can
+legitimately be the larger of the two, and a dashboard showing both labels one of them `≈`.
+
+The page takes a JSON body and no query parameters at all:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `namespace` | required | validated in SQL; a malformed one is a `400`, an unknown one is an empty page |
+| `prefix` | `""` | free text, a byte range under `starts_with`: `%` and `_` are ordinary bytes, and an empty prefix lists the whole namespace |
+| `after` | none | the exclusive keyset cursor: the last key of the previous page |
+| `limit` | `100` | clamped to `1..1000`, never rejected |
+| `keysOnly` | `false` | omit every value |
+| `includeExpired` | `false` | include rows whose expiry has passed and whose sweep has not happened yet |
+
+The wire default is `false`, matching the stored procedure's own. The dashboard's KV browser sends
+`includeExpired: true` on every page, explicitly, because an expired row is still an occupied one
+and hiding it would make the page disagree with the count in the selector beside it.
+
+```bash
+curl -sS -X POST http://localhost:6632/api/v1/resources/kv/list -H 'content-type: application/json' -d '{"namespace":"orders","limit":100,"includeExpired":true}'
+```
+
+```json
+{
+  "rows": [
+    {"key": "ord_8812", "value": {"state": "shipped"}, "version": 90101,
+     "expiresAt": "2026-09-18T09:31:04.118217Z", "updatedAt": "2026-09-11T09:31:04.118217Z",
+     "expired": false}
+  ],
+  "truncated": true,
+  "nextAfter": "ord_8812",
+  "bytes": 41
+}
+```
+
+`truncated` is true when another page exists, and `nextAfter` is then the last key printed. Send it
+back as `after`. Both stamps are rendered in UTC with a literal `Z`, whatever the broker's session
+time zone is. Every row carries `expired`, computed in SQL against one instant for the whole page, so
+a page cannot show one key alive and the next dead by a few microseconds, and a client must never
+re-decide it from `expiresAt` against its own clock.
+
+A page can also end **before** the row limit. `bytes` is the value bytes the page charged against
+`QUEEN_KV_MAX_READ_BYTES` (4 MiB), the row that straddles the budget is kept and the page stops
+there: a thousand keys of 64 KiB are 64 MB, and the real resource is the byte. So a short page with
+`truncated: true` is the byte budget speaking, not a broken pager. Under `keysOnly` that figure is
+`0`, which is why a keysOnly page can only ever stop at the row limit.
+
+**Why the list is a `POST`.** Its cursor is a key. `?after=wh.deliver:acme:b15f6d46…` in a URL is
+recorded by the access log of the browser's proxy, the ingress, the queen proxy and the broker. It is
+the same rule that makes the path routes refuse a query string, applied to the one parameter that
+would otherwise have to travel in one. It is nevertheless a **read**: `read-only` broker-side, so a
+read-only token can page through a namespace, and `Read` at the proxy, where `/api/v1/resources` is
+classified by prefix and method-agnostically. Neither route is metered as a KV operation, and neither
+is behind the `kv` plan feature. Both are behind the KV kill switch and the per-tenant read rate, so
+a paused cell answers `503 kv_disabled` here exactly as it does on the batch route.
+
+Two things this pair deliberately does not have: a total, and an offset. Page 135 of 27,000 keys
+costs what page 1 costs because the cursor is a keyset cursor; knowing it is page 135 of anything
+would cost a `count(*)` per page.
+
 ## The one rule about status codes
 
 > The status describes the outcome of the **call**, never the verdict of the business predicate.
@@ -206,7 +286,8 @@ A lost `required` is the expected outcome of every legitimate redelivery, which 
 | Code | When | `error` |
 | --- | --- | --- |
 | `200` | the call ran, whatever each operation decided | |
-| `400` | shape: charset, missing or double expiry, unknown op, empty prefix, a `tenant` field inside an op, one key named twice, a query string on a path route | `kv_bad_request` |
+| `400` | shape: charset, missing or double expiry, unknown op, empty prefix, a `tenant` field inside an op, one key named twice | `kv_bad_request` |
+| `400` | a query string on any route but the batch | `kv_no_query_string` |
 | `403` | occupancy quota exhausted | `kv_quota_exceeded` |
 | `403` | the feature is not on the plan, or tenancy is on and there is no quota row | `feature_gated` |
 | `403` | the operator paused KV **and** the operations arrived inside the transaction wire | `kv_disabled` |

@@ -26,7 +26,8 @@
 //
 // API:
 //   const { queues, loading, error, lastFetched, fetchQueues, queueMeta,
-//           namespaces, tasks, isFresh, invalidate, reset } = useQueuesStore()
+//           namespaces, tasks, isFresh, invalidate, reset,
+//           kvRows, kvBytes, timerRows, timerBytes } = useQueuesStore()
 //
 //   await fetchQueues()                // use cache if fresh, else fetch
 //   await fetchQueues({ force: true }) // always fetch (e.g. after mutation)
@@ -34,6 +35,7 @@
 import { ref, computed } from 'vue'
 
 import { queues as queuesApi } from '@/api'
+import { toNum } from '@/composables/useApi'
 import { currentEpoch, onClusterChange } from '@/stores/identity'
 
 // Default cache TTL — long enough that incidental view-switching is free,
@@ -51,6 +53,54 @@ const error = ref(null)
 const lastFetched = ref(0)
 let inflight = null  // pending Promise, used for de-duplication
 let inflightEpoch = -1
+
+// ---------------------------------------------------------------------------
+// The tenant's KV and timer footprint, which rides on the ROOT of this same
+// listing (server/src/handlers/queues.rs, kv_usage_snapshot): four top-level
+// fields next to `queues`, put there because those two tables have no queue to
+// hang off and the proxy's reconciler already polls this route.
+//
+// They are a SWEEPER SNAPSHOT (a primary-key read of a cached measurement, up
+// to a few minutes old), never a live count, which is why every surface that
+// renders one marks it `≈`.
+//
+// NULL IS "THE BROKER DID NOT SAY", AND IT IS NOT THE ONLY UNMEASURED STATE.
+// The four fields are OMITTED only when the read itself FAILED
+// (handlers/queues.rs logs and skips them); a tenant whose row the sweeper has
+// not written yet gets an explicit `0`, because the snapshot lookup returning
+// no row is `unwrap_or((0,0,0,0))`. So:
+//
+//   · nothing here may coerce a MISSING field into 0 — which is exactly what
+//     `payload.kvRows || 0` does, and why toNum is used instead;
+//   · a ZERO is not by itself a measurement. The page that renders one decides
+//     with a witness it already has — the KV namespace listing
+//     (useKvView.js sweeperUsageIsMeasured) or the timer page on screen
+//     (useTimers.js timerUsageIsMeasured) — because a confident `≈ 0` beside a
+//     full page of rows is worse than saying nothing.
+// ---------------------------------------------------------------------------
+const kvRows = ref(null)
+const kvBytes = ref(null)
+const timerRows = ref(null)
+const timerBytes = ref(null)
+
+/** The four usage fields off a listing root, each null where it was absent. */
+export const readUsage = (payload) => {
+  const root = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : null
+  return {
+    kvRows: toNum(root?.kvRows),
+    kvBytes: toNum(root?.kvBytes),
+    timerRows: toNum(root?.timerRows),
+    timerBytes: toNum(root?.timerBytes),
+  }
+}
+
+const applyUsage = (payload) => {
+  const usage = readUsage(payload)
+  kvRows.value = usage.kvRows
+  kvBytes.value = usage.kvBytes
+  timerRows.value = usage.timerRows
+  timerBytes.value = usage.timerBytes
+}
 
 // ---------------------------------------------------------------------------
 // Fetch with TTL + de-duplication.
@@ -76,6 +126,10 @@ const fetchQueues = async ({ force = false, ttlMs = DEFAULT_TTL_MS } = {}) => {
       // entries from the partition_lookup table that should be cleaned
       // up server-side but show up in the API response today.
       queues.value = all.filter(q => q.name && q.name.trim() !== '')
+      // Re-read on every load, including the loads that carry none: a cell
+      // that has stopped answering the usage fields must stop reporting the
+      // figure it answered ten minutes ago.
+      applyUsage(r.data)
       lastFetched.value = Date.now()
       return queues.value
     } catch (err) {
@@ -102,6 +156,13 @@ const reset = () => {
   error.value = null
   lastFetched.value = 0
   loading.value = false
+  // The usage figures are this tenant's on this cell, so they go with the
+  // rows: another cluster's KV footprint under this cluster's name is the same
+  // cross-tenant lie the rows are reset to prevent.
+  kvRows.value = null
+  kvBytes.value = null
+  timerRows.value = null
+  timerBytes.value = null
 }
 
 onClusterChange(reset)
@@ -152,6 +213,12 @@ export function useQueuesStore() {
     queueMeta,
     namespaces,
     tasks,
+    // The tenant's KV / timer footprint from the listing's root — `≈`, and
+    // null when this cell did not report it.
+    kvRows,
+    kvBytes,
+    timerRows,
+    timerBytes,
     fetchQueues,
     invalidate,
     reset,

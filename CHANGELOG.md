@@ -3,6 +3,106 @@
 Release history for the Queen MQ server and client SDKs. Full release notes live on
 [GitHub Releases](https://github.com/queen-mq/queen/releases).
 
+## 1.6.0 - 2026-09-11
+
+**A read-scoped credential could replay a dead letter through the proxy. It cannot now.**
+`classify` in `queen_proxy` had a single arm for `/api/v1/messages/`, and it matched `DELETE`
+only, so every other method on that prefix fell through to the reads block. The one route of
+that family that writes, `POST /api/v1/messages/:partitionId/:transactionId/retry`, was
+therefore classified `read`,
+which is the class every user role holds and which an API key gets from the `read` scope alone.
+Through the proxy, a Viewer session or a read-only key could push a message into a live
+partition and delete a dead-letter record. Brokers reached directly were never affected: the
+broker gives a `POST` its `read-write` default. Both replay routes are now `queue admin`, so
+they need the Admin role or an admin-scoped key; they answer the storage and monthly push
+blocks like a push, because they grow stored bytes like one; and a confirmed replay is metered
+as one `push` message on a second sample with `reqs: 0`. The `/api/v1/messages` family is now
+method-bounded as a whole, `GET` and `HEAD` read and everything else blocked, so the next write
+added under that prefix cannot inherit a read either, and the generator that publishes the route
+table refuses to build when a non-`GET` route classifies as `read` without a written reason.
+
+**`/configure` merges instead of replacing, and a manifest says so explicitly.** An option a
+body does not mention now keeps the value the queue already has; an explicit `null` restores
+that one option's default; and a new top-level `"mode": "replace"` re-parses the whole
+configuration from defaults, which is what every call did before. This is a behaviour change for
+every partial body, which means Go, Rust, `queenctl queue configure` and any hand-written
+request: `queenctl queue configure orders --lease-time 60` used to reset the dedup window,
+retention and the dead-letter policy on its way past, and now changes the lease and nothing
+else. JavaScript, Python and PHP merge a nine-option client-side default bag into every
+`.config()` call, so those nine still travel; the other twelve now survive. `queenctl apply -f`
+sends `mode: replace`, because a manifest is the whole desired configuration, and it now refuses
+a manifest key it cannot bind rather than ignoring it, since under `replace` an ignored key is
+an option silently reset. That refusal also covers the all-lowercase spellings (`leasetime:`)
+that used to bind by accident. `queue configure` sends `--dlq` and `--encrypt` only when they
+are typed, and as literal values, so `--dlq=false` finally disables dead-lettering. The two
+sink-hold option refusals now answer `400` with an `invalid` key naming the option, where they
+used to arrive as `500`. `GET /api/v1/resources/queues/:queue` gained an `options` object
+carrying all 21 keys in the spellings `/configure` parses, so a read, an edit and a write
+round-trip without a mapping table.
+
+**Dead-letter replay runs on a move.** `queen.log_dlq_move_v1` claims the dead-letter row under
+`FOR UPDATE`, pushes one frame through the ordinary allocator and deletes the row, in one
+transaction. That closes four defects at once: the replayed frame carries the deterministic
+transaction id `dlq:<row id>` instead of a fresh one per attempt, two concurrent callers
+serialise on the lock, there is no "pushed but still dead-lettered" state because the push and
+the delete commit together, and only the addressed consumer group's record is removed where the
+old path deleted every group's. `POST /api/v1/dlq/:id/replay` is new: it addresses the
+dead-letter row by id, which is what a console and a redrive want, and takes an optional
+`{queue, partition}` naming a different destination, provisioned if it does not exist. Three
+verdicts to read rather than infer. `moved` wrote the frame and removed the row; `duplicate`
+wrote nothing **and kept the row**, because the dedup identity is a transaction id anyone who
+can read the listing could derive, and a move that moved nothing must not destroy a record; a
+second call answers `404 gone`. Push maintenance now refuses a replay with `503` rather than
+diverting it, since a move cannot be spooled, and a `500` may carry `dlqRowRemoved: null` when
+the broker never learned whether the statement committed. The response gained `result`,
+`consumerGroup`, `dlqId` and `originalTransactionId` beside the `replayedAs` push result the
+five SDK wrappers and `queenctl dlq retry` already parse, so those keep working unchanged.
+Through the proxy, a destination override names both halves or neither: a half-named body is
+refused `400 invalid_request` naming the half to add on a cell that enforces, because the
+omitted half lives in the broker's row and no plan cap could answer for the pair that would be
+created. A cell in shadow mode logs that one and forwards it, like every refusal there except
+the size caps and the two push-block quotas.
+
+**The console pushes.** One form behind three entry points: a Push button on Messages, a Push
+message button on a queue's detail page with the queue fixed, and **Push a copy** in the message
+drawer, pre-filled from the message being inspected. It renders the broker's own per-item
+verdict rather than the HTTP status, so `duplicate`, `buffered` and a spool failure each read as
+themselves, and a copy is stated as a new message rather than a retry: the original stays where
+it is. A payload the broker could not decrypt refuses the copy instead of pushing the envelope.
+Gated on `produce`.
+
+**The console creates and edits queues.** Create from the Queues page, edit from a queue's
+detail page. The editor prefills from the new 21-key `options` read and sends only the fields
+that changed, with a cleared field going out as `null`, which is exactly the merge rule above
+made visible. Typing the name of a queue that already exists repaints the form from that queue
+rather than reporting a creation that never happened. `ttl`, `maxSize` and `retryDelay` are
+shown read-only and labelled declared rather than enforced, because this broker stores and
+echoes them and reads them nowhere. `priority` is a fourth option of exactly that kind, and it
+stays in the editor, worded there as a label the engine does not act on.
+
+**A KV browser, on two new read-only routes.** `GET /api/v1/resources/kv/namespaces` lists every
+namespace of the tenant with its exact key count, and `POST /api/v1/resources/kv/list` returns
+one keyset page of one namespace. They are not `getPrefix` under another name: the prefix may be
+empty, the page carries the rows whose expiry has passed and whose sweep has not happened yet,
+labelled `expired`, and both are classified `read` so a read-only token and a Viewer can browse.
+The list is a `POST` because its cursor is a key, and a key in a query string is written to the
+access log of every component in the path; for the same reason both routes refuse a query
+string outright, including the selector that reads no parameters. Neither is metered as a KV
+operation or gated by the `kv` plan feature, and both sit behind the KV kill switch and the
+per-tenant read rate. The dashboard's page is read-only by design.
+
+**A Timers page.** The four timer routes get a surface: a queue picker, a keyset list, an exact
+count for a key prefix, a peek drawer that base64-decodes and, where the row says so,
+zstd-decompresses the payload in the browser, and a cancel that renders the stored procedure's
+verdict verbatim. An encrypted payload is named rather than guessed at, because the broker
+encrypts at schedule and the envelope is outermost. The page has no ticker: every row is a
+database read on a metered route, and a keyset page that refetched under the reader would move
+rows while they are being read.
+
+**A State group in the dashboard's navigation.** KV and Timers sit together between Routing and
+Observability, because both read stored state that belongs to no queue. Dead Letter gains Replay
+beside Purge, and `app/README.md` no longer advertises a pop inspector or calls the light theme retired.
+
 ## 1.5.3 - 2026-09-09
 
 **A Workload page, and the four reads behind it.** The dashboard gains an analytics page that

@@ -76,8 +76,8 @@ async fn run() -> Result<usize, String> {
 
     // Both queues are created up front here, rather than by the first push, so
     // the stream has something to attach to before any event exists.
-    // configure() is a full replace: keys left out go back to the broker's
-    // defaults rather than keeping a previous value.
+    // configure() merges: an option left out keeps the value the queue already
+    // has. Both names are unique per run, so here that value is the default.
     queen
         .queue(&events)
         .configure(QueueOptions {

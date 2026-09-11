@@ -152,7 +152,10 @@ const isActive = (path) => path === '/' ? route.path === '/' : route.path.starts
 // is last and marked, because its pages answer for the CELL and not for the
 // acting tenant.
 // ---------------------------------------------------------------------------
-const GROUP_ORDER = ['Overview', 'Routing', 'Observability', 'Cell']
+// `State` sits between Routing and Observability because that is the order of
+// the questions: what moves through the cell, what is SITTING in it (keys,
+// scheduled messages), and then what all of it has been doing.
+const GROUP_ORDER = ['Overview', 'Routing', 'State', 'Observability', 'Cell']
 const OPERATOR_GROUP = 'Cell'
 
 const navGroups = computed(() => {
@@ -187,6 +190,8 @@ const icons = {
   ephemeral: EphemeralIcon,
   consumers: ConsumersIcon,
   messages: MessagesIcon,
+  kv: KvIcon,
+  timers: TimersIcon,
   traces: TracesIcon,
   analytics: AnalyticsIcon,
   workload: WorkloadIcon,
@@ -203,6 +208,13 @@ function QueuesIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24
 function EphemeralIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.6', 'stroke-linecap':'round', 'stroke-linejoin':'round' }, [h('path',{d:'M3 7h9M3 12h6M3 17h8'}),h('path',{d:'M18 3l-4 8h4l-2 10'})]) }
 function ConsumersIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.6' }, [h('circle',{cx:'9',cy:'8',r:'3'}),h('circle',{cx:'17',cy:'10',r:'2.2'}),h('path',{d:'M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6M15 20c.2-2 1.6-3.5 3.3-3.9'})]) }
 function MessagesIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.6' }, [h('path',{d:'M4 6h16v10a2 2 0 01-2 2H9l-5 4V6Z'}),h('path',{d:'M8 11h8M8 14h5'})]) }
+/* KV: a key. The store is addressed BY the key — namespace plus a byte-ordered
+   string — and every other glyph for a key/value store is a table, which this
+   sidebar already spends on queues. */
+function KvIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.6', 'stroke-linecap':'round', 'stroke-linejoin':'round' }, [h('circle',{cx:'7.5',cy:'12',r:'3.5'}),h('path',{d:'M11 12h9M17 12v3.5M20 12v2.5'})]) }
+/* Timers: a clock, and nothing else. A timer is a message with an instant on
+   it, and the instant is the only thing the glyph has to carry. */
+function TimersIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.6', 'stroke-linecap':'round', 'stroke-linejoin':'round' }, [h('circle',{cx:'12',cy:'13',r:'8'}),h('path',{d:'M12 9v4l3 2'}),h('path',{d:'M9 2h6'})]) }
 function TracesIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.6' }, [h('path',{d:'M3 6h6M11 10h8M7 14h10M3 18h6'}),h('circle',{cx:'9',cy:'6',r:'1.6',fill:'currentColor'}),h('circle',{cx:'19',cy:'10',r:'1.6',fill:'currentColor'}),h('circle',{cx:'17',cy:'14',r:'1.6',fill:'currentColor'}),h('circle',{cx:'9',cy:'18',r:'1.6',fill:'currentColor'})]) }
 function WorkloadIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.6', 'stroke-linecap':'round' }, [h('rect',{x:'3',y:'4',width:'8',height:'6',rx:'1.5'}),h('rect',{x:'13',y:'4',width:'8',height:'11',rx:'1.5'}),h('rect',{x:'3',y:'14',width:'8',height:'6',rx:'1.5'}),h('path',{d:'M17 18v2'})]) }
 function AnalyticsIcon(p) { return h('svg', { ...p, fill:'none', viewBox:'0 0 24 24', stroke:'currentColor', 'stroke-width':'1.6' }, [h('path',{d:'M4 20V10M10 20V4M16 20v-8M22 20H2'})]) }

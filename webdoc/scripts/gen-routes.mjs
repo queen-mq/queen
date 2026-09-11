@@ -86,7 +86,17 @@ function parseRoutes(text) {
 // Without the arm it reaches the read-write fallthrough and the table claims
 // that listing partition names needs write access, which would make a read-only
 // token useless to the sink.
-const ACCESS_FINGERPRINT = "e58553c3eb7704c2";
+// 2026-09-11: re-read for PLAN_DASHBOARD_ACTIONS.md §2.5. One new rule,
+// mirrored below in the position the Rust evaluates it: `POST
+// /api/v1/resources/kv/list` — the console's keyset page over a KV namespace —
+// is read-only, immediately after the two arms it shares its shape with (a pure
+// read whose request is a body). It is a POST because its cursor is a KEY, and a
+// key in a query string is recorded by every access log between the browser and
+// the database; without the arm it reaches the read-write fallthrough and the
+// published table says a read-only token cannot browse. Its GET sibling
+// (`/api/v1/resources/kv/namespaces`) needs no arm: it is already inside the
+// `m === "GET"` block's `/api/v1/resources/` read.
+const ACCESS_FINGERPRINT = "a336be99401b4b95";
 
 function accessLevel(method, path) {
   const m = method;
@@ -131,6 +141,10 @@ function accessLevel(method, path) {
   // beside it. Method-exact, so a future verb on the path does not inherit it.
   if (m === "POST" && path === "/api/v1/partitions/changed") return "read-only";
 
+  // PLAN_DASHBOARD_ACTIONS.md §2.5: the console's KV page. A read whose cursor
+  // is a key, hence a POST; method- and path-exact, like the two arms above it.
+  if (m === "POST" && path === "/api/v1/resources/kv/list") return "read-only";
+
   if (path === "/streams/v1/state/get") return "read-only";
   if (path.startsWith("/streams/")) return "read-write";
 
@@ -172,7 +186,12 @@ function tenantScopedHandlers() {
 
 const GROUPS = [
   ["Message plane", (p) => /^\/api\/v1\/(push|pop|ack|transaction|lease)/.test(p)],
-  ["Queues and partitions", (p) => /^\/api\/v1\/(configure|resources)/.test(p)],
+  // The KV console pair is excluded here and claimed by the KV group below: it
+  // lives under /api/v1/resources so the proxy classifies it as a read by
+  // prefix (PLAN_DASHBOARD_ACTIONS.md §2.5), but a reader looking for the key/
+  // value surface must find it with its family and not among the queues.
+  ["Queues and partitions", (p) =>
+    /^\/api\/v1\/(configure|resources)/.test(p) && !p.startsWith("/api/v1/resources/kv/")],
   ["Consumer groups", (p) => p.startsWith("/api/v1/consumer-groups")],
   ["Messages, DLQ and traces", (p) => /^\/api\/v1\/(messages|dlq|traces)/.test(p)],
   ["Status, metrics and analytics", (p) =>
@@ -182,7 +201,8 @@ const GROUPS = [
   // These eight are registered unconditionally, like every other row here: the
   // boot flags that used to gate them are gone. Without this entry they land in
   // "Ungrouped".
-  ["Key/value state and timers", (p) => /^\/api\/v1\/(kv|timers)(\/|$)/.test(p)],
+  ["Key/value state and timers", (p) =>
+    /^\/api\/v1\/(kv|timers)(\/|$)/.test(p) || p.startsWith("/api/v1/resources/kv/")],
   // EPHEMERAL_QUEUES.md §3.1. Registered unconditionally like the eight above;
   // without this entry the family lands in "Ungrouped".
   ["Ephemeral queues", (p) => /^\/api\/v1\/ephemeral(\/|$)/.test(p)],

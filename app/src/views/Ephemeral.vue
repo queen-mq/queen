@@ -242,7 +242,7 @@
                             <td class="font-mono" style="font-size:12px;">{{ g.name }}</td>
                             <td class="num">{{ num(g.cursor) }}</td>
                             <td class="num">{{ num(g.lag) }}</td>
-                            <td class="num" :class="{ warn: (g.skipped || 0) > 0 }" :title="g.skipped ? 'Messages evicted by ttl or bounds before this group reached them' : ''">
+                            <td class="num" :class="skippedClass(g)" :title="g.skipped ? 'Messages evicted by ttl or bounds before this group reached them' : ''">
                               {{ num(g.skipped) }}
                             </td>
                           </tr>
@@ -376,6 +376,7 @@ import { useRefreshAgo } from '@/composables/useRefreshAgo'
 import { useToast } from '@/composables/useToast'
 import { useEphemeralStore } from '@/stores/ephemeralStore'
 import { useIdentity } from '@/stores/identity'
+import { lossSeverity } from '@/composables/useSeverity'
 
 const { can, actingTenantSlug, actingClusterSlug, actingCellSlug } = useIdentity()
 const { notifySuccess } = useToast()
@@ -419,7 +420,17 @@ const acting = ref(false)
 // ---------------------------------------------------------------------------
 const num = (v) => (v === null || v === undefined ? '—' : formatNumber(v))
 const bytes = (v) => (v === null || v === undefined ? '—' : formatBytes(v))
+// A ring that drops is a ring doing what it was configured to do: bounds and
+// ttl are the POLICY of an ephemeral queue, and a count of drops carries no
+// verdict without knowing what the queue was asked to hold. So a non-zero
+// count is raised in INK — it is worth finding on the row — and never in
+// amber, which would mark every long-running ephemeral queue as degraded.
 const dropClass = (v) => (v ? 'eph-drop on' : 'eph-drop')
+
+// The per-group column is different: `skipped` is what THIS reader missed,
+// and it has a denominator — `cursor`, the number of messages it did read.
+// Loss becomes attention once it is a real share of that.
+const skippedClass = (g) => lossSeverity({ dropped: g.skipped, delivered: g.cursor })
 
 const firstLoad = computed(() => loading.value && lastFetched.value === 0)
 const lastFetchedText = computed(() =>
@@ -635,8 +646,8 @@ const runPending = async () => {
   font-style: normal; font-size: 9px; letter-spacing: .06em;
   text-transform: uppercase; color: var(--text-faint);
 }
-/* Amber only once something has actually been dropped: a zero is not a warning. */
-.eph-drop.on { color: var(--warn-400); }
+/* Raised ink once something has actually been dropped — see dropClass(). */
+.eph-drop.on { color: var(--text-hi); }
 
 .eph-detail-meta {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px;

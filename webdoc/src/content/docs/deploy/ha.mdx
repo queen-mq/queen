@@ -29,6 +29,7 @@ digest: >-
   node-local, drained only by its broker, uncapped in size and age: a long outage fills the disk
   and pushes report `failed`.
 # sourceOfTruth re-read 2026-09-09 (through ff644495): 1.5.3 adds three analytics read paths and bumps the version, and touches nothing this page describes.
+# sourceOfTruth re-read 2026-09-11 (through bcea60c0 + working tree): main.rs registers three new routes (the two KV console reads and POST /api/v1/dlq/:id/replay) and no new environment variable; nothing this page describes moved.
 ---
 
 Brokers hold no authoritative state, so a second broker is another copy of the same binary pointed
