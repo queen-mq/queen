@@ -54,6 +54,12 @@ mod pgtls;
 mod quota;
 mod reconcile;
 mod retention;
+// PLAN_RAFT.md §3.4 — the replicated state machine. Twin of the `mod rsm;` in
+// lib.rs (the twin-list rule of lib.rs's header). `dead_code` while the
+// storage seam (WP-1.7) does not exist: the binary compiles the module and its
+// tests but calls nothing in it, exactly as `dedup` above was carried.
+#[allow(dead_code)]
+mod rsm;
 mod schema;
 mod stats;
 mod switches;

@@ -126,6 +126,23 @@ queen-protocol = { path = "../crates/queen-protocol", version = "1.3.0" }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
 http-body-util = "0.1"
 
+# --- PLAN_RAFT.md phase 1 (server/src/rsm/) -------------------------------
+# Added by WP-1.1 for the whole phase, so the parallel work packages do not
+# each edit this file. Nothing outside src/rsm/ uses them, and in
+# QUEEN_STORAGE=postgres (the default until GA, D1) none of it runs.
+#
+# The embedded ordered store, RATIFIED at G0 as D9: heed 0.22 (LMDB)
+# EVERYWHERE — 3 voters, raft1 and embedded alike. Exactly the pin spike S1
+# measured (test/raft/spikes/s1-store/Cargo.toml), default-features off for
+# the same reason it used them off: no serde/bincode codec, the store adapter
+# writes the bytes the rsm codec produces. C-2 holds (pure Rust + a C
+# compiler for the LMDB sources, no cmake); C-3 checked at 1.88 by the spike.
+heed = { version = "0.22", default-features = false }
+# The segment index of a SEALED segment file (§6.1 amendment, §11.2): one
+# immutable `.qidx` beside the file, binary-searched in place. mmap is what
+# keeps that read O(log n) with no per-partition RAM, which is I8.
+memmap2 = "0.9"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

@@ -68,6 +68,13 @@ mod pgtls;
 mod quota;
 mod reconcile;
 mod retention;
+// PLAN_RAFT.md §3.4 — the replicated state machine (Queen without Postgres).
+// In BOTH crate roots (the twin-list rule of this header): the embedded
+// `queen::Broker` is a single-node deployment, which is exactly the topology
+// the LocalReplicator serves (O15). Compiled from WP-1.1 on, reached by no
+// handler until the storage seam of WP-1.7 exists, and inert in
+// QUEEN_STORAGE=postgres, which is the default until GA (D1).
+mod rsm;
 mod schema;
 mod stats;
 mod switches;
