@@ -13,19 +13,25 @@ Base: branch `raft` in `/Users/alice/Work/queen`, cut from `fc71b65b`
 
 Shape: PLAN_RAFT.md §15.0.
 
-**Read this before the tables.** PLAN_RAFT.md's header and §2 record
-`G0 RATIFIED 2026-09-18` and mark D9, D10, D11 and D12 ratified. This working
-record has **no evidence that Alice ratified anything**, and all four spike
-memos were revised *after* that date, when two adversarial reviews each came
-back `refuted` and a further ~2 h of VM measurement changed three of the four
-decisions (D9 re-admits redb, D10 stays on option (a) in a new encoding, D12
-withdraws two of its four recommendations). So in this file **every decision is
-`proposed` and G0 is `ready for Alice`**. Where the plan's text is now factually
-wrong against the evidence it cites, the correction is in *Findings* with the
-exact replacement wording; PLAN_RAFT.md is not edited by this task.
+**G0 ratified by Alice on 2026-09-18, in two rounds.** Round one (before this
+packet): every recommendation as listed in PLAN_RAFT.md §17, with O14's
+failover target at ≤ 4 s. Round two (after this packet and its reviews),
+answering the checklist below: (1) D9 **heed everywhere**, 3 voters and
+single-voter/embedded alike, with the four pins of the amended proposal, and
+§11.5 repair-from-own-snapshot for a single voter; (2) §11.5 repair rather than
+discard; (3) D10 option (a) in the lean encoding, without waiting for D-06; (4)
+D11 as proposed with the seven plan changes; (5) D12 framed TCP with the
+**sequenced per-frame MAC**, not TLS (trust anchor undefined); (6) §11.4 and
+§11.8 defaults as proposed, tuned inside WP-1.4 / WP-1.2; (7) O1–O23 as
+recommended, D14 kept at 1–2 s; (8) O14 as recommended, and the evidence gaps
+below **accepted**: the D-01..D-03 and D-09 runs are skipped, WP-1.2's own crash
+tests are the check, and any disagreement re-opens D9. PLAN_RAFT.md carries the
+ratified wording (header, §2, I3, §6.1, §9.4, §11.3, §11.5, §17, Appendix H).
+Phase 1 starts 2026-09-18.
 
-No product code changed in phase 0: `git status --short` is
-`?? PLAN_RAFT.md`, `?? RAFT_STATUS.md`, `?? test/raft/`. Nothing is committed.
+Phase 0 is committed on `raft` as eight commits (`34c5714f`..`f4b0337c`), plus
+the ratification commit that follows this revision. No product code changed in
+phase 0.
 
 ---
 
@@ -33,7 +39,7 @@ No product code changed in phase 0: `git status --short` is
 
 | gate | state | date | decision | evidence |
 |---|---|---|---|---|
-| G0 | **ready for Alice** | packet 2026-09-18 | Ratify or change D9, D10, D11, D12 as amended below; decide the seven plan changes S3 produced and the three S1/S2 asks (§11.5 repair, §11.4 fan-out + cadence, §11.8 map rule); answer O1–O23; approve phase 1 with the gaps listed in the checklist. | WP-0.2 `test/raft/vm/baseline/RESULTS.md`; WP-0.3 `test/raft/spikes/s1-store/MEMO.md`; WP-0.4 `s2-dedup/MEMO.md`; WP-0.5 `s3-consensus/MEMO.md`; WP-0.6 `s4-transport/MEMO.md`; WP-0.7 `test/raft/README.md`; Findings R-01..R-64 below |
+| G0 | **RATIFIED** | 2026-09-18 | D9 heed everywhere (+ pins, §11.5 repair); D10 option (a) lean; D11 openraft `54094270` + raft-log 0.4.6 with the seven plan changes; D12 framed TCP + sequenced per-frame MAC; §11.4/§11.8 defaults as proposed; O1–O23 as recommended (O14 failover ≤ 4 s, D14 kept); evidence gaps accepted, phase 1 approved. See the note at the top. | WP-0.2 `test/raft/vm/baseline/RESULTS.md`; WP-0.3 `test/raft/spikes/s1-store/MEMO.md`; WP-0.4 `s2-dedup/MEMO.md`; WP-0.5 `s3-consensus/MEMO.md`; WP-0.6 `s4-transport/MEMO.md`; WP-0.7 `test/raft/README.md`; Findings R-01..R-64 below |
 | G1 | not reached | — | Message-path parity, crash matrix, differential and flatness results, raft1 performance vs postgres against the O14 targets. | — |
 | G2 | not reached | — | Full parity on raft1 (RAFT PARITY identical to `single`), differential clean, crash matrix and flatness pass, performance vs O14. | — |
 | G3 | not reached | — | Confirm the consensus library, re-checking its release status and the open issues (openraft GH#2080 still OPEN on 2026-09-18). | — |
@@ -76,8 +82,10 @@ No product code changed in phase 0: `git status --short` is
 
 ## Decisions
 
-All decisions are **proposed defaults** until Alice ratifies them. See the note
-at the top of this file about PLAN_RAFT.md's `RATIFIED` markings.
+All decisions below were **ratified by Alice on 2026-09-18** (see the note at
+the top of this file for the two rounds and the round-two answers); the
+"proposed" states in the table are the packet's state at the time it was
+written and are kept as the record of what was put to her.
 
 | id | decision (short) | state | change | date | reason |
 |---|---|---|---|---|---|
