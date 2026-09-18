@@ -1,0 +1,3 @@
+regime,role,window_s,cores,rss_max_mb,rss_avg_mb,pss_max_mb,samples
+FAT100,postgres,20,1.00,1066,758,305,5
+FAT100,queen,20,0.89,97,63,95,5

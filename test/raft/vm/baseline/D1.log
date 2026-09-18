@@ -1,0 +1,8 @@
+goload -mode openloop -> http://127.0.0.1:6698 queue=bq-D1 partitions=1 consumers=1 manualAck=true ackAsync=false ackInflight=256
+  offered: rate=500 msg/s | push-batch=1 -> 500.0 req/s across 11 pacer workers (45.45 req/s each) | max-inflight=20000 | payload=256B
+[configure] queue=bq-D1 completedRetentionSeconds=300
+[13:18:16] offered=      500/s achieved=      500/s shed=        0/s inflight=     0 | p50=   1.99 p99=    3.98 p999=    4.70 ms | push=2499 pop=2497 lag=2 | errs push=0 pop=0 empty=187 gor=26 | ack=      499/s ackErr=0 ackAvg=0.80ms
+[13:18:21] offered=      500/s achieved=      500/s shed=        0/s inflight=     1 | p50=   1.99 p99=    4.02 p999=    5.47 ms | push=4999 pop=4998 lag=1 | errs push=0 pop=0 empty=391 gor=27 | ack=      500/s ackErr=0 ackAvg=0.79ms
+[13:18:26] offered=      500/s achieved=      500/s shed=        0/s inflight=     1 | p50=   1.99 p99=    4.05 p999=   20.61 ms | push=7500 pop=7497 lag=3 | errs push=0 pop=0 empty=608 gor=41 | ack=      500/s ackErr=0 ackAvg=0.79ms
+[13:18:31] offered=      500/s achieved=      500/s shed=        0/s inflight=     1 | p50=   1.96 p99=    4.45 p999=   24.96 ms | push=9999 pop=9999 lag=0 | errs push=0 pop=0 empty=824 gor=36 | ack=      501/s ackErr=0 ackAvg=0.79ms
+[final] offered=10000 achieved=9999 shed=0 (msgs: offered=10000 achieved=9999 shed=0) pushErr=0 | pushed=9999 popped=9999 lag=0 | popErr=0 empty=824 | overall p50=1.99 p99=4.08 p999=18.30 ms | acked=9999 ackErr=0 ackLag=0 ackAvg=0.79ms

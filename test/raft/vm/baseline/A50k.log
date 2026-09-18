@@ -1,0 +1,12 @@
+goload -mode openloop -> http://127.0.0.1:6698 queue=bq-A50k partitions=100 consumers=48 manualAck=true ackAsync=false ackInflight=256
+  offered: rate=50000 msg/s | push-batch=10 -> 5000.0 req/s across 64 pacer workers (78.12 req/s each) | max-inflight=20000 | payload=256B
+[configure] queue=bq-A50k completedRetentionSeconds=300
+[13:16:27] offered=    25006/s achieved=    24832/s shed=        0/s inflight=    71 | p50=  15.30 p99=   54.02 p999=   88.58 ms | push=124160 pop=121290 lag=2870 | errs push=0 pop=0 empty=15826 gor=580 | ack=    24050/s ackErr=0 ackAvg=18.00ms
+[13:16:32] offered=    49998/s achieved=    49886/s shed=        0/s inflight=   143 | p50=  22.40 p99=   70.14 p999=   93.70 ms | push=373590 pop=372300 lag=1290 | errs push=0 pop=0 empty=18259 gor=881 | ack=    49934/s ackErr=0 ackAvg=27.25ms
+[13:16:37] offered=    49978/s achieved=    50076/s shed=        0/s inflight=    94 | p50=  23.17 p99=   77.31 p999=  112.13 ms | push=623970 pop=620720 lag=3250 | errs push=0 pop=0 empty=21201 gor=1064 | ack=    49970/s ackErr=0 ackAvg=29.49ms
+[13:16:42] offered=    50000/s achieved=    49914/s shed=        0/s inflight=   137 | p50=  23.42 p99=   79.36 p999=  103.94 ms | push=873540 pop=869660 lag=3880 | errs push=0 pop=0 empty=23656 gor=1070 | ack=    49714/s ackErr=0 ackAvg=30.67ms
+[13:16:47] offered=    50018/s achieved=    50024/s shed=        0/s inflight=   130 | p50=  23.68 p99=   76.29 p999=  112.13 ms | push=1123660 pop=1119940 lag=3720 | errs push=0 pop=0 empty=26370 gor=1084 | ack=    50214/s ackErr=0 ackAvg=31.63ms
+[13:16:52] offered=    50002/s achieved=    49930/s shed=        0/s inflight=   170 | p50=  23.68 p99=   66.05 p999=   93.70 ms | push=1373310 pop=1371620 lag=1690 | errs push=0 pop=0 empty=29475 gor=1135 | ack=    50036/s ackErr=0 ackAvg=32.21ms
+[13:16:57] offered=    50002/s achieved=    50174/s shed=        0/s inflight=    84 | p50=  24.96 p99=   76.29 p999=  100.86 ms | push=1624180 pop=1620890 lag=3290 | errs push=0 pop=0 empty=32265 gor=1054 | ack=    49990/s ackErr=0 ackAvg=32.51ms
+[13:17:02] offered=    49982/s achieved=    49948/s shed=        0/s inflight=   101 | p50=  24.96 p99=   81.41 p999=  110.08 ms | push=1873920 pop=1872140 lag=1780 | errs push=0 pop=0 empty=35261 gor=1156 | ack=    50004/s ackErr=0 ackAvg=32.93ms
+[final] offered=187515 achieved=187399 shed=0 (msgs: offered=1875150 achieved=1873990 shed=0) pushErr=0 | pushed=1873990 popped=1872270 lag=1720 | popErr=0 empty=35261 | overall p50=23.17 p99=75.26 p999=103.94 ms | acked=1869750 ackErr=0 ackLag=4240 ackAvg=32.92ms

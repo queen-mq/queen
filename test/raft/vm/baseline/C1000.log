@@ -1,0 +1,10 @@
+goload -mode openloop -> http://127.0.0.1:6698 queue=bq-C1000 partitions=1000 consumers=64 manualAck=true ackAsync=false ackInflight=256
+  offered: rate=3000 msg/s | push-batch=1 -> 3000.0 req/s across 61 pacer workers (49.18 req/s each) | max-inflight=20000 | payload=256B
+[configure] queue=bq-C1000 completedRetentionSeconds=300
+[13:17:43] offered=     2101/s achieved=     2097/s shed=        0/s inflight=    19 | p50=   8.03 p99=   42.24 p999=   63.23 ms | push=10486 pop=10287 lag=199 | errs push=0 pop=0 empty=14971 gor=422 | ack=     2026/s ackErr=0 ackAvg=16.94ms
+[13:17:48] offered=     3000/s achieved=     2996/s shed=        0/s inflight=    23 | p50=   6.24 p99=   37.12 p999=   61.18 ms | push=25465 pop=25432 lag=33 | errs push=0 pop=0 empty=19174 gor=426 | ack=     3026/s ackErr=0 ackAvg=18.72ms
+[13:17:53] offered=     3001/s achieved=     3005/s shed=        0/s inflight=    20 | p50=   5.98 p99=   20.10 p999=   31.36 ms | push=40491 pop=40377 lag=114 | errs push=0 pop=0 empty=22595 gor=423 | ack=     2988/s ackErr=0 ackAvg=20.64ms
+[13:17:58] offered=     2999/s achieved=     3000/s shed=        0/s inflight=    16 | p50=   6.56 p99=   20.86 p999=   32.64 ms | push=55490 pop=55353 lag=137 | errs push=0 pop=0 empty=27666 gor=419 | ack=     3030/s ackErr=0 ackAvg=20.67ms
+[13:18:03] offered=     3000/s achieved=     3000/s shed=        0/s inflight=    19 | p50=   7.01 p99=   35.07 p999=   59.65 ms | push=70489 pop=70463 lag=26 | errs push=0 pop=0 empty=32783 gor=573 | ack=     2945/s ackErr=0 ackAvg=21.31ms
+[13:18:08] offered=     2999/s achieved=     2999/s shed=        0/s inflight=    19 | p50=   6.88 p99=   25.47 p999=   39.68 ms | push=85486 pop=85418 lag=68 | errs push=0 pop=0 empty=38049 gor=574 | ack=     3038/s ackErr=0 ackAvg=21.36ms
+[final] offered=85527 achieved=85513 shed=0 (msgs: offered=85527 achieved=85513 shed=0) pushErr=0 | pushed=85513 popped=85426 lag=87 | popErr=0 empty=38049 | overall p50=6.62 p99=33.02 p999=54.02 ms | acked=85287 ackErr=0 ackLag=226 ackAvg=21.36ms

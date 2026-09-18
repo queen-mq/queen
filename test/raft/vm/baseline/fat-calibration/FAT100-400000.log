@@ -1,0 +1,8 @@
+goload -mode openloop -> http://127.0.0.1:6698 queue=bq-FAT100 partitions=100 consumers=0 manualAck=false ackAsync=false ackInflight=256
+  offered: rate=400000 msg/s | push-batch=100 -> 4000.0 req/s across 64 pacer workers (62.50 req/s each) | max-inflight=4096 | payload=256B
+[configure] queue=bq-FAT100 completedRetentionSeconds=300
+[13:09:29] offered=   200060/s achieved=   190420/s shed=        0/s inflight=   482 | p50=  17.28 p99=  242.69 p999=  374.78 ms | push=952100 pop=0 lag=952100 | errs push=0 pop=0 empty=0 gor=1016
+[13:09:34] offered=   399600/s achieved=   385500/s shed=        0/s inflight=  1187 | p50=  98.82 p99= 1011.71 p999= 1400.83 ms | push=2879600 pop=0 lag=2879600 | errs push=0 pop=0 empty=0 gor=2229
+[13:09:39] offered=   400220/s achieved=   397940/s shed=        0/s inflight=  1301 | p50= 238.59 p99= 1003.52 p999= 1368.06 ms | push=4869300 pop=0 lag=4869300 | errs push=0 pop=0 empty=0 gor=3601
+[13:09:44] offered=   399580/s achieved=   406680/s shed=        0/s inflight=   946 | p50= 240.64 p99=  913.41 p999= 1089.54 ms | push=6902700 pop=0 lag=6902700 | errs push=0 pop=0 empty=0 gor=3240
+[final] offered=69993 achieved=69296 shed=0 (msgs: offered=6999300 achieved=6929600 shed=0) pushErr=0 | pushed=6929600 popped=0 lag=6929600 | popErr=0 empty=0 | overall p50=158.72 p99=962.56 p999=1335.30 ms
