@@ -1,0 +1,25 @@
+[package]
+name = "s1-store"
+version = "0.1.0"
+edition = "2021"
+# Same floor as server/Cargo.toml (C-3). See DEPS.md: the LATEST redb and fjall
+# releases declare 1.90 and do NOT build here; the pins below are the newest
+# releases of each engine that build on 1.88.
+rust-version = "1.88"
+publish = false
+
+# Deliberately standalone: this crate is NOT in server/Cargo.toml and has no
+# workspace parent (a [workspace] table with no members keeps cargo from
+# walking up the tree looking for one).
+[workspace]
+
+[dependencies]
+libc = "0.2"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+redb = "2.6"
+fjall = "2.11"
+heed = { version = "0.22", default-features = false }
+
+[profile.release]
+debug = 1

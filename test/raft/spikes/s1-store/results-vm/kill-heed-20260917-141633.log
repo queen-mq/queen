@@ -1,0 +1,18 @@
+kill-loop: engine=heed runs=15 rate=20000 kill in [3000,12000] ms mode=mixed
+run 1 self/postcommit@8628ms rc=137 -> VERIFY PASS agree=true torn=false applied=17256 durable=14664 past_durable=true checked=17257 rows=17257 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=2267 open_ms=24 verify_ms=102
+run 2 external@10521ms rc=137 -> VERIFY PASS agree=true torn=false applied=20476 durable=17680 past_durable=true checked=20477 rows=20477 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=2456 open_ms=38 verify_ms=118
+run 3 self/append@6293ms rc=137 -> VERIFY PASS agree=true torn=false applied=12379 durable=12379 past_durable=false checked=12380 rows=12380 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=0 verify_ms=72
+run 4 external@11801ms rc=137 -> VERIFY PASS agree=true torn=false applied=23571 durable=22702 past_durable=true checked=23572 rows=23572 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=805 open_ms=31 verify_ms=136
+run 5 self/append@11066ms rc=137 -> VERIFY PASS agree=true torn=false applied=22131 durable=20126 past_durable=true checked=22132 rows=22132 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=1817 open_ms=70 verify_ms=133
+run 6 external@9240ms rc=137 -> VERIFY PASS agree=true torn=false applied=17793 durable=17793 past_durable=false checked=17794 rows=17794 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=0 verify_ms=102
+run 7 self/postcommit@9395ms rc=137 -> VERIFY PASS agree=true torn=false applied=18701 durable=18700 past_durable=true checked=18702 rows=18702 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=1 open_ms=1 verify_ms=111
+run 8 external@11361ms rc=137 -> VERIFY PASS agree=true torn=false applied=22686 durable=20772 past_durable=true checked=22687 rows=22687 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=1741 open_ms=35 verify_ms=138
+run 9 self/postcommit@8925ms rc=137 -> VERIFY PASS agree=true torn=false applied=17483 durable=17482 past_durable=true checked=17484 rows=17484 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=1 open_ms=1 verify_ms=106
+run 10 external@10179ms rc=137 -> VERIFY PASS agree=true torn=false applied=20323 durable=17509 past_durable=true checked=20324 rows=20324 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=2445 open_ms=46 verify_ms=119
+run 11 self/append@3712ms rc=137 -> VERIFY PASS agree=true torn=false applied=7157 durable=7157 past_durable=false checked=7158 rows=7158 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=0 verify_ms=42
+run 12 external@8556ms rc=137 -> VERIFY PASS agree=true torn=false applied=17083 durable=15027 past_durable=true checked=17084 rows=17084 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=1829 open_ms=22 verify_ms=99
+run 13 self/postcommit@10341ms rc=137 -> VERIFY PASS agree=true torn=false applied=20682 durable=18179 past_durable=true checked=20683 rows=20683 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=2225 open_ms=27 verify_ms=120
+run 14 external@11808ms rc=137 -> VERIFY PASS agree=true torn=false applied=23230 durable=22930 past_durable=true checked=23231 rows=23231 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=281 open_ms=21 verify_ms=135
+run 15 self/precommit@10686ms rc=137 -> VERIFY PASS agree=true torn=false applied=20801 durable=20753 past_durable=true checked=20802 rows=20802 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=46 open_ms=9 verify_ms=122
+
+SUMMARY engine=heed runs=15 pass=15 fail=0 reopened_past_durable=12 torn_entries=0 no_reopen=0

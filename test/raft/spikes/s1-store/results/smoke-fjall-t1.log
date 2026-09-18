@@ -1,0 +1,52 @@
+=== s1-store run ===
+host        macos/aarch64 Darwin alice.local 24.5.0 Darwin Kernel Version 24.5.0: Tue Apr 22 19:54:43 PDT 2025; root:xnu-11417.121.6~2/RELEASE_ARM64_T8132 arm64
+engine      fjall
+dir         /private/tmp/claude-502/-Users-alice-Work-queen/e561891e-3c5f-4589-8141-dd6b961a2d37/scratchpad/wp-0.3/data/s-fjall-1
+load        20000 msg/s, batch 10 -> 2000 entries/s, payload 512 B, 4096 partitions, 64 queues, 1 groups
+mix         kv 8000 ops/s over 200000 keys, timers 400 ops/s, request-id window 60 s
+durability  non-durable commit per entry, durable point every 1000 ms or 256 MiB; segment files roll at 0.25 MiB; fsync Full x1 threads; store cache 256 MiB; nofile=1048576
+label       laptop smoke fsync-threads=1
+
+--- throughput ---
+wall 60.0 s, 107687 entries (1795/s target 2000/s), 1076870 messages (17945 msg/s)
+store ops 2767991 (46127/s), kv put/cas/del/list 258190/85956/1639/21566, timers sched/fired 21537/10026, request ids expired 0
+pacing: max lag 7212.2 ms, entries more than 50 ms late 100314
+
+--- latency (ms) ---
+non-durable commit   n=107687 p50=0.033 p90=0.104 p99=0.375 p99.9=2.623 max=40.711 mean=0.063 (ms)
+entry total          n=107687 p50=0.082 p90=0.263 p99=1.087 p99.9=8.063 max=106.409 mean=0.159 (ms)
+durable point        n=19 p50=2031.615 p90=3538.943 p99=3538.943 p99.9=3538.943 max=3517.316 mean=2156.738 (ms)
+  of which seg fsync n=19 p50=2031.615 p90=3538.943 p99=3538.943 p99.9=3538.943 max=3509.490 mean=2149.039 (ms)
+kv read (get)        n=150992 p50=0.002 p90=0.004 p99=0.021 p99.9=0.100 max=22.230 mean=0.003 (ms)
+kv prefix list       n=21566 p50=0.023 p90=0.047 p99=0.106 p99.9=0.303 max=7.355 mean=0.029 (ms)
+durable points 19, segment fsyncs 6790, final durable point 5.0 ms
+
+--- write amplification ---
+logical: store keys+values 115.2 MiB + payloads 525.8 MiB = 641.0 MiB
+process disk writes 735.1 MiB  ->  WA(io) 1.15x
+on-disk growth: store 37.1 MiB + segments 538.9 MiB = 576.0 MiB  ->  WA(files) 0.90x  (store alone 0.32x of its own 115.2 MiB of rows)
+segment files: 107687 frames, 538.1 MiB appended, 2279 files, engine reports 443.2 MiB of store
+
+--- RSS ---
+start 3.3 MiB, end 140.5 MiB
+max 140.5 MiB over 19 samples
+series 3s:11M 6s:28M 10s:46M 13s:73M 18s:86M 21s:101M 24s:104M 27s:112M 30s:112M 32s:113M 36s:116M 38s:120M 41s:121M 44s:122M 47s:122M 50s:123M 53s:125M 56s:128M 60s:141M
+
+--- consistent export (snapshot) ---
+logical dump (per-partition snapshot)      74.1 MiB in      585 ms (127 MiB/s)
+incremental checkpoint: yes in principle: SSTs are immutable, so a snapshot can hard-link the sealed segments and ship only new ones (fjall has no built-in checkpoint API in 2.11)
+writer pause:           none (snapshots are MVCC seqno views)
+
+--- ordered iteration (segments table as it stands) ---
+107687 rows, 5.8 MiB in 0.01 s = 12945 k rows/s, 691 MiB/s
+
+--- file growth and reclamation after deletes ---
+deleted 57864 segment rows (+ the same number of seg_loc rows) in 88 ms
+store: 30.9 MiB before -> 34.5 MiB after the deletes -> 26.0 MiB after maintenance (832 ms)
+maintenance: rotate_memtable + major_compact on 13 partitions in 831 ms
+segment files: 538.9 MiB before -> 280.4 MiB after unlinking 1034 sealed files (258.4 MiB freed)
+
+--- clean reopen ---
+open 423 ms (fresh) / 21 ms (populated); applied index Some((107686, 1, 1789651724059220)), durable index Some((107686, 1, 1789651724059220))
+
+RESULT engine=fjall rate=20000 batch=10 payload=512 duration=60.0 entries=107687 msgs=1076870 entries_per_s=1795 msgs_per_s=17945 nondur_p50_ms=0.033 nondur_p99_ms=0.375 nondur_p999_ms=2.623 dur_p50_ms=2031.615 dur_p99_ms=3538.943 dur_max_ms=3517.316 fsync_p99_ms=3538.943 read_p99_ms=0.021 list_p99_ms=0.106 wa_io=1.15 wa_files=0.90 logical_mib=641.0 io_mib=735.1 store_growth_mib=37.1 seg_growth_mib=538.9 rss_start_mib=3.3 rss_max_mib=140.5 rss_end_mib=140.5 export_mib=74.1 export_ms=585 scan_rows=107687 scan_rows_per_s=12944963 reopen_ms=21 max_lag_ms=7212.2 late_entries=100314 durable_points=19 reclaim_rows=57864 reclaim_del_ms=88 store_before_mib=30.9 store_after_del_mib=34.5 store_after_maint_mib=26.0 maint_ms=832 seg_files_unlinked=1034

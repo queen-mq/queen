@@ -1,0 +1,47 @@
+=== s1-store run ===
+host        linux/x86_64 Linux queenpgless-01 6.8.0-124-generic #124-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:00:45 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+engine      heed
+dir         /root/raft/s1-store/data-refute/heed-50000
+load        50000 msg/s, batch 10 -> 5000 entries/s, payload 512 B, 4096 partitions, 64 queues, 1 groups
+mix         kv 20000 ops/s over 200000 keys, timers 1000 ops/s, request-id window 60 s
+shape       ratified (segments rows in store: false, dedup rows per message: true, dedup window 0 s)
+durability  store commit every 256 entries or 4 ms (§11.3 as amended at G0), durable point every 1000 ms or 256 MiB; segment files roll at 0.25 MiB; fsync Full x1 threads; store cache 256 MiB; nofile=4096
+config      heed 0.22.1 / LMDB, flags MDB_NOSYNC, thread-local reader slots (RoTxn is NOT Send, nested read txns illegal), max_readers 126
+
+--- throughput ---
+wall 40.8 s, 193643 entries (4742/s target 5000/s), 1936430 messages (47425 msg/s)
+store ops 6709317 (164316/s), kv put/cas/del/list 464503/155530/5358/38850, timers sched/fired 38728/8396, request ids expired 0
+dedup rows written 1936430 (47425/s), pruned 0
+pacing: max lag 1903.8 ms, entries more than 50 ms late 127394
+
+--- latency (ms) ---
+non-durable store commit (2650 commits, 65/s, 73.1 entries per commit)
+non-durable commit   n=2629 p50=1.791 p90=13.567 p99=16.383 p99.9=21.503 max=25.742 mean=4.015 (ms)
+entry total          n=193643 p50=0.011 p90=0.020 p99=1.375 p99.9=14.335 max=29.945 mean=0.069 (ms)
+durable point        n=21 p50=770.047 p90=1703.935 p99=1703.935 p99.9=1703.935 max=1699.059 mean=943.192 (ms)
+  of which seg fsync n=21 p50=573.439 p90=1146.879 p99=1409.023 p99.9=1409.023 max=1387.978 mean=719.391 (ms)
+kv read (get)        n=271219 p50=0.001 p90=0.002 p99=0.004 p99.9=0.012 max=0.188 mean=0.001 (ms)
+kv prefix list       n=38850 p50=0.006 p90=0.008 p99=0.014 p99.9=0.024 max=0.080 mean=0.005 (ms)
+durable points 21, segment fsyncs 9040, final durable point 1.4 ms
+
+--- write amplification ---
+logical: store keys+values 255.7 MiB + payloads 945.5 MiB = 1201.2 MiB
+process disk writes 3603.2 MiB  ->  WA(io) 3.00x
+on-disk growth: store 319.5 MiB + segments 968.7 MiB = 1288.2 MiB  ->  WA(files) 1.07x  (store alone 1.25x of its own 255.7 MiB of rows)
+segment files: 193643 frames, 967.7 MiB appended, 3996 files, engine reports 319.5 MiB of store
+
+--- RSS ---
+start 3.8 MiB, end 349.4 MiB
+max 349.4 MiB over 21 samples
+series 1s:18M 3s:36M 5s:55M 6s:70M 8s:85M 10s:100M 11s:114M 13s:128M 15s:144M 16s:157M 18s:171M 20s:183M 22s:199M 24s:215M 26s:233M 28s:250M 30s:270M 33s:288M 35s:313M 38s:332M 41s:349M
+
+--- ordered iteration (dedup, the ratified store's largest keyspace) ---
+1936430 rows, 59.1 MiB in 0.04 s = 47508 k rows/s, 1450 MiB/s
+
+--- ordered iteration (seg_loc table as it stands) ---
+193643 rows, 9.2 MiB in 0.00 s = 41469 k rows/s, 1977 MiB/s
+
+--- clean reopen ---
+open 2 ms (fresh) / 1 ms (populated); applied index Some((193642, 1, 1789713019517621)), durable index Some((193642, 1, 1789713019517621))
+
+RESULT engine=heed rate=50000 batch=10 payload=512 duration=40.8 entries=193643 msgs=1936430 entries_per_s=4742 msgs_per_s=47425 nondur_p50_ms=1.791 nondur_p99_ms=16.383 nondur_p999_ms=21.503 dur_p50_ms=770.047 dur_p99_ms=1703.935 dur_max_ms=1699.059 fsync_p99_ms=1409.023 read_p99_ms=0.004 list_p99_ms=0.014 wa_io=3.00 wa_files=1.07 logical_mib=1201.2 io_mib=3603.2 store_growth_mib=319.5 seg_growth_mib=968.7 rss_start_mib=3.8 rss_max_mib=349.4 rss_end_mib=349.4 export_mib=0.0 export_ms=0 scan_rows=193643 scan_rows_per_s=41469351 reopen_ms=1 max_lag_ms=1903.8 late_entries=127394 durable_points=21 shape=ratified store_commits=2650 store_commits_per_s=65 entries_per_commit=73.1 dedup_rows=1936430 heed_flags=nosync heed_no_tls=false 

@@ -1,0 +1,8 @@
+flaky: engine=redb runs=5 rate=20000 run_s=20 size=4096MiB
+run 1 -> VERIFY PASS agree=true torn=false applied=20037 durable=20037 past_durable=false checked=20038 rows=20038 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=129 verify_ms=222
+run 2 -> VERIFY PASS agree=true torn=false applied=22671 durable=22671 past_durable=false checked=22672 rows=22672 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=140 verify_ms=247
+run 3 -> VERIFY PASS agree=true torn=false applied=20131 durable=20131 past_durable=false checked=20132 rows=20132 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=134 verify_ms=227
+run 4 -> VERIFY PASS agree=true torn=false applied=20170 durable=20170 past_durable=false checked=20171 rows=20171 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=130 verify_ms=229
+run 5 -> VERIFY PASS agree=true torn=false applied=20089 durable=20089 past_durable=false checked=20090 rows=20090 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=132 verify_ms=223
+
+SUMMARY engine=redb runs=5 pass=5 fail=0 reopened_past_durable=0 no_reopen=0

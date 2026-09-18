@@ -1,0 +1,72 @@
+=== s1-store reads (heed) === /private/tmp/claude-502/-Users-alice-Work-queen/e561891e-3c5f-4589-8141-dd6b961a2d37/scratchpad/s1-refute/heed-r
+config      heed 0.22.1 / LMDB, flags MDB_NOSYNC, thread-local reader slots (RoTxn is NOT Send, nested read txns illegal), max_readers 512
+threads     1, duration 4 s, 1 prefix list per 8 gets
+gets  12882752 (3220688/s aggregate) n=12882752 p50=0.000 p90=0.000 p99=0.000 p99.9=0.000 max=0.356 mean=0.000 (ms)
+lists 1610344 (402586/s aggregate) n=1610344 p50=0.000 p90=0.000 p99=0.000 p99.9=0.003 max=0.522 mean=0.000 (ms)
+RESULT-READS engine=heed threads=1 duration=4 heed_no_tls=false heed_flags=nosync gets=12882752 gets_per_s=3220688 get_p50_ms=0.000 get_p99_ms=0.000 lists=1610344 lists_per_s=402586 list_p50_ms=0.000 list_p99_ms=0.000
+=== s1-store reads (heed) === /private/tmp/claude-502/-Users-alice-Work-queen/e561891e-3c5f-4589-8141-dd6b961a2d37/scratchpad/s1-refute/heed-r
+config      heed 0.22.1 / LMDB, flags MDB_NOSYNC, MDB_NOTLS (RoTxn is Send, nested read txns legal), max_readers 512
+threads     1, duration 4 s, 1 prefix list per 8 gets
+gets  5244416 (1311104/s aggregate) n=5244416 p50=0.000 p90=0.000 p99=0.000 p99.9=0.001 max=0.237 mean=0.000 (ms)
+lists 655552 (163888/s aggregate) n=655552 p50=0.000 p90=0.001 p99=0.001 p99.9=0.002 max=0.048 mean=0.000 (ms)
+RESULT-READS engine=heed threads=1 duration=4 heed_no_tls=true heed_flags=nosync gets=5244416 gets_per_s=1311104 get_p50_ms=0.000 get_p99_ms=0.000 lists=655552 lists_per_s=163888 list_p50_ms=0.000 list_p99_ms=0.001
+=== s1-store reads (heed) === /private/tmp/claude-502/-Users-alice-Work-queen/e561891e-3c5f-4589-8141-dd6b961a2d37/scratchpad/s1-refute/heed-r
+config      heed 0.22.1 / LMDB, flags MDB_NOSYNC, thread-local reader slots (RoTxn is NOT Send, nested read txns illegal), max_readers 512
+threads     2, duration 4 s, 1 prefix list per 8 gets
+gets  25808320 (6452080/s aggregate) n=25808320 p50=0.000 p90=0.000 p99=0.000 p99.9=0.000 max=2.342 mean=0.000 (ms)
+lists 3226040 (806510/s aggregate) n=3226040 p50=0.000 p90=0.000 p99=0.000 p99.9=0.001 max=0.921 mean=0.000 (ms)
+RESULT-READS engine=heed threads=2 duration=4 heed_no_tls=false heed_flags=nosync gets=25808320 gets_per_s=6452080 get_p50_ms=0.000 get_p99_ms=0.000 lists=3226040 lists_per_s=806510 list_p50_ms=0.000 list_p99_ms=0.000
+=== s1-store reads (heed) === /private/tmp/claude-502/-Users-alice-Work-queen/e561891e-3c5f-4589-8141-dd6b961a2d37/scratchpad/s1-refute/heed-r
+config      heed 0.22.1 / LMDB, flags MDB_NOSYNC, MDB_NOTLS (RoTxn is Send, nested read txns legal), max_readers 512
+threads     2, duration 4 s, 1 prefix list per 8 gets
+gets  5004736 (1251184/s aggregate) n=5004736 p50=0.000 p90=0.003 p99=0.005 p99.9=0.011 max=2.832 mean=0.001 (ms)
+lists 625592 (156398/s aggregate) n=625592 p50=0.001 p90=0.004 p99=0.005 p99.9=0.012 max=0.368 mean=0.001 (ms)
+RESULT-READS engine=heed threads=2 duration=4 heed_no_tls=true heed_flags=nosync gets=5004736 gets_per_s=1251184 get_p50_ms=0.000 get_p99_ms=0.005 lists=625592 lists_per_s=156398 list_p50_ms=0.001 list_p99_ms=0.005
+=== s1-store reads (heed) === /private/tmp/claude-502/-Users-alice-Work-queen/e561891e-3c5f-4589-8141-dd6b961a2d37/scratchpad/s1-refute/heed-r
+config      heed 0.22.1 / LMDB, flags MDB_NOSYNC, thread-local reader slots (RoTxn is NOT Send, nested read txns illegal), max_readers 512
+threads     4, duration 4 s, 1 prefix list per 8 gets
+gets  48817408 (12204352/s aggregate) n=48817408 p50=0.000 p90=0.000 p99=0.000 p99.9=0.000 max=1.899 mean=0.000 (ms)
+lists 6102176 (1525544/s aggregate) n=6102176 p50=0.000 p90=0.000 p99=0.001 p99.9=0.006 max=1.075 mean=0.000 (ms)
+RESULT-READS engine=heed threads=4 duration=4 heed_no_tls=false heed_flags=nosync gets=48817408 gets_per_s=12204352 get_p50_ms=0.000 get_p99_ms=0.000 lists=6102176 lists_per_s=1525544 list_p50_ms=0.000 list_p99_ms=0.001
+=== s1-store reads (heed) === /private/tmp/claude-502/-Users-alice-Work-queen/e561891e-3c5f-4589-8141-dd6b961a2d37/scratchpad/s1-refute/heed-r
+config      heed 0.22.1 / LMDB, flags MDB_NOSYNC, MDB_NOTLS (RoTxn is Send, nested read txns legal), max_readers 512
+threads     4, duration 4 s, 1 prefix list per 8 gets
+gets  2558656 (639664/s aggregate) n=2558656 p50=0.001 p90=0.015 p99=0.042 p99.9=0.075 max=5.169 mean=0.005 (ms)
+lists 319832 (79958/s aggregate) n=319832 p50=0.002 p90=0.016 p99=0.043 p99.9=0.077 max=5.026 mean=0.006 (ms)
+RESULT-READS engine=heed threads=4 duration=4 heed_no_tls=true heed_flags=nosync gets=2558656 gets_per_s=639664 get_p50_ms=0.001 get_p99_ms=0.042 lists=319832 lists_per_s=79958 list_p50_ms=0.002 list_p99_ms=0.043
+=== s1-store reads (heed) === /private/tmp/claude-502/-Users-alice-Work-queen/e561891e-3c5f-4589-8141-dd6b961a2d37/scratchpad/s1-refute/heed-r
+config      heed 0.22.1 / LMDB, flags MDB_NOSYNC, thread-local reader slots (RoTxn is NOT Send, nested read txns illegal), max_readers 512
+threads     8, duration 4 s, 1 prefix list per 8 gets
+gets  45612352 (11403088/s aggregate) n=45612352 p50=0.000 p90=0.000 p99=0.000 p99.9=0.000 max=49.625 mean=0.000 (ms)
+lists 5701544 (1425386/s aggregate) n=5701544 p50=0.000 p90=0.001 p99=0.001 p99.9=0.009 max=42.766 mean=0.000 (ms)
+RESULT-READS engine=heed threads=8 duration=4 heed_no_tls=false heed_flags=nosync gets=45612352 gets_per_s=11403088 get_p50_ms=0.000 get_p99_ms=0.000 lists=5701544 lists_per_s=1425386 list_p50_ms=0.000 list_p99_ms=0.001
+=== s1-store reads (heed) === /private/tmp/claude-502/-Users-alice-Work-queen/e561891e-3c5f-4589-8141-dd6b961a2d37/scratchpad/s1-refute/heed-r
+config      heed 0.22.1 / LMDB, flags MDB_NOSYNC, MDB_NOTLS (RoTxn is Send, nested read txns legal), max_readers 512
+threads     8, duration 4 s, 1 prefix list per 8 gets
+gets  1172672 (293168/s aggregate) n=1172672 p50=0.005 p90=0.069 p99=0.199 p99.9=0.407 max=5.784 mean=0.024 (ms)
+lists 146584 (36646/s aggregate) n=146584 p50=0.006 p90=0.069 p99=0.195 p99.9=0.399 max=4.964 mean=0.024 (ms)
+RESULT-READS engine=heed threads=8 duration=4 heed_no_tls=true heed_flags=nosync gets=1172672 gets_per_s=293168 get_p50_ms=0.005 get_p99_ms=0.199 lists=146584 lists_per_s=36646 list_p50_ms=0.006 list_p99_ms=0.195
+=== s1-store reads (heed) === /private/tmp/claude-502/-Users-alice-Work-queen/e561891e-3c5f-4589-8141-dd6b961a2d37/scratchpad/s1-refute/heed-r
+config      heed 0.22.1 / LMDB, flags MDB_NOSYNC, thread-local reader slots (RoTxn is NOT Send, nested read txns illegal), max_readers 512
+threads     1, duration 1 s, 1 prefix list per 8 gets
+reader-slot probe: asked for 200 simultaneous read txns, opened 1, then: MDB_BAD_RSLOT: Invalid reuse of reader locktable slot
+READERS engine=heed asked=200 opened=1 err="MDB_BAD_RSLOT: Invalid reuse of reader locktable slot"
+gets  3297088 (3297088/s aggregate) n=3297088 p50=0.000 p90=0.000 p99=0.000 p99.9=0.000 max=0.077 mean=0.000 (ms)
+lists 412136 (412136/s aggregate) n=412136 p50=0.000 p90=0.000 p99=0.000 p99.9=0.001 max=0.058 mean=0.000 (ms)
+RESULT-READS engine=heed threads=1 duration=1 heed_no_tls=false heed_flags=nosync gets=3297088 gets_per_s=3297088 get_p50_ms=0.000 get_p99_ms=0.000 lists=412136 lists_per_s=412136 list_p50_ms=0.000 list_p99_ms=0.000
+=== s1-store reads (heed) === /private/tmp/claude-502/-Users-alice-Work-queen/e561891e-3c5f-4589-8141-dd6b961a2d37/scratchpad/s1-refute/heed-r
+config      heed 0.22.1 / LMDB, flags MDB_NOSYNC, MDB_NOTLS (RoTxn is Send, nested read txns legal), max_readers 512
+threads     1, duration 1 s, 1 prefix list per 8 gets
+reader-slot probe: asked for 300 simultaneous read txns, opened 300 (no ceiling hit)
+READERS engine=heed asked=300 opened=300 err=""
+gets  1309888 (1309888/s aggregate) n=1309888 p50=0.000 p90=0.000 p99=0.000 p99.9=0.001 max=0.050 mean=0.000 (ms)
+lists 163736 (163736/s aggregate) n=163736 p50=0.000 p90=0.001 p99=0.001 p99.9=0.003 max=0.056 mean=0.000 (ms)
+RESULT-READS engine=heed threads=1 duration=1 heed_no_tls=true heed_flags=nosync gets=1309888 gets_per_s=1309888 get_p50_ms=0.000 get_p99_ms=0.000 lists=163736 lists_per_s=163736 list_p50_ms=0.000 list_p99_ms=0.001
+=== s1-store reads (heed) === /private/tmp/claude-502/-Users-alice-Work-queen/e561891e-3c5f-4589-8141-dd6b961a2d37/scratchpad/s1-refute/heed-r
+config      heed 0.22.1 / LMDB, flags MDB_NOSYNC, MDB_NOTLS (RoTxn is Send, nested read txns legal), max_readers 64
+threads     1, duration 1 s, 1 prefix list per 8 gets
+reader-slot probe: asked for 100 simultaneous read txns, opened 64, then: MDB_READERS_FULL: Environment maxreaders limit reached
+READERS engine=heed asked=100 opened=64 err="MDB_READERS_FULL: Environment maxreaders limit reached"
+gets  733440 (733440/s aggregate) n=733440 p50=0.000 p90=0.001 p99=0.001 p99.9=0.005 max=9.000 mean=0.001 (ms)
+lists 91680 (91680/s aggregate) n=91680 p50=0.001 p90=0.002 p99=0.003 p99.9=0.106 max=4.466 mean=0.002 (ms)
+RESULT-READS engine=heed threads=1 duration=1 heed_no_tls=true heed_flags=nosync gets=733440 gets_per_s=733440 get_p50_ms=0.000 get_p99_ms=0.001 lists=91680 lists_per_s=91680 list_p50_ms=0.001 list_p99_ms=0.003

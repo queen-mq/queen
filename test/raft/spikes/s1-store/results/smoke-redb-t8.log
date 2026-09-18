@@ -1,0 +1,52 @@
+=== s1-store run ===
+host        macos/aarch64 Darwin alice.local 24.5.0 Darwin Kernel Version 24.5.0: Tue Apr 22 19:54:43 PDT 2025; root:xnu-11417.121.6~2/RELEASE_ARM64_T8132 arm64
+engine      redb
+dir         /private/tmp/claude-502/-Users-alice-Work-queen/e561891e-3c5f-4589-8141-dd6b961a2d37/scratchpad/wp-0.3/data/s-redb-8
+load        20000 msg/s, batch 10 -> 2000 entries/s, payload 512 B, 4096 partitions, 64 queues, 1 groups
+mix         kv 8000 ops/s over 200000 keys, timers 400 ops/s, request-id window 60 s
+durability  non-durable commit per entry, durable point every 1000 ms or 256 MiB; segment files roll at 0.25 MiB; fsync Full x8 threads; store cache 256 MiB; nofile=1048576
+label       laptop smoke fsync-threads=8
+
+--- throughput ---
+wall 60.9 s, 13627 entries (224/s target 2000/s), 136270 messages (2239 msg/s)
+store ops 350619 (5761/s), kv put/cas/del/list 32766/10916/21/2690, timers sched/fired 2725/1431, request ids expired 0
+pacing: max lag 47300.1 ms, entries more than 50 ms late 13596
+
+--- latency (ms) ---
+non-durable commit   n=13627 p50=0.455 p90=3.007 p99=8.447 p99.9=25.087 max=610.283 mean=1.197 (ms)
+entry total          n=13627 p50=0.639 p90=3.391 p99=10.751 p99.9=45.055 max=664.836 mean=1.590 (ms)
+durable point        n=21 p50=1212.415 p90=3801.087 p99=6160.383 p99.9=6160.383 max=6139.881 mean=1865.966 (ms)
+  of which seg fsync n=21 p50=802.815 p90=2064.383 p99=6160.383 p99.9=6160.383 max=6092.964 mean=1252.449 (ms)
+kv read (get)        n=19052 p50=0.003 p90=0.010 p99=0.040 p99.9=0.623 max=6.461 mean=0.007 (ms)
+kv prefix list       n=2690 p50=0.014 p90=0.026 p99=0.106 p99.9=1.215 max=2.172 mean=0.020 (ms)
+durable points 21, segment fsyncs 4657, final durable point 58.6 ms
+
+--- write amplification ---
+logical: store keys+values 14.6 MiB + payloads 66.5 MiB = 81.1 MiB
+process disk writes 2616.9 MiB  ->  WA(io) 32.25x
+on-disk growth: store 293.8 MiB + segments 68.6 MiB = 362.5 MiB  ->  WA(files) 4.47x  (store alone 20.13x of its own 14.6 MiB of rows)
+segment files: 13627 frames, 68.1 MiB appended, 394 files, engine reports 514.5 MiB of store
+
+--- RSS ---
+start 7.5 MiB, end 312.3 MiB
+max 315.1 MiB over 21 samples
+series 2s:34M 4s:44M 7s:93M 8s:136M 10s:144M 12s:209M 14s:246M 17s:277M 19s:307M 21s:230M 23s:237M 26s:295M 28s:311M 32s:271M 34s:269M 38s:271M 39s:272M 44s:262M 48s:267M 53s:311M 61s:315M
+
+--- consistent export (snapshot) ---
+logical dump (read txn)                   10.3 MiB in      243 ms (43 MiB/s)
+incremental checkpoint: no file-level incremental snapshot; persistent savepoints keep an older version alive inside the same file
+writer pause:           none (MVCC read txn), but held pages are not freed while it lives
+
+--- ordered iteration (segments table as it stands) ---
+13627 rows, 0.7 MiB in 0.00 s = 22862 k rows/s, 1221 MiB/s
+
+--- file growth and reclamation after deletes ---
+deleted 9540 segment rows (+ the same number of seg_loc rows) in 49 ms
+store: 294.4 MiB before -> 294.4 MiB after the deletes -> 23.2 MiB after maintenance (1789 ms)
+maintenance: Database::compact() -> true in 1789 ms
+segment files: 68.6 MiB before -> 60.4 MiB after unlinking 33 sealed files (8.2 MiB freed)
+
+--- clean reopen ---
+open 63 ms (fresh) / 11 ms (populated); applied index Some((13626, 1, 1789651660462512)), durable index Some((13626, 1, 1789651660462512))
+
+RESULT engine=redb rate=20000 batch=10 payload=512 duration=60.9 entries=13627 msgs=136270 entries_per_s=224 msgs_per_s=2239 nondur_p50_ms=0.455 nondur_p99_ms=8.447 nondur_p999_ms=25.087 dur_p50_ms=1212.415 dur_p99_ms=6160.383 dur_max_ms=6139.881 fsync_p99_ms=6160.383 read_p99_ms=0.040 list_p99_ms=0.106 wa_io=32.25 wa_files=4.47 logical_mib=81.1 io_mib=2616.9 store_growth_mib=293.8 seg_growth_mib=68.6 rss_start_mib=7.5 rss_max_mib=315.1 rss_end_mib=312.3 export_mib=10.3 export_ms=243 scan_rows=13627 scan_rows_per_s=22862483 reopen_ms=11 max_lag_ms=47300.1 late_entries=13596 durable_points=21 reclaim_rows=9540 reclaim_del_ms=49 store_before_mib=294.4 store_after_del_mib=294.4 store_after_maint_mib=23.2 maint_ms=1789 seg_files_unlinked=33

@@ -1,0 +1,47 @@
+=== s1-store run ===
+host        linux/x86_64 Linux queenpgless-01 6.8.0-124-generic #124-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:00:45 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+engine      fjall
+dir         /root/raft/s1-store/data-refute/fjall-50000
+load        50000 msg/s, batch 10 -> 5000 entries/s, payload 512 B, 4096 partitions, 64 queues, 1 groups
+mix         kv 20000 ops/s over 200000 keys, timers 1000 ops/s, request-id window 60 s
+shape       ratified (segments rows in store: false, dedup rows per message: true, dedup window 0 s)
+durability  store commit every 256 entries or 4 ms (§11.3 as amended at G0), durable point every 1000 ms or 256 MiB; segment files roll at 0.25 MiB; fsync Full x1 threads; store cache 256 MiB; nofile=4096
+config      fjall 2.11.2, Batch commit, PersistMode::SyncAll at the durable point
+
+--- throughput ---
+wall 40.0 s, 196102 entries (4902/s target 5000/s), 1961020 messages (49019 msg/s)
+store ops 6794086 (169828/s), kv put/cas/del/list 470329/157490/5513/39368, timers sched/fired 39220/8332, request ids expired 0
+dedup rows written 1961020 (49019/s), pruned 0
+pacing: max lag 736.2 ms, entries more than 50 ms late 103771
+
+--- latency (ms) ---
+non-durable store commit (3370 commits, 84/s, 58.2 entries per commit)
+non-durable commit   n=3344 p50=1.695 p90=8.703 p99=17.919 p99.9=38.911 max=54.062 mean=3.643 (ms)
+entry total          n=196102 p50=0.016 p90=0.067 p99=1.663 p99.9=9.471 max=54.083 mean=0.091 (ms)
+durable point        n=26 p50=540.671 p90=655.359 p99=786.431 p99.9=786.431 max=781.864 mean=537.442 (ms)
+  of which seg fsync n=26 p50=507.903 p90=606.207 p99=737.279 p99.9=737.279 max=734.140 mean=517.252 (ms)
+kv read (get)        n=274711 p50=0.002 p90=0.005 p99=0.029 p99.9=0.179 max=7.262 mean=0.005 (ms)
+kv prefix list       n=39368 p50=0.048 p90=0.061 p99=0.124 p99.9=0.815 max=17.402 mean=0.050 (ms)
+durable points 26, segment fsyncs 10320, final durable point 3.2 ms
+
+--- write amplification ---
+logical: store keys+values 258.9 MiB + payloads 957.5 MiB = 1216.4 MiB
+process disk writes 1615.8 MiB  ->  WA(io) 1.33x
+on-disk growth: store 119.0 MiB + segments 981.0 MiB = 1100.0 MiB  ->  WA(files) 0.90x  (store alone 0.46x of its own 258.9 MiB of rows)
+segment files: 196102 frames, 980.0 MiB appended, 4039 files, engine reports 496.6 MiB of store
+
+--- RSS ---
+start 4.3 MiB, end 193.8 MiB
+max 195.0 MiB over 26 samples
+series 1s:25M 4s:75M 7s:92M 10s:106M 14s:109M 17s:118M 20s:119M 23s:125M 26s:142M 29s:152M 32s:163M 35s:195M 38s:192M
+
+--- ordered iteration (dedup, the ratified store's largest keyspace) ---
+1961020 rows, 59.8 MiB in 0.51 s = 3827 k rows/s, 117 MiB/s
+
+--- ordered iteration (seg_loc table as it stands) ---
+196102 rows, 9.4 MiB in 0.10 s = 2054 k rows/s, 98 MiB/s
+
+--- clean reopen ---
+open 52 ms (fresh) / 457 ms (populated); applied index Some((196101, 1, 1789712936496708)), durable index Some((196101, 1, 1789712936496708))
+
+RESULT engine=fjall rate=50000 batch=10 payload=512 duration=40.0 entries=196102 msgs=1961020 entries_per_s=4902 msgs_per_s=49019 nondur_p50_ms=1.695 nondur_p99_ms=17.919 nondur_p999_ms=38.911 dur_p50_ms=540.671 dur_p99_ms=786.431 dur_max_ms=781.864 fsync_p99_ms=737.279 read_p99_ms=0.029 list_p99_ms=0.124 wa_io=1.33 wa_files=0.90 logical_mib=1216.4 io_mib=1615.8 store_growth_mib=119.0 seg_growth_mib=981.0 rss_start_mib=4.3 rss_max_mib=195.0 rss_end_mib=193.8 export_mib=0.0 export_ms=0 scan_rows=196102 scan_rows_per_s=2054249 reopen_ms=457 max_lag_ms=736.2 late_entries=103771 durable_points=26 shape=ratified store_commits=3370 store_commits_per_s=84 entries_per_commit=58.2 dedup_rows=1961020 heed_flags=nosync heed_no_tls=false 

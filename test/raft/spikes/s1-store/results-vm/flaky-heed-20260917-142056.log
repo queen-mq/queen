@@ -1,0 +1,8 @@
+flaky: engine=heed runs=5 rate=20000 run_s=20 size=4096MiB
+run 1 -> VERIFY PASS agree=true torn=false applied=36581 durable=36581 past_durable=false checked=36582 rows=36582 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=1 verify_ms=407
+run 2 -> VERIFY PASS agree=true torn=false applied=36586 durable=36586 past_durable=false checked=36587 rows=36587 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=2 verify_ms=404
+run 3 -> VERIFY PASS agree=true torn=false applied=36998 durable=36998 past_durable=false checked=36999 rows=36999 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=2 verify_ms=404
+run 4 -> VERIFY DID NOT RUN (store would not reopen)
+run 5 -> VERIFY PASS agree=true torn=false applied=37156 durable=37156 past_durable=false checked=37157 rows=37157 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=2 verify_ms=419
+
+SUMMARY engine=heed runs=5 pass=4 fail=0 reopened_past_durable=0 no_reopen=1

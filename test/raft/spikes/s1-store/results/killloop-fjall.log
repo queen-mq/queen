@@ -1,0 +1,18 @@
+kill-loop: engine=fjall runs=10 rate=20000 kill in [3000,12000] ms mode=mixed
+./kill-loop.sh: line 49: 13505 Killed: 9               "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 1 self/postcommit@5292ms rc=137 -> VERIFY PASS agree=true torn=false applied=483 durable=483 past_durable=false checked=484 rows=484 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=35 verify_ms=24
+run 2 external@3085ms rc=137 -> VERIFY PASS agree=true torn=false applied=273 durable=0 past_durable=true checked=274 rows=274 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=39 verify_ms=4
+./kill-loop.sh: line 49: 13594 Killed: 9               "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 3 self/precommit@10543ms rc=137 -> VERIFY PASS agree=true torn=false applied=1163 durable=1163 past_durable=false checked=1164 rows=1164 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=46 verify_ms=71
+run 4 external@6615ms rc=137 -> VERIFY PASS agree=true torn=false applied=781 durable=413 past_durable=true checked=782 rows=782 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=368 open_ms=44 verify_ms=8
+./kill-loop.sh: line 49: 13703 Killed: 9               "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 5 self/precommit@3443ms rc=137 -> VERIFY PASS agree=true torn=false applied=443 durable=402 past_durable=true checked=444 rows=444 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=41 open_ms=39 verify_ms=6
+run 6 external@10563ms rc=137 -> VERIFY PASS agree=true torn=false applied=849 durable=554 past_durable=true checked=850 rows=850 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=295 open_ms=67 verify_ms=13
+./kill-loop.sh: line 49: 13848 Killed: 9               "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 7 self/precommit@4931ms rc=137 -> VERIFY PASS agree=true torn=false applied=629 durable=629 past_durable=false checked=630 rows=630 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=41 verify_ms=8
+run 8 external@6840ms rc=137 -> VERIFY PASS agree=true torn=false applied=273 durable=0 past_durable=true checked=274 rows=274 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=42 verify_ms=5
+./kill-loop.sh: line 49: 13948 Killed: 9               "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 9 self/postcommit@3028ms rc=137 -> VERIFY PASS agree=true torn=false applied=305 durable=305 past_durable=false checked=306 rows=306 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=48 verify_ms=6
+run 10 external@3109ms rc=137 -> VERIFY PASS agree=true torn=false applied=317 durable=0 past_durable=true checked=318 rows=318 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=41 verify_ms=5
+
+SUMMARY engine=fjall runs=10 pass=10 fail=0 reopened_past_durable=6 torn_entries=0 no_reopen=0

@@ -1,0 +1,18 @@
+kill-loop: engine=heed runs=10 rate=20000 kill in [3000,12000] ms mode=mixed
+./kill-loop.sh: line 49: 14137 Killed: 9               "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 1 self/append@7299ms rc=137 -> VERIFY PASS agree=true torn=false applied=830 durable=830 past_durable=false checked=831 rows=831 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=6 verify_ms=31
+run 2 external@11238ms rc=137 -> VERIFY PASS agree=true torn=false applied=808 durable=610 past_durable=true checked=809 rows=809 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=198 open_ms=4 verify_ms=22
+./kill-loop.sh: line 49: 14273 Killed: 9               "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 3 self/precommit@8825ms rc=137 -> VERIFY PASS agree=true torn=false applied=781 durable=781 past_durable=false checked=782 rows=782 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=8 verify_ms=41
+run 4 external@4425ms rc=137 -> VERIFY PASS agree=true torn=false applied=264 durable=253 past_durable=true checked=265 rows=265 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=11 open_ms=5 verify_ms=4
+./kill-loop.sh: line 49: 14366 Killed: 9               "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 5 self/append@6200ms rc=137 -> VERIFY PASS agree=true torn=false applied=573 durable=434 past_durable=true checked=574 rows=574 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=139 open_ms=6 verify_ms=7
+run 6 external@10044ms rc=137 -> VERIFY PASS agree=true torn=false applied=914 durable=697 past_durable=true checked=915 rows=915 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=217 open_ms=7 verify_ms=174
+./kill-loop.sh: line 49: 14500 Killed: 9               "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 7 self/append@5635ms rc=137 -> VERIFY PASS agree=true torn=false applied=488 durable=488 past_durable=false checked=489 rows=489 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=4 verify_ms=25
+run 8 external@11907ms rc=137 -> VERIFY PASS agree=true torn=false applied=1081 durable=830 past_durable=true checked=1082 rows=1082 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=251 open_ms=6 verify_ms=57
+./kill-loop.sh: line 49: 14628 Killed: 9               "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 9 self/append@10723ms rc=137 -> VERIFY PASS agree=true torn=false applied=1062 durable=1062 past_durable=false checked=1063 rows=1063 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=6 verify_ms=76
+run 10 external@6394ms rc=137 -> VERIFY PASS agree=true torn=false applied=397 durable=203 past_durable=true checked=398 rows=398 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=194 open_ms=7 verify_ms=5
+
+SUMMARY engine=heed runs=10 pass=10 fail=0 reopened_past_durable=6 torn_entries=0 no_reopen=0

@@ -1,0 +1,6 @@
+=== s1-store iter (redb) === 2000000 keys of 16 B -> 40 B, 10000 per transaction
+load 2000000 keys in 42.8 s = 47 k keys/s; on disk 622.1 MiB (326.1 B/key, logical 56 B/key)
+pass 0: 2000000 rows, 106.8 MiB in 0.22 s = 9278 k rows/s, 495 MiB/s
+pass 1: 2000000 rows, 106.8 MiB in 0.18 s = 11200 k rows/s, 598 MiB/s
+range scan of 1000 rows: n=100 p50=0.025 p90=0.031 p99=0.051 p99.9=0.063 max=0.063 mean=0.027 (ms)
+RESULT-ITER engine=redb keys=2000000 load_s=42.8 load_keys_per_s=46716 disk_mib=622.1 bytes_per_key=326.1 scan_s=0.18 scan_rows_per_s=11199708 range1000_p50_ms=0.025 range1000_p99_ms=0.051

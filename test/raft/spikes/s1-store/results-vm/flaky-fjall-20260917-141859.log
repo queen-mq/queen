@@ -1,0 +1,8 @@
+flaky: engine=fjall runs=5 rate=20000 run_s=20 size=4096MiB
+run 1 -> VERIFY PASS agree=true torn=false applied=38257 durable=38257 past_durable=false checked=38258 rows=38258 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=1853 verify_ms=779
+run 2 -> VERIFY FAIL agree=false torn=false applied=38387 durable=36813 past_durable=true checked=38388 rows=38388 missing=0 badsum=0 shortfile=1574 cross_table_mismatch=0 beyond_recorded=1466 open_ms=1926 verify_ms=820
+run 3 -> VERIFY FAIL agree=false torn=false applied=38644 durable=37515 past_durable=true checked=38645 rows=38645 missing=0 badsum=0 shortfile=1129 cross_table_mismatch=0 beyond_recorded=1085 open_ms=1942 verify_ms=851
+run 4 -> VERIFY FAIL agree=false torn=false applied=37899 durable=35787 past_durable=true checked=37900 rows=37900 missing=0 badsum=0 shortfile=256 cross_table_mismatch=0 beyond_recorded=1891 open_ms=1861 verify_ms=762
+run 5 -> VERIFY FAIL agree=false torn=false applied=38895 durable=37195 past_durable=true checked=38896 rows=38896 missing=0 badsum=0 shortfile=1700 cross_table_mismatch=0 beyond_recorded=1568 open_ms=1898 verify_ms=857
+
+SUMMARY engine=fjall runs=5 pass=1 fail=4 reopened_past_durable=4 no_reopen=0

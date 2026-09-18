@@ -1,0 +1,2 @@
+=== s1-store iter (redb) === 10000000 keys of 16 B -> 40 B, 10000 per transaction
+1418	/private/tmp/claude-502/-Users-alice-Work-queen/e561891e-3c5f-4589-8141-dd6b961a2d37/scratchpad/wp-0.3/data/iter-redb

@@ -1,0 +1,43 @@
+flaky: engine=redb runs=5 rate=20000 run_s=20 size=4096MiB
+run 1 -> VERIFY PASS agree=true torn=false applied=20037 durable=20037 past_durable=false checked=20038 rows=20038 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=129 verify_ms=222
+run 2 -> VERIFY PASS agree=true torn=false applied=22671 durable=22671 past_durable=false checked=22672 rows=22672 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=140 verify_ms=247
+run 3 -> VERIFY PASS agree=true torn=false applied=20131 durable=20131 past_durable=false checked=20132 rows=20132 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=134 verify_ms=227
+run 4 -> VERIFY PASS agree=true torn=false applied=20170 durable=20170 past_durable=false checked=20171 rows=20171 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=130 verify_ms=229
+run 5 -> VERIFY PASS agree=true torn=false applied=20089 durable=20089 past_durable=false checked=20090 rows=20090 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=132 verify_ms=223
+
+SUMMARY engine=redb runs=5 pass=5 fail=0 reopened_past_durable=0 no_reopen=0
+flaky: engine=heed runs=5 rate=20000 run_s=20 size=4096MiB
+run 1 -> VERIFY PASS agree=true torn=false applied=37321 durable=37321 past_durable=false checked=37322 rows=37322 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=2 verify_ms=420
+run 2 -> VERIFY PASS agree=true torn=false applied=37046 durable=37046 past_durable=false checked=37047 rows=37047 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=37 verify_ms=423
+run 3 -> VERIFY PASS agree=true torn=false applied=36369 durable=36369 past_durable=false checked=36370 rows=36370 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=2 verify_ms=421
+run 4 -> VERIFY PASS agree=true torn=false applied=37464 durable=37464 past_durable=false checked=37465 rows=37465 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=2 verify_ms=428
+run 5 -> VERIFY PASS agree=true torn=false applied=35854 durable=35854 past_durable=false checked=35855 rows=35855 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=1 verify_ms=410
+
+SUMMARY engine=heed runs=5 pass=5 fail=0 reopened_past_durable=0 no_reopen=0
+kill-loop: engine=redb runs=15 rate=20000 kill in [3000,12000] ms mode=mixed
+./kill-loop.sh: line 49: 98270 Killed                  "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 1 self/postcommit@9363ms rc=137 -> VERIFY PASS agree=true torn=false applied=14884 durable=14884 past_durable=false checked=14885 rows=14885 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=66 verify_ms=90
+run 2 external@7937ms rc=137 -> VERIFY PASS agree=true torn=false applied=10073 durable=10073 past_durable=false checked=10074 rows=10074 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=371 verify_ms=60
+./kill-loop.sh: line 49: 98298 Killed                  "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 3 self/postcommit@5211ms rc=137 -> VERIFY PASS agree=true torn=false applied=7525 durable=7525 past_durable=false checked=7526 rows=7526 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=58 verify_ms=45
+run 4 external@7689ms rc=137 -> VERIFY PASS agree=true torn=false applied=9943 durable=9943 past_durable=false checked=9944 rows=9944 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=335 verify_ms=61
+./kill-loop.sh: line 49: 98324 Killed                  "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 5 self/postcommit@5252ms rc=137 -> VERIFY PASS agree=true torn=false applied=7584 durable=7584 past_durable=false checked=7585 rows=7585 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=119 verify_ms=46
+run 6 external@5760ms rc=137 -> VERIFY PASS agree=true torn=false applied=7590 durable=7590 past_durable=false checked=7591 rows=7591 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=162 verify_ms=46
+./kill-loop.sh: line 49: 98349 Killed                  "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 7 self/precommit@10801ms rc=137 -> VERIFY PASS agree=true torn=false applied=14901 durable=14901 past_durable=false checked=14902 rows=14902 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=66 verify_ms=90
+run 8 external@11245ms rc=137 -> VERIFY PASS agree=true torn=false applied=14865 durable=14865 past_durable=false checked=14866 rows=14866 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=118 verify_ms=90
+./kill-loop.sh: line 49: 98381 Killed                  "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 9 self/precommit@10255ms rc=137 -> VERIFY PASS agree=true torn=false applied=12516 durable=12516 past_durable=false checked=12517 rows=12517 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=425 verify_ms=76
+run 10 external@5499ms rc=137 -> VERIFY PASS agree=true torn=false applied=7497 durable=7497 past_durable=false checked=7498 rows=7498 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=203 verify_ms=44
+./kill-loop.sh: line 49: 98408 Killed                  "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 11 self/append@10679ms rc=137 -> VERIFY PASS agree=true torn=false applied=14880 durable=14880 past_durable=false checked=14881 rows=14881 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=66 verify_ms=91
+run 12 external@9236ms rc=137 -> VERIFY PASS agree=true torn=false applied=12389 durable=12389 past_durable=false checked=12390 rows=12390 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=243 verify_ms=75
+./kill-loop.sh: line 49: 98438 Killed                  "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 13 self/postcommit@6316ms rc=137 -> VERIFY PASS agree=true torn=false applied=9987 durable=9987 past_durable=false checked=9988 rows=9988 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=60 verify_ms=61
+run 14 external@9526ms rc=137 -> VERIFY PASS agree=true torn=false applied=12446 durable=12446 past_durable=false checked=12447 rows=12447 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=465 verify_ms=75
+./kill-loop.sh: line 49: 98464 Killed                  "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 15 self/append@4589ms rc=137 -> VERIFY PASS agree=true torn=false applied=7515 durable=7515 past_durable=false checked=7516 rows=7516 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=57 verify_ms=46
+
+SUMMARY engine=redb runs=15 pass=15 fail=0 reopened_past_durable=0 torn_entries=0 no_reopen=0
+EXTRA-DONE

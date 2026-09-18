@@ -1,0 +1,7 @@
+=== s1-store iter (heed) === 10000000 keys of 16 B -> 40 B, 10000 per transaction
+load 10000000 keys in 74.8 s = 134 k keys/s; on disk 1322.0 MiB (138.6 B/key, logical 56 B/key)
+pass 0: 10000000 rows, 534.1 MiB in 0.15 s = 65144 k rows/s, 3479 MiB/s
+pass 1: 10000000 rows, 534.1 MiB in 0.08 s = 118916 k rows/s, 6351 MiB/s
+range scan of 1000 rows: n=100 p50=0.013 p90=0.014 p99=0.017 p99.9=0.020 max=0.020 mean=0.013 (ms)
+RESULT-ITER engine=heed keys=10000000 load_s=74.8 load_keys_per_s=133626 disk_mib=1322.0 bytes_per_key=138.6 scan_s=0.08 scan_rows_per_s=118915845 range1000_p50_ms=0.013 range1000_p99_ms=0.017
+1323	/private/tmp/claude-502/-Users-alice-Work-queen/e561891e-3c5f-4589-8141-dd6b961a2d37/scratchpad/wp-0.3/data/iter-heed

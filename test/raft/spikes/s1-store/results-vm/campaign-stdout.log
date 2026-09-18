@@ -1,0 +1,141 @@
+[14:00:00] campaign profile=short steps=matrix,kill,flaky,soak host=queenpgless-01 kernel=6.8.0-124-generic
+[14:00:00] engines=redb fjall heed rates=20000 50000 100000 matrix_dur=90s kill_runs=15 flaky_runs=5 soak=600s
+[14:00:00] STEP 1 matrix: 3 engines x 3 rates x 90s
+=== redb @ 20000 msg/s for 90s -> ./results-vm/redb-20000.log
+msgs_per_s=10046 nondur_p99_ms=0.543 dur_p99_ms=1802.239 wa_io=29.31 rss_max_mib=249.8 
+=== redb @ 50000 msg/s for 90s -> ./results-vm/redb-50000.log
+msgs_per_s=10260 nondur_p99_ms=0.543 dur_p99_ms=1671.167 wa_io=29.36 rss_max_mib=250.7 
+=== redb @ 100000 msg/s for 90s -> ./results-vm/redb-100000.log
+msgs_per_s=9909 nondur_p99_ms=0.543 dur_p99_ms=1933.311 wa_io=29.28 rss_max_mib=250.2 
+=== fjall @ 20000 msg/s for 90s -> ./results-vm/fjall-20000.log
+msgs_per_s=20000 nondur_p99_ms=0.295 dur_p99_ms=606.207 wa_io=1.38 rss_max_mib=155.1 
+=== fjall @ 50000 msg/s for 90s -> ./results-vm/fjall-50000.log
+msgs_per_s=49905 nondur_p99_ms=0.175 dur_p99_ms=884.735 wa_io=1.35 rss_max_mib=553.9 
+=== fjall @ 100000 msg/s for 90s -> ./results-vm/fjall-100000.log
+msgs_per_s=67641 nondur_p99_ms=0.171 dur_p99_ms=1032.191 wa_io=1.36 rss_max_mib=717.4 
+=== heed @ 20000 msg/s for 90s -> ./results-vm/heed-20000.log
+msgs_per_s=20000 nondur_p99_ms=0.122 dur_p99_ms=786.431 wa_io=3.30 rss_max_mib=182.0 
+=== heed @ 50000 msg/s for 90s -> ./results-vm/heed-50000.log
+msgs_per_s=48783 nondur_p99_ms=0.116 dur_p99_ms=1474.559 wa_io=2.86 rss_max_mib=445.2 
+=== heed @ 100000 msg/s for 90s -> ./results-vm/heed-100000.log
+msgs_per_s=58958 nondur_p99_ms=0.119 dur_p99_ms=1409.023 wa_io=2.80 rss_max_mib=528.4 
+
+=== matrix (./results-vm/matrix-20260917-140000.tsv) ===
+engine      rate      msg/s    nd_p50    nd_p99   dur_p50   dur_p99    WA_io  WA_disk rssMaxMiB reopen_ms
+redb       20000      10046     0.399     0.543  1409.023  1802.239    29.31     2.42     249.8         2
+redb       50000      10260     0.399     0.543  1310.719  1671.167    29.36     2.37     250.7         1
+redb      100000       9909     0.399     0.543  1376.255  1933.311    29.28     2.46     250.2         2
+fjall      20000      20000     0.047     0.295   360.447   606.207     1.38     0.89     155.1         3
+fjall      50000      49905     0.042     0.175   573.439   884.735     1.35     0.89     553.9         4
+fjall     100000      67641     0.044     0.171   688.127  1032.191     1.36     0.89     717.4         5
+heed       20000      20000     0.065     0.122   475.135   786.431     3.30     1.00     182.0         0
+heed       50000      48783     0.067     0.116   901.119  1474.559     2.86     1.00     445.2         0
+heed      100000      58958     0.068     0.119  1015.807  1409.023     2.80     1.00     528.4         0
+
+full lines: ./results-vm/matrix-20260917-140000.tsv ; logs: ./results-vm/<engine>-<rate>.log
+[14:14:12] STEP 1 done after 852s
+[14:14:12] top two engines by achieved msg/s: fjall heed  ; leading engine for the soak: fjall
+[14:14:12] STEP 2 kill -9 loop: 15 runs for each of [fjall heed ]
+kill-loop: engine=fjall runs=15 rate=20000 kill in [3000,12000] ms mode=mixed
+./kill-loop.sh: line 49: 90591 Killed                  "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 1 self/precommit@6870ms rc=137 -> VERIFY PASS agree=true torn=false applied=13738 durable=12203 past_durable=true checked=13739 rows=13739 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=1401 open_ms=529 verify_ms=101
+run 2 external@3419ms rc=137 -> VERIFY PASS agree=true torn=false applied=6685 durable=4524 past_durable=true checked=6686 rows=6686 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=2149 open_ms=234 verify_ms=47
+./kill-loop.sh: line 49: 90642 Killed                  "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 3 self/append@11558ms rc=137 -> VERIFY PASS agree=true torn=false applied=22681 durable=22681 past_durable=false checked=22682 rows=22682 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=913 verify_ms=165
+run 4 external@10287ms rc=137 -> VERIFY PASS agree=true torn=false applied=20447 durable=17805 past_durable=true checked=20448 rows=20448 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=2308 open_ms=821 verify_ms=155
+./kill-loop.sh: line 49: 90756 Killed                  "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 5 self/append@4653ms rc=137 -> VERIFY PASS agree=true torn=false applied=9300 durable=7144 past_durable=true checked=9301 rows=9301 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=2066 open_ms=339 verify_ms=66
+run 6 external@11725ms rc=137 -> VERIFY PASS agree=true torn=false applied=22820 durable=20160 past_durable=true checked=22821 rows=22821 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=2327 open_ms=931 verify_ms=168
+./kill-loop.sh: line 49: 90866 Killed                  "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 7 self/append@4492ms rc=137 -> VERIFY PASS agree=true torn=false applied=8981 durable=7072 past_durable=true checked=8982 rows=8982 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=1841 open_ms=321 verify_ms=65
+run 8 external@3512ms rc=137 -> VERIFY PASS agree=true torn=false applied=6854 durable=4552 past_durable=true checked=6855 rows=6855 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=2287 open_ms=278 verify_ms=50
+./kill-loop.sh: line 49: 90967 Killed                  "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 9 self/precommit@11836ms rc=137 -> VERIFY PASS agree=true torn=false applied=23665 durable=22644 past_durable=true checked=23666 rows=23666 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=941 open_ms=967 verify_ms=177
+run 10 external@5939ms rc=137 -> VERIFY PASS agree=true torn=false applied=11740 durable=9606 past_durable=true checked=11741 rows=11741 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=1787 open_ms=451 verify_ms=84
+./kill-loop.sh: line 49: 91059 Killed                  "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 11 self/precommit@10090ms rc=137 -> VERIFY PASS agree=true torn=false applied=20178 durable=17558 past_durable=true checked=20179 rows=20179 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=2326 open_ms=816 verify_ms=149
+run 12 external@11044ms rc=137 -> VERIFY PASS agree=true torn=false applied=21943 durable=20171 past_durable=true checked=21944 rows=21944 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=1638 open_ms=890 verify_ms=161
+./kill-loop.sh: line 49: 91109 Killed                  "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 13 self/append@10750ms rc=137 -> VERIFY PASS agree=true torn=false applied=21497 durable=19715 past_durable=true checked=21498 rows=21498 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=1661 open_ms=910 verify_ms=159
+run 14 external@8188ms rc=137 -> VERIFY PASS agree=true torn=false applied=16208 durable=15169 past_durable=true checked=16209 rows=16209 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=980 open_ms=642 verify_ms=121
+./kill-loop.sh: line 49: 91159 Killed                  "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 15 self/postcommit@9202ms rc=137 -> VERIFY PASS agree=true torn=false applied=18399 durable=17475 past_durable=true checked=18400 rows=18400 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=876 open_ms=743 verify_ms=135
+
+SUMMARY engine=fjall runs=15 pass=15 fail=0 reopened_past_durable=14 torn_entries=0 no_reopen=0
+[14:16:33]   kill-loop fjall rc=0
+kill-loop: engine=heed runs=15 rate=20000 kill in [3000,12000] ms mode=mixed
+./kill-loop.sh: line 49: 91198 Killed                  "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 1 self/postcommit@8628ms rc=137 -> VERIFY PASS agree=true torn=false applied=17256 durable=14664 past_durable=true checked=17257 rows=17257 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=2267 open_ms=24 verify_ms=102
+run 2 external@10521ms rc=137 -> VERIFY PASS agree=true torn=false applied=20476 durable=17680 past_durable=true checked=20477 rows=20477 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=2456 open_ms=38 verify_ms=118
+./kill-loop.sh: line 49: 91223 Killed                  "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 3 self/append@6293ms rc=137 -> VERIFY PASS agree=true torn=false applied=12379 durable=12379 past_durable=false checked=12380 rows=12380 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=0 verify_ms=72
+run 4 external@11801ms rc=137 -> VERIFY PASS agree=true torn=false applied=23571 durable=22702 past_durable=true checked=23572 rows=23572 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=805 open_ms=31 verify_ms=136
+./kill-loop.sh: line 49: 91249 Killed                  "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 5 self/append@11066ms rc=137 -> VERIFY PASS agree=true torn=false applied=22131 durable=20126 past_durable=true checked=22132 rows=22132 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=1817 open_ms=70 verify_ms=133
+run 6 external@9240ms rc=137 -> VERIFY PASS agree=true torn=false applied=17793 durable=17793 past_durable=false checked=17794 rows=17794 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=0 verify_ms=102
+./kill-loop.sh: line 49: 91275 Killed                  "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 7 self/postcommit@9395ms rc=137 -> VERIFY PASS agree=true torn=false applied=18701 durable=18700 past_durable=true checked=18702 rows=18702 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=1 open_ms=1 verify_ms=111
+run 8 external@11361ms rc=137 -> VERIFY PASS agree=true torn=false applied=22686 durable=20772 past_durable=true checked=22687 rows=22687 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=1741 open_ms=35 verify_ms=138
+./kill-loop.sh: line 49: 91299 Killed                  "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 9 self/postcommit@8925ms rc=137 -> VERIFY PASS agree=true torn=false applied=17483 durable=17482 past_durable=true checked=17484 rows=17484 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=1 open_ms=1 verify_ms=106
+run 10 external@10179ms rc=137 -> VERIFY PASS agree=true torn=false applied=20323 durable=17509 past_durable=true checked=20324 rows=20324 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=2445 open_ms=46 verify_ms=119
+./kill-loop.sh: line 49: 91322 Killed                  "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 11 self/append@3712ms rc=137 -> VERIFY PASS agree=true torn=false applied=7157 durable=7157 past_durable=false checked=7158 rows=7158 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=0 verify_ms=42
+run 12 external@8556ms rc=137 -> VERIFY PASS agree=true torn=false applied=17083 durable=15027 past_durable=true checked=17084 rows=17084 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=1829 open_ms=22 verify_ms=99
+./kill-loop.sh: line 49: 91344 Killed                  "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 13 self/postcommit@10341ms rc=137 -> VERIFY PASS agree=true torn=false applied=20682 durable=18179 past_durable=true checked=20683 rows=20683 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=2225 open_ms=27 verify_ms=120
+run 14 external@11808ms rc=137 -> VERIFY PASS agree=true torn=false applied=23230 durable=22930 past_durable=true checked=23231 rows=23231 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=281 open_ms=21 verify_ms=135
+./kill-loop.sh: line 49: 91371 Killed                  "$BIN" run --engine "$ENGINE" --dir "$DIR" --rate "$RATE" --duration 600 --segment-bytes 262144 --self-kill-after-ms "$at" --kill-point "$point" $EXTRA > "$OUT/.kill-run.log" 2>&1
+run 15 self/precommit@10686ms rc=137 -> VERIFY PASS agree=true torn=false applied=20801 durable=20753 past_durable=true checked=20802 rows=20802 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=46 open_ms=9 verify_ms=122
+
+SUMMARY engine=heed runs=15 pass=15 fail=0 reopened_past_durable=12 torn_entries=0 no_reopen=0
+[14:18:59]   kill-loop heed rc=0
+[14:18:59] STEP 2 done after 1139s
+[14:18:59] STEP 3 dropped unflushed writes (dm-flakey): 5 runs for each of [fjall heed ]
+flaky: engine=fjall runs=5 rate=20000 run_s=20 size=4096MiB
+run 1 -> VERIFY PASS agree=true torn=false applied=38257 durable=38257 past_durable=false checked=38258 rows=38258 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=1853 verify_ms=779
+run 2 -> VERIFY FAIL agree=false torn=false applied=38387 durable=36813 past_durable=true checked=38388 rows=38388 missing=0 badsum=0 shortfile=1574 cross_table_mismatch=0 beyond_recorded=1466 open_ms=1926 verify_ms=820
+run 3 -> VERIFY FAIL agree=false torn=false applied=38644 durable=37515 past_durable=true checked=38645 rows=38645 missing=0 badsum=0 shortfile=1129 cross_table_mismatch=0 beyond_recorded=1085 open_ms=1942 verify_ms=851
+run 4 -> VERIFY FAIL agree=false torn=false applied=37899 durable=35787 past_durable=true checked=37900 rows=37900 missing=0 badsum=0 shortfile=256 cross_table_mismatch=0 beyond_recorded=1891 open_ms=1861 verify_ms=762
+run 5 -> VERIFY FAIL agree=false torn=false applied=38895 durable=37195 past_durable=true checked=38896 rows=38896 missing=0 badsum=0 shortfile=1700 cross_table_mismatch=0 beyond_recorded=1568 open_ms=1898 verify_ms=857
+
+SUMMARY engine=fjall runs=5 pass=1 fail=4 reopened_past_durable=4 no_reopen=0
+[14:20:56]   flaky fjall rc=0
+flaky: engine=heed runs=5 rate=20000 run_s=20 size=4096MiB
+run 1 -> VERIFY PASS agree=true torn=false applied=36581 durable=36581 past_durable=false checked=36582 rows=36582 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=1 verify_ms=407
+run 2 -> VERIFY PASS agree=true torn=false applied=36586 durable=36586 past_durable=false checked=36587 rows=36587 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=2 verify_ms=404
+run 3 -> VERIFY PASS agree=true torn=false applied=36998 durable=36998 past_durable=false checked=36999 rows=36999 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=2 verify_ms=404
+run 4 -> VERIFY DID NOT RUN (store would not reopen)
+./flaky.sh: line 74: 92439 Bus error               (core dumped) "$BIN" verify --engine "$ENGINE" --dir "$DIR" >> "$LOG" 2>&1
+run 5 -> VERIFY PASS agree=true torn=false applied=37156 durable=37156 past_durable=false checked=37157 rows=37157 missing=0 badsum=0 shortfile=0 cross_table_mismatch=0 beyond_recorded=0 open_ms=2 verify_ms=419
+
+SUMMARY engine=heed runs=5 pass=4 fail=0 reopened_past_durable=0 no_reopen=1
+[14:22:40]   flaky heed rc=0
+No devices found
+[14:22:40] STEP 3 done after 1360s
+[14:22:40] STEP 4 soak: fjall at 50000 msg/s for 600s, RSS every 5 s, growth every 30 s, delete 30% at 360s
+[14:33:14]   soak rc=0 -> ./results-vm/soak-fjall-50000-20260917-140000.log
+GROWTH t_s=0.0 rss_mib=4.3 store_mib=0.2 seg_mib=0.0 seg_files=256 entries=0 msgs=0
+GROWTH t_s=30.0 rss_mib=151.8 store_mib=65.0 seg_mib=751.1 seg_files=281 entries=150001 msgs=1500010
+GROWTH t_s=60.0 rss_mib=310.3 store_mib=101.8 seg_mib=1491.6 seg_files=514 entries=297974 msgs=2979740
+GROWTH t_s=90.0 rss_mib=566.3 store_mib=144.6 seg_mib=2249.9 seg_files=687 entries=449504 msgs=4495040
+GROWTH t_s=120.0 rss_mib=703.9 store_mib=178.0 seg_mib=3003.6 seg_files=888 entries=600133 msgs=6001330
+GROWTH t_s=150.2 rss_mib=717.4 store_mib=209.7 seg_mib=3748.6 seg_files=1063 entries=748979 msgs=7489790
+GROWTH t_s=180.3 rss_mib=751.8 store_mib=243.8 seg_mib=4503.1 seg_files=1253 entries=899766 msgs=8997660
+GROWTH t_s=210.7 rss_mib=778.6 store_mib=278.1 seg_mib=5260.3 seg_files=1436 entries=1051062 msgs=10510620
+GROWTH t_s=240.8 rss_mib=763.6 store_mib=316.9 seg_mib=6012.6 seg_files=1641 entries=1201388 msgs=12013880
+GROWTH t_s=270.9 rss_mib=764.5 store_mib=355.1 seg_mib=6778.0 seg_files=1816 entries=1354349 msgs=13543490
+GROWTH t_s=301.2 rss_mib=813.8 store_mib=387.6 seg_mib=7525.7 seg_files=2009 entries=1503769 msgs=15037690
+GROWTH t_s=331.5 rss_mib=827.3 store_mib=422.5 seg_mib=8282.6 seg_files=2214 entries=1655021 msgs=16550210
+MIDDELETE t_s=374.5 pct=30 rows_written=1797240 rows_deleted=540008 del_ms=1777 maint_ms=12302 store_before_mib=472.5 store_after_del_mib=479.2 store_after_maint_mib=289.9 seg_before_mib=8994.3 seg_after_unlink_mib=6828.4 seg_after_maint_mib=6828.4 files_unlinked=541 files_freed_mib=2162.8 rss_mib=815.3 maint="rotate_memtable + major_compact on 13 partitions in 12302 ms"
+GROWTH t_s=375.0 rss_mib=823.0 store_mib=296.6 seg_mib=6828.4 seg_files=1840 entries=1797241 msgs=17972410
+GROWTH t_s=405.0 rss_mib=824.6 store_mib=376.9 seg_mib=7590.3 seg_files=2028 entries=1949500 msgs=19495000
+GROWTH t_s=435.0 rss_mib=850.0 store_mib=409.4 seg_mib=8336.8 seg_files=2214 entries=2098668 msgs=20986680
+GROWTH t_s=465.0 rss_mib=862.2 store_mib=455.5 seg_mib=9078.3 seg_files=2399 entries=2246831 msgs=22468310
+GROWTH t_s=495.0 rss_mib=901.0 store_mib=490.0 seg_mib=9838.3 seg_files=2585 entries=2398713 msgs=23987130
+GROWTH t_s=525.1 rss_mib=909.1 store_mib=548.2 seg_mib=10586.9 seg_files=2779 entries=2548317 msgs=25483170
+GROWTH t_s=555.3 rss_mib=960.2 store_mib=572.0 seg_mib=11327.6 seg_files=2962 entries=2696314 msgs=26963140
+GROWTH t_s=585.3 rss_mib=978.2 store_mib=593.5 seg_mib=12070.9 seg_files=3140 entries=2844876 msgs=28448760
+RESULT engine=fjall rate=50000 batch=10 payload=512 duration=600.0 entries=2917232 msgs=29172320 entries_per_s=4862 msgs_per_s=48621 nondur_p50_ms=0.052 nondur_p99_ms=0.203 nondur_p999_ms=2.015 dur_p50_ms=442.367 dur_p99_ms=688.127 dur_max_ms=2400.406 fsync_p99_ms=622.591 read_p99_ms=0.101 list_p99_ms=0.120 wa_io=1.74 wa_files=0.74 logical_mib=17520.8 io_mib=30441.7 store_growth_mib=608.9 seg_growth_mib=12433.1 rss_start_mib=4.3 rss_max_mib=985.9 rss_end_mib=985.9 export_mib=1125.3 export_ms=12112 scan_rows=2377224 scan_rows_per_s=1345839 reopen_ms=13 max_lag_ms=2526.4 late_entries=2073381 durable_points=402 reclaim_rows=1027474 reclaim_del_ms=2373 store_before_mib=585.7 store_after_del_mib=668.5 store_after_maint_mib=356.8 maint_ms=15331 seg_files_unlinked=1299
+[14:33:16] STEP 4 done after 1996s
+[14:33:16] campaign finished in 1996s; journal ./results-vm/campaign-20260917-140000.log

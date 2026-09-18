@@ -1,0 +1,44 @@
+=== s1-store reads (heed) === /root/raft/s1-store/data-refute/heed-20000
+config      heed 0.22.1 / LMDB, flags MDB_NOSYNC, thread-local reader slots (RoTxn is NOT Send, nested read txns illegal), max_readers 512
+threads     1, duration 5 s, 1 prefix list per 8 gets
+gets  10510336 (2102067/s aggregate) n=10510336 p50=0.000 p90=0.000 p99=0.000 p99.9=0.000 max=0.429 mean=0.000 (ms)
+lists 1313792 (262758/s aggregate) n=1313792 p50=0.001 p90=0.001 p99=0.002 p99.9=0.009 max=0.113 mean=0.001 (ms)
+RESULT-READS engine=heed threads=1 duration=5 heed_no_tls=false heed_flags=nosync gets=10510336 gets_per_s=2102067 get_p50_ms=0.000 get_p99_ms=0.000 lists=1313792 lists_per_s=262758 list_p50_ms=0.001 list_p99_ms=0.002
+=== s1-store reads (heed) === /root/raft/s1-store/data-refute/heed-20000
+config      heed 0.22.1 / LMDB, flags MDB_NOSYNC, MDB_NOTLS (RoTxn is Send, nested read txns legal), max_readers 512
+threads     1, duration 5 s, 1 prefix list per 8 gets
+gets  10291072 (2058214/s aggregate) n=10291072 p50=0.000 p90=0.000 p99=0.000 p99.9=0.000 max=0.428 mean=0.000 (ms)
+lists 1286384 (257277/s aggregate) n=1286384 p50=0.001 p90=0.001 p99=0.002 p99.9=0.009 max=0.581 mean=0.001 (ms)
+RESULT-READS engine=heed threads=1 duration=5 heed_no_tls=true heed_flags=nosync gets=10291072 gets_per_s=2058214 get_p50_ms=0.000 get_p99_ms=0.000 lists=1286384 lists_per_s=257277 list_p50_ms=0.001 list_p99_ms=0.002
+=== s1-store reads (heed) === /root/raft/s1-store/data-refute/heed-20000
+config      heed 0.22.1 / LMDB, flags MDB_NOSYNC, thread-local reader slots (RoTxn is NOT Send, nested read txns illegal), max_readers 512
+threads     4, duration 5 s, 1 prefix list per 8 gets
+gets  40889664 (8177933/s aggregate) n=40889664 p50=0.000 p90=0.000 p99=0.000 p99.9=0.002 max=1.094 mean=0.000 (ms)
+lists 5111208 (1022242/s aggregate) n=5111208 p50=0.001 p90=0.001 p99=0.002 p99.9=0.009 max=0.853 mean=0.001 (ms)
+RESULT-READS engine=heed threads=4 duration=5 heed_no_tls=false heed_flags=nosync gets=40889664 gets_per_s=8177933 get_p50_ms=0.000 get_p99_ms=0.000 lists=5111208 lists_per_s=1022242 list_p50_ms=0.001 list_p99_ms=0.002
+=== s1-store reads (heed) === /root/raft/s1-store/data-refute/heed-20000
+config      heed 0.22.1 / LMDB, flags MDB_NOSYNC, MDB_NOTLS (RoTxn is Send, nested read txns legal), max_readers 512
+threads     4, duration 5 s, 1 prefix list per 8 gets
+gets  9843968 (1968794/s aggregate) n=9843968 p50=0.001 p90=0.002 p99=0.004 p99.9=0.012 max=1.722 mean=0.001 (ms)
+lists 1230496 (246099/s aggregate) n=1230496 p50=0.002 p90=0.004 p99=0.007 p99.9=0.015 max=1.530 mean=0.003 (ms)
+RESULT-READS engine=heed threads=4 duration=5 heed_no_tls=true heed_flags=nosync gets=9843968 gets_per_s=1968794 get_p50_ms=0.001 get_p99_ms=0.004 lists=1230496 lists_per_s=246099 list_p50_ms=0.002 list_p99_ms=0.007
+=== s1-store reads (heed) === /root/raft/s1-store/data-refute/heed-20000
+config      heed 0.22.1 / LMDB, flags MDB_NOSYNC, thread-local reader slots (RoTxn is NOT Send, nested read txns illegal), max_readers 512
+threads     8, duration 5 s, 1 prefix list per 8 gets
+gets  49813824 (9962765/s aggregate) n=49813824 p50=0.000 p90=0.000 p99=0.000 p99.9=0.006 max=24.025 mean=0.000 (ms)
+lists 6226728 (1245346/s aggregate) n=6226728 p50=0.001 p90=0.002 p99=0.002 p99.9=0.012 max=24.025 mean=0.001 (ms)
+RESULT-READS engine=heed threads=8 duration=5 heed_no_tls=false heed_flags=nosync gets=49813824 gets_per_s=9962765 get_p50_ms=0.000 get_p99_ms=0.000 lists=6226728 lists_per_s=1245346 list_p50_ms=0.001 list_p99_ms=0.002
+=== s1-store reads (heed) === /root/raft/s1-store/data-refute/heed-20000
+config      heed 0.22.1 / LMDB, flags MDB_NOSYNC, MDB_NOTLS (RoTxn is Send, nested read txns legal), max_readers 512
+threads     8, duration 5 s, 1 prefix list per 8 gets
+gets  10392320 (2078464/s aggregate) n=10392320 p50=0.002 p90=0.005 p99=0.010 p99.9=0.041 max=12.733 mean=0.003 (ms)
+lists 1299040 (259808/s aggregate) n=1299040 p50=0.004 p90=0.006 p99=0.012 p99.9=0.047 max=9.117 mean=0.004 (ms)
+RESULT-READS engine=heed threads=8 duration=5 heed_no_tls=true heed_flags=nosync gets=10392320 gets_per_s=2078464 get_p50_ms=0.002 get_p99_ms=0.010 lists=1299040 lists_per_s=259808 list_p50_ms=0.004 list_p99_ms=0.012
+=== s1-store reads (heed) === /root/raft/s1-store/data-refute/heed-20000
+config      heed 0.22.1 / LMDB, flags MDB_NOSYNC, thread-local reader slots (RoTxn is NOT Send, nested read txns illegal), max_readers 512
+threads     1, duration 1 s, 1 prefix list per 8 gets
+reader-slot probe: asked for 200 simultaneous read txns, opened 1, then: MDB_BAD_RSLOT: Invalid reuse of reader locktable slot
+READERS engine=heed asked=200 opened=1 err="MDB_BAD_RSLOT: Invalid reuse of reader locktable slot"
+gets  2009728 (2009728/s aggregate) n=2009728 p50=0.000 p90=0.000 p99=0.000 p99.9=0.003 max=0.972 mean=0.000 (ms)
+lists 251216 (251216/s aggregate) n=251216 p50=0.001 p90=0.001 p99=0.004 p99.9=0.012 max=0.193 mean=0.001 (ms)
+RESULT-READS engine=heed threads=1 duration=1 heed_no_tls=false heed_flags=nosync gets=2009728 gets_per_s=2009728 get_p50_ms=0.000 get_p99_ms=0.000 lists=251216 lists_per_s=251216 list_p50_ms=0.001 list_p99_ms=0.004

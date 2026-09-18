@@ -1,0 +1,52 @@
+=== s1-store run ===
+host        macos/aarch64 Darwin alice.local 24.5.0 Darwin Kernel Version 24.5.0: Tue Apr 22 19:54:43 PDT 2025; root:xnu-11417.121.6~2/RELEASE_ARM64_T8132 arm64
+engine      redb
+dir         /private/tmp/claude-502/-Users-alice-Work-queen/e561891e-3c5f-4589-8141-dd6b961a2d37/scratchpad/wp-0.3/data/s-redb-1
+load        20000 msg/s, batch 10 -> 2000 entries/s, payload 512 B, 4096 partitions, 64 queues, 1 groups
+mix         kv 8000 ops/s over 200000 keys, timers 400 ops/s, request-id window 60 s
+durability  non-durable commit per entry, durable point every 1000 ms or 256 MiB; segment files roll at 0.25 MiB; fsync Full x1 threads; store cache 256 MiB; nofile=1048576
+label       laptop smoke fsync-threads=1
+
+--- throughput ---
+wall 61.3 s, 16310 entries (266/s target 2000/s), 163100 messages (2660 msg/s)
+store ops 418815 (6831/s), kv put/cas/del/list 39155/13087/34/3227, timers sched/fired 3262/1346, request ids expired 0
+pacing: max lag 51050.8 ms, entries more than 50 ms late 16273
+
+--- latency (ms) ---
+non-durable commit   n=16310 p50=0.511 p90=3.135 p99=8.959 p99.9=18.943 max=52.325 mean=1.268 (ms)
+entry total          n=16310 p50=0.719 p90=3.455 p99=9.215 p99.9=19.455 max=52.474 mean=1.474 (ms)
+durable point        n=24 p50=1441.791 p90=2162.687 p99=2359.295 p99.9=2359.295 max=2351.525 mean=1552.575 (ms)
+  of which seg fsync n=24 p50=1146.879 p90=1638.399 p99=2064.383 p99.9=2064.383 max=2056.625 mean=1215.880 (ms)
+kv read (get)        n=22858 p50=0.004 p90=0.012 p99=0.063 p99.9=1.023 max=6.814 mean=0.011 (ms)
+kv prefix list       n=3227 p50=0.015 p90=0.029 p99=0.103 p99.9=0.991 max=11.390 mean=0.026 (ms)
+durable points 24, segment fsyncs 5613, final durable point 61.5 ms
+
+--- write amplification ---
+logical: store keys+values 17.4 MiB + payloads 79.6 MiB = 97.1 MiB
+process disk writes 3308.7 MiB  ->  WA(io) 34.08x
+on-disk growth: store 317.2 MiB + segments 82.0 MiB = 399.2 MiB  ->  WA(files) 4.11x  (store alone 18.19x of its own 17.4 MiB of rows)
+segment files: 16310 frames, 81.5 MiB appended, 459 files, engine reports 514.5 MiB of store
+
+--- RSS ---
+start 6.6 MiB, end 312.8 MiB
+max 313.5 MiB over 24 samples
+series 2s:32M 6s:73M 11s:122M 16s:248M 22s:223M 26s:235M 30s:274M 35s:304M 40s:235M 47s:314M 52s:297M 58s:309M
+
+--- consistent export (snapshot) ---
+logical dump (read txn)                   12.2 MiB in      159 ms (77 MiB/s)
+incremental checkpoint: no file-level incremental snapshot; persistent savepoints keep an older version alive inside the same file
+writer pause:           none (MVCC read txn), but held pages are not freed while it lives
+
+--- ordered iteration (segments table as it stands) ---
+16310 rows, 0.9 MiB in 0.00 s = 15562 k rows/s, 831 MiB/s
+
+--- file growth and reclamation after deletes ---
+deleted 7591 segment rows (+ the same number of seg_loc rows) in 72 ms
+store: 317.8 MiB before -> 317.8 MiB after the deletes -> 34.5 MiB after maintenance (1552 ms)
+maintenance: Database::compact() -> true in 1552 ms
+segment files: 82.0 MiB before -> 80.7 MiB after unlinking 5 sealed files (1.2 MiB freed)
+
+--- clean reopen ---
+open 25 ms (fresh) / 9 ms (populated); applied index Some((16309, 1, 1789651596225553)), durable index Some((16309, 1, 1789651596225553))
+
+RESULT engine=redb rate=20000 batch=10 payload=512 duration=61.3 entries=16310 msgs=163100 entries_per_s=266 msgs_per_s=2660 nondur_p50_ms=0.511 nondur_p99_ms=8.959 nondur_p999_ms=18.943 dur_p50_ms=1441.791 dur_p99_ms=2359.295 dur_max_ms=2351.525 fsync_p99_ms=2064.383 read_p99_ms=0.063 list_p99_ms=0.103 wa_io=34.08 wa_files=4.11 logical_mib=97.1 io_mib=3308.7 store_growth_mib=317.2 seg_growth_mib=82.0 rss_start_mib=6.6 rss_max_mib=313.5 rss_end_mib=312.8 export_mib=12.2 export_ms=159 scan_rows=16310 scan_rows_per_s=15561745 reopen_ms=9 max_lag_ms=51050.8 late_entries=16273 durable_points=24 reclaim_rows=7591 reclaim_del_ms=72 store_before_mib=317.8 store_after_del_mib=317.8 store_after_maint_mib=34.5 maint_ms=1552 seg_files_unlinked=5

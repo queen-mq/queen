@@ -1,0 +1,72 @@
+=== s1-store run ===
+host        linux/x86_64 Linux queenpgless-01 6.8.0-124-generic #124-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:00:45 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+engine      fjall
+dir         /root/raft/s1-store/data/soak-fjall
+load        50000 msg/s, batch 10 -> 5000 entries/s, payload 512 B, 4096 partitions, 64 queues, 1 groups
+mix         kv 20000 ops/s over 200000 keys, timers 1000 ops/s, request-id window 60 s
+durability  non-durable commit per entry, durable point every 1000 ms or 256 MiB; segment files roll at 4 MiB; fsync Full x1 threads; store cache 256 MiB; nofile=4096
+GROWTH t_s=0.0 rss_mib=4.3 store_mib=0.2 seg_mib=0.0 seg_files=256 entries=0 msgs=0
+GROWTH t_s=30.0 rss_mib=151.8 store_mib=65.0 seg_mib=751.1 seg_files=281 entries=150001 msgs=1500010
+GROWTH t_s=60.0 rss_mib=310.3 store_mib=101.8 seg_mib=1491.6 seg_files=514 entries=297974 msgs=2979740
+GROWTH t_s=90.0 rss_mib=566.3 store_mib=144.6 seg_mib=2249.9 seg_files=687 entries=449504 msgs=4495040
+GROWTH t_s=120.0 rss_mib=703.9 store_mib=178.0 seg_mib=3003.6 seg_files=888 entries=600133 msgs=6001330
+GROWTH t_s=150.2 rss_mib=717.4 store_mib=209.7 seg_mib=3748.6 seg_files=1063 entries=748979 msgs=7489790
+GROWTH t_s=180.3 rss_mib=751.8 store_mib=243.8 seg_mib=4503.1 seg_files=1253 entries=899766 msgs=8997660
+GROWTH t_s=210.7 rss_mib=778.6 store_mib=278.1 seg_mib=5260.3 seg_files=1436 entries=1051062 msgs=10510620
+GROWTH t_s=240.8 rss_mib=763.6 store_mib=316.9 seg_mib=6012.6 seg_files=1641 entries=1201388 msgs=12013880
+GROWTH t_s=270.9 rss_mib=764.5 store_mib=355.1 seg_mib=6778.0 seg_files=1816 entries=1354349 msgs=13543490
+GROWTH t_s=301.2 rss_mib=813.8 store_mib=387.6 seg_mib=7525.7 seg_files=2009 entries=1503769 msgs=15037690
+GROWTH t_s=331.5 rss_mib=827.3 store_mib=422.5 seg_mib=8282.6 seg_files=2214 entries=1655021 msgs=16550210
+MIDDELETE t_s=374.5 pct=30 rows_written=1797240 rows_deleted=540008 del_ms=1777 maint_ms=12302 store_before_mib=472.5 store_after_del_mib=479.2 store_after_maint_mib=289.9 seg_before_mib=8994.3 seg_after_unlink_mib=6828.4 seg_after_maint_mib=6828.4 files_unlinked=541 files_freed_mib=2162.8 rss_mib=815.3 maint="rotate_memtable + major_compact on 13 partitions in 12302 ms"
+GROWTH t_s=375.0 rss_mib=823.0 store_mib=296.6 seg_mib=6828.4 seg_files=1840 entries=1797241 msgs=17972410
+GROWTH t_s=405.0 rss_mib=824.6 store_mib=376.9 seg_mib=7590.3 seg_files=2028 entries=1949500 msgs=19495000
+GROWTH t_s=435.0 rss_mib=850.0 store_mib=409.4 seg_mib=8336.8 seg_files=2214 entries=2098668 msgs=20986680
+GROWTH t_s=465.0 rss_mib=862.2 store_mib=455.5 seg_mib=9078.3 seg_files=2399 entries=2246831 msgs=22468310
+GROWTH t_s=495.0 rss_mib=901.0 store_mib=490.0 seg_mib=9838.3 seg_files=2585 entries=2398713 msgs=23987130
+GROWTH t_s=525.1 rss_mib=909.1 store_mib=548.2 seg_mib=10586.9 seg_files=2779 entries=2548317 msgs=25483170
+GROWTH t_s=555.3 rss_mib=960.2 store_mib=572.0 seg_mib=11327.6 seg_files=2962 entries=2696314 msgs=26963140
+GROWTH t_s=585.3 rss_mib=978.2 store_mib=593.5 seg_mib=12070.9 seg_files=3140 entries=2844876 msgs=28448760
+
+--- throughput ---
+wall 600.0 s, 2917232 entries (4862/s target 5000/s), 29172320 messages (48621 msg/s)
+store ops 82292328 (137154/s), kv put/cas/del/list 7003143/2333875/772022/583525, timers sched/fired 583446/552759, request ids expired 2623862
+pacing: max lag 2526.4 ms, entries more than 50 ms late 2073381
+
+--- latency (ms) ---
+non-durable commit   n=2917232 p50=0.052 p90=0.070 p99=0.203 p99.9=2.015 max=242.960 mean=0.068 (ms)
+entry total          n=2917232 p50=0.089 p90=0.163 p99=0.383 p99.9=2.303 max=245.280 mean=0.116 (ms)
+durable point        n=402 p50=442.367 p90=557.055 p99=688.127 p99.9=2424.831 max=2400.406 mean=454.756 (ms)
+  of which seg fsync n=402 p50=417.791 p90=524.287 p99=622.591 p99.9=2424.831 max=2368.127 mean=430.340 (ms)
+kv read (get)        n=4082260 p50=0.005 p90=0.038 p99=0.101 p99.9=0.303 max=24.738 mean=0.016 (ms)
+kv prefix list       n=583525 p50=0.060 p90=0.086 p99=0.120 p99.9=0.343 max=18.132 mean=0.063 (ms)
+durable points 402, segment fsyncs 106305, final durable point 437.4 ms
+
+--- write amplification ---
+logical: store keys+values 3276.5 MiB + payloads 14244.3 MiB = 17520.8 MiB
+process disk writes 30441.7 MiB  ->  WA(io) 1.74x
+on-disk growth: store 608.9 MiB + segments 12433.1 MiB = 13042.0 MiB  ->  WA(files) 0.74x  (store alone 0.19x of its own 3276.5 MiB of rows)
+segment files: 2917232 frames, 14578.1 MiB appended, 3235 files, engine reports 945.5 MiB of store
+
+--- RSS ---
+start 4.3 MiB, end 985.9 MiB
+max 985.9 MiB over 115 samples
+series 5s:92M 50s:245M 96s:631M 142s:730M 188s:774M 234s:786M 280s:777M 326s:840M 385s:823M 431s:850M 477s:877M 523s:926M 568s:960M
+
+--- consistent export (snapshot) ---
+logical dump (per-partition snapshot)    1125.3 MiB in    12112 ms (93 MiB/s)
+incremental checkpoint: yes in principle: SSTs are immutable, so a snapshot can hard-link the sealed segments and ship only new ones (fjall has no built-in checkpoint API in 2.11)
+writer pause:           none (snapshots are MVCC seqno views)
+
+--- ordered iteration (segments table as it stands) ---
+2377224 rows, 127.0 MiB in 1.77 s = 1346 k rows/s, 72 MiB/s
+
+--- file growth and reclamation after deletes ---
+deleted 1027474 segment rows (+ the same number of seg_loc rows) in 2373 ms
+store: 585.7 MiB before -> 668.5 MiB after the deletes -> 356.8 MiB after maintenance (15331 ms)
+maintenance: rotate_memtable + major_compact on 13 partitions in 15331 ms
+segment files: 12433.1 MiB before -> 7232.6 MiB after unlinking 1299 sealed files (5193.1 MiB freed)
+
+--- clean reopen ---
+open 55 ms (fresh) / 13 ms (populated); applied index Some((2917231, 1, 1789655560976838)), durable index Some((2917231, 1, 1789655560976838))
+
+RESULT engine=fjall rate=50000 batch=10 payload=512 duration=600.0 entries=2917232 msgs=29172320 entries_per_s=4862 msgs_per_s=48621 nondur_p50_ms=0.052 nondur_p99_ms=0.203 nondur_p999_ms=2.015 dur_p50_ms=442.367 dur_p99_ms=688.127 dur_max_ms=2400.406 fsync_p99_ms=622.591 read_p99_ms=0.101 list_p99_ms=0.120 wa_io=1.74 wa_files=0.74 logical_mib=17520.8 io_mib=30441.7 store_growth_mib=608.9 seg_growth_mib=12433.1 rss_start_mib=4.3 rss_max_mib=985.9 rss_end_mib=985.9 export_mib=1125.3 export_ms=12112 scan_rows=2377224 scan_rows_per_s=1345839 reopen_ms=13 max_lag_ms=2526.4 late_entries=2073381 durable_points=402 reclaim_rows=1027474 reclaim_del_ms=2373 store_before_mib=585.7 store_after_del_mib=668.5 store_after_maint_mib=356.8 maint_ms=15331 seg_files_unlinked=1299

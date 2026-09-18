@@ -1,0 +1,52 @@
+=== s1-store run ===
+host        linux/x86_64 Linux queenpgless-01 6.8.0-124-generic #124-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:00:45 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+engine      heed
+dir         /root/raft/s1-store/data/heed-20000
+load        20000 msg/s, batch 10 -> 2000 entries/s, payload 512 B, 4096 partitions, 64 queues, 1 groups
+mix         kv 8000 ops/s over 200000 keys, timers 400 ops/s, request-id window 60 s
+durability  non-durable commit per entry, durable point every 1000 ms or 256 MiB; segment files roll at 0.25 MiB; fsync Full x1 threads; store cache 256 MiB; nofile=4096
+
+--- throughput ---
+wall 90.0 s, 180001 entries (2000/s target 2000/s), 1800010 messages (20000 msg/s)
+store ops 4763869 (52932/s), kv put/cas/del/list 431680/143831/4575/36195, timers sched/fired 36000/23662, request ids expired 59423
+pacing: max lag 775.5 ms, entries more than 50 ms late 60364
+
+--- latency (ms) ---
+non-durable commit   n=180001 p50=0.065 p90=0.086 p99=0.122 p99.9=0.327 max=3.972 mean=0.069 (ms)
+entry total          n=180001 p50=0.081 p90=0.106 p99=0.167 p99.9=0.431 max=4.158 mean=0.085 (ms)
+durable point        n=61 p50=475.135 p90=622.591 p99=786.431 p99.9=786.431 max=772.350 mean=466.957 (ms)
+  of which seg fsync n=61 p50=344.063 p90=475.135 p99=540.671 p99.9=540.671 max=531.769 mean=360.130 (ms)
+kv read (get)        n=252129 p50=0.001 p90=0.002 p99=0.003 p99.9=0.013 max=0.141 mean=0.001 (ms)
+kv prefix list       n=36195 p50=0.005 p90=0.007 p99=0.011 p99.9=0.021 max=0.142 mean=0.005 (ms)
+durable points 61, segment fsyncs 18762, final durable point 450.3 ms
+
+--- write amplification ---
+logical: store keys+values 195.3 MiB + payloads 878.9 MiB = 1074.2 MiB
+process disk writes 3548.3 MiB  ->  WA(io) 3.30x
+on-disk growth: store 172.1 MiB + segments 900.6 MiB = 1072.7 MiB  ->  WA(files) 1.00x  (store alone 0.88x of its own 195.3 MiB of rows)
+segment files: 180001 frames, 899.5 MiB appended, 3729 files, engine reports 172.1 MiB of store
+
+--- RSS ---
+start 3.7 MiB, end 184.5 MiB
+max 182.0 MiB over 61 samples
+series 1s:9M 8s:24M 15s:39M 22s:54M 29s:69M 36s:85M 43s:100M 52s:115M 59s:129M 67s:144M 74s:157M 82s:170M 89s:182M
+
+--- consistent export (snapshot) ---
+mdb_env_copy (consistent file copy)      172.1 MiB in      309 ms (556 MiB/s)
+mdb_env_copy compacting                  170.7 MiB in      312 ms (548 MiB/s)
+incremental checkpoint: no: mdb_env_copy is always O(state)
+writer pause:           none (the copy runs in a read transaction; it does hold the free list, so the file grows while it runs)
+
+--- ordered iteration (segments table as it stands) ---
+180001 rows, 9.6 MiB in 0.00 s = 44160 k rows/s, 2358 MiB/s
+
+--- file growth and reclamation after deletes ---
+deleted 91824 segment rows (+ the same number of seg_loc rows) in 178 ms
+store: 172.1 MiB before -> 172.1 MiB after the deletes -> 172.1 MiB after maintenance (116 ms)
+maintenance: no in-place compaction; a compacting copy would be 169 MiB, made in 116 ms (freed pages are reused in place instead)
+segment files: 900.6 MiB before -> 471.0 MiB after unlinking 1718 sealed files (429.3 MiB freed)
+
+--- clean reopen ---
+open 8 ms (fresh) / 0 ms (populated); applied index Some((180000, 1, 1789654263987386)), durable index Some((180000, 1, 1789654263987386))
+
+RESULT engine=heed rate=20000 batch=10 payload=512 duration=90.0 entries=180001 msgs=1800010 entries_per_s=2000 msgs_per_s=20000 nondur_p50_ms=0.065 nondur_p99_ms=0.122 nondur_p999_ms=0.327 dur_p50_ms=475.135 dur_p99_ms=786.431 dur_max_ms=772.350 fsync_p99_ms=540.671 read_p99_ms=0.003 list_p99_ms=0.011 wa_io=3.30 wa_files=1.00 logical_mib=1074.2 io_mib=3548.3 store_growth_mib=172.1 seg_growth_mib=900.6 rss_start_mib=3.7 rss_max_mib=182.0 rss_end_mib=184.5 export_mib=172.1 export_ms=309 scan_rows=180001 scan_rows_per_s=44160223 reopen_ms=0 max_lag_ms=775.5 late_entries=60364 durable_points=61 reclaim_rows=91824 reclaim_del_ms=178 store_before_mib=172.1 store_after_del_mib=172.1 store_after_maint_mib=172.1 maint_ms=116 seg_files_unlinked=1718

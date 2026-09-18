@@ -1,0 +1,52 @@
+=== s1-store run ===
+host        linux/x86_64 Linux queenpgless-01 6.8.0-124-generic #124-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:00:45 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+engine      heed
+dir         /root/raft/s1-store/data/heed-50000
+load        50000 msg/s, batch 10 -> 5000 entries/s, payload 512 B, 4096 partitions, 64 queues, 1 groups
+mix         kv 20000 ops/s over 200000 keys, timers 1000 ops/s, request-id window 60 s
+durability  non-durable commit per entry, durable point every 1000 ms or 256 MiB; segment files roll at 0.25 MiB; fsync Full x1 threads; store cache 256 MiB; nofile=4096
+
+--- throughput ---
+wall 90.0 s, 439281 entries (4878/s target 5000/s), 4392810 messages (48783 msg/s)
+store ops 11657334 (129456/s), kv put/cas/del/list 1054122/351680/26374/87933, timers sched/fired 87856/57631, request ids expired 143675
+pacing: max lag 2078.2 ms, entries more than 50 ms late 326035
+
+--- latency (ms) ---
+non-durable commit   n=439281 p50=0.067 p90=0.092 p99=0.116 p99.9=0.155 max=16.183 mean=0.070 (ms)
+entry total          n=439281 p50=0.079 p90=0.106 p99=0.139 p99.9=0.199 max=16.391 mean=0.083 (ms)
+durable point        n=49 p50=901.119 p90=1146.879 p99=1474.559 p99.9=1474.559 max=1448.559 mean=837.627 (ms)
+  of which seg fsync n=49 p50=573.439 p90=704.511 p99=868.351 p99.9=868.351 max=852.026 mean=577.022 (ms)
+kv read (get)        n=615069 p50=0.001 p90=0.002 p99=0.002 p99.9=0.011 max=0.196 mean=0.001 (ms)
+kv prefix list       n=87933 p50=0.005 p90=0.006 p99=0.011 p99.9=0.019 max=0.317 mean=0.005 (ms)
+durable points 49, segment fsyncs 20972, final durable point 0.4 ms
+
+--- write amplification ---
+logical: store keys+values 477.6 MiB + payloads 2144.9 MiB = 2622.5 MiB
+process disk writes 7494.7 MiB  ->  WA(io) 2.86x
+on-disk growth: store 420.0 MiB + segments 2196.9 MiB = 2616.9 MiB  ->  WA(files) 1.00x  (store alone 0.88x of its own 477.6 MiB of rows)
+segment files: 439281 frames, 2195.2 MiB appended, 8902 files, engine reports 420.0 MiB of store
+
+--- RSS ---
+start 3.7 MiB, end 445.3 MiB
+max 445.2 MiB over 49 samples
+series 1s:13M 7s:45M 14s:81M 21s:112M 27s:145M 34s:184M 42s:220M 49s:258M 58s:302M 66s:345M 73s:381M 81s:413M 90s:445M
+
+--- consistent export (snapshot) ---
+mdb_env_copy (consistent file copy)      420.0 MiB in      631 ms (665 MiB/s)
+mdb_env_copy compacting                  416.9 MiB in      677 ms (616 MiB/s)
+incremental checkpoint: no: mdb_env_copy is always O(state)
+writer pause:           none (the copy runs in a read transaction; it does hold the free list, so the file grows while it runs)
+
+--- ordered iteration (segments table as it stands) ---
+439281 rows, 23.5 MiB in 0.01 s = 41693 k rows/s, 2227 MiB/s
+
+--- file growth and reclamation after deletes ---
+deleted 232208 segment rows (+ the same number of seg_loc rows) in 482 ms
+store: 420.0 MiB before -> 420.0 MiB after the deletes -> 420.0 MiB after maintenance (273 ms)
+maintenance: no in-place compaction; a compacting copy would be 398 MiB, made in 273 ms (freed pages are reused in place instead)
+segment files: 2196.9 MiB before -> 1069.2 MiB after unlinking 4511 sealed files (1127.1 MiB freed)
+
+--- clean reopen ---
+open 5 ms (fresh) / 0 ms (populated); applied index Some((439280, 1, 1789654355481587)), durable index Some((439280, 1, 1789654355481587))
+
+RESULT engine=heed rate=50000 batch=10 payload=512 duration=90.0 entries=439281 msgs=4392810 entries_per_s=4878 msgs_per_s=48783 nondur_p50_ms=0.067 nondur_p99_ms=0.116 nondur_p999_ms=0.155 dur_p50_ms=901.119 dur_p99_ms=1474.559 dur_max_ms=1448.559 fsync_p99_ms=868.351 read_p99_ms=0.002 list_p99_ms=0.011 wa_io=2.86 wa_files=1.00 logical_mib=2622.5 io_mib=7494.7 store_growth_mib=420.0 seg_growth_mib=2196.9 rss_start_mib=3.7 rss_max_mib=445.2 rss_end_mib=445.3 export_mib=420.0 export_ms=631 scan_rows=439281 scan_rows_per_s=41692696 reopen_ms=0 max_lag_ms=2078.2 late_entries=326035 durable_points=49 reclaim_rows=232208 reclaim_del_ms=482 store_before_mib=420.0 store_after_del_mib=420.0 store_after_maint_mib=420.0 maint_ms=273 seg_files_unlinked=4511
