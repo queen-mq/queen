@@ -33,6 +33,21 @@ Phase 0 is committed on `raft` as eight commits (`34c5714f`..`f4b0337c`), plus
 the ratification commit that follows this revision. No product code changed in
 phase 0.
 
+**G1 packet — phase 1 built, gate open for Alice (2026-09-18).** Phase 1 is
+committed on `raft` (`d6500817`..`ee181d91`, WP-1.1..WP-1.11): single node,
+message path, LocalReplicator; no Raft, no network. The message path plans,
+applies, recovers and reads off this node's own segment files — push, pop
+(pinned / wildcard / discovery), ack by hash and by position, batch ack, nack,
+renew, DLQ head, dedup and request-id replay. The one-line verdict, with the
+detail in the **G1 checklist** and **M6** below: **parity and crash safety hold
+at pipeline=1; the O14 performance comparison, the clean I8 flatness result and
+the O19 isolation verdict do not exist yet**, because the ratified pipeline of
+4 (D4) hit a correctness bug (**F-1 / R-117**) that stopped the node under any
+concurrent load. The fix is written (the batcher submits each propose in plan
+order, with a deterministic witness test) but is **uncommitted in the working
+tree**, and the pipeline=4 VM re-run it unblocks is owed. Postgres (D22) is
+still the oracle; nothing in phase 1 changes that.
+
 ---
 
 ## Gates
@@ -40,7 +55,7 @@ phase 0.
 | gate | state | date | decision | evidence |
 |---|---|---|---|---|
 | G0 | **RATIFIED** | 2026-09-18 | D9 heed everywhere (+ pins, §11.5 repair); D10 option (a) lean; D11 openraft `54094270` + raft-log 0.4.6 with the seven plan changes; D12 framed TCP + sequenced per-frame MAC; §11.4/§11.8 defaults as proposed; O1–O23 as recommended (O14 failover ≤ 4 s, D14 kept); evidence gaps accepted, phase 1 approved. See the note at the top. | WP-0.2 `test/raft/vm/baseline/RESULTS.md`; WP-0.3 `test/raft/spikes/s1-store/MEMO.md`; WP-0.4 `s2-dedup/MEMO.md`; WP-0.5 `s3-consensus/MEMO.md`; WP-0.6 `s4-transport/MEMO.md`; WP-0.7 `test/raft/README.md`; Findings R-01..R-64 below |
-| G1 | not reached | — | Message-path parity, crash matrix, differential and flatness results, raft1 performance vs postgres against the O14 targets. | — |
+| G1 | **phase 1 built — open for Alice** | 2026-09-18 | Message-path parity **PASS** (difffuzz clean after 7 documented envelope gaps; RAFT PARITY js lane green; crash matrix 22/22 reachable cells PASS; dropped-writes durability 20/20). raft1 performance vs O14 **NOT JUDGED**; flatness (I8) and noisy-neighbour (O19) **INCONCLUSIVE** — all three blocked by **F-1 / R-117** (pipeline=4 stopped the node; fix written, uncommitted; pipeline=4 VM re-run owed). See the G1 checklist. | crash `test/raft/crash/RESULTS.md`; difffuzz `test/raft/difffuzz/PARITY-NOTES.md`; VM `test/raft/vm/raft1/RESULTS.md`; **M6** below; Findings R-101..R-119 |
 | G2 | not reached | — | Full parity on raft1 (RAFT PARITY identical to `single`), differential clean, crash matrix and flatness pass, performance vs O14. | — |
 | G3 | not reached | — | Confirm the consensus library, re-checking its release status and the open issues (openraft GH#2080 still OPEN on 2026-09-18). | — |
 | G4 | not reached | — | raft3 parity; kill matrix with zero acknowledged loss and failover within target; equal digests; performance within the O14 budget. | — |
@@ -77,6 +92,63 @@ phase 0.
 | WP-0.5 | The 10 GiB manifest snapshot ran at **1 GiB**; no kill during a snapshot build or install; **a pipeline of exactly 4 (the D4 amendment) was never measured** (1 and 16 were). Snapshot *cadence* against `QUEEN_RAFT_SNAPSHOT_LOG_BYTES` unmeasured. | D-09, D-10, D-11 |
 | WP-0.6 | No RTT (netem needs Alice), no HTTP/2 comparison, no failure/reconnect behaviour, `MAX_FRAME` 8 MiB vs `QUEEN_RAFT_ENTRY_MAX_BYTES` 96 MiB unreconciled, certificate anchor undecided. | D-13..D-17 |
 | all | Every regime is single-VM with a **co-resident loader** (FAT100: goload 3.31 + queen 1.38 + pg 1.39 = 6.08 of 8 vCPU). Three VMs are O13. | G4 |
+
+---
+
+### G1 checklist — what phase 1 proved, and what it did not
+
+Against the gate criterion (PLAN §15: *message-path parity, crash matrix,
+differential and flatness results, raft1 performance vs postgres against the
+O14 targets*). Numbers, not adjectives; what failed is stated plainly.
+
+| criterion | verdict | evidence |
+|---|---|---|
+| message-path parity (differential fuzzer) | **PASS** | thousands of 250-op seeds, **0 divergence** in message-path responses once 7 classified envelope gaps are absorbed; per-side checker (at-least-once + payload-hash) green on **both** brokers. `PARITY-NOTES.md`. Caveat: the 2000-seed target was not reached (200+; a contended shared checkout with a concurrent crash harness), re-runnable on a release broker. |
+| RAFT PARITY (client suite) | **PASS, narrow** | `run.sh --topo raft1` js lane green (kept 12/12, skipped 161 by un-ported route), `rc=0`. The parity *surface* is **one** message-path test today (`testPushAutoCreatesQueueAndPartition`) — every other suite test needs queue admin (WP-2.5) or a phase-2 route; it grows when those land. single↔raft1 gate print not captured in-session (a sibling's `single` stack was live in the shared checkout). go/py raft lanes deferred until their runners honour `QUEEN_TEST_STORAGE=raft`. |
+| crash matrix (§13.5) | **PASS** | 13 phase-1 points × {nth 1,2} = **22 PASS / 0 FAIL / 4 N/A**; every reachable cell recovers **exactly once** across `kill -9` (dedup, one txn→one offset, held claims redelivered after the lease, completions not resurrected). 4 N/A = gc points (no retention/delete route in phase 1), proven at the Rust level to a byte-equal digest. `crash/RESULTS.md`. Limit: SIGKILL keeps the page cache, so this proves bookkeeping, not unsynced-byte loss — covered by the next row. |
+| dropped-unflushed-writes durability | **PASS** | discharges **R-106 / R-111 / R-114**. 20/20 dm-flakey rounds on the VM, ~73k acked messages, `missing=0`, 0 error lines; an instrumented round proves the drop is adversarial (store reopens at `applied=0`, the fsync'd log `replayed=38`, 3000/3000 acks recovered from the log). `vm/raft1/RESULTS.md` §4. |
+| flatness (I8, §13.6) | **INCONCLUSIVE** | shrunk to 3 M / 2-min and partial (a shell fault after 3 of 4 runs; the preload confounded the A20k regime); at pipeline=1 push cannot preload the plan volume. One firm signal: **resident memory scales with stored count** — an empty A20k run goes 8→578 MB, a 4.4 M-message at-rest store holds 2 685→3 060 MB ≈ **610 B/msg**. That is R-105 showing up; whether it stays page-reclaimable is exactly what the full test must decide. Owed at pipeline=4. |
+| noisy neighbour (O19) | **INCONCLUSIVE** | confounded by pipeline=1 (a shared serial store slows every partition, so a bigger store is not isolation) and the delta cell (`284.67` p99) is a **known transcription error** — the same value was copied between two different workloads and the raw data was on the torn-down VM. **No numeric verdict**; the WP-1.11 row's "+134 %" is withdrawn. Owed at pipeline=4 with a settled backlog and a real DLQ storm. |
+| raft1 performance vs O14 | **NOT JUDGED** | pipeline=4 stopped the node under load (F-1), so the O14 targets (raft1 p50/p99 ≤ postgres at A20k/A50k/C1000; fat-batch ≥ 70 % of the 300k knee) cannot be judged. The pipeline=1 numbers (M6) are a **degenerate cap**: push p50 competitive (A20k **6.18** vs 9.15 ms) but the tail explodes (A20k p99 **175** vs 27, A50k p99 **1106** vs 75), consume caps at ≈9–24k msg/s, FAT100 tops at ≈**72k msg/s ≈ 24 %** of the postgres knee (below O14's 70 %). Owed on the fixed binary at pipeline=4. |
+
+**The one blocker between here and a judgeable G1: F-1 / R-117.** At
+`QUEEN_RAFT_PIPELINE=4` (the ratified D4 default) the batcher stamps `now_us`
+monotone in *plan* order, but `propose` (`batcher.rs`) `tokio::spawn`ed each
+`repl.propose()` independently, so the `LocalReplicator` writer could assign
+the log index **out of plan order**; apply then sees `now_us` go backwards with
+the index, refuses (**I5** `TimeWentBackwards`), and the node poisons under any
+concurrent load (dies at applied≈33–670; survives 400 sequential — which is why
+the strictly-sequential difffuzz was green). **Fix written, in the working
+tree, not yet committed**: `batcher.rs` drives each propose's first poll inline
+on the one driver task in plan order (the submission then follows the stamp),
+and `apply.rs` now logs the gate refusal it used to swallow (R-118). It carries
+a **deterministic** witness — `every_propose_submits_on_the_one_driver_task_in_plan_order`
+fails 30/30 on the old spawn form and passes 40/40 on the fix — plus a real-log
+pipeline=4 load test. The pipeline=4 VM re-run of O14 / flatness / O19 is
+unblocked and owed once that fix is committed and reviewed.
+
+### G1 checklist — what Alice decides
+
+1. **G1 go / no-go.** Parity, crash safety and dropped-write durability are
+   proven at pipeline=1; the performance and isolation story is not, and cannot
+   be until the F-1 fix is committed and a pipeline=4 VM pass runs. Either
+   (a) hold G1 open until that pass exists, or (b) ratify G1 on
+   parity + crash + durability and make the pipeline=4 O14 / flatness / O19
+   numbers a WP-2.12 / G2 deliverable.
+2. **F-1 fix.** Approve the written fix and require the pipeline=4 re-run as the
+   gate evidence (recommended), or require an adversarial review of the batcher
+   change first (it changes the propose contract to "submit on first poll").
+3. **The two client-visible parity gaps.** **R-115** (empty pop returns 200+body
+   on raft vs a bodiless 204 on postgres) is a one-line WP-1.7 facade fix.
+   **R-116** (`leaseReleased` attributed to a different batch item per engine)
+   needs Alice's call on which item is canonical — the underlying state agrees.
+4. **Decisions the phase-1 evidence puts in doubt** — see the Decisions note
+   *"Phase-1 evidence: decisions now in doubt"* below: D4 pipeline sizing, D9's
+   per-frame active-index RAM (R-105), the §11.3 durable-point cadence default,
+   and whether the O14 targets survive a single-process store footprint.
+5. **Operational carry-ins.** **R-119** (F-2): the raft broker holds ~304 open
+   data-file fds; the phase-3+ deploy unit needs `LimitNOFILE` ≥ 256 + peak
+   connections. **R-118** (apply-gate diagnosability) is fixed in the F-1 tree.
 
 ---
 
@@ -268,6 +340,37 @@ and mixed frame sizes.
 **Not measured**: HTTP/2 over the same rustls — the one alternative that would
 remove most of the framing, multiplexing, backpressure and reconnect code
 (D-17).
+
+### Phase-1 evidence: decisions now in doubt
+
+The G0 ratifications hold, but phase 1 produced numbers that put four of them
+in question. None is a re-decision here — they are flagged for G1.
+
+- **D4 — the pipeline of 4.** Ratified on S3's 1-vs-16-in-flight numbers; **4
+  itself was never measured** (O23), and phase 1 is the first evidence that the
+  pipeline is not free. At 4, the plan-order / log-index divergence poisoned the
+  node (F-1 / R-117, I5); it needed a batcher fix. Its *throughput and tail at
+  4* are exactly the O14 measurement that does not yet exist, so D4's chosen
+  value is still unproven on both correctness margin and performance.
+- **D9 / R-105 — per-frame active-index RAM.** The single-process raft store
+  measured **≈610 B/msg resident**; a 4.4 M-message at-rest store held **2.7–3.0
+  GB** (C1000: 885 MB for 85k messages across 1000 single-message partitions).
+  §6.1's "the active file's entries in RAM" is one record **per frame**; R-105
+  bounds it at **~4 GB** worst case (256 hot buckets, single-message pushes).
+  The levers (smaller `QUEEN_RAFT_SEGMENT_BYTES`, a partial `.qidx` per durable
+  point) are unexercised and the I8 flatness run that would settle it is
+  INCONCLUSIVE at pipeline=1.
+- **§11.3 — the durable-point cadence default (4 ms / 256 entries).** The S2
+  sweep on heed: 250 / 1000 / 4000 ms → **0.605 / 0.307 / 0.137 s of sync per
+  wall second**, and §11.4's "cost proportional to what changed" is false on
+  LMDB — 16× the interval costs 1.65× the time (R-27). The default was tuned
+  inside WP-1.2 / WP-1.4 but never validated against a steady-state store on the
+  VM; by design a durable point fsyncs 293–484 files every second.
+- **O14 — the targets themselves.** The postgres baseline is M1; the raft1
+  comparison does not exist. What pipeline=1 already shows: the raft store
+  footprint (0.9–3.0 GB queen RSS vs postgres's ~0.1 GB queen + ~1.5 GB PG
+  split) and FAT100 at **24 %** of the 300k knee. Whether "p50/p99 ≤ postgres"
+  and "fat-batch ≥ 70 %" are reachable at pipeline=4 is unknown until the re-run.
 
 ---
 
@@ -462,8 +565,8 @@ decision or a plan edit (PLAN_RAFT.md is not edited by this task).
 
 | R-id | src | finding | resolution | state |
 |---|---|---|---|---|
-| R-117 | WP-1.11 | **⚠ Under `QUEEN_RAFT_PIPELINE=4` the log index can diverge from batcher plan order → apply I5 `TimeWentBackwards` → node poisons under any concurrent load.** The batcher stamps `now_us` monotone in plan order, but `propose` (`batcher.rs:902`) `tokio::spawn`s each `repl.propose()` independently, so the LocalReplicator writer may assign the log index out of plan order; apply sees `now_us` go backwards vs the index, refuses (`entry now_us …698930 below last applied …699010, index=672 applied=671`), and every later write 503s. Reproduces **only under concurrency** (dies at applied≈33–670; survives 400 sequential), so the strictly-sequential WP-1.10 difffuzz could not catch it. Blocks the O14 comparison, the clean flatness I8 result, and the O19 verdict — all owed a pipeline=4 re-run. | Accepted, **not fixed in this WP** (measurement WP, touched no broker source). Fix: make the log index follow the batcher seq/plan order (propose in order, or gate the writer on seq). The RESULTS.md records that such a fix has since landed in a sibling's uncommitted `batcher.rs`; it needs the planner owner + an adversarial ⚠ review with a **deterministic** regression that fails on the old spawn-per-propose form. | **open** |
-| R-118 | WP-1.11 | **Apply-gate refusals aren't logged.** A gate rejection in `Applier::apply` (`gates(c)?`) bypasses `poison()`'s log line, so the real `ApplyError` (the I5/I18 detail) is lost and only "apply thread gone" surfaces to the operator — the poison that took F-1 down was near-undiagnosable from logs alone. | Accepted, not fixed here (diagnosability, outside a measurement WP). Log the `ApplyError` at `error` before poisoning. | **open** |
+| R-117 | WP-1.11 | **⚠ Under `QUEEN_RAFT_PIPELINE=4` the log index can diverge from batcher plan order → apply I5 `TimeWentBackwards` → node poisons under any concurrent load.** The batcher stamps `now_us` monotone in plan order, but `propose` (`batcher.rs:902`) `tokio::spawn`s each `repl.propose()` independently, so the LocalReplicator writer may assign the log index out of plan order; apply sees `now_us` go backwards vs the index, refuses (`entry now_us …698930 below last applied …699010, index=672 applied=671`), and every later write 503s. Reproduces **only under concurrency** (dies at applied≈33–670; survives 400 sequential), so the strictly-sequential WP-1.10 difffuzz could not catch it. Blocks the O14 comparison, the clean flatness I8 result, and the O19 verdict — all owed a pipeline=4 re-run. | Accepted, **not fixed in this WP** (measurement WP, touched no broker source). Fix: make the log index follow the batcher seq/plan order (propose in order, or gate the writer on seq). The RESULTS.md records that such a fix has since landed in a sibling's uncommitted `batcher.rs`; it needs the planner owner + an adversarial ⚠ review with a **deterministic** regression that fails on the old spawn-per-propose form. **Fixed (commit `f8bfa672`):** propose is now submitted INLINE on the one driver task in plan order (no-op-waker first poll drives the future to `LocalReplicator`'s pre-`.await` writer-channel submission; only the local-apply wait is spawned, so up to `pipeline` stay in flight — `step_down_with_four_in_flight` green). Deterministic guard `every_propose_submits_on_the_one_driver_task_in_plan_order` (ONE tokio task Id vs N), plus the in-plan-order and real-log pipeline=4 tests. Adversarial review **could not refute** (I5 guaranteed structurally, not by timing; I3 preserved; noop-waker re-poll sound). **One MINOR finding stays OPEN:** the deterministic guard drives `TaskWitnessReplicator` (a fake that submits in its first-poll prefix by construction) and does not exercise the real `LocalReplicator` submit-before-`.await` contract — a future edit moving `cmd_tx.send` past an `.await` would silently reintroduce F-1 with no deterministic test failing; latent risk flagged for the phase-3 openraft adapter (the `Replicator::propose` doc now states the contract + phase-3 obligation). | **fixed (commit `f8bfa672`)**; one MINOR test-net finding **open** |
+| R-118 | WP-1.11 | **Apply-gate refusals aren't logged.** A gate rejection in `Applier::apply` (`gates(c)?`) bypasses `poison()`'s log line, so the real `ApplyError` (the I5/I18 detail) is lost and only "apply thread gone" surfaces to the operator — the poison that took F-1 down was near-undiagnosable from logs alone. | Accepted, not fixed here (diagnosability, outside a measurement WP). Log the `ApplyError` at `error` before poisoning. **Fixed (commit `f8bfa672`):** `Applier::apply` now matches `gates()` and returns `Err(self.refused(e))`; `refused()` logs the `ApplyError` at `error` with `applied`/`durable` before the node stops, so the I5/gap/bases cause surfaces instead of only the replicator's later "apply thread gone". | **fixed (commit `f8bfa672`)** |
 | R-119 | WP-1.11 | **raft broker fd footprint exceeds the default ulimit.** ~304 open data-file fds (256 buckets + log + store) + one socket per connection; at `ulimit -n 1024` the log append fails `EMFILE` ("Too many open files") under A50k (48 consumers, 512 idle conns) and the node poisons. Inherent to §11.2 (a file per hot bucket). | Accepted, operational. helm/systemd need `LimitNOFILE` (the VM used 262144). | **open** |
 
 ---
@@ -657,6 +760,53 @@ HTTPS 0.36–0.41. Crypto per ~2918 B command: MAC +12.1 µs = **0.24 GB/s**
 (fewer frames per coalesced write): framed 2.24, HTTP 2.88, framed+MAC 3.41,
 framed+TLS 2.51, HTTPS-no-MAC 4.63 µs/msg.
 
+### M6 — raft1 message path on the VM (WP-1.11)
+
+**Date** 2026-09-18 · **host** `root@164.90.215.224` (`queenpgless-01`), Ubuntu
+24.04, 8 vCPU, 15 GB, ext4 · **broker** `queen` release from `raft` @ `a04a3abb`
+(`rustc 1.98.1`, md5 `be80d860b4a1`, byte-identical before/after the reverted
+diagnostic edit), `QUEEN_STORAGE=raft`, LocalReplicator, **no Postgres** ·
+**loader** `/root/goload` md5 `2c97cccb0d1e` — the exact WP-0.2 loader, so the
+columns line up under M1. Both classes create queues with `dedup_window=3600`
+and retention off, so the footprint comparison is not confounded.
+
+**Read every regime row as `QUEEN_RAFT_PIPELINE=1`, throughput-capped — NOT the
+O14 comparison, which F-1 blocks.** At pipeline=1 a single in-flight entry
+serialises the node: push commits fast (p50 competitive) but the tail explodes
+and consume cannot keep up. Postgres columns are M1 (same VM + loader).
+
+| regime | raft1 p50 | pg p50 | raft1 p99 | pg p99 | raft1 ack | pg ack | pushed / popped in window | queen cores | queen RSS | disk MB/s | shed |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| A20k  | **6.18** | 9.15 | 175.1 | 27.0 | 7.04 | 9.06 | 749 890 / 367 430 | 1.12 | 253 MB | 63.3 | 0 |
+| A50k  | 148.5 | 23.17 | 1105.9 | 75.3 | 93.5 | 32.9 | 1 828 350 / 959 070 | 1.50 | 1013 MB | 117.9 | 0 |
+| B1    | 3.73 | 3.34 | 68.1 | 14.3 | 3.56 | 1.72 | 60 001 / 37 495 | 0.93 | 899 MB | 34.7 | 0 |
+| C1000 | 13.12 | 6.62 | 138.2 | 33.0 | 16.4 | 21.4 | 85 008 / 68 373 | 1.25 | 885 MB | 30.9 | 0 |
+| D1    | 3.28 | 1.99 | 24.96 | 4.08 | 2.67 | 0.79 | 9 999 / 3 552 | 0.76 | 829 MB | 18.0 | 0 |
+| FAT100 (push-only) | 5275.65 | 23.17 | 7897.1 | 209.9 | — | — | 4 340 800 / 0 (sheds 12.5 M) | 1.02 | 2995 MB | 199.7 | 12.5 M |
+
+raft RSS is the store itself (payload + the uncapped dedup index + framing +
+the LMDB mmap): 0.9–3.0 GB in one process, against the postgres split of
+~55–255 MB queen + ~1.5 GB Postgres. C1000's 885 MB for 85k messages is R-105's
+per-frame active-file RAM (1000 single-message partitions). Consume at
+pipeline=1: A20k popped 367k of 750k pushed in 40 s ≈ **9k msg/s**, A50k ≈
+**24k msg/s**; FAT100 tops at **≈72k msg/s ≈ 24 %** of the 300k postgres knee
+(< O14's 70 %). `shed=0`, `pushErr=0` throughout at the raised fd limit.
+**`0` poison lines this run.**
+
+**Dropped-unflushed-writes durability — PASS** (discharges R-106/R-111/R-114):
+20/20 dm-flakey rounds, ~73k acknowledged messages, every one delivered after
+reopen, `missing=0`, 0 error lines; per-cadence 100/500/1000/60000 ms all
+clean. Adversarial round (nothing durable-pointed): store reopens `applied=0`,
+the fsync'd log `replayed=38`, 3000/3000 acks recovered from the log.
+
+**Flatness / O19: INCONCLUSIVE at pipeline=1** (see the G1 checklist) — the one
+firm signal is that resident memory scales with stored count. **F-1 (R-117):**
+`QUEEN_RAFT_PIPELINE=4` poisoned the node under load (I5), fix written and
+uncommitted, pipeline=4 re-run owed. **F-2 (R-119):** ~304 open data-file fds
+(256 buckets + log + store) + one socket per connection cross `ulimit -n 1024`
+at A50k → `EMFILE`; the harness runs `ulimit -n 262144`, the phase-3+ deploy
+unit needs `LimitNOFILE`.
+
 ---
 
 ## Open questions for Alice
@@ -664,7 +814,10 @@ framed+TLS 2.51, HTTPS-no-MAC 4.63 µs/msg.
 O1–O16 are PLAN_RAFT.md §17. O17–O20 come from the 2026-09-17 head-of-line
 discussion. **O21–O23 are new**, from Alice's 2026-09-17 notes (a), (b) and
 (d). PLAN_RAFT.md §17 records these as answered at G0; they are repeated here
-with the data that now exists, because three of them changed.
+with the data that now exists, because three of them changed. **The decisions
+G1 itself asks for are in the "G1 checklist — what Alice decides" above** (go /
+no-go, the F-1 fix and its re-run, R-115/R-116 parity, and the four decisions
+phase-1 evidence puts in doubt); O14 and O19 below now carry phase-1 numbers.
 
 | id | question | what the data says now | recommended answer |
 |---|---|---|---|
@@ -681,12 +834,12 @@ with the data that now exists, because three of them changed.
 | O11 | Migration: offline window or online copy. | — | offline first. |
 | O12 | When to remove the postgres class (D22). | GH#2080 is open and reproduced; D22 is its mitigation. | Keep it deployable **to GA**; decide removal after 3 months of GA. |
 | O13 | Three VMs for the final numbers. | Every number so far is single-VM with a co-resident loader (FAT100: 6.08 of 8 vCPU busy, the loader the largest share). | yes for G4; one extra VM for load generation would also clean up G1. |
-| O14 | Performance targets for G1/G2/G4. | Baseline M1 is the comparison point. Failover measured 3.0–3.4 s. | raft1 p50/p99 ≤ postgres at A20k/A50k/C1000; raft3 p50 ≤ raft1 + 2 ms; **failover ≤ 4 s p99**; push-only fat-batch ≥ 70% of postgres. |
+| O14 | Performance targets for G1/G2/G4. | Baseline M1 is the comparison point. Failover measured 3.0–3.4 s. **Phase-1 raft1 (M6) is pipeline=1, throughput-capped and NOT the comparison** (F-1 blocks pipeline=4): push p50 competitive (A20k 6.18 vs 9.15 ms), tail explodes (A20k p99 175 vs 27), FAT100 ≈ 24 % of the knee. RSS is 0.9–3.0 GB in one process vs the pg split. | raft1 p50/p99 ≤ postgres at A20k/A50k/C1000; raft3 p50 ≤ raft1 + 2 ms; **failover ≤ 4 s p99**; push-only fat-batch ≥ 70% of postgres. **Re-judge at pipeline=4 after F-1.** |
 | O15 | Replicator for embedded mode. | S1 adds: the **engine** for embedded should be redb (no snapshot source in raft1). | LocalReplicator + redb. |
 | O16 | Ack fast path: record the delivered set at claim, or always compute. | S2 risk 5: narrowing what 005 must answer below the cursor would narrow (b)'s gap too. | Record the delivered set in the cursor at claim, bounded by batch size. |
 | O17 | Bounded planning time per batch. | Not measured. PLAN §17 records **5 ms**; this file previously proposed 20 ms. | Confirm the number. `QUEEN_RAFT_PLAN_BUDGET_MS`; a single command that alone exceeds the budget must still be planned, or it can never progress. |
 | O18 | Per-command-kind planner metrics + a slow-command log. | — | yes: `queen_raft_plan_seconds{kind=…}` + WARN above `QUEEN_RAFT_SLOW_COMMAND_MS` (50). |
-| O19 | Noisy-neighbour test: gate condition or advisory? | — | Gate at G2 (raft1) and G4 (raft3); a named scenario in `test/raft/flatness`. |
+| O19 | Noisy-neighbour test: gate condition or advisory? | Phase-1 raft1 run (M6) is **INCONCLUSIVE**: pipeline=1 confounds isolation (a serial shared store slows every partition) and the one delta cell is a known transcription error, so no numeric verdict. Owed at pipeline=4. | Gate at G2 (raft1) and G4 (raft3); a named scenario in `test/raft/flatness`. |
 | O20 | Move DLQ head decompression and duplicate repacking off the planner. | — | yes, receiver-side. |
 | **O21** | **(a) Commit the store every N entries / few ms instead of once per applied entry** (the Raft log is already the durable WAL). | Measured, VM, 20k target: redb **10 046 → 19 539 msg/s** and WA **29.31 → 8.33×** from the cadence alone (a 2×2 isolates it from the keyspaces); fjall and heed move ±2% and ±0.6 points. The knobs in §11.3 are 4 ms / 256 entries. | **Yes — it is already the §11.3 amendment; keep it.** It re-admits redb, which is what makes D9's embedded answer possible. Consequence to accept: local reads that need the very latest entry wait ≤ 4 ms. |
 | **O22** | **(b) Keep the segment index out of the store**, Kafka-style: an immutable `.qidx` per sealed segment file, the active file's index in RAM. | `segments` was the highest-rate keyspace. S1 re-ran the matrix without it (`--shape ratified`): heed's ordered-scan lead over fjall survives the change (41.5 M vs 2.1–2.7 M rows/s over `seg_loc`), and most of the export-size spread (heed 172 vs redb 58.7 MiB) was those rows. `partition_files` keeps one row per (pid, file) at seal. | **Yes — keep the §6.1 amendment.** It removes the store's highest-rate keyspace and makes `seg_loc` (node-local, D8) the only per-segment structure. WP-1.3 owes the `.qidx` format, its checksum and its rebuild-by-scan path. |
@@ -728,5 +881,7 @@ were shortened on Alice's instruction (10-minute soak, 6-minute dedup window,
 
 ---
 
-*Last revised 2026-09-18 (G0 packet). Nothing in phase 0 is committed; the
-phase-0 commit agent commits `PLAN_RAFT.md`, this file and `test/raft/`.*
+*Last revised 2026-09-18 (**G1 packet**): phase 1 built and recorded, the gate
+opened for Alice. Phase 0 was the previous revision (G0 packet). Phase 1 is
+committed on `raft` (`d6500817`..`ee181d91`); the F-1 / R-117 fix is written but
+uncommitted in the working tree. This revision edits `RAFT_STATUS.md` only.*
