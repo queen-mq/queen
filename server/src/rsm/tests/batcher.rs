@@ -12,6 +12,14 @@
 //!   the [`LocalReplicator`] and WP-1.4's apply thread, a restart, and recovery;
 //!   and an `#[ignore]` throughput smoke of four in flight against one (laptop
 //!   numbers, §0.3, smoke only).
+//! - **the WP-1.11 F-1 submission-order guards** — that the log index follows
+//!   plan order under the pipeline (I5). The pure fake-number reorder the old
+//!   spawn-per-propose form allowed is a scheduler race that does not reproduce
+//!   on a laptop, so the DETERMINISTIC guard
+//!   ([`every_propose_submits_on_the_one_driver_task_in_plan_order`]) witnesses
+//!   the driver task the submission runs on — one id on the fix, N distinct ids
+//!   on the old form — while the fake and real-log ordering tests are positive
+//!   PASSES of the fixed path.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -29,8 +37,15 @@ use crate::rsm::planner::{
 use crate::rsm::replicator::fake::{FakeReplicator, Step};
 use crate::rsm::replicator::local::{LocalReplicator, NoWaker, OpenConfig};
 use crate::rsm::replicator::log::{Fsync, LogOptions};
-use crate::rsm::replicator::{ProposeError, Replicator};
+use crate::rsm::replicator::{
+    AppliedAt, Membership, MembershipChange, NodeId, ProposeError, ReplError, ReplMetrics,
+    Replicator, Role,
+};
 use crate::rsm::store::{HeedStore, Store, TypedReads};
+
+use async_trait::async_trait;
+use bytes::Bytes;
+use tokio::sync::watch;
 
 use super::apply::{cfg, seg_opts, store_opts};
 use super::planner_harness::{item, qcfg, rid, TENANT};
@@ -237,6 +252,70 @@ async fn not_leader_retries_the_waiter_with_the_hint() {
         Reply::Retry { hint } => assert_eq!(hint, Some(9), "the leader hint is carried"),
         other => panic!("expected Retry, got {other:?}"),
     }
+    fx.close().await;
+}
+
+/// §7.1 / I13, the D4 "drop every overlay together on any propose error" path,
+/// reached by a per-entry `Poll::Ready(Err)` ARRIVING MID-PIPELINE — not by a
+/// role-watch step-down. A depth-4 pipeline of healthy, slow-committing entries
+/// is left concurrently in flight (already handed to the log — the fake has
+/// appended them and consumed their indexes), then ONE later `propose` resolves
+/// `NotLeader`. That single error must drop the WHOLE overlay: every waiter,
+/// including the three entries that were already in flight, is answered `Retry`
+/// with the hint, and the driver pauses (a retryable loss, not a Fatal stop).
+///
+/// Covers the residual gap the WP-1.11 refuters named: the other error tests
+/// fail on the FIRST propose (nothing else in flight), and the depth-4 drop was
+/// otherwise exercised only via `step_down`, never via a per-entry error landing
+/// while a full pipeline of other entries is live.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_propose_error_mid_pipeline_drops_the_whole_depth_four_overlay() {
+    let fx = FakeFixture::open("err-mid-pipeline", small_pipeline(4, 5_000));
+    // Three healthy-but-slow commits stay in flight for the whole test (the
+    // fake caps the sleep at the propose deadline, so they never resolve before
+    // the error drops them), then the fourth propose refuses `NotLeader`.
+    fx.fake.push_steps([
+        Step::After(Duration::from_secs(30)),
+        Step::After(Duration::from_secs(30)),
+        Step::After(Duration::from_secs(30)),
+        Step::Fail(ProposeError::NotLeader { hint: Some(7) }),
+    ]);
+
+    // Submit all four before awaiting, so three proposes are genuinely in flight
+    // (in-order, one entry each) when the fourth's error lands.
+    let mut rxs = Vec::with_capacity(4);
+    for i in 0..4u64 {
+        let (sub, rx) = Submission::new(push(1_000 + i, "q", "p0", &[&format!("t{i}")]));
+        fx.tx.send(sub).await.expect("send");
+        rxs.push(rx);
+    }
+
+    // Every waiter — the three that were in flight AND the one that erred — is
+    // answered Retry with the hint: the overlay was dropped as a group.
+    for (i, rx) in rxs.into_iter().enumerate() {
+        let reply = rx.await.expect("reply");
+        match reply {
+            Reply::Retry { hint } => assert_eq!(
+                hint,
+                Some(7),
+                "push {i}: the whole overlay drops to Retry with the NotLeader hint"
+            ),
+            other => panic!("push {i}: expected Retry (overlay dropped), got {other:?}"),
+        }
+    }
+
+    // All four proposes reached the replicator; the three healthy ones had
+    // already been appended to the log (indexes consumed) before the error
+    // dropped them — the point of the D4 path.
+    assert_eq!(fx.fake.proposal_count(), 4, "all four proposes ran");
+    assert_eq!(
+        fx.fake.proposals().len(),
+        3,
+        "the three in-flight entries were appended before the NotLeader dropped the overlay"
+    );
+
+    // A NotLeader is a retryable loss: the driver paused, it did not stop as a
+    // Fatal would. Closing drains cleanly with nothing left in flight.
     fx.close().await;
 }
 
@@ -559,7 +638,15 @@ async fn throughput_four_in_flight_vs_one() {
         let mut lat: Vec<u128> = Vec::with_capacity(n as usize);
         for rx in rxs {
             let t = Instant::now();
-            let _ = rx.await.expect("reply");
+            let reply = rx.await.expect("reply");
+            // WP-1.11 F-1: a reorder under the pipeline poisons the node (I5),
+            // and every later reply comes back `Retry`. Assert `Done` so a
+            // poison FAILS this smoke instead of passing silently.
+            assert!(
+                matches!(reply, Reply::Done { .. }),
+                "pipeline={pipeline}: every reply must be Done (a poison/Retry means I5 \
+                 was violated, WP-1.11 F-1), got {reply:?}"
+            );
             lat.push(t.elapsed().as_micros());
         }
         let elapsed = started.elapsed();
@@ -585,4 +672,357 @@ async fn throughput_four_in_flight_vs_one() {
         "throughput smoke (laptop, N={N}): 1-in-flight {eps1:.0} entries/s p50 {p50_1} µs; \
          4-in-flight {eps4:.0} entries/s p50 {p50_4} µs"
     );
+}
+
+// ---------------------------------------------------------------------------
+// WP-1.11 F-1 regression: the log index must follow plan order (I5)
+// ---------------------------------------------------------------------------
+
+/// The submission-order contract (§7.1, I5). The batcher stamps `now_us`
+/// monotone in plan order; whatever order the entries reach the replicator's
+/// `propose` — and thus the order the log assigns their index — must be that
+/// same plan order, or apply sees `now_us` go backwards with the index and
+/// refuses (WP-1.11 F-1).
+///
+/// This drives a real (frozen) store and a [`FakeReplicator`] whose `propose`
+/// records each entry's bytes in submission order (`proposals()`), with a small
+/// commit delay so the pipeline actually holds several in flight at once. The
+/// fix submits proposes inline on the one driver task, in plan order, so the
+/// recorded order is strictly increasing in `now_us`.
+///
+/// HONEST SCOPE: this is a deterministic PASS of the fix, NOT a repro of the old
+/// bug. Before the fix — one `tokio::spawn` per propose — the recorded order
+/// COULD diverge under a multi-worker runtime, but that reorder is a pure
+/// scheduler race that does not reproduce on a laptop (verified: this test and
+/// the real-log one below stay green on the reverted spawn form over 250+ runs).
+/// The DETERMINISTIC guard that fails on the old form is
+/// [`every_propose_submits_on_the_one_driver_task_in_plan_order`], which
+/// witnesses the task the submission runs on rather than racing for a reorder.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_batcher_submits_proposes_to_the_replicator_in_plan_order() {
+    const N: u64 = 64;
+    let fx = FakeFixture::open("plan-order", small_pipeline(4, 5_000));
+    // A slow-but-healthy commit, so up to `pipeline` proposes are in flight
+    // together and their submissions can race if they are spawned.
+    fx.fake.set_default(Step::After(Duration::from_millis(3)));
+
+    // Submit everything before awaiting, so several proposes are live at once.
+    let mut rxs = Vec::with_capacity(N as usize);
+    for i in 0..N {
+        let (sub, rx) = Submission::new(push(1_000 + i, "q", "p0", &[&format!("t{i}")]));
+        fx.tx.send(sub).await.expect("send");
+        rxs.push(rx);
+    }
+    for rx in rxs {
+        let reply = rx.await.expect("reply");
+        assert!(
+            matches!(reply, Reply::Done { .. }),
+            "every push must commit (a Retry would mean the node poisoned), got {reply:?}"
+        );
+    }
+
+    // The order the entries reached the replicator == the order their `now_us`
+    // was stamped: strictly increasing.
+    let proposals = fx.fake.proposals();
+    assert_eq!(proposals.len(), N as usize, "one entry per push");
+    let mut last = i64::MIN;
+    for (k, bytes) in proposals.iter().enumerate() {
+        let entry = decode_entry(bytes).expect("decode proposed entry");
+        assert!(
+            entry.now_us > last,
+            "submission {k}: now_us {} is not above the previous {last} — the log index \
+             diverged from plan order (WP-1.11 F-1, I5)",
+            entry.now_us,
+        );
+        last = entry.now_us;
+    }
+
+    fx.close().await;
+}
+
+/// The same property end to end, over the REAL `LocalReplicator` and WP-1.4's
+/// apply thread at the ratified pipeline depth (D4). Under concurrent load the
+/// apply I5 gate is live: a reorder poisons the node and every later reply is
+/// `Retry`. Asserting every reply `Done`, that the node never stopped, and that
+/// it applied every entry proves the message path is I5-correct at
+/// `QUEEN_RAFT_PIPELINE=4` (the config the O14 comparison assumes).
+///
+/// HONEST SCOPE: this is a positive test of the fixed path, NOT the CI guard
+/// that discriminates the bug. It stays green on the reverted spawn form too
+/// (the F-1 reorder is a scheduler race that does not reproduce on a laptop —
+/// verified over 40 runs on the old form), so on its own it could not have
+/// caught F-1. The deterministic guard is
+/// [`every_propose_submits_on_the_one_driver_task_in_plan_order`]; this test's
+/// job is to exercise the real log + apply gate at pipeline=4 and confirm the
+/// gate turns any residual reorder into a loud poison, never silent corruption.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pipeline_four_over_the_real_log_stays_i5_correct_under_load() {
+    const N: u64 = 1_500;
+    let dir = scratch("i5-load");
+    let store = Arc::new(HeedStore::open(&dir.join("store"), &store_opts()).expect("store"));
+    let repl = Arc::new(open_repl(&dir, store.clone()));
+    let cfg = BatcherConfig {
+        pipeline: 4,
+        batch_max_cmds: 1, // one command per cycle == one entry per propose: the
+        // most distinct in-flight proposes, the worst case for a reorder.
+        request_expire_every_ms: 3_600_000,
+        ..BatcherConfig::default()
+    };
+    let batcher = Batcher::new(store.clone(), repl.clone(), cfg);
+    let (tx, handle) = batcher.spawn();
+
+    // Spread across a few partitions so pushes really run concurrently through
+    // the planner, not all serialised on one partition's ring.
+    let mut rxs = Vec::with_capacity(N as usize);
+    for i in 0..N {
+        let part = format!("p{}", i % 8);
+        let (sub, rx) = Submission::new(push(10_000 + i, "q", &part, &[&format!("t{i}")]));
+        tx.send(sub).await.expect("send");
+        rxs.push(rx);
+    }
+    for (i, rx) in rxs.into_iter().enumerate() {
+        let reply = rx.await.expect("reply");
+        assert!(
+            matches!(reply, Reply::Done { .. }),
+            "push {i}: every reply must be Done at pipeline=4; a Retry means the apply \
+             I5 gate refused a reordered log and the node poisoned (WP-1.11 F-1), got {reply:?}"
+        );
+    }
+
+    // The node is still a leader (never poisoned) and applied every entry.
+    assert!(
+        repl.role().is_leader(),
+        "the node must still be leader; a poison would have stopped it"
+    );
+    assert!(
+        repl.applied_index() >= N,
+        "every entry applied (I5 held for all {N}); applied_index={}",
+        repl.applied_index()
+    );
+
+    drop(tx);
+    handle.await.expect("driver join");
+    let repl = Arc::try_unwrap(repl).unwrap_or_else(|_| panic!("replicator still shared"));
+    let (_stats, store2) = repl.shutdown().expect("shutdown");
+    drop(store);
+    drop(store2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// WP-1.11 F-1 deterministic guard: the submission runs on the ONE driver task
+// ---------------------------------------------------------------------------
+
+/// One recorded `propose` submission: the tokio task it ran on, the entry's
+/// `now_us` stamp, and the log index it was assigned — everything the
+/// first-poll synchronous prefix produces (§7.1, mod.rs `propose` contract).
+#[derive(Clone, Copy, Debug)]
+struct SubmitWitness {
+    task: Option<tokio::task::Id>,
+    now_us: i64,
+    index: u64,
+}
+
+/// A [`Replicator`] whose `propose` does its whole submission — record the
+/// driver task, read the stamp, assign the index — in the first-poll
+/// synchronous prefix (before its only `.await`), exactly where
+/// [`LocalReplicator`] sends on its writer channel. It then commits after a
+/// small delay so up to `pipeline` proposes are in flight together.
+///
+/// This is the DETERMINISTIC witness of the WP-1.11 F-1 fix, and it needs no
+/// scheduler race. The fix drives every propose's first poll INLINE on the one
+/// driver task (`RunState::propose`), so every submission runs on THAT task —
+/// `task` is identical across all of them. The old spawn-per-propose form ran
+/// each `repl.propose()` on its own freshly-spawned task, so the submissions
+/// would carry N DISTINCT task ids. Asserting one id therefore fails on the old
+/// form and passes on the fix, on any machine (the fake-number reorder the pure
+/// race would need does not reproduce on a laptop; the task identity does).
+struct TaskWitnessReplicator {
+    role_rx: watch::Receiver<Role>,
+    // Kept so the watch channel stays open for the batcher's `watch_role`.
+    _role_tx: watch::Sender<Role>,
+    next_index: AtomicU64,
+    applied: AtomicU64,
+    submissions: std::sync::Mutex<Vec<SubmitWitness>>,
+}
+
+impl TaskWitnessReplicator {
+    fn new() -> TaskWitnessReplicator {
+        let (tx, rx) = watch::channel(Role::Leader { term: 1 });
+        TaskWitnessReplicator {
+            role_rx: rx,
+            _role_tx: tx,
+            next_index: AtomicU64::new(1),
+            applied: AtomicU64::new(0),
+            submissions: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn submissions(&self) -> Vec<SubmitWitness> {
+        self.submissions.lock().expect("witness").clone()
+    }
+}
+
+#[async_trait]
+impl Replicator for TaskWitnessReplicator {
+    async fn propose(&self, entry: Bytes, deadline: Instant) -> Result<AppliedAt, ProposeError> {
+        // --- submission: the first-poll synchronous prefix (before any .await) ---
+        let task = tokio::task::try_id();
+        let now_us = decode_entry(&entry).expect("decode proposed entry").now_us;
+        let index = self.next_index.fetch_add(1, Ordering::AcqRel);
+        self.submissions
+            .lock()
+            .expect("witness")
+            .push(SubmitWitness {
+                task,
+                now_us,
+                index,
+            });
+        // --- the only suspension: a slow-but-healthy commit ---
+        let until = Instant::now() + Duration::from_millis(3);
+        tokio::time::sleep_until(tokio::time::Instant::from_std(until.min(deadline))).await;
+        self.applied.fetch_max(index, Ordering::AcqRel);
+        Ok(AppliedAt { index, term: 1 })
+    }
+
+    fn role(&self) -> Role {
+        *self.role_rx.borrow()
+    }
+
+    fn watch_role(&self) -> watch::Receiver<Role> {
+        self.role_rx.clone()
+    }
+
+    async fn read_barrier(&self, _deadline: Instant) -> Result<u64, ProposeError> {
+        Ok(self.applied.load(Ordering::Acquire))
+    }
+
+    fn applied_index(&self) -> u64 {
+        self.applied.load(Ordering::Acquire)
+    }
+
+    async fn transfer_leadership(
+        &self,
+        _to: Option<NodeId>,
+        _deadline: Instant,
+    ) -> Result<(), ReplError> {
+        Ok(())
+    }
+
+    async fn membership(&self) -> Membership {
+        Membership::single(1)
+    }
+
+    async fn change_membership(
+        &self,
+        _change: MembershipChange,
+        _deadline: Instant,
+    ) -> Result<(), ReplError> {
+        Err(ReplError::Unsupported("task-witness replicator".into()))
+    }
+
+    fn metrics(&self) -> ReplMetrics {
+        ReplMetrics {
+            term: 1,
+            leader: Some(1),
+            is_leader: true,
+            last_log_index: self.applied.load(Ordering::Acquire),
+            committed_index: self.applied.load(Ordering::Acquire),
+            applied_index: self.applied.load(Ordering::Acquire),
+            durable_index: self.applied.load(Ordering::Acquire),
+            inflight: 0,
+            proposals: self.submissions.lock().expect("witness").len() as u64,
+            log_files: 1,
+            log_bytes: 0,
+        }
+    }
+}
+
+/// WP-1.11 F-1, the deterministic regression guard the reviewer required. The
+/// fix's guarantee is that the log submission of every entry runs INLINE on the
+/// one driver task, in plan order (`RunState::propose` drives the first poll
+/// itself, §7.1 Threads). The old `tokio::spawn(repl.propose(..))` form ran
+/// each submission on its own task, which let the writer assign the log index
+/// out of `now_us` order and poison apply (I5) under load.
+///
+/// A pure fake-number reorder cannot be forced on a laptop (the reviewers and
+/// this WP both confirmed it: 250+ runs of the ordering tests never reordered
+/// on the old form). This test instead witnesses the STRUCTURAL property the
+/// fix establishes and the old form violated — the task the submission runs on:
+///
+/// * every submission ran on ONE task (the driver) — false on the spawn form,
+///   where each runs on a distinct spawned task;
+/// * the submissions are in plan order, strictly increasing in `now_us` and in
+///   the index the replicator assigned.
+///
+/// It is deterministic: no sleep-race, no scheduler dependence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_propose_submits_on_the_one_driver_task_in_plan_order() {
+    const N: u64 = 64;
+    let dir = scratch("task-witness");
+    let store = Arc::new(HeedStore::open(&dir.join("store"), &store_opts()).expect("store"));
+    let repl = Arc::new(TaskWitnessReplicator::new());
+    let batcher = Batcher::new(store.clone(), repl.clone(), small_pipeline(4, 5_000));
+    let (tx, handle) = batcher.spawn();
+
+    // Submit everything before awaiting, so up to `pipeline` proposes are live
+    // at once: on the old spawn form these would be N separate tasks.
+    let mut rxs = Vec::with_capacity(N as usize);
+    for i in 0..N {
+        let (sub, rx) = Submission::new(push(2_000 + i, "q", "p0", &[&format!("t{i}")]));
+        tx.send(sub).await.expect("send");
+        rxs.push(rx);
+    }
+    for rx in rxs {
+        let reply = rx.await.expect("reply");
+        assert!(
+            matches!(reply, Reply::Done { .. }),
+            "every push must commit, got {reply:?}"
+        );
+    }
+
+    let subs = repl.submissions();
+    assert_eq!(subs.len(), N as usize, "one submission per push");
+
+    // (1) Every submission ran on the SAME tokio task — the one driver task.
+    // The old spawn-per-propose form fails here: N distinct spawned tasks.
+    let first_task = subs[0].task;
+    assert!(
+        first_task.is_some(),
+        "the submission ran inside a tokio task"
+    );
+    let distinct = subs
+        .iter()
+        .map(|s| s.task)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        distinct.len(),
+        1,
+        "every propose must submit on the ONE driver task (WP-1.11 F-1: the fix \
+         drives the first poll inline; the old form spawned each propose on its \
+         own task). Saw {} distinct submission tasks across {N} proposes.",
+        distinct.len(),
+    );
+
+    // (2) Submission order == plan order: strictly increasing now_us AND index.
+    let mut last_now = i64::MIN;
+    let mut last_index = 0u64;
+    for (k, s) in subs.iter().enumerate() {
+        assert!(
+            s.now_us > last_now,
+            "submission {k}: now_us {} not above previous {last_now} (I5)",
+            s.now_us
+        );
+        assert!(
+            s.index > last_index,
+            "submission {k}: index {} not above previous {last_index}",
+            s.index
+        );
+        last_now = s.now_us;
+        last_index = s.index;
+    }
+
+    drop(tx);
+    handle.await.expect("driver join");
+    let _ = std::fs::remove_dir_all(&dir);
 }

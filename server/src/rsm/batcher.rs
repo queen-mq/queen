@@ -57,12 +57,17 @@
 //!
 //! `run` is one tokio task. The planning step — a store read transaction and
 //! the pure planner — runs on the blocking pool ([`tokio::task::spawn_blocking`]),
-//! so no store call ever blocks a tokio worker; `propose` is awaited as a
-//! spawned task per entry, so several are in flight at once without the driver
-//! blocking on any. No `std::sync::Mutex` is held across an `.await`.
+//! so no store call ever blocks a tokio worker. Each entry's `propose` is
+//! SUBMITTED to the replicator inline, on this one driver task and in plan
+//! order (so the log index follows the `now_us` stamp order — WP-1.11 F-1,
+//! I5), and only its wait for local apply is spawned, so up to `pipeline`
+//! entries are in flight at once without the driver blocking on any. No
+//! `std::sync::Mutex` is held across an `.await`.
 
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::sync::Arc;
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
@@ -898,7 +903,32 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         }
     }
 
-    /// Spawn the `propose` for one entry and record it in flight.
+    /// Submit the `propose` for one entry, IN PLAN ORDER, and record it in
+    /// flight.
+    ///
+    /// The submission — the part of [`Replicator::propose`] that hands the entry
+    /// to the log and fixes the index it will occupy — runs INLINE here, on the
+    /// single driver task, in the same order the cycle stamped `now_us`. Only
+    /// the wait for local apply is spawned, so up to `pipeline` entries are
+    /// still in flight at once (D4). This is the fix for WP-1.11 F-1: spawning
+    /// the whole `propose` per entry let the [`LocalReplicator`] writer assign
+    /// the log index in the order the spawned tasks happened to reach its
+    /// channel — which tokio does not order by spawn order — so two entries
+    /// stamped `now_a < now_b` in plan order could land as index `n = b`,
+    /// `n+1 = a`; apply then saw `now_us` go backwards with the index and
+    /// refused (I5, `apply::gates` → `TimeWentBackwards`), poisoning the node.
+    /// Driving the submission from the one driver task, in plan order, makes the
+    /// log index follow the stamp order, so I5 holds under the pipeline.
+    ///
+    /// This relies on the [`Replicator::propose`] submission-ordering contract:
+    /// the backend assigns log indexes in the order the driver first-polls the
+    /// proposes. Driving each first poll INLINE here, in plan order, therefore
+    /// pins the index order to plan order. ([`LocalReplicator`] meets that
+    /// contract by performing the submission in the future's first-poll
+    /// synchronous prefix, before its first suspension.) The no-op waker here
+    /// only advances the future to that first suspension; the spawned task
+    /// re-polls with a real waker, which oneshot/timer re-register, so no wake
+    /// is lost.
     fn propose(
         &mut self,
         seq: u64,
@@ -915,19 +945,41 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             resolved: None,
             timed_out: false,
         });
+        // §13.5 `propose.sent`: the entry is about to reach the replicator; the
+        // client is still waiting and the outcome is UNKNOWN (D6, I6). A crash
+        // here has put nothing in the log, so the write is unanswered and
+        // at-most-once: the retry with the same request id finds nothing
+        // committed and plans anew (§5.4).
+        crate::rsm::faults::hit("propose.sent");
+
         let repl = self.repl.clone();
-        let result_tx = self.result_tx.clone();
         let deadline = Instant::now() + Duration::from_millis(self.cfg.propose_ms);
-        tokio::spawn(async move {
-            // §13.5 `propose.sent`: the entry is about to reach the replicator;
-            // the client is still waiting and the outcome is UNKNOWN (D6, I6).
-            // A crash here has put nothing in the log, so the write is
-            // unanswered and at-most-once: the retry with the same request id
-            // finds nothing committed and plans anew (§5.4).
-            crate::rsm::faults::hit("propose.sent");
-            let res = repl.propose(bytes, deadline).await;
-            let _ = result_tx.send((seq, res));
-        });
+        // Own the replicator inside the future so it is `'static`; `propose`
+        // borrows `&self` only for the length of the call.
+        let mut fut = Box::pin(async move { repl.propose(bytes, deadline).await });
+
+        // Drive the future to its first suspension INLINE, so the log submission
+        // happens now, in plan order, on this one task. The no-op waker never
+        // needs to fire: the spawned task below re-polls with a real one.
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        match fut.as_mut().poll(&mut cx) {
+            Poll::Ready(res) => {
+                // Resolved on the first poll: a poisoned or refused backend, or
+                // a deadline already past. Route it like any other result; the
+                // entry was still submitted (I3), so `on_result` handles it.
+                let _ = self.result_tx.send((seq, res));
+            }
+            Poll::Pending => {
+                // Submitted and now awaiting local apply: finish off the driver
+                // task so the next entry can be planned and submitted (D4).
+                let result_tx = self.result_tx.clone();
+                tokio::spawn(async move {
+                    let res = fut.await;
+                    let _ = result_tx.send((seq, res));
+                });
+            }
+        }
     }
 
     /// Attach a retry whose id is in an entry still in flight (§5.4): answer at

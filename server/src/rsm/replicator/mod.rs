@@ -211,6 +211,41 @@ pub struct ReplMetrics {
 pub trait Replicator: Send + Sync + 'static {
     /// Leader only. Resolves after the entry is committed AND applied on this
     /// node (I4). `entry` is one encoded [`Entry`](crate::rsm::entry).
+    ///
+    /// # Submission ordering (I5, WP-1.11 F-1)
+    ///
+    /// SEMANTIC CONTRACT. When several `propose` futures are outstanding at
+    /// once, the backend MUST assign their log indexes in the order the driver
+    /// FIRST-POLLED them — not the order they later suspend, wake or commit.
+    /// This is stated on the ordering the caller depends on, deliberately NOT on
+    /// any tokio future-shape detail of how a backend achieves it; a backend is
+    /// free to satisfy it with an explicit per-propose sequence number the log
+    /// sorts by, by serializing its submissions, or any other means.
+    ///
+    /// Why it exists: the batcher (§7.1) stamps `now_us` monotone in plan order
+    /// and first-polls each `propose` from its one driver task in that same
+    /// order ([`crate::rsm::batcher`]). With this contract the log index then
+    /// follows the `now_us` stamp, so apply never sees `now_us` go backwards
+    /// with the index (I5). A backend that assigned indexes in commit or enqueue
+    /// order instead would let concurrent proposes reorder the log and poison
+    /// the node at the ratified pipeline depth (D4) — the WP-1.11 F-1 bug.
+    ///
+    /// [`local::LocalReplicator`] satisfies the contract by handing the entry to
+    /// its writer channel in the future's first-poll synchronous prefix, before
+    /// its first `.await`; there first-poll order IS the index order. That is one
+    /// valid realization of the guarantee above, not the guarantee itself.
+    ///
+    /// PHASE-3 OBLIGATION (not discharged here). The openraft adapter (WP-3.x)
+    /// MUST demonstrate it honours this index ordering under a pipeline-of-4 with
+    /// backpressure, or discharge it explicitly (an in-adapter sequence number,
+    /// or serialized `client_write` submission). It cannot simply inherit the
+    /// `LocalReplicator` sync-prefix trick: openraft assigns indexes in the order
+    /// `RaftCore` receives client writes on its internal channel, and there is no
+    /// guarantee `client_write`'s enqueue completes before its first suspension
+    /// under backpressure, so a concurrently-spawned propose could enqueue out of
+    /// first-poll order and reintroduce F-1. The pipeline of 4 was never measured
+    /// on openraft (S3 memo, deferred to WP-3.x); until the adapter proves this,
+    /// the openraft backend runs at pipeline=1.
     async fn propose(&self, entry: Bytes, deadline: Instant) -> Result<AppliedAt, ProposeError>;
 
     fn role(&self) -> Role;

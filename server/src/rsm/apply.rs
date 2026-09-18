@@ -752,13 +752,38 @@ impl<'s, S: Store> Applier<'s, S> {
         // still stops (every [`ApplyError`] is fatal), but this applier is
         // consistent and a test — or a crash matrix step — can carry on with
         // it. Everything after them can leave a prefix, and poisons.
-        if let Some(done) = self.gates(c)? {
-            return Ok(done);
+        match self.gates(c) {
+            Ok(Some(done)) => return Ok(done),
+            Ok(None) => {}
+            // A gate refusal (I5/I16/I18) rejects the entry before any write,
+            // so — unlike `execute` — it does NOT poison this applier: it stays
+            // consistent and an in-process test (or a crash-matrix step) can
+            // carry on with it. But it IS fatal for the node (the apply thread
+            // returns `Err` and stops), so log the reason here. Without this the
+            // only log the operator sees is the replicator's later "apply thread
+            // gone" (`local.rs`), never the I5/gap/bases cause (WP-1.11
+            // diagnosability finding).
+            Err(e) => return Err(self.refused(e)),
         }
         match self.execute(c) {
             Ok(a) => Ok(a),
             Err(e) => Err(self.poison(e)),
         }
+    }
+
+    /// Log a gate refusal that stops this node here (§12.1 Fatal) and hand it
+    /// back unchanged. Unlike [`Self::poison`] it does not mark the applier
+    /// poisoned, because a gate refuses before any write and leaves the applier
+    /// consistent (see [`Self::apply`]).
+    fn refused(&self, e: ApplyError) -> ApplyError {
+        tracing::error!(
+            target: "rsm",
+            error = %e,
+            applied = self.applied_index,
+            durable = self.durable_index,
+            "apply refused at the gate: this node stops here (§12.1 Fatal)",
+        );
+        e
     }
 
     /// The applier is usable: no earlier refusal.
