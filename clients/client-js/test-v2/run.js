@@ -53,12 +53,78 @@ export const TEST_CONFIG_MULTIPLE = {
 export const TEST_CONFIG = process.env.TEST_CONFIG === 'multiple' ? TEST_CONFIG_MULTIPLE : TEST_CONFIG_SINGLE;
 console.log('TEST_CONFIG:', TEST_CONFIG);
 
+// PLAN_RAFT.md §13.3 / WP-1.9 — the raft1 lane (QUEEN_TEST_STORAGE=raft).
+//
+// A phase-1 raft broker serves ONLY the message path — push, the three pops,
+// ack/ack-batch, lease renew — with IMPLICIT queue/partition creation, plus
+// /health, /metrics and the ephemeral RAM verbs. Every other /api or /streams
+// route answers 503 raft_phase1_unsupported (server handlers/raft.rs
+// raft_fallback): queue configure/create/delete, transactions, kv, timers,
+// streams, consumer-group admin and seek, and every dashboard/analytics/
+// resources read. And there is NO Postgres, so the direct-DB setup and cleanup
+// do not run.
+//
+// So this lane runs only the tests that exercise the served surface (or touch no
+// broker at all) and SKIPS the rest LOUDLY, each printed with its reason, so the
+// RAFT PARITY gate in test/run.sh compares single<->raft1 on the tests both
+// lanes actually run. The kept set GROWS as phase 2 ports routes — a WP that
+// ports queue admin removes `queue` from RAFT_SKIP_REASON and its push/pop/…
+// tests start running here.
+const RAFT_LANE = process.env.QUEEN_TEST_STORAGE === 'raft';
+
+// The name→module map, so a skipped test can be attributed to the route class it
+// needs. Order is cosmetic; keys are the reason-table keys below.
+const RAFT_MODULES = {
+  queue: queueTests, push: pushTests, pop: popTests, consume: consumerTests,
+  load: loadTests, dlq: dlqTests, complete: completeTests, transaction: transactionTests,
+  subscription: subscriptionTests, maintenance: maintenanceTests, retention: retentionTests,
+  bootstrap: bootstrapTests, logger: loggerTests, watermark: watermarkTests, auth: authTests,
+  semantics: semanticsTests, ackwindow: ackWindowTests, kv: kvTests, timers: timerTests,
+  docs: docsTests, stream: streamTests,
+};
+
+// Tests a phase-1 raft broker runs GREEN. Kept as an EXPLICIT allow-list, not a
+// heuristic, because the served surface is narrow: the only integration test
+// that pushes and pops without first calling the un-ported queue configure/
+// create route is testPushAutoCreatesQueueAndPartition (implicit creation on the
+// push path). The whole `logger` module is broker-free (it exercises the SDK's
+// own logger, never the wire) and so is storage-agnostic — it is kept via its
+// module below, not named here.
+const RAFT_KEEP = new Set([
+  'testPushAutoCreatesQueueAndPartition',
+]);
+const RAFT_KEEP_MODULES = new Set(['logger']);
+
+// Why each class of test is skipped on raft1 — printed once per skipped test.
+const RAFT_SKIP_REASON = {
+  queue:        'queue configure/create/delete not served in raft phase 1 (503; WP-2.5 admin)',
+  transaction:  'transaction wire not served in raft phase 1 (503; WP-2.1)',
+  subscription: 'consumer-group subscription/seek admin not served in raft phase 1 (503; WP-2.5)',
+  maintenance:  'maintenance-mode admin / dashboard SQL not served in raft phase 1 (503; WP-2.5/2.8)',
+  retention:    'retention loop not started in raft phase 1 (§10.3; WP-2.7)',
+  bootstrap:    'consumer-group bootstrap admin not served in raft phase 1 (503; WP-2.5)',
+  watermark:    'reads Postgres directly + consumer seek; unavailable in raft phase 1 (no DB; WP-2.5/2.6)',
+  kv:           'kv routes not served in raft phase 1 (503; WP-2.2)',
+  timers:       'timer routes not served in raft phase 1 (503; WP-2.3)',
+  docs:         'reads Postgres directly for the published dedup snippet; unavailable in raft phase 1 (no DB)',
+  stream:       'streams routes not served in raft phase 1 (503; WP-2.4)',
+};
+const RAFT_SKIP_DEFAULT =
+  'needs queue configure/create or another admin/read route not served in raft phase 1 (503; WP-2.5/2.6)';
+
 // Global test state
 export let dbPool;  
 let activeClient;
 
 // Initialize database pool
 export async function initDb() {
+  if (RAFT_LANE) {
+    // No Postgres in raft mode (G-2). The suite's direct-DB assertions and the
+    // SQL cleanup do not apply; dbPool stays undefined and the raft lane runs
+    // only the tests that never touch it.
+    log(true, 'raft1 lane: QUEEN_TEST_STORAGE=raft — no Postgres, skipping the direct-DB setup');
+    return undefined;
+  }
   dbPool = new pg.Pool(TEST_CONFIG.dbConfig);
   await dbPool.query('SELECT 1');
   return dbPool;
@@ -94,6 +160,13 @@ function printResults() {
 }
 
 export const cleanupTestData = async () => {
+    if (RAFT_LANE) {
+      // A raft1 stack has no Postgres and boots on a fresh data volume every
+      // run (test/run.sh tears it down with `down -v`), so there is nothing to
+      // purge and no SQL to run it with — the store is already empty.
+      log(true, 'raft1 lane: fresh data volume, no Postgres — skipping SQL cleanup (store is empty at boot)');
+      return;
+    }
     // All the LIKE patterns test queues use. The three exact names are the
     // documentation queues (test-v2/docs.js): purging them here is what lets
     // the published dedup snippet keep a fixed transactionId across runs.
@@ -251,9 +324,33 @@ async function main() {
         log(true, `Running all tests (${allTestFunctions.length} tests)...`)
     }
 
+    // PLAN_RAFT.md §13.3 / WP-1.9 — on the raft1 lane, keep only the tests the
+    // phase-1 broker can serve and skip the rest LOUDLY, each with its reason.
+    if (RAFT_LANE) {
+        const fnModule = new Map()
+        for (const [mn, mod] of Object.entries(RAFT_MODULES)) {
+            for (const f of Object.values(mod)) {
+                if (typeof f === 'function') fnModule.set(f.name, mn)
+            }
+        }
+        const kept = []
+        const skipped = []
+        for (const t of testsToRun) {
+            const mn = fnModule.get(t.name) || '?'
+            if (RAFT_KEEP.has(t.name) || RAFT_KEEP_MODULES.has(mn)) kept.push(t)
+            else skipped.push([mn, t.name])
+        }
+        log(true, `raft1 lane: keeping ${kept.length} served/broker-free test(s), skipping ${skipped.length} that need a route not in raft phase 1 (listed below)`)
+        for (const [mn, name] of skipped) {
+            const reason = RAFT_SKIP_REASON[mn] || RAFT_SKIP_DEFAULT
+            console.log(`⏭️  SKIP (raft1) ${mn}.${name} — ${reason}`)
+        }
+        testsToRun = kept
+    }
+
     // Cleanup test data
     await cleanupTestData()
-    
+
     for (const test of testsToRun) {
         try {
             console.log('Running test:', test.name)

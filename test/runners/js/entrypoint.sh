@@ -3,9 +3,12 @@
 set -eu
 
 export QUEEN_SERVER_URL="$QUEEN_HTTP_URL"
-# The suite reads PG_DB (not PG_DATABASE) for its direct cleanup pool.
-export PG_HOST="$QUEEN_PG_HOST" PG_PORT="$QUEEN_PG_PORT" \
-       PG_DB="$QUEEN_PG_DB" PG_USER="$QUEEN_PG_USER" PG_PASSWORD="$QUEEN_PG_PASSWORD"
+# The suite reads PG_DB (not PG_DATABASE) for its direct cleanup pool. On the
+# raft1 lane there is NO Postgres, so the compose sets no QUEEN_PG_* — default
+# each to empty (`:-`) so `set -u` does not abort here; run.js skips the direct-DB
+# setup and cleanup whenever QUEEN_TEST_STORAGE=raft (PLAN_RAFT.md §13.3, WP-1.9).
+export PG_HOST="${QUEEN_PG_HOST:-}" PG_PORT="${QUEEN_PG_PORT:-}" \
+       PG_DB="${QUEEN_PG_DB:-}" PG_USER="${QUEEN_PG_USER:-}" PG_PASSWORD="${QUEEN_PG_PASSWORD:-}"
 
 /usr/local/bin/wait-for-broker
 

@@ -17,7 +17,15 @@ function runWithUnavailableDatabase() {
         PG_DB: 'postgres',
         PG_USER: 'postgres',
         PG_PASSWORD: 'postgres',
-        QUEEN_SERVER_URL: 'http://127.0.0.1:1'
+        QUEEN_SERVER_URL: 'http://127.0.0.1:1',
+        // This test exercises the POSTGRES database-init-failure fatal path, so
+        // pin the child to postgres regardless of the ambient lane. On the raft1
+        // lane the container env carries QUEEN_TEST_STORAGE=raft, which run.js
+        // reads to SKIP the direct-DB setup (PLAN_RAFT.md §13.3) — inherited
+        // through `...process.env`, it would make run.js never touch Postgres and
+        // never print the ECONNREFUSED this test asserts. Overriding it here keeps
+        // the unit test identical and green on both the single and raft1 lanes.
+        QUEEN_TEST_STORAGE: 'postgres'
       },
       stdio: ['ignore', 'pipe', 'pipe']
     })

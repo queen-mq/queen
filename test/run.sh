@@ -30,6 +30,13 @@
 #                  TENANCY PARITY line and fails the run on any divergence.
 #     ha-tenanted  the HA pair with QUEEN_TENANCY_HEADER=true — the substrate for
 #                  the `tenancy` suite (two tenants, one queue name, mesh in play).
+#     raft1        1 broker on QUEEN_STORAGE=raft, NO Postgres (PLAN_RAFT.md
+#                  §13.3, WP-1.9). The runner reads QUEEN_TEST_STORAGE=raft and
+#                  runs only the message-path tests the phase-1 broker serves,
+#                  skipping the rest LOUDLY (each with its reason). run.sh reports
+#                  a RAFT PARITY line comparing single↔raft1 and fails on any
+#                  divergence in the tests both lanes ran. Only suites whose
+#                  runner implements the raft lane (RAFT_SUITES) get a raft1 job.
 #
 # Each stack = its own Postgres + broker(s) + runner on a private network, so
 # suites never collide (they share test-queue name patterns) and nothing binds
@@ -40,6 +47,7 @@
 #   test/run.sh --suite js,go          # subset of suites
 #   test/run.sh --suite py --topo single
 #   test/run.sh --suite js --topo tenanted     # flag-ON default-tenant lane
+#   test/run.sh --suite js --topo single,raft1 # the RAFT PARITY gate (WP-1.9)
 #   test/run.sh --suite tenancy        # two-tenant isolation over the HA pair
 #   test/run.sh --suite http           # every kv/timer route, no SDK in the way
 #   test/run.sh --suite conflation     # PLAN_CONFLATION §7.3 e2e, no SDK in the way
@@ -60,7 +68,24 @@ CLIENT_SUITES="js go py cli cpp laravel rust-client"
 # and default-tenant lanes is exactly the regression the gate exists to catch.
 PARITY_SUITES="$CLIENT_SUITES s3sink"
 
+# Suites whose runner implements the raft lane (QUEEN_TEST_STORAGE=raft): they
+# skip the un-ported routes LOUDLY and run only the message-path tests a phase-1
+# raft broker serves (PLAN_RAFT.md §13.3, WP-1.9). Only these get a `raft1` job,
+# so requesting `--topo raft1` never starts a lane a runner cannot honour. `go`
+# and `py` join as their runners learn the lane; `js` is done.
+RAFT_SUITES="js"
+# Suites whose single↔raft1 verdicts the RAFT PARITY gate compares. The same set
+# by construction: a suite is comparable exactly when it ran a raft1 lane.
+RAFT_PARITY_SUITES="$RAFT_SUITES"
+
 SUITES="$ALL_SUITES"
+# `raft1` is OPT-IN (`--topo …,raft1`), like pgless's `native` lane was while its
+# class was young: phase-1 raft serves only the message path with implicit queue
+# creation, so a runner skips almost everything and the parity surface is small.
+# Keeping it out of the default matrix means a bare `test/run.sh` (and CI's
+# per-suite cells) are unchanged; add raft1 to `--topo` to run the gate:
+#   test/run.sh --suite js --topo single,raft1
+# The RAFT PARITY gate below fires automatically whenever both lanes ran.
 TOPOS="single ha tenanted"
 BUILD_BROKER=1
 BUILD_RUNNERS=1
@@ -81,7 +106,7 @@ while [ $# -gt 0 ]; do
     --no-build)         BUILD_RUNNERS=0; BUILD_BROKER=0; shift;;
     -j)       MAXP="$2"; shift 2;;
     --keep)   KEEP=1; shift;;
-    -h|--help) sed -n '2,49p' "$0"; exit 0;;
+    -h|--help) sed -n '2,59p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -93,6 +118,7 @@ LOGDIR="$(mktemp -d -t queen-test.XXXXXX)"
 echo ">> logs: $LOGDIR"
 
 is_client() { case " $CLIENT_SUITES " in *" $1 "*) return 0;; *) return 1;; esac; }
+is_raft_suite() { case " $RAFT_SUITES " in *" $1 "*) return 0;; *) return 1;; esac; }
 want_suite() { case " $SUITES " in *" $1 "*) return 0;; *) return 1;; esac; }
 want_topo()  { case " $TOPOS " in *" $1 "*) return 0;; *) return 1;; esac; }
 
@@ -104,9 +130,12 @@ compose_for() {
   case "$1" in
     single|tenanted)  echo "$COMPOSE_DIR/docker-compose.single.yml";;
     ha|ha-tenanted)   echo "$COMPOSE_DIR/docker-compose.ha.yml";;
+    raft1)            echo "$COMPOSE_DIR/docker-compose.raft1.yml";;
     *) echo ""; return 1;;
   esac
 }
+# `raft1` carries no tenant header (there is no raft-tenanted lane in phase 1),
+# so it falls through to false with every non-tenanted topology.
 tenancy_for() { case "$1" in tenanted|ha-tenanted) echo true;; *) echo false;; esac; }
 
 # --- build images -----------------------------------------------------------
@@ -145,6 +174,8 @@ for s in $SUITES; do
     want_topo single   && add_job "$s" single
     want_topo ha       && add_job "$s" ha
     want_topo tenanted && add_job "$s" tenanted
+    # raft1 only for suites whose runner honours QUEEN_TEST_STORAGE=raft (WP-1.9).
+    want_topo raft1 && is_raft_suite "$s" && add_job "$s" raft1
   elif [ "$s" = "mesh" ]; then
     add_job mesh ha            # mesh is inherently an HA-stack check
   elif [ "$s" = "tenancy" ]; then
@@ -194,7 +225,7 @@ run_job() {
     proj="queen-test-${suite}-${topo}"
     compose="$(compose_for "$topo")"
     if [ -z "$compose" ]; then
-      echo "unknown topology: $topo (want single|ha|tenanted|ha-tenanted)" >"$log"
+      echo "unknown topology: $topo (want single|ha|tenanted|ha-tenanted|raft1)" >"$log"
       echo 2 >"$base.code"; echo 0 >"$base.dur"
       echo ">> FAIL ${suite}/${topo} rc=2 (unknown topology)"; return
     fi
@@ -247,8 +278,8 @@ wait
 # --- matrix report ----------------------------------------------------------
 echo
 echo "========================= Queen test matrix ========================="
-printf "%-12s %-11s %-11s %-11s %-13s %-8s\n" \
-  "suite" "single" "ha" "tenanted" "ha-tenanted" "unit"
+printf "%-12s %-11s %-11s %-11s %-13s %-11s %-8s\n" \
+  "suite" "single" "ha" "tenanted" "ha-tenanted" "raft1" "unit"
 overall=0
 cell() {  # suite topo width
   f="$LOGDIR/$1-$2.code"; w="$3"
@@ -262,7 +293,7 @@ for s in $ALL_SUITES; do
   want_suite "$s" || continue
   printf "%-12s " "$s"
   cell "$s" single 11; cell "$s" ha 11; cell "$s" tenanted 11
-  cell "$s" ha-tenanted 13; cell "$s" unit 8
+  cell "$s" ha-tenanted 13; cell "$s" raft1 11; cell "$s" unit 8
   printf "\n"
 done
 echo "===================================================================="
@@ -325,6 +356,62 @@ if [ "$parity_checked" -gt 0 ]; then
     echo "TENANCY PARITY: OK ($parity_checked suite(s) identical with the flag on and off)"
   else
     echo "TENANCY PARITY: FAILED ($parity_bad of $parity_checked suite(s) diverged)"
+    overall=1
+  fi
+fi
+
+# --- raft parity gate -------------------------------------------------------
+# PLAN_RAFT.md §13.3, WP-1.9. The `raft1` lane runs the SAME suite against a
+# broker on QUEEN_STORAGE=raft with NO Postgres. In phase 1 that broker serves
+# only the message path (push/pop/ack/renew with implicit queue creation), so the
+# runner SKIPS every test that needs an un-ported route (queue admin,
+# transaction, kv, timers, streams, consumer-group admin, dashboard reads) and
+# prints each skip with its reason. The totals therefore differ from `single` BY
+# DESIGN — like the tenancy gate's coarse counts, we never compare totals. What
+# must match is the VERDICT: the exit code, and the FAILED count of the tests
+# both lanes ran. A raft1 test that runs and fails where `single` passes is a
+# real divergence (a finding), which is exactly what this gate catches.
+#
+# The failed tally, not the passed one: JS prints "0/12 tests failed" on raft1
+# and "0/130 tests failed" on single — same failure count (0), different totals,
+# so we extract only the numerator. cargo/pytest print bare "N failed".
+raft_failed() {  # logfile -> comma-joined FAILED counts across the suite's buckets, or ""
+  local f="$1" t
+  # JS: "Overall Results: P/T tests passed, F/T tests failed" — keep F, drop /T.
+  t="$(grep -aoE '[0-9]+/[0-9]+ tests failed' "$f" 2>/dev/null | sed -E 's#/[0-9]+ tests failed##' | paste -sd, -)"
+  [ -n "$t" ] && { echo "$t"; return; }
+  # cargo ("test result: FAILED. 3 passed; 1 failed; …") and pytest ("1 failed, …").
+  t="$(grep -aoE '[0-9]+ failed' "$f" 2>/dev/null | grep -oE '^[0-9]+' | paste -sd, -)"
+  [ -n "$t" ] && { echo "$t"; return; }
+  echo ""
+}
+rparity_checked=0; rparity_bad=0
+for s in $RAFT_PARITY_SUITES; do
+  want_suite "$s" || continue
+  fo="$LOGDIR/$s-single.code"; fn="$LOGDIR/$s-raft1.code"
+  [ -f "$fo" ] && [ -f "$fn" ] || continue
+  rparity_checked=$((rparity_checked+1))
+  co="$(cat "$fo")"; cn="$(cat "$fn")"
+  # Passed tallies for context (they differ by design); failed tallies for the gate.
+  to="$(tally "$LOGDIR/$s-single.log")"; tn="$(tally "$LOGDIR/$s-raft1.log")"
+  ffo="$(raft_failed "$LOGDIR/$s-single.log")"; ffn="$(raft_failed "$LOGDIR/$s-raft1.log")"
+  diverged=0
+  [ "$co" != "$cn" ] && diverged=1
+  [ -n "$ffo" ] && [ -n "$ffn" ] && [ "$ffo" != "$ffn" ] && diverged=1
+  if [ "$diverged" = 1 ]; then
+    rparity_bad=$((rparity_bad+1))
+    echo "!! RAFT DIVERGENCE $s (single vs raft1): rc=$co [${to:-no tally}, failed ${ffo:-?}] vs rc=$cn [${tn:-no tally}, failed ${ffn:-?}]"
+    echo "   postgres log: $LOGDIR/$s-single.log"
+    echo "   raft1    log: $LOGDIR/$s-raft1.log"
+  else
+    echo "   raft parity $s (single vs raft1): rc=$co both lanes, failed ${ffo:-0} both lanes (single ran ${to:-?}, raft1 ran ${tn:-?} — subset by design, skips printed in the raft1 log)"
+  fi
+done
+if [ "$rparity_checked" -gt 0 ]; then
+  if [ "$rparity_bad" = 0 ]; then
+    echo "RAFT PARITY: OK ($rparity_checked suite(s): raft1 message-path verdict identical to single)"
+  else
+    echo "RAFT PARITY: FAILED ($rparity_bad of $rparity_checked suite(s) diverged)"
     overall=1
   fi
 fi
