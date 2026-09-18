@@ -22,9 +22,13 @@ nothing. Every tool prints what it still owes (`--list-ops`, `--list-checks`,
 | `kill/` | VM kill campaigns: table of scenarios, stratified kill times, reporting | §13.6 | 10 scenarios, scheduler and reporting real; scenario bodies stubs |
 | `flatness/` | the G-3 / I8 test: bulk preload, regime runs, comparator | §13.6 | RESULTS format, comparator and preload CLI real; send loop and regime runner stubs |
 
-Two neighbours in this directory belong to other work packages and are not
-described here: `spikes/` (the phase-0 spikes S1–S4) and `vm/` (the WP-0.2
-postgres baseline on the Linux VM).
+Three neighbours in this directory belong to other work packages and are not
+described here: `spikes/` (the phase-0 spikes S1–S4), `vm/` (the WP-0.2
+postgres baseline on the Linux VM) and `lint/` (WP-1.4:
+`lint/deny-bites.sh` proves that the I2 pin in `server/clippy.toml` and the
+`#![deny(clippy::disallowed_methods)]` in `rsm/apply.rs`, `rsm/state/` and
+`rsm/store/` actually refuse a clock, an environment read and a random number —
+it appends one call of each, runs clippy, and restores the file).
 
 ## Running them
 
