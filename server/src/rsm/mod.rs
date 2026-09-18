@@ -157,7 +157,7 @@ pub mod digest {}
 pub mod local_metrics {}
 
 /// Crash points (§13.5), from the pgless `native/faults.rs`. Owner: WP-1.8.
-pub mod faults {}
+pub mod faults;
 
 #[cfg(test)]
 mod tests;

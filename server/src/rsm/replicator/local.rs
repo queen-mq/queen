@@ -255,6 +255,12 @@ impl Writer {
             .store(last_index, Ordering::Release);
         self.refresh_log_metrics();
 
+        // §13.5 `commit.before_apply`: the group is committed by quorum (a
+        // single voter here) and durable in the log, and not one entry of it
+        // has been applied. A crash here loses nothing: apply replays the
+        // whole group from the log on restart, exactly once (I4, I13).
+        crate::rsm::faults::hit("commit.before_apply");
+
         let mut index = first_index;
         for p in pending {
             // Register BEFORE the send, so `Notify::applied(index)` — which can

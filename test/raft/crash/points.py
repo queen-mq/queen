@@ -37,6 +37,12 @@ class Point:
     stage: str
     invariant: str
     topology: tuple = ("raft1", "raft3")
+    # The phase whose WP wires this point into a real code path. A point above
+    # the current phase is a valid §13.5 name whose code does not exist yet, so
+    # the broker of an earlier phase refuses to arm it (rsm/faults.rs exits 2).
+    # WP-1.8 wires the 13 phase-1 points; the rest are named here for the
+    # catalogue and set to the phase that owns them.
+    phase: int = 1
 
 
 POINTS = [
@@ -79,19 +85,19 @@ POINTS = [
     # --- snapshots --------------------------------------------------------
     Point("snapshot.sealed", "snapshots",
           "the snapshot's index and file set are fixed; nothing is copied",
-          "I10, I17"),
+          "I10, I17", phase=4),
     Point("snapshot.built", "snapshots",
           "the snapshot exists locally and is referenced by its manifest",
-          "I10, I17"),
+          "I10, I17", phase=4),
     Point("snapshot.file_sent", "snapshots",
           "one file of a transfer reached the receiver; the rest did not",
-          "I17", ("raft3",)),
+          "I17", ("raft3",), phase=4),
     Point("snapshot.install_staged", "snapshots",
           "sm-<index>-<term>/ is written and verified; CURRENT still names the old directory",
-          "I17", ("raft3",)),
+          "I17", ("raft3",), phase=4),
     Point("snapshot.install_activated", "snapshots",
           "CURRENT names the new directory; the old one is not yet reclaimed",
-          "I17", ("raft3",)),
+          "I17", ("raft3",), phase=4),
     # --- GC and compaction ------------------------------------------------
     Point("gc.before_unlink", "GC and compaction",
           "a store commit no longer references the file; the file is still on disk",
@@ -101,23 +107,23 @@ POINTS = [
           "I10"),
     Point("compaction.copied", "GC and compaction",
           "live frames are copied into a new file; positions still point at the old one",
-          "I7, I10"),
+          "I7, I10", phase=2),
     Point("compaction.loc_committed", "GC and compaction",
           "positions point at the new file; the old file is not yet unlinked",
-          "I7, I10"),
+          "I7, I10", phase=2),
     # --- leadership, identity, membership ---------------------------------
     Point("transfer.started", "leadership, identity, membership",
           "a leadership transfer is in flight; the old leader must plan nothing more",
-          "I3, I13", ("raft3",)),
+          "I3, I13", ("raft3",), phase=4),
     Point("identity.written", "leadership, identity, membership",
           "IDENTITY is on disk; the membership record may not know this generation",
-          "I9"),
+          "I9", phase=4),
     Point("membership.learner_added", "leadership, identity, membership",
           "the learner is in the membership; it has caught up with nothing",
-          "I9", ("raft3",)),
+          "I9", ("raft3",), phase=4),
     Point("membership.changed", "leadership, identity, membership",
           "the new voter set is committed; the old leader may still think it leads",
-          "I9, I13", ("raft3",)),
+          "I9, I13", ("raft3",), phase=4),
 ]
 
 BY_NAME = {p.name: p for p in POINTS}

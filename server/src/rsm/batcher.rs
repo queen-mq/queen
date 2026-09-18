@@ -717,6 +717,11 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         if batch.is_empty() && !expire {
             return;
         }
+        // §13.5 `batcher.drained`: commands are out of the channel and in the
+        // cycle; nothing is planned. A crash here loses only unanswered work.
+        if !batch.is_empty() {
+            crate::rsm::faults::hit("batcher.drained");
+        }
 
         // Split the submissions: commands go to the blocking planner, reply
         // senders stay here in the same order.
@@ -764,6 +769,13 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
 
         if out.expired {
             self.expire_due = false;
+        }
+
+        // §13.5 `planner.planned`: effects and outcomes exist in the overlay;
+        // nothing is proposed. A crash here has committed nothing (I1): the
+        // overlay is RAM, the store was only read.
+        if out.entry.is_some() {
+            crate::rsm::faults::hit("planner.planned");
         }
 
         // Drop the in-flight entries the committed read now reflects (§7.2).
@@ -907,6 +919,12 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         let result_tx = self.result_tx.clone();
         let deadline = Instant::now() + Duration::from_millis(self.cfg.propose_ms);
         tokio::spawn(async move {
+            // §13.5 `propose.sent`: the entry is about to reach the replicator;
+            // the client is still waiting and the outcome is UNKNOWN (D6, I6).
+            // A crash here has put nothing in the log, so the write is
+            // unanswered and at-most-once: the retry with the same request id
+            // finds nothing committed and plans anew (§5.4).
+            crate::rsm::faults::hit("propose.sent");
             let res = repl.propose(bytes, deadline).await;
             let _ = result_tx.send((seq, res));
         });

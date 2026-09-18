@@ -323,7 +323,18 @@ impl LogStore {
         }
 
         self.active.write_all(&buf)?;
+        // §13.5 `log.appended`: the group is in the local raft log, not yet
+        // flushed. A crash here (page cache kept) may or may not leave the
+        // bytes on disk; recovery's torn-tail truncation drops an unfsynced
+        // frame, so the entry is unanswered (its propose never returned) and
+        // at-most-once (I4).
+        crate::rsm::faults::hit("log.appended");
         self.fsync_active()?;
+        // §13.5 `log.flushed`: the group is durable in the raft log. It is
+        // committed on a single voter (quorum of one); a crash here means the
+        // entry WILL replay on restart, so a write whose propose had not yet
+        // returned still becomes exactly-once through the log (I4).
+        crate::rsm::faults::hit("log.flushed");
 
         let added = buf.len() as u64;
         self.active_size += added;

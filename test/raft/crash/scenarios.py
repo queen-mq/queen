@@ -81,9 +81,10 @@ SCENARIOS = [
         name="push-ack",
         title="pushes and acks in flight when the fault fires",
         topologies=("raft1", "raft3"),
-        implemented=False,
-        owes="the client workload (a difffuzz-style push/pop/ack loop that writes push_ok / "
-             "push_unanswered / delivery / ack_ok to the run log) and the restart wait",
+        # WP-1.8: the raft1 body is written (runner.py). raft3 stays owed to
+        # phase 4 (WP-4.10), so a raft3 run still refuses.
+        implemented=True,
+        owes="raft3 body (WP-4.10); the gc.* points need retention (WP-2.7)",
         plan=(
             Action("start", "start {topology} with QUEEN_TEST_FAULTS={point}",
                    "one data dir per node under the run directory; never a shared one"),

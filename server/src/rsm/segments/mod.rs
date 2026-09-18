@@ -1905,7 +1905,15 @@ impl Segments {
         // (2) The index write. Its failure is owed, and reported.
         let mut first_err = None;
         let qidx = match self.write_qidx(bucket, old.file_id, old.len, &records) {
-            Ok(f) => Some(f),
+            Ok(f) => {
+                // §13.5 (R-107) `seg.qidx_written`: the sealed file's `.qidx`
+                // is written (temp + rename), not yet fsynced. A crash here
+                // leaves a `.qidx` for a file the store still calls active,
+                // which recovery deletes and rebuilds (step 5). Not part of the
+                // HTTP crash matrix; the segment roll tests arm it.
+                crate::rsm::faults::hit("seg.qidx_written");
+                Some(f)
+            }
             Err(e) => {
                 tracing::warn!(
                     target: "rsm",
@@ -1924,6 +1932,12 @@ impl Segments {
         if let Err(e) = self.create_active(bucket, next_id) {
             first_err = first_err.or(Some(e));
         }
+        // §13.5 (R-107) `seg.rolled`: the old file is sealed and the bucket has
+        // a fresh active file. A crash here is ordinary — the seal is recorded
+        // at the next store commit, and recovery truncates/rebuilds as needed
+        // (I11). Not part of the HTTP crash matrix; the segment roll tests arm
+        // it so a kill around a roll is deterministic, not timing-driven.
+        crate::rsm::faults::hit("seg.rolled");
         match first_err {
             Some(e) => Err(e),
             None => Ok(()),

@@ -1585,6 +1585,10 @@ async fn main() {
 /// `503 raft_phase1_unsupported`), and serve. WP-1.7c installs the real facade
 /// behind the builder hook and this function does not change.
 async fn run_raft(cfg: config::Config) {
+    // Crash points (§13.5), off unless QUEEN_TEST_FAULTS is set. Read once here,
+    // before any command can reach a fault point (test/raft/crash arms them).
+    rsm::faults::init_from_env();
+
     // Auth, resolved as in the Postgres boot (fail fast on bad key material).
     if let Err(e) = cfg.auth.validate() {
         obs::fatal(format!("invalid JWT auth configuration: {e}"));

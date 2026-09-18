@@ -45,9 +45,13 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::rsm::apply::{Applier, NoNotify, StateDigest};
+use crate::rsm::apply::{Applier, Committed, NoNotify, StateDigest};
+use crate::rsm::effect::{Effect, Pid};
 
-use super::apply::{cfg, seg_opts, settle, Node, Workload};
+use super::apply::{
+    cfg, fresh_cursor, group_meta, hashes, queue_config, seg_opts, settle, uuid, Build, Node,
+    Workload, BASE_US, QUEUE, TENANT,
+};
 
 const CRASH_DIR_ENV: &str = "QUEEN_RSM_APPLY_CRASH_DIR";
 const CRASH_N_ENV: &str = "QUEEN_RSM_APPLY_CRASH_N";
@@ -335,5 +339,478 @@ fn a_node_killed_mid_apply_repairs_by_replaying_from_the_durable_index() {
         crossed > 0,
         "no round reopened past its durable point, so nothing exercised the \
          idempotence the repair needs"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Fault-driven crash points (§13.5, WP-1.8)
+// ---------------------------------------------------------------------------
+//
+// The crash matrix (test/raft/crash) drives a raft1 broker over HTTP and
+// reaches 11 of the 13 phase-1 points. The two GC points — `gc.before_unlink`,
+// `gc.after_unlink` — cannot be reached from a phase-1 push/pop/ack workload (a
+// file becomes collectable only through retention or a delete, §10.3, WP-2.7),
+// and the two segment-roll points of R-107 — `seg.rolled`, `seg.qidx_written` —
+// are not in the HTTP matrix. This test proves ALL of those, plus the apply/
+// durable points, DO fire — by arming each in a child that runs the apply
+// workload (which crosses GC, durable points and 8 KiB segment rolls) and then
+// aborts itself at the point — and that the node REPAIRS to the same state a
+// clean run produces (§11.5). It is R-107's "re-run the roll cases against the
+// fault points", extended to every apply-side point.
+//
+// Unlike the timing kill above, this kill is DETERMINISTIC: `faults::hit`
+// aborts at exactly the armed point, so a failure names the point.
+
+const FAULT_ENV: &str = "QUEEN_TEST_FAULTS";
+const FAULT_CHILD_TEST: &str = "rsm::tests::apply_crash::crash_child_fault_applier";
+
+/// The points this test arms, with the nth hit and how many entries the child
+/// runs to reach it. Every one is reached by the apply workload; the child
+/// aborts at it. `apply.mid_entry` needs an entry with ≥2 effects (the
+/// workload's multi-command entries), `seg.*` need a roll (8 KiB segments,
+/// early), `gc.*` need a fully dead file — the workload's watermarks retire one
+/// only after ~6000 entries (measured), so those cells run longer. The parent's
+/// reference is a clean run of the SAME entry count.
+const FAULT_POINTS: &[(&str, u64, u64)] = &[
+    ("apply.mid_entry", 1, ENTRIES),
+    ("apply.segment_written", 1, ENTRIES),
+    ("apply.store_committed", 1, ENTRIES),
+    ("durable.files_synced", 1, ENTRIES),
+    ("durable.store_committed", 1, ENTRIES),
+    ("seg.rolled", 1, ENTRIES),
+    ("seg.qidx_written", 1, ENTRIES),
+    ("gc.before_unlink", 1, ENTRIES_GC),
+    ("gc.after_unlink", 1, ENTRIES_GC),
+];
+
+/// Entries a GC cell runs. The workload's slow watermark retires the first full
+/// segment file at ~6000 entries (measured: 0 unlinks by 3000, 4 by 6000), so
+/// arm `gc.*:1` over a longer run to be sure it fires.
+const ENTRIES_GC: u64 = 8000;
+
+/// The child: arm the fault from the environment, then apply until it aborts.
+/// Never runs unless the parent set both [`CRASH_DIR_ENV`] and [`FAULT_ENV`].
+#[test]
+fn crash_child_fault_applier() {
+    let Ok(dir) = std::env::var(CRASH_DIR_ENV) else {
+        return;
+    };
+    if std::env::var(FAULT_ENV).is_err() {
+        return;
+    }
+    // Arm the crash point (§13.5). From here `faults::hit` aborts the process
+    // at the named point.
+    crate::rsm::faults::init_from_env();
+    let n: u64 = std::env::var(CRASH_N_ENV)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(ENTRIES);
+    let dir = PathBuf::from(dir);
+    let store = crate::rsm::store::HeedStore::open(&dir.join("store"), &super::apply::store_opts())
+        .expect("child: open store");
+    let (mut a, _rec) = Applier::open(
+        &store,
+        &dir.join("seg"),
+        seg_opts(),
+        cfg(),
+        Arc::new(NoNotify),
+    )
+    .expect("child: open applier");
+
+    let mut w = Workload::new(SEED);
+    say("WRITING");
+    for i in 1..=n {
+        let c = w.next();
+        a.apply(&c).expect("child: apply");
+        if i % DURABLE_EVERY == 0 {
+            a.durable_point().expect("child: durable point");
+        } else if i % COMMIT_EVERY == 0 {
+            a.commit().expect("child: commit");
+        }
+        a.gc_pass().expect("child: gc");
+    }
+    // If control reaches here the armed point NEVER FIRED — the code path was
+    // not taken. Say so and exit non-abort, so the parent's SIGABRT assert
+    // fails with a clear message instead of hanging.
+    say("EXHAUSTED-NO-FAULT");
+    std::process::exit(3);
+}
+
+/// Spawn the fault child with one point armed over `n` entries, and let it
+/// abort itself.
+fn spawn_fault_child(dir: &Path, fault: &str, n: u64) -> Child {
+    let exe = std::env::current_exe().expect("test binary");
+    Command::new(&exe)
+        .args([
+            "--exact",
+            FAULT_CHILD_TEST,
+            "--nocapture",
+            "--test-threads",
+            "1",
+        ])
+        .env(CRASH_DIR_ENV, dir)
+        .env(CRASH_SEED_ENV, SEED.to_string())
+        .env(CRASH_N_ENV, n.to_string())
+        .env(FAULT_ENV, fault)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn the fault child")
+}
+
+/// A clean run of `n` entries, replicated and node-local digests: the state
+/// the child + replay must reproduce. Cached per `n` so the two counts are
+/// each computed once.
+fn reference_for(n: u64) -> (StateDigest, StateDigest) {
+    let node = Node::new(&format!("crash-ref-{n}"));
+    let replicated = super::apply::run_workload(&node, SEED, n, DURABLE_EVERY);
+    (replicated, node.local_digest())
+}
+
+#[test]
+fn each_fault_point_fires_and_the_node_repairs() {
+    use std::collections::HashMap;
+    use std::os::unix::process::ExitStatusExt;
+
+    let mut refs: HashMap<u64, (StateDigest, StateDigest)> = HashMap::new();
+
+    for (point, nth, n) in FAULT_POINTS.iter().copied() {
+        let (want, want_local) = refs.entry(n).or_insert_with(|| reference_for(n)).clone();
+        let fault = format!("{point}:{nth}");
+        let dir = std::env::temp_dir().join(format!(
+            "queen-rsm-fault-{}-{}",
+            std::process::id(),
+            point.replace('.', "_"),
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fault dir");
+
+        let mut child = spawn_fault_child(&dir, &fault, n);
+        // Wait for the child to abort ITSELF at the point (no kill from here).
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let status = loop {
+            if let Some(s) = child.try_wait().expect("try_wait") {
+                break s;
+            }
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("{fault}: the point never fired within 60s (code path not taken)");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(
+            status.signal(),
+            Some(9),
+            "{fault}: the child exited {status:?}, not by SIGKILL — \
+             the fault did not fire (a code=3 exit means it ran to the end)"
+        );
+
+        // §11.5: reopen the aborted state, replay every entry after the durable
+        // index, and prove the repaired state is byte-equal to a clean run.
+        let node = Node::at(dir.clone());
+        {
+            let (mut a, rec) = super::apply::open_at(&node);
+            assert!(
+                rec.applied_index >= rec.durable_index,
+                "{fault}: reopened at {} behind durable {}",
+                rec.applied_index,
+                rec.durable_index
+            );
+            let mut w = Workload::new(SEED);
+            let mut replayed = 0u64;
+            for i in 1..=n {
+                let c = w.next();
+                if i <= rec.replay_after {
+                    continue;
+                }
+                if let crate::rsm::apply::Applied::Executed { .. } = a.apply(&c).expect("replay") {
+                    replayed += 1;
+                }
+                a.gc_pass().expect("gc");
+            }
+            settle(&mut a);
+            assert_eq!(
+                a.segments_mut().saturated_releases(),
+                0,
+                "{fault}: a segment claim was released twice"
+            );
+            assert!(replayed > 0, "{fault}: nothing was left to replay");
+        }
+        let got = node.digest();
+        assert_eq!(
+            got.whole,
+            want.whole,
+            "{fault}: the repaired replicated state differs, first at {:?}",
+            got.first_difference(&want)
+        );
+        let got_local = node.local_digest();
+        assert_eq!(
+            got_local.whole,
+            want_local.whole,
+            "{fault}: the repaired node-local state differs, first at {:?}",
+            got_local.first_difference(&want_local)
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A COMPLETION crashed mid-apply (§13.5 `apply.mid_entry`, I1/I11; WP-1.8)
+// ---------------------------------------------------------------------------
+//
+// The HTTP crash matrix (test/raft/crash) reaches `apply.mid_entry` only on the
+// first entries of a run, which are unavoidably pushes (a claim needs a prior
+// push): its `nth∈{1,2}` cells crash on an `Append`, never on a cursor. So "a
+// claim/ack entry crashed MID-APPLY" is NOT exercised by the HTTP matrix — the
+// WP-1.8 refutation. `each_fault_point_fires_and_the_node_repairs` above proves
+// the GENERAL mechanism (an uncommitted store txn is discarded and the whole
+// entry replays, identical across effect kinds), but its `apply.mid_entry:1`
+// lands on the shared `Workload`'s SEED entry (QueueUpsert + GroupUpsert +
+// PartitionCreate) — pure setup, no completion.
+//
+// This test closes that gap deterministically: it builds a three-entry script
+// whose LAST entry carries a `CursorSet` (a completion: it advances `committed`
+// and bumps the Completed counter) as its FIRST of two effects, arms
+// `apply.mid_entry:3` so the kill lands AFTER that completion is written to the
+// open store txn but BEFORE the entry commits, and proves the reopened node
+// replays to a state byte-equal to a clean run — replicated AND node-local.
+// The count of 3: the seed entry's three effects fire `apply.mid_entry` twice
+// (after effects 0 and 1), the append entry has one effect and fires it not at
+// all, so the completion entry's only mid-entry point is the third hit.
+
+/// The child selected by [`a_completion_entry_crashed_mid_apply_repairs`]. Runs
+/// only when the parent set both [`CRASH_DIR_ENV`] and [`FAULT_ENV`].
+const CURSOR_CHILD_TEST: &str = "rsm::tests::apply_crash::crash_child_cursor_mid_entry";
+
+/// A fixed three-entry script whose third entry's first effect is a completion
+/// (`CursorSet` advancing `committed`). Deterministic and clock-free, so the
+/// child, the reference run and the replay all build identical entries. The
+/// per-entry `pid_base`/`kv_version_base`/`now_us` follow what a fresh applier
+/// expects (I18/I5): pid_base is the running `next_pid` (1, then 2, then 2),
+/// kv_version_base is 1 throughout (no KV writes), now_us is strictly monotone.
+fn cursor_mid_apply_script() -> Vec<Committed> {
+    let g = "g1";
+    let pid: Pid = 1;
+    let bucket = (pid % 8) as u16;
+    let (t1, t2, t3) = (BASE_US + 1_000, BASE_US + 2_000, BASE_US + 3_000);
+
+    // Entry 1 (index 1): create the queue, one group and one partition. Three
+    // effects in one command — `apply.mid_entry` fires twice inside it.
+    let e1 = Build::new(t1, 1, 0)
+        .cmd(vec![
+            Effect::QueueUpsert {
+                tenant: TENANT.into(),
+                queue: QUEUE.into(),
+                cfg: queue_config(t1),
+            },
+            Effect::GroupUpsert {
+                tenant: TENANT.into(),
+                queue: QUEUE.into(),
+                group: g.into(),
+                meta: group_meta(0, t1),
+            },
+            Effect::PartitionCreate {
+                pid,
+                uuid: uuid(pid),
+                tenant: TENANT.into(),
+                queue: QUEUE.into(),
+                partition: "p0".into(),
+                created_at_us: t1,
+            },
+        ])
+        .at(1, 1);
+
+    // Entry 2 (index 2): append four messages, so offsets 0..3 exist for a
+    // cursor to advance over. One effect — fires `apply.mid_entry` not at all.
+    let e2 = Build::new(t2, 2, 100)
+        .cmd(vec![Effect::Append {
+            pid,
+            bucket,
+            base_offset: 0,
+            count: 4,
+            created_at_us: t2,
+            hashes: hashes(0xAB, 4),
+            blob: vec![0xAB; 24 * 4],
+        }])
+        .at(2, 1);
+
+    // Entry 3 (index 3): a COMPLETION (advance committed to 1, two messages
+    // consumed) then an append. Two effects, so `apply.mid_entry` fires once —
+    // after the completion, before the append and before the commit.
+    let mut row = fresh_cursor(1, t3);
+    row.total_consumed = 2;
+    let e3 = Build::new(t3, 2, 200)
+        .cmd(vec![Effect::CursorSet {
+            pid,
+            group: g.into(),
+            row,
+        }])
+        .cmd(vec![Effect::Append {
+            pid,
+            bucket,
+            base_offset: 4,
+            count: 1,
+            created_at_us: t3,
+            hashes: hashes(0xCD, 1),
+            blob: vec![0xAB; 24],
+        }])
+        .at(3, 1);
+
+    vec![e1, e2, e3]
+}
+
+/// The child: apply entries 1 and 2 and COMMIT them (so the store reopens with
+/// them durable and the crash is one PAST a commit), then apply entry 3 with
+/// `apply.mid_entry:3` armed — the kill lands after the completion is in the
+/// open txn. Never runs unless the parent set both env vars.
+#[test]
+fn crash_child_cursor_mid_entry() {
+    let Ok(dir) = std::env::var(CRASH_DIR_ENV) else {
+        return;
+    };
+    if std::env::var(FAULT_ENV).is_err() {
+        return;
+    }
+    crate::rsm::faults::init_from_env();
+    let dir = PathBuf::from(dir);
+    let store = crate::rsm::store::HeedStore::open(&dir.join("store"), &super::apply::store_opts())
+        .expect("child: open store");
+    let (mut a, _rec) = Applier::open(
+        &store,
+        &dir.join("seg"),
+        seg_opts(),
+        cfg(),
+        Arc::new(NoNotify),
+    )
+    .expect("child: open applier");
+
+    let script = cursor_mid_apply_script();
+    a.apply(&script[0]).expect("child: apply seed"); // survives 2 mid_entry hits
+    a.gc_pass().expect("child: gc");
+    a.apply(&script[1]).expect("child: apply append"); // no mid_entry hit
+    a.gc_pass().expect("child: gc");
+    a.commit().expect("child: commit entries 1 and 2");
+    // The completion entry: `apply.mid_entry` fires after the `CursorSet` and
+    // aborts the process (SIGKILL). Control does not return.
+    a.apply(&script[2]).expect("child: apply completion entry");
+    // Reached only if the fault never fired (a wrong nth): make the parent's
+    // SIGKILL assert fail loudly instead of hanging.
+    say("EXHAUSTED-NO-FAULT");
+    std::process::exit(3);
+}
+
+fn spawn_cursor_child(dir: &Path, fault: &str) -> Child {
+    let exe = std::env::current_exe().expect("test binary");
+    Command::new(&exe)
+        .args([
+            "--exact",
+            CURSOR_CHILD_TEST,
+            "--nocapture",
+            "--test-threads",
+            "1",
+        ])
+        .env(CRASH_DIR_ENV, dir)
+        .env(FAULT_ENV, fault)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn the cursor child")
+}
+
+#[test]
+fn a_completion_entry_crashed_mid_apply_repairs() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let script = cursor_mid_apply_script();
+
+    // Reference: a clean, uninterrupted run of the same three entries.
+    let (want, want_local) = {
+        let node = Node::new("cursor-mid-ref");
+        {
+            let (mut a, _rec) = Applier::open(
+                node.store(),
+                &node.seg_dir(),
+                seg_opts(),
+                cfg(),
+                Arc::new(NoNotify),
+            )
+            .expect("ref: open");
+            for c in &script {
+                a.apply(c).expect("ref: apply");
+                a.gc_pass().expect("ref: gc");
+            }
+            settle(&mut a);
+        }
+        (node.digest(), node.local_digest())
+    };
+
+    let dir = std::env::temp_dir().join(format!("queen-rsm-cursor-mid-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+
+    let mut child = spawn_cursor_child(&dir, "apply.mid_entry:3");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        if let Some(s) = child.try_wait().expect("try_wait") {
+            break s;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("apply.mid_entry:3 never fired on the completion entry (code path not taken)");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(
+        status.signal(),
+        Some(9),
+        "the child exited {status:?}, not by SIGKILL — the completion mid-apply \
+         fault did not fire (a code=3 exit means it ran to the end)"
+    );
+
+    // §11.5: reopen the aborted state, prove the completion entry was NOT
+    // committed (the kill landed mid-apply), replay it, and prove byte-equal.
+    let node = Node::at(dir.clone());
+    {
+        let (mut a, rec) = super::apply::open_at(&node);
+        assert!(
+            rec.applied_index >= rec.durable_index,
+            "reopened at {} behind durable {}",
+            rec.applied_index,
+            rec.durable_index
+        );
+        assert!(
+            rec.applied_index < 3,
+            "the completion entry (index 3) was already committed at reopen \
+             (applied={}); the kill did not land mid-apply",
+            rec.applied_index
+        );
+        let mut replayed = 0u64;
+        for (i, c) in script.iter().enumerate() {
+            let idx = i as u64 + 1;
+            if idx <= rec.replay_after {
+                continue;
+            }
+            if let crate::rsm::apply::Applied::Executed { .. } = a.apply(c).expect("replay") {
+                replayed += 1;
+            }
+            a.gc_pass().expect("gc");
+        }
+        settle(&mut a);
+        assert!(replayed > 0, "nothing was left to replay");
+    }
+    let got = node.digest();
+    assert_eq!(
+        got.whole,
+        want.whole,
+        "the repaired replicated state differs, first at {:?}",
+        got.first_difference(&want)
+    );
+    let got_local = node.local_digest();
+    assert_eq!(
+        got_local.whole,
+        want_local.whole,
+        "the repaired node-local state differs, first at {:?}",
+        got_local.first_difference(&want_local)
     );
 }

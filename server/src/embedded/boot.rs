@@ -145,6 +145,9 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
             dir = %cfg.raft_dir,
             "embedded broker in raft mode — no Postgres pool, no schema apply"
         );
+        // Crash points (§13.5), off unless QUEEN_TEST_FAULTS is set. KEEP IN
+        // SYNC with `run_raft`.
+        crate::rsm::faults::init_from_env();
         // WP-1.7c: register the real state-machine builder before the seam
         // builds the facade (first-write-wins; KEEP IN SYNC with `run_raft`).
         crate::rsm::facade::set_builder(crate::rsm::facade::real::real_builder);

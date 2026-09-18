@@ -847,6 +847,16 @@ impl<'s, S: Store> Applier<'s, S> {
                 Assigns::Nothing => {}
             }
             self.effect(c.index, ord as u32, c.entry.now_us, e, &mut wakes)?;
+            // §13.5 `apply.mid_entry`: some effects of this entry are written
+            // to the OPEN store transaction (and some payload bytes to files),
+            // the rest are not, and the applied index has NOT advanced — it is
+            // written last, in the same commit as every effect (I11). A crash
+            // here (before any store commit) reopens at the previous applied
+            // index and replays the whole entry: the atomicity test (I1, I11).
+            // Only when at least one effect remains, so it means "mid".
+            if ord + 1 < c.entry.effects.len() {
+                crate::rsm::faults::hit("apply.mid_entry");
+            }
         }
         self.stats.effects += c.entry.effects.len() as u64;
 
@@ -1209,6 +1219,12 @@ impl<'s, S: Store> Applier<'s, S> {
         let pos =
             self.segments
                 .append(bucket, pid, base_offset, count, created_at_us, hashes, blob)?;
+        // §13.5 `apply.segment_written`: the payload bytes are in a segment
+        // file (page cache, unsynced) and the store commit that records this
+        // append and the applied index has NOT happened. A crash here reopens
+        // at the previous applied index; recovery truncates the file to the
+        // length the reopened store records and the entry replays (I11).
+        crate::rsm::faults::hit("apply.segment_written");
         self.writes.put_seg_loc(
             pid,
             base_offset,
@@ -2337,6 +2353,13 @@ impl<'s, S: Store> Applier<'s, S> {
         self.record_files()?;
         let seals = self.record_seals()?;
         self.writes.commit()?;
+        // §13.5 `apply.store_committed`: the (non-durable) store commit that
+        // carries the applied index and the segment file lengths has landed;
+        // the files themselves are NOT fsynced. A `kill -9` here keeps the page
+        // cache, so the store reopens AT this applied index and recovery
+        // truncates the files to the recorded lengths (I11). A power loss
+        // returns to the last DURABLE commit instead, and the log replays.
+        crate::rsm::faults::hit("apply.store_committed");
         self.stats.commits += 1;
         self.entries_since_commit = 0;
         self.dirty = false;
@@ -2371,6 +2394,13 @@ impl<'s, S: Store> Applier<'s, S> {
 
     fn durable_point_inner(&mut self) -> Result<u64> {
         let point = self.segments.durable_point()?;
+        // §13.5 `durable.files_synced`: every segment file written since the
+        // last point is fsynced (step 1, §11.4), the durable store commit that
+        // records their lengths (step 2) has NOT landed. A crash here reopens
+        // at the last durable store commit (the previous point); the files are
+        // safe on disk but longer than the store records, and recovery
+        // truncates them back and replays the log tail (I11).
+        crate::rsm::faults::hit("durable.files_synced");
         for f in &point.files {
             self.put_file_state(f)?;
         }
@@ -2398,6 +2428,12 @@ impl<'s, S: Store> Applier<'s, S> {
         self.durable_index = self.applied_index;
         self.stats.commits += 1;
         self.stats.durable_points += 1;
+        // §13.5 `durable.store_committed`: the durable point is complete (files
+        // fsynced AND the durable store commit landed); the entries after this
+        // index are not durable yet. A crash here reopens exactly here; nothing
+        // owed to this point is lost, and phase two of GC below simply runs
+        // again on the next point (I10, I11).
+        crate::rsm::faults::hit("durable.store_committed");
         for (b, id) in seals {
             self.segments.forget_sealed(b, id);
         }
@@ -2554,8 +2590,18 @@ impl<'s, S: Store> Applier<'s, S> {
         let mut staged = std::mem::take(&mut self.gc_staged);
         staged.append(&mut self.gc_deferred);
         for (b, id) in staged {
+            // §13.5 `gc.before_unlink`: a durable store commit no longer
+            // references this file (its rows are gone); the file is still on
+            // disk. A crash here leaves an orphan file that recovery sweeps
+            // because no row names it (I10) — never a referenced file gone.
+            crate::rsm::faults::hit("gc.before_unlink");
             match self.segments.unlink(b, id) {
                 Ok(true) => {
+                    // §13.5 `gc.after_unlink`: the file is unlinked. Its rows
+                    // were already removed in a durable commit, so a crash here
+                    // is indistinguishable from a clean unlink: nothing points
+                    // at it (I10).
+                    crate::rsm::faults::hit("gc.after_unlink");
                     self.recorded_seals.remove(&(b, id));
                     self.stats.files_unlinked += 1;
                 }
