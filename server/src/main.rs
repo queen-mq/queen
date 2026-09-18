@@ -1625,9 +1625,14 @@ async fn run_raft(cfg: config::Config) {
             target: "boot",
             dir = %cfg.raft_dir,
             error = %e,
-            "could not create the raft data directory (the WP-1.7a stub does not use it yet)"
+            "could not create the raft data directory"
         );
     }
+
+    // WP-1.7c: install the real state-machine builder before the storage seam
+    // builds the facade. First-write-wins; `build_raft_state` -> `facade::build`
+    // then returns the real `RaftFacade` instead of the phase-1 stub.
+    rsm::facade::set_builder(rsm::facade::real::real_builder);
 
     let state = match handlers::raft::build_raft_state(&cfg) {
         Ok(s) => s,

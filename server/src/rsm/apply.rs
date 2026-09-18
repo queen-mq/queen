@@ -2659,10 +2659,41 @@ pub fn spawn<S: Store + 'static>(
     clock: Arc<dyn Clock>,
     rx: Receiver<Committed>,
 ) -> std::thread::JoinHandle<Result<ApplyStats>> {
+    spawn_with_reader(store, seg_root, seg_opts, cfg, notify, clock, rx, None)
+}
+
+/// [`spawn`], plus a one-shot sink the thread publishes the segment
+/// [`segments::Reader`] into once it has opened the applier (WP-1.7c).
+///
+/// The apply thread is the only owner of the [`Segments`] writer, and the
+/// facade (`rsm/facade`) must read pop payloads from the very same file set the
+/// writer keeps appending to — its RAM active index and sealed `.qidx` files —
+/// so a second, independently opened reader (which would rescan its own copy
+/// and never see live appends) will not do (§7.5, D7). The reader shares the
+/// writer's `Arc<Shared>`, so it is published HERE, right after `Applier::open`
+/// (before any entry replays), and the caller ([`LocalReplicator::open`]) takes
+/// it out of the sink and hands it to the facade. `None` is the pre-WP-1.7c
+/// path and every test that does not read payloads back.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_with_reader<S: Store + 'static>(
+    store: Arc<S>,
+    seg_root: std::path::PathBuf,
+    seg_opts: segments::Options,
+    cfg: ApplyConfig,
+    notify: Arc<dyn Notify>,
+    clock: Arc<dyn Clock>,
+    rx: Receiver<Committed>,
+    reader_sink: Option<Arc<std::sync::OnceLock<segments::Reader>>>,
+) -> std::thread::JoinHandle<Result<ApplyStats>> {
     std::thread::Builder::new()
         .name("queen-rsm-apply".into())
         .spawn(move || {
             let (mut applier, rec) = Applier::open(&*store, &seg_root, seg_opts, cfg, notify)?;
+            if let Some(sink) = &reader_sink {
+                // First-write-wins; there is only ever one apply thread per
+                // replicator, so this sets exactly once.
+                let _ = sink.set(applier.reader());
+            }
             tracing::info!(
                 target: "rsm",
                 replay_after = rec.replay_after,

@@ -143,8 +143,11 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
         tracing::info!(
             target: "boot",
             dir = %cfg.raft_dir,
-            "embedded broker in raft mode — no Postgres pool, no schema apply (WP-1.7a stub facade)"
+            "embedded broker in raft mode — no Postgres pool, no schema apply"
         );
+        // WP-1.7c: register the real state-machine builder before the seam
+        // builds the facade (first-write-wins; KEEP IN SYNC with `run_raft`).
+        crate::rsm::facade::set_builder(crate::rsm::facade::real::real_builder);
         let st = crate::handlers::raft::build_raft_state(&cfg).map_err(StartError::Config)?;
         return Ok(Booted {
             st,

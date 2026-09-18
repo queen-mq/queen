@@ -34,6 +34,12 @@ use async_trait::async_trait;
 use crate::notify::Notifier;
 use crate::util::uuidv7_bytes;
 
+/// The real state machine (WP-1.7c): store + `LocalReplicator` + apply thread +
+/// batcher + segments, behind the [`Rsm`] trait. Registered through the builder
+/// hook ([`set_builder`]) by the boot paths; the [`NotReady`] stub is what a
+/// build with no builder installed (the WP-1.7a seam tests) still gets.
+pub mod real;
+
 // ---------------------------------------------------------------------------
 // Store key bound (WP-1.2 finding R-108).
 // ---------------------------------------------------------------------------
@@ -120,6 +126,12 @@ impl Deadline {
         self.at.saturating_duration_since(Instant::now())
     }
 
+    /// The underlying instant, for a blocking-pool call that takes an
+    /// `Option<Instant>` budget (segment reads, §7.5).
+    pub fn instant(&self) -> Instant {
+        self.at
+    }
+
     /// Whether the deadline has passed.
     pub fn expired(&self) -> bool {
         Instant::now() >= self.at
@@ -176,6 +188,13 @@ pub enum RsmError {
     StorageFull,
     /// The command's deadline elapsed before it could be answered (I15).
     Timeout,
+    /// A non-retryable, whole-command refusal from the planner (§5.4, I14): a
+    /// bad request the client must fix, not retry — rendered `400` with the
+    /// planner's own `code`. Distinct from [`RsmError::Internal`] (a broker
+    /// fault) and from a per-item refusal (which rides inside a `201` push
+    /// body). WP-1.7c added it so the facade can surface `plan_*`'s client
+    /// refusals as 4xx rather than 500.
+    Rejected { code: String, message: String },
     /// An internal, non-retryable failure → `500`. Never produced by the stub.
     Internal(String),
 }
@@ -190,6 +209,7 @@ impl RsmError {
             RsmError::NameTooLong { .. } => "name_too_long",
             RsmError::StorageFull => "storage_full",
             RsmError::Timeout => "timeout",
+            RsmError::Rejected { .. } => "rejected",
             RsmError::Internal(_) => "internal",
         }
     }
@@ -213,6 +233,7 @@ impl std::fmt::Display for RsmError {
             ),
             RsmError::StorageFull => write!(f, "storage is full on at least one node"),
             RsmError::Timeout => write!(f, "the request deadline elapsed"),
+            RsmError::Rejected { message, .. } => write!(f, "{message}"),
             RsmError::Internal(m) => write!(f, "{m}"),
         }
     }

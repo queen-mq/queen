@@ -351,6 +351,10 @@ pub struct LocalReplicator<S: Store> {
     writer_join: Option<JoinHandle<()>>,
     apply_join: Option<JoinHandle<apply::Result<ApplyStats>>>,
     store: Arc<S>,
+    /// The segment reader the apply thread published at open (WP-1.7c). The
+    /// facade reads pop payloads through it, off the SAME file set the writer
+    /// keeps appending to (§7.5). Always set once `open` returns.
+    reader: segments::Reader,
 }
 
 impl<S: Store + 'static> LocalReplicator<S> {
@@ -408,7 +412,12 @@ impl<S: Store + 'static> LocalReplicator<S> {
             shared: shared.clone(),
             waker,
         });
-        let apply_join = apply::spawn(
+        // The apply thread owns the segment writer; publish its reader here so
+        // the facade can read pop payloads off the same live file set (§7.5,
+        // WP-1.7c). Set once, before the first entry replays.
+        let reader_sink: Arc<std::sync::OnceLock<segments::Reader>> =
+            Arc::new(std::sync::OnceLock::new());
+        let apply_join = apply::spawn_with_reader(
             store.clone(),
             cfg.seg_root.clone(),
             cfg.seg_opts,
@@ -416,6 +425,7 @@ impl<S: Store + 'static> LocalReplicator<S> {
             notify,
             clock,
             apply_rx,
+            Some(reader_sink.clone()),
         );
 
         // 5. Replay: every entry after the store's durable index, in order.
@@ -455,6 +465,35 @@ impl<S: Store + 'static> LocalReplicator<S> {
             return Err(e);
         }
 
+        // The reader the apply thread published at `Applier::open` (WP-1.7c). It
+        // is set before any entry replays, so it is available by now on the
+        // replay>0 path; on the replay==0 path the thread may still be inside
+        // `Applier::open`, so spin briefly (the apply thread has no reason to be
+        // slow here, and a dead thread short-circuits).
+        let reader = {
+            let end = Instant::now() + cfg.replay_deadline;
+            loop {
+                if let Some(r) = reader_sink.get() {
+                    break r.clone();
+                }
+                if apply_join.is_finished() {
+                    drop(apply_tx);
+                    let _ = apply_join.join();
+                    return Err(io::Error::other(
+                        "apply thread exited before it published the segment reader",
+                    ));
+                }
+                if Instant::now() >= end {
+                    drop(apply_tx);
+                    let _ = apply_join.join();
+                    return Err(io::Error::other(
+                        "apply thread did not publish the segment reader in time",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+
         tracing::info!(
             target: "rsm",
             node = cfg.node_id,
@@ -490,12 +529,19 @@ impl<S: Store + 'static> LocalReplicator<S> {
             writer_join: Some(writer_join),
             apply_join: Some(apply_join),
             store,
+            reader,
         })
     }
 
     /// The node id.
     pub fn node_id(&self) -> NodeId {
         self.shared.node_id
+    }
+
+    /// The segment reader for pop payloads (§7.5, WP-1.7c). Cloneable and
+    /// `Send + Sync`; the facade clones one per blocking-pool read.
+    pub fn reader(&self) -> segments::Reader {
+        self.reader.clone()
     }
 
     /// The last index the log holds (fsynced).

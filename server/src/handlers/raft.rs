@@ -59,14 +59,20 @@ pub(crate) fn err_response(e: RsmError) -> Response {
         RsmError::NameTooLong { .. } => (StatusCode::PAYLOAD_TOO_LARGE, None),
         RsmError::StorageFull => (StatusCode::INSUFFICIENT_STORAGE, None),
         RsmError::Timeout => (StatusCode::SERVICE_UNAVAILABLE, Some(1)),
+        RsmError::Rejected { .. } => (StatusCode::BAD_REQUEST, None),
         RsmError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, None),
     };
     // Build a valid JSON body {"error":"<escaped>","code":"<code>"} (+ the
     // leader hint when we have one). Reuse `json_escape_into` for the message.
+    // A `Rejected` carries the planner's own `code`; every other variant uses
+    // its stable static one.
     let mut body = String::from("{\"error\":\"");
     crate::fusion::json_escape_into(&mut body, &e.to_string());
     body.push_str("\",\"code\":\"");
-    body.push_str(e.code());
+    match &e {
+        RsmError::Rejected { code, .. } => crate::fusion::json_escape_into(&mut body, code),
+        _ => body.push_str(e.code()),
+    }
     body.push('"');
     if let RsmError::Retry {
         leader_hint: Some(h),
