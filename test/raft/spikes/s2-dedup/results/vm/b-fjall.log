@@ -1,0 +1,54 @@
+=== s2-dedup run ===
+host        linux/x86_64 Linux queenpgless-01 6.8.0-124-generic #124-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:00:45 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+option      (b) hash lists in files + per-file blooms + recent cache
+engine      fjall    dir /root/raft/s2-dedup/data/b-fjall
+load        50000 msg/s, batch 10, 10 appends/entry -> 500 entries/s, payload 96 B, 4096 partitions
+dedup       window 360 s, txns window 432 s, retention 72 s, duplicates 1.0 % at ages 0..420 s, ack-by-hash 5000 /s
+structures  cache 64 MiB (blocks of 16384 hashes), blooms 16 bits/key sized for 18724 keys/file, frames verified on read: false, hash-only compaction: true, ack early stop: false
+durability  non-durable commit per entry, durable point every 1000 ms; files roll at 2 MiB; fsync Data x8; store cache 256 MiB; nofile=4096
+label       b-fjall
+
+--- throughput ---
+wall 600.1 s, 127782 entries (213/s target 500/s), 12778200 messages (21294 msg/s), 1277820 appends, 53329 appends carrying a duplicate
+store ops 9453329 (15754/s), pruned hash records 670037, segment rows deleted 1197096, max pacing lag 344391.1 ms, entries behind >50 ms: 86061
+store open 65 ms, durable points 555
+
+--- probe latency (one push of 10 hashes) ---
+probe                  n=1277820   p50    0.074 ms  p99    0.767 ms  p99.9    0.991 ms  max   19.217 ms  mean   0.093 ms
+probe (disk)           n=62928     p50    0.623 ms  p99    1.087 ms  p99.9    2.623 ms  max   19.217 ms  mean   0.625 ms
+ack-by-hash            n=511013    p50    0.591 ms  p99    1.055 ms  p99.9    1.983 ms  max   42.990 ms  mean   0.598 ms
+entry total            n=127782    p50    3.071 ms  p99   11.519 ms  p99.9   94.207 ms  max  197.085 ms  mean   4.373 ms
+commit                 n=127782    p50    0.271 ms  p99    0.399 ms  p99.9    1.279 ms  max   39.122 ms  mean   0.261 ms
+durable point          n=555       p50   75.775 ms  p99  135.167 ms  p99.9  196.607 ms  max  196.129 ms  mean  77.842 ms
+prune step             n=127782    p50    0.179 ms  p99    0.431 ms  p99.9    1.855 ms  max    8.295 ms  mean   0.170 ms
+retention step         n=127782    p50    0.062 ms  p99    0.203 ms  p99.9    0.463 ms  max    4.062 ms  mean   0.064 ms
+hash-only compaction   n=529       p50   14.847 ms  p99   43.007 ms  p99.9   75.775 ms  max   74.338 ms  mean  16.086 ms
+
+--- dedup work ---
+store gets 0 puts 1277820 dels 670037 scan rows 122251650
+bloom tests 13778304 hits 574836 (false hits 10246), frame reads 58011689 (11252.9 MiB), probes that touched disk 573941
+recent cache: vouched 12739672 maybe 38528
+txns rows: 607783
+cache RAM: 64.2 MiB
+cache blocks dropped: 549
+cache floor age at end: 1789661394348039
+txns rows skipped by scans: 1937402
+
+--- exactness ---
+duplicates injected: 53329 inside the window, 3244 outside it (oracle misses 71254)
+inside the window : detected 53329, MISSED 0, wrong original offset 0
+outside the window: falsely reported 0
+fresh hashes falsely reported as duplicates: 0
+duplicates caught by the planner overlay (same entry, not committed yet): 194
+misses audited by an exhaustive scan: 0 were THERE (fast-path bug), 0 were genuinely absent
+ack-by-hash below the cursor: 511013 probes, resolved 511013, UNRESOLVED 0, of which the segment was already deleted by retention: 511000; unexpected in-span offsets 0
+
+--- footprint ---
+store 146.5 MiB, segment files 459.4 MiB, bloom sidecars 13.4 MiB (579 saved, 20.7 MiB written)
+files live 598 (opened 835), unlinked 237 (83.1 MiB), hash-only rewrites 529 (1057.7 -> 185.4 MiB)
+RAM: dedup structures 85.6 MiB (blooms 21.4 MiB + cache 64.2 MiB), oracle 20.3 MiB, RSS 6 -> 986 MiB (max 986)
+kernel bytes written 2906.6 MiB (4.84 MiB/s), payload appended 1412.8 MiB
+per message: 12.0 B of store, 37.7 B of files, 1.76 B of bloom RAM
+dedup alone writes 21.3 B per message logically (260.0 MiB over the run)
+
+RESULT option=b engine=fjall rate=21294 probe_p50_us=74 probe_p99_us=767 ack_p50_us=591 ack_p99_us=1055 store_mib=146.5 seg_mib=459.4 ram_mib=85.6 rss_max_mib=986 exact=true label=b-fjall

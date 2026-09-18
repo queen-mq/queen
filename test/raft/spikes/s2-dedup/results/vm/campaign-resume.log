@@ -1,0 +1,21 @@
+=== build 2026-09-18T05:40:31Z
+=== run a-heed engine=heed 2026-09-18T05:40:33Z
+    rc=0
+RESULT option=a engine=heed rate=37565 probe_p50_us=13 probe_p99_us=24 ack_p50_us=2 ack_p99_us=3 store_mib=3133.1 seg_mib=344.6 ram_mib=0.0 rss_max_mib=3156 exact=true label=a-heed
+=== rebuild a-heed mode=blooms 2026-09-18T05:50:35Z
+    rc=0
+RESULT rebuild option=a mode=blooms open_ms=0 table_ms=18 bloom_ms=1 total_ms=20 bloom_mib=0.0 checked=3967 wrong=0
+=== run samples-legacy legacy-samples=true 2026-09-18T05:50:36Z
+    rc=0
+=== rebuild samples-legacy 2026-09-18T05:52:38Z
+    rc=1
+samples checked 4096 (0 expect the original offset, 4096 expect no answer): 3838 correct, 258 WRONG, of the wrong ones 258 have a YOUNGER occurrence of the same hash in the store (re-pushed during the run: a stale sample, not a restart defect)
+RESULT rebuild option=a mode=blooms open_ms=783 table_ms=162 bloom_ms=1 total_ms=946 bloom_mib=0.0 checked=4096 wrong=258
+=== run samples-fixed legacy-samples=false 2026-09-18T05:52:40Z
+    rc=0
+=== rebuild samples-fixed 2026-09-18T05:54:42Z
+    rc=0
+samples checked 3539 (547 expect the original offset, 2992 expect no answer): 3539 correct, 0 WRONG, of the wrong ones 0 have a YOUNGER occurrence of the same hash in the store (re-pushed during the run: a stale sample, not a restart defect)
+RESULT rebuild option=a mode=blooms open_ms=1256 table_ms=164 bloom_ms=1 total_ms=1421 bloom_mib=0.0 checked=3539 wrong=0
+=== done 2026-09-18T05:54:44Z
+nothing left running

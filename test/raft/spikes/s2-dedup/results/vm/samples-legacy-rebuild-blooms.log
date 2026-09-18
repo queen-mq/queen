@@ -1,0 +1,19 @@
+=== s2-dedup rebuild (option a, mode blooms) ===
+host        linux/x86_64 Linux queenpgless-01 6.8.0-124-generic #124-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:00:45 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+  MISMATCH pid=2604 off=2 created_age=119 s inside=false got=Some(868)
+    occurrences still in the store: [off=868 age=39 s] -> a younger one exists: true
+  MISMATCH pid=1018 off=9 created_age=119 s inside=false got=Some(938)
+    occurrences still in the store: [off=938 age=29 s] -> a younger one exists: true
+  MISMATCH pid=3356 off=35 created_age=117 s inside=false got=Some(1060)
+    occurrences still in the store: [off=1060 age=34 s] -> a younger one exists: true
+  MISMATCH pid=576 off=45 created_age=117 s inside=false got=Some(989)
+    occurrences still in the store: [off=989 age=27 s] -> a younger one exists: true
+  MISMATCH pid=3065 off=16 created_age=119 s inside=false got=Some(838)
+    occurrences still in the store: [off=838 age=29 s] -> a younger one exists: true
+store open                     783 ms
+file table (scan seg_loc 43329 rows + txns 0 rows)      162 ms
+blooms: 0 loaded from sidecars, 0 rebuilt by walking 0 frames ->        1 ms, 0.0 MiB resident
+total ready-to-probe           946 ms
+probe after restart    n=4096      p50    0.026 ms  p99    0.121 ms  p99.9    0.191 ms  max    5.060 ms  mean   0.034 ms
+samples checked 4096 (0 expect the original offset, 4096 expect no answer): 3838 correct, 258 WRONG, of the wrong ones 258 have a YOUNGER occurrence of the same hash in the store (re-pushed during the run: a stale sample, not a restart defect)
+RESULT rebuild option=a mode=blooms open_ms=783 table_ms=162 bloom_ms=1 total_ms=946 bloom_mib=0.0 checked=4096 wrong=258

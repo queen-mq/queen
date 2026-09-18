@@ -1,0 +1,54 @@
+=== s2-dedup run ===
+host        macos/aarch64 Darwin alice.local 24.5.0 Darwin Kernel Version 24.5.0: Tue Apr 22 19:54:43 PDT 2025; root:xnu-11417.121.6~2/RELEASE_ARM64_T8132 arm64
+option      (b) hash lists in files + per-file blooms + recent cache
+engine      fjall    dir /var/tmp/s2-dedup/b-short-earlystop
+load        50000 msg/s, batch 10, 10 appends/entry -> 500 entries/s, payload 96 B, 4096 partitions
+dedup       window 60 s, txns window 72 s, retention 20 s, duplicates 1.0 % at ages 0..70 s, ack-by-hash 5000 /s
+structures  cache 64 MiB (blocks of 16384 hashes), blooms 16 bits/key sized for 18724 keys/file, frames verified on read: false, hash-only compaction: true, ack early stop: true
+durability  non-durable commit per entry, durable point every 1000 ms; files roll at 2 MiB; fsync Data x8; store cache 256 MiB; nofile=1048576
+label       b-short-earlystop
+
+--- throughput ---
+wall 300.0 s, 69540 entries (232/s target 500/s), 6954000 messages (23180 msg/s), 695400 appends, 47347 appends carrying a duplicate
+store ops 5267729 (17559/s), pruned hash records 533347, segment rows deleted 628691, max pacing lag 160922.4 ms, entries behind >50 ms: 55285
+store open 291 ms, durable points 294
+
+--- probe latency (one push of 10 hashes) ---
+probe                  n=695400    p50    0.022 ms  p99    1.567 ms  p99.9    4.479 ms  max  337.217 ms  mean   0.091 ms
+probe (disk)           n=53438     p50    0.607 ms  p99    4.863 ms  p99.9    9.471 ms  max  310.187 ms  mean   0.901 ms
+ack-by-hash            n=508938    p50    0.207 ms  p99    2.111 ms  p99.9    5.119 ms  max  401.513 ms  mean   0.341 ms
+entry total            n=69540     p50    3.007 ms  p99   19.967 ms  p99.9   41.983 ms  max  434.017 ms  mean   4.120 ms
+commit                 n=69540     p50    0.147 ms  p99    0.671 ms  p99.9    5.759 ms  max   61.761 ms  mean   0.185 ms
+durable point          n=294       p50   12.543 ms  p99   63.487 ms  p99.9  135.167 ms  max  133.753 ms  mean  15.409 ms
+prune step             n=69540     p50    0.100 ms  p99    0.303 ms  p99.9    0.639 ms  max  194.513 ms  mean   0.112 ms
+retention step         n=69540     p50    0.037 ms  p99    0.119 ms  p99.9    0.319 ms  max   15.238 ms  mean   0.041 ms
+hash-only compaction   n=233       p50    5.631 ms  p99   17.407 ms  p99.9  270.335 ms  max  265.934 ms  mean   7.121 ms
+
+--- dedup work ---
+store gets 0 puts 695400 dels 533347 scan rows 21981941
+bloom tests 1104449 hits 562526 (false hits 6714), frame reads 9912985 (1918.4 MiB), probes that touched disk 562376
+recent cache: vouched 6900457 maybe 53543
+txns rows: 162053
+cache RAM: 27.9 MiB
+cache blocks dropped: 323
+cache floor age at end: 1789657851954441
+txns rows skipped by scans: 364397
+
+--- exactness ---
+duplicates injected: 47347 inside the window, 6196 outside it (oracle misses 15656)
+inside the window : detected 47347, MISSED 0, wrong original offset 0
+outside the window: falsely reported 0
+fresh hashes falsely reported as duplicates: 0
+duplicates caught by the planner overlay (same entry, not committed yet): 521
+misses audited by an exhaustive scan: 0 were THERE (fast-path bug), 0 were genuinely absent
+ack-by-hash below the cursor: 508938 probes, resolved 508938, UNRESOLVED 0, of which the segment was already deleted by retention: 508542; unexpected in-span offsets 0
+
+--- footprint ---
+store 107.3 MiB, segment files 372.5 MiB, bloom sidecars 3.8 MiB (266 saved, 9.5 MiB written)
+files live 353 (opened 522), unlinked 169 (16.4 MiB), hash-only rewrites 233 (465.9 -> 20.6 MiB)
+RAM: dedup structures 40.5 MiB (blooms 12.6 MiB + cache 27.9 MiB), oracle 3.5 MiB, RSS 3 -> 376 MiB (max 376)
+kernel bytes written 2222.4 MiB (7.41 MiB/s), payload appended 766.9 MiB
+per message: 16.2 B of store, 56.2 B of files, 1.90 B of bloom RAM
+dedup alone writes 21.3 B per message logically (141.2 MiB over the run)
+
+RESULT option=b engine=fjall rate=23180 probe_p50_us=22 probe_p99_us=1567 ack_p50_us=207 ack_p99_us=2111 store_mib=107.3 seg_mib=372.5 ram_mib=40.5 rss_max_mib=376 exact=true label=b-short-earlystop

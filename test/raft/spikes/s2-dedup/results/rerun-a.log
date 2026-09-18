@@ -1,0 +1,7 @@
+=== run a-short (file GC fixed) 17:27:45
+RESULT option=a engine=fjall rate=49975 probe_p50_us=11 probe_p99_us=56 ack_p50_us=6 ack_p99_us=76 store_mib=1017.9 seg_mib=429.8 ram_mib=0.0 rss_max_mib=1328 exact=true label=a-short
+RESULT rebuild option=a mode=blooms open_ms=1885 table_ms=183 bloom_ms=1 total_ms=2069 bloom_mib=0.0 checked=4096 wrong=0
+=== run a-long 17:32:49
+RESULT option=a engine=fjall rate=50000 probe_p50_us=19 probe_p99_us=95 ack_p50_us=16 ack_p99_us=199 store_mib=920.2 seg_mib=614.5 ram_mib=0.0 rss_max_mib=981 exact=true label=a-long
+RESULT rebuild option=a mode=blooms open_ms=559 table_ms=171 bloom_ms=3 total_ms=733 bloom_mib=0.0 checked=4096 wrong=0
+=== done 17:37:52

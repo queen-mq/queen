@@ -1,0 +1,49 @@
+=== s2-dedup run ===
+host        macos/aarch64 Darwin alice.local 24.5.0 Darwin Kernel Version 24.5.0: Tue Apr 22 19:54:43 PDT 2025; root:xnu-11417.121.6~2/RELEASE_ARM64_T8132 arm64
+option      (a) store index per hash
+engine      fjall    dir /var/tmp/s2-dedup/a-short
+load        50000 msg/s, batch 10, 10 appends/entry -> 500 entries/s, payload 96 B, 4096 partitions
+dedup       window 60 s, txns window 72 s, retention 20 s, duplicates 1.0 % at ages 0..70 s, ack-by-hash 5000 /s
+structures  cache 64 MiB (blocks of 16384 hashes), blooms 16 bits/key sized for 18724 keys/file, frames verified on read: false, hash-only compaction: true, ack early stop: false
+durability  non-durable commit per entry, durable point every 1000 ms; files roll at 2 MiB; fsync Data x8; store cache 256 MiB; nofile=1048576
+label       a-short
+
+--- throughput ---
+wall 300.0 s, 149924 entries (500/s target 500/s), 14992400 messages (49975 msg/s), 1499240 appends, 114730 appends carrying a duplicate
+store ops 61175762 (203919/s), pruned hash records 11314901, segment rows deleted 1396830, max pacing lag 824.5 ms, entries behind >50 ms: 24853
+store open 212 ms, durable points 295
+
+--- probe latency (one push of 10 hashes) ---
+probe                  n=1499240   p50    0.011 ms  p99    0.056 ms  p99.9    0.223 ms  max   27.642 ms  mean   0.015 ms
+ack-by-hash            n=1296528   p50    0.006 ms  p99    0.076 ms  p99.9    0.295 ms  max   24.720 ms  mean   0.011 ms
+entry total            n=149924    p50    1.215 ms  p99    6.143 ms  p99.9   19.455 ms  max  143.275 ms  mean   1.392 ms
+commit                 n=149924    p50    0.295 ms  p99    1.247 ms  p99.9   15.103 ms  max   32.685 ms  mean   0.358 ms
+durable point          n=295       p50   12.287 ms  p99   25.599 ms  p99.9  143.359 ms  max  142.788 ms  mean  13.070 ms
+prune step             n=149924    p50    0.407 ms  p99    3.135 ms  p99.9    8.063 ms  max   36.854 ms  mean   0.572 ms
+retention step         n=149924    p50    0.032 ms  p99    0.126 ms  p99.9    0.383 ms  max   20.356 ms  mean   0.037 ms
+
+--- dedup work ---
+store gets 27603829 puts 29772437 dels 22612705 scan rows 11447304
+bloom tests 0 hits 0 (false hits 0), frame reads 0 (0.0 MiB), probes that touched disk 0
+recent cache: vouched 0 maybe 0
+dedup rows: 3562262
+rows with >1 occurrence: 17604
+
+--- exactness ---
+duplicates injected: 114730 inside the window, 17604 outside it (oracle misses 17540)
+inside the window : detected 114730, MISSED 0, wrong original offset 0
+outside the window: falsely reported 0
+fresh hashes falsely reported as duplicates: 0
+duplicates caught by the planner overlay (same entry, not committed yet): 922
+misses audited by an exhaustive scan: 0 were THERE (fast-path bug), 0 were genuinely absent
+ack-by-hash below the cursor: 1296528 probes, resolved 1296528, UNRESOLVED 0, of which the segment was already deleted by retention: 1296528; unexpected in-span offsets 0
+
+--- footprint ---
+store 1017.9 MiB, segment files 429.8 MiB, bloom sidecars 0.0 MiB (0 saved, 0.0 MiB written)
+files live 310 (opened 839), unlinked 529 (1057.8 MiB), hash-only rewrites 0 (0.0 -> 0.0 MiB)
+RAM: dedup structures 0.0 MiB (blooms 0.0 MiB + cache 0.0 MiB), oracle 3.5 MiB, RSS 3 -> 1188 MiB (max 1328)
+kernel bytes written 11944.8 MiB (39.82 MiB/s), payload appended 1425.0 MiB
+per message: 71.2 B of store, 30.1 B of files, 0.00 B of bloom RAM
+dedup alone writes 79.4 B per message logically (1135.3 MiB over the run)
+
+RESULT option=a engine=fjall rate=49975 probe_p50_us=11 probe_p99_us=56 ack_p50_us=6 ack_p99_us=76 store_mib=1017.9 seg_mib=429.8 ram_mib=0.0 rss_max_mib=1328 exact=true label=a-short

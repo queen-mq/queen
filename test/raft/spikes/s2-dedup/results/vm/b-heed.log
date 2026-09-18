@@ -1,0 +1,54 @@
+=== s2-dedup run ===
+host        linux/x86_64 Linux queenpgless-01 6.8.0-124-generic #124-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:00:45 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+option      (b) hash lists in files + per-file blooms + recent cache
+engine      heed    dir /root/raft/s2-dedup/data/b-heed
+load        50000 msg/s, batch 10, 10 appends/entry -> 500 entries/s, payload 96 B, 4096 partitions
+dedup       window 360 s, txns window 432 s, retention 72 s, duplicates 1.0 % at ages 0..420 s, ack-by-hash 5000 /s
+structures  cache 64 MiB (blocks of 16384 hashes), blooms 16 bits/key sized for 18724 keys/file, frames verified on read: false, hash-only compaction: true, ack early stop: false
+durability  non-durable commit per entry, durable point every 1000 ms; files roll at 2 MiB; fsync Data x8; store cache 256 MiB; nofile=4096
+label       b-heed
+
+--- throughput ---
+wall 600.0 s, 144218 entries (240/s target 500/s), 14421800 messages (24036 msg/s), 1442180 appends, 64702 appends carrying a duplicate
+store ops 10607707 (17679/s), pruned hash records 720523, segment rows deleted 1338142, max pacing lag 311562.2 ms, entries behind >50 ms: 106355
+store open 3 ms, durable points 505
+
+--- probe latency (one push of 10 hashes) ---
+probe                  n=1442180   p50    0.070 ms  p99    0.575 ms  p99.9    0.767 ms  max    1.307 ms  mean   0.084 ms
+probe (disk)           n=77272     p50    0.463 ms  p99    0.815 ms  p99.9    1.023 ms  max    1.307 ms  mean   0.455 ms
+ack-by-hash            n=633278    p50    0.423 ms  p99    0.767 ms  p99.9    0.959 ms  max    4.030 ms  mean   0.427 ms
+entry total            n=144218    p50    2.815 ms  p99    7.551 ms  p99.9  217.087 ms  max  381.000 ms  mean   3.861 ms
+commit                 n=144218    p50    0.303 ms  p99    0.415 ms  p99.9    0.471 ms  max   14.640 ms  mean   0.286 ms
+durable point          n=505       p50  176.127 ms  p99  319.487 ms  p99.9  385.023 ms  max  380.431 ms  mean 184.742 ms
+prune step             n=144218    p50    0.034 ms  p99    0.049 ms  p99.9    0.067 ms  max    0.223 ms  mean   0.030 ms
+retention step         n=144218    p50    0.010 ms  p99    0.018 ms  p99.9    0.026 ms  max    0.299 ms  mean   0.009 ms
+hash-only compaction   n=613       p50    9.727 ms  p99   45.055 ms  p99.9  143.359 ms  max  140.451 ms  mean  11.113 ms
+
+--- dedup work ---
+store gets 0 puts 1442180 dels 720523 scan rows 166659483
+bloom tests 18129316 hits 711876 (false hits 13455), frame reads 74008955 (14353.3 MiB), probes that touched disk 710550
+recent cache: vouched 14379874 maybe 41926
+txns rows: 721657
+cache RAM: 64.2 MiB
+cache blocks dropped: 649
+cache floor age at end: 1789660253253976
+txns rows skipped by scans: 2523366
+
+--- exactness ---
+duplicates injected: 64702 inside the window, 4176 outside it (oracle misses 75681)
+inside the window : detected 64702, MISSED 0, wrong original offset 0
+outside the window: falsely reported 0
+fresh hashes falsely reported as duplicates: 0
+duplicates caught by the planner overlay (same entry, not committed yet): 212
+misses audited by an exhaustive scan: 0 were THERE (fast-path bug), 0 were genuinely absent
+ack-by-hash below the cursor: 633278 probes, resolved 633278, UNRESOLVED 0, of which the segment was already deleted by retention: 633278; unexpected in-span offsets 0
+
+--- footprint ---
+store 177.2 MiB, segment files 488.8 MiB, bloom sidecars 15.4 MiB (670 saved, 24.0 MiB written)
+files live 651 (opened 926), unlinked 275 (96.4 MiB), hash-only rewrites 613 (1225.6 -> 214.7 MiB)
+RAM: dedup structures 87.5 MiB (blooms 23.3 MiB + cache 64.2 MiB), oracle 20.3 MiB, RSS 6 -> 290 MiB (max 290)
+kernel bytes written 19943.3 MiB (33.24 MiB/s), payload appended 1594.0 MiB
+per message: 12.9 B of store, 35.5 B of files, 1.69 B of bloom RAM
+dedup alone writes 21.3 B per message logically (293.3 MiB over the run)
+
+RESULT option=b engine=heed rate=24036 probe_p50_us=70 probe_p99_us=575 ack_p50_us=423 ack_p99_us=767 store_mib=177.2 seg_mib=488.8 ram_mib=87.5 rss_max_mib=290 exact=true label=b-heed

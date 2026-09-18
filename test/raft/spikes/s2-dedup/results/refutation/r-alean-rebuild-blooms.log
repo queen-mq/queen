@@ -1,0 +1,9 @@
+=== s2-dedup rebuild (option a-lean, mode blooms) ===
+host        macos/aarch64 Darwin alice.local 24.5.0 Darwin Kernel Version 24.5.0: Tue Apr 22 19:54:43 PDT 2025; root:xnu-11417.121.6~2/RELEASE_ARM64_T8132 arm64
+store open                       5 ms
+file table (scan seg_loc 102141 rows + txns 0 rows)        2 ms
+blooms: 0 loaded from sidecars, 0 rebuilt by walking 0 frames ->        1 ms, 0.0 MiB resident
+total ready-to-probe             8 ms
+probe after restart    n=3803      p50    0.002 ms  p99    0.003 ms  p99.9    0.008 ms  max    0.057 ms  mean   0.002 ms
+samples checked 3803 (1017 expect the original offset, 2786 expect no answer): 3803 correct, 0 WRONG, of the wrong ones 0 have a YOUNGER occurrence of the same hash in the store (re-pushed during the run: a stale sample, not a restart defect)
+RESULT rebuild option=a-lean mode=blooms open_ms=5 table_ms=2 bloom_ms=1 total_ms=8 bloom_mib=0.0 checked=3803 wrong=0

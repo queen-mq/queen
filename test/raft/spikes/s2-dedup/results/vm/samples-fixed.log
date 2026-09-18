@@ -1,0 +1,52 @@
+=== s2-dedup run ===
+host        linux/x86_64 Linux queenpgless-01 6.8.0-124-generic #124-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:00:45 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+option      (a) store index per hash
+engine      fjall    dir /root/raft/s2-dedup/data/samples-fixed
+load        50000 msg/s, batch 10, 10 appends/entry -> 500 entries/s, payload 96 B, 4096 partitions
+dedup       window 40 s, txns window 50 s, retention 10 s, duplicates 1.0 % at ages 0..90 s, ack-by-hash 5000 /s
+structures  cache 64 MiB (blocks of 16384 hashes), blooms 16 bits/key sized for 18724 keys/file, frames verified on read: false, hash-only compaction: true, ack early stop: false
+durability  non-durable commit per entry, durable point every 1000 ms; files roll at 2 MiB; fsync Data x8; store cache 256 MiB; nofile=4096
+label       samples-fixed
+  minute  1: 476 entries/s (47640 msg/s), entry mean 1.255 ms, busy 60 % of the wall, store 237 MiB, files 274 MiB, rss 885 MiB, pacing lag 3 s
+  minute  2: 332 entries/s (33233 msg/s), entry mean 3.008 ms, busy 100 % of the wall, store 318 MiB, files 363 MiB, rss 1123 MiB, pacing lag 23 s
+rebuild samples: 3539 kept of 350602 seen (557 dropped: the hash was re-pushed out of window during the run and now has a second occurrence; legacy selection: false, hashes re-pushed in the run: 10063)
+
+--- throughput ---
+wall 120.1 s, 48566 entries (404/s target 500/s), 4856600 messages (40425 msg/s), 485660 appends, 17184 appends carrying a duplicate
+store ops 18985626 (158030/s), pruned hash records 3236093, segment rows deleted 445984, max pacing lag 23020.7 ms, entries behind >50 ms: 25736
+store open 53 ms, durable points 108
+
+--- probe latency (one push of 10 hashes) ---
+probe                  n=485660    p50    0.020 ms  p99    0.064 ms  p99.9    0.351 ms  max   19.807 ms  mean   0.022 ms
+ack-by-hash            n=350602    p50    0.011 ms  p99    0.085 ms  p99.9    1.407 ms  max    9.423 ms  mean   0.021 ms
+entry total            n=48566     p50    1.007 ms  p99   10.239 ms  p99.9  106.495 ms  max  246.001 ms  mean   1.976 ms
+commit                 n=48566     p50    0.439 ms  p99    3.263 ms  p99.9   11.519 ms  max  116.889 ms  mean   0.683 ms
+durable point          n=108       p50   98.303 ms  p99  204.799 ms  p99.9  241.663 ms  max  238.336 ms  mean 111.035 ms
+prune step             n=48566     p50    0.012 ms  p99    3.391 ms  p99.9    6.911 ms  max   40.077 ms  mean   0.457 ms
+retention step         n=48566     p50    0.049 ms  p99    0.239 ms  p99.9    2.623 ms  max   22.763 ms  mean   0.064 ms
+
+--- dedup work ---
+store gets 8443295 puts 9681527 dels 6469491 scan rows 3271867
+bloom tests 0 hits 0 (false hits 0), frame reads 0 (0.0 MiB), probes that touched disk 0
+recent cache: vouched 0 maybe 0
+dedup rows: 1603140
+rows with >1 occurrence: 2878
+
+--- exactness ---
+duplicates injected: 17184 inside the window, 10063 outside it (oracle misses 21385)
+inside the window : detected 17184, MISSED 0, wrong original offset 0
+outside the window: falsely reported 0
+fresh hashes falsely reported as duplicates: 0
+duplicates caught by the planner overlay (same entry, not committed yet): 278
+misses audited by an exhaustive scan: 0 were THERE (fast-path bug), 0 were genuinely absent
+ack-by-hash below the cursor: 350602 probes, resolved 350602, UNRESOLVED 0, of which the segment was already deleted by retention: 350602; unexpected in-span offsets 0
+
+--- footprint ---
+store 318.3 MiB, segment files 363.0 MiB, bloom sidecars 0.0 MiB (0 saved, 0.0 MiB written)
+files live 286 (opened 337), unlinked 51 (102.0 MiB), hash-only rewrites 0 (0.0 -> 0.0 MiB)
+RAM: dedup structures 0.0 MiB (blooms 0.0 MiB + cache 0.0 MiB), oracle 4.3 MiB, RSS 5 -> 1123 MiB (max 1169)
+kernel bytes written 2754.9 MiB (22.93 MiB/s), payload appended 463.4 MiB
+per message: 68.7 B of store, 78.4 B of files, 0.00 B of bloom RAM
+dedup alone writes 79.7 B per message logically (369.3 MiB over the run)
+
+RESULT option=a engine=fjall rate=40425 probe_p50_us=20 probe_p99_us=64 ack_p50_us=11 ack_p99_us=85 store_mib=318.3 seg_mib=363.0 ram_mib=0.0 rss_max_mib=1169 exact=true label=samples-fixed

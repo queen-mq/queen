@@ -1,0 +1,9 @@
+=== s2-dedup rebuild (option b, mode blooms) ===
+host        macos/aarch64 Darwin alice.local 24.5.0 Darwin Kernel Version 24.5.0: Tue Apr 22 19:54:43 PDT 2025; root:xnu-11417.121.6~2/RELEASE_ARM64_T8132 arm64
+store open                    1088 ms
+file table (scan seg_loc 51072 rows + txns 650550 rows)      381 ms
+blooms: 245 loaded from sidecars, 256 rebuilt by walking 208594 frames ->      135 ms, 17.9 MiB resident
+total ready-to-probe          1604 ms
+probe after restart    n=4096      p50    1.007 ms  p99    1.695 ms  p99.9    1.855 ms  max    1.997 ms  mean   1.025 ms
+samples checked 4096: 4096 correct, 0 WRONG
+RESULT rebuild option=b mode=blooms open_ms=1088 table_ms=381 bloom_ms=135 total_ms=1604 bloom_mib=17.9 checked=4096 wrong=0

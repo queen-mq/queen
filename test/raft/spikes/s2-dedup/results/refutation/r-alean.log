@@ -1,0 +1,53 @@
+=== s2-dedup run ===
+host        macos/aarch64 Darwin alice.local 24.5.0 Darwin Kernel Version 24.5.0: Tue Apr 22 19:54:43 PDT 2025; root:xnu-11417.121.6~2/RELEASE_ARM64_T8132 arm64
+option      (a-lean) store index per hash, expiry through per-Append txns rows
+engine      heed    dir /private/tmp/claude-502/-Users-alice-Work-queen/e561891e-3c5f-4589-8141-dd6b961a2d37/scratchpad/s2-memo/data/r-alean
+load        50000 msg/s, batch 10, 10 appends/entry -> 500 entries/s, payload 96 B, 4096 partitions
+dedup       window 60 s, txns window 72 s, retention 20 s, duplicates 1.0 % at ages 0..70 s, ack-by-hash 5000 /s
+structures  cache 64 MiB (blocks of 16384 hashes), blooms 16 bits/key sized for 18724 keys/file, frames verified on read: false, hash-only compaction: true, ack early stop: false
+durability  non-durable commit per entry, durable point every 1000 ms; files roll at 2 MiB; fsync Data x8; store cache 256 MiB; nofile=1048576
+label       r-alean
+  minute  1: 499 entries/s (49881 msg/s), entry mean 1.086 ms, busy 54 % of the wall, store 321 MiB, files 401 MiB, rss 315 MiB, pacing lag 0 s
+rebuild samples: 3803 kept of 398066 seen (293 dropped: the hash was re-pushed out of window during the run and now has a second occurrence; legacy selection: false, hashes re-pushed in the run: 4075)
+
+--- throughput ---
+wall 120.0 s, 60000 entries (500/s target 500/s), 6000000 messages (50000 msg/s), 600000 appends, 38246 appends carrying a duplicate
+store ops 12583241 (104860/s), pruned hash records 2386313, segment rows deleted 497859, max pacing lag 363.8 ms, entries behind >50 ms: 11893
+store open 5 ms, durable points 102
+
+--- probe latency (one push of 10 hashes) ---
+probe                  n=600000    p50    0.011 ms  p99    0.036 ms  p99.9    0.053 ms  max    9.892 ms  mean   0.012 ms
+ack-by-hash            n=398066    p50    0.002 ms  p99    0.005 ms  p99.9    0.012 ms  max    6.776 ms  mean   0.002 ms
+entry total            n=60000     p50    0.927 ms  p99    3.327 ms  p99.9  155.647 ms  max  360.273 ms  mean   1.285 ms
+commit                 n=60000     p50    0.591 ms  p99    2.239 ms  p99.9    5.247 ms  max   55.310 ms  mean   0.646 ms
+durable point          n=102       p50  159.743 ms  p99  344.063 ms  p99.9  360.447 ms  max  358.969 ms  mean 168.944 ms
+prune step             n=60000     p50    0.052 ms  p99    0.295 ms  p99.9    0.407 ms  max   31.385 ms  mean   0.088 ms
+retention step         n=60000     p50    0.006 ms  p99    0.017 ms  p99.9    0.030 ms  max   11.514 ms  mean   0.007 ms
+
+--- dedup work ---
+store gets 8784379 puts 6565323 dels 2622200 scan rows 2139456
+bloom tests 0 hits 0 (false hits 0), frame reads 0 (0.0 MiB), probes that touched disk 0
+recent cache: vouched 0 maybe 0
+dedup rows: 3574935
+rows with >1 occurrence: 4075
+expiry: txns rows per Append (a-lean)
+
+--- exactness ---
+duplicates injected: 38246 inside the window, 4075 outside it (oracle misses 17474)
+inside the window : detected 38246, MISSED 0, wrong original offset 0
+outside the window: falsely reported 0
+fresh hashes falsely reported as duplicates: 0
+duplicates caught by the planner overlay (same entry, not committed yet): 371
+misses audited by an exhaustive scan: 0 were THERE (fast-path bug), 0 were genuinely absent
+ack-by-hash calls 398066 of 1 hashes each: per call p50 2 us p99 5 us mean 2.047 us; per hash p50 2 us p99 5 us
+ack-by-hash below the cursor: 398066 probes, resolved 398066, UNRESOLVED 0, of which the segment was already deleted by retention: 398066; unexpected in-span offsets 0
+
+--- footprint ---
+store 432.7 MiB, segment files 453.7 MiB, bloom sidecars 0.0 MiB (0 saved, 0.0 MiB written)
+files live 326 (opened 411), unlinked 85 (170.0 MiB), hash-only rewrites 0 (0.0 -> 0.0 MiB)
+RAM: dedup structures 0.0 MiB (blooms 0.0 MiB + cache 0.0 MiB), oracle 3.5 MiB, RSS 5 -> 434 MiB (max 433)
+kernel bytes written 24844.8 MiB (207.04 MiB/s), payload appended 571.0 MiB
+per message: 75.6 B of store, 79.3 B of files, 0.00 B of bloom RAM
+dedup alone writes 58.9 B per message logically (336.8 MiB over the run)
+
+RESULT option=a-lean engine=heed rate=50000 probe_p50_us=11 probe_p99_us=36 ack_batch=1 ack_call_p50_us=2 ack_call_p99_us=5 ack_p50_us=2 ack_p99_us=5 store_mib=432.7 seg_mib=453.7 ram_mib=0.0 rss_max_mib=433 exact=true label=r-alean

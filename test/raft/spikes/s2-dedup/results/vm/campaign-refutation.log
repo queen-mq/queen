@@ -1,0 +1,26 @@
+=== build 2026-09-18T06:29:55Z
+=== run v-a-dms250 2026-09-18T06:29:57Z
+    rc=0
+RESULT option=a engine=heed rate=46275 probe_p50_us=10 probe_p99_us=21 ack_batch=1 ack_call_p50_us=2 ack_call_p99_us=3 ack_p50_us=2 ack_p99_us=3 store_mib=906.1 seg_mib=533.3 ram_mib=0.0 rss_max_mib=913 exact=true label=v-a-dms250
+=== run v-a-dms1000 2026-09-18T06:31:58Z
+    rc=0
+RESULT option=a engine=heed rate=49715 probe_p50_us=10 probe_p99_us=18 ack_batch=1 ack_call_p50_us=2 ack_call_p99_us=3 ack_p50_us=2 ack_p99_us=3 store_mib=975.3 seg_mib=572.4 ram_mib=0.0 rss_max_mib=985 exact=true label=v-a-dms1000
+=== run v-a-dms4000 2026-09-18T06:33:58Z
+    rc=0
+RESULT option=a engine=heed rate=49557 probe_p50_us=10 probe_p99_us=21 ack_batch=1 ack_call_p50_us=2 ack_call_p99_us=5 ack_p50_us=2 ack_p99_us=5 store_mib=975.6 seg_mib=572.9 ram_mib=0.0 rss_max_mib=987 exact=true label=v-a-dms4000
+=== run v-alean-dms1000 2026-09-18T06:35:59Z
+    rc=0
+RESULT option=a-lean engine=heed rate=49664 probe_p50_us=11 probe_p99_us=19 ack_batch=1 ack_call_p50_us=2 ack_call_p99_us=3 ack_p50_us=2 ack_p99_us=3 store_mib=677.1 seg_mib=572.4 ram_mib=0.0 rss_max_mib=689 exact=true label=v-alean-dms1000
+=== rebuild v-alean-dms1000 2026-09-18T06:37:59Z
+    rc=0
+samples checked 4096 (4096 expect the original offset, 0 expect no answer): 4096 correct, 0 WRONG, of the wrong ones 0 have a YOUNGER occurrence of the same hash in the store (re-pushed during the run: a stale sample, not a restart defect)
+RESULT rebuild option=a-lean mode=blooms open_ms=0 table_ms=31 bloom_ms=5 total_ms=36 bloom_mib=0.0 checked=4096 wrong=0
+=== run v-b-ack10 2026-09-18T06:38:00Z
+    rc=0
+RESULT option=b engine=heed rate=49930 probe_p50_us=63 probe_p99_us=431 ack_batch=10 ack_call_p50_us=479 ack_call_p99_us=703 ack_p50_us=47 ack_p99_us=68 store_mib=136.2 seg_mib=666.6 ram_mib=80.9 rss_max_mib=221 exact=true label=v-b-ack10
+=== rebuild v-b-ack10 2026-09-18T06:40:00Z
+    rc=0
+samples checked 1793 (1793 expect the original offset, 0 expect no answer): 1793 correct, 0 WRONG, of the wrong ones 0 have a YOUNGER occurrence of the same hash in the store (re-pushed during the run: a stale sample, not a restart defect)
+RESULT rebuild option=b mode=blooms open_ms=0 table_ms=47 bloom_ms=156 total_ms=203 bloom_mib=16.7 checked=1793 wrong=0
+=== done 2026-09-18T06:40:01Z
+nothing left running

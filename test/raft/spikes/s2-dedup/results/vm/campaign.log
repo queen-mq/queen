@@ -1,0 +1,31 @@
+=== build 2026-09-17T15:45:01Z
+=== run a-heed engine=heed 2026-09-17T15:45:15Z
+    rc=2
+=== rebuild a-heed mode=blooms 2026-09-17T15:45:15Z
+    rc=2
+=== run b-heed engine=heed 2026-09-17T15:45:15Z
+    rc=0
+RESULT option=b engine=heed rate=24036 probe_p50_us=70 probe_p99_us=575 ack_p50_us=423 ack_p99_us=767 store_mib=177.2 seg_mib=488.8 ram_mib=87.5 rss_max_mib=290 exact=true label=b-heed
+=== rebuild b-heed mode=blooms 2026-09-17T15:55:15Z
+    rc=1
+RESULT rebuild option=b mode=blooms open_ms=0 table_ms=49 bloom_ms=163 total_ms=212 bloom_mib=23.3 checked=4096 wrong=91
+=== rebuild b-heed mode=files 2026-09-17T15:55:15Z
+    rc=1
+RESULT rebuild option=b mode=files open_ms=0 table_ms=49 bloom_ms=417 total_ms=466 bloom_mib=23.3 checked=4096 wrong=91
+=== run a-fjall engine=fjall 2026-09-17T15:55:16Z
+    rc=0
+RESULT option=a engine=fjall rate=39855 probe_p50_us=21 probe_p99_us=84 ack_p50_us=29 ack_p99_us=167 store_mib=1569.6 seg_mib=364.1 ram_mib=0.0 rss_max_mib=1370 exact=true label=a-fjall
+=== rebuild a-fjall mode=blooms 2026-09-17T16:05:18Z
+    rc=1
+RESULT rebuild option=a mode=blooms open_ms=1174 table_ms=669 bloom_ms=4 total_ms=1848 bloom_mib=0.0 checked=4096 wrong=302
+=== run b-fjall engine=fjall 2026-09-17T16:05:21Z
+    rc=0
+RESULT option=b engine=fjall rate=21294 probe_p50_us=74 probe_p99_us=767 ack_p50_us=591 ack_p99_us=1055 store_mib=146.5 seg_mib=459.4 ram_mib=85.6 rss_max_mib=986 exact=true label=b-fjall
+=== rebuild b-fjall mode=blooms 2026-09-17T16:15:22Z
+    rc=1
+RESULT rebuild option=b mode=blooms open_ms=2587 table_ms=1262 bloom_ms=156 total_ms=4005 bloom_mib=21.4 checked=4096 wrong=76
+=== rebuild b-fjall mode=files 2026-09-17T16:15:26Z
+    rc=1
+RESULT rebuild option=b mode=files open_ms=819 table_ms=915 bloom_ms=376 total_ms=2110 bloom_mib=21.4 checked=4096 wrong=76
+=== done 2026-09-17T16:15:29Z
+nothing left running

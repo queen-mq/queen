@@ -1,0 +1,5 @@
+166 |     pub fn active_file(&self, bucket: u16) -> u32 {
+    |            ^^^^^^^^^^^
+
+warning: `s2-dedup` (bin "s2-dedup") generated 8 warnings
+    Finished `release` profile [optimized + debuginfo] target(s) in 4.84s

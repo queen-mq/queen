@@ -1,0 +1,10 @@
+=== s2-dedup run ===
+host        linux/x86_64 Linux queenpgless-01 6.8.0-124-generic #124-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:00:45 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+option      (a) store index per hash
+engine      heed    dir /root/raft/s2-dedup/data/a-heed
+load        50000 msg/s, batch 10, 10 appends/entry -> 500 entries/s, payload 96 B, 4096 partitions
+dedup       window 360 s, txns window 432 s, retention 72 s, duplicates 1.0 % at ages 0..420 s, ack-by-hash 5000 /s
+structures  cache 64 MiB (blocks of 16384 hashes), blooms 16 bits/key sized for 18724 keys/file, frames verified on read: false, hash-only compaction: true, ack early stop: false
+durability  non-durable commit per entry, durable point every 1000 ms; files roll at 2 MiB; fsync Data x8; store cache 256 MiB; nofile=4096
+label       a-heed
+ERROR: heed: MDB_BAD_VALSIZE: Unsupported size of key/DB name/data, or wrong DUPFIXED size

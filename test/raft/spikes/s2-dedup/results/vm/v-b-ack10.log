@@ -1,0 +1,56 @@
+=== s2-dedup run ===
+host        linux/x86_64 Linux queenpgless-01 6.8.0-124-generic #124-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:00:45 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+option      (b) hash lists in files + per-file blooms + recent cache
+engine      heed    dir /root/raft/s2-dedup/data/v-b-ack10
+load        50000 msg/s, batch 10, 10 appends/entry -> 500 entries/s, payload 96 B, 4096 partitions
+dedup       window 360 s, txns window 432 s, retention 72 s, duplicates 1.0 % at ages 0..420 s, ack-by-hash 5000 /s
+structures  cache 64 MiB (blocks of 16384 hashes), blooms 16 bits/key sized for 18724 keys/file, frames verified on read: false, hash-only compaction: true, ack early stop: false
+durability  non-durable commit per entry, durable point every 1000 ms; files roll at 2 MiB; fsync Data x8; store cache 256 MiB; nofile=4096
+label       v-b-ack10
+  minute  1: 499 entries/s (49896 msg/s), entry mean 0.956 ms, busy 48 % of the wall, store 74 MiB, files 334 MiB, rss 144 MiB, pacing lag 0 s
+rebuild samples: 1793 kept of 1793 seen (0 dropped: the hash was re-pushed out of window during the run and now has a second occurrence; legacy selection: false, hashes re-pushed in the run: 0)
+
+--- throughput ---
+wall 120.0 s, 59916 entries (499/s target 500/s), 5991600 messages (49930 msg/s), 599160 appends, 8511 appends carrying a duplicate
+store ops 3469826 (28915/s), pruned hash records 0, segment rows deleted 237013, max pacing lag 326.1 ms, entries behind >50 ms: 19540
+store open 4 ms, durable points 100
+
+--- probe latency (one push of 10 hashes) ---
+probe                  n=599160    p50    0.063 ms  p99    0.431 ms  p99.9    0.655 ms  max    0.942 ms  mean   0.061 ms
+probe (disk)           n=9646      p50    0.479 ms  p99    0.751 ms  p99.9    0.847 ms  max    0.942 ms  mean   0.453 ms
+ack-by-hash            n=1793      p50    0.047 ms  p99    0.068 ms  p99.9    0.079 ms  max    0.083 ms  mean   0.047 ms
+entry total            n=59916     p50    1.119 ms  p99    2.303 ms  p99.9  180.223 ms  max  327.931 ms  mean   1.368 ms
+commit                 n=59916     p50    0.279 ms  p99    0.375 ms  p99.9    0.439 ms  max    0.741 ms  mean   0.267 ms
+durable point          n=100       p50  188.415 ms  p99  319.487 ms  p99.9  327.679 ms  max  326.542 ms  mean 196.548 ms
+prune step             n=59916     p50    0.036 ms  p99    0.059 ms  p99.9    0.076 ms  max    0.362 ms  mean   0.034 ms
+retention step         n=59916     p50    0.009 ms  p99    0.020 ms  p99.9    0.033 ms  max    0.388 ms  mean   0.009 ms
+
+--- dedup work ---
+store gets 0 puts 599160 dels 0 scan rows 1210433
+bloom tests 2273029 hits 11466 (false hits 1225), frame reads 1012714 (196.9 MiB), probes that touched disk 11439
+recent cache: vouched 5984360 maybe 7240
+txns rows: 599160
+cache RAM: 64.2 MiB
+cache blocks dropped: 138
+cache floor age at end: 1789713525575444
+txns rows skipped by scans: 0
+
+--- exactness ---
+duplicates injected: 8511 inside the window, 0 outside it (oracle misses 51399)
+inside the window : detected 8511, MISSED 0, wrong original offset 0
+outside the window: falsely reported 0
+fresh hashes falsely reported as duplicates: 0
+duplicates caught by the planner overlay (same entry, not committed yet): 64
+misses audited by an exhaustive scan: 0 were THERE (fast-path bug), 0 were genuinely absent
+ack-by-hash calls 1793 of 10 hashes each: per call p50 479 us p99 703 us mean 473.896 us; per hash p50 47 us p99 68 us
+ack-by-hash below the cursor: 1793 probes, resolved 1793, UNRESOLVED 0, of which the segment was already deleted by retention: 1793; unexpected in-span offsets 0
+
+--- footprint ---
+store 136.2 MiB, segment files 666.6 MiB, bloom sidecars 8.2 MiB (211 saved, 7.5 MiB written)
+files live 467 (opened 467), unlinked 0 (0.0 MiB), hash-only rewrites 0 (0.0 -> 0.0 MiB)
+RAM: dedup structures 80.9 MiB (blooms 16.7 MiB + cache 64.2 MiB), oracle 20.3 MiB, RSS 6 -> 222 MiB (max 221)
+kernel bytes written 4786.6 MiB (39.89 MiB/s), payload appended 664.2 MiB
+per message: 23.8 B of store, 116.7 B of files, 2.92 B of bloom RAM
+dedup alone writes 21.4 B per message logically (122.2 MiB over the run)
+
+RESULT option=b engine=heed rate=49930 probe_p50_us=63 probe_p99_us=431 ack_batch=10 ack_call_p50_us=479 ack_call_p99_us=703 ack_p50_us=47 ack_p99_us=68 store_mib=136.2 seg_mib=666.6 ram_mib=80.9 rss_max_mib=221 exact=true label=v-b-ack10

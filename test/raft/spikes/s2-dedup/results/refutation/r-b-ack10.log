@@ -1,0 +1,57 @@
+=== s2-dedup run ===
+host        macos/aarch64 Darwin alice.local 24.5.0 Darwin Kernel Version 24.5.0: Tue Apr 22 19:54:43 PDT 2025; root:xnu-11417.121.6~2/RELEASE_ARM64_T8132 arm64
+option      (b) hash lists in files + per-file blooms + recent cache
+engine      heed    dir /private/tmp/claude-502/-Users-alice-Work-queen/e561891e-3c5f-4589-8141-dd6b961a2d37/scratchpad/s2-memo/data/r-b-ack10
+load        50000 msg/s, batch 10, 10 appends/entry -> 500 entries/s, payload 96 B, 4096 partitions
+dedup       window 60 s, txns window 72 s, retention 20 s, duplicates 1.0 % at ages 0..70 s, ack-by-hash 5000 /s
+structures  cache 64 MiB (blocks of 16384 hashes), blooms 16 bits/key sized for 18724 keys/file, frames verified on read: false, hash-only compaction: true, ack early stop: false
+durability  non-durable commit per entry, durable point every 1000 ms; files roll at 2 MiB; fsync Data x8; store cache 256 MiB; nofile=1048576
+label       r-b-ack10
+  minute  1: 462 entries/s (46176 msg/s), entry mean 1.387 ms, busy 64 % of the wall, store 45 MiB, files 438 MiB, rss 115 MiB, pacing lag 5 s
+rebuild samples: 3872 kept of 33415 seen (224 dropped: the hash was re-pushed out of window during the run and now has a second occurrence; legacy selection: false, hashes re-pushed in the run: 3314)
+
+--- throughput ---
+wall 120.0 s, 53292 entries (444/s target 500/s), 5329200 messages (44410 msg/s), 532920 appends, 32845 appends carrying a duplicate
+store ops 3759820 (31332/s), pruned hash records 231956, segment rows deleted 431632, max pacing lag 15109.5 ms, entries behind >50 ms: 31491
+store open 12 ms, durable points 116
+
+--- probe latency (one push of 10 hashes) ---
+probe                  n=532920    p50    0.024 ms  p99    1.119 ms  p99.9    3.775 ms  max   37.022 ms  mean   0.073 ms
+probe (disk)           n=36155     p50    0.543 ms  p99    4.351 ms  p99.9    7.423 ms  max   37.022 ms  mean   0.771 ms
+ack-by-hash            n=33415     p50    0.060 ms  p99    0.511 ms  p99.9    0.783 ms  max    3.880 ms  mean   0.090 ms
+entry total            n=53292     p50    1.343 ms  p99    9.471 ms  p99.9   28.671 ms  max  105.293 ms  mean   1.846 ms
+commit                 n=53292     p50    0.223 ms  p99    0.847 ms  p99.9    3.263 ms  max   39.804 ms  mean   0.272 ms
+durable point          n=116       p50   25.087 ms  p99   71.679 ms  p99.9   81.919 ms  max   81.459 ms  mean  26.745 ms
+prune step             n=53292     p50    0.028 ms  p99    0.078 ms  p99.9    0.143 ms  max    2.377 ms  mean   0.032 ms
+retention step         n=53292     p50    0.005 ms  p99    0.020 ms  p99.9    0.040 ms  max    1.533 ms  mean   0.007 ms
+hash-only compaction   n=85        p50    2.943 ms  p99    9.215 ms  p99.9    9.215 ms  max    9.040 ms  mean   3.067 ms
+
+--- dedup work ---
+store gets 0 puts 532920 dels 231956 scan rows 4753284
+bloom tests 340596 hits 69653 (false hits 3722), frame reads 4107845 (795.5 MiB), probes that touched disk 69570
+recent cache: vouched 5293041 maybe 36159
+txns rows: 300964
+cache RAM: 51.5 MiB
+cache blocks dropped: 141
+cache floor age at end: 1789712974139079
+txns rows skipped by scans: 307268
+
+--- exactness ---
+duplicates injected: 32845 inside the window, 3314 outside it (oracle misses 16977)
+inside the window : detected 32845, MISSED 0, wrong original offset 0
+outside the window: falsely reported 0
+fresh hashes falsely reported as duplicates: 0
+duplicates caught by the planner overlay (same entry, not committed yet): 336
+misses audited by an exhaustive scan: 0 were THERE (fast-path bug), 0 were genuinely absent
+ack-by-hash calls 33415 of 10 hashes each: per call p50 607 us p99 5119 us mean 903.896 us; per hash p50 60 us p99 511 us
+ack-by-hash below the cursor: 33415 probes, resolved 33415, UNRESOLVED 0, of which the segment was already deleted by retention: 33415; unexpected in-span offsets 0
+
+--- footprint ---
+store 56.9 MiB, segment files 489.7 MiB, bloom sidecars 6.7 MiB (172 saved, 6.2 MiB written)
+files live 428 (opened 428), unlinked 0 (0.0 MiB), hash-only rewrites 85 (170.0 -> 18.0 MiB)
+RAM: dedup structures 66.8 MiB (blooms 15.3 MiB + cache 51.5 MiB), oracle 3.5 MiB, RSS 4 -> 169 MiB (max 166)
+kernel bytes written 5370.3 MiB (44.75 MiB/s), payload appended 588.1 MiB
+per message: 11.2 B of store, 96.4 B of files, 3.01 B of bloom RAM
+dedup alone writes 21.3 B per message logically (108.3 MiB over the run)
+
+RESULT option=b engine=heed rate=44410 probe_p50_us=24 probe_p99_us=1119 ack_batch=10 ack_call_p50_us=607 ack_call_p99_us=5119 ack_p50_us=60 ack_p99_us=511 store_mib=56.9 seg_mib=489.7 ram_mib=66.8 rss_max_mib=166 exact=true label=r-b-ack10

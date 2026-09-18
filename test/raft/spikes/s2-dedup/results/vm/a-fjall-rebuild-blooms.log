@@ -1,0 +1,14 @@
+=== s2-dedup rebuild (option a, mode blooms) ===
+host        linux/x86_64 Linux queenpgless-01 6.8.0-124-generic #124-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:00:45 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+  MISMATCH pid=4010 off=36 created_age=596 s inside=false got=Some(5382)
+  MISMATCH pid=828 off=18 created_age=598 s inside=false got=Some(4422)
+  MISMATCH pid=1365 off=24 created_age=596 s inside=false got=Some(4378)
+  MISMATCH pid=1927 off=87 created_age=594 s inside=false got=Some(4712)
+  MISMATCH pid=1811 off=29 created_age=597 s inside=false got=Some(4712)
+store open                    1174 ms
+file table (scan seg_loc 103683 rows + txns 0 rows)      669 ms
+blooms: 0 loaded from sidecars, 0 rebuilt by walking 0 frames ->        4 ms, 0.0 MiB resident
+total ready-to-probe          1848 ms
+probe after restart    n=4096      p50    0.030 ms  p99    0.058 ms  p99.9    0.079 ms  max    0.454 ms  mean   0.032 ms
+samples checked 4096: 3794 correct, 302 WRONG
+RESULT rebuild option=a mode=blooms open_ms=1174 table_ms=669 bloom_ms=4 total_ms=1848 bloom_mib=0.0 checked=4096 wrong=302

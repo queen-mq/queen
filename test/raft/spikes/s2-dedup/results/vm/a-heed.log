@@ -1,0 +1,59 @@
+=== s2-dedup run ===
+host        linux/x86_64 Linux queenpgless-01 6.8.0-124-generic #124-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:00:45 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+option      (a) store index per hash
+engine      heed    dir /root/raft/s2-dedup/data/a-heed
+load        50000 msg/s, batch 10, 10 appends/entry -> 500 entries/s, payload 96 B, 4096 partitions
+dedup       window 360 s, txns window 432 s, retention 72 s, duplicates 1.0 % at ages 0..420 s, ack-by-hash 5000 /s
+structures  cache 64 MiB (blocks of 16384 hashes), blooms 16 bits/key sized for 18724 keys/file, frames verified on read: false, hash-only compaction: true, ack early stop: false
+durability  non-durable commit per entry, durable point every 1000 ms; files roll at 2 MiB; fsync Data x8; store cache 256 MiB; nofile=4096
+label       a-heed
+  minute  1: 495 entries/s (49489 msg/s), entry mean 1.056 ms, busy 52 % of the wall, store 501 MiB, files 288 MiB, rss 510 MiB, pacing lag 1 s
+  minute  2: 501 entries/s (50144 msg/s), entry mean 1.590 ms, busy 80 % of the wall, store 980 MiB, files 576 MiB, rss 992 MiB, pacing lag 0 s
+  minute  3: 492 entries/s (49158 msg/s), entry mean 1.842 ms, busy 91 % of the wall, store 1433 MiB, files 630 MiB, rss 1447 MiB, pacing lag 1 s
+  minute  4: 488 entries/s (48771 msg/s), entry mean 2.049 ms, busy 100 % of the wall, store 1882 MiB, files 581 MiB, rss 1898 MiB, pacing lag 3 s
+  minute  5: 452 entries/s (45218 msg/s), entry mean 2.211 ms, busy 100 % of the wall, store 2299 MiB, files 583 MiB, rss 2316 MiB, pacing lag 9 s
+  minute  6: 425 entries/s (42548 msg/s), entry mean 2.349 ms, busy 100 % of the wall, store 2691 MiB, files 578 MiB, rss 2710 MiB, pacing lag 18 s
+  minute  7: 412 entries/s (41228 msg/s), entry mean 2.425 ms, busy 100 % of the wall, store 3078 MiB, files 547 MiB, rss 3099 MiB, pacing lag 29 s
+  minute  8: 188 entries/s (18837 msg/s), entry mean 5.308 ms, busy 100 % of the wall, store 3133 MiB, files 421 MiB, rss 3156 MiB, pacing lag 67 s
+  minute  9: 142 entries/s (14228 msg/s), entry mean 7.027 ms, busy 100 % of the wall, store 3133 MiB, files 359 MiB, rss 3156 MiB, pacing lag 111 s
+rebuild samples: 3967 kept of 1095115 seen (129 dropped: the hash was re-pushed out of window during the run and now has a second occurrence; legacy selection: false, hashes re-pushed in the run: 5591)
+
+--- throughput ---
+wall 600.0 s, 225389 entries (376/s target 500/s), 22538900 messages (37565 msg/s), 2253890 appends, 104444 appends carrying a duplicate
+store ops 67847036 (113078/s), pruned hash records 4829398, segment rows deleted 2151884, max pacing lag 149223.1 ms, entries behind >50 ms: 185944
+store open 4 ms, durable points 269
+
+--- probe latency (one push of 10 hashes) ---
+probe                  n=2253890   p50    0.013 ms  p99    0.024 ms  p99.9    0.035 ms  max    0.958 ms  mean   0.013 ms
+ack-by-hash            n=1095115   p50    0.002 ms  p99    0.003 ms  p99.9    0.014 ms  max    0.097 ms  mean   0.002 ms
+entry total            n=225389    p50    0.879 ms  p99    2.431 ms  p99.9  557.055 ms  max 2569.596 ms  mean   2.454 ms
+commit                 n=225389    p50    0.623 ms  p99    1.759 ms  p99.9    2.015 ms  max    4.024 ms  mean   0.706 ms
+durable point          n=269       p50 1310.719 ms  p99 2490.367 ms  p99.9 2621.439 ms  max 2567.151 ms  mean 1227.411 ms
+prune step             n=225389    p50    0.001 ms  p99    0.335 ms  p99.9    0.383 ms  max    0.727 ms  mean   0.034 ms
+retention step         n=225389    p50    0.010 ms  p99    0.020 ms  p99.9    0.030 ms  max    0.726 ms  mean   0.010 ms
+
+--- dedup work ---
+store gets 28463413 puts 44872606 dels 9655102 scan rows 5030866
+bloom tests 0 hits 0 (false hits 0), frame reads 0 (0.0 MiB), probes that touched disk 0
+recent cache: vouched 0 maybe 0
+dedup rows: 17603161
+rows with >1 occurrence: 5591
+
+--- exactness ---
+duplicates injected: 104444 inside the window, 5591 outside it (oracle misses 115221)
+inside the window : detected 104444, MISSED 0, wrong original offset 0
+outside the window: falsely reported 0
+fresh hashes falsely reported as duplicates: 0
+duplicates caught by the planner overlay (same entry, not committed yet): 188
+misses audited by an exhaustive scan: 0 were THERE (fast-path bug), 0 were genuinely absent
+ack-by-hash below the cursor: 1095115 probes, resolved 1095115, UNRESOLVED 0, of which the segment was already deleted by retention: 1095109; unexpected in-span offsets 0
+
+--- footprint ---
+store 3133.1 MiB, segment files 344.6 MiB, bloom sidecars 0.0 MiB (0 saved, 0.0 MiB written)
+files live 300 (opened 1203), unlinked 903 (1805.6 MiB), hash-only rewrites 0 (0.0 -> 0.0 MiB)
+RAM: dedup structures 0.0 MiB (blooms 0.0 MiB + cache 0.0 MiB), oracle 20.3 MiB, RSS 6 -> 3156 MiB (max 3156)
+kernel bytes written 94785.4 MiB (157.98 MiB/s), payload appended 2148.5 MiB
+per message: 145.8 B of store, 16.0 B of files, 0.00 B of bloom RAM
+dedup alone writes 79.6 B per message logically (1711.7 MiB over the run)
+
+RESULT option=a engine=heed rate=37565 probe_p50_us=13 probe_p99_us=24 ack_p50_us=2 ack_p99_us=3 store_mib=3133.1 seg_mib=344.6 ram_mib=0.0 rss_max_mib=3156 exact=true label=a-heed

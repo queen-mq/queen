@@ -1,0 +1,49 @@
+=== s2-dedup run ===
+host        linux/x86_64 Linux queenpgless-01 6.8.0-124-generic #124-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:00:45 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+option      (a) store index per hash
+engine      fjall    dir /root/raft/s2-dedup/data/a-fjall
+load        50000 msg/s, batch 10, 10 appends/entry -> 500 entries/s, payload 96 B, 4096 partitions
+dedup       window 360 s, txns window 432 s, retention 72 s, duplicates 1.0 % at ages 0..420 s, ack-by-hash 5000 /s
+structures  cache 64 MiB (blocks of 16384 hashes), blooms 16 bits/key sized for 18724 keys/file, frames verified on read: false, hash-only compaction: true, ack early stop: false
+durability  non-durable commit per entry, durable point every 1000 ms; files roll at 2 MiB; fsync Data x8; store cache 256 MiB; nofile=4096
+label       a-fjall
+
+--- throughput ---
+wall 600.0 s, 239133 entries (399/s target 500/s), 23913300 messages (39855 msg/s), 2391330 appends, 127808 appends carrying a duplicate
+store ops 70964198 (118273/s), pruned hash records 4626300, segment rows deleted 2287647, max pacing lag 121731.7 ms, entries behind >50 ms: 59852
+store open 55 ms, durable points 544
+
+--- probe latency (one push of 10 hashes) ---
+probe                  n=2391330   p50    0.021 ms  p99    0.084 ms  p99.9    0.831 ms  max   81.764 ms  mean   0.027 ms
+ack-by-hash            n=1338943   p50    0.029 ms  p99    0.167 ms  p99.9    1.279 ms  max   17.334 ms  mean   0.035 ms
+entry total            n=239133    p50    1.087 ms  p99    8.447 ms  p99.9  102.399 ms  max  321.994 ms  mean   1.863 ms
+commit                 n=239133    p50    0.407 ms  p99    1.247 ms  p99.9    7.935 ms  max  217.508 ms  mean   0.487 ms
+durable point          n=544       p50   96.255 ms  p99  192.511 ms  p99.9  270.335 ms  max  264.680 ms  mean 100.625 ms
+prune step             n=239133    p50    0.009 ms  p99    5.119 ms  p99.9   13.311 ms  max   42.723 ms  mean   0.441 ms
+retention step         n=239133    p50    0.064 ms  p99    0.375 ms  p99.9    0.751 ms  max   17.631 ms  mean   0.085 ms
+
+--- dedup work ---
+store gets 29878543 puts 47575048 dels 9248536 scan rows 4842301
+bloom tests 0 hits 0 (false hits 0), frame reads 0 (0.0 MiB), probes that touched disk 0
+recent cache: vouched 0 maybe 0
+dedup rows: 19156919
+rows with >1 occurrence: 6337
+
+--- exactness ---
+duplicates injected: 127808 inside the window, 6337 outside it (oracle misses 105097)
+inside the window : detected 127808, MISSED 0, wrong original offset 0
+outside the window: falsely reported 0
+fresh hashes falsely reported as duplicates: 0
+duplicates caught by the planner overlay (same entry, not committed yet): 266
+misses audited by an exhaustive scan: 0 were THERE (fast-path bug), 0 were genuinely absent
+ack-by-hash below the cursor: 1338943 probes, resolved 1338943, UNRESOLVED 0, of which the segment was already deleted by retention: 1338943; unexpected in-span offsets 0
+
+--- footprint ---
+store 1569.6 MiB, segment files 364.1 MiB, bloom sidecars 0.0 MiB (0 saved, 0.0 MiB written)
+files live 302 (opened 1260), unlinked 958 (1915.5 MiB), hash-only rewrites 0 (0.0 -> 0.0 MiB)
+RAM: dedup structures 0.0 MiB (blooms 0.0 MiB + cache 0.0 MiB), oracle 20.3 MiB, RSS 6 -> 1307 MiB (max 1370)
+kernel bytes written 14363.9 MiB (23.94 MiB/s), payload appended 2278.0 MiB
+per message: 68.8 B of store, 16.0 B of files, 0.00 B of bloom RAM
+dedup alone writes 79.6 B per message logically (1814.8 MiB over the run)
+
+RESULT option=a engine=fjall rate=39855 probe_p50_us=21 probe_p99_us=84 ack_p50_us=29 ack_p99_us=167 store_mib=1569.6 seg_mib=364.1 ram_mib=0.0 rss_max_mib=1370 exact=true label=a-fjall

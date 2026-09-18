@@ -1,0 +1,101 @@
+# cargo +1.88 check --release  (C-3, MSRV 1.88), 2026-09-18, after the WP-0.4 part 2 changes
+# host: Darwin arm64, rustc 1.88.0 (6b00bc388 2025-06-23)
+warning: method `name` is never used
+  --> src/dedup.rs:72:8
+   |
+71 | pub trait Dedup {
+   |           ----- method in this trait
+72 |     fn name(&self) -> &'static str;
+   |        ^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: constant `T_COUNTERS` is never used
+  --> src/engines/mod.rs:41:11
+   |
+41 | pub const T_COUNTERS: u8 = 8;
+   |           ^^^^^^^^^^
+
+warning: method `logical_bytes` is never used
+   --> src/engines/mod.rs:144:12
+    |
+79  | impl OpBuf {
+    | ---------- method in this implementation
+...
+144 |     pub fn logical_bytes(&self) -> u64 {
+    |            ^^^^^^^^^^^^^
+
+warning: fields `method`, `bytes`, and `ms` are never read
+   --> src/engines/mod.rs:150:9
+    |
+149 | pub struct ExportPart {
+    |            ---------- fields in this struct
+150 |     pub method: &'static str,
+    |         ^^^^^^
+151 |     pub bytes: u64,
+    |         ^^^^^
+152 |     pub ms: f64,
+    |         ^^
+
+warning: fields `incremental_checkpoint`, `export_method`, `writer_pause`, and `crash_model` are never read
+   --> src/engines/mod.rs:159:9
+    |
+156 | pub struct Caps {
+    |            ---- fields in this struct
+...
+159 |     pub incremental_checkpoint: &'static str,
+    |         ^^^^^^^^^^^^^^^^^^^^^^
+160 |     pub export_method: &'static str,
+    |         ^^^^^^^^^^^^^
+161 |     /// Does the export pause the writer?
+162 |     pub writer_pause: &'static str,
+    |         ^^^^^^^^^^^^
+...
+165 |     pub crash_model: &'static str,
+    |         ^^^^^^^^^^^
+    |
+    = note: `Caps` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: methods `scan`, `export`, `maintain`, `caps`, and `reported_disk` are never used
+   --> src/engines/mod.rs:198:8
+    |
+168 | pub trait Engine {
+    |           ------ methods in this trait
+...
+198 |     fn scan(&self, table: u8) -> Result<(u64, u64), String>;
+    |        ^^^^
+...
+204 |     fn export(&self, dest: &Path) -> Result<Vec<ExportPart>, String>;
+    |        ^^^^^^
+...
+207 |     fn maintain(&mut self) -> Result<String, String>;
+    |        ^^^^^^^^
+208 |
+209 |     fn caps(&self) -> Caps;
+    |        ^^^^
+...
+213 |     fn reported_disk(&self) -> u64 {
+    |        ^^^^^^^^^^^^^
+
+warning: fields `files_unlinked` and `bytes_unlinked` are never read
+  --> src/files.rs:36:9
+   |
+29 | pub struct FileTable {
+   |            --------- fields in this struct
+...
+36 |     pub files_unlinked: u64,
+   |         ^^^^^^^^^^^^^^
+37 |     pub bytes_unlinked: u64,
+   |         ^^^^^^^^^^^^^^
+
+warning: method `active_file` is never used
+   --> src/seg.rs:166:12
+    |
+122 | impl Segments {
+    | ------------- method in this implementation
+...
+166 |     pub fn active_file(&self, bucket: u16) -> u32 {
+    |            ^^^^^^^^^^^
+
+warning: `s2-dedup` (bin "s2-dedup") generated 8 warnings
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.07s

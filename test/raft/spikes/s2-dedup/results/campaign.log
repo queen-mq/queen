@@ -1,0 +1,45 @@
+=== run a-short  16:51:56
+    rc=0 43 lines
+RESULT option=a engine=fjall rate=50000 probe_p50_us=12 probe_p99_us=55 ack_p50_us=6 ack_p99_us=72 store_mib=956.7 seg_mib=1489.3 ram_mib=0.1 rss_max_mib=1487 exact=true label=a-short
+=== rebuild a-short mode=blooms  16:56:57
+    rc=0
+RESULT rebuild option=a mode=blooms open_ms=471 table_ms=206 bloom_ms=1 total_ms=678 bloom_mib=0.0 checked=4096 wrong=0
+=== run b-short  16:56:59
+    rc=0 48 lines
+RESULT option=b engine=fjall rate=25253 probe_p50_us=15 probe_p99_us=471 ack_p50_us=319 ack_p99_us=1759 store_mib=119.5 seg_mib=369.6 ram_mib=39.9 rss_max_mib=455 exact=true label=b-short
+=== rebuild b-short mode=blooms  17:01:59
+    rc=0
+RESULT rebuild option=b mode=blooms open_ms=1349 table_ms=238 bloom_ms=199 total_ms=1786 bloom_mib=12.1 checked=4096 wrong=0
+=== rebuild b-short mode=files  17:02:01
+    rc=0
+RESULT rebuild option=b mode=files open_ms=33 table_ms=138 bloom_ms=100 total_ms=270 bloom_mib=12.1 checked=4096 wrong=0
+=== run b-short-nocache  17:02:02
+    rc=0 48 lines
+RESULT option=b engine=fjall rate=17488 probe_p50_us=0 probe_p99_us=799 ack_p50_us=487 ack_p99_us=3135 store_mib=101.6 seg_mib=340.3 ram_mib=12.4 rss_max_mib=299 exact=true label=b-short-nocache
+=== run b-short-earlystop  17:07:03
+    rc=0 48 lines
+RESULT option=b engine=fjall rate=23180 probe_p50_us=22 probe_p99_us=1567 ack_p50_us=207 ack_p99_us=2111 store_mib=107.3 seg_mib=372.5 ram_mib=40.5 rss_max_mib=376 exact=true label=b-short-earlystop
+=== run b-short-noack  17:12:04
+    rc=0 47 lines
+RESULT option=b engine=fjall rate=42286 probe_p50_us=33 probe_p99_us=2687 ack_p50_us=0 ack_p99_us=0 store_mib=178.1 seg_mib=422.3 ram_mib=49.4 rss_max_mib=704 exact=true label=b-short-noack
+=== run a-long  17:17:07
+    rc=0 43 lines
+RESULT option=a engine=fjall rate=49991 probe_p50_us=14 probe_p99_us=92 ack_p50_us=15 ack_p99_us=263 store_mib=1008.7 seg_mib=1491.3 ram_mib=0.1 rss_max_mib=1190 exact=true label=a-long
+=== rebuild a-long mode=blooms  17:22:08
+    rc=0
+RESULT rebuild option=a mode=blooms open_ms=2023 table_ms=222 bloom_ms=3 total_ms=2248 bloom_mib=0.0 checked=4096 wrong=0
+=== run b-long  17:22:12
+    rc=0 48 lines
+RESULT option=b engine=fjall rate=21684 probe_p50_us=36 probe_p99_us=1535 ack_p50_us=1119 ack_p99_us=7935 store_mib=119.1 seg_mib=418.1 ram_mib=82.1 rss_max_mib=488 exact=true label=b-long
+=== rebuild b-long mode=blooms  17:27:13
+    rc=0
+RESULT rebuild option=b mode=blooms open_ms=1088 table_ms=381 bloom_ms=135 total_ms=1604 bloom_mib=17.9 checked=4096 wrong=0
+=== done 17:27:19
+
+NOTE (added by hand): the a-short and a-long RESULT lines above are SUPERSEDED.
+They were produced before the file-GC fix (the harness counted a hash reference
+into every segment file for both options, so option (a)'s files were never
+unlinked and its segment-file column read 1489 / 1491 MiB). The option (a) runs
+were repeated with the fixed binary; their logs (a-short.log, a-long.log) and
+RESULT lines are the repeated ones, and the repeat is recorded in rerun-a.log.
+Nothing in the b-* runs changed.

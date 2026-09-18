@@ -1,0 +1,9 @@
+=== s2-dedup rebuild (option a-lean, mode blooms) ===
+host        linux/x86_64 Linux queenpgless-01 6.8.0-124-generic #124-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:00:45 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+store open                       0 ms
+file table (scan seg_loc 363410 rows + txns 0 rows)       31 ms
+blooms: 0 loaded from sidecars, 0 rebuilt by walking 0 frames ->        5 ms, 0.0 MiB resident
+total ready-to-probe            36 ms
+probe after restart    n=4096      p50    0.005 ms  p99    0.012 ms  p99.9    0.020 ms  max    0.041 ms  mean   0.004 ms
+samples checked 4096 (4096 expect the original offset, 0 expect no answer): 4096 correct, 0 WRONG, of the wrong ones 0 have a YOUNGER occurrence of the same hash in the store (re-pushed during the run: a stale sample, not a restart defect)
+RESULT rebuild option=a-lean mode=blooms open_ms=0 table_ms=31 bloom_ms=5 total_ms=36 bloom_mib=0.0 checked=4096 wrong=0
