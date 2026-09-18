@@ -319,6 +319,7 @@ fn two_unsealed_files_in_one_bucket_are_refused() {
         bucket: 0,
         file_id: 1,
         len: 0,
+        durable_len: 0,
         sealed: false,
         frames: 0,
         retained_frames: 0,

@@ -20,11 +20,21 @@
 //! - [`store`] the store against a real LMDB environment (WP-1.2): CRUD and
 //!   range scans per keyspace, read isolation, the four pins of D9, the dedup
 //!   index of D10 and the derived indexes of §6.3.
+//! - [`apply`] the apply thread against a real store and real segment files
+//!   (WP-1.4): the gates on an entry (I16, I18, I5, the log's own order), the
+//!   message path, the counters of §6.4 recomputed from the rows, I2's
+//!   determinism property, the idempotence §11.5's repair rests on, the
+//!   durable point that did not happen, and the claim pin against file GC.
+//! - [`apply_crash`] `kill -9` of a child process mid-apply, then re-apply
+//!   from the durable index and compare the digest with an uninterrupted run:
+//!   the crash half of the idempotence above.
 //! - [`store_crash`] `kill -9` of a child process while it commits, and inside
 //!   an uncommitted transaction, then a reopen: the check G0 made WP-1.2 owe
 //!   for D9 — minus its durability leg, which only dropped unflushed writes on
 //!   the VM can decide (the file says so at its head).
 
+mod apply;
+mod apply_crash;
 mod columns;
 mod fuzz;
 mod gates;

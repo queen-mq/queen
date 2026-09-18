@@ -35,7 +35,7 @@ fn a_file_lives_while_its_payload_is_retained_or_its_hashes_are_in_the_window() 
     assert_eq!(m.retained_frames, frames.len() as u64);
     assert_eq!(m.window_frames, frames.len() as u64);
     assert!(!m.is_dead());
-    assert!(s.gc_candidates().is_empty());
+    assert!(s.gc_candidates(usize::MAX).is_empty());
 
     // Retention takes the payloads: the hashes keep the file alive.
     for p in &frames {
@@ -48,14 +48,14 @@ fn a_file_lives_while_its_payload_is_retained_or_its_hashes_are_in_the_window() 
         !m.is_dead(),
         "the hash lists are still inside the txns window"
     );
-    assert!(!s.gc_candidates().contains(&(0, file)));
+    assert!(!s.gc_candidates(usize::MAX).contains(&(0, file)));
 
     // The txns purge passes them: now nothing wants the file.
     for p in &frames {
         s.release(*p, Release::Window);
     }
     assert!(s.file_meta(0, file).expect("meta").is_dead());
-    assert!(s.gc_candidates().contains(&(0, file)));
+    assert!(s.gc_candidates(usize::MAX).contains(&(0, file)));
 }
 
 #[test]
@@ -85,7 +85,7 @@ fn the_active_file_is_never_a_candidate_and_never_unlinked() {
     let p = push(&mut s, 0, 1, 0, 1, 64);
     s.release(p, Release::Both);
     assert!(
-        s.gc_candidates().is_empty(),
+        s.gc_candidates(usize::MAX).is_empty(),
         "an unsealed file is never dead, whatever its counters say"
     );
     let e = s.unlink(0, 0).expect_err("the active file");
@@ -109,7 +109,7 @@ fn a_pin_holds_a_dead_file_until_it_is_dropped() {
     }
     assert!(s.file_meta(0, file).expect("meta").is_dead());
     assert!(
-        !s.gc_candidates().contains(&(0, file)),
+        !s.gc_candidates(usize::MAX).contains(&(0, file)),
         "a pinned file is not a candidate"
     );
     assert!(
@@ -121,7 +121,7 @@ fn a_pin_holds_a_dead_file_until_it_is_dropped() {
     assert!(reader.read(frames[0]).is_ok());
 
     drop(pin);
-    assert!(s.gc_candidates().contains(&(0, file)));
+    assert!(s.gc_candidates(usize::MAX).contains(&(0, file)));
     assert!(s.unlink(0, file).expect("unlink"));
     assert!(!seg_file(&d, 0, file).exists());
     assert!(
@@ -238,9 +238,9 @@ fn liveness_survives_a_restart_and_gc_does_not_eat_the_unacked() {
         assert!(!m.is_dead(), "b000/f{id} is not dead after a restart");
     }
     assert!(
-        s.gc_candidates().is_empty(),
+        s.gc_candidates(usize::MAX).is_empty(),
         "GC has nothing to take: {:?}",
-        s.gc_candidates()
+        s.gc_candidates(usize::MAX)
     );
     for id in &sealed {
         assert!(!s.unlink(0, *id).expect("unlink"), "and refuses to be told");
@@ -265,7 +265,7 @@ fn liveness_survives_a_restart_and_gc_does_not_eat_the_unacked() {
         s.file_meta(0, first).expect("meta").is_dead(),
         "a release recorded before the restart stays recorded"
     );
-    assert!(s.gc_candidates().contains(&(0, first)));
+    assert!(s.gc_candidates(usize::MAX).contains(&(0, first)));
     assert!(s.unlink(0, first).expect("unlink"));
     assert!(!seg_file(&d, 0, first).exists());
 }
@@ -292,7 +292,7 @@ fn a_snapshot_reference_survives_a_restart() {
     let (mut s, _) = Segments::open(&d.seg(), Options::testing(4096), &state).expect("reopen");
     assert_eq!(s.file_meta(0, file).expect("meta").snapshot_refs, 1);
     assert!(!s.file_meta(0, file).expect("meta").is_dead());
-    assert!(!s.gc_candidates().contains(&(0, file)));
+    assert!(!s.gc_candidates(usize::MAX).contains(&(0, file)));
     assert!(!s.unlink(0, file).expect("unlink"));
     assert!(seg_file(&d, 0, file).exists());
 

@@ -129,6 +129,13 @@
 //!   §11.8's gate and the readiness check of §14.1 are what turn into a
 //!   refusal. WP-1.4 owns that end.
 
+// I2, enforced rather than reviewed: `clippy.toml` lists the clock,
+// environment and randomness calls this side of the line may not make,
+// `[lints.clippy]` in Cargo.toml switches the lint off for the rest of the
+// package (the postgres class, and every integration test), and this is where
+// it is switched back on — for this module and every module under it.
+#![deny(clippy::disallowed_methods)]
+
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub mod heed_store;

@@ -106,7 +106,7 @@ mod tests;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufReader, Read, Write};
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
@@ -401,6 +401,11 @@ pub struct FileState {
     pub file_id: u32,
     /// The length apply had made durable.
     pub len: u64,
+    /// The length at the last DURABLE point (§11.4), which is at or below
+    /// `len`: `len` is what the store's last commit recorded, and a commit is
+    /// not a barrier. The frames between the two are the ones §11.5 step 3
+    /// verifies at recovery — see [`Segments::recover`].
+    pub durable_len: u64,
     /// Sealed files never change again.
     pub sealed: bool,
     /// Frames written into it, ever. Never decreases.
@@ -421,6 +426,7 @@ impl FileState {
             bucket,
             file_id,
             len: m.bytes,
+            durable_len: m.durable_bytes.min(m.bytes),
             sealed: m.sealed,
             frames: m.frames,
             retained_frames: m.retained_frames,
@@ -430,12 +436,11 @@ impl FileState {
         }
     }
 
-    /// The file table entry this row reopens as. `durable_bytes` starts at
-    /// `len`: what the store recorded is exactly what is durable.
+    /// The file table entry this row reopens as.
     fn meta(&self) -> FileMeta {
         FileMeta {
             bytes: self.len,
-            durable_bytes: self.len,
+            durable_bytes: self.durable_len.min(self.len),
             sealed: self.sealed,
             frames: self.frames,
             retained_frames: self.retained_frames,
@@ -522,6 +527,13 @@ pub struct Recovery {
     /// Sealed files whose `.qidx` was missing, stale or damaged and was
     /// rebuilt by scanning.
     pub rebuilt: Vec<(u16, u32)>,
+    /// `(bucket, file, from, to)` — sealed files whose frames above the last
+    /// durable point were checksum-verified without rebuilding the index
+    /// (§11.5 step 3).
+    pub verified: Vec<(u16, u32, u64, u64)>,
+    /// Files this open fsynced because the state recorded bytes above their
+    /// durable length: the barrier those verified frames had never had.
+    pub synced: u64,
     /// Active files whose RAM index was rebuilt by scanning.
     pub rescanned: Vec<(u16, u32)>,
     pub scanned_frames: u64,
@@ -1161,6 +1173,16 @@ pub struct Segments {
     /// Files whose length changed since the caller last drained them: what
     /// every apply store commit records (I11).
     touched: BTreeSet<(u16, u32)>,
+    /// Files that have GROWN since the last durable point — the ones whose
+    /// `durable_bytes` that point advances.
+    ///
+    /// Kept apart from `touched`, which a plain store commit drains every 4 ms
+    /// (§11.3), and maintained for the same reason as `dead`: the first cut
+    /// walked the WHOLE file table at every durable point looking for lengths
+    /// to advance, which is periodic work proportional to stored data (I8) —
+    /// one pass per second over a table that grows with retained bytes /
+    /// `QUEEN_RAFT_SEGMENT_BYTES`.
+    written_since_durable: BTreeSet<(u16, u32)>,
     /// Bytes appended since the last durable point — the
     /// `QUEEN_RAFT_DURABLE_EVERY_BYTES` side of §11.4, counted here so the
     /// caller does not have to.
@@ -1168,6 +1190,36 @@ pub struct Segments {
     /// Directory barriers [`Segments::recover`] issued for the directories it
     /// created, for the test that proves it did.
     dir_syncs_at_open: u64,
+    /// Segment files [`Segments::recover`] fsynced because the reopened state
+    /// recorded bytes above their durable length (step 7), for the test that
+    /// proves the barrier was issued.
+    files_synced_at_open: u64,
+    /// File table entries the durable points have examined to advance durable
+    /// lengths, ever. The same instrument as [`Segments::gc_examined`], for
+    /// the other loop that used to walk the whole table (I8).
+    durable_examined: u64,
+    /// Releases that hit zero and had nothing left to subtract: a claim
+    /// retired twice, which leaves the file table's retained figures BELOW the
+    /// truth. Counted rather than asserted so a test can insist on zero
+    /// (§11.7 feeds compaction from those figures).
+    saturated_releases: u64,
+    /// The files [`FileMeta::is_dead`] is true of, maintained INCREMENTALLY by
+    /// [`Segments::track_liveness`] at every mutation of the file table.
+    ///
+    /// I8: no periodic work proportional to stored data. [`Segments::gc_pass`]'s
+    /// caller runs after every applied entry and on every idle tick, and the
+    /// first cut answered it by walking the whole file table and allocating a
+    /// vector of every dead file — a per-entry cost that grows with retained
+    /// bytes / `QUEEN_RAFT_SEGMENT_BYTES`, which is exactly what the flatness
+    /// test of §13.6 measures. A file crosses into this set when a release, a
+    /// seal or a dropped snapshot reference empties it, and out of it when an
+    /// append or a snapshot reference revives it, so the cost of finding
+    /// candidates follows the change and not the store.
+    dead: BTreeSet<(u16, u32)>,
+    /// File table entries [`Segments::gc_candidates`] has looked at, ever. The
+    /// instrument behind the I8 claim above: it must follow the number of
+    /// candidates asked for, never the number of files this node holds.
+    gc_examined: u64,
     buf: Vec<u8>,
 }
 
@@ -1249,11 +1301,29 @@ impl Segments {
             qidx_owed: BTreeMap::new(),
             dirty_dirs: BTreeSet::new(),
             touched: BTreeSet::new(),
+            written_since_durable: BTreeSet::new(),
             unsynced_bytes: 0,
             dir_syncs_at_open: 0,
+            files_synced_at_open: 0,
+            durable_examined: 0,
+            saturated_releases: 0,
+            dead: BTreeSet::new(),
+            gc_examined: 0,
             buf: Vec::with_capacity(1 << 16),
         };
         let rec = segs.recover(root_is_new)?;
+        // The dead set is seeded ONCE, here, from the table the store reopened
+        // with and whatever recovery made of it: after this it is maintained
+        // by the mutations themselves, so no later call walks the table.
+        segs.dead = segs
+            .shared
+            .files
+            .read()
+            .expect("segment files poisoned")
+            .iter()
+            .filter(|(_, m)| m.is_dead())
+            .map(|(k, _)| *k)
+            .collect();
         Ok((segs, rec))
     }
 
@@ -1261,6 +1331,21 @@ impl Segments {
     /// it created). Zero on an open that created nothing.
     pub fn dir_syncs_at_open(&self) -> u64 {
         self.dir_syncs_at_open
+    }
+
+    /// Segment files this open fsynced because the state recorded bytes above
+    /// their durable length (§11.5 step 7). Zero on a clean start.
+    pub fn files_synced_at_open(&self) -> u64 {
+        self.files_synced_at_open
+    }
+
+    /// File table entries the durable points have examined, ever (§11.4).
+    ///
+    /// It must follow the files that GREW since each point, never the files
+    /// this node holds: a durable point that walks the table is periodic work
+    /// proportional to stored data, which is what I8 forbids.
+    pub fn durable_examined(&self) -> u64 {
+        self.durable_examined
     }
 
     /// The read side, for the blocking pool.
@@ -1399,6 +1484,37 @@ impl Segments {
                     Ok(v) => v.check_identity(b, id).is_ok(),
                     Err(_) => false,
                 };
+                if ok && meta.durable_bytes < meta.bytes {
+                    // §11.5 step 3: the frames this file gained since its last
+                    // DURABLE point are the ones no barrier has ever covered,
+                    // so they are the ones to verify — a valid `.qidx` says
+                    // nothing about them (it is written at the seal and
+                    // fsynced at the point that follows it, so it can be whole
+                    // while the bytes it indexes are not).
+                    //
+                    // Below `durable_bytes` nothing is scanned, which is what
+                    // makes recovery cost proportional to what changed (I8).
+                    // The two crash modes are complementary, and that is why
+                    // this bound is sound: a PROCESS crash can leave the store
+                    // reopening past its last durable commit (MDB_NOSYNC),
+                    // but the page cache still holds the file bytes; a POWER
+                    // loss can lose unsynced bytes, and then the store comes
+                    // back AT its durable commit, so `durable_bytes` is the
+                    // real barrier. Neither leaves an unverified frame above
+                    // the recorded `durable_bytes`.
+                    let scan = self.scan_range(b, id, meta.durable_bytes, meta.bytes)?;
+                    if let Some((at, why)) = scan.torn {
+                        return Err(SegError::Damaged {
+                            bucket: b,
+                            file_id: id,
+                            offset: at,
+                            why,
+                        });
+                    }
+                    rep.scanned_frames += scan.records.len() as u64;
+                    rep.scanned_bytes += scan.valid_bytes - meta.durable_bytes;
+                    rep.verified.push((b, id, meta.durable_bytes, meta.bytes));
+                }
                 if !ok {
                     let mut scan = self.scan(b, id, meta.bytes)?;
                     if let Some((at, why)) = scan.torn {
@@ -1498,6 +1614,48 @@ impl Segments {
                 self.create_active(b, next)?;
             }
         }
+
+        // 7. The frames between a file's recorded DURABLE length and its
+        //    recorded length have just been verified (step 5) — and nothing
+        //    has ever fsynced them: they are bytes a plain store commit
+        //    recorded, which §11.3 deliberately does not make durable.
+        //
+        //    Issuing the barrier HERE, once, is what lets the next durable
+        //    point advance their `durable_bytes` honestly. Advancing it
+        //    without the barrier — the first cut did — closes the window
+        //    §11.5 step 3 exists for while the bytes are still only in the
+        //    page cache: a process crash followed by a power loss inside the
+        //    writeback window would lose them, and the boot after it would
+        //    not re-verify, because the row would say they were durable.
+        //
+        //    The cost is the files that were mid-write when the node stopped,
+        //    never the files it holds (I8).
+        let owed: Vec<(u16, u32)> = recorded
+            .iter()
+            .filter(|(_, m)| m.durable_bytes < m.bytes)
+            .map(|(k, _)| *k)
+            .collect();
+        if !owed.is_empty() {
+            let mut handles: Vec<File> = Vec::with_capacity(owed.len());
+            for (b, id) in &owed {
+                handles.push(File::open(seg_path(&root, *b, *id))?);
+            }
+            let fds: Vec<RawFd> = handles.iter().map(|f| f.as_raw_fd()).collect();
+            self.fsync_all(&fds)?;
+            self.files_synced_at_open = fds.len() as u64;
+            let mut g = self.shared.files.write().expect("segment files poisoned");
+            for key in &owed {
+                if let Some(m) = g.get_mut(key) {
+                    m.durable_bytes = m.bytes;
+                }
+            }
+            drop(g);
+            // They are durable now, so the rows must say so at the next store
+            // commit: a row left claiming a stale durable length would make
+            // every later boot re-verify frames a barrier has covered.
+            self.touched.extend(owed);
+            rep.synced = self.files_synced_at_open;
+        }
         Ok(rep)
     }
 
@@ -1525,6 +1683,9 @@ impl Segments {
             .write()
             .expect("segment files poisoned")
             .insert((bucket, file_id), FileMeta::default());
+        // Not sealed, so not dead — and a file id is reused by nobody, but the
+        // set is kept honest at every mutation and this is one.
+        self.track_liveness((bucket, file_id), false);
         self.shared
             .active
             .write()
@@ -1631,6 +1792,7 @@ impl Segments {
             .write()
             .expect("segment active index poisoned")
             .insert(bucket, rec);
+        let dead;
         {
             let mut g = self.shared.files.write().expect("segment files poisoned");
             let m = g.entry((bucket, file_id)).or_default();
@@ -1639,8 +1801,15 @@ impl Segments {
             m.retained_frames += 1;
             m.retained_bytes += flen;
             m.window_frames += 1;
+            dead = m.is_dead();
         }
+        // A frame revives the file it lands in — it never can, in fact: this is
+        // the ACTIVE file, and a file enters the dead set only once sealed.
+        self.track_liveness((bucket, file_id), dead);
         self.touched.insert((bucket, file_id));
+        // The only place a file's length grows, and therefore the only place
+        // the next durable point's work comes from.
+        self.written_since_durable.insert((bucket, file_id));
         self.unsynced_bytes += flen;
         // One fat frame must not leave the encode buffer fat for the life of
         // the process: `QUEEN_RAFT_ENTRY_MAX_BYTES` is 96 MiB, and holding
@@ -1718,12 +1887,18 @@ impl Segments {
             // is looking at a `sealed_recent` that already has the answer.
             records
         };
+        let dead;
         {
             let mut g = self.shared.files.write().expect("segment files poisoned");
             let m = g.entry((bucket, old.file_id)).or_default();
             m.bytes = old.len;
             m.sealed = true;
+            dead = m.is_dead();
         }
+        // Sealing is one of the two ways a file becomes dead: a file whose
+        // every frame was released before the roll is collectable the moment
+        // it stops being the active one.
+        self.track_liveness((bucket, old.file_id), dead);
         self.touched.insert((bucket, old.file_id));
         let seg = if old.dirty { Some(old.file) } else { None };
 
@@ -1977,11 +2152,29 @@ impl Segments {
             a.dirty = false;
         }
 
+        // The durable length of every file this point SYNCED advances to its
+        // length, and each of them is TOUCHED again, so the commit this point
+        // is about to take records the new one. That length is the floor
+        // recovery verifies from (§11.5 step 3): a stale one makes the next
+        // boot re-verify bytes a barrier already covered, and the rows went
+        // stale because a plain store commit in between drains the touched
+        // set.
+        //
+        // The set is the files that GREW since the last point — the ones the
+        // barriers above covered — and not a walk of the file table, so a
+        // point costs what changed and not what this node stores (I8).
         {
-            let mut g = self.shared.files.write().expect("segment files poisoned");
-            for m in g.values_mut() {
-                m.durable_bytes = m.bytes;
+            let grown = std::mem::take(&mut self.written_since_durable);
+            self.durable_examined += grown.len() as u64;
+            {
+                let mut g = self.shared.files.write().expect("segment files poisoned");
+                for key in &grown {
+                    if let Some(m) = g.get_mut(key) {
+                        m.durable_bytes = m.bytes;
+                    }
+                }
             }
+            self.touched.extend(grown);
         }
         // Seals are retired ONE durable point late, never at this one.
         //
@@ -2082,13 +2275,29 @@ impl Segments {
     /// Scan a file's frames up to `upto`, verifying each. The engine behind
     /// both "rebuild a `.qidx`" and "is this tail torn".
     pub fn scan(&self, bucket: u16, file_id: u32, upto: u64) -> Result<Scan> {
+        self.scan_range(bucket, file_id, 0, upto)
+    }
+
+    /// The same, from a frame boundary: §11.5 step 3 verifies the frames a
+    /// file gained since its last DURABLE point, and nothing below it.
+    ///
+    /// `from` must be a boundary — every recorded length is one, because a
+    /// frame is appended whole — and `Scan::valid_bytes` is absolute, so a
+    /// caller compares it with `upto` exactly as it does for a full scan.
+    pub fn scan_range(&self, bucket: u16, file_id: u32, from: u64, upto: u64) -> Result<Scan> {
         let path = seg_path(&self.shared.root, bucket, file_id);
         let f = File::open(&path)?;
         let mut r = BufReader::with_capacity(1 << 16, f);
-        let mut out = Scan::default();
+        if from > 0 {
+            r.seek(SeekFrom::Start(from))?;
+        }
+        let mut out = Scan {
+            valid_bytes: from,
+            ..Default::default()
+        };
         let mut head = [0u8; frame::HEADER_LEN];
         let mut body: Vec<u8> = Vec::new();
-        let mut pos = 0u64;
+        let mut pos = from;
         while pos < upto {
             match read_exact_or_less(&mut r, &mut head)? {
                 0 => break,
@@ -2183,20 +2392,119 @@ impl Segments {
     /// record about it, exactly like a new length, and a restart that did not
     /// see it would bring the retired frames back to life.
     pub fn release(&mut self, pos: Position, what: Release) {
+        let mut saturated = false;
+        let dead;
         {
             let mut g = self.shared.files.write().expect("segment files poisoned");
             let Some(m) = g.get_mut(&(pos.bucket, pos.file_id)) else {
                 return;
             };
             if matches!(what, Release::Retained | Release::Both) {
+                saturated |= m.retained_frames == 0;
                 m.retained_frames = m.retained_frames.saturating_sub(1);
                 m.retained_bytes = m.retained_bytes.saturating_sub(pos.len as u64);
             }
             if matches!(what, Release::Window | Release::Both) {
+                saturated |= m.window_frames == 0;
                 m.window_frames = m.window_frames.saturating_sub(1);
             }
+            dead = m.is_dead();
         }
+        if saturated {
+            // The caller retired a claim this frame no longer held. The
+            // saturation keeps the counters sane, but the figures are now
+            // below the truth for every frame of this file that is still
+            // live, so it is worth a line and a counter, not silence.
+            self.saturated_releases += 1;
+            tracing::warn!(
+                target: "rsm",
+                bucket = pos.bucket, file = pos.file_id, offset = pos.offset,
+                what = ?what,
+                "a segment claim was released twice",
+            );
+        }
+        // The other way a file becomes dead, and the common one: the last
+        // retained frame or the last hash list of a sealed file goes.
+        self.track_liveness((pos.bucket, pos.file_id), dead);
         self.touched.insert((pos.bucket, pos.file_id));
+    }
+
+    /// How many releases had nothing left to retire (see
+    /// [`Segments::release`]).
+    ///
+    /// Zero on a correct caller, but only a FLOOR on the mistake: a claim
+    /// retired twice is invisible here while the counter is still above zero,
+    /// and shows up as a file table whose retained figures are below the
+    /// truth. The test that falsifies it compares the figures themselves
+    /// against two partitions sharing one file.
+    pub fn saturated_releases(&self) -> u64 {
+        self.saturated_releases
+    }
+
+    /// Forget that a file owes the store a row.
+    ///
+    /// GC phase one (§11.7) deletes a dead file's `files` and
+    /// `partition_files` rows and then unlinks it at the next durable point.
+    /// Between the two, the file is still in this writer's touched set — every
+    /// [`Segments::release`] that emptied it put it there — and the durable
+    /// point would hand it back to the caller as a row to RECORD, in the very
+    /// commit whose job is to stop naming it (I10). The caller therefore tells
+    /// this writer, at phase one, that the file is no longer its business.
+    ///
+    /// Nothing else is dropped: the file keeps its `FileMeta` and its pins
+    /// until [`Segments::unlink`] succeeds, so a pin taken in between still
+    /// wins and the caller can put the row back.
+    pub fn untouch(&mut self, bucket: u16, file_id: u32) {
+        self.touched.remove(&(bucket, file_id));
+    }
+
+    /// The partitions whose frames a SEALED file holds, sorted and deduped.
+    ///
+    /// This is the source of the `partition_files` rows (§6.1's G0 amendment):
+    /// the file's own index, never a map this process happens to have built.
+    /// A RAM map cannot answer for a file that sealed before a restart, which
+    /// is how those rows came to leak — one per partition, per file, for ever
+    /// (I8 says the cost of a change is proportional to the change).
+    ///
+    /// Three sources, in this order: the index of a just-sealed file, still in
+    /// RAM; the `.qidx` on disk; and, if neither is there, a scan of the file.
+    /// One of them always is: a file whose `.qidx` could not be written keeps
+    /// its RAM index until it can ([`Segments::retire_sealed`]), and recovery
+    /// rebuilds a missing one at boot.
+    pub fn pids_in(&self, bucket: u16, file_id: u32) -> Result<Vec<Pid>> {
+        let key = (bucket, file_id);
+        let mut pids: Vec<Pid> = Vec::new();
+        let recent = self
+            .shared
+            .sealed_recent
+            .read()
+            .expect("segment sealed index poisoned")
+            .get(&key)
+            .cloned();
+        if let Some(records) = recent {
+            pids.extend(records.iter().map(|r| r.pid));
+        } else if let Some(view) = self.shared.index_for(key)? {
+            pids.extend(view.records().map(|r| r.pid));
+        } else {
+            let bytes = self.file_meta(bucket, file_id).map(|m| m.bytes);
+            let Some(bytes) = bytes else {
+                return Err(SegError::MissingFile { bucket, file_id });
+            };
+            tracing::warn!(
+                target: "rsm",
+                bucket, file = file_id,
+                "no index for a sealed segment file: scanning it for its partitions",
+            );
+            pids.extend(
+                self.scan(bucket, file_id, bytes)?
+                    .records
+                    .iter()
+                    .map(|r| r.pid),
+            );
+        }
+        pids.sort_unstable();
+        pids.dedup();
+        Ok(pids)
     }
 
     /// A snapshot manifest started or stopped naming this file (§11.6).
@@ -2206,6 +2514,7 @@ impl Segments {
     /// new process unlinks the file out from under a snapshot that is being
     /// sent.
     pub fn set_snapshot_ref(&mut self, bucket: u16, file_id: u32, held: bool) {
+        let dead;
         {
             let mut g = self.shared.files.write().expect("segment files poisoned");
             let Some(m) = g.get_mut(&(bucket, file_id)) else {
@@ -2216,28 +2525,77 @@ impl Segments {
             } else {
                 m.snapshot_refs = m.snapshot_refs.saturating_sub(1);
             }
+            dead = m.is_dead();
         }
+        // A manifest revives a dead file and, when it lets go, hands it back
+        // to GC.
+        self.track_liveness((bucket, file_id), dead);
         self.touched.insert((bucket, file_id));
     }
 
-    /// Files with no live bytes, no hash list inside a txns window, no
-    /// snapshot reference and no pin (§11.7).
+    /// Keep [`Segments::dead`] in step with one file's liveness.
+    ///
+    /// Called after every mutation of a `FileMeta`, with the flag computed
+    /// under the write lock the mutation already held: no second lock, one set
+    /// operation. It is what lets `gc_candidates` cost the candidates it
+    /// returns instead of the files this node holds (I8).
+    fn track_liveness(&mut self, key: (u16, u32), dead: bool) {
+        if dead {
+            self.dead.insert(key);
+        } else {
+            self.dead.remove(&key);
+        }
+    }
+
+    /// At most `limit` files with no live bytes, no hash list inside a txns
+    /// window, no snapshot reference and no pin (§11.7).
     ///
     /// This is PHASE ONE of GC. I10 says a file is unlinked only after a
     /// durable store commit that no longer references it, so the caller
     /// records the removal, takes a durable point, and only then calls
     /// [`Segments::unlink`]. The candidate list is re-checked there, so a pin
     /// taken in between still wins.
-    pub fn gc_candidates(&self) -> Vec<(u16, u32)> {
-        let pins = self.shared.pins.lock().expect("segment pins poisoned");
-        self.shared
-            .files
-            .read()
-            .expect("segment files poisoned")
-            .iter()
-            .filter(|((b, id), m)| m.is_dead() && !pins.contains_key(&(*b, *id)))
-            .map(|((b, id), _)| (*b, *id))
-            .collect()
+    ///
+    /// `limit` is a WORK bound, not a buffer bound (I8): the caller runs this
+    /// after every applied entry, and it must not pay for files it is not
+    /// going to collect. The walk is over the incrementally maintained dead
+    /// set, so it examines the candidates it returns plus the pinned files
+    /// ahead of them — pins are outstanding claims (§11.7, I4), bounded by
+    /// work in flight and never by retained volume.
+    pub fn gc_candidates(&mut self, limit: usize) -> Vec<(u16, u32)> {
+        if limit == 0 || self.dead.is_empty() {
+            // The common case, on every turn of the apply loop: nothing to
+            // collect, and not even the pins lock is taken for it — readers
+            // take pins under that lock (§11.7, I4).
+            return Vec::new();
+        }
+        let mut out: Vec<(u16, u32)> = Vec::new();
+        let mut examined = 0u64;
+        {
+            let pins = self.shared.pins.lock().expect("segment pins poisoned");
+            for key in &self.dead {
+                examined += 1;
+                if pins.contains_key(key) {
+                    continue;
+                }
+                out.push(*key);
+                if out.len() >= limit {
+                    break;
+                }
+            }
+        }
+        self.gc_examined += examined;
+        out
+    }
+
+    /// File table entries [`Segments::gc_candidates`] has examined, ever.
+    ///
+    /// The instrument for I8 on the GC path: a test asserts it follows the
+    /// candidates asked for, not the number of files. Without it, "the cost of
+    /// a change is proportional to the change" is a claim about a loop nobody
+    /// measures.
+    pub fn gc_examined(&self) -> u64 {
+        self.gc_examined
     }
 
     /// Phase two: unlink a dead file and forget it.
@@ -2285,6 +2643,8 @@ impl Segments {
             .write()
             .expect("segment files poisoned")
             .remove(&(bucket, file_id));
+        self.dead.remove(&(bucket, file_id));
+        self.written_since_durable.remove(&(bucket, file_id));
         drop(pins);
         self.sealed_dirty
             .retain(|(b, id, _, _)| !(*b == bucket && *id == file_id));

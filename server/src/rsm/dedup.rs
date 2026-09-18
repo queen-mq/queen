@@ -75,7 +75,13 @@ pub fn occurrences(v: &[u8]) -> impl Iterator<Item = (u64, i64)> + '_ {
     })
 }
 
-fn push_occurrence(v: &mut Vec<u8>, offset: u64, created_at_us: i64) {
+/// Append one occurrence to a `(pid, hash)` row's value.
+///
+/// Public because the `Watermark` effect (§5.2) expires hash lists by OFFSET
+/// rather than by the time [`prune`] walks, and apply (WP-1.4) must rewrite a
+/// row that keeps some of its occurrences without owning a second copy of this
+/// encoding.
+pub fn push_occurrence(v: &mut Vec<u8>, offset: u64, created_at_us: i64) {
     v.extend_from_slice(&offset.to_le_bytes());
     v.extend_from_slice(&created_at_us.to_le_bytes());
 }
@@ -177,7 +183,7 @@ pub fn probe_one<R: Reads + ?Sized>(
     Ok(best)
 }
 
-fn check_occurrences(v: &[u8]) -> Result<()> {
+pub fn check_occurrences(v: &[u8]) -> Result<()> {
     if v.is_empty() || !v.len().is_multiple_of(OCCURRENCE_LEN) {
         return Err(StoreError::corrupt(
             Keyspace::Dedup,

@@ -107,7 +107,7 @@ pub mod planner {
 /// The apply thread: the ONLY mutator of the store and the segment files (I1),
 /// deterministic (I2), plus counters, wakes, waiters, durable points (§11.4),
 /// recovery (§11.5) and local file GC (§11.7). Owner: WP-1.4.
-pub mod apply {}
+pub mod apply;
 
 /// The committed view: store reads plus the RAM-derived indexes of §6.3
 /// (ready rings, deadline heaps, hot caches, timer wheel, notifiers).

@@ -52,6 +52,17 @@ required-features = ["server"]
 default = ["server"]
 server = ["dep:rust-embed", "dep:tracing-subscriber", "axum/http1", "axum/tokio"]
 
+[lints.clippy]
+# PLAN_RAFT.md I2 (WP-1.4). `clippy.toml` lists the clock, environment and
+# randomness calls that `src/rsm/apply.rs`, `src/rsm/state/` and
+# `src/rsm/store/` may not make — apply is a pure function of (committed state,
+# entry). `clippy::disallowed_methods` is warn-by-default and inert until that
+# file names something, so it is switched off HERE, for every target of the
+# package (the postgres class reads clocks and the environment 196 times, and
+# every integration test does too), and re-`deny`ed at the top of those three
+# files. That is the scope, and it is the only reason this table exists.
+disallowed_methods = "allow"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 # Lean by default: the embedded facade and the handlers need only axum's core

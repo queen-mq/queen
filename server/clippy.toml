@@ -1,0 +1,53 @@
+# Clippy configuration for queen-engine.
+#
+# PLAN_RAFT.md I2 (WP-1.4): apply is a pure function of (committed state,
+# entry) — no clock, no randomness, no environment reads. The list below is
+# how that is ENFORCED rather than reviewed, and the enforcement is SCOPED:
+#
+#   - `clippy::disallowed_methods` is warn-by-default but inert until a method
+#     is listed here, so this file is what turns it on;
+#   - `[lints.clippy]` in Cargo.toml then allows it for every target of the
+#     package, so the 196 legitimate clock and environment reads of the
+#     postgres class — and every integration test under tests/ — stay exactly
+#     as they are;
+#   - `rsm/apply.rs`, `rsm/state/` and `rsm/store/` re-`deny` it at the top of
+#     the file, which is the scope I2 names. Nothing else in the crate changes
+#     behaviour because of this file.
+#
+# The two `#[allow]`s inside that scope are both boot-only or node-local and
+# both carry the reason at the allow: `ApplyConfig::from_env` (read once at
+# boot, never from the apply loop) and `SystemClock::now` (the store-commit and
+# durable-point cadence, which decides WHEN bytes move and never WHAT they
+# are).
+disallowed-methods = [
+    { path = "std::time::SystemTime::now", reason = "I2: apply has no clock; the planner stamps time (D5) and the entry carries it" },
+    { path = "std::time::Instant::now", reason = "I2: apply has no clock; the cadence clock is injected through rsm::apply::Clock" },
+    { path = "std::env::var", reason = "I2: apply reads no environment; knobs are resolved at boot into ApplyConfig" },
+    { path = "std::env::var_os", reason = "I2: apply reads no environment; knobs are resolved at boot into ApplyConfig" },
+    { path = "std::env::vars", reason = "I2: apply reads no environment; knobs are resolved at boot into ApplyConfig" },
+    { path = "rand::random", reason = "I2: apply is deterministic; randomness is the planner's (§5.2 rules)" },
+    # The DEFINITION paths, not the re-export, and one per rand in the graph.
+    #
+    # `rand::thread_rng` is a `pub use` of `rand::rngs::thread::thread_rng`
+    # (rand 0.8.7, this crate's direct dependency) and clippy resolves
+    # DEFINITIONS: the re-export spelling made clippy answer "does not refer to
+    # a reachable function" on every run — a warning of its own, and an entry
+    # that enforced nothing. The path below is the one that bites, and it bites
+    # on the re-export spelling too (`rand::thread_rng()` inside the denied
+    # scope is an error; `test/raft/lint/deny-bites.sh` demonstrates it).
+    #
+    # `allow-invalid` is set because the dependency graph holds TWO rands (0.8.7
+    # directly, 0.10.2 transitively) whose entry points differ — 0.10 renamed
+    # `thread_rng` to `rng` — so in a compilation unit that links only one of
+    # them the other path cannot resolve, and neither can be spelled in a way
+    # that resolves everywhere. Both are listed so the pin survives the upgrade
+    # of the direct dependency.
+    { path = "rand::rngs::thread::thread_rng", reason = "I2: apply is deterministic; randomness is the planner's (§5.2 rules)", allow-invalid = true },
+    { path = "rand::rngs::thread::rng", reason = "I2: apply is deterministic; randomness is the planner's (§5.2 rules)", allow-invalid = true },
+]
+
+# That every entry above is ENFORCED and not merely written down is checked by
+# `test/raft/lint/deny-bites.sh`: it puts one call of each into
+# `src/rsm/apply.rs`, runs clippy, requires an error per entry, and puts the
+# file back. Run it after changing this file or the `#![deny]` at the top of
+# `rsm/apply.rs`, `rsm/state/mod.rs` and `rsm/store/mod.rs`.

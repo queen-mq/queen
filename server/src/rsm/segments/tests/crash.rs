@@ -48,7 +48,8 @@ fn write_state(root: &Path, s: &Segments, durable: &[(Position, Pid, u64)]) {
     // lengths reopens believing every sealed file is dead (see `FileState`).
     for (bucket, file_id, m) in s.files() {
         out.push_str(&format!(
-            "F {bucket} {file_id} {} {} {} {} {} {} {}\n",
+            "F {bucket} {file_id} {} {} {} {} {} {} {} {}\n",
+            m.durable_bytes,
             m.durable_bytes,
             u8::from(m.sealed),
             m.frames,
@@ -86,16 +87,17 @@ fn read_state(root: &Path) -> (Vec<FileState>, Vec<(Position, Pid, u64)>) {
     for line in text.lines() {
         let f: Vec<&str> = line.split(' ').collect();
         match f.first() {
-            Some(&"F") if f.len() == 10 => files.push(FileState {
+            Some(&"F") if f.len() == 11 => files.push(FileState {
                 bucket: f[1].parse().expect("bucket"),
                 file_id: f[2].parse().expect("file"),
                 len: f[3].parse().expect("len"),
-                sealed: f[4] == "1",
-                frames: f[5].parse().expect("frames"),
-                retained_frames: f[6].parse().expect("retained frames"),
-                retained_bytes: f[7].parse().expect("retained bytes"),
-                window_frames: f[8].parse().expect("window frames"),
-                snapshot_refs: f[9].parse().expect("snapshot refs"),
+                durable_len: f[4].parse().expect("durable len"),
+                sealed: f[5] == "1",
+                frames: f[6].parse().expect("frames"),
+                retained_frames: f[7].parse().expect("retained frames"),
+                retained_bytes: f[8].parse().expect("retained bytes"),
+                window_frames: f[9].parse().expect("window frames"),
+                snapshot_refs: f[10].parse().expect("snapshot refs"),
             }),
             Some(&"P") if f.len() == 7 => pos.push((
                 Position {

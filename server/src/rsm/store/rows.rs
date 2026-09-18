@@ -27,13 +27,41 @@ use crate::rsm::effect::{
 /// decoded beside this one.
 pub const ROW_V1: u8 = 1;
 
+/// The second layout of the two rows WP-1.4 had to WIDEN after WP-1.2 shipped
+/// them (`files`, `garbage`).
+///
+/// The version byte is per row, not per build: a row whose body changed takes
+/// the next number and everything else stays at [`ROW_V1`]. Keeping the widened
+/// bodies at version 1 is what makes a data directory written by the WP-1.2 cut
+/// decode its version byte as valid and then mis-read the body — a
+/// [`CodecError::Field`] naming some field in the middle of the row instead of
+/// the version mismatch that it is. These two say which it is.
+pub const ROW_V2: u8 = 2;
+
 fn head(w: &mut Writer) {
     w.u8(ROW_V1);
 }
 
+/// The version byte of a row whose body has changed since [`ROW_V1`].
+fn head_v2(w: &mut Writer) {
+    w.u8(ROW_V2);
+}
+
 fn expect_v1(r: &mut Reader<'_>, what: &'static str) -> Result<(), CodecError> {
+    expect_row(r, ROW_V1, what)
+}
+
+/// The version gate of one row.
+///
+/// A mismatch is [`CodecError::UnknownVersion`] with `kind: 0` — a STORED ROW,
+/// never an effect kind or an outcome tag, which is what a non-zero kind means
+/// (§5.3). The caller turns it into `StoreError::Corrupt`, which names the
+/// keyspace, so the pair reads "keyspace `files`: unknown version 1". That is
+/// fatal for the node, exactly as an unreadable row must be (see the module
+/// header): these bytes are what apply wrote from an entry a quorum committed.
+fn expect_row(r: &mut Reader<'_>, want: u8, what: &'static str) -> Result<(), CodecError> {
     let v = r.u8(what)?;
-    if v != ROW_V1 {
+    if v != want {
         return Err(CodecError::UnknownVersion {
             kind: 0,
             version: v as u16,
@@ -453,26 +481,46 @@ pub fn dlq_decode(b: &[u8]) -> Result<DlqRow, CodecError> {
 pub struct GarbageRow {
     pub deleted_at_us: i64,
     pub scope: GarbageScope,
+    /// Which QUEUE INCARNATION this pid belonged to when it became garbage,
+    /// and therefore whose gauges its chunks may still settle.
+    ///
+    /// §5.2 makes the name reusable the instant the delete lands ("a push,
+    /// configure or pop right after the delete recreates it"), while the
+    /// pid-keyed rows go on being deleted in chunks for as long as that takes.
+    /// A chunk that decided by NAME whether the queue is still there would
+    /// subtract a dead queue's dead letters and retained bytes from the live
+    /// queue that took the name — and D16 says the counters ARE the answer, so
+    /// both gauges stay wrong, and negative, for ever.
+    ///
+    /// `Some(id)` is the `queues` row's id (a fresh uuid per creation) as it
+    /// stood when the pids were moved: its gauges are the right ones while the
+    /// live row still carries that id. `None` means the queue's own name-keyed
+    /// rows went in the same command — a queue or tenant delete — which
+    /// settled its gauges from its own counters and swept them; nothing these
+    /// chunks remove may touch them again.
+    pub queue_id: Option<[u8; 16]>,
     /// Where the next `DeleteChunk` resumes, in key order. Empty = the
     /// beginning.
     pub resume: Vec<u8>,
 }
 
 pub fn garbage_encode(g: &GarbageRow) -> Vec<u8> {
-    let mut w = Writer::with_capacity(48);
-    head(&mut w);
+    let mut w = Writer::with_capacity(64);
+    head_v2(&mut w);
     w.i64(g.deleted_at_us);
     w.scope(&g.scope);
+    w.opt_bytes16(g.queue_id.as_ref());
     w.blob(&g.resume);
     w.into_inner()
 }
 
 pub fn garbage_decode(b: &[u8]) -> Result<GarbageRow, CodecError> {
     let mut r = Reader::new(b);
-    expect_v1(&mut r, "garbage row version")?;
+    expect_row(&mut r, ROW_V2, "garbage row version")?;
     Ok(GarbageRow {
         deleted_at_us: r.i64("deleted_at_us")?,
         scope: r.scope("scope")?,
+        queue_id: r.opt_bytes16("queue_id")?,
         resume: r.blob("resume")?,
     })
 }
@@ -543,40 +591,100 @@ pub fn seg_loc_decode(b: &[u8]) -> Result<SegLocRow, CodecError> {
     })
 }
 
+/// The value of the `dlq_by_pos` index: the dead letters filed at one
+/// `(pid, group, offset)`, in the order they were filed.
+///
+/// Plain 16-byte ids, no header: the length says how many. Postgres's index on
+/// `(partition_id, consumer_group, "offset")` is not unique (005), so this one
+/// cannot be either — a replayed dead letter that dies again is filed at the
+/// same position, and an index that held the newest made the older row
+/// unreachable by every delete path that walks it.
+pub fn dlq_ids_encode(ids: &[[u8; 16]]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(ids.len() * 16);
+    for id in ids {
+        out.extend_from_slice(id);
+    }
+    out
+}
+
+pub fn dlq_ids_decode(b: &[u8]) -> Result<Vec<[u8; 16]>, CodecError> {
+    if !b.len().is_multiple_of(16) || b.is_empty() {
+        return Err(CodecError::Field("dlq id list"));
+    }
+    Ok(b.chunks_exact(16)
+        .map(|c| {
+            let mut id = [0u8; 16];
+            id.copy_from_slice(c);
+            id
+        })
+        .collect())
+}
+
 /// One segment file as this node knows it (§6.2, I11).
 ///
 /// `len` is the length AT THE LAST STORE COMMIT that recorded it — the number
 /// recovery truncates the file to (§11.5 step 3). It is written in the same
 /// transaction as `meta.applied_index`, which is the whole of I11.
+///
+/// The other fields are the file's LIVENESS, and they are here because
+/// `segments::Segments::open` refuses to reopen without them (WP-1.3
+/// `FileState`): a row that carried only `len` and `sealed` came back from a
+/// restart with every counter at zero, which is `FileMeta::is_dead` for every
+/// sealed file — a two-phase GC that unlinks unacked payloads, hash lists
+/// still inside the txns window and files a live snapshot hard-links (I10,
+/// §11.7). The two structs are therefore the same row: WP-1.4's apply thread
+/// writes one from the other at every store commit.
+///
+/// Widening it is what [`ROW_V2`] is for: the WP-1.2 cut wrote
+/// `len | sealed | live_bytes | snapshot_refs`, and a data directory from that
+/// build must be refused by its VERSION rather than decoded into whatever the
+/// new field order makes of those bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileRow {
     pub len: u64,
+    /// The length at the last DURABLE point (§11.4), at or below `len`. It is
+    /// the floor of recovery's checksum verification: the frames above it are
+    /// the ones no barrier has covered (§11.5 step 3).
+    pub durable_len: u64,
     pub sealed: bool,
-    /// Bytes still referenced by a retained segment or by a hash list inside
-    /// the txns window (§11.7). Zero means the file may be unlinked after the
-    /// next durable point that no longer references it (I10).
-    pub live_bytes: u64,
+    /// Frames written into it, ever. Never decreases.
+    pub frames: u64,
+    /// Frames whose payload retention still keeps, and their bytes (§11.7):
+    /// the "live bytes per file" a GC candidate must have none of.
+    pub retained_frames: u64,
+    pub retained_bytes: u64,
+    /// Frames whose hash list is still inside their partition's txns window —
+    /// the lists that outlive the segments retention deletes (D10).
+    pub window_frames: u64,
     /// How many snapshot manifests hold a hard link to it.
     pub snapshot_refs: u32,
 }
 
 pub fn file_encode(f: &FileRow) -> Vec<u8> {
-    let mut w = Writer::with_capacity(24);
-    head(&mut w);
+    let mut w = Writer::with_capacity(56);
+    head_v2(&mut w);
     w.u64(f.len);
+    w.u64(f.durable_len);
     w.bool(f.sealed);
-    w.u64(f.live_bytes);
+    w.u64(f.frames);
+    w.u64(f.retained_frames);
+    w.u64(f.retained_bytes);
+    w.u64(f.window_frames);
     w.u32(f.snapshot_refs);
     w.into_inner()
 }
 
 pub fn file_decode(b: &[u8]) -> Result<FileRow, CodecError> {
     let mut r = Reader::new(b);
-    expect_v1(&mut r, "file row version")?;
+    expect_row(&mut r, ROW_V2, "file row version")?;
     Ok(FileRow {
         len: r.u64("len")?,
+        durable_len: r.u64("durable_len")?,
         sealed: r.bool("sealed")?,
-        live_bytes: r.u64("live_bytes")?,
+        frames: r.u64("frames")?,
+        retained_frames: r.u64("retained_frames")?,
+        retained_bytes: r.u64("retained_bytes")?,
+        window_frames: r.u64("window_frames")?,
         snapshot_refs: r.u32("snapshot_refs")?,
     })
 }
@@ -652,9 +760,79 @@ mod tests {
         let g = GarbageRow {
             deleted_at_us: 11,
             scope: GarbageScope::Group { group: "g".into() },
+            queue_id: Some([4u8; 16]),
             resume: vec![1, 2, 3],
         };
         assert_eq!(garbage_decode(&garbage_encode(&g)).unwrap(), g);
+        // The other half of the field: the queue went with the command that
+        // opened the garbage, so nothing it leaves behind may settle a queue
+        // gauge again.
+        let g = GarbageRow {
+            queue_id: None,
+            scope: GarbageScope::Queue,
+            ..g
+        };
+        assert_eq!(garbage_decode(&garbage_encode(&g)).unwrap(), g);
+    }
+
+    /// The WP-1.2 cut's `files` row, byte for byte: version 1, then
+    /// `len | sealed | live_bytes | snapshot_refs`.
+    ///
+    /// A data directory written by `be28a050` must be refused by its VERSION.
+    /// Decoded as a version-2 row these 22 bytes read `durable_len` out of
+    /// `sealed ‖ live_bytes` and then run out of buffer — a
+    /// `CodecError::Field("frames")`, which names a field that build never
+    /// wrote and says nothing about what actually happened.
+    #[test]
+    fn the_old_file_row_is_refused_by_its_version_and_not_mis_read() {
+        let mut old = Writer::with_capacity(24);
+        old.u8(ROW_V1);
+        old.u64(1 << 26); // len
+        old.bool(true); // sealed
+        old.u64(42); // live_bytes, the field WP-1.4 split into four
+        old.u32(1); // snapshot_refs
+        let old = old.into_inner();
+        assert_eq!(old.len(), 22);
+        match file_decode(&old) {
+            Err(CodecError::UnknownVersion { kind, version }) => {
+                assert_eq!((kind, version), (0, ROW_V1 as u16));
+            }
+            other => panic!("the old layout must be refused by its version: {other:?}"),
+        }
+        // And this build's own row still round trips, at version 2.
+        let f = FileRow {
+            len: 1 << 26,
+            durable_len: 1 << 25,
+            sealed: true,
+            frames: 9,
+            retained_frames: 3,
+            retained_bytes: 42,
+            window_frames: 7,
+            snapshot_refs: 1,
+        };
+        let bytes = file_encode(&f);
+        assert_eq!(bytes[0], ROW_V2);
+        assert_eq!(file_decode(&bytes).unwrap(), f);
+    }
+
+    /// The `dlq_by_pos` value did NOT need a version: it never had a header.
+    ///
+    /// WP-1.2 wrote the 16 raw bytes of one dlq id; WP-1.4 writes the list,
+    /// because the postgres index on `(partition_id, consumer_group, "offset")`
+    /// is not unique and a second dead letter at one position made the first
+    /// unreachable. The widening is compatible by construction — a stored
+    /// value of 16 bytes IS a one-element list — and this is the evidence.
+    #[test]
+    fn an_old_single_id_dlq_index_value_reads_as_a_one_element_list() {
+        let id = [9u8; 16];
+        assert_eq!(dlq_ids_decode(&id).unwrap(), vec![id]);
+        assert_eq!(dlq_ids_encode(&[id]), id.to_vec());
+        // Anything that is not a whole number of ids is damage, not a version.
+        assert!(matches!(
+            dlq_ids_decode(&id[..15]),
+            Err(CodecError::Field(_))
+        ));
+        assert!(matches!(dlq_ids_decode(&[]), Err(CodecError::Field(_))));
     }
 
     #[test]
@@ -668,8 +846,12 @@ mod tests {
         assert_eq!(seg_loc_decode(&seg_loc_encode(&s)).unwrap(), s);
         let f = FileRow {
             len: 1 << 26,
+            durable_len: 1 << 25,
             sealed: true,
-            live_bytes: 42,
+            frames: 9,
+            retained_frames: 3,
+            retained_bytes: 42,
+            window_frames: 7,
             snapshot_refs: 1,
         };
         assert_eq!(file_decode(&file_encode(&f)).unwrap(), f);

@@ -33,6 +33,13 @@
 //! group, partition) with work) — so a restart rebuilds them in O(pending)
 //! with one ordered scan, and nothing walks the partitions.
 
+// I2, enforced rather than reviewed: `clippy.toml` lists the clock,
+// environment and randomness calls this side of the line may not make,
+// `[lints.clippy]` in Cargo.toml switches the lint off for the rest of the
+// package (the postgres class, and every integration test), and this is where
+// it is switched back on — for this module and every module under it.
+#![deny(clippy::disallowed_methods)]
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::rsm::effect::{CursorRow, Pid, QueueConfig};

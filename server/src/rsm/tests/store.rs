@@ -135,8 +135,12 @@ fn every_message_path_keyspace_round_trips_through_a_commit() {
     };
     let file = FileRow {
         len: 4096,
+        durable_len: 4096,
         sealed: false,
-        live_bytes: 4096,
+        frames: 2,
+        retained_frames: 2,
+        retained_bytes: 4096,
+        window_frames: 2,
         snapshot_refs: 0,
     };
 
@@ -164,6 +168,7 @@ fn every_message_path_keyspace_round_trips_through_a_commit() {
             &GarbageRow {
                 deleted_at_us: 1,
                 scope: GarbageScope::Queue,
+                queue_id: None,
                 resume: Vec::new(),
             },
         )
@@ -573,8 +578,12 @@ fn an_install_clears_every_row_that_names_a_local_file() {
             1,
             &FileRow {
                 len: 8,
+                durable_len: 8,
                 sealed: true,
-                live_bytes: 8,
+                frames: 1,
+                retained_frames: 1,
+                retained_bytes: 8,
+                window_frames: 1,
                 snapshot_refs: 0,
             },
         )
@@ -1576,6 +1585,7 @@ fn the_committed_view_hides_garbage_pids_and_stamps_a_monotone_now() {
             &GarbageRow {
                 deleted_at_us: 1,
                 scope: GarbageScope::Queue,
+                queue_id: None,
                 resume: Vec::new(),
             },
         )

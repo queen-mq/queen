@@ -407,16 +407,27 @@ pub trait TypedReads: Reads {
         )
     }
 
-    /// The `(pid, group, offset)` index → the dead letter's id.
-    fn dlq_id_at(&self, pid: Pid, group: &str, offset: i64) -> Result<Option<[u8; 16]>> {
+    /// The `(pid, group, offset)` index → the dead letters filed AT that
+    /// position, in the order they were filed.
+    ///
+    /// A list, not one id: `log_dlq`'s index in postgres is not unique, and a
+    /// message that is replayed from the DLQ and dies again is filed at the
+    /// same position twice (005). An index that kept only the newest left the
+    /// older row reachable by nothing — a delete of the partition or of the
+    /// consumer group walks this index, so the row and its `dlq_count` would
+    /// outlive the queue itself.
+    fn dlq_ids_at(&self, pid: Pid, group: &str, offset: i64) -> Result<Vec<[u8; 16]>> {
         let k = keys::dlq_by_pos(pid, group, offset);
         match self.get_raw(Keyspace::DlqByPos, &k)? {
-            None => Ok(None),
-            Some(b) => b
-                .try_into()
-                .map(Some)
-                .map_err(|_| StoreError::corrupt(Keyspace::DlqByPos, "dlq id")),
+            None => Ok(Vec::new()),
+            Some(b) => rows::dlq_ids_decode(b)
+                .map_err(|_| StoreError::corrupt(Keyspace::DlqByPos, "dlq id list")),
         }
+    }
+
+    /// The first dead letter filed at a position, if any.
+    fn dlq_id_at(&self, pid: Pid, group: &str, offset: i64) -> Result<Option<[u8; 16]>> {
+        Ok(self.dlq_ids_at(pid, group, offset)?.first().copied())
     }
 
     // ----------------------------------------------------------- request ids
@@ -539,13 +550,24 @@ pub trait TypedReads: Reads {
         cb: &mut dyn FnMut(u16, u32, FileRow) -> bool,
     ) -> Result<usize> {
         let mut err: Option<StoreError> = None;
+        // The CAUSE travels with the refusal: a row this build cannot read is
+        // fatal for the node (§11.5 answers a disagreement by discarding the
+        // state directory), so "file row" alone leaves the operator unable to
+        // tell a version mismatch from damage.
         let n = self.scan_raw(Keyspace::Files, &[], &[], limit, &mut |k, v| match (
             keys::files_parts(k),
             rows::file_decode(v),
         ) {
             (Some((b, f)), Ok(row)) => cb(b, f, row),
-            _ => {
-                err = Some(StoreError::corrupt(Keyspace::Files, "file row"));
+            (None, _) => {
+                err = Some(StoreError::corrupt(Keyspace::Files, "file row key"));
+                false
+            }
+            (_, Err(e)) => {
+                err = Some(StoreError::corrupt(
+                    Keyspace::Files,
+                    format!("file row: {e}"),
+                ));
                 false
             }
         })?;
@@ -715,8 +737,12 @@ pub trait TypedWrites: Writes {
     ) -> Result<()> {
         let k = keys::dlq(tenant, queue, dlq_id);
         self.put_raw(Keyspace::Dlq, &k, &rows::dlq_encode(row))?;
+        let mut ids = self.dlq_ids_at(row.pid, &row.group, row.offset)?;
+        if !ids.contains(dlq_id) {
+            ids.push(*dlq_id);
+        }
         let k = keys::dlq_by_pos(row.pid, &row.group, row.offset);
-        self.put_raw(Keyspace::DlqByPos, &k, dlq_id)
+        self.put_raw(Keyspace::DlqByPos, &k, &rows::dlq_ids_encode(&ids))
     }
 
     fn del_dlq(
@@ -726,8 +752,16 @@ pub trait TypedWrites: Writes {
         dlq_id: &[u8; 16],
         row: &DlqRow,
     ) -> Result<bool> {
+        // Only THIS dead letter leaves the position: another one filed at the
+        // same `(pid, group, offset)` keeps its place in the list.
+        let mut ids = self.dlq_ids_at(row.pid, &row.group, row.offset)?;
+        ids.retain(|id| id != dlq_id);
         let k = keys::dlq_by_pos(row.pid, &row.group, row.offset);
-        self.del_raw(Keyspace::DlqByPos, &k)?;
+        if ids.is_empty() {
+            self.del_raw(Keyspace::DlqByPos, &k)?;
+        } else {
+            self.put_raw(Keyspace::DlqByPos, &k, &rows::dlq_ids_encode(&ids))?;
+        }
         let k = keys::dlq(tenant, queue, dlq_id);
         self.del_raw(Keyspace::Dlq, &k)
     }
@@ -792,11 +826,20 @@ pub trait TypedWrites: Writes {
 
     /// Record a file's length at this commit: the second half of I11, always
     /// in the same transaction as [`TypedWrites::set_applied`].
+    ///
+    /// It preserves the row's LIVENESS, which is the half of the row apply
+    /// must not lose (see [`FileRow`]); a caller that has the whole file state
+    /// — the apply thread, at every store commit — writes it with
+    /// [`TypedWrites::put_file`] instead.
     fn set_file_len(&mut self, bucket: u16, file_id: u32, len: u64) -> Result<()> {
         let mut row = self.file(bucket, file_id)?.unwrap_or(FileRow {
             len: 0,
+            durable_len: 0,
             sealed: false,
-            live_bytes: 0,
+            frames: 0,
+            retained_frames: 0,
+            retained_bytes: 0,
+            window_frames: 0,
             snapshot_refs: 0,
         });
         row.len = len;
