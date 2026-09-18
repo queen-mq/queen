@@ -1,0 +1,16 @@
+2026-09-17T15:16:02Z waiting for pid 104153 to exit (max 60 min)
+2026-09-17T15:25:33Z pid 104153 gone; settling 30 s
+2026-09-17T15:26:03Z host facts
+Linux queenpgless-01 6.8.0-124-generic #124-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:00:45 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+8
+model name	: INTEL(R) XEON(R) GOLD 6548N
+sha_ni_lines=0 aes_lines=8
+rustc 1.98.1 (48a229cea 2026-09-01)
+ 15:26:03 up 1 day,  4:45,  1 user,  load average: 0.24, 0.32, 0.53
+2026-09-17T15:26:03Z building
+2026-09-17T15:26:35Z unit tests
+2026-09-17T15:26:41Z tests rc=0 (1 ok lines)
+2026-09-17T15:26:41Z matrix SECS=60 ROUNDS=1 -> /root/raft/wp06-part2/s4-transport/results/vm
+2026-09-17T15:43:45Z matrix rc=0 rows=15
+2026-09-17T15:43:45Z no leader left running
+2026-09-17T15:43:45Z done

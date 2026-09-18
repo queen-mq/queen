@@ -1,0 +1,120 @@
+=== receiver-http-mac-20k-r1.log ===
+[receiver] http tls=false mac=true rate=20000 -> p50 94 us  p99 398 us  leader 0.07 cores  recv 0.12 cores  315 B/msg  conns 25
+=== receiver-http-mac-20k-r2.log ===
+[receiver] http tls=false mac=true rate=20000 -> p50 149 us  p99 543 us  leader 0.11 cores  recv 0.16 cores  315 B/msg  conns 39
+=== receiver-http-mac-20k-r3.log ===
+[receiver] http tls=false mac=true rate=20000 -> p50 71 us  p99 290 us  leader 0.08 cores  recv 0.13 cores  315 B/msg  conns 8
+=== receiver-http-mac-20k-r4.log ===
+[receiver] http tls=false mac=true rate=20000 -> p50 122 us  p99 348 us  leader 0.11 cores  recv 0.17 cores  315 B/msg  conns 14
+=== receiver-http-mac-50k-r1.log ===
+[receiver] http tls=false mac=true rate=50000 -> p50 104 us  p99 246 us  leader 0.13 cores  recv 0.21 cores  315 B/msg  conns 46
+=== receiver-http-mac-50k-r2.log ===
+[receiver] http tls=false mac=true rate=50000 -> p50 235 us  p99 25117 us  leader 0.26 cores  recv 0.41 cores  315 B/msg  conns 64
+=== receiver-http-mac-50k-r3.log ===
+[receiver] http tls=false mac=true rate=50000 -> p50 125 us  p99 2491 us  leader 0.19 cores  recv 0.27 cores  315 B/msg  conns 64
+=== receiver-http-mac-50k-r4.log ===
+[receiver] http tls=false mac=true rate=50000 -> p50 218 us  p99 723 us  leader 0.33 cores  recv 0.49 cores  315 B/msg  conns 58
+=== receiver-http-plain-20k-r1.log ===
+[receiver] http tls=false mac=false rate=20000 -> p50 93 us  p99 517 us  leader 0.07 cores  recv 0.13 cores  310 B/msg  conns 32
+=== receiver-http-plain-20k-r2.log ===
+[receiver] http tls=false mac=false rate=20000 -> p50 96 us  p99 432 us  leader 0.07 cores  recv 0.13 cores  310 B/msg  conns 51
+=== receiver-http-plain-20k-r3.log ===
+[receiver] http tls=false mac=false rate=20000 -> p50 87 us  p99 293 us  leader 0.06 cores  recv 0.11 cores  310 B/msg  conns 10
+=== receiver-http-plain-20k-r4.log ===
+[receiver] http tls=false mac=false rate=20000 -> p50 120 us  p99 3966 us  leader 0.07 cores  recv 0.12 cores  310 B/msg  conns 38
+=== receiver-http-plain-50k-r1.log ===
+[receiver] http tls=false mac=false rate=50000 -> p50 102 us  p99 1045 us  leader 0.11 cores  recv 0.20 cores  310 B/msg  conns 64
+=== receiver-http-plain-50k-r2.log ===
+[receiver] http tls=false mac=false rate=50000 -> p50 244 us  p99 29836 us  leader 0.16 cores  recv 0.31 cores  310 B/msg  conns 64
+=== receiver-http-plain-50k-r3.log ===
+[receiver] http tls=false mac=false rate=50000 -> p50 109 us  p99 723 us  leader 0.12 cores  recv 0.22 cores  310 B/msg  conns 64
+=== receiver-http-plain-50k-r4.log ===
+[receiver] http tls=false mac=false rate=50000 -> p50 125 us  p99 630 us  leader 0.17 cores  recv 0.30 cores  310 B/msg  conns 56
+=== receiver-http-tls-mac-20k-r1.log ===
+[receiver] http tls=true mac=true rate=20000 -> p50 105 us  p99 1460 us  leader 0.08 cores  recv 0.13 cores  319 B/msg  conns 26
+=== receiver-http-tls-mac-20k-r2.log ===
+[receiver] http tls=true mac=true rate=20000 -> p50 221 us  p99 7477 us  leader 0.13 cores  recv 0.22 cores  319 B/msg  conns 64
+=== receiver-http-tls-mac-20k-r3.log ===
+[receiver] http tls=true mac=true rate=20000 -> p50 131 us  p99 510 us  leader 0.11 cores  recv 0.17 cores  319 B/msg  conns 23
+=== receiver-http-tls-mac-20k-r4.log ===
+[receiver] http tls=true mac=true rate=20000 -> p50 201 us  p99 9167 us  leader 0.11 cores  recv 0.18 cores  319 B/msg  conns 48
+=== receiver-http-tls-mac-50k-r1.log ===
+[receiver] http tls=true mac=true rate=50000 -> p50 117 us  p99 403 us  leader 0.17 cores  recv 0.25 cores  319 B/msg  conns 59
+=== receiver-http-tls-mac-50k-r2.log ===
+[receiver] http tls=true mac=true rate=50000 -> p50 245 us  p99 41256 us  leader 0.32 cores  recv 0.48 cores  322 B/msg  conns 64
+=== receiver-http-tls-mac-50k-r3.log ===
+[receiver] http tls=true mac=true rate=50000 -> p50 115 us  p99 267 us  leader 0.17 cores  recv 0.23 cores  319 B/msg  conns 38
+=== receiver-http-tls-mac-50k-r4.log ===
+[receiver] http tls=true mac=true rate=50000 -> p50 246 us  p99 1176 us  leader 0.39 cores  recv 0.55 cores  319 B/msg  conns 64
+=== receiver-tcp-mac-20k-r1.log ===
+[receiver] tcp tls=false mac=true rate=20000 -> p50 88 us  p99 7323 us  leader 0.04 cores  recv 0.08 cores  297 B/msg  conns 2
+=== receiver-tcp-mac-20k-r2.log ===
+[receiver] tcp tls=false mac=true rate=20000 -> p50 211 us  p99 10160 us  leader 0.09 cores  recv 0.18 cores  297 B/msg  conns 2
+=== receiver-tcp-mac-20k-r3.log ===
+[receiver] tcp tls=false mac=true rate=20000 -> p50 111 us  p99 2194 us  leader 0.06 cores  recv 0.10 cores  297 B/msg  conns 2
+=== receiver-tcp-mac-20k-r4.log ===
+[receiver] tcp tls=false mac=true rate=20000 -> p50 137 us  p99 346 us  leader 0.07 cores  recv 0.12 cores  297 B/msg  conns 2
+=== receiver-tcp-mac-50k-r1.log ===
+[receiver] tcp tls=false mac=true rate=50000 -> p50 117 us  p99 479 us  leader 0.09 cores  recv 0.18 cores  297 B/msg  conns 2
+=== receiver-tcp-mac-50k-r2.log ===
+[receiver] tcp tls=false mac=true rate=50000 -> p50 100 us  p99 305 us  leader 0.09 cores  recv 0.16 cores  297 B/msg  conns 2
+=== receiver-tcp-mac-50k-r3.log ===
+[receiver] tcp tls=false mac=true rate=50000 -> p50 214 us  p99 19438 us  leader 0.15 cores  recv 0.26 cores  297 B/msg  conns 2
+=== receiver-tcp-mac-50k-r4.log ===
+[receiver] tcp tls=false mac=true rate=50000 -> p50 194 us  p99 1100 us  leader 0.15 cores  recv 0.24 cores  297 B/msg  conns 2
+=== receiver-tcp-plain-20k-r1.log ===
+[receiver] tcp tls=false mac=false rate=20000 -> p50 84 us  p99 399 us  leader 0.04 cores  recv 0.08 cores  294 B/msg  conns 2
+=== receiver-tcp-plain-20k-r2.log ===
+[receiver] tcp tls=false mac=false rate=20000 -> p50 135 us  p99 2178 us  leader 0.07 cores  recv 0.15 cores  294 B/msg  conns 2
+=== receiver-tcp-plain-20k-r3.log ===
+[receiver] tcp tls=false mac=false rate=20000 -> p50 73 us  p99 161 us  leader 0.03 cores  recv 0.06 cores  294 B/msg  conns 2
+=== receiver-tcp-plain-20k-r4.log ===
+[receiver] tcp tls=false mac=false rate=20000 -> p50 114 us  p99 453 us  leader 0.05 cores  recv 0.11 cores  294 B/msg  conns 2
+=== receiver-tcp-plain-50k-conns1-r1.log ===
+[receiver] tcp tls=false mac=false rate=50000 -> p50 120 us  p99 8443 us  leader 0.05 cores  recv 0.14 cores  294 B/msg  conns 1
+=== receiver-tcp-plain-50k-conns1-r2.log ===
+[receiver] tcp tls=false mac=false rate=50000 -> p50 73 us  p99 191 us  leader 0.02 cores  recv 0.08 cores  294 B/msg  conns 1
+=== receiver-tcp-plain-50k-conns1-r3.log ===
+[receiver] tcp tls=false mac=false rate=50000 -> p50 60 us  p99 223 us  leader 0.03 cores  recv 0.11 cores  294 B/msg  conns 1
+=== receiver-tcp-plain-50k-conns1-r4.log ===
+[receiver] tcp tls=false mac=false rate=50000 -> p50 148 us  p99 331 us  leader 0.06 cores  recv 0.18 cores  294 B/msg  conns 1
+=== receiver-tcp-plain-50k-conns4-r1.log ===
+[receiver] tcp tls=false mac=false rate=50000 -> p50 114 us  p99 3203 us  leader 0.09 cores  recv 0.18 cores  294 B/msg  conns 4
+=== receiver-tcp-plain-50k-conns4-r2.log ===
+[receiver] tcp tls=false mac=false rate=50000 -> p50 86 us  p99 4943 us  leader 0.06 cores  recv 0.12 cores  294 B/msg  conns 4
+=== receiver-tcp-plain-50k-conns4-r3.log ===
+[receiver] tcp tls=false mac=false rate=50000 -> p50 92 us  p99 1434 us  leader 0.11 cores  recv 0.19 cores  294 B/msg  conns 4
+=== receiver-tcp-plain-50k-conns4-r4.log ===
+[receiver] tcp tls=false mac=false rate=50000 -> p50 132 us  p99 469 us  leader 0.13 cores  recv 0.26 cores  294 B/msg  conns 4
+=== receiver-tcp-plain-50k-conns8-r1.log ===
+[receiver] tcp tls=false mac=false rate=50000 -> p50 151 us  p99 4186 us  leader 0.13 cores  recv 0.23 cores  294 B/msg  conns 8
+=== receiver-tcp-plain-50k-conns8-r2.log ===
+[receiver] tcp tls=false mac=false rate=50000 -> p50 81 us  p99 189 us  leader 0.07 cores  recv 0.13 cores  294 B/msg  conns 8
+=== receiver-tcp-plain-50k-conns8-r3.log ===
+[receiver] tcp tls=false mac=false rate=50000 -> p50 124 us  p99 10363 us  leader 0.10 cores  recv 0.18 cores  294 B/msg  conns 8
+=== receiver-tcp-plain-50k-conns8-r4.log ===
+[receiver] tcp tls=false mac=false rate=50000 -> p50 128 us  p99 634 us  leader 0.13 cores  recv 0.23 cores  294 B/msg  conns 8
+=== receiver-tcp-plain-50k-r1.log ===
+[receiver] tcp tls=false mac=false rate=50000 -> p50 79 us  p99 523 us  leader 0.05 cores  recv 0.12 cores  294 B/msg  conns 2
+=== receiver-tcp-plain-50k-r2.log ===
+[receiver] tcp tls=false mac=false rate=50000 -> p50 147 us  p99 8635 us  leader 0.07 cores  recv 0.18 cores  294 B/msg  conns 2
+=== receiver-tcp-plain-50k-r3.log ===
+[receiver] tcp tls=false mac=false rate=50000 -> p50 100 us  p99 8233 us  leader 0.07 cores  recv 0.15 cores  294 B/msg  conns 2
+=== receiver-tcp-plain-50k-r4.log ===
+[receiver] tcp tls=false mac=false rate=50000 -> p50 113 us  p99 268 us  leader 0.08 cores  recv 0.19 cores  294 B/msg  conns 2
+=== receiver-tcp-tls-20k-r1.log ===
+[receiver] tcp tls=true mac=false rate=20000 -> p50 81 us  p99 274 us  leader 0.04 cores  recv 0.07 cores  298 B/msg  conns 2
+=== receiver-tcp-tls-20k-r2.log ===
+[receiver] tcp tls=true mac=false rate=20000 -> p50 140 us  p99 3330 us  leader 0.07 cores  recv 0.13 cores  298 B/msg  conns 2
+=== receiver-tcp-tls-20k-r3.log ===
+[receiver] tcp tls=true mac=false rate=20000 -> p50 76 us  p99 212 us  leader 0.04 cores  recv 0.07 cores  298 B/msg  conns 2
+=== receiver-tcp-tls-20k-r4.log ===
+[receiver] tcp tls=true mac=false rate=20000 -> p50 111 us  p99 1646 us  leader 0.06 cores  recv 0.12 cores  298 B/msg  conns 2
+=== receiver-tcp-tls-50k-r1.log ===
+[receiver] tcp tls=true mac=false rate=50000 -> p50 116 us  p99 8163 us  leader 0.06 cores  recv 0.13 cores  297 B/msg  conns 2
+=== receiver-tcp-tls-50k-r2.log ===
+[receiver] tcp tls=true mac=false rate=50000 -> p50 52 us  p99 234 us  leader 0.05 cores  recv 0.11 cores  297 B/msg  conns 2
+=== receiver-tcp-tls-50k-r3.log ===
+[receiver] tcp tls=true mac=false rate=50000 -> p50 78 us  p99 199 us  leader 0.05 cores  recv 0.10 cores  297 B/msg  conns 2
+=== receiver-tcp-tls-50k-r4.log ===
+[receiver] tcp tls=true mac=false rate=50000 -> p50 122 us  p99 315 us  leader 0.10 cores  recv 0.19 cores  297 B/msg  conns 2

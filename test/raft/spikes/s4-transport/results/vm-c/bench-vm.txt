@@ -1,0 +1,10 @@
+# s4 bench  host=queenpgless-01  iters=20000 x 5 rounds (min)  body=2801 B
+hmac-sha256 over the body                  9022.5 ns/op
+hex of a 16 B tag (16x format!)             492.4 ns/op
+String == on two 32-char hex tags             2.3 ns/op
+hmac + constant-time verify                9094.1 ns/op
+frame encode + sequenced MAC              10061.7 ns/op
+frame encode, no MAC                        177.8 ns/op
+# hmac throughput: 0.310 GB/s
+# the HTTP leader path per request = hmac 9023 + hex 492 + String== 2 = 9517 ns; constant-time binary = 9094 ns; hex share 5.2 %
+# sequenced frame MAC over 2801 B: 9884 ns (encode alone 178 ns)

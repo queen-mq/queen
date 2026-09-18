@@ -1,0 +1,18 @@
+2026-09-18T06:16:57Z host
+ 06:16:57 up 1 day, 19:36,  1 user,  load average: 0.00, 0.01, 0.22
+sha_ni_lines=0
+Linux queenpgless-01 6.8.0-124-generic #124-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:00:45 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+8
+model name	: INTEL(R) XEON(R) GOLD 6548N
+ 06:16:57 up 1 day, 19:36,  1 user,  load average: 0.00, 0.01, 0.22
+binary=/root/raft/wp-0.6/s4-transport/target/release/s4
+-rwxr-xr-x 2 root root 21457440 2026-09-17 15:08:21.628076149 +0000 /root/raft/wp-0.6/s4-transport/target/release/s4
+7ecbc51709f9b37f0d18c7ef8a43ded6  /root/raft/wp-0.6/s4-transport/target/release/s4
+2026-09-18T06:16:57Z phase 1: missing cells on the pass A binary (SECS=60)
+2026-09-18T06:21:30Z phase 1 rc=0 rows=4
+2026-09-18T06:21:30Z phase 2: build the pacer binary
+2026-09-18T06:21:51Z unit tests rc=0 (1 ok lines)
+2026-09-18T06:21:51Z phase 2: timer vs spin pacer (SECS=40)
+2026-09-18T06:25:05Z phase 2 rc=0 rows=4
+2026-09-18T06:25:05Z no leader left running
+2026-09-18T06:25:05Z done

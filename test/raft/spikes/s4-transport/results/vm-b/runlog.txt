@@ -1,0 +1,17 @@
+# s4 matrix  host=queenpgless-01  secs=60  rounds=1  threads=4  batch=10  payload=256
+Linux queenpgless-01 6.8.0-124-generic #124-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:00:45 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+tcp-plain-20k rc=0 load_before=[1.83, 0.74, 0.66] load_after=[0.71, 0.62, 0.62]
+tcp-mac-20k rc=0 load_before=[0.66, 0.61, 0.62] load_after=[0.37, 0.52, 0.58]
+tcp-tls-20k rc=0 load_before=[0.37, 0.52, 0.58] load_after=[0.60, 0.53, 0.58]
+http-plain-20k rc=0 load_before=[0.55, 0.52, 0.57] load_after=[0.30, 0.46, 0.55]
+http-mac-20k rc=0 load_before=[0.28, 0.45, 0.54] load_after=[0.22, 0.40, 0.52]
+http-tls-mac-20k rc=0 load_before=[0.22, 0.40, 0.52] load_after=[0.29, 0.39, 0.51]
+tcp-plain-50k rc=0 load_before=[0.27, 0.38, 0.50] load_after=[0.22, 0.36, 0.49]
+tcp-mac-50k rc=0 load_before=[0.20, 0.35, 0.48] load_after=[0.31, 0.33, 0.46]
+tcp-tls-50k rc=0 load_before=[0.31, 0.33, 0.46] load_after=[0.10, 0.26, 0.43]
+http-plain-50k rc=0 load_before=[0.09, 0.26, 0.43] load_after=[0.03, 0.20, 0.40]
+http-mac-50k rc=0 load_before=[0.03, 0.20, 0.39] load_after=[0.72, 0.35, 0.43]
+http-tls-mac-50k rc=0 load_before=[0.72, 0.35, 0.43] load_after=[0.24, 0.28, 0.40]
+tcp-plain-50k-conns1 rc=0 load_before=[0.22, 0.27, 0.39] load_after=[0.21, 0.26, 0.38]
+tcp-plain-50k-conns4 rc=0 load_before=[0.19, 0.26, 0.38] load_after=[0.31, 0.28, 0.37]
+tcp-plain-50k-conns8 rc=0 load_before=[0.31, 0.28, 0.37] load_after=[0.10, 0.22, 0.35]

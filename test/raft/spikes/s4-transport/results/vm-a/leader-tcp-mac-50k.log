@@ -1,0 +1,3 @@
+[leader] tcp listening on 127.0.0.1:6734 mac=true tls=false
+[leader] conn ended: early eof
+[leader] conn ended: early eof

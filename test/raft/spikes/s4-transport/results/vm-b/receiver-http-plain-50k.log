@@ -1,0 +1,1 @@
+[receiver] http tls=false mac=false rate=50000 -> p50 70 us  p99 127 us  leader 0.11 cores  recv 0.20 cores  310 B/msg  conns 49

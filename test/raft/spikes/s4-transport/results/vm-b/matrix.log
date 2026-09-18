@@ -1,0 +1,32 @@
+# s4 matrix  host=queenpgless-01  secs=60  rounds=1  threads=4  batch=10  payload=256
+--- tcp-plain-20k
+[receiver] tcp tls=false mac=false rate=20000 -> p50 59 us  p99 111 us  leader 0.05 cores  recv 0.08 cores  294 B/msg  conns 2
+--- tcp-mac-20k
+[receiver] tcp tls=false mac=true rate=20000 -> p50 89 us  p99 147 us  leader 0.07 cores  recv 0.12 cores  297 B/msg  conns 2
+--- tcp-tls-20k
+[receiver] tcp tls=true mac=false rate=20000 -> p50 63 us  p99 116 us  leader 0.05 cores  recv 0.09 cores  298 B/msg  conns 2
+--- http-plain-20k
+[receiver] http tls=false mac=false rate=20000 -> p50 72 us  p99 127 us  leader 0.06 cores  recv 0.12 cores  310 B/msg  conns 7
+--- http-mac-20k
+[receiver] http tls=false mac=true rate=20000 -> p50 102 us  p99 167 us  leader 0.09 cores  recv 0.14 cores  315 B/msg  conns 8
+--- http-tls-mac-20k
+[receiver] http tls=true mac=true rate=20000 -> p50 110 us  p99 175 us  leader 0.10 cores  recv 0.16 cores  319 B/msg  conns 7
+--- tcp-plain-50k
+[receiver] tcp tls=false mac=false rate=50000 -> p50 62 us  p99 112 us  leader 0.06 cores  recv 0.13 cores  294 B/msg  conns 2
+--- tcp-mac-50k
+[receiver] tcp tls=false mac=true rate=50000 -> p50 125 us  p99 199 us  leader 0.12 cores  recv 0.21 cores  297 B/msg  conns 2
+--- tcp-tls-50k
+[receiver] tcp tls=true mac=false rate=50000 -> p50 67 us  p99 118 us  leader 0.07 cores  recv 0.14 cores  297 B/msg  conns 2
+--- http-plain-50k
+[receiver] http tls=false mac=false rate=50000 -> p50 70 us  p99 127 us  leader 0.11 cores  recv 0.20 cores  310 B/msg  conns 49
+--- http-mac-50k
+[receiver] http tls=false mac=true rate=50000 -> p50 103 us  p99 172 us  leader 0.19 cores  recv 0.29 cores  315 B/msg  conns 18
+--- http-tls-mac-50k
+[receiver] http tls=true mac=true rate=50000 -> p50 113 us  p99 199 us  leader 0.21 cores  recv 0.31 cores  319 B/msg  conns 13
+--- tcp-plain-50k-conns1
+[receiver] tcp tls=false mac=false rate=50000 -> p50 72 us  p99 131 us  leader 0.03 cores  recv 0.11 cores  294 B/msg  conns 1
+--- tcp-plain-50k-conns4
+[receiver] tcp tls=false mac=false rate=50000 -> p50 60 us  p99 109 us  leader 0.08 cores  recv 0.15 cores  294 B/msg  conns 4
+--- tcp-plain-50k-conns8
+[receiver] tcp tls=false mac=false rate=50000 -> p50 61 us  p99 113 us  leader 0.09 cores  recv 0.15 cores  294 B/msg  conns 8
+done -> /root/raft/wp06-part2/s4-transport/results/vm/results.jsonl

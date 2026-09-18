@@ -1,0 +1,7 @@
+Linux queenpgless-01 6.8.0-124-generic #124-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:00:45 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+8
+model name	: INTEL(R) XEON(R) GOLD 6548N
+ 06:16:57 up 1 day, 19:36,  1 user,  load average: 0.00, 0.01, 0.22
+binary=/root/raft/wp-0.6/s4-transport/target/release/s4
+-rwxr-xr-x 2 root root 21457440 2026-09-17 15:08:21.628076149 +0000 /root/raft/wp-0.6/s4-transport/target/release/s4
+7ecbc51709f9b37f0d18c7ef8a43ded6  /root/raft/wp-0.6/s4-transport/target/release/s4

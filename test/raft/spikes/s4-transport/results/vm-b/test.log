@@ -1,0 +1,64 @@
+   Compiling s4-transport v0.1.0 (/root/raft/wp06-part2/s4-transport)
+warning: method `counters` is never used
+  --> src/main.rs:43:8
+   |
+39 | trait Transport: Send + Sync + 'static {
+   |       --------- method in this trait
+...
+43 |     fn counters(&self) -> Arc<Counters>;
+   |        ^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `recv_open` is never read
+   --> src/main.rs:426:5
+    |
+418 | struct Snapshot {
+    |        -------- field in this struct
+...
+426 |     recv_open: u64,
+    |     ^^^^^^^^^
+
+warning: field `counters` is never read
+  --> src/httpx.rs:67:9
+   |
+62 | pub struct HttpClient {
+   |            ---------- field in this struct
+...
+67 |     pub counters: Arc<Counters>,
+   |         ^^^^^^^^
+
+warning: field `counters` is never read
+  --> src/tcpx.rs:46:9
+   |
+43 | pub struct TcpClient {
+   |            --------- field in this struct
+...
+46 |     pub counters: Arc<Counters>,
+   |         ^^^^^^^^
+
+warning: field `payload_bytes` is never read
+  --> src/wire.rs:48:9
+   |
+45 | pub struct Parsed {
+   |            ------ field in this struct
+...
+48 |     pub payload_bytes: usize,
+   |         ^^^^^^^^^^^^^
+
+warning: `s4-transport` (bin "s4" test) generated 5 warnings
+    Finished `release` profile [optimized + debuginfo] target(s) in 5.80s
+     Running unittests src/main.rs (target/release/deps/s4-c0ba8c56be15c50f)
+
+running 8 tests
+test auth::tests::a_proof_for_another_peer_pair_does_not_transfer ... ok
+test auth::tests::the_transcript_does_not_replay_in_the_other_direction ... ok
+test frame::tests::corrupt_body_is_rejected ... ok
+test frame::tests::frame_roundtrip_plain_and_mac ... ok
+test auth::tests::wrong_secret_is_rejected_by_the_client_first ... ok
+test frame::tests::a_frame_from_another_session_is_rejected ... ok
+test auth::tests::matching_secret_agrees_on_a_session_key ... ok
+test auth::tests::wrong_node_id_or_cluster_is_rejected_by_the_server ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

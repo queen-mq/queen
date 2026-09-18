@@ -1,0 +1,3 @@
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=true
+[leader] conn ended: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+[leader] conn ended: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof

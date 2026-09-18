@@ -1,0 +1,6 @@
+# s4 matrix  host=queenpgless-01  secs=60  rounds=1  threads=4  batch=10  payload=256
+Linux queenpgless-01 6.8.0-124-generic #124-Ubuntu SMP PREEMPT_DYNAMIC Tue May 26 13:00:45 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+https-plain-50k rc=0 load_before=[0.00, 0.01, 0.22] load_after=[0.05, 0.02, 0.21]
+https-plain-20k rc=0 load_before=[0.04, 0.02, 0.21] load_after=[0.12, 0.04, 0.20]
+http-pool2-50k rc=0 load_before=[0.11, 0.04, 0.20] load_after=[0.90, 0.29, 0.28]
+tcp-control-50k rc=0 load_before=[0.90, 0.29, 0.28] load_after=[0.41, 0.27, 0.27]

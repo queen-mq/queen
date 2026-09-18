@@ -1,0 +1,20 @@
+# s4 matrix  host=alice.local  secs=60  threads=4  batch=10  payload=256
+Darwin alice.local 24.5.0 Darwin Kernel Version 24.5.0: Tue Apr 22 19:54:43 PDT 2025; root:xnu-11417.121.6~2/RELEASE_ARM64_T8132 arm64
+tcp-plain-20k rc=0 load_before=[7.84 5.67 7.88] load_after=[4.30 5.09 7.49]
+tcp-mac-20k rc=0 load_before=[4.30 5.09 7.49] load_after=[8.42 6.11 7.69]
+tcp-tls-20k rc=0 load_before=[8.06 6.07 7.67] load_after=[7.94 6.85 7.87]
+http-plain-20k rc=0 load_before=[7.94 6.85 7.87] load_after=[20.64 10.59 9.17]
+http-mac-20k rc=0 load_before=[20.64 10.59 9.17] load_after=[44.93 17.75 11.85]
+http-tls-mac-20k rc=0 load_before=[52.70 19.82 12.61] load_after=[41.18 24.95 15.21]
+tcp-plain-50k rc=0 load_before=[38.53 24.67 15.17] load_after=[21.81 22.47 15.04]
+tcp-mac-50k rc=0 load_before=[21.81 22.47 15.04] load_after=[12.47 19.51 14.47]
+tcp-tls-50k rc=0 load_before=[11.71 19.23 14.40] load_after=[9.65 16.92 13.87]
+http-plain-50k rc=0 load_before=[9.20 16.70 13.81] load_after=[9.63 15.71 13.68]
+http-mac-50k rc=0 load_before=[9.63 15.71 13.68] load_after=[6.38 13.58 13.02]
+http-tls-mac-50k rc=0 load_before=[6.11 13.41 12.96] load_after=[4.61 11.53 12.29]
+tcp-plain-50k-conns1 rc=0 load_before=[4.25 11.34 12.22] load_after=[4.25 9.99 11.64]
+# s4 matrix  host=alice.local  secs=60  rounds=1  threads=4  batch=10  payload=256
+Darwin alice.local 24.5.0 Darwin Kernel Version 24.5.0: Tue Apr 22 19:54:43 PDT 2025; root:xnu-11417.121.6~2/RELEASE_ARM64_T8132 arm64
+tcp-plain-50k-conns1 rc=0 load_before=[4.09 7.55 10.38] load_after=[3.68 6.76 9.88]
+tcp-plain-50k-conns4 rc=0 load_before=[3.68 6.76 9.88] load_after=[3.51 6.14 9.41]
+tcp-plain-50k-conns8 rc=0 load_before=[3.55 6.10 9.38] load_after=[4.12 5.85 9.05]

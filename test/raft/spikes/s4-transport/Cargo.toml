@@ -1,0 +1,43 @@
+[package]
+name = "s4-transport"
+version = "0.1.0"
+edition = "2021"
+# Same floor as server/Cargo.toml (C-3). Checked with `cargo +1.88 check`.
+rust-version = "1.88"
+publish = false
+
+# Deliberately standalone: this crate is NOT in server/Cargo.toml and has no
+# workspace parent (an empty [workspace] table keeps cargo from walking up).
+[workspace]
+
+[[bin]]
+name = "s4"
+path = "src/main.rs"
+
+[dependencies]
+# Same crates and versions as server/Cargo.toml wherever they overlap, so the
+# numbers transfer to the broker: no reqwest (the repo's one HTTP client
+# pattern is hyper + hyper-util), rustls/ring (no cmake, C-2).
+tokio = { version = "1", features = ["full"] }
+hmac = "0.12"
+sha2 = "0.10"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+libc = "0.2"
+rand = "0.8"
+bytes = "1"
+hyper = { version = "1", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio", "server"] }
+http-body-util = "0.1"
+tower-service = "0.3"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+# Spike-only: the leader mints a throwaway self-signed localhost cert at start
+# and writes the DER to --cert-out; no key material is ever stored in the repo.
+# `ring` (not aws_lc_rs) keeps the build cmake-free.
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring", "pem"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = 1

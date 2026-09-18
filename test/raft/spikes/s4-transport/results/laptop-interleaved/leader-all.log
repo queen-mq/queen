@@ -1,0 +1,257 @@
+=== leader-http-mac-20k-r1.log ===
+[leader] http listening on 127.0.0.1:6744 mac=true tls=false
+=== leader-http-mac-20k-r2.log ===
+[leader] http listening on 127.0.0.1:6744 mac=true tls=false
+=== leader-http-mac-20k-r3.log ===
+[leader] http listening on 127.0.0.1:6744 mac=true tls=false
+=== leader-http-mac-20k-r4.log ===
+[leader] http listening on 127.0.0.1:6744 mac=true tls=false
+=== leader-http-mac-50k-r1.log ===
+[leader] http listening on 127.0.0.1:6744 mac=true tls=false
+=== leader-http-mac-50k-r2.log ===
+[leader] http listening on 127.0.0.1:6744 mac=true tls=false
+=== leader-http-mac-50k-r3.log ===
+[leader] http listening on 127.0.0.1:6744 mac=true tls=false
+=== leader-http-mac-50k-r4.log ===
+[leader] http listening on 127.0.0.1:6744 mac=true tls=false
+=== leader-http-plain-20k-r1.log ===
+[leader] http listening on 127.0.0.1:6744 mac=false tls=false
+=== leader-http-plain-20k-r2.log ===
+[leader] http listening on 127.0.0.1:6744 mac=false tls=false
+=== leader-http-plain-20k-r3.log ===
+[leader] http listening on 127.0.0.1:6744 mac=false tls=false
+=== leader-http-plain-20k-r4.log ===
+[leader] http listening on 127.0.0.1:6744 mac=false tls=false
+=== leader-http-plain-50k-r1.log ===
+[leader] http listening on 127.0.0.1:6744 mac=false tls=false
+=== leader-http-plain-50k-r2.log ===
+[leader] http listening on 127.0.0.1:6744 mac=false tls=false
+=== leader-http-plain-50k-r3.log ===
+[leader] http listening on 127.0.0.1:6744 mac=false tls=false
+=== leader-http-plain-50k-r4.log ===
+[leader] http listening on 127.0.0.1:6744 mac=false tls=false
+=== leader-http-tls-mac-20k-r1.log ===
+[leader] http listening on 127.0.0.1:6744 mac=true tls=true
+=== leader-http-tls-mac-20k-r2.log ===
+[leader] http listening on 127.0.0.1:6744 mac=true tls=true
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+=== leader-http-tls-mac-20k-r3.log ===
+[leader] http listening on 127.0.0.1:6744 mac=true tls=true
+=== leader-http-tls-mac-20k-r4.log ===
+[leader] http listening on 127.0.0.1:6744 mac=true tls=true
+=== leader-http-tls-mac-50k-r1.log ===
+[leader] http listening on 127.0.0.1:6744 mac=true tls=true
+=== leader-http-tls-mac-50k-r2.log ===
+[leader] http listening on 127.0.0.1:6744 mac=true tls=true
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+[leader] http conn: error shutting down connection
+=== leader-http-tls-mac-50k-r3.log ===
+[leader] http listening on 127.0.0.1:6744 mac=true tls=true
+=== leader-http-tls-mac-50k-r4.log ===
+[leader] http listening on 127.0.0.1:6744 mac=true tls=true
+=== leader-tcp-mac-20k-r1.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=true tls=false
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+=== leader-tcp-mac-20k-r2.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=true tls=false
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+=== leader-tcp-mac-20k-r3.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=true tls=false
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+=== leader-tcp-mac-20k-r4.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=true tls=false
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+=== leader-tcp-mac-50k-r1.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=true tls=false
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+=== leader-tcp-mac-50k-r2.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=true tls=false
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+=== leader-tcp-mac-50k-r3.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=true tls=false
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+=== leader-tcp-mac-50k-r4.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=true tls=false
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+=== leader-tcp-plain-20k-r1.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=false
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+=== leader-tcp-plain-20k-r2.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=false
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+=== leader-tcp-plain-20k-r3.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=false
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+=== leader-tcp-plain-20k-r4.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=false
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+=== leader-tcp-plain-50k-conns1-r1.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=false
+[leader] conn ended: early eof
+=== leader-tcp-plain-50k-conns1-r2.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=false
+[leader] conn ended: early eof
+=== leader-tcp-plain-50k-conns1-r3.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=false
+[leader] conn ended: early eof
+=== leader-tcp-plain-50k-conns1-r4.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=false
+[leader] conn ended: early eof
+=== leader-tcp-plain-50k-conns4-r1.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=false
+[leader] conn ended: === leader-tcp-plain-50k-conns4-r2.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=false
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+=== leader-tcp-plain-50k-conns4-r3.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=false
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+=== leader-tcp-plain-50k-conns4-r4.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=false
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+=== leader-tcp-plain-50k-conns8-r1.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=false
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+=== leader-tcp-plain-50k-conns8-r2.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=false
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+=== leader-tcp-plain-50k-conns8-r3.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=false
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+=== leader-tcp-plain-50k-conns8-r4.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=false
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+=== leader-tcp-plain-50k-r1.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=false
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+=== leader-tcp-plain-50k-r2.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=false
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+=== leader-tcp-plain-50k-r3.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=false
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+=== leader-tcp-plain-50k-r4.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=false
+[leader] conn ended: early eof
+[leader] conn ended: early eof
+=== leader-tcp-tls-20k-r1.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=true
+[leader] conn ended: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+[leader] conn ended: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+=== leader-tcp-tls-20k-r2.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=true
+[leader] conn ended: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+[leader] conn ended: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+=== leader-tcp-tls-20k-r3.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=true
+[leader] conn ended: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+[leader] conn ended: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+=== leader-tcp-tls-20k-r4.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=true
+[leader] conn ended: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+[leader] conn ended: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+=== leader-tcp-tls-50k-r1.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=true
+[leader] conn ended: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+[leader] conn ended: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+=== leader-tcp-tls-50k-r2.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=true
+[leader] conn ended: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+[leader] conn ended: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+=== leader-tcp-tls-50k-r3.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=true
+[leader] conn ended: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+[leader] conn ended: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+=== leader-tcp-tls-50k-r4.log ===
+[leader] tcp listening on 127.0.0.1:6744 mac=false tls=true
+[leader] conn ended: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+[leader] conn ended: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof

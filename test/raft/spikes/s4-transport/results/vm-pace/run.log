@@ -1,0 +1,10 @@
+# s4 matrix  host=queenpgless-01  secs=40  rounds=1  threads=4  batch=10  payload=256
+--- pace-timer-tcp-50k
+[receiver] tcp tls=false mac=false rate=50000 -> p50 77 us  p99 132 us  leader 0.07 cores  recv 0.16 cores  294 B/msg  conns 2
+--- pace-spin-tcp-50k
+[receiver] tcp tls=false mac=false rate=50000 -> p50 39 us  p99 68 us  leader 0.09 cores  recv 1.20 cores  294 B/msg  conns 2
+--- pace-timer-http-50k
+[receiver] http tls=false mac=false rate=50000 -> p50 93 us  p99 170 us  leader 0.13 cores  recv 0.26 cores  310 B/msg  conns 12
+--- pace-spin-http-50k
+[receiver] http tls=false mac=false rate=50000 -> p50 47 us  p99 100 us  leader 0.13 cores  recv 1.27 cores  310 B/msg  conns 8
+pace done -> /root/raft/wp06-refute/s4-transport/results/vm-pace/results.jsonl

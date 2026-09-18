@@ -1,0 +1,5 @@
+2026-09-17T15:04:19Z queued; waiting for s3-consensus to finish (max 60 min)
+2026-09-17T15:07:49Z building
+2026-09-17T15:08:21Z running matrix (TAG=vm SECS=60 PORT=6734)
+2026-09-17T15:25:26Z matrix exit 0; rows: 15
+2026-09-17T15:25:26Z done

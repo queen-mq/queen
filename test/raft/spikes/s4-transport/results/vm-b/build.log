@@ -1,0 +1,125 @@
+   Compiling libc v0.2.189
+   Compiling cfg-if v1.0.5
+   Compiling shlex v2.0.1
+   Compiling proc-macro2 v1.0.107
+   Compiling find-msvc-tools v0.1.12
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.26
+   Compiling version_check v0.9.5
+   Compiling pin-project-lite v0.2.17
+   Compiling bytes v1.12.1
+   Compiling parking_lot_core v0.9.12
+   Compiling cc v1.4.6
+   Compiling smallvec v1.16.1
+   Compiling scopeguard v1.2.0
+   Compiling typenum v1.20.1
+   Compiling generic-array v0.14.7
+   Compiling lock_api v0.4.14
+   Compiling itoa v1.0.18
+   Compiling zerocopy v0.8.57
+   Compiling once_cell v1.21.4
+   Compiling untrusted v0.9.0
+   Compiling zeroize v1.9.0
+   Compiling futures-core v0.3.34
+   Compiling subtle v2.6.1
+   Compiling rustls-pki-types v1.15.1
+   Compiling http v1.5.0
+   Compiling syn v3.0.6
+   Compiling httparse v1.10.1
+   Compiling num-conv v0.2.2
+   Compiling getrandom v0.2.17
+   Compiling errno v0.3.14
+   Compiling signal-hook-registry v1.4.8
+   Compiling mio v1.2.3
+   Compiling parking_lot v0.12.5
+   Compiling ring v0.17.14
+   Compiling socket2 v0.6.5
+   Compiling http-body v1.1.0
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling powerfmt v0.2.0
+   Compiling time-core v0.1.9
+   Compiling rustls v0.23.45
+   Compiling deranged v0.5.8
+   Compiling try-lock v0.2.5
+   Compiling digest v0.10.7
+   Compiling want v0.3.1
+   Compiling rand_core v0.6.4
+   Compiling futures-channel v0.3.34
+   Compiling tracing-core v0.1.36
+   Compiling log v0.4.34
+   Compiling futures-task v0.3.34
+   Compiling base64 v0.22.1
+   Compiling httpdate v1.0.3
+   Compiling atomic-waker v1.1.2
+   Compiling futures-util v0.3.34
+   Compiling pem v3.0.6
+   Compiling tracing v0.1.44
+   Compiling cpufeatures v0.2.17
+   Compiling tower-service v0.3.3
+   Compiling sha2 v0.10.9
+   Compiling hmac v0.12.1
+   Compiling time v0.3.55
+   Compiling http-body-util v0.1.5
+   Compiling xxhash-rust v0.8.18
+   Compiling tokio-macros v2.7.2
+   Compiling yasna v0.5.2
+   Compiling tokio v1.53.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_chacha v0.3.1
+   Compiling rand v0.8.8
+   Compiling hyper v1.11.1
+   Compiling rustls-webpki v0.103.15
+   Compiling rcgen v0.13.2
+   Compiling hyper-util v0.1.20
+   Compiling tokio-rustls v0.26.5
+   Compiling s4-transport v0.1.0 (/root/raft/wp06-part2/s4-transport)
+warning: method `counters` is never used
+  --> src/main.rs:43:8
+   |
+39 | trait Transport: Send + Sync + 'static {
+   |       --------- method in this trait
+...
+43 |     fn counters(&self) -> Arc<Counters>;
+   |        ^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `recv_open` is never read
+   --> src/main.rs:426:5
+    |
+418 | struct Snapshot {
+    |        -------- field in this struct
+...
+426 |     recv_open: u64,
+    |     ^^^^^^^^^
+
+warning: field `counters` is never read
+  --> src/httpx.rs:67:9
+   |
+62 | pub struct HttpClient {
+   |            ---------- field in this struct
+...
+67 |     pub counters: Arc<Counters>,
+   |         ^^^^^^^^
+
+warning: field `counters` is never read
+  --> src/tcpx.rs:46:9
+   |
+43 | pub struct TcpClient {
+   |            --------- field in this struct
+...
+46 |     pub counters: Arc<Counters>,
+   |         ^^^^^^^^
+
+warning: field `payload_bytes` is never read
+  --> src/wire.rs:48:9
+   |
+45 | pub struct Parsed {
+   |            ------ field in this struct
+...
+48 |     pub payload_bytes: usize,
+   |         ^^^^^^^^^^^^^
+
+warning: `s4-transport` (bin "s4") generated 5 warnings
+    Finished `release` profile [optimized + debuginfo] target(s) in 32.18s
