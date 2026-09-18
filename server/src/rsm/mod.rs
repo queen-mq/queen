@@ -79,31 +79,7 @@ pub mod command {}
 /// Leader-side planning (§7): pure functions over (committed view, overlay)
 /// producing effects and outcomes, never mutations (I1). One submodule per
 /// atomic unit of §8. Owners: WP-1.5 (push, pop, ack), phase 2 (the rest).
-pub mod planner {
-    /// Push: dedup verdict, gapless offsets, implicit queue and partition
-    /// creation, `created_at = max(now, last_created_at + 1 µs)` (003).
-    pub mod push {}
-    /// Pop: every variant, lazy position-based seeding, conflation, leases,
-    /// attempt tracking, the budget walk (004).
-    pub mod pop {}
-    /// Ack: positional, by hash, multi; renew; DLQ head; nack (005).
-    pub mod ack {}
-    /// The transaction wire: one command, the SQL's lock order (005). WP-2.1.
-    pub mod txn {}
-    /// KV: versions from `kv_version_base + ordinal`, TTL, prefix lists,
-    /// `required` (024). WP-2.2.
-    pub mod kv {}
-    /// Timers: apply, fire, fail, DLQ, and the leader wheel (025). WP-2.3.
-    pub mod timers {}
-    /// Streams: cycle, register, state (007, 008). WP-2.4.
-    pub mod streams {}
-    /// Admin: configure, deletes, consumer groups, messages, flags, quotas
-    /// (010, 012, 013, 014, 016, 030, 031). WP-2.5.
-    pub mod admin {}
-    /// Retention as a leader loop: rules 1–3, max-wait eviction, txns purge
-    /// (006). WP-2.7.
-    pub mod retention {}
-}
+pub mod planner;
 
 /// The apply thread: the ONLY mutator of the store and the segment files (I1),
 /// deterministic (I2), plus counters, wakes, waiters, durable points (§11.4),
