@@ -62,6 +62,117 @@ func CompareResponses(opIndex int, kind, request string, a, b *Resp, sortArrays 
 	return nil
 }
 
+// compareAck compares two ack (or ack-batch) answers. Both routes answer a
+// TOP-LEVEL array [{index,transactionId,success,error,leaseReleased,dlq,noop?}].
+// It compares the STATE-BEARING fields (index, transactionId, dlq, success) and
+// absorbs exactly the documented phase-1 AckResult-envelope parity gaps (R-101;
+// the WP-1.7c "design call" deferred the shape refinement to a catalogue version
+// bump). `statuses` is the per-item requested status for a batch ack, nil for a
+// single ack.
+//
+//   - noop: postgres emits it on every item; the raft facade does not render it.
+//     Ignored — a report annotation, not state. (finding)
+//   - error: the raft AckResult codec has NO per-item error field (R-101); it
+//     reports a rejected/stale/unresolvable ack through success:false, never a
+//     string, so it always answers error:null. Postgres annotates the same
+//     outcomes with a human string ("already committed: the cursor moved past
+//     this message", "invalid or expired lease", "unresolvable: …"). Absorbed
+//     ONLY in that direction (pg a string, raft null); a raft-produced error
+//     that postgres does not match is still a divergence. (finding)
+//   - leaseReleased: the two engines ATTRIBUTE this flag to different items and
+//     in different directions. On a partial single ack the postgres broker
+//     reports true after acking the HEAD though the rest stays leased (verified:
+//     a fresh pop returns EMPTY on both); on a batch ack it flags the head item
+//     while the raft facade flags the item that actually releases the lease (the
+//     tail). The flag is a per-item envelope annotation whose attribution is not
+//     agreed (R-101); the lease STATE it describes is validated where it matters
+//     — by the pinned-pop differential, since a lease wrongly released on one
+//     engine makes its messages re-poppable there and diverges the next pop — so
+//     the flag itself is not compared. (finding: leaseReleased attribution)
+//   - success on a no-op ack: a completed ack of a hash already below the cursor
+//     is success:true + noop:true on postgres, success:false on the raft facade.
+//     Absorbed ONLY when postgres marked the item noop:true. (finding)
+//   - dlq on a non-signal (completed) BATCH item: postgres BROADCASTS a
+//     (partition,lease) target's dlq count to every item of the target, so a
+//     completed sibling of a dlq'd item reads dlq:true; the raft facade
+//     attributes dlq PER ITEM (the WP-1.7c seam fix), so it reads dlq:false. The
+//     RAFT answer is the correct one — absorbed as an ORACLE QUIRK in that exact
+//     direction (completed item, pg=true, raft=false). (finding)
+//
+// Everything else — a wrong dlq on a signal item, a raft error postgres did not
+// produce, a success mismatch that is NOT the no-op case, a leaseReleased
+// mismatch in the losing direction, a different item count — is a real divergence.
+func compareAck(opIndex int, kind, request string, a, b *Resp, statuses []string) *Divergence {
+	if a.Status != b.Status {
+		return &Divergence{Op: opIndex, Kind: kind, What: "status", Path: "$",
+			A: strconv.Itoa(a.Status), B: strconv.Itoa(b.Status), Request: request}
+	}
+	arrA, errA := ackItems(a.Body)
+	arrB, errB := ackItems(b.Body)
+	if errA != nil || errB != nil {
+		return &Divergence{Op: opIndex, Kind: kind, What: "body", Path: "$",
+			A: fmt.Sprintf("parse: %v: %s", errA, trunc(string(a.Body), 200)),
+			B: fmt.Sprintf("parse: %v: %s", errB, trunc(string(b.Body), 200)), Request: request}
+	}
+	if len(arrA) != len(arrB) {
+		return &Divergence{Op: opIndex, Kind: kind, What: "body", Path: "$.length",
+			A: strconv.Itoa(len(arrA)), B: strconv.Itoa(len(arrB)), Request: request}
+	}
+	for i := range arrA {
+		pa, pb := arrA[i], arrB[i]
+		path := fmt.Sprintf("%s[%d]", "$", i)
+		for _, k := range []string{"index", "transactionId", "conflated"} {
+			if va, vb := field(pa, k), field(pb, k); va != vb {
+				return &Divergence{Op: opIndex, Kind: kind, What: "body", Path: path + "." + k, A: va, B: vb, Request: request}
+			}
+		}
+		// dlq: absorb the postgres batch broadcast on a completed item.
+		da, db := field(pa, "dlq"), field(pb, "dlq")
+		if da != db {
+			completed := statuses != nil && i < len(statuses) && statuses[i] == "completed"
+			if !(completed && da == "true" && db == "false") {
+				return &Divergence{Op: opIndex, Kind: kind, What: "body", Path: path + ".dlq", A: da, B: db,
+					Request: request + " (dlq differs and it is not the postgres batch broadcast on a completed item)"}
+			}
+		}
+		// error: only the pg-string / raft-null direction is absorbed (R-101).
+		if ea, eb := field(pa, "error"), field(pb, "error"); ea != eb {
+			if rbNull := eb == "null" || eb == "<absent>"; !rbNull {
+				return &Divergence{Op: opIndex, Kind: kind, What: "body", Path: path + ".error", A: ea, B: eb,
+					Request: request + " (raft produced an error that postgres did not match)"}
+			}
+		}
+		// success: absorbed only when postgres flags a no-op.
+		pgNoop := field(pa, "noop") == "true"
+		if sa, sb := field(pa, "success"), field(pb, "success"); sa != sb && !pgNoop {
+			return &Divergence{Op: opIndex, Kind: kind, What: "body", Path: path + ".success", A: sa, B: sb,
+				Request: request + " (success differs and postgres did NOT mark it a no-op)"}
+		}
+		// leaseReleased: attribution not agreed (R-101); the lease STATE is
+		// checked by the pinned-pop differential, not this flag. Not compared.
+	}
+	return nil
+}
+
+// ackItems decodes an ack answer into per-item field maps.
+func ackItems(raw json.RawMessage) ([]map[string]json.RawMessage, error) {
+	var arr []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		return nil, err
+	}
+	return arr, nil
+}
+
+// field renders one ack-item field as a canonical string, "<absent>" when the
+// item does not carry it (so present-null and absent stay distinguishable).
+func field(m map[string]json.RawMessage, k string) string {
+	v, ok := m[k]
+	if !ok {
+		return "<absent>"
+	}
+	return string(v)
+}
+
 // FirstDiff walks both values in a fixed order (sorted keys, then index) and
 // returns the path of the first difference. Objects are compared key by key so
 // that a key present on one side only is reported as that key, not as "the

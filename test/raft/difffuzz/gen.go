@@ -25,6 +25,15 @@ type Generator struct {
 	groups []string
 	parts  []string
 
+	// pinned pops (strict compare, they feed the ack pool) draw from
+	// pinnedGroups; the wildcard and discovery pops (relaxed compare, isolated
+	// cursor) use wildGroup, so their planner-random partition choice (§5.2)
+	// never desyncs a pinned group's backlog. With one group, the same group is
+	// both — the ack pool then coexists with wildcard consumption, which is why
+	// -groups defaults to 3.
+	pinnedGroups []string
+	wildGroup    string
+
 	// txnIDs are the transaction ids minted so far, so a later push can reuse
 	// one on purpose. Bounded: only the most recent `dupWindow` are candidates,
 	// because a duplicate of something pushed 10 000 operations ago tests the
@@ -52,6 +61,14 @@ func NewGenerator(cfg *Config) *Generator {
 	for i := 0; i < cfg.Groups; i++ {
 		g.groups = append(g.groups, fmt.Sprintf("%s-%s-g%d", cfg.Namespace, cfg.RunID, i))
 	}
+	// Reserve the last group for wildcard/discovery pops; the rest are pinned.
+	if len(g.groups) >= 2 {
+		g.wildGroup = g.groups[len(g.groups)-1]
+		g.pinnedGroups = g.groups[:len(g.groups)-1]
+	} else {
+		g.wildGroup = g.groups[0]
+		g.pinnedGroups = g.groups
+	}
 	for _, name := range AllKindNames() {
 		k := OpKind(name)
 		for i := 0; i < cfg.Mix[k]; i++ {
@@ -63,6 +80,10 @@ func NewGenerator(cfg *Config) *Generator {
 
 // Queues is the world this run touches; the view comparison walks it.
 func (g *Generator) Queues() []string { return append([]string(nil), g.queues...) }
+
+// AllGroups is every consumer group (pinned and the reserved wildcard one);
+// priming and draining walk all of them.
+func (g *Generator) AllGroups() []string { return append([]string(nil), g.groups...) }
 
 // Generate returns the whole sequence up front, so that a report can quote the
 // operations after the failing one — the ones that would have run.
@@ -83,33 +104,59 @@ func (g *Generator) next(i int) Op {
 		for j := 0; j < n; j++ {
 			op.Items = append(op.Items, g.plannedPush(i, j))
 		}
-	case OpPop:
+	case OpPop, OpPopAuto:
+		// PINNED to one partition so the two engines return byte-identical
+		// batches (the wildcard partition choice is planner-random, §5.2). Under
+		// a pinned group, so wildcard/discovery consumption never desyncs it.
 		op.Queue = g.queues[g.rnd.Intn(len(g.queues))]
-		op.Group = g.groups[g.rnd.Intn(len(g.groups))]
+		op.Group = g.pinnedGroups[g.rnd.Intn(len(g.pinnedGroups))]
+		op.Partition = g.parts[g.rnd.Intn(len(g.parts))]
 		op.Batch = 1 + g.rnd.Intn(8)
-		// A third of the pops are pinned to one partition; the rest take the
-		// queue route with a width, which is the shape almost every consumer in
-		// the field uses.
-		if g.rnd.Intn(3) == 0 {
-			op.Partition = g.parts[g.rnd.Intn(len(g.parts))]
-		} else {
-			op.Partitions = 1 + g.rnd.Intn(len(g.parts))
-		}
 		// Leases long enough that no expiry fires inside a run: an expiry is a
 		// CLOCK event, and two brokers cannot be expected to fire it in the same
-		// operation. Lease expiry belongs to the kill tests (§13.6), where the
-		// checker judges it, not to a response-by-response comparison.
-		op.LeaseSecs = 300
-	case OpAck:
+		// operation. The lease is only meaningful for OpPop (manual ack);
+		// OpPopAuto takes none. The raft facade caps its own lease at 60 s
+		// (real.rs, phase 1) — the expiry field is dropped as volatile, and a
+		// run finishes well inside 60 s so no expiry fires.
+		op.LeaseSecs = 120
+	case OpPopWildcard:
+		// Wildcard route, under the reserved group. Relaxed compare (§5.2).
+		op.Queue = g.queues[g.rnd.Intn(len(g.queues))]
+		op.Group = g.wildGroup
+		op.Partitions = 1 + g.rnd.Intn(len(g.parts))
+		op.Batch = 1 + g.rnd.Intn(8)
+	case OpPopDiscover:
+		// Discovery has no queue in the path; it selects by the run's namespace,
+		// under the reserved group. Relaxed compare.
+		op.Group = g.wildGroup
+		op.Batch = 1 + g.rnd.Intn(4)
+	case OpAck, OpNack, OpAckByHash:
 		op.Slot = g.rnd.Int()
-		switch g.rnd.Intn(10) {
-		case 0:
-			op.AckStatus = "dlq"
-		case 1, 2:
+		op.DelSlot = g.rnd.Int()
+		switch {
+		case kind == OpNack:
 			op.AckStatus = "failed"
-		default:
+		case kind == OpAckByHash:
 			op.AckStatus = "completed"
+		default:
+			switch g.rnd.Intn(10) {
+			case 0:
+				op.AckStatus = "dlq"
+			case 1, 2:
+				op.AckStatus = "failed"
+			default:
+				op.AckStatus = "completed"
+			}
 		}
+	case OpAckBatch:
+		op.Slot = g.rnd.Int()
+		// A third of the batch acks are mixed (last item dlq): the per-item DLQ
+		// attribution the WP-1.7c seam fixed. The rest are all-completed, which
+		// is the positional fast path (log_ack_at_v1) when the acked set equals
+		// the delivered set.
+		op.BatchMixed = g.rnd.Intn(3) == 0
+	case OpRenew:
+		op.Slot = g.rnd.Int()
 	default:
 		// Unreachable while Validate() refuses unimplemented kinds; kept so that
 		// a newly declared kind without a planner fails here, loudly, instead of

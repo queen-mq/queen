@@ -17,3 +17,10 @@ __pycache__/
 !**/results/**/*.log
 !**/results-vm/**/*.log
 !vm/baseline/**/*.log
+
+# Go build artifacts: `go build .` in a tool dir emits a binary named after the
+# dir (difffuzz/difffuzz, checker/checker, …). Tools run via `go run .`; never
+# commit the compiled binary.
+difffuzz/difffuzz
+checker/checker
+flatness/flatness

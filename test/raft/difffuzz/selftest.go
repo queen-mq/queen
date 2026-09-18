@@ -18,6 +18,7 @@ package main
 // harness honest; the real oracle is the postgres class (D22).
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -41,8 +42,9 @@ func SelfTest() error {
 		{"normalizer keeps id identity", checkNormalizerIdentity},
 		{"comparison names the first difference", checkFirstDiffPath},
 		{"mix parsing", checkMixParsing},
-		{"two honest sides do not diverge", checkHonestRun},
+		{"the full message-path mix does not diverge on two honest sides", checkHonestRun},
 		{"a changed field is caught", checkDishonestRun},
+		{"the per-side checker log is well formed", checkCheckerLogEmission},
 	} {
 		if err := c.fn(); err != nil {
 			return fmt.Errorf("%s: %w", c.name, err)
@@ -57,16 +59,21 @@ func selfTestConfig(seed int64, a, b string) *Config {
 		NameA: "fakeA", NameB: "fakeB",
 		Timeout:   5 * time.Second,
 		Seed:      seed,
-		Ops:       60,
+		Ops:       120,
 		RunID:     "selftest",
 		Mix:       DefaultMix(),
 		Queues:    2,
 		Parts:     3,
-		Groups:    2,
+		Groups:    3,
 		DupRate:   20,
 		Namespace: "difffuzz-selftest",
 	}
 }
+
+// pinnedMix drives only the strictly-compared path (push, pinned pop, single
+// ack), so the injected difference in checkDishonestRun reliably lands on a
+// compared field rather than on a relaxed wildcard pop.
+func pinnedMix() Mix { return Mix{OpPush: 3, OpPop: 2, OpAck: 1} }
 
 func checkGeneratorIsSeeded() error {
 	c1 := selfTestConfig(42, "http://a", "http://b")
@@ -169,7 +176,9 @@ func checkHonestRun() error {
 		return err
 	}
 	defer a.Close()
-	b, err := startFakeBroker(fakeOpts{idPrefix: 0xb2})
+	// Side B is the phase-1 SUT: the resource views answer 503, so Preflight
+	// picks the views-deferred mode, exactly as against the real raft1 broker.
+	b, err := startFakeBroker(fakeOpts{idPrefix: 0xb2, unsupportedViews: true})
 	if err != nil {
 		return err
 	}
@@ -183,12 +192,15 @@ func checkHonestRun() error {
 	if err := r.Preflight(ctx); err != nil {
 		return err
 	}
+	if r.views != viewsDeferred {
+		return fmt.Errorf("Preflight picked views mode %d, want deferred (2) against an unsupported-views SUT", r.views)
+	}
 	rep, err := r.Run(ctx)
 	if err != nil {
 		return err
 	}
 	if len(rep.Divergences) != 0 {
-		return fmt.Errorf("two honest sides diverged %d time(s); first: %s", len(rep.Divergences), rep.Divergences[0])
+		return fmt.Errorf("two honest sides diverged %d time(s) over the full mix; first: %s", len(rep.Divergences), rep.Divergences[0])
 	}
 	if rep.Executed != cfg.Ops {
 		return fmt.Errorf("executed %d of %d operations", rep.Executed, cfg.Ops)
@@ -204,13 +216,14 @@ func checkDishonestRun() error {
 	defer a.Close()
 	// Side B reports one more delivery attempt than it should: a plausible
 	// planner bug, invisible to a status-code check.
-	b, err := startFakeBroker(fakeOpts{idPrefix: 0xb2, bumpDeliveryAttempt: true})
+	b, err := startFakeBroker(fakeOpts{idPrefix: 0xb2, bumpDeliveryAttempt: true, unsupportedViews: true})
 	if err != nil {
 		return err
 	}
 	defer b.Close()
 
 	cfg := selfTestConfig(7, a.URL, b.URL)
+	cfg.Mix = pinnedMix() // the strictly-compared path, so the bump lands on a compared field
 	cfg.StopOnDiff = true
 	r := NewRunner(cfg, io.Discard)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -231,11 +244,93 @@ func checkDishonestRun() error {
 	return nil
 }
 
+// checkCheckerLogEmission runs a short honest sequence with the per-side logs
+// attached and asserts the SUT log is a well-formed checker run log: every line
+// is valid JSON of a kind the checker knows, and it carries the events the
+// checks read (push_ok, delivery, ack_ok) plus the drain-complete notes.
+func checkCheckerLogEmission() error {
+	a, err := startFakeBroker(fakeOpts{idPrefix: 0xa1})
+	if err != nil {
+		return err
+	}
+	defer a.Close()
+	b, err := startFakeBroker(fakeOpts{idPrefix: 0xb2, unsupportedViews: true})
+	if err != nil {
+		return err
+	}
+	defer b.Close()
+
+	cfg := selfTestConfig(11, a.URL, b.URL)
+	cfg.Mix = Mix{OpPush: 3, OpPop: 2, OpAck: 1}
+	cfg.Ops = 80
+	cfg.StopOnDiff = false
+	r := NewRunner(cfg, io.Discard)
+	var bufA, bufB bytes.Buffer
+	r.SetLogs(NewRunLog(&bufA, "fakeA"), NewRunLog(&bufB, "fakeB"))
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := r.Preflight(ctx); err != nil {
+		return err
+	}
+	if _, err := r.Run(ctx); err != nil {
+		return err
+	}
+	seen, err := validateRunLog(bufB.Bytes())
+	if err != nil {
+		return err
+	}
+	for _, want := range []string{"push_ok", "delivery", "ack_ok"} {
+		if seen[want] == 0 {
+			return fmt.Errorf("the SUT run log carries no %q event: %v", want, seen)
+		}
+	}
+	if seen["note"] == 0 {
+		return fmt.Errorf("the SUT run log carries no drain-complete note: %v", seen)
+	}
+	return nil
+}
+
+// validateRunLog parses a JSONL run log the way the checker's loader does
+// (comment and blank lines skipped, every kind known, seq monotone) and returns
+// the count per kind. It duplicates the checker's rule on purpose: the two are
+// separate modules, and this keeps the format contract pinned on the writer's
+// side so a mismatch is caught here, not after a campaign.
+func validateRunLog(b []byte) (map[string]int, error) {
+	seen := map[string]int{}
+	var lastSeq int64
+	for i, raw := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		var ev struct {
+			Seq  int64  `json:"seq"`
+			Kind string `json:"kind"`
+		}
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			return nil, fmt.Errorf("line %d is not valid JSON: %w", i+1, err)
+		}
+		if !knownLogKinds[ev.Kind] {
+			return nil, fmt.Errorf("line %d has kind %q the checker does not know", i+1, ev.Kind)
+		}
+		if ev.Seq <= lastSeq {
+			return nil, fmt.Errorf("line %d seq %d is not above the previous %d", i+1, ev.Seq, lastSeq)
+		}
+		lastSeq = ev.Seq
+		seen[ev.Kind]++
+	}
+	return seen, nil
+}
+
 // ------------------------------------------------------------ the fake broker
 
 type fakeOpts struct {
 	idPrefix            byte
 	bumpDeliveryAttempt bool
+	// unsupportedViews models a phase-1 raft1 broker: the resource views answer
+	// 503 raft_phase1_unsupported (WP-1.7a), so the runner's Preflight picks the
+	// views-deferred mode, as it does against the real SUT.
+	unsupportedViews bool
 }
 
 type fakeMsg struct {
@@ -319,6 +414,13 @@ func (f *fakeBroker) handle(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	path := r.URL.Path
+	// Phase-1 SUT: the resource views are not served (WP-1.7a). Answer 503
+	// raft_phase1_unsupported so Preflight picks the views-deferred mode.
+	if f.opts.unsupportedViews && (strings.HasPrefix(path, "/api/v1/resources") ||
+		path == "/api/v1/consumer-groups" || path == "/api/v1/messages" || path == "/api/v1/dlq") {
+		writeJSON(w, 503, map[string]any{"error": "raft phase 1 does not serve this route", "code": "raft_phase1_unsupported"})
+		return
+	}
 	switch {
 	case path == "/health":
 		writeJSON(w, 200, map[string]any{"status": "ok", "uptimeSeconds": 12})
@@ -326,8 +428,15 @@ func (f *fakeBroker) handle(w http.ResponseWriter, r *http.Request) {
 		f.push(w, r)
 	case strings.HasPrefix(path, "/api/v1/pop/queue/") && r.Method == http.MethodGet:
 		f.pop(w, r)
+	case path == "/api/v1/pop" && r.Method == http.MethodGet:
+		// Discovery: the fake has no namespace index, so it discovers nothing.
+		writeJSON(w, 200, map[string]any{"success": true, "messages": []any{}})
 	case path == "/api/v1/ack" && r.Method == http.MethodPost:
 		f.ack(w, r)
+	case path == "/api/v1/ack/batch" && r.Method == http.MethodPost:
+		f.ackBatch(w, r)
+	case strings.HasPrefix(path, "/api/v1/lease/") && strings.HasSuffix(path, "/extend") && r.Method == http.MethodPost:
+		writeJSON(w, 200, map[string]any{"success": true, "renewed": 1, "newExpiresAt": "2026-09-17T10:05:00.000Z"})
 	case path == "/api/v1/resources/queues":
 		f.listQueues(w)
 	case path == "/api/v1/consumer-groups":
@@ -423,14 +532,40 @@ func (f *fakeBroker) ack(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]any{"error": err.Error()})
 		return
 	}
+	writeJSON(w, 200, []map[string]any{f.applyAck(a, 0)})
+}
+
+func (f *fakeBroker) ackBatch(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ConsumerGroup   string    `json:"consumerGroup"`
+		Acknowledgments []AckItem `json:"acknowledgments"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, 400, map[string]any{"error": err.Error()})
+		return
+	}
+	out := make([]map[string]any, 0, len(body.Acknowledgments))
+	for i, a := range body.Acknowledgments {
+		if a.ConsumerGroup == "" {
+			a.ConsumerGroup = body.ConsumerGroup
+		}
+		out = append(out, f.applyAck(a, i))
+	}
+	writeJSON(w, 200, out)
+}
+
+// applyAck is the shared verdict for one acknowledgment, so single and batch
+// acks answer the same shape. The fake keys leases by (group, txn), which is
+// enough for the harness: the two sides run identical logic, only their ids
+// differ.
+func (f *fakeBroker) applyAck(a AckItem, index int) map[string]any {
 	key := a.ConsumerGroup + "|" + a.TransactionID
 	lease, ok := f.claimed[key]
 	if !ok {
-		writeJSON(w, 200, []map[string]any{{
-			"index": 0, "transactionId": a.TransactionID, "success": false,
+		return map[string]any{
+			"index": index, "transactionId": a.TransactionID, "success": false,
 			"error": "no outstanding delivery", "leaseReleased": false, "dlq": false,
-		}})
-		return
+		}
 	}
 	delete(f.claimed, key)
 	dlq := false
@@ -443,10 +578,10 @@ func (f *fakeBroker) ack(w http.ResponseWriter, r *http.Request) {
 		f.dlq[lease.msg.Queue] = append(f.dlq[lease.msg.Queue], lease.msg)
 		dlq = true
 	}
-	writeJSON(w, 200, []map[string]any{{
-		"index": 0, "transactionId": a.TransactionID, "success": true,
+	return map[string]any{
+		"index": index, "transactionId": a.TransactionID, "success": true,
 		"error": nil, "leaseReleased": true, "dlq": dlq,
-	}})
+	}
 }
 
 func (f *fakeBroker) listQueues(w http.ResponseWriter) {

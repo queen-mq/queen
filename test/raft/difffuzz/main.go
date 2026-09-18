@@ -64,6 +64,12 @@ func run(args []string) int {
 	fmt.Printf("  A(%s)=%s  B(%s)=%s\n", cfg.NameA, cfg.URLA, cfg.NameB, cfg.URLB)
 
 	r := NewRunner(cfg, os.Stdout)
+	closeLogs, err := openSideLogs(cfg, r)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "difffuzz: %v\n", err)
+		return 2
+	}
+	defer closeLogs()
 	if err := r.Preflight(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "difffuzz: %v\n", err)
 		return 2
@@ -83,6 +89,36 @@ func run(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// openSideLogs creates the per-side checker run logs under cfg.LogDir (one per
+// broker: <name>.jsonl), attaches them to the runner, and returns a closer. When
+// LogDir is empty it is a no-op and the runner writes no logs.
+func openSideLogs(cfg *Config, r *Runner) (func(), error) {
+	if cfg.LogDir == "" {
+		return func() {}, nil
+	}
+	if err := os.MkdirAll(cfg.LogDir, 0o755); err != nil {
+		return nil, fmt.Errorf("logdir: %w", err)
+	}
+	open := func(name string) (*os.File, error) {
+		p := filepath.Join(cfg.LogDir, fmt.Sprintf("%s-%d-%s.jsonl", name, cfg.Seed, cfg.RunID))
+		return os.Create(p)
+	}
+	fa, err := open(cfg.NameA)
+	if err != nil {
+		return nil, fmt.Errorf("logdir: %w", err)
+	}
+	fb, err := open(cfg.NameB)
+	if err != nil {
+		_ = fa.Close()
+		return nil, fmt.Errorf("logdir: %w", err)
+	}
+	_, _ = fmt.Fprintf(fa, "# difffuzz side=%s seed=%d run-id=%s\n", cfg.NameA, cfg.Seed, cfg.RunID)
+	_, _ = fmt.Fprintf(fb, "# difffuzz side=%s seed=%d run-id=%s\n", cfg.NameB, cfg.Seed, cfg.RunID)
+	r.SetLogs(NewRunLog(fa, cfg.NameA), NewRunLog(fb, cfg.NameB))
+	fmt.Printf("  logs: %s/{%s,%s}-%d-%s.jsonl\n", cfg.LogDir, cfg.NameA, cfg.NameB, cfg.Seed, cfg.RunID)
+	return func() { _ = fa.Close(); _ = fb.Close() }, nil
 }
 
 func writeReport(cfg *Config, report *Report) error {

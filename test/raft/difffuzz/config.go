@@ -49,6 +49,8 @@ type Config struct {
 
 	Namespace  string // KV namespace and queue namespace prefix for this run
 	OutDir     string // where a divergence report is written ("" = stdout only)
+	LogDir     string // where per-side checker run logs are written ("" = none)
+	NoDrain    bool   // skip the end-of-run drain (drain feeds the checker's at-least-once)
 	StopOnDiff bool
 	Verbose    bool
 }
@@ -78,12 +80,28 @@ func (m Mix) total() int {
 	return t
 }
 
-// DefaultMix is the FIRST mix of §13.4: push, pop, ack. The remaining kinds are
-// declared in ops.go with weight 0 and a stub planner, so `-mix txn=10` names a
-// real kind and fails loudly ("not implemented") instead of being a typo the
-// flag parser accepts.
+// DefaultMix is the phase-1 MESSAGE-PATH mix of §13.4: push (with duplicates),
+// the three pop routes (pinned/wildcard/discovery, auto and manual ack), ack by
+// position and by hash, batch ack (positional and mixed), nack and renew. The
+// phase-2 kinds (txn, kv, timer, configure, seek, group_delete, dlq_move,
+// dlq_purge) are declared in ops.go as stubs and left out here, so `-mix txn=10`
+// names a real kind and fails loudly ("not implemented") instead of being a typo.
+//
+// Weights are tilted toward push and pop so the queue keeps something to ack;
+// ack_by_hash and discovery are rare because they mostly answer noop/empty.
 func DefaultMix() Mix {
-	return Mix{OpPush: 50, OpPop: 30, OpAck: 20}
+	return Mix{
+		OpPush:        32,
+		OpPop:         20,
+		OpPopAuto:     8,
+		OpPopWildcard: 6,
+		OpPopDiscover: 2,
+		OpAck:         12,
+		OpAckBatch:    10,
+		OpNack:        4,
+		OpRenew:       3,
+		OpAckByHash:   3,
+	}
 }
 
 // ParseMix reads "push=50,pop=30,ack=20".
@@ -164,10 +182,12 @@ func ParseFlags(args []string, stderr *os.File) (*Config, error) {
 	fs.StringVar(&mixStr, "mix", DefaultMix().String(), "operation mix, kind=weight,...")
 	fs.IntVar(&c.Queues, "queues", 3, "number of queues in the world")
 	fs.IntVar(&c.Parts, "partitions", 4, "partitions per queue")
-	fs.IntVar(&c.Groups, "groups", 2, "consumer groups")
+	fs.IntVar(&c.Groups, "groups", 3, "consumer groups (the last is reserved for wildcard/discovery pops; see gen.go)")
 	fs.IntVar(&c.DupRate, "dup-rate", 15, "percent of pushes that deliberately reuse a live transactionId")
 	fs.StringVar(&c.Namespace, "namespace", "difffuzz", "namespace prefix for queues and the KV namespace")
 	fs.StringVar(&c.OutDir, "out", "", "directory for the divergence report (default: stdout only)")
+	fs.StringVar(&c.LogDir, "logdir", "", "directory for the per-side checker run logs (sideA.jsonl, sideB.jsonl); empty: none")
+	fs.BoolVar(&c.NoDrain, "no-drain", false, "skip the end-of-run drain (the drain feeds the checker's at-least-once check)")
 	fs.BoolVar(&c.StopOnDiff, "stop-on-diff", true, "stop at the first divergence (false: keep going and collect)")
 	fs.BoolVar(&c.Verbose, "v", false, "print every operation")
 	fs.Usage = func() {

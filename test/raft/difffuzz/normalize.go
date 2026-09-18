@@ -38,6 +38,24 @@ var (
 	tsRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$`)
 )
 
+// IdKeys are keys whose VALUE is a broker-minted opaque id, compared only by its
+// identity RELATION and never by its bytes — like the uuid regex, but for id
+// fields whose FORMAT differs between the two engines. `partitionId` is a uuid on
+// the postgres broker and the numeric pid on the raft facade in phase 1 (the
+// WP-1.7c deferral, documented there: "partitionId is the numeric pid not a uuid
+// (no uuid→pid index yet)"); both are opaque handles a client round-trips, so
+// the relation that must match is "the same partition yields the same symbol on
+// each side" and "the top-level partitionId equals the message's" — never the
+// string. `leaseId` already normalizes through the uuid regex on both engines;
+// it is listed so a future numeric lease id still normalizes rather than reading
+// as a divergence. This is the review surface for §13.4: an id compared by
+// relation, not value — the PARTITION IDENTITY itself is still checked, by the
+// `partition` NAME field, which is compared exactly.
+var IdKeys = map[string]bool{
+	"partitionId": true,
+	"leaseId":     true,
+}
+
 // VolatileKeys are dropped wherever they appear. They are node-local or
 // wall-clock-derived by construction, so comparing them would only ever produce
 // noise. Each entry needs a reason: this list is where a real difference goes to
@@ -106,6 +124,15 @@ func (n *Normalizer) value(v any) any {
 			if _, drop := VolatileKeys[k]; drop {
 				continue
 			}
+			// A keyed id: normalize its value by identity relation regardless of
+			// format (uuid on one engine, numeric pid on the other), so the
+			// relation is compared and the differing bytes are not.
+			if IdKeys[k] {
+				if s, ok := t[k].(string); ok && s != "" {
+					out[k] = n.idSymbol(s)
+					continue
+				}
+			}
 			out[k] = n.value(t[k])
 		}
 		return out
@@ -128,18 +155,25 @@ func (n *Normalizer) value(v any) any {
 func (n *Normalizer) str(s string) string {
 	switch {
 	case uuidRe.MatchString(s):
-		if sym, ok := n.ids[s]; ok {
-			return sym
-		}
-		sym := "<id:" + strconv.Itoa(n.next) + ">"
-		n.next++
-		n.ids[s] = sym
-		return sym
+		return n.idSymbol(s)
 	case tsRe.MatchString(s):
 		return "<ts>"
 	default:
 		return s
 	}
+}
+
+// idSymbol maps an id value to a stable per-side symbol (`<id:N>`), numbered in
+// order of first appearance. Shared by the uuid regex and the keyed-id path, so
+// a uuid and a numeric pid land in the same relation table.
+func (n *Normalizer) idSymbol(s string) string {
+	if sym, ok := n.ids[s]; ok {
+		return sym
+	}
+	sym := "<id:" + strconv.Itoa(n.next) + ">"
+	n.next++
+	n.ids[s] = sym
+	return sym
 }
 
 func sortedKeys(m map[string]any) []string {

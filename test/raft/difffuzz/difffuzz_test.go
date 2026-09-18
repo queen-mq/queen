@@ -77,8 +77,9 @@ func TestParseFlagsDefaultsAreReplayable(t *testing.T) {
 func TestListOpsCoversEveryPlannedKind(t *testing.T) {
 	// §13.4 names these; the catalogue must declare every one of them, either
 	// implemented or as a documented stub.
-	for _, k := range []OpKind{OpPush, OpPop, OpAck, OpRenew, OpNack, OpTxn, OpKV, OpTimer,
-		OpConfigure, OpSeek, OpGroupDelete, OpDLQMove, OpDLQPurge, OpPopAuto, OpPopDiscover, OpAckByHash} {
+	for _, k := range []OpKind{OpPush, OpPop, OpPopAuto, OpPopWildcard, OpPopDiscover, OpAck, OpAckBatch,
+		OpRenew, OpNack, OpAckByHash, OpTxn, OpKV, OpTimer,
+		OpConfigure, OpSeek, OpGroupDelete, OpDLQMove, OpDLQPurge} {
 		if !KnownKind(k) {
 			t.Errorf("operation kind %q from §13.4 is not in the catalogue", k)
 		}

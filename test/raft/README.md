@@ -16,8 +16,8 @@ nothing. Every tool prints what it still owes (`--list-ops`, `--list-checks`,
 
 | directory | what it is | plan section | state |
 |---|---|---|---|
-| `difffuzz/` | differential fuzzer: one seeded sequence against a postgres broker and a raft broker, every response and every final view compared | §13.4 | push/pop/ack mix runs; the other 13 operation kinds are declared stubs |
-| `checker/` | run-log checkers: the invariants that judge any harness's log | §13.7 | at-least-once and payload-hash implemented; 7 checks are documented stubs |
+| `difffuzz/` | differential fuzzer: one seeded sequence against a postgres broker and a raft broker, every response and every final view compared | §13.4 | **v1 (WP-1.10): the whole phase-1 message-path mix runs** (push+dups, pinned/wildcard/discovery pop with auto and manual ack, ack ok/failed/dlq by hash and by position, batch ack, nack, renew, below-cursor re-ack); emits per-side `checker` logs; `campaign.sh` + `fixtures/`; the classified parity gaps are in `PARITY-NOTES.md`. The 8 phase-2 kinds (txn, kv, timer, configure, seek, group_delete, dlq_move, dlq_purge) stay stubs — raft1 503s them |
+| `checker/` | run-log checkers: the invariants that judge any harness's log | §13.7 | at-least-once and payload-hash implemented **and validated by WP-1.10 over difffuzz's per-side run logs on both real brokers** (strict, both green); 7 checks are documented stubs |
 | `crash/` | crash-point driver: arm `QUEEN_TEST_FAULTS`, drive a scenario, restart, check | §13.5 | 24 points, 5 scenarios, plan/matrix/dry run real; scenario bodies stubs |
 | `kill/` | VM kill campaigns: table of scenarios, stratified kill times, reporting | §13.6 | 10 scenarios, scheduler and reporting real; scenario bodies stubs |
 | `flatness/` | the G-3 / I8 test: bulk preload, regime runs, comparator | §13.6 | RESULTS format, comparator and preload CLI real; send loop and regime runner stubs |
@@ -81,12 +81,33 @@ green once and red for the next hour.
 
 What it deliberately does NOT compare: wall-clock fields, node-local sizes, and
 anything whose value is a broker's own id (the identity RELATION between ids is
-compared, the values are not). `normalize.go` lists every dropped key with the
-reason; that list is the review surface.
+compared, the values are not — `normalize.go` `VolatileKeys` and `IdKeys` list
+every one with its reason). `compareAck` and `notePop` add the phase-1
+postgres↔raft ENVELOPE parity gaps, each absorbed at its site with the reason and
+each a finding in `PARITY-NOTES.md` (the review surface for §13.4). Wildcard and
+discovery pops choose their partition with planner randomness (§5.2), so they run
+under a reserved group and are compared only for a hard-error status; their
+delivery is judged per-side by the checker log.
 
-Owed: the other operation kinds of §13.4 (transactions with riders, KV, timers,
-renew/nack, ack-by-hash, configure, seek, group delete, DLQ move and purge),
-and a fixture format for failing seeds.
+The per-side checker logs (`-logdir`) let the `checker` (§13.7) judge each
+broker's own at-least-once and payload-hash over the same sequence — the phase-1
+substitute for the final-view comparison, which the raft1 router does not serve
+(every resource view answers 503 `raft_phase1_unsupported`; `Preflight` detects
+this and asserts it instead of comparing bodies). Before the drain the runner
+SETTLES (completes outstanding leases) so no unacked lease hides the messages
+behind it; the drain then long-polls to defeat the window_buffer debounce.
+
+Run a campaign (brokers must already be up — the caller owns them):
+
+```sh
+./campaign.sh -a http://localhost:6632 -b http://localhost:7632 -n 2000
+```
+
+Owed (phase 2): the 8 non-message-path kinds of §13.4 (transactions with riders,
+KV, timers, configure, seek, group delete, DLQ move and purge), which land as
+their WP wires the route on raft, and the final-view body comparison once WP-2.6
+serves the resource views (`Preflight` already switches to that mode when side B
+answers 200).
 
 ## checker — §13.7
 
@@ -110,9 +131,13 @@ rather than being skipped.
 Implemented: every acknowledged push delivered at least once (scoped by the
 `drain-complete` notes the harness writes), and no payload mismatch (including
 "delivered something that was never pushed" and "delivered a push the broker
-refused"). Owed: offsets monotone per lease, transaction atomicity, KV
-linearizability (porcupine), timer generations, streams counts, delivery after
-a partition delete, DLQ payloads.
+refused"). WP-1.10 wired difffuzz to WRITE these logs (`log.go`'s format) and
+ran both checks over the raft AND postgres logs of many seeded runs — both green
+under `-strict` on both brokers, which is the phase-1 evidence the raft message
+path is faithful even where its response envelopes differ (`PARITY-NOTES.md`).
+Owed: offsets monotone per lease, transaction atomicity, KV linearizability
+(porcupine), timer generations, streams counts, delivery after a partition
+delete, DLQ payloads.
 
 ## crash — §13.5
 
