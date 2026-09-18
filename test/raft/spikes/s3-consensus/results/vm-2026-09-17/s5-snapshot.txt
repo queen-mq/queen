@@ -1,0 +1,6 @@
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 5: 1024 MiB snapshot to a wiped learner
+filled 256 entries of 4194304 B in 14.0 s (73.1 MiB/s)
+snapshot built at index Some(257) in 0.2 s (build cost is I8's declared exception)
+purged log up to 257: Some(257)
+learner caught up at index Some(258) in 2.6 s (398.1 MiB/s of manifest)

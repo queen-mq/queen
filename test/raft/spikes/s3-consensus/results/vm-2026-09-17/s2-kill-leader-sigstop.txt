@@ -1,0 +1,15 @@
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 2: kill -9 leader 1001 under 200/s of 65536 B writes
+steady state before the freeze: n=515 p50=3.30 p90=3.80 p99=14.80 max=31.92 mean=3.64 (ms)
+SIGSTOPped follower 2001 for 5 s
+while follower 2001 is frozen: n=516 p50=3.20 p90=3.48 p99=18.33 max=31.99 mean=3.61 (ms)
+SIGCONT 2001; leader is at index 1032
+  follower 2001 caught up to Some(1032) 460 ms after SIGCONT
+after the resume: n=479 p50=3.73 p90=5.27 p99=16.56 max=27.23 mean=4.35 (ms)
+before kill: 1510 acknowledged writes
+killed 1001 at t=0
+new leader 2001 after 3048 ms
+first committed write after 3051 ms
+node 2001: applied 2544 ids, acknowledged 2544, missing 0 []
+node 3001: applied 2544 ids, acknowledged 2544, missing 0 []
+VERDICT acknowledged-writes-missing=0

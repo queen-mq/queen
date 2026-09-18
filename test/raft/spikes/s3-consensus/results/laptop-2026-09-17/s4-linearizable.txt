@@ -1,0 +1,22 @@
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 4: linearizable reads on leader 1001 (batch window 2 ms)
+mode=single   concurrency=1 reads/s=18001
+  n=90004 p50=0.05 p90=0.06 p99=0.09 max=8.34 mean=0.06 (ms)
+mode=single   concurrency=8 reads/s=68308
+  n=341540 p50=0.11 p90=0.15 p99=0.24 max=12.19 mean=0.12 (ms)
+mode=single   concurrency=32 reads/s=109965
+  n=549824 p50=0.28 p90=0.37 p99=0.50 max=13.30 mean=0.29 (ms)
+mode=window   concurrency=1 reads/s=269
+  n=1346 p50=3.68 p90=3.84 p99=5.68 max=16.26 mean=3.72 (ms)
+mode=window   concurrency=8 reads/s=2142
+  n=10712 p50=3.73 p90=3.93 p99=6.44 max=13.92 mean=3.74 (ms)
+mode=window   concurrency=32 reads/s=8363
+  n=41816 p50=3.91 p90=4.36 p99=7.15 max=16.44 mean=3.83 (ms)
+mode=coalesce concurrency=1 reads/s=17843
+  n=89214 p50=0.05 p90=0.06 p99=0.09 max=8.94 mean=0.06 (ms)
+mode=coalesce concurrency=8 reads/s=65962
+  n=329812 p50=0.12 p90=0.15 p99=0.28 max=8.33 mean=0.12 (ms)
+mode=coalesce concurrency=32 reads/s=111041
+  n=555206 p50=0.28 p90=0.37 p99=0.50 max=11.88 mean=0.29 (ms)
+with both followers dead, a linearizable read failed after 2002 ms: not enough for a quorum, cluster: {voters:[{1001:NodeInfo { raft_addr: "127.0.0.1:26101", data: "" },2001:NodeInfo { raft_addr: "127.0.0.1:26102", data: "" },3001:NodeInfo { raft_addr: "127.0.0.1:26103", data: "" }}], learners:[]}, got: {1001}
+the local (stale) read still answers: applied=Some(1)

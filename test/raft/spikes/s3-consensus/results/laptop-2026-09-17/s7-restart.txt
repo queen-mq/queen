@@ -1,0 +1,13 @@
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 7: restart all with enable_leader_restore=false (leader 1001)
+before: node 1001 leader=Some(1001) term=1 last_log=Some(51) applied=Some(51) count=50 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+before: node 2001 leader=Some(1001) term=1 last_log=Some(51) applied=Some(51) count=50 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+before: node 3001 leader=Some(1001) term=1 last_log=Some(51) applied=Some(51) count=50 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+all three stopped
+right after the restarts, the nodes BELIEVE: [(1001, None, false), (2001, Some(1001), false), (3001, Some(1001), false)]
+a node reports is_leader again 1277 ms after the restarts began: 1001
+after:  node 1001 leader=Some(1001) term=2 last_log=Some(52) applied=Some(51) count=50 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+after:  node 2001 leader=Some(1001) term=2 last_log=Some(52) applied=Some(51) count=50 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+after:  node 3001 leader=Some(1001) term=2 last_log=Some(52) applied=Some(51) count=50 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+write after the restart: Ok(53)
+VERDICT applied-state-preserved=true

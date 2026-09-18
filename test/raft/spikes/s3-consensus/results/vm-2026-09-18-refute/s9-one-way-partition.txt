@@ -1,0 +1,31 @@
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 9: one-way partition, leader 1001, followers [2001, 3001], heartbeat 100 ms, election 1000-2000 ms
+warm: 20 writes committed
+--- phase heal: both followers stopped answering leader 1001 at t=0
+  t= 0.9s  1001*t1 lead=Some(1001) acked=901ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t= 2.5s  1001*t1 lead=Some(1001) acked=2504ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t= 4.1s  1001*t1 lead=Some(1001) acked=4107ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t= 5.7s  1001*t1 lead=Some(1001) acked=5710ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t= 7.3s  1001*t1 lead=Some(1001) acked=7313ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t= 8.9s  1001*t1 lead=Some(1001) acked=8917ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t=10.5s  1001*t1 lead=Some(1001) acked=10521ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t=12.1s  1001*t1 lead=Some(1001) acked=12125ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  during the block: 0 writes committed, last error: write did not answer within 900 ms
+  patience probe: after 10.0 s the write answered NOTHING (still waiting at 10 s)
+  no node became leader while the fault lasted: the cell is WRITE-DEAD
+  operator action: healed the link
+  VERDICT phase=heal write-dead=22.8s recovery-after-operator=616ms
+--- phase kill: both followers stopped answering leader 1001 at t=0
+  t= 0.9s  1001*t1 lead=Some(1001) acked=985ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t= 2.5s  1001*t1 lead=Some(1001) acked=2588ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t= 4.1s  1001*t1 lead=Some(1001) acked=4191ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t= 5.7s  1001*t1 lead=Some(1001) acked=5794ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t= 7.3s  1001*t1 lead=Some(1001) acked=7397ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t= 8.9s  1001*t1 lead=Some(1001) acked=9000ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t=10.5s  1001*t1 lead=Some(1001) acked=10603ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t=12.1s  1001*t1 lead=Some(1001) acked=12207ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  during the block: 0 writes committed, last error: write did not answer within 900 ms
+  patience probe: after 10.0 s the write answered NOTHING (still waiting at 10 s)
+  no node became leader while the fault lasted: the cell is WRITE-DEAD
+  operator action: kill -9 the stuck leader 1001
+  VERDICT phase=kill write-dead=22.8s recovery-after-operator=3528ms

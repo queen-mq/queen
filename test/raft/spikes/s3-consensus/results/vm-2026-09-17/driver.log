@@ -1,0 +1,166 @@
+profile=vm-today out=/root/raft/s3-consensus/out-vm-today root=/root/raft/s3-consensus/data
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.09s
+free space at /root/raft/s3-consensus: 189802 MiB
+=== s1-latency: latency --rates 200,500,1000 --secs 60 --entry-bytes 65536 --writers 1 ===
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 1: commit latency, 65536 B entries, 1 in flight, leader 1001, fsync=periodic
+rate=200/s offered, achieved=200/s, committed=12000, errors=0
+  service  n=12000 p50=3.07 p90=3.44 p99=5.27 max=87.19 mean=3.42 (ms)
+  response n=12000 p50=4.32 p90=25.47 p99=63.02 max=87.94 mean=9.03 (ms)
+rate=500/s offered, achieved=307/s, committed=30000, errors=0
+  service  n=30000 p50=2.97 p90=3.31 p99=4.43 max=108.72 mean=3.25 (ms)
+  response n=30000 p50=18954.70 p90=33753.10 p99=37233.01 max=37574.54 mean=18829.34 (ms)
+rate=1000/s offered, achieved=306/s, committed=38217, errors=0
+  service  n=38217 p50=2.98 p90=3.34 p99=4.96 max=110.74 mean=3.27 (ms)
+  response n=38217 p50=43197.95 p90=78234.93 p99=85929.94 max=86785.02 mean=43253.68 (ms)
+=== s1-latency-16: latency --rates 200,500,1000 --secs 20 --entry-bytes 65536 --writers 16 ===
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 1: commit latency, 65536 B entries, 16 in flight, leader 1001, fsync=periodic
+rate=200/s offered, achieved=201/s, committed=4000, errors=0
+  service  n=4000 p50=12.67 p90=22.18 p99=56.10 max=72.65 mean=14.81 (ms)
+  response n=4000 p50=13.91 p90=23.63 p99=57.24 max=74.16 mean=16.03 (ms)
+rate=500/s offered, achieved=501/s, committed=10000, errors=0
+  service  n=10000 p50=12.11 p90=17.36 p99=95.64 max=122.38 mean=15.67 (ms)
+  response n=10000 p50=14.38 p90=50.51 p99=101.79 max=124.19 mean=21.78 (ms)
+rate=1000/s offered, achieved=974/s, committed=20000, errors=0
+  service  n=20000 p50=11.24 p90=15.60 p99=145.89 max=282.25 mean=15.08 (ms)
+  response n=20000 p50=88.20 p90=222.25 p99=524.68 max=608.10 mean=109.78 (ms)
+=== s3-transfer: transfer --rounds 5 ===
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 3: leadership transfer, leader 1001, 5 healthy round(s)
+round 1: transfer 1001 -> 2001: OK, 2001 reports is_leader after 7 ms
+round 1: first write committed on the new leader 16 ms after the trigger (last error before it: Some(NotLeader { hint: None, reason: "LeaseExpired" }))
+round 2: transfer 2001 -> 1001: OK, 1001 reports is_leader after 28 ms
+round 2: first write committed on the new leader 31 ms after the trigger (last error before it: None)
+round 3: transfer 1001 -> 2001: OK, 2001 reports is_leader after 28 ms
+round 3: first write committed on the new leader 36 ms after the trigger (last error before it: None)
+round 4: transfer 2001 -> 1001: OK, 1001 reports is_leader after 28 ms
+round 4: first write committed on the new leader 31 ms after the trigger (last error before it: None)
+round 5: transfer 1001 -> 2001: OK, 2001 reports is_leader after 29 ms
+round 5: first write committed on the new leader 31 ms after the trigger (last error before it: None)
+healthy transfers: role change n=5 p50=28.30 p90=28.46 p99=28.55 max=28.56 mean=24.05 (ms)
+healthy transfers: first write n=5 p50=30.96 p90=34.41 p99=36.17 max=36.36 mean=29.16 (ms)
+killed 1001; asking 2001 to transfer leadership to it
+trigger returned Ok(())
+failed transfer: leaderless from None ms to None ms; a node reported is_leader again at Some((2001, 0)); first committed write by (node, ms) Some((3001, 3357))
+=== s4-linearizable: linearizable --rates 1000,5000 --secs 30 ===
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 4: linearizable reads on leader 1001 (batch window 2 ms)
+rate=1000/s offered mode=single   achieved=1000/s
+  service  n=30000 p50=0.16 p90=0.20 p99=0.25 max=18.75 mean=0.17 (ms)
+  response n=30000 p50=1.11 p90=1.58 p99=1.72 max=18.94 mean=1.12 (ms)
+rate=1000/s offered mode=window   achieved=1000/s
+  service  n=30000 p50=1.28 p90=2.40 p99=2.60 max=58.62 mean=1.46 (ms)
+  response n=30000 p50=2.67 p90=4.06 p99=4.37 max=60.31 mean=2.74 (ms)
+rate=1000/s offered mode=coalesce achieved=1000/s
+  service  n=30000 p50=0.16 p90=0.21 p99=0.28 max=3.54 mean=0.17 (ms)
+  response n=30000 p50=1.08 p90=1.54 p99=1.71 max=4.29 mean=1.09 (ms)
+rate=5000/s offered mode=single   achieved=4999/s
+  service  n=150000 p50=0.21 p90=0.27 p99=0.36 max=25.25 mean=0.24 (ms)
+  response n=150000 p50=1.33 p90=1.95 p99=2.32 max=26.43 mean=1.36 (ms)
+rate=5000/s offered mode=window   achieved=4999/s
+  service  n=150000 p50=1.47 p90=2.72 p99=2.90 max=44.28 mean=1.99 (ms)
+  response n=150000 p50=2.88 p90=4.01 p99=4.59 max=45.46 mean=2.95 (ms)
+rate=5000/s offered mode=coalesce achieved=4999/s
+  service  n=150000 p50=0.23 p90=0.29 p99=0.38 max=12.24 mean=0.24 (ms)
+  response n=150000 p50=1.18 p90=1.81 p99=2.18 max=13.54 mean=1.20 (ms)
+with both followers dead, a linearizable read failed after 2001 ms: not enough for a quorum, cluster: {voters:[{1001:NodeInfo { raft_addr: "127.0.0.1:26101", data: "" },2001:NodeInfo { raft_addr: "127.0.0.1:26102", data: "" },3001:NodeInfo { raft_addr: "127.0.0.1:26103", data: "" }}], learners:[]}, got: {1001}
+the local (stale) read still answers: applied=Some(51)
+=== s7-restart: restart --entries 2000 ===
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 7: restart all with enable_leader_restore=false (leader 1001)
+before: node 1001 leader=Some(1001) term=1 last_log=Some(2001) applied=Some(2001) count=2000 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+before: node 2001 leader=Some(1001) term=1 last_log=Some(2001) applied=Some(2001) count=2000 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+before: node 3001 leader=Some(1001) term=1 last_log=Some(2001) applied=Some(2001) count=2000 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+all three stopped
+right after the restarts, the nodes BELIEVE: [(1001, None, false), (2001, None, false), (3001, Some(2001), false)]
+a node reports is_leader again 1656 ms after the restarts began: 3001
+after:  node 1001 leader=Some(3001) term=3 last_log=Some(2003) applied=Some(2003) count=2000 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+after:  node 2001 leader=Some(3001) term=3 last_log=Some(2003) applied=Some(2003) count=2000 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+after:  node 3001 leader=Some(3001) term=3 last_log=Some(2003) applied=Some(2003) count=2000 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+write after the restart: Ok(2004)
+VERDICT applied-state-preserved=true
+=== s2-kill-leader-1: kill-leader --rate 200 --entry-bytes 65536 --secs-before 10 --secs-after 10 ===
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 2: kill -9 leader 1001 under 200/s of 65536 B writes
+steady state before the kill: n=1013 p50=3.43 p90=3.98 p99=17.02 max=39.53 mean=3.79 (ms)
+before kill: 1013 acknowledged writes
+killed 1001 at t=0
+new leader 2001 after 3087 ms
+first committed write after 3090 ms
+node 2001: applied 2067 ids, acknowledged 2067, missing 0 []
+node 3001: applied 2067 ids, acknowledged 2067, missing 0 []
+VERDICT acknowledged-writes-missing=0
+=== s2-kill-leader-2: kill-leader --rate 200 --entry-bytes 65536 --secs-before 10 --secs-after 10 ===
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 2: kill -9 leader 1001 under 200/s of 65536 B writes
+steady state before the kill: n=995 p50=3.39 p90=4.23 p99=15.80 max=30.40 mean=3.97 (ms)
+before kill: 995 acknowledged writes
+killed 1001 at t=0
+new leader 2001 after 3300 ms
+first committed write after 3307 ms
+node 2001: applied 2043 ids, acknowledged 2043, missing 0 []
+node 3001: applied 2043 ids, acknowledged 2043, missing 0 []
+VERDICT acknowledged-writes-missing=0
+=== s2-kill-leader-3: kill-leader --rate 200 --entry-bytes 65536 --secs-before 10 --secs-after 10 ===
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 2: kill -9 leader 1001 under 200/s of 65536 B writes
+steady state before the kill: n=1016 p50=3.22 p90=3.70 p99=16.20 max=40.88 mean=3.77 (ms)
+before kill: 1016 acknowledged writes
+killed 1001 at t=0
+new leader 3001 after 3353 ms
+first committed write after 3358 ms
+node 2001: applied 2051 ids, acknowledged 2051, missing 0 []
+node 3001: applied 2051 ids, acknowledged 2051, missing 0 []
+VERDICT acknowledged-writes-missing=0
+=== s2-kill-leader-sigstop: kill-leader --rate 200 --entry-bytes 65536 --secs-before 10 --secs-after 10 --stop-follower-secs 5 ===
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 2: kill -9 leader 1001 under 200/s of 65536 B writes
+steady state before the freeze: n=515 p50=3.30 p90=3.80 p99=14.80 max=31.92 mean=3.64 (ms)
+SIGSTOPped follower 2001 for 5 s
+while follower 2001 is frozen: n=516 p50=3.20 p90=3.48 p99=18.33 max=31.99 mean=3.61 (ms)
+SIGCONT 2001; leader is at index 1032
+  follower 2001 caught up to Some(1032) 460 ms after SIGCONT
+after the resume: n=479 p50=3.73 p90=5.27 p99=16.56 max=27.23 mean=4.35 (ms)
+before kill: 1510 acknowledged writes
+killed 1001 at t=0
+new leader 2001 after 3048 ms
+first committed write after 3051 ms
+node 2001: applied 2544 ids, acknowledged 2544, missing 0 []
+node 3001: applied 2544 ids, acknowledged 2544, missing 0 []
+VERDICT acknowledged-writes-missing=0
+=== s6-wiped-voter: wiped-voter ===
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 6: wiped voter 2001 (leader 1001)
+before: node 1001 leader=Some(1001) term=1 last_log=Some(201) applied=Some(201) count=200 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+restarted 2001 with an empty directory and the SAME id
+  wrong-way state: node 1001 leader=Some(1001) term=1 last_log=Some(201) applied=Some(201) count=200 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+  wrong-way state: node 2001 leader=Some(1001) term=1 last_log=None applied=None count=0 voters=[] learners=[] snap=None purged=None
+  wrong-way state: node 3001 leader=Some(1001) term=1 last_log=Some(201) applied=Some(201) count=200 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+  leader after the wrong way: Some((1001, "127.0.0.1:26101"))
+  write after the wrong way: Ok(202)
+  leader sees: node 1001 leader=Some(1001) term=1 last_log=Some(202) applied=Some(202) count=201 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+removing 2001 from the membership, keeping [1001, 3001]
+started the replacement as node 2002
+learner caught up in 51 ms
+promoted; voters are now [1001, 3001, 2002]
+write after the right way: Ok(208)
+after: node 1001 leader=Some(1001) term=1 last_log=Some(208) applied=Some(208) count=202 voters=[1001, 2002, 3001] learners=[] snap=None purged=None
+=== s5-snapshot: --file-bytes 16777216 --keep-logs 0 snapshot --total-bytes 1073741824 --entry-bytes 4194304 --kill-after-ms 0 ===
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 5: 1024 MiB snapshot to a wiped learner
+filled 256 entries of 4194304 B in 14.0 s (73.1 MiB/s)
+snapshot built at index Some(257) in 0.2 s (build cost is I8's declared exception)
+purged log up to 257: Some(257)
+learner caught up at index Some(258) in 2.6 s (398.1 MiB/s of manifest)
+=== s5-snapshot-resume: --file-bytes 16777216 --keep-logs 0 snapshot --total-bytes 1073741824 --entry-bytes 4194304 --kill-after-ms 400 ===
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 5: 1024 MiB snapshot to a wiped learner
+filled 256 entries of 4194304 B in 14.5 s (70.5 MiB/s)
+snapshot built at index Some(257) in 0.2 s (build cost is I8's declared exception)
+purged log up to 257: Some(257)
+killed the learner 0.5 s into the transfer
+learner restarted; the leader retries and the receiver keeps whole files
+learner caught up at index Some(257) in 3.4 s (298.7 MiB/s of manifest)
+transfer was interrupted at 1.0 s; see n4001.log for 'N of M files needed'
+done; output in /root/raft/s3-consensus/out-vm-today

@@ -1,0 +1,9 @@
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 5: 1024 MiB snapshot to a wiped learner
+filled 256 entries of 4194304 B in 14.5 s (70.5 MiB/s)
+snapshot built at index Some(257) in 0.2 s (build cost is I8's declared exception)
+purged log up to 257: Some(257)
+killed the learner 0.5 s into the transfer
+learner restarted; the leader retries and the receiver keeps whole files
+learner caught up at index Some(257) in 3.4 s (298.7 MiB/s of manifest)
+transfer was interrupted at 1.0 s; see n4001.log for 'N of M files needed'

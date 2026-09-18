@@ -1,0 +1,46 @@
+# scenario 8: kill -9 follower 2001 10x under 200/s of 65536 B writes (leader 1001, save_committed=none, DROPPED WRITES before every kill (dm-flakey))
+round 1: acked before kill=194 (p50 3.92 ms, 101 while it was down), leader matched=Some(195) victim last_log=Some(195) vote_term=1
+  reopened: log last=Some(195) purged=None committed=Some(193) vote_term=Some(1); sm applied=Some(190) count=189 digest=a787bfb726844049; restart->answer 438 ms; caught up in 372 ms 
+  read-back of the reopened log: purged=None last=Some(195) read 196/196 entries
+  log>=matched: OK   log<=leader: OK   readable: OK   vote monotone: OK
+round 2: acked before kill=486 (p50 3.78 ms, 100 while it was down), leader matched=Some(487) victim last_log=Some(487) vote_term=1
+  reopened: log last=Some(487) purged=None committed=Some(486) vote_term=Some(1); sm applied=Some(452) count=451 digest=eefedc9a297183a6; restart->answer 433 ms; caught up in 301 ms 
+  read-back of the reopened log: purged=None last=Some(487) read 488/488 entries
+  log>=matched: OK   log<=leader: OK   readable: OK   vote monotone: OK
+round 3: acked before kill=777 (p50 3.97 ms, 100 while it was down), leader matched=Some(778) victim last_log=Some(778) vote_term=1
+  reopened: log last=Some(778) purged=None committed=Some(777) vote_term=Some(1); sm applied=Some(750) count=749 digest=1c4460b14140071e; restart->answer 428 ms; caught up in 274 ms 
+  read-back of the reopened log: purged=None last=Some(778) read 779/779 entries
+  log>=matched: OK   log<=leader: OK   readable: OK   vote monotone: OK
+round 4: acked before kill=1072 (p50 3.75 ms, 104 while it was down), leader matched=Some(1073) victim last_log=Some(1073) vote_term=1
+  reopened: log last=Some(1073) purged=None committed=Some(1072) vote_term=Some(1); sm applied=Some(1047) count=1046 digest=80807ed98b0fcef7; restart->answer 435 ms; caught up in 218 ms 
+  read-back of the reopened log: purged=None last=Some(1073) read 1074/1074 entries
+  log>=matched: OK   log<=leader: OK   readable: OK   vote monotone: OK
+round 5: acked before kill=1374 (p50 3.73 ms, 104 while it was down), leader matched=Some(1375) victim last_log=Some(1375) vote_term=1
+  reopened: log last=Some(1375) purged=None committed=Some(1374) vote_term=Some(1); sm applied=Some(1355) count=1354 digest=71a7187e8f7a2e92; restart->answer 427 ms; caught up in 185 ms 
+  read-back of the reopened log: purged=None last=Some(1375) read 1376/1376 entries
+  log>=matched: OK   log<=leader: OK   readable: OK   vote monotone: OK
+round 6: acked before kill=1665 (p50 3.71 ms, 97 while it was down), leader matched=Some(1666) victim last_log=Some(1666) vote_term=1
+  reopened: log last=Some(1666) purged=None committed=Some(1665) vote_term=Some(1); sm applied=Some(1656) count=1655 digest=16284881e38680f3; restart->answer 430 ms; caught up in 146 ms 
+  read-back of the reopened log: purged=None last=Some(1666) read 1667/1667 entries
+  log>=matched: OK   log<=leader: OK   readable: OK   vote monotone: OK
+round 7: acked before kill=1958 (p50 3.76 ms, 97 while it was down), leader matched=Some(1959) victim last_log=Some(1959) vote_term=1
+  reopened: log last=Some(1959) purged=None committed=Some(1958) vote_term=Some(1); sm applied=Some(1945) count=1944 digest=a4c3081658e942e5; restart->answer 462 ms; caught up in 155 ms 
+  read-back of the reopened log: purged=None last=Some(1959) read 1960/1960 entries
+  log>=matched: OK   log<=leader: OK   readable: OK   vote monotone: OK
+round 8: acked before kill=2235 (p50 4.11 ms, 95 while it was down), leader matched=Some(2236) victim last_log=Some(2236) vote_term=1
+  reopened: log last=Some(2236) purged=None committed=Some(2235) vote_term=Some(1); sm applied=Some(2222) count=2221 digest=a7fb56154189dc27; restart->answer 436 ms; caught up in 101 ms 
+  read-back of the reopened log: purged=None last=Some(2236) read 2237/2237 entries
+  log>=matched: OK   log<=leader: OK   readable: OK   vote monotone: OK
+round 9: acked before kill=2526 (p50 3.76 ms, 97 while it was down), leader matched=Some(2527) victim last_log=Some(2527) vote_term=1
+  reopened: log last=Some(2527) purged=None committed=Some(2526) vote_term=Some(1); sm applied=Some(2518) count=2517 digest=712d9197c0b988e8; restart->answer 431 ms; caught up in 79 ms 
+  read-back of the reopened log: purged=None last=Some(2527) read 2528/2528 entries
+  log>=matched: OK   log<=leader: OK   readable: OK   vote monotone: OK
+round 10: acked before kill=2809 (p50 3.97 ms, 97 while it was down), leader matched=Some(2810) victim last_log=Some(2810) vote_term=1
+  reopened: log last=Some(2810) purged=None committed=Some(2809) vote_term=Some(1); sm applied=Some(2805) count=2804 digest=6e7716dd9bf769c4; restart->answer 437 ms; caught up in 41 ms 
+  read-back of the reopened log: purged=None last=Some(2810) read 2811/2811 entries
+  log>=matched: OK   log<=leader: OK   readable: OK   vote monotone: OK
+node 1001: applied 2906 ids, acknowledged 2906, missing 0 []; last_applied=Some(2907) count=2906 digest=9cfe231642d82578
+node 2001: applied 2906 ids, acknowledged 2906, missing 0 []; last_applied=Some(2907) count=2906 digest=9cfe231642d82578
+node 3001: applied 2906 ids, acknowledged 2906, missing 0 []; last_applied=Some(2907) count=2906 digest=9cfe231642d82578
+catch-up after restart: n=10 p50=169.74 p90=308.17 p99=365.54 max=371.92 mean=187.13 (ms)
+VERDICT rounds=10 dropped-writes=true log-reopened-below-matched=0 log-above-leader=0 unreadable-log=0 vote-reversions=0 empty-reopen=0 acknowledged-writes-missing=0 digests-equal=true

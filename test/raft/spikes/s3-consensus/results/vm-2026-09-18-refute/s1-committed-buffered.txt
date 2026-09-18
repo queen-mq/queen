@@ -1,0 +1,5 @@
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 1: commit latency, 65536 B entries, 16 in flight, leader 1001, fsync=periodic
+rate=500/s offered, achieved=500/s, committed=10000, errors=0
+  service  n=10000 p50=12.56 p90=16.57 p99=140.69 max=185.37 mean=16.39 (ms)
+  response n=10000 p50=15.16 p90=83.64 p99=154.24 max=186.90 mean=28.44 (ms)

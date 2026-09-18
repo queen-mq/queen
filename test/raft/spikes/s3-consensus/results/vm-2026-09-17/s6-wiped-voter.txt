@@ -1,0 +1,16 @@
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 6: wiped voter 2001 (leader 1001)
+before: node 1001 leader=Some(1001) term=1 last_log=Some(201) applied=Some(201) count=200 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+restarted 2001 with an empty directory and the SAME id
+  wrong-way state: node 1001 leader=Some(1001) term=1 last_log=Some(201) applied=Some(201) count=200 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+  wrong-way state: node 2001 leader=Some(1001) term=1 last_log=None applied=None count=0 voters=[] learners=[] snap=None purged=None
+  wrong-way state: node 3001 leader=Some(1001) term=1 last_log=Some(201) applied=Some(201) count=200 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+  leader after the wrong way: Some((1001, "127.0.0.1:26101"))
+  write after the wrong way: Ok(202)
+  leader sees: node 1001 leader=Some(1001) term=1 last_log=Some(202) applied=Some(202) count=201 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+removing 2001 from the membership, keeping [1001, 3001]
+started the replacement as node 2002
+learner caught up in 51 ms
+promoted; voters are now [1001, 3001, 2002]
+write after the right way: Ok(208)
+after: node 1001 leader=Some(1001) term=1 last_log=Some(208) applied=Some(208) count=202 voters=[1001, 2002, 3001] learners=[] snap=None purged=None

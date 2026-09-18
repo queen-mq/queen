@@ -1,0 +1,10 @@
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 2: kill -9 leader 1001 under 200/s of 65536 B writes
+steady state before the kill: n=1016 p50=3.22 p90=3.70 p99=16.20 max=40.88 mean=3.77 (ms)
+before kill: 1016 acknowledged writes
+killed 1001 at t=0
+new leader 3001 after 3353 ms
+first committed write after 3358 ms
+node 2001: applied 2051 ids, acknowledged 2051, missing 0 []
+node 3001: applied 2051 ids, acknowledged 2051, missing 0 []
+VERDICT acknowledged-writes-missing=0

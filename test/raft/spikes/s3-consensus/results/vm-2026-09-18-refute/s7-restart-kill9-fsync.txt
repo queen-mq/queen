@@ -1,0 +1,16 @@
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 7: restart all with enable_leader_restore=false (leader 1001), stop=kill -9, durable_ms=60000, save_committed=fsync
+before: node 1001 leader=Some(1001) term=1 last_log=Some(2001) applied=Some(2001) count=2000 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+before: node 2001 leader=Some(1001) term=1 last_log=Some(2001) applied=Some(2001) count=2000 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+before: node 3001 leader=Some(1001) term=1 last_log=Some(2001) applied=Some(2001) count=2000 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+all three killed with -9
+right after the restarts, the nodes BELIEVE: [(1001, None, false), (2001, Some(1001), false), (3001, Some(1001), false)]
+a node reports is_leader again 1478 ms after the restarts began: 2001
+after:  node 1001 leader=Some(2001) term=2 last_log=Some(2002) applied=Some(2001) count=2000 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+  reopened with: log last=Some(2001) purged=None committed=Some(2001) vote_term=Some(1); sm applied=None count=0 digest=0
+after:  node 2001 leader=Some(2001) term=2 last_log=Some(2002) applied=Some(2001) count=2000 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+  reopened with: log last=Some(2001) purged=None committed=Some(2001) vote_term=Some(1); sm applied=None count=0 digest=0
+after:  node 3001 leader=Some(2001) term=2 last_log=Some(2002) applied=Some(2001) count=2000 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+  reopened with: log last=Some(2001) purged=None committed=Some(2001) vote_term=Some(1); sm applied=None count=0 digest=0
+write after the restart: Ok(2003)
+VERDICT applied-state-preserved=true

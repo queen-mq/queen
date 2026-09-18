@@ -1,0 +1,135 @@
+profile=vm-refute out=/root/raft/s3-consensus/out-vm-refute root=/root/raft/s3-consensus/data-refute
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.08s
+free space at /root/raft/s3-consensus: 188708 MiB
+=== s8-log-crash: log-crash --rounds 10 --rate 200 --entry-bytes 65536 --secs-per-round 2 --secs-down 1 ===
+# scenario 8: kill -9 follower 2001 10x under 200/s of 65536 B writes (leader 1001, save_committed=none)
+round 1: acked before kill=193 (p50 4.02 ms, 99 while it was down), leader matched=Some(194) victim last_log=Some(194) vote_term=1
+  reopened: log last=Some(194) purged=None committed=Some(193) vote_term=Some(1); sm applied=Some(192) count=191 digest=efedc9a11012365e; restart->answer 433 ms; caught up in 367 ms 
+  read-back of the reopened log: purged=None last=Some(194) read 195/195 entries
+  log>=matched: OK   log<=leader: OK   readable: OK   vote monotone: OK
+round 2: acked before kill=492 (p50 3.68 ms, 91 while it was down), leader matched=Some(493) victim last_log=Some(493) vote_term=1
+  reopened: log last=Some(493) purged=None committed=Some(492) vote_term=Some(1); sm applied=Some(456) count=455 digest=a297183a561e4f0e; restart->answer 432 ms; caught up in 322 ms 
+  read-back of the reopened log: purged=None last=Some(493) read 494/494 entries
+  log>=matched: OK   log<=leader: OK   readable: OK   vote monotone: OK
+round 3: acked before kill=782 (p50 3.55 ms, 98 while it was down), leader matched=Some(783) victim last_log=Some(783) vote_term=1
+  reopened: log last=Some(783) purged=None committed=Some(782) vote_term=Some(1); sm applied=Some(750) count=749 digest=1c4460b14140071e; restart->answer 427 ms; caught up in 273 ms 
+  read-back of the reopened log: purged=None last=Some(783) read 784/784 entries
+  log>=matched: OK   log<=leader: OK   readable: OK   vote monotone: OK
+round 4: acked before kill=1078 (p50 3.53 ms, 103 while it was down), leader matched=Some(1079) victim last_log=Some(1079) vote_term=1
+  reopened: log last=Some(1079) purged=None committed=Some(1078) vote_term=Some(1); sm applied=Some(1052) count=1051 digest=587e77fdf607bfd7; restart->answer 444 ms; caught up in 268 ms 
+  read-back of the reopened log: purged=None last=Some(1079) read 1080/1080 entries
+  log>=matched: OK   log<=leader: OK   readable: OK   vote monotone: OK
+round 5: acked before kill=1383 (p50 3.58 ms, 102 while it was down), leader matched=Some(1384) victim last_log=Some(1384) vote_term=1
+  reopened: log last=Some(1384) purged=None committed=Some(1383) vote_term=Some(1); sm applied=Some(1357) count=1356 digest=c61fa3de8ba63ca5; restart->answer 428 ms; caught up in 228 ms 
+  read-back of the reopened log: purged=None last=Some(1384) read 1385/1385 entries
+  log>=matched: OK   log<=leader: OK   readable: OK   vote monotone: OK
+round 6: acked before kill=1681 (p50 3.74 ms, 97 while it was down), leader matched=Some(1682) victim last_log=Some(1682) vote_term=1
+  reopened: log last=Some(1682) purged=None committed=Some(1681) vote_term=Some(1); sm applied=Some(1662) count=1661 digest=1a03fffffffffff3; restart->answer 440 ms; caught up in 197 ms 
+  read-back of the reopened log: purged=None last=Some(1682) read 1683/1683 entries
+  log>=matched: OK   log<=leader: OK   readable: OK   vote monotone: OK
+round 7: acked before kill=1975 (p50 3.71 ms, 94 while it was down), leader matched=Some(1976) victim last_log=Some(1976) vote_term=1
+  reopened: log last=Some(1976) purged=None committed=Some(1975) vote_term=Some(1); sm applied=Some(1956) count=1955 digest=f52483942db6c7b1; restart->answer 463 ms; caught up in 198 ms 
+  read-back of the reopened log: purged=None last=Some(1976) read 1977/1977 entries
+  log>=matched: OK   log<=leader: OK   readable: OK   vote monotone: OK
+round 8: acked before kill=2263 (p50 3.77 ms, 97 while it was down), leader matched=Some(2264) victim last_log=Some(2264) vote_term=1
+  reopened: log last=Some(2264) purged=None committed=Some(2263) vote_term=Some(1); sm applied=Some(2243) count=2242 digest=cbddfdb936166a04; restart->answer 428 ms; caught up in 141 ms 
+  read-back of the reopened log: purged=None last=Some(2264) read 2265/2265 entries
+  log>=matched: OK   log<=leader: OK   readable: OK   vote monotone: OK
+round 9: acked before kill=2553 (p50 3.82 ms, 100 while it was down), leader matched=Some(2554) victim last_log=Some(2554) vote_term=1
+  reopened: log last=Some(2554) purged=None committed=Some(2553) vote_term=Some(1); sm applied=Some(2542) count=2541 digest=68adb3160fdd3d24; restart->answer 436 ms; caught up in 124 ms 
+  read-back of the reopened log: purged=None last=Some(2554) read 2555/2555 entries
+  log>=matched: OK   log<=leader: OK   readable: OK   vote monotone: OK
+round 10: acked before kill=2850 (p50 3.89 ms, 100 while it was down), leader matched=Some(2851) victim last_log=Some(2851) vote_term=1
+  reopened: log last=Some(2851) purged=None committed=Some(2850) vote_term=Some(1); sm applied=Some(2838) count=2837 digest=52234474d9c3b4dd; restart->answer 428 ms; caught up in 93 ms 
+  read-back of the reopened log: purged=None last=Some(2851) read 2852/2852 entries
+  log>=matched: OK   log<=leader: OK   readable: OK   vote monotone: OK
+node 1001: applied 2950 ids, acknowledged 2950, missing 0 []; last_applied=Some(2951) count=2950 digest=ffd1a34ead7b36f9
+node 2001: applied 2950 ids, acknowledged 2950, missing 0 []; last_applied=Some(2951) count=2950 digest=ffd1a34ead7b36f9
+node 3001: applied 2950 ids, acknowledged 2950, missing 0 []; last_applied=Some(2951) count=2950 digest=ffd1a34ead7b36f9
+catch-up after restart: n=10 p50=213.14 p90=326.50 p99=362.66 max=366.67 mean=220.98 (ms)
+VERDICT rounds=10 dropped-writes=false log-reopened-below-matched=0 log-above-leader=0 unreadable-log=0 vote-reversions=0 empty-reopen=0 acknowledged-writes-missing=0 digests-equal=true
+=== s7-restart-kill9-none: --durable-ms 60000 --wait-recovery true restart --entries 2000 --kill9 true ===
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 7: restart all with enable_leader_restore=false (leader 1001), stop=kill -9, durable_ms=60000, save_committed=none
+before: node 1001 leader=Some(1001) term=1 last_log=Some(2001) applied=Some(2001) count=2000 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+before: node 2001 leader=Some(1001) term=1 last_log=Some(2001) applied=Some(2001) count=2000 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+before: node 3001 leader=Some(1001) term=1 last_log=Some(2001) applied=Some(2001) count=2000 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+all three killed with -9
+right after the restarts, the nodes BELIEVE: [(1001, None, false), (2001, Some(1001), false), (3001, Some(1001), false)]
+a node reports is_leader again 1109 ms after the restarts began: 1001
+after:  node 1001 leader=Some(1001) term=2 last_log=Some(2002) applied=Some(2002) count=2000 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+  reopened with: log last=Some(2001) purged=None committed=Some(2000) vote_term=Some(1); sm applied=None count=0 digest=0; wait_for_recovery 1055 ms
+after:  node 2001 leader=Some(1001) term=2 last_log=Some(2002) applied=Some(2002) count=2000 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+  reopened with: log last=Some(2001) purged=None committed=Some(2000) vote_term=Some(1); sm applied=None count=0 digest=0; wait_for_recovery 1011 ms
+after:  node 3001 leader=Some(1001) term=2 last_log=Some(2002) applied=Some(2002) count=2000 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+  reopened with: log last=Some(2001) purged=None committed=Some(2000) vote_term=Some(1); sm applied=None count=0 digest=0; wait_for_recovery 944 ms
+write after the restart: Ok(2003)
+VERDICT applied-state-preserved=true
+=== s7-restart-kill9-fsync: --durable-ms 60000 --committed fsync --wait-recovery true restart --entries 2000 --kill9 true ===
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 7: restart all with enable_leader_restore=false (leader 1001), stop=kill -9, durable_ms=60000, save_committed=fsync
+before: node 1001 leader=Some(1001) term=1 last_log=Some(2001) applied=Some(2001) count=2000 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+before: node 2001 leader=Some(1001) term=1 last_log=Some(2001) applied=Some(2001) count=2000 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+before: node 3001 leader=Some(1001) term=1 last_log=Some(2001) applied=Some(2001) count=2000 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+all three killed with -9
+right after the restarts, the nodes BELIEVE: [(1001, None, false), (2001, Some(1001), false), (3001, Some(1001), false)]
+a node reports is_leader again 1478 ms after the restarts began: 2001
+after:  node 1001 leader=Some(2001) term=2 last_log=Some(2002) applied=Some(2001) count=2000 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+  reopened with: log last=Some(2001) purged=None committed=Some(2001) vote_term=Some(1); sm applied=None count=0 digest=0
+after:  node 2001 leader=Some(2001) term=2 last_log=Some(2002) applied=Some(2001) count=2000 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+  reopened with: log last=Some(2001) purged=None committed=Some(2001) vote_term=Some(1); sm applied=None count=0 digest=0
+after:  node 3001 leader=Some(2001) term=2 last_log=Some(2002) applied=Some(2001) count=2000 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+  reopened with: log last=Some(2001) purged=None committed=Some(2001) vote_term=Some(1); sm applied=None count=0 digest=0
+write after the restart: Ok(2003)
+VERDICT applied-state-preserved=true
+=== s1-committed-none: --committed none latency --rates 500 --secs 20 --entry-bytes 65536 --writers 16 ===
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 1: commit latency, 65536 B entries, 16 in flight, leader 1001, fsync=periodic
+rate=500/s offered, achieved=500/s, committed=10000, errors=0
+  service  n=10000 p50=12.37 p90=16.31 p99=131.42 max=163.86 mean=15.98 (ms)
+  response n=10000 p50=14.14 p90=65.74 p99=144.29 max=164.97 mean=25.11 (ms)
+=== s1-committed-buffered: --committed buffered latency --rates 500 --secs 20 --entry-bytes 65536 --writers 16 ===
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 1: commit latency, 65536 B entries, 16 in flight, leader 1001, fsync=periodic
+rate=500/s offered, achieved=500/s, committed=10000, errors=0
+  service  n=10000 p50=12.56 p90=16.57 p99=140.69 max=185.37 mean=16.39 (ms)
+  response n=10000 p50=15.16 p90=83.64 p99=154.24 max=186.90 mean=28.44 (ms)
+=== s1-committed-fsync: --committed fsync latency --rates 500 --secs 20 --entry-bytes 65536 --writers 16 ===
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 1: commit latency, 65536 B entries, 16 in flight, leader 1001, fsync=periodic
+rate=500/s offered, achieved=500/s, committed=10000, errors=0
+  service  n=10000 p50=14.75 p90=19.84 p99=165.77 max=183.52 mean=19.14 (ms)
+  response n=10000 p50=17.61 p90=105.24 p99=168.45 max=184.72 mean=36.00 (ms)
+=== s9-one-way-partition: one-way-partition --secs-blocked 12 ===
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 9: one-way partition, leader 1001, followers [2001, 3001], heartbeat 100 ms, election 1000-2000 ms
+warm: 20 writes committed
+--- phase heal: both followers stopped answering leader 1001 at t=0
+  t= 0.9s  1001*t1 lead=Some(1001) acked=901ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t= 2.5s  1001*t1 lead=Some(1001) acked=2504ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t= 4.1s  1001*t1 lead=Some(1001) acked=4107ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t= 5.7s  1001*t1 lead=Some(1001) acked=5710ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t= 7.3s  1001*t1 lead=Some(1001) acked=7313ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t= 8.9s  1001*t1 lead=Some(1001) acked=8917ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t=10.5s  1001*t1 lead=Some(1001) acked=10521ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t=12.1s  1001*t1 lead=Some(1001) acked=12125ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  during the block: 0 writes committed, last error: write did not answer within 900 ms
+  patience probe: after 10.0 s the write answered NOTHING (still waiting at 10 s)
+  no node became leader while the fault lasted: the cell is WRITE-DEAD
+  operator action: healed the link
+  VERDICT phase=heal write-dead=22.8s recovery-after-operator=616ms
+--- phase kill: both followers stopped answering leader 1001 at t=0
+  t= 0.9s  1001*t1 lead=Some(1001) acked=985ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t= 2.5s  1001*t1 lead=Some(1001) acked=2588ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t= 4.1s  1001*t1 lead=Some(1001) acked=4191ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t= 5.7s  1001*t1 lead=Some(1001) acked=5794ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t= 7.3s  1001*t1 lead=Some(1001) acked=7397ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t= 8.9s  1001*t1 lead=Some(1001) acked=9000ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t=10.5s  1001*t1 lead=Some(1001) acked=10603ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  t=12.1s  1001*t1 lead=Some(1001) acked=12207ms  2001=t1 lead=Some(1001) acked=-ms  3001=t1 lead=Some(1001) acked=-ms
+  during the block: 0 writes committed, last error: write did not answer within 900 ms
+  patience probe: after 10.0 s the write answered NOTHING (still waiting at 10 s)
+  no node became leader while the fault lasted: the cell is WRITE-DEAD
+  operator action: kill -9 the stuck leader 1001
+  VERDICT phase=kill write-dead=22.8s recovery-after-operator=3528ms
+done; output in /root/raft/s3-consensus/out-vm-refute

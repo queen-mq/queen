@@ -1,0 +1,22 @@
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 7: restart all with enable_leader_restore=false (leader 1001), stop=kill -9, durable_ms=60000, save_committed=none
+before: node 1001 leader=Some(1001) term=1 last_log=Some(301) applied=Some(301) count=300 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+before: node 2001 leader=Some(1001) term=1 last_log=Some(301) applied=Some(301) count=300 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+before: node 3001 leader=Some(1001) term=1 last_log=Some(301) applied=Some(300) count=299 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+all three killed with -9
+right after the restarts, the nodes BELIEVE: [(1001, None, false), (2001, Some(1001), false), (3001, Some(1001), false)]
+a node reports is_leader again 1212 ms after the restarts began: 1001
+after:  node 1001 leader=Some(1001) term=2 last_log=Some(302) applied=Some(300) count=299 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+  reopened with: log last=Some(301) purged=None committed=Some(300) vote_term=Some(1); sm applied=None count=0 digest=0
+  WENT BACKWARDS on 1001: applied_count 300 -> 299, last_applied Some(301) -> Some(300)
+  node 1001 is missing 1 acknowledged writes
+after:  node 2001 leader=None term=2 last_log=Some(301) applied=Some(300) count=299 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+  reopened with: log last=Some(301) purged=None committed=Some(300) vote_term=Some(1); sm applied=None count=0 digest=0
+  WENT BACKWARDS on 2001: applied_count 300 -> 299, last_applied Some(301) -> Some(300)
+  node 2001 is missing 1 acknowledged writes
+after:  node 3001 leader=None term=2 last_log=Some(301) applied=Some(299) count=298 voters=[1001, 2001, 3001] learners=[] snap=None purged=None
+  reopened with: log last=Some(301) purged=None committed=Some(299) vote_term=Some(1); sm applied=None count=0 digest=0
+  WENT BACKWARDS on 3001: applied_count 299 -> 298, last_applied Some(300) -> Some(299)
+  node 3001 is missing 2 acknowledged writes
+write after the restart: Ok(303)
+VERDICT applied-state-preserved=false

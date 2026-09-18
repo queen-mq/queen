@@ -1,0 +1,19 @@
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 8: kill -9 follower 2001 4x under 100/s of 16384 B writes (leader 1001, save_committed=none)
+round 1: acked before kill=45 (p50 10.90 ms, 23 while it was down), leader matched=Some(46) victim last_log=Some(46) vote_term=1
+  reopened: log last=Some(46) purged=None committed=Some(45) vote_term=Some(1); sm applied=Some(42) count=41 digest=7e546c63ec932dcd; restart->answer 97 ms; caught up in 74 ms 
+  log>=matched: OK   vote monotone: OK
+round 2: acked before kill=114 (p50 10.85 ms, 22 while it was down), leader matched=Some(115) victim last_log=Some(115) vote_term=1
+  reopened: log last=Some(115) purged=None committed=Some(114) vote_term=Some(1); sm applied=Some(111) count=110 digest=c3f3dfaebc3bf710; restart->answer 122 ms; caught up in 99 ms 
+  log>=matched: OK   vote monotone: OK
+round 3: acked before kill=180 (p50 10.86 ms, 24 while it was down), leader matched=Some(181) victim last_log=Some(181) vote_term=1
+  reopened: log last=Some(181) purged=None committed=Some(180) vote_term=Some(1); sm applied=Some(176) count=175 digest=4abb2c9b84fa599e; restart->answer 97 ms; caught up in 74 ms 
+  log>=matched: OK   vote monotone: OK
+round 4: acked before kill=250 (p50 10.57 ms, 21 while it was down), leader matched=Some(251) victim last_log=Some(251) vote_term=1
+  reopened: log last=Some(251) purged=None committed=Some(250) vote_term=Some(1); sm applied=Some(247) count=246 digest=ede7c7bf5f7e7fff; restart->answer 121 ms; caught up in 98 ms 
+  log>=matched: OK   vote monotone: OK
+node 1001: applied 271 ids, acknowledged 271, missing 0 []; last_applied=Some(272) count=271 digest=516284c91d307cd
+node 2001: applied 271 ids, acknowledged 271, missing 0 []; last_applied=Some(272) count=271 digest=516284c91d307cd
+node 3001: applied 271 ids, acknowledged 271, missing 0 []; last_applied=Some(272) count=271 digest=516284c91d307cd
+catch-up after restart: n=4 p50=85.86 p90=98.38 p99=98.64 max=98.67 mean=85.97 (ms)
+VERDICT rounds=4 log-reopened-below-acked=0 vote-reversions=0 empty-reopen=0 acknowledged-writes-missing=0 digests-equal=true

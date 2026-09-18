@@ -1,0 +1,17 @@
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 3: leadership transfer, leader 1001, 5 healthy round(s)
+round 1: transfer 1001 -> 2001: OK, 2001 reports is_leader after 7 ms
+round 1: first write committed on the new leader 16 ms after the trigger (last error before it: Some(NotLeader { hint: None, reason: "LeaseExpired" }))
+round 2: transfer 2001 -> 1001: OK, 1001 reports is_leader after 28 ms
+round 2: first write committed on the new leader 31 ms after the trigger (last error before it: None)
+round 3: transfer 1001 -> 2001: OK, 2001 reports is_leader after 28 ms
+round 3: first write committed on the new leader 36 ms after the trigger (last error before it: None)
+round 4: transfer 2001 -> 1001: OK, 1001 reports is_leader after 28 ms
+round 4: first write committed on the new leader 31 ms after the trigger (last error before it: None)
+round 5: transfer 1001 -> 2001: OK, 2001 reports is_leader after 29 ms
+round 5: first write committed on the new leader 31 ms after the trigger (last error before it: None)
+healthy transfers: role change n=5 p50=28.30 p90=28.46 p99=28.55 max=28.56 mean=24.05 (ms)
+healthy transfers: first write n=5 p50=30.96 p90=34.41 p99=36.17 max=36.36 mean=29.16 (ms)
+killed 1001; asking 2001 to transfer leadership to it
+trigger returned Ok(())
+failed transfer: leaderless from None ms to None ms; a node reported is_leader again at Some((2001, 0)); first committed write by (node, ms) Some((3001, 3357))

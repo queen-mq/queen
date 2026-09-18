@@ -1,0 +1,7 @@
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 3: leadership transfer, leader 1001
+transfer to 2001: OK, 2001 reports is_leader after 44 ms
+first write committed on the new leader 53 ms after the trigger (last error before it: None)
+killed 1001; asking 2001 to transfer leadership to it
+trigger returned Ok(())
+failed transfer: leaderless from None ms to None ms; a node reported is_leader again at Some((2001, 0)); first committed write by (node, ms) Some((3001, 3052))

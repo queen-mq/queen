@@ -1,0 +1,22 @@
+cluster up: [(1001, "127.0.0.1:26101"), (2001, "127.0.0.1:26102"), (3001, "127.0.0.1:26103")], leader 1001
+# scenario 4: linearizable reads on leader 1001 (batch window 2 ms)
+rate=1000/s offered mode=single   achieved=1000/s
+  service  n=30000 p50=0.16 p90=0.20 p99=0.25 max=18.75 mean=0.17 (ms)
+  response n=30000 p50=1.11 p90=1.58 p99=1.72 max=18.94 mean=1.12 (ms)
+rate=1000/s offered mode=window   achieved=1000/s
+  service  n=30000 p50=1.28 p90=2.40 p99=2.60 max=58.62 mean=1.46 (ms)
+  response n=30000 p50=2.67 p90=4.06 p99=4.37 max=60.31 mean=2.74 (ms)
+rate=1000/s offered mode=coalesce achieved=1000/s
+  service  n=30000 p50=0.16 p90=0.21 p99=0.28 max=3.54 mean=0.17 (ms)
+  response n=30000 p50=1.08 p90=1.54 p99=1.71 max=4.29 mean=1.09 (ms)
+rate=5000/s offered mode=single   achieved=4999/s
+  service  n=150000 p50=0.21 p90=0.27 p99=0.36 max=25.25 mean=0.24 (ms)
+  response n=150000 p50=1.33 p90=1.95 p99=2.32 max=26.43 mean=1.36 (ms)
+rate=5000/s offered mode=window   achieved=4999/s
+  service  n=150000 p50=1.47 p90=2.72 p99=2.90 max=44.28 mean=1.99 (ms)
+  response n=150000 p50=2.88 p90=4.01 p99=4.59 max=45.46 mean=2.95 (ms)
+rate=5000/s offered mode=coalesce achieved=4999/s
+  service  n=150000 p50=0.23 p90=0.29 p99=0.38 max=12.24 mean=0.24 (ms)
+  response n=150000 p50=1.18 p90=1.81 p99=2.18 max=13.54 mean=1.20 (ms)
+with both followers dead, a linearizable read failed after 2001 ms: not enough for a quorum, cluster: {voters:[{1001:NodeInfo { raft_addr: "127.0.0.1:26101", data: "" },2001:NodeInfo { raft_addr: "127.0.0.1:26102", data: "" },3001:NodeInfo { raft_addr: "127.0.0.1:26103", data: "" }}], learners:[]}, got: {1001}
+the local (stale) read still answers: applied=Some(51)
