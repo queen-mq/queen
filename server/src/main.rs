@@ -121,6 +121,15 @@ async fn main() {
         return;
     }
 
+    // PLAN_RAFT.md D1 / §14.7 — in raft mode the broker boots on the replicated
+    // state machine, with NO Postgres pool, NO schema apply and NONE of the
+    // Postgres boot below. Kept a hard branch (not interleaved guards) so the
+    // Postgres path stays byte-identical in the default `QUEEN_STORAGE=postgres`.
+    if cfg.storage == config::StorageMode::Raft {
+        run_raft(cfg).await;
+        return;
+    }
+
     // EMBEDDED MODE (kafka_facade.rs) is resolved HERE, before the pool and before
     // the schema apply, because both of its failure modes are unfixable by
     // retrying: a binary that is not there, and the one facade knob that has no
@@ -603,6 +612,12 @@ async fn main() {
         ownership_ok: std::sync::Mutex::new(std::collections::HashSet::new()),
         auth_enabled: cfg.auth.enabled,
         server_id: cfg.sync.server_id.clone(),
+        // PLAN_RAFT.md WP-1.7 — this is the Postgres boot (the raft boot returned
+        // in `run_raft` far above). The facade is the inert `NotReady` stub and
+        // is never consulted: every handler branches on `storage` first.
+        storage: config::StorageMode::Postgres,
+        rsm: Arc::new(rsm::facade::NotReady::new()),
+        raft_ready_lag_ms: cfg.raft_ready_lag_ms,
     });
 
     // LOGGING_PLAN.md Phase 1: periodic `rates` + `sizes` aggregate blocks —
@@ -1545,6 +1560,104 @@ async fn main() {
     let pending = file_buffer.pending_count();
     if pending > 0 {
         tracing::warn!(target: "shutdown", pending, "spool has undrained events at shutdown");
+    }
+    tracing::info!(target: "shutdown", "shutdown complete");
+}
+
+/// PLAN_RAFT.md §14.7 / WP-1.7a — the raft-mode boot. The broker runs on the
+/// replicated state machine (Queen without Postgres), so this path deliberately
+/// does NOT do any of the Postgres boot in `main`:
+///
+///   - NO `db::create_pool` used for real work, NO `schema::apply` (there is no
+///     database to bring to a shape); a lazy pool HANDLE lives in `AppState` for
+///     its type only and is never dialled (see `handlers::raft::build_raft_state`);
+///   - NONE of the §10.3 loops: `retention::spawn`, `stats::spawn`,
+///     `stats::spawn_retained_bytes`, `syscollect::spawn`, the KV/quota
+///     `quota::spawn_refresh`, `ephemeral::spawn_refresh`, `sweeper::spawn`,
+///     `reconcile::spawn*`, the hot-list wheel/wake/reseed ticks, the mesh, and
+///     `file_buffer::spawn_drain` — every one of those reads or writes Postgres
+///     and is replaced by the RSM's own loops (§10.1/§10.2) in later WPs;
+///   - NO push spool recovery (D19), NO DB flag seeds (maintenance starts off).
+///
+/// What it DOES: resolve auth exactly as the Postgres boot does (auth is
+/// cross-cutting and works unchanged in raft mode), build the raft `AppState`
+/// and the raft router (message-path handlers → the facade; un-ported routes →
+/// `503 raft_phase1_unsupported`), and serve. WP-1.7c installs the real facade
+/// behind the builder hook and this function does not change.
+async fn run_raft(cfg: config::Config) {
+    // Auth, resolved as in the Postgres boot (fail fast on bad key material).
+    if let Err(e) = cfg.auth.validate() {
+        obs::fatal(format!("invalid JWT auth configuration: {e}"));
+    }
+    let authenticator = auth::Authenticator::new(cfg.auth.clone());
+    if cfg.auth.enabled && authenticator.uses_jwks() {
+        match authenticator.fetch_jwks().await {
+            Ok(n) => tracing::info!(target: "auth", keys = n, "JWKS pre-fetch OK"),
+            Err(e) => {
+                tracing::warn!(target: "auth", error = %e, "JWKS pre-fetch failed (will retry on demand)")
+            }
+        }
+        let a = authenticator.clone();
+        let interval = authenticator.jwks_refresh_interval();
+        tokio::spawn(async move {
+            static JWKS_FAIL: obs::Sampler = obs::Sampler::new(60_000);
+            loop {
+                tokio::time::sleep(interval).await;
+                if let Err(e) = a.fetch_jwks().await {
+                    if let Some(suppressed) = JWKS_FAIL.tick_now() {
+                        tracing::warn!(target: "auth", error = %e, suppressed, "JWKS refresh failed");
+                    }
+                }
+            }
+        });
+    }
+
+    config::log_effective(&cfg);
+
+    // §11.1 — the data directory is required in raft mode. Create it now so a
+    // later WP's state machine finds it; the WP-1.7a stub does not open it, so a
+    // create failure is a warning here, not fatal (WP-1.7c will refuse to boot).
+    if cfg.raft_dir.trim().is_empty() {
+        obs::fatal("QUEEN_RAFT_DIR is required in raft mode (the raft data directory, §11.1)");
+    }
+    if let Err(e) = std::fs::create_dir_all(&cfg.raft_dir) {
+        tracing::warn!(
+            target: "boot",
+            dir = %cfg.raft_dir,
+            error = %e,
+            "could not create the raft data directory (the WP-1.7a stub does not use it yet)"
+        );
+    }
+
+    let state = match handlers::raft::build_raft_state(&cfg) {
+        Ok(s) => s,
+        Err(e) => obs::fatal(format!("raft state init failed: {e}")),
+    };
+
+    let app = handlers::raft::build_raft_router(state, authenticator, cfg.tenancy_header);
+
+    let addr = config::host_port(&cfg.bind_addr, &cfg.port);
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => obs::fatal(format!("cannot bind {addr}: {e}")),
+    };
+    tracing::info!(
+        target: "boot",
+        version = VERSION,
+        addr = %addr,
+        storage = cfg.storage.as_str(),
+        data_dir = %cfg.raft_dir,
+        planner_queue_depth = cfg.raft_planner_queue_depth,
+        "listening (raft mode — message path routed to the state machine facade; \
+         un-ported routes answer 503 raft_phase1_unsupported until WP-1.7c)"
+    );
+
+    if let Err(e) = axum::serve(listener, app)
+        .tcp_nodelay(true)
+        .with_graceful_shutdown(obs::shutdown_signal())
+        .await
+    {
+        tracing::error!(target: "boot", error = %e, "serve loop ended with error");
     }
     tracing::info!(target: "shutdown", "shutdown complete");
 }

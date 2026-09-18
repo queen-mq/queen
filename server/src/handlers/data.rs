@@ -223,6 +223,12 @@ pub async fn handle_push(
     Extension(tenant): Extension<crate::tenant::Tenant>,
     body: Bytes,
 ) -> Response {
+    // PLAN_RAFT.md WP-1.7 — in raft mode the receiver routes to the state
+    // machine facade instead of the Postgres pool. The guard is first, so the
+    // Postgres path below is byte-identical in `storage = postgres`.
+    if st.storage.is_raft() {
+        return crate::handlers::raft::dispatch_push(&st, tenant.as_str(), body).await;
+    }
     let parsed: PushBody = match serde_json::from_slice(&body) {
         Ok(p) => p,
         Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),
@@ -859,6 +865,21 @@ pub async fn handle_pop(
     Path(queue): Path<String>,
     Query(p): Query<PopParams>,
 ) -> Response {
+    // PLAN_RAFT.md WP-1.7 — raft mode routes the wildcard pop to the facade.
+    // Guard first; the Postgres path below is untouched in `storage = postgres`.
+    if st.storage.is_raft() {
+        return crate::handlers::raft::dispatch_pop(
+            &st,
+            tenant.as_str(),
+            queue,
+            p.consumer_group.clone(),
+            p.batch.unwrap_or(200),
+            p.auto_ack.unwrap_or(false),
+            p.wait.unwrap_or(false),
+            p.timeout.unwrap_or(st.pop_default_timeout_ms),
+        )
+        .await;
+    }
     let batch = p.batch.unwrap_or(200);
     let auto_ack = p.auto_ack.unwrap_or(false);
     let wait = p.wait.unwrap_or(false);
@@ -2374,6 +2395,21 @@ pub async fn handle_pop_partition(
     Path((queue, partition)): Path<(String, String)>,
     Query(p): Query<PopParams>,
 ) -> Response {
+    // PLAN_RAFT.md WP-1.7 — raft mode routes the pinned pop to the facade.
+    if st.storage.is_raft() {
+        return crate::handlers::raft::dispatch_pop_partition(
+            &st,
+            tenant.as_str(),
+            queue,
+            partition,
+            p.consumer_group.clone(),
+            p.batch.unwrap_or(200),
+            p.auto_ack.unwrap_or(false),
+            p.wait.unwrap_or(false),
+            p.timeout.unwrap_or(st.pop_default_timeout_ms),
+        )
+        .await;
+    }
     let batch = p.batch.unwrap_or(200);
     let auto_ack = p.auto_ack.unwrap_or(false);
     let wait = p.wait.unwrap_or(false);
@@ -2575,6 +2611,21 @@ pub async fn handle_pop_discover(
     Extension(tenant): Extension<crate::tenant::Tenant>,
     Query(p): Query<PopDiscoverParams>,
 ) -> Response {
+    // PLAN_RAFT.md WP-1.7 — raft mode routes the discovery pop to the facade.
+    if st.storage.is_raft() {
+        return crate::handlers::raft::dispatch_pop_discover(
+            &st,
+            tenant.as_str(),
+            p.namespace.clone().unwrap_or_default(),
+            p.task.clone().unwrap_or_default(),
+            p.consumer_group.clone(),
+            p.batch.unwrap_or(200),
+            p.auto_ack.unwrap_or(false),
+            p.wait.unwrap_or(false),
+            p.timeout.unwrap_or(st.pop_default_timeout_ms),
+        )
+        .await;
+    }
     let namespace = p.namespace.unwrap_or_default();
     let task = p.task.unwrap_or_default();
     if namespace.is_empty() && task.is_empty() {
@@ -3268,6 +3319,10 @@ pub async fn handle_ack(
     Extension(tenant): Extension<crate::tenant::Tenant>,
     body: Bytes,
 ) -> Response {
+    // PLAN_RAFT.md WP-1.7 — raft mode routes ack to the facade.
+    if st.storage.is_raft() {
+        return crate::handlers::raft::dispatch_ack(&st, tenant.as_str(), body).await;
+    }
     let a: AckSingle = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),
@@ -3289,6 +3344,10 @@ pub async fn handle_ack_batch(
     Extension(tenant): Extension<crate::tenant::Tenant>,
     body: Bytes,
 ) -> Response {
+    // PLAN_RAFT.md WP-1.7 — raft mode routes the batch ack to the facade.
+    if st.storage.is_raft() {
+        return crate::handlers::raft::dispatch_ack(&st, tenant.as_str(), body).await;
+    }
     let b: AckBatch = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return json(StatusCode::BAD_REQUEST, json_err("bad body: ", e)),
@@ -3982,6 +4041,17 @@ pub async fn handle_lease_extend(
             .and_then(|b| b.seconds)
             .unwrap_or(60)
     };
+
+    // PLAN_RAFT.md WP-1.7 — raft mode routes the lease renew to the facade.
+    if st.storage.is_raft() {
+        return crate::handlers::raft::dispatch_lease_extend(
+            &st,
+            tenant.as_str(),
+            lease_id,
+            seconds as i64,
+        )
+        .await;
+    }
 
     // Ack-lane admission BEFORE the pool checkout (ordering contract,
     // admission.rs). Held for the single renew statement.

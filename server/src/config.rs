@@ -12,6 +12,45 @@ pub const DEFAULT_TENANT: &str = "00000000-0000-0000-0000-000000000001";
 /// against anything (it is opaque; the trust is network — the cell boundary).
 pub const TENANT_HEADER: &str = "x-queen-tenant";
 
+/// PLAN_RAFT.md D1 — the storage mode of a whole deployment. `postgres` is the
+/// only class until GA; `raft` selects the replicated state machine (Queen
+/// without Postgres). There is NO per-queue mixing (D1): mixing classes is what
+/// created the two-store coupling behind pgless C17/C18/C20/C21.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageMode {
+    /// The PostgreSQL-backed class (`QUEEN_STORAGE=postgres`, the default).
+    Postgres,
+    /// The replicated-log class (`QUEEN_STORAGE=raft`).
+    Raft,
+}
+
+impl StorageMode {
+    /// Parse `QUEEN_STORAGE`. `None` for an unrecognised value, so `load` can
+    /// refuse it at boot the way `env_bool` refuses a bad boolean (a knob that
+    /// reads as set and silently means the default is exactly the failure mode
+    /// the broker's config parsing exists to prevent).
+    pub fn parse(raw: &str) -> Option<StorageMode> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "postgres" | "pg" => Some(StorageMode::Postgres),
+            "raft" => Some(StorageMode::Raft),
+            _ => None,
+        }
+    }
+
+    /// The canonical string, as `/health` and the effective-config banner print it.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StorageMode::Postgres => "postgres",
+            StorageMode::Raft => "raft",
+        }
+    }
+
+    /// Whether this deployment runs the replicated-log class.
+    pub fn is_raft(&self) -> bool {
+        matches!(self, StorageMode::Raft)
+    }
+}
+
 /// The `JWT_ALGORITHM` values the broker accepts, in the order the boot error
 /// lists them. This is the ONE spelling of the set: `AuthConfig::validate` is
 /// matched against it and its "not supported" message is BUILT from it, so the
@@ -657,6 +696,25 @@ pub struct Config {
     // broker never validates the value — it is opaque; the trust is the cell
     // network (the proxy is the only thing that can set the header).
     pub tenancy_header: bool,
+
+    // ------------------------------------------------------- raft (PLAN_RAFT.md)
+    /// D1 — the storage class of this deployment (`QUEEN_STORAGE`). `postgres`
+    /// (the default until GA) is byte-identical to every prior release; `raft`
+    /// boots the replicated state machine and no Postgres pool (WP-1.7).
+    pub storage: StorageMode,
+    /// §11.1 — the raft data directory (`QUEEN_RAFT_DIR`). Carries the consensus
+    /// log, the store, the segment files and the IDENTITY. REQUIRED in raft mode
+    /// (boot refuses without it); ignored in postgres mode.
+    pub raft_dir: String,
+    /// §14.1 — `/health` answers `200 healthy` while the apply lag is under this
+    /// (`QUEEN_RAFT_READY_LAG_MS`), else `503 settling`.
+    pub raft_ready_lag_ms: u64,
+    /// The admission arbiter's budget ceiling in raft mode
+    /// (`QUEEN_RAFT_PLANNER_QUEUE_DEPTH`). In postgres mode admission is sized by
+    /// `DB_POOL_SIZE`; in raft mode there is no pool — writes flow through the
+    /// planner's bounded command channel, so the concurrency the arbiter governs
+    /// is that channel's depth, not a connection count (WP-1.7, admission.rs).
+    pub raft_planner_queue_depth: usize,
 
     // ----------------------------------------------------- kv + timers (PLAN_KV_TIMERS.md)
     //
@@ -1871,6 +1929,14 @@ pub fn load() -> Config {
         log_rates_ms: env_int("QUEEN_LOG_RATES_MS", 10000).max(1000) as u64,
         log_top_n_queues: env_int("QUEEN_LOG_TOPN_QUEUES", 10).max(1) as usize,
         tenancy_header,
+        // ------------------------------------------------------- raft (PLAN_RAFT.md)
+        // Parsed below the struct so a mis-spelled QUEEN_STORAGE is fatal (the
+        // env_bool rule: a knob that reads as set and silently means the default
+        // is the failure mode config parsing exists to prevent). Placeholder here.
+        storage: StorageMode::Postgres,
+        raft_dir: env_str("QUEEN_RAFT_DIR", "/var/lib/queen/raft"),
+        raft_ready_lag_ms: env_int("QUEEN_RAFT_READY_LAG_MS", 2000).max(0) as u64,
+        raft_planner_queue_depth: env_int("QUEEN_RAFT_PLANNER_QUEUE_DEPTH", 1024).max(1) as usize,
         // ------------------------------------------- kv + timers (PLAN_KV_TIMERS.md)
         kv_max_value_bytes: env_int("QUEEN_KV_MAX_VALUE_BYTES", 65536).max(1) as usize,
         kv_max_key_bytes: env_int("QUEEN_KV_MAX_KEY_BYTES", 512).max(1) as usize,
@@ -1944,6 +2010,20 @@ pub fn load() -> Config {
         sweeper_backoff_min_ms: env_int("QUEEN_SWEEPER_BACKOFF_MIN_MS", 1000).max(1),
         sweeper_backoff_max_ms: env_int("QUEEN_SWEEPER_BACKOFF_MAX_MS", 60_000).max(1),
     };
+    // PLAN_RAFT.md D1 — the storage class. Rejected rather than defaulted on a
+    // typo (the env_bool rule): `QUEEN_STORAGE=raftt` silently running the
+    // Postgres class is exactly the kind of invisible misconfiguration the
+    // parsers refuse. Unset ⇒ the documented default (postgres, until GA).
+    cfg.storage = {
+        let raw = env_str("QUEEN_STORAGE", "postgres");
+        match StorageMode::parse(&raw) {
+            Some(m) => m,
+            None => crate::obs::fatal(format!(
+                "QUEEN_STORAGE=\"{raw}\" is not a storage class (expected postgres or raft)"
+            )),
+        }
+    };
+
     // §8 windowed reseed: derive it when unset, then clamp it — see
     // resolve_reseed_window_ms. Resolved here, before anything reads the field, so the
     // boot line and every consumer see the number actually in force.

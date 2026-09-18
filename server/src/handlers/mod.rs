@@ -186,6 +186,20 @@ pub struct AppState {
     // cluster's cell_slug so the SPA's cell-level pages can name this broker.
     pub auth_enabled: bool,
     pub server_id: String,
+    // PLAN_RAFT.md D1 / WP-1.7 — the storage class this broker runs. `Postgres`
+    // (the default) takes every existing handler path unchanged; `Raft` makes the
+    // message-path handlers route to `rsm` below instead of the pool. A plain
+    // copy field, read on the hot path with one comparison.
+    pub storage: crate::config::StorageMode,
+    // WP-1.7 — the storage seam (rsm/facade.rs). In postgres mode this is the
+    // `NotReady` stub and is never consulted (the handlers branch on `storage`
+    // first). In raft mode it is the facade the receiver hands commands to; the
+    // real implementation is installed by WP-1.7c's builder hook.
+    pub rsm: std::sync::Arc<dyn crate::rsm::facade::Rsm>,
+    // §14.1 — the apply-lag threshold `/health` gates `200 healthy` on in raft
+    // mode (`QUEEN_RAFT_READY_LAG_MS`). Copied off the config; unused in postgres
+    // mode, where `/health` is the DB ping.
+    pub raft_ready_lag_ms: u64,
 }
 
 const PARTITION_QUEUE_CACHE_CAP: usize = 100_000;
@@ -554,6 +568,13 @@ pub(crate) fn sp_result_to_response(txt: String) -> Response {
     }
 }
 
+
+// PLAN_RAFT.md WP-1.7a — the raft-mode storage seam wiring: the receiver
+// dispatch helpers the message-path handlers branch to, the RsmError→HTTP
+// mapping, the raft-mode `/health`/`/metrics/prometheus`/`stats/refresh`
+// variants, the un-ported-route 503 fallback, and the raft AppState + router
+// builders. Compiled in every feature set; the router builder is server-only.
+pub(crate) mod raft;
 
 mod data;
 // PLAN_KV_TIMERS.md §8.1 — the KV and timer HTTP surfaces. Compiled and

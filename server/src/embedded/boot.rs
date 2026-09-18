@@ -126,6 +126,33 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
     // default tenant, exactly like the OSS HTTP path with the flag off.
     cfg.tenancy_header = false;
 
+    // PLAN_RAFT.md §14.7 — embedded raft mode. KEEP IN SYNC with main.rs's
+    // `run_raft`: no Postgres pool, no `SELECT 1`, no schema apply, and a
+    // REQUIRED data dir (§11.1). The state is built by the shared
+    // `handlers::raft::build_raft_state`, so the embedded and binary raft
+    // `AppState` cannot drift. WP-1.7a hands back the `NotReady` facade stub, so
+    // the embedded message-path methods (which call the same storage-aware
+    // handlers) answer `503 raft_phase1_unsupported`; WP-1.7c/2.10 wire the real
+    // state machine and the embedded dispatch to it.
+    if cfg.storage == config::StorageMode::Raft {
+        if cfg.raft_dir.trim().is_empty() {
+            return Err(StartError::Config(
+                "QUEEN_RAFT_DIR is required in raft mode (the raft data directory, §11.1)".into(),
+            ));
+        }
+        tracing::info!(
+            target: "boot",
+            dir = %cfg.raft_dir,
+            "embedded broker in raft mode — no Postgres pool, no schema apply (WP-1.7a stub facade)"
+        );
+        let st = crate::handlers::raft::build_raft_state(&cfg).map_err(StartError::Config)?;
+        return Ok(Booted {
+            st,
+            tasks: Vec::new(),
+            auto_spool_dir: None,
+        });
+    }
+
     if let Some(h) = &bc.pg_host {
         cfg.pg.host = Some(h.clone());
     }
@@ -496,6 +523,13 @@ pub(super) async fn boot(bc: &BrokerConfig) -> Result<Booted, StartError> {
         ownership_ok: std::sync::Mutex::new(std::collections::HashSet::new()),
         auth_enabled: cfg.auth.enabled,
         server_id: cfg.sync.server_id.clone(),
+        // PLAN_RAFT.md WP-1.7 — this embedded boot path is the Postgres class
+        // (the raft embedded path branches earlier, below). The facade is the
+        // inert `NotReady` stub and is never consulted, because every handler
+        // checks `storage` first.
+        storage: config::StorageMode::Postgres,
+        rsm: Arc::new(crate::rsm::facade::NotReady::new()),
+        raft_ready_lag_ms: cfg.raft_ready_lag_ms,
     });
 
     let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();

@@ -268,6 +268,43 @@ impl AdmissionCfg {
             .min(self.pool_size.saturating_sub(self.pool_reserve))
             .max(self.min)
     }
+
+    /// PLAN_RAFT.md WP-1.7 — the arbiter sized for raft mode, where there is no
+    /// Postgres pool. In postgres mode `pool_size` is `DB_POOL_SIZE` and
+    /// `ceiling()` caps the write-transaction budget at the CONNECTIONS that
+    /// exist. In raft mode there is no pool: writes flow through the planner's
+    /// bounded command channel, so the concurrency the arbiter governs is that
+    /// channel's DEPTH. This maps the depth onto `pool_size` (with no reserve —
+    /// there are no connections to keep back), so the same `ceiling()` contract
+    /// holds against the planner queue instead of the pool. The lanes and their
+    /// shares are unchanged: the arbiter is ignorant of what backs a write.
+    ///
+    /// The maintenance lane keeps a floor of 1 (retention still runs as a leader
+    /// loop, §10.1), matching the postgres construction's `retention_parallelism
+    /// + 1` with a raft cell's single-slot retention.
+    pub fn for_raft_planner(depth: u64, tick: Duration, train_gap: Duration, trace: bool) -> Self {
+        let depth = depth.max(1);
+        // Two thirds of the depth as the working budget, floored at 8 — the same
+        // shape as the postgres `admission_floor` derivation, so the arbiter
+        // behaves the same way against a queue of `depth` as it does against a
+        // pool of `depth` connections.
+        let floor = (depth * 2 / 3).max(8).min(depth);
+        let mut lane_min_cap = [0.0f64; LANES];
+        lane_min_cap[Lane::Maint as usize] = 1.0;
+        AdmissionCfg {
+            init: floor,
+            min: floor,
+            max: depth,
+            pool_reserve: 0,
+            pool_size: depth,
+            train_gap,
+            tick,
+            share: [0.25, 0.40, 0.30, 0.05],
+            lane_min_cap,
+            nosync_budget: floor,
+            trace,
+        }
+    }
 }
 
 struct Waiter {

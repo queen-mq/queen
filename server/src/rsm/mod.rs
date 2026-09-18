@@ -65,6 +65,7 @@
 
 pub mod effect;
 pub mod entry;
+pub mod facade;
 
 // ---------------------------------------------------------------------------
 // The map as stubs. One line each, replaced by the owning WP (see the header).
