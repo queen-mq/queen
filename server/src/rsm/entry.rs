@@ -356,6 +356,38 @@ impl Outcome {
         }
     }
 
+    /// The outcome ON ITS OWN, framed exactly as it is framed inside an entry
+    /// (`tag:u16 | version:u16 | body_len:u32 | body`).
+    ///
+    /// Added by WP-1.2: apply records `request_id → (now, outcome)` in the
+    /// `request_ids` keyspace (D6, §5.4), and that row holds one outcome
+    /// outside any entry. The bytes are the entry's bytes, so a row written by
+    /// one build and read by another is governed by the same catalogue gate
+    /// (I16): [`Outcome::decode`] refuses an unknown tag or version.
+    pub fn encode(&self) -> Vec<u8> {
+        let body = self.encode_body();
+        let mut out = Vec::with_capacity(8 + body.len());
+        out.extend_from_slice(&self.tag().to_le_bytes());
+        out.extend_from_slice(&self.version().to_le_bytes());
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// The inverse of [`Outcome::encode`]. Trailing bytes are a layout error,
+    /// not something to ignore.
+    pub fn decode(b: &[u8]) -> Result<Outcome, CodecError> {
+        let mut r = Reader::new(b);
+        let tag_id = r.u16("outcome tag")?;
+        let version = r.u16("outcome version")?;
+        let len = r.u32("outcome len")? as usize;
+        if len != r.remaining() {
+            return Err(CodecError::Layout("outcome len does not fill the row"));
+        }
+        let out = Outcome::decode_body(tag_id, version, &r.rest()[..len])?;
+        Ok(out)
+    }
+
     fn encode_body(&self) -> Vec<u8> {
         let mut w = Writer::with_capacity(64);
         match self {

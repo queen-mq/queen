@@ -1,0 +1,619 @@
+//! Key encodings for the keyspaces of §6.1 and §6.2.
+//!
+//! LMDB orders keys by `memcmp`, so the encoding IS the index order: every
+//! "in key order" the plan asks for — the retention walk, `log_renew_lease_v1`
+//! iterating a worker's leases, the wildcard candidate scan, a `DeleteChunk`
+//! resuming where the last one stopped — is a range scan over one of the
+//! functions below, and nothing sorts in RAM.
+//!
+//! Three rules hold everywhere:
+//!
+//! - **Unsigned integers are big-endian.** `memcmp` on big-endian bytes is
+//!   numeric order.
+//! - **Signed integers are big-endian with the sign bit flipped**
+//!   ([`push_i64`]), so −1 sorts below 0. Offsets are `u64` in the keyspaces
+//!   that hold them, but `log_consumers.committed` and a timer's DLQ offset
+//!   are −1 in the SQL, and a key that carries one must still order.
+//! - **Names are escaped and terminated** ([`push_name`]): `0x00` becomes
+//!   `0x00 0xFF` and the name ends with `0x00 0x00`. Without the escape,
+//!   `("ab", "c")` and `("a", "bc")` would encode to the same bytes; with it,
+//!   the encoding is unambiguous AND order-preserving (a terminator, `0x00
+//!   0x00`, sorts below any escaped content byte, so a prefix sorts before a
+//!   longer name, which is plain string order).
+//!
+//! A composite key of names can therefore exceed LMDB's 511-byte limit —
+//! `(tenant, queue, group)` is three unbounded names in the postgres schema
+//! (`consumer_groups_metadata.consumer_group` is `TEXT`). The adapter refuses
+//! such a key with [`super::StoreError::KeyTooLong`] rather than truncating
+//! it; see the note in `super`'s header.
+
+use crate::rsm::effect::Pid;
+
+// ---------------------------------------------------------------------------
+// Primitives
+// ---------------------------------------------------------------------------
+
+/// A name, escaped and terminated. See the module header.
+pub fn push_name(out: &mut Vec<u8>, s: &str) {
+    for &b in s.as_bytes() {
+        if b == 0x00 {
+            out.push(0x00);
+            out.push(0xFF);
+        } else {
+            out.push(b);
+        }
+    }
+    out.push(0x00);
+    out.push(0x00);
+}
+
+/// Read one escaped name back, returning it and the offset just past its
+/// terminator. `None` when the bytes end before the terminator.
+pub fn read_name(b: &[u8], mut at: usize) -> Option<(String, usize)> {
+    let mut out: Vec<u8> = Vec::new();
+    while at < b.len() {
+        let c = b[at];
+        if c != 0x00 {
+            out.push(c);
+            at += 1;
+            continue;
+        }
+        let next = *b.get(at + 1)?;
+        at += 2;
+        match next {
+            0x00 => return Some((String::from_utf8(out).ok()?, at)),
+            0xFF => out.push(0x00),
+            _ => return None,
+        }
+    }
+    None
+}
+
+pub fn push_u16(out: &mut Vec<u8>, v: u16) {
+    out.extend_from_slice(&v.to_be_bytes());
+}
+
+pub fn push_u32(out: &mut Vec<u8>, v: u32) {
+    out.extend_from_slice(&v.to_be_bytes());
+}
+
+pub fn push_u64(out: &mut Vec<u8>, v: u64) {
+    out.extend_from_slice(&v.to_be_bytes());
+}
+
+/// Big-endian with the sign bit flipped, so negatives sort below zero.
+pub fn push_i64(out: &mut Vec<u8>, v: i64) {
+    out.extend_from_slice(&((v as u64) ^ (1u64 << 63)).to_be_bytes());
+}
+
+pub fn read_u16(b: &[u8], at: usize) -> Option<u16> {
+    Some(u16::from_be_bytes(b.get(at..at + 2)?.try_into().ok()?))
+}
+
+pub fn read_u32(b: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(b.get(at..at + 4)?.try_into().ok()?))
+}
+
+pub fn read_u64(b: &[u8], at: usize) -> Option<u64> {
+    Some(u64::from_be_bytes(b.get(at..at + 8)?.try_into().ok()?))
+}
+
+pub fn read_i64(b: &[u8], at: usize) -> Option<i64> {
+    Some((read_u64(b, at)? ^ (1u64 << 63)) as i64)
+}
+
+fn with(cap: usize) -> Vec<u8> {
+    Vec::with_capacity(cap)
+}
+
+// ---------------------------------------------------------------------------
+// queues, groups
+// ---------------------------------------------------------------------------
+
+/// `(tenant, queue)`.
+pub fn queues(tenant: &str, queue: &str) -> Vec<u8> {
+    let mut k = with(tenant.len() + queue.len() + 4);
+    push_name(&mut k, tenant);
+    push_name(&mut k, queue);
+    k
+}
+
+/// Every queue of a tenant, in name order.
+pub fn queues_prefix(tenant: &str) -> Vec<u8> {
+    let mut k = with(tenant.len() + 2);
+    push_name(&mut k, tenant);
+    k
+}
+
+/// `(tenant, queue, group)`.
+pub fn groups(tenant: &str, queue: &str, group: &str) -> Vec<u8> {
+    let mut k = with(tenant.len() + queue.len() + group.len() + 6);
+    push_name(&mut k, tenant);
+    push_name(&mut k, queue);
+    push_name(&mut k, group);
+    k
+}
+
+/// Every group of a queue, in name order.
+pub fn groups_prefix(tenant: &str, queue: &str) -> Vec<u8> {
+    queues(tenant, queue)
+}
+
+/// The group name of a `groups` key.
+pub fn groups_group_of(k: &[u8]) -> Option<String> {
+    let (_t, at) = read_name(k, 0)?;
+    let (_q, at) = read_name(k, at)?;
+    Some(read_name(k, at)?.0)
+}
+
+// ---------------------------------------------------------------------------
+// partitions and their indexes
+// ---------------------------------------------------------------------------
+
+/// `pid`. Also [`super::Keyspace::Garbage`]'s key.
+pub fn pid(p: Pid) -> Vec<u8> {
+    p.to_be_bytes().to_vec()
+}
+
+pub fn pid_of(k: &[u8]) -> Option<Pid> {
+    read_u64(k, 0)
+}
+
+/// `(tenant, queue, partition)` → pid.
+pub fn partitions_by_key(tenant: &str, queue: &str, partition: &str) -> Vec<u8> {
+    let mut k = with(tenant.len() + queue.len() + partition.len() + 6);
+    push_name(&mut k, tenant);
+    push_name(&mut k, queue);
+    push_name(&mut k, partition);
+    k
+}
+
+/// Every partition NAME of a queue, in name order.
+pub fn partitions_by_key_prefix(tenant: &str, queue: &str) -> Vec<u8> {
+    queues(tenant, queue)
+}
+
+/// `(tenant, queue, pid)` → (): the scan index for wildcard pops and admin.
+pub fn queue_partitions(tenant: &str, queue: &str, p: Pid) -> Vec<u8> {
+    let mut k = with(tenant.len() + queue.len() + 12);
+    push_name(&mut k, tenant);
+    push_name(&mut k, queue);
+    push_u64(&mut k, p);
+    k
+}
+
+/// Every partition of a queue, in pid order.
+pub fn queue_partitions_prefix(tenant: &str, queue: &str) -> Vec<u8> {
+    queues(tenant, queue)
+}
+
+/// The pid at the end of a `queue_partitions` key.
+pub fn queue_partitions_pid_of(k: &[u8]) -> Option<Pid> {
+    read_u64(k, k.len().checked_sub(8)?)
+}
+
+/// `(pid, file_id)` → (): which sealed segment files hold data of a partition
+/// (§6.1, G0 amendment).
+pub fn partition_files(p: Pid, file_id: u32) -> Vec<u8> {
+    let mut k = with(12);
+    push_u64(&mut k, p);
+    push_u32(&mut k, file_id);
+    k
+}
+
+pub fn partition_files_prefix(p: Pid) -> Vec<u8> {
+    pid(p)
+}
+
+pub fn partition_files_file_of(k: &[u8]) -> Option<u32> {
+    read_u32(k, 8)
+}
+
+// ---------------------------------------------------------------------------
+// cursors and the two indexes derived from them
+// ---------------------------------------------------------------------------
+
+/// `(pid, group)`.
+pub fn cursors(p: Pid, group: &str) -> Vec<u8> {
+    let mut k = with(group.len() + 10);
+    push_u64(&mut k, p);
+    push_name(&mut k, group);
+    k
+}
+
+/// Every group's cursor on one partition, in group-name order.
+pub fn cursors_prefix(p: Pid) -> Vec<u8> {
+    pid(p)
+}
+
+pub fn cursors_group_of(k: &[u8]) -> Option<String> {
+    Some(read_name(k, 8)?.0)
+}
+
+/// `(worker, pid, group)` → `lease_expires_at_us`. `log_renew_lease_v1` walks
+/// one worker's leases in this order (§8).
+pub fn leases_by_worker(worker: &str, p: Pid, group: &str) -> Vec<u8> {
+    let mut k = with(worker.len() + group.len() + 12);
+    push_name(&mut k, worker);
+    push_u64(&mut k, p);
+    push_name(&mut k, group);
+    k
+}
+
+pub fn leases_by_worker_prefix(worker: &str) -> Vec<u8> {
+    let mut k = with(worker.len() + 2);
+    push_name(&mut k, worker);
+    k
+}
+
+/// `(pid, group)` of a `leases_by_worker` key.
+pub fn leases_by_worker_parts(k: &[u8]) -> Option<(String, Pid, String)> {
+    let (worker, at) = read_name(k, 0)?;
+    let p = read_u64(k, at)?;
+    let (group, _) = read_name(k, at + 8)?;
+    Some((worker, p, group))
+}
+
+/// `(tenant, queue, group, pid)` → `ready_at_us` (§6.1 `pending`).
+pub fn pending(tenant: &str, queue: &str, group: &str, p: Pid) -> Vec<u8> {
+    let mut k = with(tenant.len() + queue.len() + group.len() + 14);
+    push_name(&mut k, tenant);
+    push_name(&mut k, queue);
+    push_name(&mut k, group);
+    push_u64(&mut k, p);
+    k
+}
+
+/// Every partition with work for one (tenant, queue, group), in pid order:
+/// the O(pending) rebuild of the ready rings (§6.3).
+pub fn pending_prefix(tenant: &str, queue: &str, group: &str) -> Vec<u8> {
+    groups(tenant, queue, group)
+}
+
+/// Everything pending for one tenant, for the rebuild's outer walk.
+pub fn pending_tenant_prefix(tenant: &str) -> Vec<u8> {
+    queues_prefix(tenant)
+}
+
+/// `(tenant, queue, group, pid)` of a `pending` key.
+pub fn pending_parts(k: &[u8]) -> Option<(String, String, String, Pid)> {
+    let (t, at) = read_name(k, 0)?;
+    let (q, at) = read_name(k, at)?;
+    let (g, at) = read_name(k, at)?;
+    let p = read_u64(k, at)?;
+    Some((t, q, g, p))
+}
+
+// ---------------------------------------------------------------------------
+// dead letters
+// ---------------------------------------------------------------------------
+
+/// `(tenant, queue, dlq_id)`: the primary key of `log_dlq`.
+pub fn dlq(tenant: &str, queue: &str, dlq_id: &[u8; 16]) -> Vec<u8> {
+    let mut k = with(tenant.len() + queue.len() + 20);
+    push_name(&mut k, tenant);
+    push_name(&mut k, queue);
+    k.extend_from_slice(dlq_id);
+    k
+}
+
+pub fn dlq_prefix(tenant: &str, queue: &str) -> Vec<u8> {
+    queues(tenant, queue)
+}
+
+/// `(pid, group, offset)` → dlq_id: the second index of §6.1's `dlq`. The
+/// offset is signed because a timer's dead letter files at −1 (025).
+pub fn dlq_by_pos(p: Pid, group: &str, offset: i64) -> Vec<u8> {
+    let mut k = with(group.len() + 18);
+    push_u64(&mut k, p);
+    push_name(&mut k, group);
+    push_i64(&mut k, offset);
+    k
+}
+
+pub fn dlq_by_pos_prefix(p: Pid, group: &str) -> Vec<u8> {
+    cursors(p, group)
+}
+
+pub fn dlq_by_pos_pid_prefix(p: Pid) -> Vec<u8> {
+    pid(p)
+}
+
+// ---------------------------------------------------------------------------
+// dedup (D10 option (a), lean)
+// ---------------------------------------------------------------------------
+
+/// `(pid, hash)` → the occurrence list. The hash is the xxh3_128 of the
+/// transaction id, exactly the 16 bytes the `Append` effect carries.
+pub fn dedup(p: Pid, hash: &[u8; 16]) -> Vec<u8> {
+    let mut k = with(24);
+    push_u64(&mut k, p);
+    k.extend_from_slice(hash);
+    k
+}
+
+pub fn dedup_prefix(p: Pid) -> Vec<u8> {
+    pid(p)
+}
+
+/// `(pid, base_offset)` → `[end][created][hashes]`: one row per `Append`, the
+/// expiry half of the lean encoding. Walked forward from the partition's
+/// `txns_start`.
+pub fn txns(p: Pid, base_offset: u64) -> Vec<u8> {
+    let mut k = with(16);
+    push_u64(&mut k, p);
+    push_u64(&mut k, base_offset);
+    k
+}
+
+pub fn txns_prefix(p: Pid) -> Vec<u8> {
+    pid(p)
+}
+
+pub fn txns_base_of(k: &[u8]) -> Option<u64> {
+    read_u64(k, 8)
+}
+
+// ---------------------------------------------------------------------------
+// request ids (D6, §5.4)
+// ---------------------------------------------------------------------------
+
+pub fn request_ids(id: &[u8; 16]) -> Vec<u8> {
+    id.to_vec()
+}
+
+/// `(now_us, request_id)`: oldest first, so the expiry loop is one forward
+/// scan and a `DeleteChunk`-shaped resume.
+pub fn request_expiry(now_us: i64, id: &[u8; 16]) -> Vec<u8> {
+    let mut k = with(24);
+    push_i64(&mut k, now_us);
+    k.extend_from_slice(id);
+    k
+}
+
+pub fn request_expiry_parts(k: &[u8]) -> Option<(i64, [u8; 16])> {
+    let t = read_i64(k, 0)?;
+    let id: [u8; 16] = k.get(8..24)?.try_into().ok()?;
+    Some((t, id))
+}
+
+// ---------------------------------------------------------------------------
+// counters (D16, §6.4)
+// ---------------------------------------------------------------------------
+
+/// What a counter is counted FOR. The byte is the first of the key, so a scan
+/// over one scope is a prefix scan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CounterScope {
+    Partition = 0,
+    Queue = 1,
+    Tenant = 2,
+    /// A (queue, group) pair: the lag inputs.
+    Group = 3,
+}
+
+/// The counters of §6.4. Ids are permanent: a retired counter's id is never
+/// reused. The full list is WP-2.6's to close against every read of §8; the
+/// message path needs these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u16)]
+pub enum Counter {
+    Pushed = 0,
+    Pending = 1,
+    Completed = 2,
+    Failed = 3,
+    DlqCount = 4,
+    RetainedBytes = 5,
+    LastPushUs = 6,
+    LastPopUs = 7,
+    /// Frames delivered at least once: `total_consumed`'s queue-level twin.
+    Consumed = 8,
+}
+
+fn counter_head(out: &mut Vec<u8>, scope: CounterScope) {
+    out.push(scope as u8);
+}
+
+fn counter_tail(out: &mut Vec<u8>, c: Counter) {
+    push_u16(out, c as u16);
+}
+
+pub fn counter_partition(p: Pid, c: Counter) -> Vec<u8> {
+    let mut k = with(11);
+    counter_head(&mut k, CounterScope::Partition);
+    push_u64(&mut k, p);
+    counter_tail(&mut k, c);
+    k
+}
+
+pub fn counter_queue(tenant: &str, queue: &str, c: Counter) -> Vec<u8> {
+    let mut k = with(tenant.len() + queue.len() + 7);
+    counter_head(&mut k, CounterScope::Queue);
+    push_name(&mut k, tenant);
+    push_name(&mut k, queue);
+    counter_tail(&mut k, c);
+    k
+}
+
+pub fn counter_tenant(tenant: &str, c: Counter) -> Vec<u8> {
+    let mut k = with(tenant.len() + 5);
+    counter_head(&mut k, CounterScope::Tenant);
+    push_name(&mut k, tenant);
+    counter_tail(&mut k, c);
+    k
+}
+
+pub fn counter_group(tenant: &str, queue: &str, group: &str, c: Counter) -> Vec<u8> {
+    let mut k = with(tenant.len() + queue.len() + group.len() + 9);
+    counter_head(&mut k, CounterScope::Group);
+    push_name(&mut k, tenant);
+    push_name(&mut k, queue);
+    push_name(&mut k, group);
+    counter_tail(&mut k, c);
+    k
+}
+
+/// Every counter of one partition (the `PartitionDelete` sweep).
+pub fn counter_partition_prefix(p: Pid) -> Vec<u8> {
+    let mut k = with(9);
+    counter_head(&mut k, CounterScope::Partition);
+    push_u64(&mut k, p);
+    k
+}
+
+// ---------------------------------------------------------------------------
+// node-local (§6.2)
+// ---------------------------------------------------------------------------
+
+/// `(pid, base_offset)` → where THIS node put the bytes. Node-local (D8).
+pub fn seg_loc(p: Pid, base_offset: u64) -> Vec<u8> {
+    txns(p, base_offset)
+}
+
+pub fn seg_loc_prefix(p: Pid) -> Vec<u8> {
+    pid(p)
+}
+
+pub fn seg_loc_base_of(k: &[u8]) -> Option<u64> {
+    read_u64(k, 8)
+}
+
+/// `(bucket, file_id)` → the file's row. Node-local (§6.2, I11).
+pub fn files(bucket: u16, file_id: u32) -> Vec<u8> {
+    let mut k = with(6);
+    push_u16(&mut k, bucket);
+    push_u32(&mut k, file_id);
+    k
+}
+
+pub fn files_prefix(bucket: u16) -> Vec<u8> {
+    let mut k = with(2);
+    push_u16(&mut k, bucket);
+    k
+}
+
+pub fn files_parts(k: &[u8]) -> Option<(u16, u32)> {
+    Some((read_u16(k, 0)?, read_u32(k, 2)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_round_trip_including_nul() {
+        for s in ["", "a", "tenant␟x", "with\0nul", "\0\0", "ümlaut"] {
+            let mut b = Vec::new();
+            push_name(&mut b, s);
+            let (back, at) = read_name(&b, 0).expect("decodes");
+            assert_eq!(back, s);
+            assert_eq!(at, b.len());
+        }
+    }
+
+    #[test]
+    fn composite_names_are_unambiguous() {
+        assert_ne!(queues("ab", "c"), queues("a", "bc"));
+    }
+
+    #[test]
+    fn name_order_is_string_order() {
+        let mut pairs = vec!["", "a", "aa", "ab", "b", "a\0b", "a\u{1}"];
+        let mut encoded: Vec<(Vec<u8>, &str)> = pairs
+            .iter()
+            .map(|s| {
+                let mut b = Vec::new();
+                push_name(&mut b, s);
+                (b, *s)
+            })
+            .collect();
+        encoded.sort();
+        pairs.sort();
+        let got: Vec<&str> = encoded.iter().map(|(_, s)| *s).collect();
+        assert_eq!(got, pairs);
+    }
+
+    #[test]
+    fn signed_keys_order_through_zero() {
+        let mut v: Vec<Vec<u8>> = [-5i64, -1, 0, 1, 5, i64::MIN, i64::MAX]
+            .iter()
+            .map(|n| {
+                let mut b = Vec::new();
+                push_i64(&mut b, *n);
+                b
+            })
+            .collect();
+        v.sort();
+        let back: Vec<i64> = v.iter().map(|b| read_i64(b, 0).unwrap()).collect();
+        assert_eq!(back, vec![i64::MIN, -5, -1, 0, 1, 5, i64::MAX]);
+    }
+
+    #[test]
+    fn unsigned_keys_order_numerically() {
+        let mut v: Vec<Vec<u8>> = [0u64, 1, 255, 256, u64::MAX]
+            .iter()
+            .map(|n| {
+                let mut b = Vec::new();
+                push_u64(&mut b, *n);
+                b
+            })
+            .collect();
+        v.sort();
+        let back: Vec<u64> = v.iter().map(|b| read_u64(b, 0).unwrap()).collect();
+        assert_eq!(back, vec![0, 1, 255, 256, u64::MAX]);
+    }
+
+    #[test]
+    fn prefixes_really_prefix_their_keys() {
+        assert!(queues("t", "q").starts_with(&queues_prefix("t")));
+        assert!(groups("t", "q", "g").starts_with(&groups_prefix("t", "q")));
+        assert!(pending("t", "q", "g", 7).starts_with(&pending_prefix("t", "q", "g")));
+        assert!(queue_partitions("t", "q", 9).starts_with(&queue_partitions_prefix("t", "q")));
+        assert!(cursors(3, "g").starts_with(&cursors_prefix(3)));
+        assert!(leases_by_worker("w", 3, "g").starts_with(&leases_by_worker_prefix("w")));
+        assert!(dedup(3, &[7u8; 16]).starts_with(&dedup_prefix(3)));
+        assert!(txns(3, 12).starts_with(&txns_prefix(3)));
+        assert!(dlq("t", "q", &[1u8; 16]).starts_with(&dlq_prefix("t", "q")));
+        assert!(dlq_by_pos(3, "g", -1).starts_with(&dlq_by_pos_prefix(3, "g")));
+        assert!(partition_files(3, 4).starts_with(&partition_files_prefix(3)));
+        assert!(files(2, 4).starts_with(&files_prefix(2)));
+        assert!(counter_partition(3, Counter::Pushed).starts_with(&counter_partition_prefix(3)));
+    }
+
+    #[test]
+    fn composite_parts_decode() {
+        let k = pending("t", "q", "g", 42);
+        assert_eq!(
+            pending_parts(&k),
+            Some(("t".into(), "q".into(), "g".into(), 42))
+        );
+        let k = leases_by_worker("w", 42, "g");
+        assert_eq!(
+            leases_by_worker_parts(&k),
+            Some(("w".into(), 42, "g".into()))
+        );
+        assert_eq!(cursors_group_of(&cursors(42, "g")), Some("g".into()));
+        assert_eq!(groups_group_of(&groups("t", "q", "g")), Some("g".into()));
+        assert_eq!(
+            queue_partitions_pid_of(&queue_partitions("t", "q", 9)),
+            Some(9)
+        );
+        assert_eq!(txns_base_of(&txns(1, 77)), Some(77));
+        assert_eq!(seg_loc_base_of(&seg_loc(1, 77)), Some(77));
+        assert_eq!(files_parts(&files(255, 9)), Some((255, 9)));
+        assert_eq!(partition_files_file_of(&partition_files(1, 9)), Some(9));
+        let id = [3u8; 16];
+        assert_eq!(
+            request_expiry_parts(&request_expiry(-7, &id)),
+            Some((-7, id))
+        );
+    }
+
+    #[test]
+    fn a_partition_scan_is_bounded_by_its_prefix() {
+        // pid 1's rows must not be reachable from pid 0's prefix.
+        let p0 = txns_prefix(0);
+        assert!(!txns(1, 0).starts_with(&p0));
+    }
+}

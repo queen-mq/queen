@@ -112,13 +112,13 @@ pub mod apply {}
 /// The committed view: store reads plus the RAM-derived indexes of §6.3
 /// (ready rings, deadline heaps, hot caches, timer wheel, notifiers).
 /// Owner: WP-1.2.
-pub mod state {}
+pub mod state;
 
 /// The ordered store adapter (heed/LMDB, D9) and the replicated keyspaces of
 /// §6.1, with the four ratified pins: `MDB_NOSYNC`, a read-transaction handle
 /// (never free-standing get/scan), `max_readers` ≥ the blocking pool, and the
 /// map-size rule of §11.8. Owner: WP-1.2.
-pub mod store {}
+pub mod store;
 
 /// Payload segment files (§11.2): per-bucket, append-only, rolling at
 /// `QUEEN_RAFT_SEGMENT_BYTES`, sealed files immutable, the index of a sealed
@@ -128,7 +128,7 @@ pub mod segments;
 /// Dedup, option (a) in the lean encoding (D10): a store index per hash
 /// `(pid, hash) → (offset, created_at)`, pruned by the txns window, whose hash
 /// lists outlive the segments retention deletes. Owner: WP-1.2.
-pub mod dedup {}
+pub mod dedup;
 
 /// The cycle driver (§7.1): drain the command channel under the batch caps,
 /// plan, propose, wait for local apply, clear the overlay. Owner: WP-1.6.
