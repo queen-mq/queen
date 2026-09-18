@@ -123,7 +123,7 @@ pub mod store {}
 /// Payload segment files (§11.2): per-bucket, append-only, rolling at
 /// `QUEEN_RAFT_SEGMENT_BYTES`, sealed files immutable, the index of a sealed
 /// file in its own `.qidx` beside it (§6.1 amendment). Owner: WP-1.3.
-pub mod segments {}
+pub mod segments;
 
 /// Dedup, option (a) in the lean encoding (D10): a store index per hash
 /// `(pid, hash) → (offset, created_at)`, pruned by the txns window, whose hash
