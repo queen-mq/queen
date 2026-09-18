@@ -1,0 +1,662 @@
+# RAFT_STATUS.md
+
+The working record of PLAN_RAFT.md (Queen without Postgres: one replicated
+log). The plan itself is never edited for progress; everything that is done,
+decided, found or measured is recorded here. Created by WP-0.1 on 2026-09-17;
+this revision (2026-09-18) is the **G0 packet**: phase 0 closed out after the
+adversarial review round.
+
+Base: branch `raft` in `/Users/alice/Work/queen`, cut from `fc71b65b`
+(master, 1.6.0). The pgless hardening tree is parked as `2bbd10d1` on branch
+`pgless`; the superseded pgless engine is read with
+`git show 6e96e228:server/src/native/<file>`.
+
+Shape: PLAN_RAFT.md §15.0.
+
+**Read this before the tables.** PLAN_RAFT.md's header and §2 record
+`G0 RATIFIED 2026-09-18` and mark D9, D10, D11 and D12 ratified. This working
+record has **no evidence that Alice ratified anything**, and all four spike
+memos were revised *after* that date, when two adversarial reviews each came
+back `refuted` and a further ~2 h of VM measurement changed three of the four
+decisions (D9 re-admits redb, D10 stays on option (a) in a new encoding, D12
+withdraws two of its four recommendations). So in this file **every decision is
+`proposed` and G0 is `ready for Alice`**. Where the plan's text is now factually
+wrong against the evidence it cites, the correction is in *Findings* with the
+exact replacement wording; PLAN_RAFT.md is not edited by this task.
+
+No product code changed in phase 0: `git status --short` is
+`?? PLAN_RAFT.md`, `?? RAFT_STATUS.md`, `?? test/raft/`. Nothing is committed.
+
+---
+
+## Gates
+
+| gate | state | date | decision | evidence |
+|---|---|---|---|---|
+| G0 | **ready for Alice** | packet 2026-09-18 | Ratify or change D9, D10, D11, D12 as amended below; decide the seven plan changes S3 produced and the three S1/S2 asks (§11.5 repair, §11.4 fan-out + cadence, §11.8 map rule); answer O1–O23; approve phase 1 with the gaps listed in the checklist. | WP-0.2 `test/raft/vm/baseline/RESULTS.md`; WP-0.3 `test/raft/spikes/s1-store/MEMO.md`; WP-0.4 `s2-dedup/MEMO.md`; WP-0.5 `s3-consensus/MEMO.md`; WP-0.6 `s4-transport/MEMO.md`; WP-0.7 `test/raft/README.md`; Findings R-01..R-64 below |
+| G1 | not reached | — | Message-path parity, crash matrix, differential and flatness results, raft1 performance vs postgres against the O14 targets. | — |
+| G2 | not reached | — | Full parity on raft1 (RAFT PARITY identical to `single`), differential clean, crash matrix and flatness pass, performance vs O14. | — |
+| G3 | not reached | — | Confirm the consensus library, re-checking its release status and the open issues (openraft GH#2080 still OPEN on 2026-09-18). | — |
+| G4 | not reached | — | raft3 parity; kill matrix with zero acknowledged loss and failover within target; equal digests; performance within the O14 budget. | — |
+| G5 | not reached | — | Go / no-go for stage. | — |
+
+### G0 checklist — what Alice decides
+
+1. **D9 store engine.** heed 0.22.1 for the 3-voter broker *with three pins*
+   (NO_SYNC, a read-transaction handle in the store adapter, `max_readers`), and
+   **redb 2.6.3 for raft1 / embedded**. Or: redb everywhere and pay ~26k msg/s.
+2. **§11.5 repair vs discard** — decide *before* WP-1.2 picks the engine: it
+   makes fjall's failures recoverable and does nothing for heed's (R-03, R-16).
+3. **D10 dedup.** Option (a) in the lean encoding. Or wait for the 3600 s
+   window run (D-06) first.
+4. **D11 consensus.** openraft @ `54094270` + `raft-log 0.4.6` as the
+   *direction* (D11 confirms at G3), plus the seven plan changes.
+5. **D12 transport.** Framed TCP on 6634: yes. **Which authentication branch**:
+   sequenced per-frame MAC (needs only `QUEEN_RAFT_SECRET`) or TLS — and if
+   TLS, **the certificate trust anchor**, which G0 has not answered and which
+   blocks that branch (R-57).
+6. **§11.4** bucket fan-out bound and durable-point cadence default;
+   **§11.8** LMDB map-size rule.
+7. **O1–O23** below (O21–O23 are new).
+8. **Performance targets (O14)** and whether the gaps below are acceptable for
+   phase 1 to start.
+
+### G0 checklist — what is still missing
+
+| WP | gap | size |
+|---|---|---|
+| WP-0.3 | PASS/FAIL exit criterion **not met at the mandated sample size**: 15 kill runs + 20 dm-flakey runs in all, against 100 kill runs per engine plus an equivalent dropped-write sample. The kill half cannot falsify (page cache survives a process kill): all 45 passed. All discrimination comes from 20 dm-flakey runs (5 fjall, 5 redb, 10 heed). | D-01, D-02 (~2 h VM) |
+| WP-0.3 | heed's 1-in-10 "store would not reopen" is **unexplained** and unreproduced; the crash matrix was never re-run in the ratified store shape. | D-01, D-03 |
+| WP-0.4 | The criterion WP-0.4 names — **probe p99 at 50k msg/s with a 1 h window** — was never run. Longest window: 360 s (VM). No cell held 50 000 msg/s under a real ack load for a full run. | D-06 (~6 h VM) |
+| WP-0.5 | The 10 GiB manifest snapshot ran at **1 GiB**; no kill during a snapshot build or install; **a pipeline of exactly 4 (the D4 amendment) was never measured** (1 and 16 were). Snapshot *cadence* against `QUEEN_RAFT_SNAPSHOT_LOG_BYTES` unmeasured. | D-09, D-10, D-11 |
+| WP-0.6 | No RTT (netem needs Alice), no HTTP/2 comparison, no failure/reconnect behaviour, `MAX_FRAME` 8 MiB vs `QUEEN_RAFT_ENTRY_MAX_BYTES` 96 MiB unreconciled, certificate anchor undecided. | D-13..D-17 |
+| all | Every regime is single-VM with a **co-resident loader** (FAT100: goload 3.31 + queen 1.38 + pg 1.39 = 6.08 of 8 vCPU). Three VMs are O13. | G4 |
+
+---
+
+## Decisions
+
+All decisions are **proposed defaults** until Alice ratifies them. See the note
+at the top of this file about PLAN_RAFT.md's `RATIFIED` markings.
+
+| id | decision (short) | state | change | date | reason |
+|---|---|---|---|---|---|
+| D1 | `QUEEN_STORAGE=postgres\|raft` per deployment, no per-queue mixing | proposed | — | 2026-09-17 | mixing classes created the two-store coupling behind pgless C17/C18/C20/C21 |
+| D2 | one Raft group; voters = StatefulSet pods (3); embedded/single-node = 1 voter | proposed | — | 2026-09-17 | one log keeps every multi-structure transaction exact |
+| D3 | entries carry effects, not commands; apply is deterministic | proposed | — | 2026-09-17 | followers never re-run planning |
+| D4 | **bounded pipeline: `QUEEN_RAFT_PIPELINE` (4) entries in flight** | proposed (**amended**) | was "one entry in flight" | 2026-09-18 | S3: 1 in flight caps a cell at **307 entries/s of 64 KiB = 19 MiB/s**; 16 in flight reaches **974/s**. **4 was never measured** — see O23 |
+| D5 | planner stamps time: `now = max(wall clock, last committed now + 1 µs)` | proposed | — | 2026-09-17 | apply has no clock |
+| D6 | 16-byte request id, outcomes kept 600 s | proposed | — | 2026-09-17 | openraft GH#2095; also bounds S4's multiplexing blast radius (R-52) |
+| D7 | nothing answers before commit + local apply on the leader | proposed | — | 2026-09-17 | pgless answered pops before their records were durable |
+| D8 | positions are node-local; never in entries or digests | proposed | — | 2026-09-17 | S2 option (b) violates this as implemented (R-31) |
+| D9 | store engine | proposed (**amended**, see below) | heed → **heed pinned + redb for raft1/embedded** | 2026-09-18 | S1 §4 after R-01..R-19 |
+| D10 | dedup design | proposed (**amended**, see below) | option (a) → **option (a), lean encoding** | 2026-09-18 | S2 §5 after R-20..R-34 |
+| D11 | consensus library | proposed (**amended**, see below) | pin unchanged; evidence and adapter changed | 2026-09-18 | S3 after R-35..R-47 |
+| D12 | transport and authentication | proposed (**amended**, see below) | TLS-preference and pool size withdrawn | 2026-09-18 | S4 after R-48..R-64 |
+| D13 | receivers hold up to `QUEEN_RAFT_HOLD_MS` (8000), then 503 `no_leader` | proposed (**flagged**) | — | 2026-09-18 | **does not cover GH#2080**: with a leader known but quorum-ack-less, the client write *hangs* (10 s, no answer). Needs S3 plan change 7 (a `propose` deadline) |
+| D14 | heartbeat 100 ms, election 1000–2000 ms, pre-vote on, quorum check on | proposed (**flagged**) | — | 2026-09-18 | S3 measured failover **3087 / 3300 / 3353 ms** (detection = `election_timeout_max + rand(min,max)`; the election itself is ~5 ms). Either state 3–4 s in D14, or ask for 400/800 ms and pay for it in the follower's durable point |
+| D15 | local stale reads for fetch/browse/stats/…; linearizable for KV and streams state | proposed (**flagged**) | — | 2026-09-18 | two constraints added: (i) a restarted node serves **no** local stale read until it has re-applied the `committed` it reopened with (S3 plan change 5); (ii) on heed a read begins and ends inside one blocking call and never holds a `RoTxn` across `.await` (S1 §4 item 1b) |
+| D16 | stats/usage/retained bytes = O(1) counters at apply | proposed | — | 2026-09-17 | `log_refresh_all_stats_v1` was a production wall |
+| D17 | metrics tables node-local | proposed | — | 2026-09-17 | — |
+| D18 | traces replicated with a 7-day age limit | proposed | — | 2026-09-17 | — |
+| D19 | no push spool in raft mode | proposed | — | 2026-09-17 | — |
+| D20 | effect kinds gated by a replicated cluster version | proposed | — | 2026-09-17 | — |
+| D21 | IDENTITY `{cluster_id, node_id, generation, disk_uuid}` | proposed (**flagged**) | — | 2026-09-18 | S3 proved the wiped-voter case is **silent** in a release build (the promised panic is a `debug_assert!`), and found the case IDENTITY does *not* close: a **reverted** disk (PVC from a volume snapshot) matches every field and brings back a stale vote store. Needs a fencing value (plan change 6) |
+| D22 | postgres class stays as the oracle until GA | proposed | — | 2026-09-17 | also the mitigation for GH#2080 |
+| D23 | branch `raft` in the main checkout; pgless parked `2bbd10d1` | proposed (amended 2026-09-17) | — | 2026-09-17 | other worktrees belong to other sessions |
+| D24 | ephemeral queues stay outside Raft | proposed | — | 2026-09-17 | — |
+| D25 | the proxy keeps its own Postgres; block the admin tenant-delete route | proposed | — | 2026-09-17 | — |
+| D26 | Kafka facade transactions stay single-node-only | proposed | — | 2026-09-17 | — |
+
+### D9 — amended proposal (store engine)
+
+**heed 0.22.1 (LMDB) for the 3-voter broker, with its configuration pinned;
+redb 2.6.3 as the documented alternative and as the engine for single-voter /
+embedded (D2, raft1); §11.5 changed to repair rather than discard.**
+
+Pins that go with heed, without which the numbers it was chosen on do not
+apply: (a) `MDB_NOSYNC`, **not** `MDB_NOMETASYNC` — measured, NOMETASYNC costs
+13% of the 20k rate (17 309 vs 20 000 msg/s), 1.8× the kernel writes (7.04×
+vs 3.91×) and a store-commit **p99 of 123 ms** on the apply thread; (b) a
+read-path rule — `rsm/store/` exposes a *read-transaction handle*, not
+free-standing `get`/`scan`, because with thread-local reader slots a second
+read txn on one thread is `MDB_BAD_RSLOT` (measured, the 2nd of 200) and the
+`Send`-capable mode (`MDB_NOTLS`) **does not scale**: 2.06 / 1.97 / 2.08 M
+gets/s at 1 / 4 / 8 threads against 2.10 / 8.18 / **9.96** M with TLS slots;
+(c) `max_readers` ≥ the blocking pool, `MDB_READERS_FULL` a refusal, not a
+panic; (d) a map-size rule in §11.8 (`MDB_MAP_FULL` on the apply path is a
+node-local liveness cliff the leader cannot see).
+
+Evidence. Mandatory criterion (WP-0.3): redb **15/15** kill + **5/5** flaky,
+0 past-durable, and it passes *by construction* (`Durability::None` never
+publishes a crash-visible root); heed 15/15 kill + **9/10** flaky, never past
+its durable point after dropped writes but **1 run in 10 would not reopen at
+all**, unexplained; fjall 15/15 kill but **1/5** flaky, reopening ahead of its
+durable point in 14/15 kill and 4/5 flaky runs. In the ratified store shape
+(§11.3 batched commits, no `segments` rows, a random-key `dedup` keyspace)
+heed reaches 20 000 / 47 425 msg/s at the 20k/50k targets with WA 3.91/3.00×,
+4 µs KV gets, 41.5 M rows/s ordered scan and a 524–556 MiB/s native export;
+redb reaches 19 466 / 25 895 with WA 8.66/7.88×; fjall 20 000 / 49 019 with WA
+1.33× but a 12.3 s stop-the-world `major_compact` in the soak and RSS 4 →
+986 MiB still rising after ten minutes. (c) of Alice's 2026-09-17 list is
+honoured: all three candidates are libraries; nothing home-grown.
+
+What this proposal **cannot** claim yet: heed's "RAM bounded" and "ordered
+reads win" pillars are unproven — the only soak is fjall's, and heed's scan
+number is 180 001 rows over **9.6 MiB fully in page cache**. Both are demoted
+to open until D-04.
+
+### D10 — amended proposal (dedup)
+
+**Option (a): a store index `(pid, hash) → occurrence list`, pruned by the txns
+window, in the *lean encoding* — no `(created_at, pid, hash)` secondary index;
+expiry through one sequential `txns` row per `Append`,
+`(pid, base_offset) → [end][created][hashes]`, pruned by 006's rotating
+per-partition walk. Bound the durable point per §11.4.**
+
+Why (a) and not (b): `005_log_ack.sql` (`log_ack_by_hash_v1`) resolves each
+hash to `eff = MIN(voff)` over `[max(committed+1, txns_start), batch_end]`
+**and** `below = bool_or(voff <= committed)`, so the span is
+`[txns_start, batch_end]` — the whole txns window — and the value must be the
+occurrence list (5 591 of the 17.6 M rows in the a-heed cell already carry more
+than one occurrence). Any "bounded exact ack index" is therefore option (a)'s
+index, row for row; "(b) + an exact ack index" is (a) *plus* blooms, sidecars,
+a file table, 16 B/message inside the frames and hash-only compaction.
+
+Numbers (VM, 600 s cells, 360 s dedup / 432 s txns window, 50 000 offered):
+probe p99 **0.024 ms** (a) vs **0.575 ms** (b) — 24× on the statistic WP-0.4
+names; ack of ten hashes 0.479 ms (b) vs ~0.020 ms (a); ready to answer after a
+restart 20 ms vs 212 ms. Lean encoding, measured on the VM: store per message
+**171.4 → 119.0 B** (−31%), store ops per message **2.48 → 1.58** (−36%),
+RSS **985 → 689 MiB** (−30%), rate, latency and exactness unchanged, kernel
+bytes unchanged (+2% — the write amplification is the random `(pid, hash)` row
+itself, not the secondary index). Exactness is PASS for both designs in both
+directions including the retention case, and after a restart (0 wrong of 3967 /
+4096 / 1793).
+
+Cost to plan against: `rate × txns_window` rows per voter, i.e. at the product
+default (`server/sql/schema.sql:66`, `dedup_window_seconds DEFAULT 3600`) and
+50 000 msg/s, **180 M rows and ~10.6 GB of logical dedup data per voter** in
+the lean encoding. **Nobody has run that window** (D-06). Option (b) is kept as
+the fallback and would first need the D8/I7 split (its `txns` locator packs
+`(bucket, file_id, offset, len)` — a position — into a replicated keyspace).
+
+### D11 — amended proposal (consensus)
+
+**openraft pinned to git rev `54094270ede0b8a2eb6ed6ae990edc6ca19d98ec`
+(`0.10.0-alpha.34` + the GH#2095 `LogEntryDiscarded` fix) with
+`raft-log 0.4.6`**, re-confirmed at G3. Features `["serde", "type-alias"]`;
+`cargo +1.88 check` clean (C-3); MIT OR Apache-2.0. There is no 0.10 release to
+pin instead (openraft #1637 open since 2026-01-01; crates.io has only alphas).
+
+Two things about the evidence changed on 2026-09-18. **`raft-log` is now
+qualified by crash runs, not by a conformance suite**: 10 × `kill -9` of a
+follower under 64 KiB load with a restart each time, plus 10 rounds with
+dropped unflushed writes (dm-flakey, injector self-tested) — **20/20 reopened
+exactly at the index the leader had counted as matched**, every claimed index
+readable, votes monotone, 0 acknowledged writes missing. The old claim ("it
+passes `openraft::testing::log::Suite`, which is the §12.3 storage contract")
+is **withdrawn**: that suite never reopens a store, never crashes a process and
+never drops a write, and it passes against the adapter setting that never
+flushes at all. **`save_committed` must be durable**: openraft's example (which
+the spike copied) does not flush it, and with that setting a `kill -9` restart
+brings a node back with applied state *behind* what it had already answered
+(laptop: `WENT BACKWARDS on 1001: last_applied Some(301) -> Some(300)`). Cost
+of the fix: **+2.4 ms on a 64 KiB commit p50 (+19%), no throughput change**.
+
+Seven plan changes come with this pin: §9.4 coalesce read barriers into the
+in-flight one and drop the fixed 2 ms window (measured 7–8× pessimisation:
+0.16–0.23 ms vs 1.28–1.47 ms p50, max 58.6 ms); §12.5 the append/snapshot
+deadline needs a floor of its own, never `soft_ttl()` from
+`heartbeat_interval`; §12.7/§14.1 readiness is never `is_leader` and never
+`current_leader`; D14 states 3–4 s failover; **(5)** durable `save_committed`
+plus a readiness gate; **(6)** IDENTITY needs a monotonically increasing
+fencing value (highest term seen) against a *reverted* disk; **(7)** `propose`
+needs its own deadline, because a leader without a quorum-ack lease hangs the
+write instead of refusing it (GH#2080 reproduced: 0 commits for the whole
+fault, term never moves, client write unanswered after 10 s, recovery only by
+healing the link (616 ms) or `kill -9` of the stuck leader (3528 ms)).
+
+Fallback raft-rs: **20–27 agent-days** (4–5 calendar weeks) against 6–9 for an
+openraft adapter; needs a build-time `protoc` (brushes C-2); crates.io still at
+0.7.0 (2023).
+
+### D12 — amended proposal (transport)
+
+**Framed length-prefixed TCP on `QUEEN_RAFT_PORT` (6634) for forwarding and
+Raft traffic, with a mutual HMAC handshake over `QUEEN_RAFT_SECRET`.
+Confirmed.** Two of the first memo's four recommendations are withdrawn.
+
+Kept. Leader CPU per message at 50 000 msg/s, VM, like-for-like pairs: plain
+**1.26 vs 2.15 µs (0.59×)**, authenticated 2.47 vs 3.84 (0.64×), encrypted
+1.54¹ vs 3.33 (**0.46×**; the first memo's 0.32× was wrong — it divided
+framed+TLS by HTTPS+*MAC*). Plus 5% fewer bytes (294.2 vs 309.7 B/msg) on **2
+sockets against 15–49**. Two dependencies of that number, now measured: at **8
+framed sockets against HTTP's 15–49 the ratio is 0.88×**, and with a
+jitter-free pacer framed CPU rises +26% and HTTP's 2%, moving the plain ratio
+0.54× → 0.66×. HTTP/1.1 cannot be held to a socket budget: capped at 2 it
+opened **218 695 connections in 60 s** at 3.85× the framed CPU.
+¹ corrected by the 1.126 same-day framed control.
+
+**Changed — authentication.** TLS is *no longer preferred* over the per-frame
+MAC; they are alternatives, as D12 already says. The gap is 11× but 1.10 µs/msg
+= **0.055 of one core at 50 000 msg/s** (0.7% of the box) and +57 µs of p50 on
+a path S3 measured at ~3 ms. Whichever is chosen, two properties must hold and
+the spike as measured had neither: the peer must be authenticated (the spike
+used `with_no_client_auth()` and a shared DER, so a relay terminating both legs
+passes the handshake through — fix: client certificates **or** RFC 5705
+exporter material mixed into the transcript), and frames must not be replayable
+(the measured MAC covered `type || body` only, one key both directions, no
+counter — fixed in the spike: `dir || seq || len || type || body`,
+per-direction keys, receiver accepts only its expected sequence, +0.4%).
+**The TLS branch is not ratifiable while its trust anchor is undecided.**
+
+**Changed — pool size.** "Two connections is the knee" is withdrawn: it was
++9 µs of loopback p50 at an in-flight depth of **0.31** commands, where D7
+implies 15–35. One socket is CPU-optimal (0.63 vs 1.26 µs/msg). Keep §12.5's
+separate pools, start at 2, size them in the transport WP under a commit delay
+and mixed frame sizes.
+
+**Not measured**: HTTP/2 over the same rustls — the one alternative that would
+remove most of the framing, multiplexing, backpressure and reconnect code
+(D-17).
+
+---
+
+## Work packages
+
+### Phase 0 — Groundwork and spikes
+
+Two campaigns ran unattended: the **S2 VM resume campaign (2026-09-18
+05:40:31–05:54:44Z)** and the **S4 VM pass B / refutation cells** were queued by
+the coordinator on the Linux VM while Alice's PC was off. Both left the VM
+clean (no processes, no loop or dm devices, data dirs emptied).
+
+| WP | state | commit | evidence |
+|---|---|---|---|
+| WP-0.1 Branch and record | **done** (uncommitted) | — | `git rev-parse HEAD` = `fc71b65b7e3564d8d4859504a51fe214f3d89970` on branch `raft`. `cargo build --release --bin queen` 4m30s warm, binary 9 871 072 B, 0 warnings. `cargo test --lib`: **649 passed / 0 failed / 7 ignored** (re-verified in a second pass, same counts). The 7 PG-gated tests on a throwaway `postgres:16-alpine` (port 5481, container removed): **7 passed**. Details in **M0**. Files: `RAFT_STATUS.md`, `PLAN_RAFT.md` (both untracked). |
+| WP-0.2 Baselines on the VM | **done** | — | `bash /root/raft/wp02/measure-baseline.sh wp02b` (VM 164.90.215.224, 2026-09-17 13:15:38–13:19:46Z), plus a 4-point fat-batch calibration ladder. Six regimes, **0 error lines**, `shed=0` everywhere. **M1**. Files: `test/raft/vm/baseline/RESULTS.md`, `test/raft/vm/measure-baseline.sh`, `test/raft/vm/baseline/{A20k,A50k,B1,C1000,D1,FAT100}.log`, `cpu-rss.csv`, `cpu-summary.txt`, `marks.csv`, `summary.txt`, `fat-calibration/`, `run1-repeat/`. |
+| WP-0.3 ⚠ Spike S1: store engine | **partial** — memo exists, **PASS/FAIL criterion not met at the mandated sample size** | — | `./run-matrix.sh`, `sudo ./vm-campaign.sh short` (the `full` profile is the deferred one), `./kill-loop.sh` (45 runs in all), `sudo ./flaky.sh` (20 runs in all: 5 redb / 5 fjall / 10 heed), `./vm-refute.sh` (2026-09-18, ratified shape + NOMETASYNC + reader modes). 9-cell matrix ×3 engines at 20k/50k/100k, 90 s cells; 40 s cells in the refutation round; one 10-min fjall soak. **M2**. WP-0.3 mandates **100 kill runs per engine plus an equivalent dropped-write sample**; 15 and 5–10 were run, and the kill half cannot falsify. Files: `test/raft/spikes/s1-store/{MEMO.md,RESULTS-vm.md,RESULTS-laptop.md,RESULTS-refutation.md,DEPS.md,README.md,src/**,results/**,results-vm/**,*.sh}`. |
+| WP-0.4 ⚠ Spike S2: dedup | **partial** — memo exists, **the 1 h window WP-0.4 names was never run** | — | `./run-laptop.sh`, `./s2-vm-resume.sh` (VM, 2026-09-18 05:40–05:54Z, queued by the coordinator), `./refutation-vm.sh`, `./refutation-laptop.sh`, `./repro-samples.sh`. Four 600 s VM cells at 50k offered + five 120 s refutation cells + laptop cells. Exactness PASS both directions and after restart. **M3**. Longest window 360 s against the product default 3600 s; no cell held 50 000 msg/s under a real ack load for a full run. Files: `test/raft/spikes/s2-dedup/{MEMO.md,RESULTS-vm.md,RESULTS-laptop.md,README.md,src/**,results/**,*.sh}`. |
+| WP-0.5 ⚠ Spike S3: consensus | **partial** — memo + exact pin, **3 deliverables short** | — | `./run.sh vm-today` (the budgeted profile: 7 scenarios, 3 nodes over real TCP, 1 GiB snapshot, 3 kill repetitions; **11 min 41 s** of VM wall clock, node logs 14:54:40.571Z→15:06:21.985Z), `./run.sh vm-refute` (2026-09-18: scenarios 8 and 9, the `save_committed` sweep, 6 min), `sudo ./flaky-log.sh` (10 dm-flakey rounds). **M4**. Short of the WP: the manifest snapshot ran at **1 GiB** not 10 GiB; no kill during a snapshot build or install; **a pipeline of exactly 4 was never measured**. Files: `test/raft/spikes/s3-consensus/{MEMO.md,RESULTS-vm.md,RESULTS-laptop.md,RAFTRS.md,README.md,src/**,results/{vm-2026-09-17,vm-2026-09-18-refute,laptop-*}/**,run.sh,flaky-log.sh}`. |
+| WP-0.6 Spike S4: transport | **done** (its own deferred list is long) | — | `./run-vm.sh` two independent 60 s passes × 15 configurations (`results/vm/`, `results/vm-b/`; pass B queued by the coordinator while Alice's PC was off), `./run-vm-refute.sh` (2026-09-18: `results/vm-c/` HTTPS-plain + HTTP-capped-pool, `results/vm-pace/` jitter-free pacer, `s4 bench`), `python3 table.py / pairs.py / refute.py`. **8 659 953 commands forwarded, `cmds_bad = 0` in all 38 rows**, achieved = offered to 0.005%. `cargo test --release`: **13 tests green**. **M5**. Files: `test/raft/spikes/s4-transport/{MEMO.md,RESULTS-vm.md,RESULTS-laptop.md,README.md,src/**,results/**,*.sh,*.py}`. |
+| WP-0.7 Harness skeletons | **done** (five skeletons; the parts that need a raft broker refuse to run) | — | `GOWORK=off go test -count=1 ./...` in `difffuzz` (**10 tests**), `checker` (**9**), `flatness` (**17**) — all `ok`; `python3 -m pytest test/raft/crash test/raft/kill -q` → **39 passed in 0.05 s**. 75 tests in total. Catalogues: difffuzz push/pop/ack live + 13 declared stubs; checker 2 checks live + 7 stubs, three verdicts (PASS/FAIL/**SKIP with a reason**), `-strict` turns SKIP into failure; crash 24 points / 5 scenarios; kill 10 scenarios with a stratified scheduler; flatness RESULTS format + comparator + preload CLI. Exit codes uniform: 0 clean, 1 judged-thing failed, 2 could not run. Files: `test/raft/README.md`, `test/raft/{difffuzz,checker,crash,kill,flatness}/**`. |
+
+### Phases 1–6 — all `not started`
+
+Phase 1 starts on Alice's approval at G0. The WP list is PLAN_RAFT.md §15; none
+has begun, so they are kept here as one line per phase rather than six tables of
+empty rows.
+
+| phase | work packages, all `not started` |
+|---|---|
+| 1 — single node, message path | WP-1.1 codec ⚠ · 1.2 store adapter ⚠ · 1.3 segment files ⚠ · 1.4 apply thread ⚠ · 1.5 planner · 1.6 LocalReplicator + batcher ⚠ · 1.7 handler seam · 1.8 crash matrix ⚠ · 1.9 raft1 topology + parity gate · 1.10 difffuzz v1 + checker v1 · 1.11 VM regimes + flatness |
+| 2 — whole feature set | WP-2.1 transactions ⚠ · 2.2 KV · 2.3 timers ⚠ · 2.4 streams · 2.5 admin · 2.6 reads · 2.7 retention ⚠ · 2.8 local metrics + dashboard · 2.9 compaction ⚠ · 2.10 embedded · 2.11 conformance · 2.12 every suite + differential v2 |
+| 3 — one voter | WP-3.1 pin the library · 3.2 consensus log storage ⚠ · 3.3 state machine adapter ⚠ · 3.4 recovery matrix ⚠ · 3.5 parity with LocalReplicator |
+| 4 — three voters | WP-4.1 transport ⚠ · 4.2 forwarding ⚠ · 4.3 membership ⚠ · 4.4 leadership ⚠ · 4.5 reads · 4.6 snapshots ⚠ · 4.7 digests · 4.8 health/metrics · 4.9 raft3 topologies · 4.10 crash + kill matrix ⚠ · 4.11 helm |
+| 5 — operations | WP-5.1 rolling upgrade ⚠ · 5.2 backup/restore ⚠ · 5.3 migration ⚠ · 5.4 SDK resilience · 5.5 docs · 5.6 CI lanes · 5.7 final adversarial review ⚠ |
+| 6 — stage and production | a separate plan with Alice; nothing starts without her explicit OK |
+
+Two phase-1 WPs now carry a precondition:
+
+- **WP-1.2** (store adapter) must not write heed-specific code before D-01 and
+  the §11.5 repair decision (S1 §6.9, R-01/R-03).
+- **WP-1.2 / WP-1.4** must not freeze the dedup keyspaces before D-06 (S2
+  recommendation 5).
+
+---
+
+## Findings
+
+Every finding of the four adversarial reviews, with its resolution. `closed` =
+fixed or measured; `open` = upheld and still owed; `plan` = upheld, needs a
+decision or a plan edit (PLAN_RAFT.md is not edited by this task).
+
+### From S1 / WP-0.3 (reviewer A `major`, reviewer B `blocker`; the memo upholds all 19)
+
+| R-id | src | finding | resolution | state |
+|---|---|---|---|---|
+| R-01 | S1 R1.1 | The memo's own ratification precondition (20 dropped-write heed runs) was never run; D9 was ratified anyway and the plan demoted it to "residual risk". | Upheld. It is deferred item **D-01**; the pin is provisional until it exists. | **open** |
+| R-02 | S1 R1.2 / R2.5 | The `kill -9` half cannot falsify (page cache survives): all 45 passed. The verdict rests on 20 dm-flakey runs (5/5/10) against WP-0.3's 100+20, and 20 s runs on a VM with `dirty_expire_centisecs=3000` bias toward the reported result. On n=10 one failure has a 95% interval of ~0.3–45%. | Upheld, **cannot be closed in this budget**. Sample sizes now stated next to every verdict. D-01, D-02. | **open** |
+| R-03 | S1 R1.3 / R2.6 | The §11.5 log-tail repair was applied asymmetrically: it fixes fjall's failure (state ahead of an intact store) and cannot fix heed's (store will not open). | Upheld and decisive. Memo §1 rewritten with both raw log lines; with the repair adopted fjall's failures become recoverable and heed's does not. | **plan** |
+| R-04 | S1 R1.4 / R2.6 | In D2 single-voter/embedded there is no snapshot source, so heed's unopenable store is unrecoverable data loss; redb is 20/20. | Upheld. **redb is now the proposed engine for raft1/embedded.** | closed |
+| R-05 | S1 R1.5 | The spike measured `MDB_NOSYNC` without WRITE_MAP and never `MDB_NOMETASYNC`; the causal claim ("the corruption LMDB documents for that flag") is not what `lmdb.h` says for a non-WRITEMAP env. | Upheld. Claim removed. NOMETASYNC measured: **17 309 msg/s (87%), WA 7.04×, store commit p99 123 ms** — kept OFF for now; its crash behaviour is D-03. | closed |
+| R-06 | S1 R1.6 | heed's read numbers come from thread-local reader slots, where `RoTxn` is not `Send`; `max_readers` never exercised. | Upheld, and worse than guessed: `MDB_NOTLS` gives **2.06/1.97/2.08 M gets/s at 1/4/8 threads** vs 2.10/8.18/**9.96** M with TLS; `MDB_BAD_RSLOT` on the 2nd txn on one thread; `MDB_READERS_FULL` at `max_readers`. New read-path rule (D9 pin b). | closed |
+| R-07 | S1 R1.7 / R2.7 | The ordered-read pillar is 180 001 rows / **9.6 MiB fully in page cache**; heed was never scanned beyond that and never soaked. | Upheld. Demoted to unproven; D-04. | **open** |
+| R-08 | S1 R1.8 / R2.7 | The "RAM is reclaimable page cache" pillar has no long-run evidence; the only soak was fjall's, and it is used against fjall. | Upheld. Demoted; heed's RSS at 40 s is *higher* than fjall's (163 vs 129 MiB at 20k). D-04. | **open** |
+| R-09 | S1 R1.9(a) | PLAN_RAFT.md D9 says heed is "the only candidate that always reopens consistent after kill -9 and after dropped writes". Both words are false: redb is 20/20 with 0 past-durable; heed reopened past its durable point in **12 of 15** kill runs. The "redb capped at ~10k msg/s with 29× write amplification" clause is also now false. | Upheld. Replacement wording for §2 of the plan is in S1 MEMO §6.3; **PLAN_RAFT.md needs the edit**. | **plan** |
+| R-10 | S1 R1.9(b) | `RESULTS-vm.md` §3 said "3 of the 5 runs"; the log shows 4 of 5. | Upheld, fixed in `RESULTS-vm.md`. | closed |
+| R-11 | S1 R1.10 | What could not be refuted: durable-point ordering, `verify --verify-all`, adapter symmetry, the honesty of the cut list, DEPS.md's facts, the histogram's documented ±3.2%. | Recorded. | closed |
+| R-12 | S1 R2.1 | The comparison measured a design that no longer exists: §11.3 now batches, and redb was dropped on exactly the per-commit cost a 256:1 batch amortises. | Upheld **and it changes the answer**: redb 10 046 → **19 539 msg/s**, WA 29.31 → **8.33×**, isolated to the cadence by a 2×2. redb re-admitted. | closed |
+| R-13 | S1 R2.2 | The ordered-scan pillar was measured on `segments`, which the §6.1 amendment removes from the store. | Upheld. Re-measured over `seg_loc`: heed **41.5 M rows/s** vs fjall 2.1–2.7 — the 15–20× gap survives; §2's table carries a warning header. | closed |
+| R-14 | S1 R2.3 | The store's new dominant keyspace (random `(pid, hash)`) was never in the harness. | Upheld, partly closed: added; it costs heed **3.30 → 3.91×** WA. 800k keys in a 145 MiB page-cached file ≠ the ~72 M-row regime — still unmeasured. | **open** |
+| R-15 | S1 R2.4 | redb's 0/15+0/5 is structural; heed's 0/10 is an observation. The memo read them as the same kind of fact. | Upheld; the distinction is now the second reason for D9's redb clause. | closed |
+| R-16 | S1 R2.6 | The recommendation's precondition (§11.5 repair) was never ratified; §11.5 step 3 still says "discard or refuse to start", which in raft1 is data loss. | Upheld. **Decide the repair before WP-1.2.** | **plan** |
+| R-17 | S1 R2.7 | I8 says S1 "prefers engines with incremental checkpoints"; heed is the only candidate that cannot, and the memo never said it was choosing against the invariant. | Upheld; stated in the table and in §4. | closed |
+| R-18 | S1 R2.8 | `MDB_MAP_FULL` is an apply-path failure with no backpressure: §11.8 gates on disk percent only, and D15 makes long read txns ordinary. | Upheld — a plan gap. **§11.8 needs a map-size rule** (report map usage in Status, gate the planner on the worst voter, bound read-txn lifetime, define the apply-path behaviour). | **plan** |
+| R-19 | S1 R2.9 | "5–7× below at 50k/100k" is wrong (4.86× / 4.75×); DEPS.md's build-image item was open; RAFT_STATUS.md said `proposed` while the plan said RATIFIED. | Upheld ×3: sentence removed; build image **closed in heed's favour** (both Dockerfiles are `rust:1-bookworm`, glibc + gcc, C-2 holds); the status/plan disagreement is the note at the top of this file. | closed |
+
+### From S2 / WP-0.4 (two reviewers, both `blocker`; the memo upholds all 15 and the verdict changed)
+
+| R-id | src | finding | resolution | state |
+|---|---|---|---|---|
+| R-20 | S2 R1 | The recommended design was never measured: revision 1 recommended (b) minus the cache **plus** a new exact ack index — a composite in no cell. | Upheld; the recommendation is withdrawn. §5 now recommends a design measured in five cells on two hosts. | closed |
+| R-21 | S2 R2 | That "ack index" is option (a)'s index: 005's below-cursor span is `[txns_start, committed]`, the whole txns window. | Upheld — **the finding that decides**. Both reviewers found it independently. | closed |
+| R-22 | S2 R3 | A smaller ack row cannot exist: 005 needs `eff` (a MIN over a per-call range) **and** `below`, so the value must be the occurrence list. | Upheld; 5 591 multi-occurrence rows show a (min,max) pair would not do. | closed |
+| R-23 | S2 R4 | WP-0.4's mandatory criterion — probe p99 at 50k with a **1 h** window — was never run, and 1 h is the product default (`schema.sql:66`). | Upheld, **not closed**. D-06. | **open** |
+| R-24 | S2 R5 | "The only one whose cost does not follow the window" is contradicted by the spike's own sweep. | Upheld; the claim is gone. (b)'s *store* is per-Append; its blooms, file table and frame scans are linear in the window. | closed |
+| R-25 | S2 R6 | The ack measurement did not model 005: one hash per call instead of one pass per ack. | Upheld **and measured**: `--ack-batch 10` gives 2.2× the resolutions at −6.9× per-hash cost and **+54% throughput**. Revision 1's third argument withdrawn. | closed |
+| R-26 | S2 R7 | Option (a) was convicted on one wasteful encoding D10 does not mandate. | Upheld on the encoding (**a-lean**: −31% store, −36% store ops, −30% RSS, latency unchanged), **refuted by measurement** on the mechanism: kernel bytes +2%, so the secondary index was not the source of the write amplification. | closed |
+| R-27 | S2 R8 | The 1227 ms durable point is mis-attributed and has no sensitivity run. | Upheld (no sensitivity run) and **refuted by measurement** (the mechanism). Three cadences: 250/1000/4000 ms → 0.605 / 0.307 / **0.137** s of sync per wall second. "Option (a) re-opens D9" withdrawn. One correction for §11.4: its "cost is proportional to what changed" is false on LMDB — 16× the interval costs 1.65× the time. | closed / **plan** |
+| R-28 | S2 R9 | The recommended option had no valid restart-exactness number. | Upheld **and measured**: three new (b) cells, `wrong=0` of 4001, 3872 (laptop) and 1793 (VM). | closed |
+| R-29 | S2 R10 | The decision table dropped probe p99, the statistic WP-0.4 names. | Upheld; p99 is in every table and every figure carries its window and achieved rate. | closed |
+| R-30 | S2 R11 | "11–18× less store" omits the disk where (b) puts its hashes. | Upheld: **total disk per message is 3.3×** on heed (49.5 vs 161.8 B), 1.7× on fjall. | closed |
+| R-31 | S2 R14 | Option (b) puts node-local positions in a replicated keyspace, and hash-only compaction rewrites them locally (D8, I7, I1). | Upheld, **unresolved**. As implemented (b) breaks D8/I7; the split's snapshot and recovery consequences are uncosted. A reason not to adopt (b) on this evidence. | **open** |
+| R-32 | S2 R12 | System-level, (a) achieved 1.6–2.0× the rate of (b) in every cell. | Upheld, partly explained: 54% of the gap was the unbatched ack workload. | closed |
+| R-33 | S2 R13 | Dropping the recent cache was recommended against the only end-to-end number (−31% rate), never run on the VM. | Upheld; the question stays open and rate-matched, and is moot while (b) is not the design. D-08. | **open** |
+| R-34 | S2 R15 | G-3/I8 were misapplied: `rate × window` satisfies both as written; the real objection is absolute footprint plus an engine interaction. | Upheld; §4 says so in those words. | closed |
+
+### From S3 / WP-0.5 (two reviewers, both `major`)
+
+| R-id | src | finding | resolution | state |
+|---|---|---|---|---|
+| R-35 | S3 R1 | "Passes `openraft::testing::log::Suite`, which is the §12.3 storage contract" is an over-read: no case reopens a store, crashes a process or drops a write. | Upheld; claim withdrawn. Demonstrated: the suite passes against **all three** `save_committed` settings, including the one that never flushes. | closed |
+| R-36 | S3 R2 | The adapter knowingly violates "`save_committed` persisted" (copied verbatim from openraft's example) and the memo never said so. | Upheld; `CommittedDurability::{None,Buffered,Fsync}` added; `Fsync` recommended; **plan change 5**. | closed / **plan** |
+| R-37 | S3 R3 | A crashed pod recovers behind its pre-crash applied index and answers a D15 stale read without a message the client already saw. | Upheld **and reproduced**: with `none`, `WENT BACKWARDS on 1001: last_applied Some(301) -> Some(300)`, `applied-state-preserved=false`. With `fsync`: preserved on both hosts. | closed |
+| R-38 | S3 R4 | No crash-restart was ever run: scenario 7 used a graceful `Req::Shutdown`; every `kill -9` was of a leader never restarted or an empty learner. | Upheld; **scenario 8** added (10 × `kill -9` of a follower with restart, on-disk state read before replication) — 10/10 clean on the VM, 4/4 on the laptop. | closed |
+| R-39 | S3 R5 | `raft-log` must meet WP-0.3's bar including dropped unflushed writes; until then it is a proposed default. | Upheld, **now met**: `flaky-log.sh`, 10/10 rounds, injector self-tested (16 MiB unfsynced → 0 bytes; fsynced → whole). | closed |
+| R-40 | S3 R6 | GH#2080 is rated "high impact" and was never reproduced. | Upheld, **now reproduced** (scenario 9), with a new finding: the client write **hangs**, it does not get a 503, because a leader *is* known. Operator recovery timed: heal 616 ms, `kill -9` 3528 ms. | closed / **plan** |
+| R-41 | S3 R7 | `truncate_after` also returns without a flush — is that safe? | **Answered by reasoning, not measured**: openraft follows a truncate with the appends of the same `AppendEntries`, whose `flush(true, _)` is awaited; a lone truncate answers `Conflict`, which the leader does not count as matched. WP-3.1 owes a targeted test. | **open** |
+| R-42 | S3 R8 | The I9 conclusion closes an EMPTY data dir, not a REVERTED one (a PVC from a volume snapshot matches IDENTITY and brings back a stale vote store). | Upheld; **plan change 6** (a fencing value in IDENTITY). Not run in this spike. | **plan** |
+| R-43 | S3 R9 | "Snapshot build 0.2 s for 1 GiB, transfer 398 MiB/s" measures the spike's own manifest transport, not openraft and not a Queen snapshot (no store export). | Upheld; labelled everywhere. **The D11 rationale in the plan needs the same correction.** | **plan** |
+| R-44 | S3 R10 | openraft cannot purge log past the snapshot, so snapshot cadence + an O(state) export collides with I8/G-3 at flatness scale; cadence was never measured. | Upheld, out of D11's scope; **a gate for §11.6/D9 before WP-1.2 closes**. D-10. | **open** |
+| R-45 | S3 R11 | The kill matrix is not §13.6's shape (3 runs, no randomisation, no kill during a snapshot build or install). | Partly upheld: scenario 8 adds 20 kill+restart rounds at arbitrary durable-point phases (more than §13.6 asks for the follower case). Kills during a snapshot build or install remain **deferred** (D-11). | **open** |
+| R-46 | S3 R12 | Five reporting errors: scenario 1 ran 98 s and 125 s not "60 s per rate" (the 1000/s point cut at **38 217 of 60 000** offered); the VM window was 11 min 41 s not 10 min 30 s; three commits landed after the pin not two; the snapshot numbers need a label; two duplicate results directories. | Upheld, all five corrected. One archive of record: `results/vm-2026-09-17/`. | closed |
+| R-47 | S3 R13 | What could not be refuted: the pin's identity and licence, `LogEntryDiscarded` at `errors/mod.rs:116`, the wiped-voter analysis (a bare `debug_assert!`, `allow_log_reversion` false by default), the kill/transfer/read/election numbers, MSRV 1.88. | Recorded. | closed |
+
+### From S4 / WP-0.6 (two reviewers, both `major`)
+
+| R-id | src | finding | resolution | state |
+|---|---|---|---|---|
+| R-48 | S4 R-A1 | "Encrypted 0.32×" is not like-for-like: there was no HTTPS-without-MAC row. | Upheld, **measured**: HTTPS plain 3.33 µs/msg → **0.46×** @50k, 0.61× @20k. (Both reviewers' own ~0.54× estimate was also wrong.) | closed |
+| R-49 | S4 R-A2 | The CPU gap measures write coalescing, not framing; 0.88× at 8 sockets; the burst shape is a harness artefact. | Upheld in part, **measured**: jitter-free pacer → framed +26%, HTTP +2%, ratio 0.54× → 0.66×. The reverse test is impossible: HTTP capped at 2 opened **218 695 connections in 60 s**. | closed |
+| R-50 | S4 R-A3 / R-B | TLS-over-MAC rests on an 11× that is 0.055 core, and on a p50 argument the memo's own porting note deletes. | Upheld; **recommendation 2 changed to "either"**. The p50 argument is re-grounded: an anti-replay MAC needs a sequence number, which lives on the writer task — where rustls also encrypts. | closed |
+| R-51 | S4 R-A4 | "Two connections is the knee" is a 9 µs loopback artefact. | Upheld; **recommendation 4 changed**: 1 is CPU-optimal, 2 is an unmeasured hedge, the pool is sized in the transport WP. | closed |
+| R-52 | S4 R-A5 | Multiplexing's blast radius (one dead socket = N unknown outcomes) is never weighed. | Upheld, with a bound: D6 makes it N *retries*, not N unknown writes, provided in-flight waiters fail fast — which they now do. | closed |
+| R-53 | S4 R-A6 | PLAN_RAFT.md D12 ratifies with **laptop** numbers ("1.35 vs 2.77 µs", "half the leader CPU"), which §0.3 forbids quoting. | Upheld. The VM says **1.26 vs 2.15 = 0.59×** on 2 sockets against 15–49, 0.88× at matched sockets, 0.46× encrypted. **The plan needs the edit.** | **plan** |
+| R-54 | S4 R-A7a | `results/vm-a/` was called a "byte-identical copy" of `results/vm/`. | Upheld; corrected — `results.jsonl` and `runlog.txt` are identical, the directories are not. | closed |
+| R-55 | S4 R-A7b | "rc=0 for every one" records `sed`'s status, not the receiver's. | Upheld; replaced by the checks that do hold (`cmds_bad = 0`, achieved = offered, `cmds_ok = achieved × secs`). | closed |
+| R-56 | S4 R-A7c | RAFT_STATUS.md says WP-0.6 "in progress" and G0 "pending" while the plan says G0 RATIFIED. | Upheld; **this revision fixes it** (and states the disagreement explicitly). | closed |
+| R-57 | S4 R-B1 | TLS as measured has **no peer authentication and no channel binding**, so a relay that terminates both legs passes the HMAC handshake through and then injects. | Upheld — **the most serious finding**. Recommendation 2 now requires client certificates **or** RFC 5705 channel binding, and says D12's TLS branch cannot be ratified while its trust anchor is undecided. | **plan** |
+| R-58 | S4 R-B2 | The per-frame MAC covered `type \|\| body` only: replayable after the D6 window, reflectable, `len` unauthenticated. | Upheld; **fixed in `frame.rs`**: per-direction keys, MAC over `dir \|\| seq \|\| len \|\| type \|\| body`, receiver accepts only its expected sequence. +13 B of HMAC input = +0.4%. Three new tests. | closed |
+| R-59 | S4 R-B3 | "Fail closed" was claimed but not implemented: an empty secret handshook happily — pgless U19 reproduced inside the spike that cites U19. | Upheld; **fixed**: `auth::check_secret` (≥16 B) on both sides, the binary refuses to start without `--secret`. | closed |
+| R-60 | S4 R-B4 | The authenticated pair is a strawman: HTTP MACs one direction and hex-formats through 16 `format!`s. | Upheld in wording, **negligible in size**: measured, the hex path is 5.2% of the HTTP MAC op and ~1.3% of that row's CPU (0.645 → 0.653); the opposite bias is of the same order. Binary constant-time form added as the one to port. | closed |
+| R-61 | S4 R-B5 | The sweep ran at **0.31** commands in flight; D7 implies 15–35. | Upheld; recommendation 4 changed, re-run shape specified. D-14. | **open** |
+| R-62 | S4 R-B6 | §9.2 puts `PayloadRead` on the forwarding pool, and `MAX_FRAME` (8 MiB) cannot carry a 96 MiB `QUEEN_RAFT_ENTRY_MAX_BYTES` entry. | Upheld, **not fixed** (raising the cap without a chunking rule turns `buf.resize(len)` into an allocation DoS). An open item the transport WP must close. | **open** |
+| R-63 | S4 R-B7 | `tcpx.rs` is not portable as is: **no deadline at all**, waiters leak on connection loss. | Upheld; **fixed** (5 s default deadline, waiter removed on expiry, reader clears the pending map). Reconnect is **not** implemented — it needs the D13 hold and the leader hint. | closed / **open** |
+| R-64 | S4 R-B8 | HTTP/2 over the same rustls was never measured, and it is the alternative that removes most of the hand-written surface. | Upheld; not measured. D-17. | **open** |
+
+---
+
+## Measurements
+
+### M0 — raft branch baseline (WP-0.1)
+
+**Date** 2026-09-17 · **commit** branch `raft` @ `fc71b65b` (no change to any
+source that enters the build) · **host** MacBook, Apple M4, 10 cores, 24 GiB,
+macOS 15.5, APFS · **toolchain** `rustc 1.94.0`, `cargo 1.94.0`. The crate
+declares `rust-version = "1.88"`; no 1.88 toolchain is installed on this host,
+so MSRV was exercised in the spikes instead (`cargo +1.88 check`, S1/S2/S3).
+
+This is a **laptop** baseline: build time, binary size and unit-test counts on
+the branch base. Every performance number quoted comes from the Linux VM.
+
+| check | command | result |
+|---|---|---|
+| release build | `cd server && cargo build --release --bin queen` | `real 4m30.699s`, exit 0, 0 warnings, **warm target dir** (one `Compiling` line). Binary `server/target/release/queen`, **9 871 072 B** (9.4 MiB). Re-run: no-op in 0.38 s |
+| unit tests | `cd server && cargo test --lib` | `running 656 tests` → **649 passed, 0 failed, 7 ignored**, exit 0; tests 4.85 s (2.52 s on the second pass), 47.05 s of it compiling the debug profile |
+| PG-gated tests | `docker run --rm -d --name queen-raft-pg-wp01 … -p 5481:5432 postgres:16-alpine` + `QUEEN_EMBEDDED_TEST_PG=localhost:5481 cargo test --lib -- --ignored` | **7 passed, 0 failed**, 10.87 s. Container removed; the `pg18-*` containers of other sessions untouched |
+
+A from-scratch build was **not** measured: `df -h /` reported **10 GiB free of
+460 GiB** and `server/target/release` alone is 626 MB. **Standing constraint on
+this laptop**: no parallel target dirs, no large fixtures; heavy work goes to
+the VM. Not in this baseline: the 35 integration tests under `server/tests/`,
+the client suites of `test/run.sh`, the facade lanes.
+
+### M1 — postgres-class baseline on the Linux VM (WP-0.2)
+
+**Date** 2026-09-17 13:15:38–13:19:46Z · **host** `root@164.90.215.224`
+(`queenpgless-01`), Ubuntu 24.04, 8 vCPU, 15 GB, ext4, local PostgreSQL 16.15 ·
+**broker** one `queen` on :6698 (md5 `d7f5931486c9`), postgres class,
+`DB_POOL_SIZE=64` · **loader** `/root/goload` **on the same VM**, 256-byte
+payloads, manual acks · **command** `bash /root/raft/wp02/measure-baseline.sh wp02b`.
+
+| regime | offered | achieved | push p50 | p99 | p999 | ack avg | queen cores | pg cores | goload cores | queen RSS | pg PSS | errors |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| A20k | 20 000 msg/s | 749 830 / 40 s | 9.15 ms | 27.01 | 52.48 | 9.06 ms | 0.93 | 3.01 | 1.79 | 55 MB | 1 211 MB | 0 |
+| A50k | 50 000 msg/s | 1 873 990 / 40 s | 23.17 | 75.26 | 103.94 | 32.92 | 1.17 | 2.65 | 2.41 | 105 MB | 1 384 MB | 0 |
+| B1 | 2 000 msg/s | 59 995 / 30 s | 3.34 | 14.27 | 35.07 | 1.72 | 0.84 | 2.45 | 0.86 | 109 MB | 1 427 MB | 0 |
+| C1000 | 3 000 msg/s, 1 000 partitions | 85 513 / 30 s | 6.62 | 33.02 | 54.02 | 21.36 | 0.91 | **3.86** | 0.92 | 82 MB | 1 481 MB | 0 |
+| D1 | 500 msg/s | 9 999 / 20 s | 1.99 | 4.08 | 18.30 | 0.79 | 0.28 | 0.78 | 0.31 | 54 MB | 1 490 MB | 0 |
+| FAT100 | 300 000 msg/s push-only | 17 241 800 / 60 s | 23.17 | 209.92 | 415.74 | — | 1.38 | 1.39 | 3.31 | 255 MB | 1 540 MB | 0 |
+
+`shed=0` in every regime; `grep -ciE ' error|panic'` over the broker log =
+**0 lines for the whole run**. The 1.6.0 binary reproduces Appendix G's
+postgres column: p50 within 1.4 ms everywhere, p99 **lower** in all five
+regimes. **Postgres is the CPU**: 3.86 cores to move 3 000 msg/s at C1000, i.e.
+the cost follows partition cardinality, not the write rate (G-3, I8).
+
+Fat-batch calibration (20 s each): 200k flat, **300k sustained**, 400k over the
+knee (p50 drifts 17 → 241 ms), 500k saturated (loader sheds 12.8%). 300k is
+**not a broker ceiling**: at that rate goload 3.31 + queen 1.38 + pg 1.39 =
+6.08 of 8 vCPU, the loader being the largest consumer. Repeatability across two
+runs: A20k 9.15/9.15, A50k 21.12/23.17, C1000 **5.28/6.62** — treat C1000 p50
+as ±1.5 ms.
+
+### M2 — S1 store engine (WP-0.3)
+
+VM `queenpgless-01`. **Legacy shape** (one store write txn per applied entry,
+`segments` in the store, no dedup keyspace), 90 s cells, batch 10, 512 B,
+4096 partitions, durable point 1 s. **Ratified shape** (§11.3 batched 4 ms /
+256 entries, no `segments`, random-key `dedup`), 40 s cells, 2026-09-18.
+
+| | redb 2.6.3 | fjall 2.11.2 | heed 0.22.1 |
+|---|---|---|---|
+| achieved 20k / 50k / 100k — legacy | 10 046 / 10 260 / 9 909 | 20 000 / 49 905 / **67 641** | 20 000 / 48 783 / 58 958 |
+| achieved 20k / 50k — **ratified** | **19 466 / 25 895** | 20 000 / 49 019 | 20 000 / 47 425 |
+| kernel write amplification — legacy → ratified | 29.3× → **8.66/7.88×** | 1.35× → **1.33×** | 2.80–3.30× → 3.91/3.00× |
+| store commit p50 / p99, ratified 20k | 3.52 / 32.26 ms | **0.61 / 9.47** | 0.66 / 11.78 |
+| engine's own durable commit, ratified 20k | ≈336 ms | **≈17 ms** | ≈139 ms |
+| RSS max, ratified 20k / 50k | 260 / 261 MiB | **129 / 195** | 163 / 349 |
+| KV get p99 / prefix list p99, ratified | 21 / 40 µs | 31 / 126 | **4 / 13** |
+| ordered scan (`seg_loc`), ratified | 7.1–7.4 M rows/s | 2.1–2.7 M | **41.5 M** |
+| consistent export (§11.6) | 181–265 MiB/s | 91–123 MiB/s | **524–556 MiB/s** (`mdb_env_copy`, always O(state)) |
+| incremental export (I8 prefers it) | no | **yes in principle** | **no** |
+| reopen clean / after `kill -9` | 1–2 ms / 57–465 ms | 3–5 / 234–967 | **0–2 / 0–70** |
+| space given back | `compact()` 855→146 MiB, **843 ms stop-the-world** | `major_compact` 55→40 MiB, **12.3 s in the soak** | never in place; compacting copy 116–305 ms |
+| RSS over a 10-min soak at 50k | not run | **4 → 986 MiB, still rising** | **not run** |
+| build deps (C-2) / MSRV (C-3) | pure Rust / 2.6.3 is the newest on 1.88 (3.1.3 → 1.89, 4.x → 1.90) | pure Rust / 2.11.2 declares 1.76 (3.x → 1.90) | `cc` compiles 2 C files, **no cmake** / declares none, builds on 1.88 |
+| maintenance (2026-09-17) | 100+ commits/3 mo, one maintainer, 2.x EOL | 40+33 commits/3 mo, one maintainer, young | **0 commits/3 mo**, frozen C engine, Meilisearch team |
+
+**Mandatory criterion (I11).** `kill -9` during non-durable commits, 15 runs
+each; dropped unflushed writes (dm-flakey), 5/5/10 runs.
+
+| engine | kill -9 | dropped writes | reopens past its durable point | verdict |
+|---|---|---|---|---|
+| redb | 15/15 PASS | **5/5 PASS** | **never** (0/15, 0/5, 0/10 on macOS) | **PASS, by construction** |
+| fjall | 15/15 PASS | **1/5 PASS, 4/5 FAIL** | yes: 14/15 kill, 4/5 flaky | **FAIL** |
+| heed | 15/15 PASS | 9/10 PASS, **1/10 would not reopen at all** | after kill -9 yes (12/15); after dropped writes never (0/9) | **PASS with a caveat** |
+
+Two facts belonging to the design, not to any engine: the durable point fsyncs
+**293–484 files** (all 256 buckets every second plus rollovers) at ≈1.2–1.8 ms
+each = **340–580 ms of every second** for all three engines; and **nothing
+reached 100k msg/s** in a single apply thread (68k fjall, 59k heed, 10k redb in
+the legacy shape). Extra refutation cells: NOMETASYNC 17 309 msg/s, WA 7.04×,
+store commit p99 **123 ms**; heed reads `MDB_NOTLS` 2.06/1.97/2.08 M gets/s at
+1/4/8 threads vs TLS 2.10/8.18/**9.96** M.
+
+### M3 — S2 dedup (WP-0.4)
+
+VM, 600 s cells, 360 s dedup / 432 s txns window, 50 000 msg/s offered.
+Exactness over the four campaign cells: in-window duplicates **350 283
+detected, 0 missed, 0 wrong original offset**; 19 348 out-of-window, **0
+falsely reported**; **3 578 349** ack-by-hash resolutions below the cursor, **0
+unresolved**, >99.99% with the segment already deleted by retention. The
+planner overlay caught 188–266 same-entry duplicates per cell that committed
+state could not yet see.
+
+| at the rate each achieved → | (a) a-heed **37 565** | (a) a-fjall **39 855** | (b) b-heed **24 036** | (b) b-fjall **21 294** |
+|---|---|---|---|---|
+| probe p50 / **p99** | 0.013 / **0.024 ms** | 0.021 / 0.084 | 0.070 / **0.575** | 0.074 / 0.767 |
+| ack-by-hash p50 / p99 (1 hash/call) | 0.002 / 0.003 | 0.029 / 0.167 | 0.423 / 0.767 | 0.591 / 1.055 |
+| store on disk / live records | 3133 MiB / 17.6 M | 1570 / 19.2 M | **177 / 722 k** | **147 / 608 k** |
+| **total disk per message** | 161.8 B | 84.8 B | **49.5 B** | **50.7 B** |
+| store ops/s | 113 078 | 118 273 | **17 679** | **15 754** |
+| RSS max | 3156 MiB | 1370 | **290** | 986 |
+| kernel bytes written | 94 785 MiB | 14 364 | 19 943 | **2 907** |
+| durable point mean (1/s) | 1227 ms | 101 | 185 | **78** |
+| ready after a restart | **20 ms** | 1848 | 212 | 4005 |
+
+Refutation cells (VM, 120 s, growth phase, light ack load): `a` 49 715 msg/s,
+probe p99 **0.018 ms**, 171.4 store B/msg, RSS 985 MiB · **`a-lean`** 49 664,
+p99 **0.019**, **119.0** store B/msg, RSS **689**, rebuild 36 ms / 0 wrong of
+4096 · `b` 49 930, p99 0.431, 23.8 store B/msg, RSS 221, rebuild 203 ms / 0
+wrong of 1793. Ack batching (laptop, `--ack-batch 1 → 10`): 154 114 → **334 150**
+hashes resolved, 0.415 → **0.060 ms** per hash, 28 886 → **44 410 msg/s**.
+Durable-point cadence sweep (VM, option (a) on heed): 250 / 1000 / 4000 ms →
+**0.605 / 0.307 / 0.137 s of sync per wall second**, 16 413 / 13 559 / 7 774 MiB
+of kernel writes, 46 275 / 49 715 / 49 557 msg/s achieved.
+
+Two harness defects found and fixed here: `MDB_BAD_VALSIZE` (option (a)'s prune
+walked its expiry index from an empty key; LMDB rejects a zero-length key), and
+a rebuild sample-selection bug that made `wrong=76..302` look like a loss of
+exactness — proved to be the harness (258/258 and 459/459 wrong samples had a
+younger occurrence; after the fix 258 → 0 and 459 → 0).
+
+### M4 — S3 consensus (WP-0.5)
+
+VM, 3 node processes + driver on one host over loopback (scenario 5: four),
+fdatasync ≈ 1 ms, every entry byte written six times per cluster. 7 scenarios
+in **11 min 41 s**; refutation pass (scenarios 8–9 + the `save_committed`
+sweep) in 6 min.
+
+| # | what | measured |
+|---|---|---|
+| 1 | commit latency, 64 KiB, **1 in flight** (D4) | service p50 **3.0 ms** (p99 4.4–5.3); achieved 200/200, **307**/500, **306**/1000 per second ⇒ **~307 entries/s = 19 MiB/s**. The 1000/s point was cut at 38 217 of 60 000 offered |
+| 1b | the same, 16 in flight | 201 / 501 / **974** per second; service p50 11–13 ms ⇒ **61 MiB/s** is the wall on this disk |
+| 2 | `kill -9` the leader under load ×3 | new leader **3087 / 3300 / 3353 ms**; first committed write +3–7 ms; **0 acknowledged writes missing** (2067 / 2043 / 2051 ids checked on both survivors). The election itself is ~5 ms; detection dominates |
+| 2b | + a follower SIGSTOPped 5 s | commit p50 3.20 ms during the freeze (3.30 before); the resumed follower replayed 516 entries (~33 MiB) in **460 ms**; then kill → 3048 ms, 0 missing |
+| 3 | `transfer_leader` ×5 healthy | role change p50 **28 ms**, first committed write p50 31 ms, 5/5 |
+| 3b | transfer to a dead target | `trigger()` returns `Ok(())`; source reports `is_leader = true` from t=0 while refusing writes; **3357 ms with no committed write** |
+| 4 | linearizable reads | barrier p50 **0.16 ms @1000/s**, **0.21 @5000/s**; §9.4's fixed 2 ms window **1.28 / 1.47 ms** p50, max 58.6 ms — a **7–8× pessimisation**; coalescing 0.16 / 0.23 ms |
+| 5 | 1 GiB manifest snapshot | fill 73 MiB/s; build 0.2 s; transfer 2.6 s = 398 MiB/s; learner killed mid-transfer → 53 of 64 files re-sent, total 3.4 s. **Measures the spike's own transport, not a Queen snapshot** (no store export) |
+| 6 | wiped voter | wrong way: **silent**, writes keep committing (the promised panic is a `debug_assert!`). Right way (remove → generation 2002 → learner → promote): caught up in **51 ms** |
+| 7 | graceful restart ×3, `enable_leader_restore=false` | all 2000 acknowledged writes present on all three; leader again after 1656 ms. Says nothing about a crash |
+| 8 | `kill -9` a **follower** ×10 + 10 dm-flakey rounds | log reopened **exactly at the leader's matched index in 20/20**; read-back 100%; 0 vote reversions; 0 acknowledged writes missing; restart→answer 433 ms p50, catch-up 213 ms p50 |
+| 9 | one-way partition (GH#2080's mechanism) | **0 writes committed for the whole fault**, term never moves, **a client write hangs — no answer after 10 s**; `last_quorum_acked` ages 901 → 12 125 ms; recovery: heal **616 ms**, `kill -9` the stuck leader **3528 ms** |
+| 10 | `save_committed` cost, 64 KiB, 16 writers, 500/s | `none` p50 12.37 ms · `buffered` 12.56 · **`fsync` 14.75 (+2.4 ms, +19%)**, achieved 500/s in all three. `wait_for_recovery` 944–1055 ms after a 3-node restart |
+
+Open issues re-read 2026-09-18: **#2080 OPEN** (mechanism now reproduced);
+#2088, #2091, #2095, #2085 CLOSED; no open issue labelled `C-bug`. Three
+commits landed on openraft main after the pin, all tests or docs.
+
+### M5 — S4 transport (WP-0.6)
+
+VM, two independent 60 s passes × 15 configurations + four refutation cells.
+**8 659 953 commands forwarded, `cmds_bad = 0` in all 38 rows**, achieved =
+offered to 0.005%. Mean of the two passes, offered 50 000 msg/s:
+
+| configuration | p50 µs | p99 µs | leader µs/msg | recv µs/msg | B/msg | live conns |
+|---|---|---|---|---|---|---|
+| framed TCP | 62.5 | 112.5 | **1.26** | 2.63 | **294.2** | **2** |
+| framed TCP + per-frame MAC | 125.0 | 201.0 | 2.47 | 4.30 | 297.4 | 2 |
+| framed TCP + TLS | 68.0 | 120.0 | 1.37 | 2.77 | 297.1 | 2 |
+| HTTP/1.1 | 70.5 | 131.0 | 2.15 | 4.10 | 309.7 | 15 / 49 |
+| HTTP/1.1 + MAC header | 103.5 | 174.5 | 3.84 | 5.72 | 314.9 | 12 / 18 |
+| HTTPS + MAC header | 112.5 | 193.5 | 4.22 | 6.15 | 319.3 | 19 / 13 |
+| **HTTPS, no MAC** (2026-09-18) | 109 | 183 | **3.33** | 5.87 | 314.1 | 64 / 198 |
+| **HTTP, pool capped at 2** | 128 | 224 | **5.47** | 9.40 | 309.7 | 2 / **218 695** |
+| framed TCP, same-day control | 76 | 130 | 1.42 | 3.28 | 294.2 | 2 |
+
+Connection sweep, framed @50k: 1 / 2 / 4 / 8 sockets = **0.63 / 1.26 / 1.65 /
+1.89 µs/msg** leader, p50 71.5 / 62.5 / 61.0 / 60.5. Handshake per connection:
+framed+HMAC 0.17–0.33 ms, framed+TLS 0.80–0.85, HTTP first request 0.16–0.20,
+HTTPS 0.36–0.41. Crypto per ~2918 B command: MAC +12.1 µs = **0.24 GB/s**
+(software SHA-256, **no `sha_ni` on either host**); TLS +1.10 µs = 2.65 GB/s
+(hardware AES-GCM). At 20k msg/s the per-message CPU roughly doubles everywhere
+(fewer frames per coalesced write): framed 2.24, HTTP 2.88, framed+MAC 3.41,
+framed+TLS 2.51, HTTPS-no-MAC 4.63 µs/msg.
+
+---
+
+## Open questions for Alice
+
+O1–O16 are PLAN_RAFT.md §17. O17–O20 come from the 2026-09-17 head-of-line
+discussion. **O21–O23 are new**, from Alice's 2026-09-17 notes (a), (b) and
+(d). PLAN_RAFT.md §17 records these as answered at G0; they are repeated here
+with the data that now exists, because three of them changed.
+
+| id | question | what the data says now | recommended answer |
+|---|---|---|---|
+| O1 | Branch base; drop the per-queue native class (D23). | Branch `raft` @ `fc71b65b`; phase 0 touched **no product code**; pgless parked `2bbd10d1`. | As stated, with D23's amendment (main checkout, no worktree). |
+| O2 | Storage mode per deployment (D1). | — | yes. |
+| O3 | Hold (D13) and election timeouts (D14). | S3: failover **3087/3300/3353 ms**; the election is ~5 ms, detection dominates. GH#2080: with a leader known, the hold never fires and the write **hangs**. | Keep 8 s / 100 ms / 1000–2000 ms **and add a `propose` deadline** (plan change 7). |
+| O4 | 3 pods; PVC sizes; zone anti-affinity. | Dedup at the 1 h product default is **~180 M rows / 10.6 GB logical per voter** at 50k (lean (a)). openraft cannot purge log past the snapshot, so log disk follows snapshot cadence. | 3 pods; PVC = retained bytes × 1.5 **+ the dedup window + the log between snapshots**; fix the number after D-06 and D-10. |
+| O5 | Library: 0.10 stable, a pinned commit, or raft-rs. | No 0.10 release exists (#1637 open). raft-rs = 20–27 agent-days vs 6–9. | Pin the rev now; re-confirm at G3. |
+| O6 | Store engine (S1) and dedup (S2). | See the amended D9 and D10. | heed pinned + redb for raft1/embedded; option (a) lean. |
+| O7 | DLQ handoff for `dlq:true` acks inside the transaction entry. | — | yes. |
+| O8 | `too_late` for timers without claims. | — | as stated; confirm with conformance. |
+| O9 | Traces age limit (D18). | — | 7 days. |
+| O10 | No spool (D19); maintenance-mode pushes. | — | 503 `maintenance`. |
+| O11 | Migration: offline window or online copy. | — | offline first. |
+| O12 | When to remove the postgres class (D22). | GH#2080 is open and reproduced; D22 is its mitigation. | Keep it deployable **to GA**; decide removal after 3 months of GA. |
+| O13 | Three VMs for the final numbers. | Every number so far is single-VM with a co-resident loader (FAT100: 6.08 of 8 vCPU busy, the loader the largest share). | yes for G4; one extra VM for load generation would also clean up G1. |
+| O14 | Performance targets for G1/G2/G4. | Baseline M1 is the comparison point. Failover measured 3.0–3.4 s. | raft1 p50/p99 ≤ postgres at A20k/A50k/C1000; raft3 p50 ≤ raft1 + 2 ms; **failover ≤ 4 s p99**; push-only fat-batch ≥ 70% of postgres. |
+| O15 | Replicator for embedded mode. | S1 adds: the **engine** for embedded should be redb (no snapshot source in raft1). | LocalReplicator + redb. |
+| O16 | Ack fast path: record the delivered set at claim, or always compute. | S2 risk 5: narrowing what 005 must answer below the cursor would narrow (b)'s gap too. | Record the delivered set in the cursor at claim, bounded by batch size. |
+| O17 | Bounded planning time per batch. | Not measured. PLAN §17 records **5 ms**; this file previously proposed 20 ms. | Confirm the number. `QUEEN_RAFT_PLAN_BUDGET_MS`; a single command that alone exceeds the budget must still be planned, or it can never progress. |
+| O18 | Per-command-kind planner metrics + a slow-command log. | — | yes: `queen_raft_plan_seconds{kind=…}` + WARN above `QUEEN_RAFT_SLOW_COMMAND_MS` (50). |
+| O19 | Noisy-neighbour test: gate condition or advisory? | — | Gate at G2 (raft1) and G4 (raft3); a named scenario in `test/raft/flatness`. |
+| O20 | Move DLQ head decompression and duplicate repacking off the planner. | — | yes, receiver-side. |
+| **O21** | **(a) Commit the store every N entries / few ms instead of once per applied entry** (the Raft log is already the durable WAL). | Measured, VM, 20k target: redb **10 046 → 19 539 msg/s** and WA **29.31 → 8.33×** from the cadence alone (a 2×2 isolates it from the keyspaces); fjall and heed move ±2% and ±0.6 points. The knobs in §11.3 are 4 ms / 256 entries. | **Yes — it is already the §11.3 amendment; keep it.** It re-admits redb, which is what makes D9's embedded answer possible. Consequence to accept: local reads that need the very latest entry wait ≤ 4 ms. |
+| **O22** | **(b) Keep the segment index out of the store**, Kafka-style: an immutable `.qidx` per sealed segment file, the active file's index in RAM. | `segments` was the highest-rate keyspace. S1 re-ran the matrix without it (`--shape ratified`): heed's ordered-scan lead over fjall survives the change (41.5 M vs 2.1–2.7 M rows/s over `seg_loc`), and most of the export-size spread (heed 172 vs redb 58.7 MiB) was those rows. `partition_files` keeps one row per (pid, file) at seal. | **Yes — keep the §6.1 amendment.** It removes the store's highest-rate keyspace and makes `seg_loc` (node-local, D8) the only per-segment structure. WP-1.3 owes the `.qidx` format, its checksum and its rebuild-by-scan path. |
+| **O23** | **(d) What the S3 in-flight result means for D4 and batch sizing.** | 1 entry in flight = **307 entries/s of 64 KiB = 19 MiB/s**; 16 in flight = **974/s = 61 MiB/s** (the disk wall). Service p50 3.0 ms at 1, 11–13 ms at 16. **A pipeline of 4 was never measured.** | Keep D4's bounded pipeline at **4**, but make the *command batcher* (§7.1) fill the entry — 19 MiB/s at 1 in flight is ~37k msg/s of 512-byte messages only if entries are full. Before the amendment is relied on: measure exactly 4 with a step-down injected while 4 are in flight (I3), D-11. If 4 does not reach the O14 targets, raise `QUEEN_RAFT_ENTRY_MAX_BYTES`/batch size before raising the pipeline. |
+
+Alice's note **(c) — "a library for the ordered store, never a home-grown
+engine"** — needs no question: all three S1 candidates are libraries behind the
+`rsm/store/` adapter, and the adapter seam is what let S1 be revised instead of
+rewritten. It is recorded as a constraint on D9 and WP-1.2.
+
+---
+
+## Deferred measurements
+
+Every `Deferred` item of the four memos, with the command. The phase-0 runs
+were shortened on Alice's instruction (10-minute soak, 6-minute dedup window,
+1 GiB snapshot, fewer kill repetitions); this is what that cost.
+
+| id | what | why it matters | command | cost |
+|---|---|---|---|---|
+| D-01 | `flaky.sh 20` for **all three** engines at equal n (today: 5 fjall / 5 redb / 10 heed), 60 s runs. Accept heed only if its no-reopen rate is 0/20 in the shipping configuration. | WP-0.3's exit criterion; the memo's own ratification precondition (R-01, R-02). | `cd test/raft/spikes/s1-store && sudo ./vm-campaign.sh full flaky` (the `full` profile is 20 flaky runs × 60 s and 100 kill runs per engine; `full kill,flaky` adds the kill half) | ~45 min VM (flaky) |
+| D-02 | The same loop with `vm.dirty_expire_centisecs=100`, `vm.dirty_writeback_centisecs=50`, `RUN_S ≥ 120`. | The only configuration that can produce heed's dangerous case; today's 20 s runs on a VM with `dirty_expire_centisecs=3000` are biased toward the reported result. **Needs Alice**: a sysctl is outside `/root`. | `sysctl -w vm.dirty_expire_centisecs=100 vm.dirty_writeback_centisecs=50` then `sudo ENGINE=heed RATE=20000 RUN_S=120 ./flaky.sh 20` (repeat for redb, fjall) | ~1 h VM |
+| D-03 | `flaky.sh 20` for heed with `MDB_NOMETASYNC`. | Its cost is known (−13% rate, WA 7.04×, store commit p99 123 ms); its crash behaviour is not, and the header's unconditional integrity claim is the only reason to pay that cost (R-05). | `sudo ENGINE=heed RUN_S=60 EXTRA="--heed-flags nometasync" ./flaky.sh 20` | ~20 min VM |
+| D-04 | A **2 h soak on heed at 50k**: RSS, `data.mdb` high-water mark, scan rate at 10M+ rows, durable-point cost once the store is tens of GiB. | Both of heed's remaining pillars rest on 40–90 s cells and a 9.6 MiB fully cached scan (R-07, R-08). G-3 asks for RSS flat ±5% across 60 min. | `LEAD=heed SOAK_RATE=50000 ./vm-campaign.sh full soak` (the `full` profile's soak is 7200 s) | 2 h VM |
+| D-05 | redb at ≥30 min per rate in the **ratified** shape; and whether C-3 is worth one minor version (redb 3.1.3 declares MSRV 1.89, 4.x 1.90). | redb is the proposed embedded engine; its 8.3–8.7× WA and 25.9k ceiling come from 40 s cells. | `ENGINES=redb RATES="20000 50000" DUR=1800 ./vm-refute.sh` | ~1 h VM |
+| D-06 | **One VM dedup campaign at the product default**: `--window-s 3600 --txns-s 3600`, run ≥ 2× the window, at a rate both designs sustain (~20k), cells `a-lean`, `a`, `b`; report probe p99, ack p99, RAM, disk, kernel bytes, rebuild-to-ready, exactness both directions, store size and durable point at steady state. | WP-0.4's named criterion (probe p99 at a 1 h window); the only regime in which G-3 can be checked; the only run that could reverse D10 (R-20, R-23). | `cd test/raft/spikes/s2-dedup && ./target/release/s2-dedup run --dir $DATA/w3600-alean --engine heed --option a-lean --rate 20000 --batch 10 --entry-appends 10 --payload 96 --partitions 4096 --segment-bytes 2097152 --fsync-mode data --fsync-threads 8 --duration 7200 --window-s 3600 --txns-s 3600 --retention-s 720 --dup-max-age-s 4200 --ack-batch 10` then the same with `--option a` and `--option b`, each followed by `s2-dedup rebuild … --mode blooms --window-s 3600` | ~2 h VM × 3 cells |
+| D-07 | `a-lean` **in the pruning regime** on the VM (past `t = txns_window`). | Its prune walks per partition instead of one time-ordered index; measured only on the laptop (0.088 vs 0.045 ms/entry) and on the VM only in the growth phase. | covered by D-06's `a-lean` cell (`--duration` ≥ 2 × `--txns-s`) | in D-06 |
+| D-08 | `--cache-mb 0` on the VM, rate-matched. | The only end-to-end pair lost **31%** of the rate (25 253 → 17 488 msg/s); it was never run on the VM (R-33). Moot while (b) is not the design. | `s2-dedup run --option b --cache-mb 0 …` beside an identical `--cache-mb 64` cell | ~20 min VM |
+| D-09 | The **10 GiB** manifest snapshot (WP-0.5 asks for it; 1 GiB was run). | Cost is linear in file count (160 vs 64), plus build memory and the retry window against `max_in_snapshot_log_to_keep`. | `cd test/raft/spikes/s3-consensus && ./run.sh vm` — the full-scale profile already carries the 10 GiB case (`vm-today` is the 1 GiB budgeted pass that ran) | ~8 min VM |
+| D-10 | A snapshot build that includes **§11.6 step 3** (an `mdb_env_copy` of a real ≥10 GiB heed store), **plus the snapshot cadence** `QUEEN_RAFT_SNAPSHOT_LOG_BYTES` (4 GiB) implies at A20k/A50k. | openraft cannot purge log past the snapshot, so cadence sets the log disk; an O(state) export per snapshot is what I8/G-3 forbid. If no setting satisfies I8, §11.6 needs an incremental export — which re-opens **D9**, not D11 (R-44). | `s1-store run --engine heed … --duration 3600` to build a ≥10 GiB store, then `s1-store export --engine heed --dir <store>`; cadence from `./run.sh vm` with a bytes-based snapshot policy | ~1 h VM |
+| D-11 | §13.6's kill shape for the **leader**: ≥5 runs, kills randomised across ≥3 durable-point intervals **and 2 snapshot builds**, including during a build and during an install, every killed node restarted. **And a pipeline of exactly 4** with a step-down injected while 4 entries are in flight (I3). | The pgless lesson: its kill tests always killed before the first checkpoint (R-45). D4's amendment cites S3, which measured 1 and 16 in flight, never 4 (O23). | extend `s3-consensus/src/scenarios.rs` (the spike's snapshot policy is `Never`), then `./run.sh vm` | ~30 min VM + harness work |
+| D-12 | dm-delay on a follower (50 ms), ENOSPC on a follower, clock jumps, and the true #2080 **bridge** topology (a node that reaches both sides; probably 5 nodes). | Scenario 9 reproduced the *mechanism* with a one-way link, not the issue's topology. | extend `scenarios.rs` + `flaky-log.sh`'s dm harness, then `./run.sh vm-refute` | ~30 min VM + harness work |
+| D-13 | **SHA-NI**: the true size of the MAC-vs-TLS gap. Neither host has it (`grep -c sha_ni /proc/cpuinfo` → 0; QEMU `pc-i440fx-6.1` masks it). Scaled, the MAC would cost ~+0.15–0.20 µs/msg against TLS's +0.11. | It decides whether D12's two authentication branches are close or 11× apart. | `s4 bench` on any host whose `/proc/cpuinfo` shows `sha_ni` | 5 s |
+| D-14 | A real RTT and the in-flight depth D7 implies: hold each forward 3–7 ms before answering, 500 µs and 1 ms of netem, mixed frame sizes (2.8 KB outcomes interleaved with a multi-MB `PayloadRead`), sweep 1/2/4/8 sockets. | The sweep ran at **0.31** commands in flight; D7 implies 15–35 (R-61). This is the only run that can size the pools. **Needs Alice**: `tc qdisc` is a VM-wide setting. | `tc qdisc add dev lo root netem delay 500us` + a new `PART=pool` block in `s4-transport/run-vm.sh` (the commit-delay and mixed-frame options do not exist yet) | ~30 min VM + harness work |
+| D-15 | Head-of-line blocking behind a big frame; reconcile `MAX_FRAME` (8 MiB) with `QUEEN_RAFT_ENTRY_MAX_BYTES` (96 MiB), or define a chunking rule. | §12.5's separate-pools rule is asserted, not tested; raising the cap without a bound on `buf.resize(len)` is an allocation DoS (R-62). | in D-14's run, with a multi-MB frame interleaved | in D-14 |
+| D-16 | Failure behaviour: peer kill, half-open socket, reconnect reusing a request id; and backpressure (the per-connection mpsc 4096 queues were never exercised — both sides ran at ≤0.21 of 8 cores). | One multiplexed socket makes one failure retry every in-flight command, bounded by D6's recorded outcomes (R-63); reconnect is still unimplemented in the spike. | new `PART=fail` block in `s4-transport/run.sh` | ~30 min VM + harness work |
+| D-17 | **HTTP/2 over the same rustls** as a third configuration. | The one alternative that would remove most of the framing, multiplexing, backpressure and reconnect code D12 obliges us to write (R-64). `h2` is not yet in `server/Cargo.lock`, so it is a new dependency (C-2-compatible, cmake-free). | new configuration in `s4-transport` (hyper's `http2` feature) | ~1 harness day |
+| D-18 | Three brokers sharing one disk (§13.6), and the interaction between the dedup structures and a snapshot install. | Every store and dedup number is one process on a dedicated disk. | three concurrent `s1-store run` / `s2-dedup run` processes on one VM disk | ~30 min VM |
+
+---
+
+*Last revised 2026-09-18 (G0 packet). Nothing in phase 0 is committed; the
+phase-0 commit agent commits `PLAN_RAFT.md`, this file and `test/raft/`.*
