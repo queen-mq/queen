@@ -1,0 +1,19 @@
+# Build output, scratch state and caches. Never committed.
+target/
+data/
+*.img
+__pycache__/
+
+# Per-node scenario chatter (s3 writes one file per node per scenario): a few MB
+# of raft logs with no measurement in them. The scenario summary .txt next to the
+# directory carries the numbers. Anchored with **/ because every results/ dir
+# lives under spikes/<spike>/, not next to this file.
+**/results/**/logs/
+**/results/**/*-logs/
+
+# Logs are ignored by default; the measured ones are re-included below. What is
+# kept is the campaign evidence: RESULT lines, matrices, drivers, baselines.
+*.log
+!**/results/**/*.log
+!**/results-vm/**/*.log
+!vm/baseline/**/*.log

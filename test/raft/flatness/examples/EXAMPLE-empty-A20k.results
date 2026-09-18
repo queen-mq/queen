@@ -1,0 +1,15 @@
+# EXAMPLE FILE — the numbers below are INVENTED to demonstrate the format and
+# the comparator. They are not a measurement of anything. A real file is
+# written by a regime run on the Linux VM (§13.6) and carries its own host and
+# commit.
+# regime=A20k state=empty host=EXAMPLE-not-a-measurement commit=EXAMPLE topology=raft3 duration_s=3600 command="goload -mode openloop -rate 20000 -partitions 64"
+p50_ms               18.9
+p99_ms               41.2
+p999_ms              120
+ack_rtt_ms           22.4
+cpu_cores            3.1
+disk_mbps            118
+durable_point_ms     4.8
+snapshot_build_s     12
+rss_start_mb         1024
+rss_end_mb           1040
