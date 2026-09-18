@@ -109,7 +109,7 @@ pub mod dedup;
 
 /// The cycle driver (§7.1): drain the command channel under the batch caps,
 /// plan, propose, wait for local apply, clear the overlay. Owner: WP-1.6.
-pub mod batcher {}
+pub mod batcher;
 
 /// The consensus seam (§12.1): the `Replicator` trait, `local` (phases 1–2,
 /// no network) and `raft` (the openraft adapter, phase 3).

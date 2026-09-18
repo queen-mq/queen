@@ -35,6 +35,7 @@
 
 mod apply;
 mod apply_crash;
+mod batcher;
 mod columns;
 mod fuzz;
 mod gates;
