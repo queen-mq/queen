@@ -43,3 +43,5 @@ mod roundtrip;
 pub(super) mod samples;
 mod store;
 mod store_crash;
+mod replicator;
+mod replicator_crash;

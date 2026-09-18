@@ -74,6 +74,10 @@ deadpool-postgres = "0.14"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 bytes = "1"
+# WP-1.6a: `#[async_trait]` on the `Replicator` seam (§12.1). Already in the
+# lock (0.1.91) transitively via axum/tokio-postgres; this makes it a direct
+# dependency so `rsm/replicator` can name it. One line, added by WP-1.6a.
+async-trait = "0.1"
 rand = "0.8"
 zstd = "0.13"
 base64 = "0.22"

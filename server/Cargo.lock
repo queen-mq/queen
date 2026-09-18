@@ -1253,6 +1253,7 @@ name = "queen-engine"
 version = "1.6.0"
 dependencies = [
  "aes-gcm",
+ "async-trait",
  "axum",
  "base64",
  "bytes",

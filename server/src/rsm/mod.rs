@@ -138,12 +138,7 @@ pub mod batcher {}
 /// The consensus seam (§12.1): the `Replicator` trait, `local` (phases 1–2,
 /// no network) and `raft` (the openraft adapter, phase 3).
 /// Owners: WP-1.6, WP-3.1.
-pub mod replicator {
-    /// `LocalReplicator`: a single node, its own log, no network (§12.2).
-    pub mod local {}
-    /// The openraft adapter (§12.3). WP-3.1.
-    pub mod raft {}
-}
+pub mod replicator;
 
 /// Consensus log storage (§12.3): raft-log 0.4.6 behind the library's traits,
 /// with a durable `save_committed` (S3 plan change 5). Owner: WP-3.2.
