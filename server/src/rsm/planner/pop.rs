@@ -78,6 +78,86 @@ impl SegH {
     }
 }
 
+/// The default cap on the `pending` prefix scan [`wildcard_pop_provably_empty`]
+/// makes. A caught-up group has zero pending rows, so the common case stops at
+/// once; this only bounds a pathological group with very many deferred (leased /
+/// delayed / window-buffered) partitions, where the fastpath conservatively
+/// falls back to submitting rather than scan without limit.
+pub const POP_FASTPATH_SCAN_CAP: usize = 512;
+
+/// PERF-J pop empty fastpath (`QUEEN_RAFT_POP_FASTPATH_EMPTY`). Whether a
+/// wildcard pop of `(tenant, queue, group)` is PROVABLY empty from committed
+/// state alone, so the facade can answer it WITHOUT submitting a `PopWildcard`
+/// command onto the single serial batcher pipeline (where its ~0.5 ms plan
+/// competes with the pushes — the round-4 finding).
+///
+/// It reduces to the same `pending.ready_at` truth the parked long-poll's
+/// `has_pending` gate reads (§9.5), so a `true` here is consistent with what the
+/// wildcard walk would then offer: it means [`Planner::plan_pop_wildcard`] would
+/// return [`Plan::Empty`] (no log entry). Conservative by construction — it
+/// returns `true` (fastpath, skip the submit) ONLY when
+///  * the queue exists (a missing queue that a `create_cfg` would materialise is
+///    an effect; the caller passes no create when it uses this),
+///  * the group is already registered (a first-contact pop emits a `GroupUpsert`
+///    effect, so it is NOT empty and MUST be planned),
+///  * the group is not conflating (conflation delivers the tail, not the ring),
+///    and
+///  * no pending partition of the group is ready (`ready_at <= now_us`).
+///
+/// Everything else returns `false` = "submit and let the planner decide" (it may
+/// still be empty). This can only ever cost one extra command; it can never
+/// strand work, because a push that lands after this read re-arms the ring AND
+/// wakes the parked consumer (apply's per-group append wake, §9.5), which
+/// re-polls — so no message is lost, exactly as a post-empty re-poll behaves
+/// today.
+pub fn wildcard_pop_provably_empty<R: TypedReads + ?Sized>(
+    r: &R,
+    tenant: &str,
+    queue: &str,
+    group: &str,
+    now_us: i64,
+    cap: usize,
+) -> crate::rsm::store::Result<bool> {
+    // A missing queue is empty only when no create config rides the pop; the
+    // caller guarantees that, but the read is cheap and keeps this self-contained.
+    if r.queue(tenant, queue)?.is_none() {
+        return Ok(false);
+    }
+    // First contact registers the group (an effect) => not empty; must submit.
+    let Some(g) = r.group(tenant, queue, group)? else {
+        return Ok(false);
+    };
+    // Conflation reads the tail, which the pending ring does not fully capture.
+    if g.meta.conflation {
+        return Ok(false);
+    }
+    // Any pending partition ready now => the planner would try to claim it.
+    let from = keys::pending_prefix(tenant, queue, group);
+    let mut ready = false; // a claimable (ready_at <= now) partition exists
+    let mut boundary = false; // the scan walked off this group's prefix
+    let mut scanned = 0usize; // rows seen that belong to THIS group
+    r.scan_pending(&from, cap, &mut |t, q, gg, _pid, ready_at| {
+        if t != tenant || q != queue || gg != group {
+            boundary = true;
+            return false; // past this group's rows: nothing more can be ready
+        }
+        scanned += 1;
+        if ready_at <= now_us {
+            ready = true;
+            return false;
+        }
+        true
+    })?;
+    if ready {
+        return Ok(false);
+    }
+    // Proven empty only if the scan reached this group's boundary or exhausted
+    // the keyspace (fewer than `cap` of this group's rows). A full `cap` of
+    // deferred rows with no boundary might hide a ready row past the cap, so be
+    // conservative and submit.
+    Ok(boundary || scanned < cap)
+}
+
 impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     /// A pinned pop of one named partition (`log_pop_specific_v1`). An unknown
     /// partition answers EMPTY and is never provisioned — only a push

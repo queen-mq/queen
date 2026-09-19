@@ -81,6 +81,71 @@ fn a_live_lease_excludes_a_concurrent_claim() {
 }
 
 #[test]
+fn wildcard_fastpath_is_empty_only_when_provably_empty() {
+    // PERF-J: the facade's empty-pop fastpath. `wildcard_pop_provably_empty` must
+    // say "empty" (skip the batcher) ONLY when `plan_pop_wildcard` would return
+    // `Plan::Empty` — never for a first-contact (registration is an effect) nor a
+    // ready partition. New this round, so this fails to build on the pre-fix tree.
+    use super::planner_harness::TENANT;
+    use crate::rsm::planner::pop::{wildcard_pop_provably_empty, POP_FASTPATH_SCAN_CAP};
+    use crate::rsm::store::Store;
+
+    let mut c = Cell::new("pop-fastpath");
+    let probe = |c: &Cell| -> bool {
+        c.node
+            .store()
+            .read(|r| {
+                wildcard_pop_provably_empty(r, TENANT, "q", "g", c.now(), POP_FASTPATH_SCAN_CAP)
+            })
+            .expect("read")
+    };
+
+    // (1) Unknown queue + unregistered group: a wildcard pop MAY create/register
+    //     (an effect), so it is NOT provably empty -> must submit.
+    assert!(
+        !probe(&c),
+        "unknown queue must submit (may create/register)"
+    );
+
+    // (2) Push, then a first-contact wildcard pop registers the group and claims.
+    c.run(&[push(1, "q", "p0", &["a", "b"])]);
+    c.advance(1000);
+    let cy = c.run(&[pop_wildcard(2, "q", "g", "w1")]);
+    assert_eq!(
+        claims(&cy.outcome(0)).len(),
+        1,
+        "the first pop claims the run"
+    );
+    let pid = c.pid_of("q", "p0").unwrap();
+
+    // The partition is now LEASED (claimed, unacked), deferred to lease expiry, so
+    // another wildcard pop finds nothing claimable -> provably empty.
+    c.advance(1000);
+    assert!(
+        probe(&c),
+        "a fully-leased group has nothing ready -> fastpath empty"
+    );
+
+    // (3) Ack the batch: the partition drains and its pending row is deleted.
+    c.run(&[ack_pos(3, pid, "q", "g", "w1", Some(1), true, 2)]);
+    assert_eq!(c.cursor(pid, "g").unwrap().committed, 1);
+    c.advance(1000);
+    assert!(probe(&c), "a registered, drained group is provably empty");
+
+    // (4) A new push makes a partition ready NOW -> not provably empty -> submit,
+    //     and a real wildcard pop then delivers it (no claim is stranded).
+    c.run(&[push(4, "q", "p0", &["z"])]);
+    c.advance(1000);
+    assert!(!probe(&c), "a ready partition is not provably empty");
+    let cy = c.run(&[pop_wildcard(5, "q", "g", "w1")]);
+    assert_eq!(
+        claims(&cy.outcome(0)).len(),
+        1,
+        "the ready message is delivered by a real pop"
+    );
+}
+
+#[test]
 fn lease_expiry_redelivers_with_attempt_up_and_the_retry_budget_untouched() {
     let mut c = Cell::new("pop-expiry");
     c.run(&[push(1, "q", "p0", &["a", "b"])]);

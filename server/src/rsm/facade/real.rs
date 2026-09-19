@@ -132,6 +132,38 @@ pub struct RaftFacade {
     notifier: Arc<Notifier>,
     /// The batcher task handle, kept so [`RaftFacade::shutdown`] can join it.
     batcher_join: tokio::task::JoinHandle<()>,
+    /// `QUEEN_RAFT_POP_FASTPATH_EMPTY` (PERF-J, default on): answer a wildcard
+    /// pop that is provably empty from committed state WITHOUT submitting a
+    /// `PopWildcard` command onto the single serial batcher pipeline. Resolved
+    /// once at open.
+    pop_fastpath_empty: bool,
+}
+
+/// Wall micros for the PERF-J fastpath's `ready_at` comparison. A coarse hint —
+/// the pending ring's `ready_at` is in the RSM clock base (monotone wall micros),
+/// so a few microseconds of skew only ever makes a borderline deferred partition
+/// look not-yet-ready, which self-heals on the next re-poll (§9.5). The
+/// drained-partition case this optimises has no pending row at all, so it does
+/// not depend on this clock.
+fn wall_micros() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as i64)
+        .unwrap_or(0)
+}
+
+/// A boolean env knob: only `0`/`false`/`off`/`no` turns it off; unset or any
+/// other value keeps the default (matches [`BatcherConfig::from_env`]).
+fn env_flag(name: &str, default_on: bool) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|v| {
+            !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            )
+        })
+        .unwrap_or(default_on)
 }
 
 impl RaftFacade {
@@ -181,6 +213,7 @@ impl RaftFacade {
             cmd_tx,
             notifier: ctx.notifier.clone(),
             batcher_join,
+            pop_fastpath_empty: env_flag("QUEEN_RAFT_POP_FASTPATH_EMPTY", true),
         })
     }
 
@@ -197,6 +230,7 @@ impl RaftFacade {
             cmd_tx,
             notifier: _,
             batcher_join,
+            pop_fastpath_empty: _,
         } = self;
         drop(cmd_tx); // the batcher sees a closed channel, drains, and exits
         let _ = batcher_join.await; // its Arc<repl>/Arc<store> drop here
@@ -240,6 +274,35 @@ impl RaftFacade {
             Ok(Err(_dropped)) => Err(RsmError::Internal("planner dropped the reply".into())),
             Err(_elapsed) => Err(RsmError::Timeout),
         }
+    }
+
+    /// PERF-J: whether a wildcard pop of `(tenant, queue, group)` is provably
+    /// empty from committed state, so it need not enter the serial batcher
+    /// pipeline (`QUEEN_RAFT_POP_FASTPATH_EMPTY`). The committed read runs on the
+    /// blocking pool (I15), like every other store read on the facade's hot
+    /// paths. Any error (join or store) is treated as "not provably empty", so
+    /// the caller submits and the planner decides — correctness over the
+    /// optimisation.
+    async fn wildcard_would_be_empty(&self, tenant: &str, queue: &str, group: &str) -> bool {
+        let store = self.store.clone();
+        let tenant = tenant.to_string();
+        let queue = queue.to_string();
+        let group = group.to_string();
+        let now_us = wall_micros();
+        let res = tokio::task::spawn_blocking(move || {
+            store.read(|r| {
+                crate::rsm::planner::pop::wildcard_pop_provably_empty(
+                    r,
+                    &tenant,
+                    &queue,
+                    &group,
+                    now_us,
+                    crate::rsm::planner::pop::POP_FASTPATH_SCAN_CAP,
+                )
+            })
+        })
+        .await;
+        matches!(res, Ok(Ok(true)))
     }
 
     /// Every dead letter this node has filed, decoded off the committed store.
@@ -397,6 +460,12 @@ struct PushItemOut {
 
 impl RaftFacade {
     async fn push_impl(&self, ctx: ReqCtx, req: PushReq) -> Result<PushOut, RsmError> {
+        // PERF-J: the push-only HTTP-boundary split. `_t_prep` covers the
+        // pre-submit work (parse + resolve + pack); `submit_ns` accumulates the
+        // `cmd_tx.send` await (channel back-pressure, which `arrival_to_proposed`
+        // cannot see because it stamps just before the send).
+        let _t_prep = crate::rsm::timing::stamp();
+        let mut _submit_ns: u64 = 0;
         let body: PushBodyIn =
             serde_json::from_slice(&req.raw).map_err(|e| RsmError::Rejected {
                 code: "bad_body".into(),
@@ -473,6 +542,12 @@ impl RaftFacade {
 
         // 2. One PushCommand per (queue, partition) group, its items the group's
         //    survivors in order. Submit them all, then await every reply.
+        // PERF-J: record the pre-submit leg now (parse + resolve + pack done).
+        if let Some(t) = _t_prep {
+            crate::rsm::timing::metrics()
+                .push_h_prep
+                .record_dur(t.elapsed());
+        }
         let mut rxs = Vec::with_capacity(groups.len());
         for (ordinal, g) in groups.iter().enumerate() {
             let items: Vec<PushItem> = g
@@ -492,11 +567,24 @@ impl RaftFacade {
                 create_cfg: default_queue_config(),
             });
             let (sub, rx) = Submission::new(cmd);
-            match tokio::time::timeout(ctx.deadline.remaining(), self.cmd_tx.send(sub)).await {
+            let _t_send = crate::rsm::timing::stamp();
+            let sent = tokio::time::timeout(ctx.deadline.remaining(), self.cmd_tx.send(sub)).await;
+            if let Some(t) = _t_send {
+                _submit_ns = _submit_ns.saturating_add(t.elapsed().as_nanos() as u64);
+            }
+            match sent {
                 Ok(Ok(())) => rxs.push((g.members.clone(), rx)),
                 Ok(Err(_)) => return Err(RsmError::Internal("planner channel closed".into())),
                 Err(_) => return Err(RsmError::Timeout),
             }
+        }
+        // PERF-J: the accumulated channel-enqueue wait (all groups), and open
+        // the reply-wait leg (propose+commit+apply+answer), push-only.
+        let _t_await = crate::rsm::timing::stamp();
+        if _t_await.is_some() {
+            crate::rsm::timing::metrics()
+                .push_h_submit
+                .record(_submit_ns);
         }
 
         // 3. Collect. A whole-group Retry fails the whole push (the SDK retries
@@ -559,6 +647,13 @@ impl RaftFacade {
                     }
                 }
             }
+        }
+
+        // PERF-J: every group's reply is in — close the reply-wait leg.
+        if let Some(t) = _t_await {
+            crate::rsm::timing::metrics()
+                .push_h_await
+                .record_dur(t.elapsed());
         }
 
         // 4. Followers inherit the leader's id, status ("duplicate") and offset
@@ -748,17 +843,33 @@ impl RaftFacade {
                 None => Command::PopWildcard(cmd),
             };
 
-            let reply = self.submit(ctx, command).await?;
-            let claims = match reply {
-                Reply::Done { outcome, .. } => match outcome {
-                    Outcome::Pop(o) => o.claims,
-                    other => {
-                        return Err(RsmError::Internal(format!(
-                            "pop got a non-pop outcome: {other:?}"
-                        )))
-                    }
-                },
-                other => return Err(reply_error(other)),
+            // PERF-J: a wildcard pop that is provably empty from committed state
+            // (the group is registered and no partition is ready) never enters
+            // the single serial batcher pipeline, where its ~0.5 ms plan would
+            // queue behind — and delay — the pushes. It flows into exactly the
+            // same empty handling below (long-poll park or empty render); a push
+            // that lands meanwhile re-arms the ring and wakes the park, so no
+            // claim is stranded (§9.5).
+            let claims = if self.pop_fastpath_empty
+                && matches!(command, Command::PopWildcard(_))
+                && self
+                    .wildcard_would_be_empty(&ctx.tenant, &queue, &group)
+                    .await
+            {
+                Vec::new()
+            } else {
+                let reply = self.submit(ctx, command).await?;
+                match reply {
+                    Reply::Done { outcome, .. } => match outcome {
+                        Outcome::Pop(o) => o.claims,
+                        other => {
+                            return Err(RsmError::Internal(format!(
+                                "pop got a non-pop outcome: {other:?}"
+                            )))
+                        }
+                    },
+                    other => return Err(reply_error(other)),
+                }
             };
 
             if !claims.is_empty() {

@@ -83,6 +83,121 @@ pub fn stamp() -> Option<Instant> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// PERF-K: the per-cycle / per-group trace (`QUEEN_RAFT_CYCLE_TRACE`)
+// ---------------------------------------------------------------------------
+
+/// `QUEEN_RAFT_CYCLE_TRACE` (default OFF). When on, the batcher emits one
+/// `CYCLETRACE` line per planning cycle and the log writer emits one
+/// `GROUPTRACE` line per fsync group, straight to stderr (so it lands in the
+/// broker log regardless of the `RUST_LOG`/`LOG_LEVEL` filter, and never
+/// competes with the tracing subscriber's own formatting). It is a DIAGNOSTIC
+/// switch — high-frequency, one line per cycle — off in every measurement run;
+/// only the PERF-K trace-analysis run turns it on. Read once and cached; only
+/// "1"/"true"/"on"/"yes" turns it on.
+static CYCLE_TRACE: LazyLock<bool> =
+    LazyLock::new(|| match std::env::var("QUEEN_RAFT_CYCLE_TRACE") {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "on" | "yes"
+        ),
+        Err(_) => false,
+    });
+
+/// Is the PERF-K per-cycle/per-group trace on? A cached bool.
+#[inline(always)]
+pub fn cycle_trace_enabled() -> bool {
+    *CYCLE_TRACE
+}
+
+/// Microseconds since the first trace read, the monotone clock the `CYCLETRACE`
+/// and `GROUPTRACE` lines share so the batcher cycle and the writer group can be
+/// interleaved on one timeline in the analysis. Only ever called under
+/// [`cycle_trace_enabled`], so its `Instant::now()` is off the hot path when the
+/// trace is off.
+pub fn trace_now_us() -> u64 {
+    static START: LazyLock<Instant> = LazyLock::new(Instant::now);
+    START.elapsed().as_micros() as u64
+}
+
+/// The trace sink: a bounded channel to a dedicated writer thread that owns a
+/// buffered stderr. The hot-path emit (the batcher task, the log writer thread)
+/// only formats and moves a `String` onto the channel — no syscall, no lock on
+/// a shared stderr — so the trace does not throttle the very cycle it measures
+/// (the first PERF-K trace put `eprintln!` inline and slowed the batcher to a
+/// crawl, so every cycle looked arrival-driven). A bounded channel with
+/// try-send drops a line rather than block a producer or grow without bound
+/// (this is a DIAGNOSTIC path, only live under `QUEEN_RAFT_CYCLE_TRACE`, so a
+/// dropped line is a gap in the trace, never a stall); the drop count is
+/// reported at shutdown.
+struct TraceSink {
+    tx: std::sync::mpsc::SyncSender<String>,
+    dropped: AtomicU64,
+}
+
+static TRACE_SINK: LazyLock<Option<TraceSink>> = LazyLock::new(|| {
+    if !cycle_trace_enabled() {
+        return None;
+    }
+    // 1<<17 lines of headroom; the writer keeps up with far more than the
+    // batcher produces (a line is ~150 B, ≈20 MB of stderr per 100k lines).
+    let (tx, rx) = std::sync::mpsc::sync_channel::<String>(1 << 17);
+    std::thread::Builder::new()
+        .name("queen-rsm-trace".into())
+        .spawn(move || {
+            use std::io::Write;
+            let stderr = std::io::stderr();
+            let mut w = std::io::BufWriter::with_capacity(1 << 20, stderr.lock());
+            let mut since_flush = 0usize;
+            loop {
+                match rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(line) => {
+                        let _ = w.write_all(line.as_bytes());
+                        let _ = w.write_all(b"\n");
+                        since_flush += 1;
+                        if since_flush >= 4096 {
+                            let _ = w.flush();
+                            since_flush = 0;
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        let _ = w.flush();
+                        since_flush = 0;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        let _ = w.flush();
+                        break;
+                    }
+                }
+            }
+        })
+        .ok()
+        .map(|_| TraceSink {
+            tx,
+            dropped: AtomicU64::new(0),
+        })
+});
+
+/// Emit one trace line (the caller has already checked [`cycle_trace_enabled`]).
+/// Moves the `String` onto the writer thread's channel; a full channel drops the
+/// line and bumps the drop counter rather than blocking the producer.
+pub fn cycle_trace_line(line: String) {
+    if let Some(sink) = &*TRACE_SINK {
+        if sink.tx.try_send(line).is_err() {
+            sink.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// How many trace lines were dropped because the writer thread fell behind
+/// (reported at shutdown so a gap in the trace is accounted for).
+pub fn cycle_trace_dropped() -> u64 {
+    TRACE_SINK
+        .as_ref()
+        .map(|s| s.dropped.load(Ordering::Relaxed))
+        .unwrap_or(0)
+}
+
 /// How often `apply::run` emits the "rsm timing" summary line and republishes
 /// the apply counters. `QUEEN_RAFT_TIMING_LOG_MS` overrides it (still gated by
 /// `QUEEN_RAFT_METRICS`); 0 disables only the log line, not the histograms.
@@ -383,6 +498,26 @@ pub struct RsmMetrics {
     // -- facade --
     /// Pop payload read latency (the blocking segment render).
     pub pop_read: Histogram,
+    // -- PERF-J: the PUSH HTTP boundary, push-only (the mixed `arrival_to_proposed`
+    // is dominated by the empty polling POP commands, so its p50 hides the push).
+    /// Whole raft push handler: `dispatch_push` entry → response body built.
+    /// Compared to goload's per-request latency this isolates the server-side
+    /// cost from the loader / axum-accept / middleware wrapper.
+    pub push_h_total: Histogram,
+    /// Push pre-submit work: handler entry → the first command handed to the
+    /// batcher channel (parse + name-check + intra-request dedup + frame pack).
+    pub push_h_prep: Histogram,
+    /// Push channel enqueue: the `cmd_tx.send` await for a push's group commands
+    /// (a full bounded channel blocks here — facade back-pressure, invisible to
+    /// `arrival_to_proposed` which stamps just before the send).
+    pub push_h_submit: Histogram,
+    /// Push reply wait: last command sent → every group's reply collected
+    /// (propose + commit + local apply + answer), PUSH-ONLY. This is the push
+    /// equivalent of the pop-aliased `arrival_to_proposed + propose_roundtrip`.
+    pub push_h_await: Histogram,
+    /// Whole raft pop handler: `pop_run` entry → response body built, POP-ONLY.
+    /// Confirms the empty polling pops are cheap and dominate the mixed stages.
+    pub pop_h_total: Histogram,
     // -- counters --
     pub kinds: KindCounters,
     /// Commands whose per-command planning crossed the slow threshold (O18).
@@ -489,8 +624,33 @@ pub fn render_prometheus(out: &mut String) {
     let m = metrics();
 
     // Latency summaries (ns → seconds).
-    let lat: [(&str, &str, &Histogram); 16] = [
+    let lat: [(&str, &str, &Histogram); 21] = [
         ("queen_raft_plan_seconds", "Planner cycle duration", &m.plan),
+        (
+            "queen_raft_push_h_total_seconds",
+            "PERF-J: whole raft push handler (entry to response), push-only",
+            &m.push_h_total,
+        ),
+        (
+            "queen_raft_push_h_prep_seconds",
+            "PERF-J: push pre-submit (parse+pack), entry to first channel send",
+            &m.push_h_prep,
+        ),
+        (
+            "queen_raft_push_h_submit_seconds",
+            "PERF-J: push channel enqueue (cmd_tx.send await), back-pressure",
+            &m.push_h_submit,
+        ),
+        (
+            "queen_raft_push_h_await_seconds",
+            "PERF-J: push reply wait (propose+commit+apply+answer), push-only",
+            &m.push_h_await,
+        ),
+        (
+            "queen_raft_pop_h_total_seconds",
+            "PERF-J: whole raft pop handler (entry to response), pop-only",
+            &m.pop_h_total,
+        ),
         (
             "queen_raft_arrival_to_proposed_seconds",
             "Command arrival to its entry proposed",
@@ -765,9 +925,21 @@ pub fn emit_timing_log(stats: &ApplyStats) {
     let dp = m.durable_point.snapshot();
     let depth = m.apply_channel_depth.snapshot();
     let popr = m.pop_read.snapshot();
+    // PERF-J: the push-only HTTP boundary.
+    let pht = m.push_h_total.snapshot();
+    let php = m.push_h_prep.snapshot();
+    let phs = m.push_h_submit.snapshot();
+    let pha = m.push_h_await.snapshot();
+    let poh = m.pop_h_total.snapshot();
 
     tracing::info!(
         target: "rsm",
+        // PERF-J push boundary, p50/p99 in microseconds (push-only)
+        push_total_us_p50 = us(pht.p50), push_total_us_p99 = us(pht.p99),
+        push_prep_us_p50 = us(php.p50), push_prep_us_p99 = us(php.p99),
+        push_submit_us_p50 = us(phs.p50), push_submit_us_p99 = us(phs.p99),
+        push_await_us_p50 = us(pha.p50), push_await_us_p99 = us(pha.p99),
+        pop_total_us_p50 = us(poh.p50), pop_total_us_p99 = us(poh.p99),
         // stages, p50/p99 in microseconds
         plan_us_p50 = us(plan.p50), plan_us_p99 = us(plan.p99),
         arrival_to_proposed_us_p50 = us(a2p.p50), arrival_to_proposed_us_p99 = us(a2p.p99),

@@ -127,6 +127,15 @@ pub struct BatcherConfig {
     /// the pre-PERF-G path (the forwarding task alone). Inert on a backend that
     /// returns no `applied_notify`.
     pub driver_notify: bool,
+    /// `QUEEN_RAFT_PUSH_PRIORITY` (PERF-J, default on): drain a batch so pushes
+    /// are not head-of-line-blocked behind the expensive pop/other commands.
+    /// The batch is round-robined push-first (a push, then one other, then a
+    /// push, …) so a burst of ~0.5 ms pop plans cannot push a cheap ~4 µs push
+    /// past the `plan_budget_ms` cut into the next cycle, while non-push
+    /// commands still get every other early slot (no lane starves). Per-partition
+    /// push order is preserved (the partition is stable, and the push lane is
+    /// consumed in order). Off: the pre-PERF-J FIFO drain.
+    pub push_priority: bool,
 }
 
 impl Default for BatcherConfig {
@@ -141,6 +150,7 @@ impl Default for BatcherConfig {
             command_queue_depth: 1024,
             plan: PlanConfig::default(),
             driver_notify: true,
+            push_priority: true,
         }
     }
 }
@@ -198,6 +208,7 @@ impl BatcherConfig {
                 index_mode,
             },
             driver_notify: flag("QUEEN_RAFT_DRIVER_NOTIFY", d.driver_notify),
+            push_priority: flag("QUEEN_RAFT_PUSH_PRIORITY", d.push_priority),
         }
     }
 }
@@ -347,9 +358,15 @@ pub enum Reply {
 pub struct Submission {
     pub command: Command,
     pub reply: oneshot::Sender<Reply>,
-    /// When the facade handed this to the channel (PERF-1, O18): the arrival
-    /// stamp the `arrival_to_proposed` histogram measures from. A budget-cut
-    /// command re-queued for the next cycle restamps here (its wait resets).
+    /// When the facade FIRST handed this to the channel (PERF-1, O18): the
+    /// arrival stamp `arrival_to_proposed` measures from. PERF-J: this is the
+    /// TRUE facade arrival and is NEVER restamped — a budget-cut command
+    /// re-queued for the next cycle keeps its original value, so
+    /// `arrival_to_proposed` measures the whole facade→proposed wait across
+    /// every defer cycle. (Rounds 1-3 restamped it on defer, so the histogram
+    /// measured only the final re-plan leg and hid the real ~270 ms C1000 wait
+    /// — the artifact that invented the nonexistent "per-partition propose
+    /// lock". The per-cycle slot wait is measured separately by `enqueued_at`.)
     ///
     /// `None` when the instrumentation is off (`QUEEN_RAFT_METRICS=0`): this is
     /// the highest-frequency timing read (one per COMMAND, at facade ingress),
@@ -360,16 +377,25 @@ pub struct Submission {
     /// even with the knob off). Its only consumer, the `arrivals` collection,
     /// already runs only when metrics are on, so every stamp there is `Some`.
     pub received_at: Option<Instant>,
+    /// PERF-J: when this submission was LAST enqueued for a cycle — set at
+    /// ingress and RESTAMPED every time a budget-cut command is re-queued. This
+    /// is the per-cycle "slot wait" leg the `queue_wait` histogram (PERF-G's
+    /// first leg) measures, kept distinct from `received_at` so fixing the
+    /// arrival clock does not change what `queue_wait` reports. Follows the same
+    /// metrics knob.
+    pub enqueued_at: Option<Instant>,
 }
 
 impl Submission {
     pub fn new(command: Command) -> (Submission, oneshot::Receiver<Reply>) {
         let (tx, rx) = oneshot::channel();
+        let at = crate::rsm::timing::stamp();
         (
             Submission {
                 command,
                 reply: tx,
-                received_at: crate::rsm::timing::stamp(),
+                received_at: at,
+                enqueued_at: at,
             },
             rx,
         )
@@ -780,6 +806,9 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             closing: false,
             expire_due: false,
             stopped: false,
+            wake_reason: "init",
+            wake_seq: 0,
+            last_cycle_at: None,
         };
 
         loop {
@@ -793,10 +822,12 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             tokio::select! {
                 biased;
                 _ = st.role_rx.changed() => {
+                    st.note_wake("role");
                     let role = *st.role_rx.borrow();
                     st.on_role(role);
                 }
                 Some((seq, res)) = st.result_rx.recv() => {
+                    st.note_wake("result");
                     st.on_result(seq, res);
                 }
                 // PERF-G: the applied index advanced (QUEEN_RAFT_DRIVER_NOTIFY).
@@ -804,17 +835,21 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
                 // freed pipeline slot is reused on this one wake rather than
                 // waiting for each entry's forwarding task.
                 _ = wait_notify(&st.applied_notify), if st.applied_notify.is_some() => {
+                    st.note_wake("applied_notify");
                     st.on_applied_wake();
                 }
                 _ = expire.tick() => {
+                    st.note_wake("expire");
                     st.expire_due = true;
                 }
                 _ = tokio::time::sleep(Duration::from_millis(HOLD_POLL_MS)),
                     if st.holding_until.is_some() =>
                 {
+                    st.note_wake("hold");
                     st.check_hold();
                 }
                 maybe = st.cmd_rx.recv() => {
+                    st.note_wake("arrival");
                     match maybe {
                         Some(sub) => st.queue.push_back(sub),
                         None => st.closing = true,
@@ -859,6 +894,15 @@ struct RunState<S: Store, R: Replicator> {
     closing: bool,
     expire_due: bool,
     stopped: bool,
+    /// PERF-K trace: what the last `select!` wake was (`arrival` / `result` /
+    /// `applied_notify` / `expire` / `hold` / `role`), for the `CYCLETRACE`
+    /// "reason" field. Cheap `&'static str`, always maintained.
+    wake_reason: &'static str,
+    /// PERF-K trace: a monotone counter bumped on each `select!` wake, so the
+    /// analysis can group the burst of cycles that ran after one wake.
+    wake_seq: u64,
+    /// PERF-K trace: when the previous cycle ran, for the inter-cycle gap.
+    last_cycle_at: Option<Instant>,
 }
 
 impl<S: Store + 'static, R: Replicator> RunState<S, R> {
@@ -888,6 +932,9 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
     }
 
     /// Drain up to the caps (§5.1) into one batch, leaving the rest queued.
+    /// PERF-J: with `push_priority` on, the drained batch is round-robined
+    /// push-first so a cheap push is never budget-cut behind the batch's
+    /// expensive pops.
     fn drain_batch(&mut self) -> Vec<Submission> {
         let mut batch = Vec::new();
         let mut bytes = 0usize;
@@ -902,6 +949,9 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             bytes += hint;
             batch.push(self.queue.pop_front().unwrap());
         }
+        if self.cfg.push_priority && batch.len() > 1 {
+            batch = interleave_push_first(batch);
+        }
         batch
     }
 
@@ -912,6 +962,28 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         if batch.is_empty() && !expire {
             return;
         }
+        // PERF-K trace: capture the before-state and the inter-cycle gap now
+        // (before draining/proposing changes the counts). Gated on
+        // QUEEN_RAFT_CYCLE_TRACE; the whole block is a single cached-bool branch
+        // when off.
+        let trace = crate::rsm::timing::cycle_trace_enabled();
+        let (tr_drained, tr_unresolved0, tr_inflight0, tr_gap_us, tr_qbefore) = if trace {
+            let now = Instant::now();
+            let gap = self
+                .last_cycle_at
+                .map(|t| now.saturating_duration_since(t).as_micros() as u64)
+                .unwrap_or(0);
+            self.last_cycle_at = Some(now);
+            (
+                batch.len(),
+                self.unresolved(),
+                self.inflight.len(),
+                gap,
+                self.queue.len(),
+            )
+        } else {
+            (0, 0, 0, 0, 0)
+        };
         // §13.5 `batcher.drained`: commands are out of the channel and in the
         // cycle; nothing is planned. A crash here loses only unanswered work.
         if !batch.is_empty() {
@@ -941,12 +1013,15 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 tm.drain_commands.record(drain_cmds);
                 tm.drain_messages.record(drain_msgs);
                 // PERF-G leg 1: how long each drained command sat in the queue
-                // before this cycle (the pipeline-slot wait). Measured against
-                // `drain_started`, the instant the batch left the queue.
+                // before this cycle (the pipeline-slot wait). PERF-J: measured
+                // from `enqueued_at` (restamped on every defer), NOT
+                // `received_at` (the arrival, now preserved across defers), so
+                // this stays the PER-CYCLE slot wait while `arrival_to_proposed`
+                // becomes the true whole wait.
                 if let Some(now) = drain_started {
                     let qw = &crate::rsm::timing::metrics().queue_wait;
                     for s in &batch {
-                        if let Some(at) = s.received_at {
+                        if let Some(at) = s.enqueued_at {
                             qw.record_dur(now.saturating_duration_since(at));
                         }
                     }
@@ -956,6 +1031,12 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         } else {
             Vec::new()
         };
+
+        // PERF-J: carry each drained command's ORIGINAL arrival stamp past the
+        // unzip so a budget-cut command re-queued below keeps it (never
+        // restamped). Index-aligned with `slots`/`replies`; empty (and unused)
+        // when the metrics knob is off, since `received_at` is then `None`.
+        let received: Vec<Option<Instant>> = batch.iter().map(|s| s.received_at).collect();
 
         // Split the submissions: commands go to the blocking planner, reply
         // senders stay here in the same order.
@@ -1031,7 +1112,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             Some(entry) => match encode_entry(entry) {
                 Ok(bytes) => Some(Bytes::from(bytes)),
                 Err(e) => {
-                    self.route_encode_failure(out.slots, replies, &e);
+                    self.route_encode_failure(out.slots, replies, received, &e);
                     return;
                 }
             },
@@ -1046,6 +1127,12 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             (index, seq, true)
         } else {
             (0, 0, false)
+        };
+        // PERF-K trace: the command count that went into this cycle's entry.
+        let tr_entry_cmds = if trace {
+            out.entry.as_ref().map(|e| e.commands.len()).unwrap_or(0)
+        } else {
+            0
         };
 
         // The barrier entry for an empty answer that read the overlay (§7.2):
@@ -1075,15 +1162,24 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         let mut waiters: Vec<Waiter> = Vec::new();
         let mut deferred: Vec<Submission> = Vec::new();
 
-        for (slot, reply) in out.slots.into_iter().zip(replies.into_iter()) {
+        for ((slot, reply), arrived) in out
+            .slots
+            .into_iter()
+            .zip(replies.into_iter())
+            .zip(received.into_iter())
+        {
             match slot {
                 Slot::Immediate(r) => {
                     let _ = reply.send(r);
                 }
+                // PERF-J: preserve the ORIGINAL arrival (`arrived`), restamp only
+                // the per-cycle `enqueued_at`, so a command deferred several
+                // cycles reports its true whole wait in `arrival_to_proposed`.
                 Slot::Deferred(command) => deferred.push(Submission {
                     command: *command,
                     reply,
-                    received_at: crate::rsm::timing::stamp(),
+                    received_at: arrived,
+                    enqueued_at: crate::rsm::timing::stamp(),
                 }),
                 Slot::Logged(request_id) | Slot::SameCycle(request_id) => {
                     waiters.push(Waiter::Command { request_id, reply });
@@ -1144,6 +1240,31 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         } else {
             debug_assert!(waiters.is_empty(), "no entry but waiters were attached");
         }
+
+        // PERF-K trace: one line per cycle. The before-state was captured at
+        // entry; the after-state is read now (post-propose). `reason` is the
+        // wake that led here; `wake_seq` groups the burst of cycles a single
+        // wake produced (the drain shape's lockstep bursts show as several
+        // cycles sharing one `wake_seq`).
+        if trace {
+            crate::rsm::timing::cycle_trace_line(format!(
+                "CYCLETRACE t={} wake={} reason={} gap_us={} drained={} entry={} \
+                 cmds={} qbefore={} qafter={} unresolved={}->{} inflight={}->{}",
+                crate::rsm::timing::trace_now_us(),
+                self.wake_seq,
+                self.wake_reason,
+                tr_gap_us,
+                tr_drained,
+                if has_entry { 1 } else { 0 },
+                tr_entry_cmds,
+                tr_qbefore,
+                self.queue.len(),
+                tr_unresolved0,
+                self.unresolved(),
+                tr_inflight0,
+                self.inflight.len(),
+            ));
+        }
     }
 
     /// An entry that could not encode ([`encode_entry`], §5.1): a should-never
@@ -1154,15 +1275,22 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         &mut self,
         slots: Vec<Slot>,
         replies: Vec<oneshot::Sender<Reply>>,
+        received: Vec<Option<Instant>>,
         err: &crate::rsm::effect::CodecError,
     ) {
         tracing::error!(target: "rsm", error = ?err, "batcher entry failed to encode; refusing its commands");
-        for (slot, reply) in slots.into_iter().zip(replies.into_iter()) {
+        for ((slot, reply), arrived) in slots
+            .into_iter()
+            .zip(replies.into_iter())
+            .zip(received.into_iter())
+        {
             match slot {
+                // PERF-J: keep the original arrival on the requeued tail.
                 Slot::Deferred(command) => self.queue.push_front(Submission {
                     command: *command,
                     reply,
-                    received_at: crate::rsm::timing::stamp(),
+                    received_at: arrived,
+                    enqueued_at: crate::rsm::timing::stamp(),
                 }),
                 Slot::Immediate(r) => {
                     let _ = reply.send(r);
@@ -1411,6 +1539,13 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         }
     }
 
+    /// PERF-K trace: record which `select!` arm woke the driver, and bump the
+    /// per-wake sequence so the analysis can group the cycles that ran after it.
+    fn note_wake(&mut self, reason: &'static str) {
+        self.wake_reason = reason;
+        self.wake_seq = self.wake_seq.wrapping_add(1);
+    }
+
     /// PERF-G: the applied index advanced (`QUEEN_RAFT_DRIVER_NOTIFY`). Resolve
     /// every in-flight entry the apply has now passed, so the freed pipeline
     /// slot is reused on this one wake instead of each entry's forwarding task.
@@ -1499,6 +1634,51 @@ fn now_micros() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_micros() as i64)
         .unwrap_or(0)
+}
+
+/// PERF-J (`QUEEN_RAFT_PUSH_PRIORITY`): reorder a drained batch push-first so a
+/// cheap push (~4 µs plan) is not budget-cut behind the batch's expensive pops
+/// (~0.5 ms each). Round-robin, starting with a push: `[push, other, push,
+/// other, …]` then the longer lane's tail. Both lanes keep their relative order
+/// (`Vec::into_iter().partition` is stable and each lane is consumed in order),
+/// so per-partition push order is preserved AND no lane can be starved — every
+/// non-push still lands on an early (pre-cut) slot. Callers gate on the knob and
+/// on `batch.len() > 1`, so a single-command batch is never reordered.
+fn interleave_push_first(batch: Vec<Submission>) -> Vec<Submission> {
+    let n = batch.len();
+    let (pushes, others): (Vec<Submission>, Vec<Submission>) = batch
+        .into_iter()
+        .partition(|s| matches!(s.command, Command::Push(_)));
+    // All one kind: nothing to interleave, and the original order is already
+    // right (the partition preserved it).
+    if pushes.is_empty() || others.is_empty() {
+        let mut out = pushes;
+        out.extend(others);
+        return out;
+    }
+    let mut out = Vec::with_capacity(n);
+    let mut pi = pushes.into_iter();
+    let mut oi = others.into_iter();
+    loop {
+        match (pi.next(), oi.next()) {
+            (Some(p), Some(o)) => {
+                out.push(p);
+                out.push(o);
+            }
+            (Some(p), None) => {
+                out.push(p);
+                out.extend(pi);
+                break;
+            }
+            (None, Some(o)) => {
+                out.push(o);
+                out.extend(oi);
+                break;
+            }
+            (None, None) => break,
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1596,5 +1776,168 @@ mod perf1_arrival_tests {
             outcome: Outcome::Empty,
         }
         .waits_on_new_entry(seq, Some(seq)));
+    }
+}
+
+#[cfg(test)]
+mod perf_j_tests {
+    //! PERF-J: the push-priority drain reorder ([`interleave_push_first`]) and the
+    //! split arrival/enqueue stamps on [`Submission`]. Both are new this round, so
+    //! these fail to build against the pre-fix tree.
+    use super::{interleave_push_first, Command, Submission};
+    use crate::rsm::effect::QueueConfig;
+    use crate::rsm::entry::RequestId;
+    use crate::rsm::planner::{PushCommand, RenewCommand};
+
+    fn rid(n: u8) -> RequestId {
+        let mut id = [0u8; 16];
+        id[0] = n;
+        id
+    }
+
+    fn qc() -> QueueConfig {
+        QueueConfig {
+            id: [0u8; 16],
+            namespace: None,
+            task: None,
+            priority: 0,
+            lease_time: 30,
+            retry_limit: 3,
+            retry_delay: 0,
+            ttl: 0,
+            dead_letter_queue: true,
+            dlq_after_max_retries: true,
+            delayed_processing: 0,
+            window_buffer: 0,
+            retention_seconds: 0,
+            completed_retention_seconds: 0,
+            retention_enabled: false,
+            encryption_enabled: false,
+            max_wait_time_seconds: 0,
+            max_queue_size: 0,
+            min_pop_wait_time: 0,
+            dedup_window_seconds: 0,
+            retention_sink_hold: String::new(),
+            retention_sink_hold_max_seconds: 0,
+            created_at_us: 0,
+        }
+    }
+
+    /// A push submission tagged by `id`, to partition `part`.
+    fn push_sub(id: u8, part: &str) -> Submission {
+        let cmd = Command::Push(PushCommand {
+            request_id: rid(id),
+            tenant: "t".into(),
+            queue: "q".into(),
+            partition: part.into(),
+            items: Vec::new(),
+            create_cfg: qc(),
+        });
+        Submission::new(cmd).0
+    }
+
+    /// A non-push (renew) submission tagged by `id`.
+    fn other_sub(id: u8) -> Submission {
+        let cmd = Command::Renew(RenewCommand {
+            request_id: rid(id),
+            worker: "w".into(),
+            seconds: 30,
+        });
+        Submission::new(cmd).0
+    }
+
+    fn ids(batch: &[Submission]) -> Vec<u8> {
+        batch.iter().map(|s| s.command.request_id()[0]).collect()
+    }
+
+    fn is_push(s: &Submission) -> bool {
+        matches!(s.command, Command::Push(_))
+    }
+
+    #[test]
+    fn push_priority_round_robins_push_first_and_keeps_push_order() {
+        // A mixed batch as FIFO arrival order: other, push(p0), other, push(p0),
+        // push(p1), other. Pre-fix (FIFO) would plan the leading `other`(10)
+        // BEFORE the first push, so a budget cut on the expensive pops could defer
+        // the pushes. PERF-J round-robins push-first.
+        let batch = vec![
+            other_sub(10),
+            push_sub(1, "p0"),
+            other_sub(11),
+            push_sub(2, "p0"),
+            push_sub(3, "p1"),
+            other_sub(12),
+        ];
+        let out = interleave_push_first(batch);
+        // pushes [1,2,3] (stable) interleaved with others [10,11,12] (stable),
+        // starting with a push: [1,10,2,11,3,12].
+        assert_eq!(ids(&out), vec![1, 10, 2, 11, 3, 12]);
+        // The first planned command is a push (never head-of-line-blocked).
+        assert!(is_push(&out[0]));
+        // Per-partition push order preserved: 1 (p0) before 2 (p0) before 3 (p1).
+        let push_ids: Vec<u8> = out
+            .iter()
+            .filter(|s| is_push(s))
+            .map(|s| s.command.request_id()[0])
+            .collect();
+        assert_eq!(push_ids, vec![1, 2, 3], "push order must be preserved");
+        // No lane starves: every `other` is present, none dropped.
+        let other_ids: Vec<u8> = out
+            .iter()
+            .filter(|s| !is_push(s))
+            .map(|s| s.command.request_id()[0])
+            .collect();
+        assert_eq!(other_ids, vec![10, 11, 12]);
+    }
+
+    #[test]
+    fn push_priority_lifts_the_only_push_ahead_of_many_others() {
+        // One push behind three others: the push must not wait behind them.
+        let batch = vec![
+            other_sub(10),
+            other_sub(11),
+            other_sub(12),
+            push_sub(1, "p0"),
+        ];
+        let out = interleave_push_first(batch);
+        assert_eq!(ids(&out), vec![1, 10, 11, 12]);
+    }
+
+    #[test]
+    fn push_priority_never_starves_the_only_other() {
+        // Many pushes, one other: the other still lands on an early (pre-cut)
+        // slot rather than behind every push.
+        let batch = vec![
+            push_sub(1, "p0"),
+            push_sub(2, "p0"),
+            push_sub(3, "p0"),
+            other_sub(10),
+        ];
+        let out = interleave_push_first(batch);
+        assert_eq!(ids(&out), vec![1, 10, 2, 3]);
+    }
+
+    #[test]
+    fn push_priority_is_a_noop_on_a_single_kind() {
+        let all_push = vec![push_sub(1, "p0"), push_sub(2, "p1"), push_sub(3, "p0")];
+        assert_eq!(ids(&interleave_push_first(all_push)), vec![1, 2, 3]);
+        let all_other = vec![other_sub(10), other_sub(11)];
+        assert_eq!(ids(&interleave_push_first(all_other)), vec![10, 11]);
+    }
+
+    #[test]
+    fn submission_new_sets_both_the_arrival_and_the_enqueue_stamp() {
+        // PERF-J: `received_at` (arrival, never restamped) and `enqueued_at`
+        // (per-cycle) are both set at ingress, both following the metrics knob.
+        let (sub, _rx) = Submission::new(Command::Renew(RenewCommand {
+            request_id: rid(7),
+            worker: "w".into(),
+            seconds: 30,
+        }));
+        let on = crate::rsm::timing::enabled();
+        assert_eq!(sub.received_at.is_some(), on);
+        assert_eq!(sub.enqueued_at.is_some(), on);
+        // They are the SAME instant at ingress (one stamp read).
+        assert_eq!(sub.received_at, sub.enqueued_at);
     }
 }
