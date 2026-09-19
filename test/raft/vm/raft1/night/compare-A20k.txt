@@ -1,0 +1,19 @@
+flatness comparison (PLAN_RAFT.md §13.6, G-3, I8)
+  baseline  command=goload A20k 6min commit=cdc5bb59af27 duration_s=360 host=vm-164.90.215.224 pipeline=1 regime=A20k state=empty topology=raft1
+  candidate command=goload A20k 6min commit=cdc5bb59af27 duration_s=360 host=vm-164.90.215.224 pipeline=1 regime=A20k state=preloaded topology=raft1
+
+  metric                        empty    preloaded     delta  verdict
+  ack_rtt_ms                    28.18        29.06      3.1%  PASS    
+  cpu_cores                      1.31         1.31      0.0%  PASS    cost must follow the write rate, not the stored volume (G-3)
+  disk_mbps                     112.9        116.2      2.9%  PASS    two-sided: moving far fewer bytes means the run did less work
+  p50_ms                        56.58        61.18      8.1%  PASS    latency: higher is worse
+  p999_ms                       561.1         1434    155.5%  FAIL    
+  p99_ms                        452.6        477.2      5.4%  PASS    
+  rss_end_mb                     1520         4279    181.5%  REPORT  reported; the gate is the in-run drift below
+  rss_start_mb                      8         3003  37437.5%  REPORT  reported; the gate is the in-run drift below
+
+  RSS drift within each run (acceptance: ±5%)
+  baseline rss drift                8         1520  18900.0%  FAIL    ±5% across the run (§13.6)
+  candidate rss drift            3003         4279     42.5%  FAIL    ±5% across the run (§13.6)
+
+  verdict: FAIL (gate: every gated metric within ±15%, RSS drift within ±5%)

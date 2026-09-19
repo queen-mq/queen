@@ -3,8 +3,9 @@
 The working record of PLAN_RAFT.md (Queen without Postgres: one replicated
 log). The plan itself is never edited for progress; everything that is done,
 decided, found or measured is recorded here. Created by WP-0.1 on 2026-09-17;
-this revision (2026-09-18) is the **G0 packet**: phase 0 closed out after the
-adversarial review round.
+the G0 packet closed phase 0 (2026-09-18); this revision (2026-09-19) is the
+**G1 packet, pipeline=4 pass**: phase 1 built and measured on the VM at the
+ratified pipeline after the F-1 fix and the night run.
 
 Base: branch `raft` in `/Users/alice/Work/queen`, cut from `fc71b65b`
 (master, 1.6.0). The pgless hardening tree is parked as `2bbd10d1` on branch
@@ -33,19 +34,25 @@ Phase 0 is committed on `raft` as eight commits (`34c5714f`..`f4b0337c`), plus
 the ratification commit that follows this revision. No product code changed in
 phase 0.
 
-**G1 packet — phase 1 built, gate open for Alice (2026-09-18).** Phase 1 is
-committed on `raft` (`d6500817`..`ee181d91`, WP-1.1..WP-1.11): single node,
-message path, LocalReplicator; no Raft, no network. The message path plans,
-applies, recovers and reads off this node's own segment files — push, pop
-(pinned / wildcard / discovery), ack by hash and by position, batch ack, nack,
-renew, DLQ head, dedup and request-id replay. The one-line verdict, with the
-detail in the **G1 checklist** and **M6** below: **parity and crash safety hold
-at pipeline=1; the O14 performance comparison, the clean I8 flatness result and
-the O19 isolation verdict do not exist yet**, because the ratified pipeline of
-4 (D4) hit a correctness bug (**F-1 / R-117**) that stopped the node under any
-concurrent load. The fix is written (the batcher submits each propose in plan
-order, with a deterministic witness test) but is **uncommitted in the working
-tree**, and the pipeline=4 VM re-run it unblocks is owed. Postgres (D22) is
+**G1 packet — phase 1 built and measured at pipeline=4, gate open for Alice
+(revised 2026-09-19).** Phase 1 is committed on `raft` (`d6500817`..`ee181d91`,
+WP-1.1..WP-1.11); the **F-1 fix** at `f8bfa672`; the draft G1 packet at
+`29bc7cdd`. This revision folds in the **night run of 2026-09-18/19** — the owed
+pipeline=4 VM pass on the F-1-fixed binary (md5 `cdc5bb59af27`), recorded in
+`test/raft/vm/raft1/NIGHT-A-pipeline4.md` (O14 / flatness / O19), `NIGHT-B-dedup.md`
+(the 3600 s dedup window) and `NIGHT-C-flaky.md` (dropped writes at pipeline=4),
+with the raw evidence under `night/`. Single node, message path, LocalReplicator;
+no Raft, no network. The one-line verdict, detail in the **G1 checklist**, **M6**
+(pipeline=1) and **M7** (pipeline=4) below: **parity, crash safety and
+dropped-write durability hold; F-1 is fixed and now discharged on the VM (0 poison
+/ 0 `TimeWentBackwards` across every pipeline=4 run of the night — the six-regime
+sweep, a 5-min sustained A20k, a 75-min congestion collapse, a 64-min fill and 100
+crash-reopen rounds, ~200 M+ pushes total). But the performance and isolation
+story is now measured and NEGATIVE, not absent: O14 FAILS, I8 flatness is mixed
+(FAIL on the strict gate), O19 FAILS.** The night also surfaced two HIGH defects:
+**R-123** (SIGBUS on store reopen after dropped writes, 1/100 — the reproduced
+WP-0.3 D-01/D-03 heed "would not reopen") and **R-121** (unbounded push-admission
+queueing with no push-side 503 at a sustained 50k offered). Postgres (D22) is
 still the oracle; nothing in phase 1 changes that.
 
 ---
@@ -55,7 +62,7 @@ still the oracle; nothing in phase 1 changes that.
 | gate | state | date | decision | evidence |
 |---|---|---|---|---|
 | G0 | **RATIFIED** | 2026-09-18 | D9 heed everywhere (+ pins, §11.5 repair); D10 option (a) lean; D11 openraft `54094270` + raft-log 0.4.6 with the seven plan changes; D12 framed TCP + sequenced per-frame MAC; §11.4/§11.8 defaults as proposed; O1–O23 as recommended (O14 failover ≤ 4 s, D14 kept); evidence gaps accepted, phase 1 approved. See the note at the top. | WP-0.2 `test/raft/vm/baseline/RESULTS.md`; WP-0.3 `test/raft/spikes/s1-store/MEMO.md`; WP-0.4 `s2-dedup/MEMO.md`; WP-0.5 `s3-consensus/MEMO.md`; WP-0.6 `s4-transport/MEMO.md`; WP-0.7 `test/raft/README.md`; Findings R-01..R-64 below |
-| G1 | **phase 1 built — open for Alice** | 2026-09-18 | Message-path parity **PASS** (difffuzz clean after 7 documented envelope gaps; RAFT PARITY js lane green; crash matrix 22/22 reachable cells PASS; dropped-writes durability 20/20). raft1 performance vs O14 **NOT JUDGED**; flatness (I8) and noisy-neighbour (O19) **INCONCLUSIVE** — all three blocked by **F-1 / R-117** (pipeline=4 stopped the node; fix written, uncommitted; pipeline=4 VM re-run owed). See the G1 checklist. | crash `test/raft/crash/RESULTS.md`; difffuzz `test/raft/difffuzz/PARITY-NOTES.md`; VM `test/raft/vm/raft1/RESULTS.md`; **M6** below; Findings R-101..R-119 |
+| G1 | **phase 1 built & measured at pipeline=4 — open for Alice** | 2026-09-19 | Message-path parity **PASS** (difffuzz clean after 7 documented envelope gaps; RAFT PARITY js lane green); crash matrix **22/22** reachable cells PASS; dropped-writes durability **PASS** (pipeline=1 20/20; pipeline=4 **99/100**, the 1 FAIL is R-123). **F-1 fixed (`f8bfa672`) and discharged on the VM** (0 poison across every pipeline=4 run). At pipeline=4: **O14 FAIL** (A-regime push p50 ≤ pg, but p99 ~6× pg; C1000 fan-out FAIL, cleanest fresh-store p50 **9.79** = 1.48× pg 6.62; FAT100 ≈**31%** of the knee); **I8 flatness mixed/FAIL** (CPU+disk flat, A20k p50/p99 isolated, but RSS not flat ~**387 B/msg** and C1000 p50 **+546%**); **O19 FAIL** (a 463/s DLQ storm lifts cold-partition p99 **+90.6%**, **+53.2%** at rest). New: R-121 (push admission), R-123 (SIGBUS reopen). See the G1 checklist. | crash `test/raft/crash/RESULTS.md`; difffuzz `PARITY-NOTES.md`; pipeline=1 `vm/raft1/RESULTS.md` + **M6**; pipeline=4 `vm/raft1/NIGHT-{A,B,C}-*.md` + **M7**; Findings R-101..R-124 |
 | G2 | not reached | — | Full parity on raft1 (RAFT PARITY identical to `single`), differential clean, crash matrix and flatness pass, performance vs O14. | — |
 | G3 | not reached | — | Confirm the consensus library, re-checking its release status and the open issues (openraft GH#2080 still OPEN on 2026-09-18). | — |
 | G4 | not reached | — | raft3 parity; kill matrix with zero acknowledged loss and failover within target; equal digests; performance within the O14 budget. | — |
@@ -106,49 +113,75 @@ O14 targets*). Numbers, not adjectives; what failed is stated plainly.
 | message-path parity (differential fuzzer) | **PASS** | thousands of 250-op seeds, **0 divergence** in message-path responses once 7 classified envelope gaps are absorbed; per-side checker (at-least-once + payload-hash) green on **both** brokers. `PARITY-NOTES.md`. Caveat: the 2000-seed target was not reached (200+; a contended shared checkout with a concurrent crash harness), re-runnable on a release broker. |
 | RAFT PARITY (client suite) | **PASS, narrow** | `run.sh --topo raft1` js lane green (kept 12/12, skipped 161 by un-ported route), `rc=0`. The parity *surface* is **one** message-path test today (`testPushAutoCreatesQueueAndPartition`) — every other suite test needs queue admin (WP-2.5) or a phase-2 route; it grows when those land. single↔raft1 gate print not captured in-session (a sibling's `single` stack was live in the shared checkout). go/py raft lanes deferred until their runners honour `QUEEN_TEST_STORAGE=raft`. |
 | crash matrix (§13.5) | **PASS** | 13 phase-1 points × {nth 1,2} = **22 PASS / 0 FAIL / 4 N/A**; every reachable cell recovers **exactly once** across `kill -9` (dedup, one txn→one offset, held claims redelivered after the lease, completions not resurrected). 4 N/A = gc points (no retention/delete route in phase 1), proven at the Rust level to a byte-equal digest. `crash/RESULTS.md`. Limit: SIGKILL keeps the page cache, so this proves bookkeeping, not unsynced-byte loss — covered by the next row. |
-| dropped-unflushed-writes durability | **PASS** | discharges **R-106 / R-111 / R-114**. 20/20 dm-flakey rounds on the VM, ~73k acked messages, `missing=0`, 0 error lines; an instrumented round proves the drop is adversarial (store reopens at `applied=0`, the fsync'd log `replayed=38`, 3000/3000 acks recovered from the log). `vm/raft1/RESULTS.md` §4. |
-| flatness (I8, §13.6) | **INCONCLUSIVE** | shrunk to 3 M / 2-min and partial (a shell fault after 3 of 4 runs; the preload confounded the A20k regime); at pipeline=1 push cannot preload the plan volume. One firm signal: **resident memory scales with stored count** — an empty A20k run goes 8→578 MB, a 4.4 M-message at-rest store holds 2 685→3 060 MB ≈ **610 B/msg**. That is R-105 showing up; whether it stays page-reclaimable is exactly what the full test must decide. Owed at pipeline=4. |
-| noisy neighbour (O19) | **INCONCLUSIVE** | confounded by pipeline=1 (a shared serial store slows every partition, so a bigger store is not isolation) and the delta cell (`284.67` p99) is a **known transcription error** — the same value was copied between two different workloads and the raw data was on the torn-down VM. **No numeric verdict**; the WP-1.11 row's "+134 %" is withdrawn. Owed at pipeline=4 with a settled backlog and a real DLQ storm. |
-| raft1 performance vs O14 | **NOT JUDGED** | pipeline=4 stopped the node under load (F-1), so the O14 targets (raft1 p50/p99 ≤ postgres at A20k/A50k/C1000; fat-batch ≥ 70 % of the 300k knee) cannot be judged. The pipeline=1 numbers (M6) are a **degenerate cap**: push p50 competitive (A20k **6.18** vs 9.15 ms) but the tail explodes (A20k p99 **175** vs 27, A50k p99 **1106** vs 75), consume caps at ≈9–24k msg/s, FAT100 tops at ≈**72k msg/s ≈ 24 %** of the postgres knee (below O14's 70 %). Owed on the fixed binary at pipeline=4. |
+| dropped-unflushed-writes durability | **PASS (with one HIGH defect, R-123)** | discharges **R-106 / R-111 / R-114**. pipeline=1: 20/20 dm-flakey rounds, ~73k acked, `missing=0`. pipeline=4 (NIGHT-C, F-1-fixed binary): **99/100** rounds every acked push delivered after reopen (`acked==ledger==delivered`, `missing=0`), reopen 316 ms–9.2 s, ~45.6 M acked, 0 poison. The **1 FAIL (round 75) is R-123**: `SIGBUS`/`BUS_ADRERR` on the `store/data.mdb` read mmap during apply-replay — the fsync'd log is intact (`truncated_tail=false`, 680 690 frames), but the torn `MDB_NOSYNC` store crashes the process before recovery completes. The durability *property* (log-is-truth) holds; the store-reopen path has a hazard. `NIGHT-C-flaky.md`. |
+| flatness (I8, §13.6) | **mixed — FAIL on the strict gate** | pipeline=4, 8.14 M at-rest / 6-min runs (NIGHT-A §2). **CPU and disk ARE flat** with store size (G-3's core claim holds: A20k CPU +0.0%, disk +2.9%). The **A20k** shape's p50/p99 **are isolated** from an 8 M cold store (+8.1%/+5.4% PASS) — but its **p999 +155%** and RSS are not. The **C1000** (1000-single-message-partition, fan-out) shape is **NOT isolated**: p50 **+546%**, ack **+122%**, p99 +15% — all FAIL. **RSS is not flat in any shape**: ~**387 B/msg** at rest (8.14 M → ~3.0 GB), lower than pipeline=1's 610 (R-105) but still **linear in stored count**, and it climbs within every run (the 3600 s dedup index retains every push). **Provenance caveat:** `flatness-night.sh` is not committed and the surviving `.results`/`compare-*.txt` carry the literal `pipeline=1` label the sed missed; pipeline=4 is the agent's note (mechanically consistent — empty-A20k p50 56.58/p99 452.6 matches the committed pipeline=4 `fivemin.sh` 44.29/419.8 — but not independently checkable from committed artifacts). |
+| noisy neighbour (O19) | **FAIL** | pipeline=4, a **real** active DLQ storm (NIGHT-A §3, `dlqstorm.py`: wildcard queue-mode pop + ack `status:"dlq"`). A light storm on one hot partition — **463/s**, 45 350 rows filed — raised the cold partitions' p99 **+90.6%** (87.55 → 166.91 ms); the 2 M backlog **at rest** (storm stopped) still held it **+53.2%** (→ 134.14). Both blow ±15%. Quiet throughput never lagged; only its latency did. **Reproducible from committed raw** (`night/quiet-{before,during,after}.gl` finals; `storm.out` 45350/98 s = 463/s) — the WP-1.11 transcription-error cell is superseded by a clean numeric verdict. |
+| raft1 performance vs O14 | **FAIL** | pipeline=4 on the fixed binary (NIGHT-A §1, M7). O14 wants raft1 p50 **and** p99 ≤ postgres at A20k/A50k/C1000 and fat-batch ≥ 70% of the knee. **Push p50 beats/matches pg** (A20k 6.24 vs 9.15, A50k 19.58 vs 23.17 — and A50k is far better than pipeline=1's 148.5) **but the p99 tail is ~6× pg** (A20k 162.8 vs 27.0 = 6.03×; A50k 444 vs 75 = 5.9×), **C1000 fan-out FAILS** (cleanest fresh-store p50 **9.79** = 1.48× pg 6.62; the §1 shared-broker 238.6/36× is **confounded** by the A50k 1.72 M backlog drain, not a valid fan-out datum), and **FAT100 ≈ 90k msg/s ≈ 31%** of the postgres knee (287k). Like-for-like: byte-identical goload flags, same loader md5 `2c97cccb0d1e`, binary differs only by storage class. Levers if G1 wants a re-attempt: R-105 active-index RAM, the dedup row cost, the §11.3 cadence, `QUEEN_RAFT_ENTRY_MAX_BYTES`/batch caps (O23) before raising the pipeline. |
 
-**The one blocker between here and a judgeable G1: F-1 / R-117.** At
-`QUEEN_RAFT_PIPELINE=4` (the ratified D4 default) the batcher stamps `now_us`
-monotone in *plan* order, but `propose` (`batcher.rs`) `tokio::spawn`ed each
-`repl.propose()` independently, so the `LocalReplicator` writer could assign
-the log index **out of plan order**; apply then sees `now_us` go backwards with
-the index, refuses (**I5** `TimeWentBackwards`), and the node poisons under any
-concurrent load (dies at applied≈33–670; survives 400 sequential — which is why
-the strictly-sequential difffuzz was green). **Fix written, in the working
-tree, not yet committed**: `batcher.rs` drives each propose's first poll inline
-on the one driver task in plan order (the submission then follows the stamp),
-and `apply.rs` now logs the gate refusal it used to swallow (R-118). It carries
-a **deterministic** witness — `every_propose_submits_on_the_one_driver_task_in_plan_order`
-fails 30/30 on the old spawn form and passes 40/40 on the fix — plus a real-log
-pipeline=4 load test. The pipeline=4 VM re-run of O14 / flatness / O19 is
-unblocked and owed once that fix is committed and reviewed.
+**F-1 / R-117 is fixed and discharged; the standing concerns are now R-123 and
+R-121.** F-1 — the batcher `tokio::spawn`ed each `repl.propose()` independently, so
+the `LocalReplicator` writer could assign the log index **out of plan order** →
+apply saw `now_us` go backwards with the index → refused (**I5** `TimeWentBackwards`)
+→ the node poisoned under any concurrent load — was fixed at **`f8bfa672`**: the
+propose is submitted **inline on the one driver task in plan order** (a no-op-waker
+first poll drives the future to `LocalReplicator`'s pre-`.await` writer submission;
+only the local-apply wait is spawned, so up to `pipeline` stay in flight), with a
+deterministic witness (`every_propose_submits_on_the_one_driver_task_in_plan_order`,
+one task id vs N) and `apply.rs` now logging the gate refusal it used to swallow
+(R-118). **The night's pipeline=4 pass discharges it on the VM**: 0 poison / 0
+`TimeWentBackwards` across the six-regime sweep, a 5-min sustained A20k, a 75-min
+congestion collapse, a 64-min fill and 100 crash-reopen rounds (~200 M+ pushes) —
+the first proof under the VM scheduler that produced F-1 (a laptop never reproduced
+it). One MINOR test-net gap stays open (the deterministic guard drives a fake, not
+the real `LocalReplicator` submit-before-`.await` contract; R-117). What now stands
+between here and a clean G1 is not correctness under load but two night defects:
+**R-123** (1/100 dropped-writes rounds the broker `SIGBUS`es on the `store/data.mdb`
+read mmap during apply-replay and does not reopen — the reproduced WP-0.3 D-01/D-03
+hazard; the log is intact, the store is torn) and **R-121** (at a sustained 50k
+offered the node queues pushes without bound — 10 s+ hangs, no push-side 503 —
+until achieved throughput hits 0 at ~min 55; a liveness/backpressure gap, not a
+crash).
 
-### G1 checklist — what Alice decides
+### G1 checklist — what Alice decides (in priority order)
 
-1. **G1 go / no-go.** Parity, crash safety and dropped-write durability are
-   proven at pipeline=1; the performance and isolation story is not, and cannot
-   be until the F-1 fix is committed and a pipeline=4 VM pass runs. Either
-   (a) hold G1 open until that pass exists, or (b) ratify G1 on
-   parity + crash + durability and make the pipeline=4 O14 / flatness / O19
-   numbers a WP-2.12 / G2 deliverable.
-2. **F-1 fix.** Approve the written fix and require the pipeline=4 re-run as the
-   gate evidence (recommended), or require an adversarial review of the batcher
-   change first (it changes the propose contract to "submit on first poll").
-3. **The two client-visible parity gaps.** **R-115** (empty pop returns 200+body
-   on raft vs a bodiless 204 on postgres) is a one-line WP-1.7 facade fix.
-   **R-116** (`leaseReleased` attributed to a different batch item per engine)
-   needs Alice's call on which item is canonical — the underlying state agrees.
-4. **Decisions the phase-1 evidence puts in doubt** — see the Decisions note
-   *"Phase-1 evidence: decisions now in doubt"* below: D4 pipeline sizing, D9's
-   per-frame active-index RAM (R-105), the §11.3 durable-point cadence default,
-   and whether the O14 targets survive a single-process store footprint.
-5. **Operational carry-ins.** **R-119** (F-2): the raft broker holds ~304 open
-   data-file fds; the phase-3+ deploy unit needs `LimitNOFILE` ≥ 256 + peak
-   connections. **R-118** (apply-gate diagnosability) is fixed in the F-1 tree.
+1. **G1 go / no-go, now that the numbers exist.** Parity, crash safety and
+   dropped-write durability are PROVEN and F-1 is fixed (`f8bfa672`) and discharged
+   on the VM. But at pipeline=4 **O14 FAILS** (push p99 ~6× pg, C1000 fan-out
+   1.48× pg fresh-store, FAT100 ≈31% of the knee), **I8 is mixed** (CPU/disk flat,
+   A20k median isolated, but RSS not flat and C1000 not isolated) and **O19 FAILS**
+   (a 463/s DLQ storm lifts cold-partition p99 +90.6%). Either **(a)** hold G1 open
+   until the levers below close the O14 gap, or **(b)** ratify G1 on parity + crash
+   + durability + F-1, accept that single-node pipeline=4 does not yet meet O14/O19,
+   and carry the levers + R-121 / R-123 as G2 deliverables. The one-VM co-resident-
+   loader caveat (O13) applies to every number.
+2. **R-123 (HIGH — SIGBUS on store reopen).** 1/100 dropped-writes rounds the broker
+   crashes on the torn `MDB_NOSYNC` `store/data.mdb` mmap during apply-replay and
+   does not reopen (the reproduced WP-0.3 D-01/D-03). The log is truth and intact;
+   the fix is to validate/repair or discard-and-rebuild `data.mdb` from the log
+   rather than mmap-read a store behind the durable point. Owner: the planner/store
+   owner; needs an adversarial review + a deterministic reopen-after-torn-store
+   regression. **Blocks G1, or a WP-1.2/§11.5 fix owed before G2?**
+3. **R-121 (HIGH — unbounded push admission).** At a sustained 50k offered the node
+   queues pushes without bound (10 s+ hangs, no 503, `planner_queue_depth=1024`)
+   until achieved throughput hits 0 at ~min 55. §11.4 / D13's admission story needs
+   a push-side backpressure that turns overload into a fast 503, not a hang.
+   Advisory, or a G2 gate?
+4. **Decisions the pipeline=4 evidence flags** — see *"Phase-1 evidence: decisions
+   now in doubt"* below, now with numbers: **D4** (the pipeline of 4 is correct and
+   lifts A50k p50 148→20 ms, but the p99 tail and C1000 fan-out are the O14 miss),
+   **D9 / R-105** (per-frame active-index RAM — ~387 B/msg at rest, bounded and
+   reclaimable, but linear in stored count), **§11.3 cadence**, and **O14** itself
+   (reachable single-node, or only at raft3 / with an extra load-gen VM per O13?).
+5. **The two client-visible parity gaps.** **R-115** (empty pop 200+body vs a
+   bodiless 204) is a one-line WP-1.7 facade fix. **R-116** (`leaseReleased`
+   attribution) needs Alice's call on the canonical item — the underlying state
+   agrees.
+6. **Operational / observability carry-ins.** **R-119** (F-2): ~304 open data-file
+   fds → the phase-3+ deploy unit needs `LimitNOFILE`. **R-124** (retention/txns-
+   purge is a phase-1 stub, so the dedup window frees no memory/disk in phase 1 —
+   WP-2.7). **R-120** (O18 slow-command log staged, not wired). **R-122** (`/health`
+   `storageReady:true` flips true before apply-replay finishes). **R-118**
+   (apply-gate diagnosability) is fixed in `f8bfa672`.
 
 ---
 
@@ -344,33 +377,42 @@ remove most of the framing, multiplexing, backpressure and reconnect code
 ### Phase-1 evidence: decisions now in doubt
 
 The G0 ratifications hold, but phase 1 produced numbers that put four of them
-in question. None is a re-decision here — they are flagged for G1.
+in question. The pipeline=4 night pass (M7) now supplies the numbers the earlier
+draft owed. None is a re-decision here — they are flagged for G1, with numbers.
 
 - **D4 — the pipeline of 4.** Ratified on S3's 1-vs-16-in-flight numbers; **4
-  itself was never measured** (O23), and phase 1 is the first evidence that the
-  pipeline is not free. At 4, the plan-order / log-index divergence poisoned the
-  node (F-1 / R-117, I5); it needed a batcher fix. Its *throughput and tail at
-  4* are exactly the O14 measurement that does not yet exist, so D4's chosen
-  value is still unproven on both correctness margin and performance.
-- **D9 / R-105 — per-frame active-index RAM.** The single-process raft store
-  measured **≈610 B/msg resident**; a 4.4 M-message at-rest store held **2.7–3.0
-  GB** (C1000: 885 MB for 85k messages across 1000 single-message partitions).
-  §6.1's "the active file's entries in RAM" is one record **per frame**; R-105
-  bounds it at **~4 GB** worst case (256 hot buckets, single-message pushes).
-  The levers (smaller `QUEEN_RAFT_SEGMENT_BYTES`, a partial `.qidx` per durable
-  point) are unexercised and the I8 flatness run that would settle it is
-  INCONCLUSIVE at pipeline=1.
+  itself was never measured** (O23). It is now: at 4 the batcher fix (`f8bfa672`)
+  is correct under load (0 poison across ~200 M+ pushes), and it **transforms the
+  A50k median** vs pipeline=1 (p50 148.5 → 19.6 ms, p99 1106 → 444). But the
+  pipeline is where the O14 miss lives — the **p99 tail stays ~6× postgres** on the
+  A-regimes and the **C1000 fan-out regresses**. D4's value of 4 is proven correct;
+  its performance margin against O14 is the negative result. Levers before raising
+  it (O23): fill the entry (`QUEEN_RAFT_ENTRY_MAX_BYTES` / batch caps) rather than
+  deepen the pipeline.
+- **D9 / R-105 — per-frame active-index RAM.** At pipeline=4 the at-rest resident
+  is **~387 B/msg** (8.14 M store → ~3.0 GB) — **⅓ lower than pipeline=1's 610** —
+  and NIGHT-B confirms it is **bounded and reclaimable**: a 50k run's RSS plateaued
+  ~10–10.9 GB while the store grew to 51 GB on disk (file-backed mmap the kernel
+  reclaims), `MemAvailable` never below 8.8 GB, no OOM. **But resident memory scales
+  linearly with stored count, not flat** (the I8 verdict), and the dedup index climbs
+  within every run (the 3600 s window retains every push). The 100 M / 1 M-partition
+  size is infeasible on a 15 GB VM (~387 B/msg × 100 M ≈ 36 GB) — deferred to the
+  three-VM O13 rig. The levers (smaller `QUEEN_RAFT_SEGMENT_BYTES`, a partial `.qidx`
+  per durable point) are still unexercised.
 - **§11.3 — the durable-point cadence default (4 ms / 256 entries).** The S2
   sweep on heed: 250 / 1000 / 4000 ms → **0.605 / 0.307 / 0.137 s of sync per
   wall second**, and §11.4's "cost proportional to what changed" is false on
-  LMDB — 16× the interval costs 1.65× the time (R-27). The default was tuned
-  inside WP-1.2 / WP-1.4 but never validated against a steady-state store on the
-  VM; by design a durable point fsyncs 293–484 files every second.
-- **O14 — the targets themselves.** The postgres baseline is M1; the raft1
-  comparison does not exist. What pipeline=1 already shows: the raft store
-  footprint (0.9–3.0 GB queen RSS vs postgres's ~0.1 GB queen + ~1.5 GB PG
-  split) and FAT100 at **24 %** of the 300k knee. Whether "p50/p99 ≤ postgres"
-  and "fat-batch ≥ 70 %" are reachable at pipeline=4 is unknown until the re-run.
+  LMDB — 16× the interval costs 1.65× the time (R-27). NIGHT-B adds a datum: the
+  ~515 ms p999 on the sustained dedup probe was **the batched store-commit cadence,
+  not the lookup**. Still tuned inside WP-1.2 / WP-1.4, not validated against a
+  steady-state store; by design a durable point fsyncs many files every second.
+- **O14 — the targets themselves.** The raft1 comparison now exists (M7) and
+  **FAILS**: push p50 ≤ pg on the A-regimes but **p99 ~6× pg**, C1000 fan-out
+  **1.48× pg** on the cleanest fresh-store datum (the shared-broker 36× is a
+  backlog-drain confound, not fan-out), FAT100 **≈31%** of the 300k knee (< 70%).
+  Store footprint 0.9–3.2 GB queen RSS in one process vs postgres's ~0.1 GB queen
+  + ~1.5 GB PG. The question for G1 is no longer "reachable?" but "reachable
+  single-node, or only at raft3 / with a dedicated load-gen VM (O13)?"
 
 ---
 
@@ -409,7 +451,7 @@ clean (no processes, no loop or dm devices, data dirs emptied).
 | WP-1.8 Crash points and the raft1 crash matrix | **done** | this commit | **Exists**: `rsm/faults.rs` — `QUEEN_TEST_FAULTS="point[:nth],…"`, off unless set (one relaxed atomic load on the hot path); an unknown/unwired point exits **2** (never a silent no-fire); a fired point dies by **SIGKILL-to-self** (the faithful `kill -9` model, dodging the macOS crash reporter that made `abort()` core-dump). The **13** §13.5 phase-1 points wired: `batcher.drained`/`planner.planned`/`propose.sent` (`batcher.rs`), `log.appended`/`log.flushed` (`replicator/log.rs`), `commit.before_apply` (`replicator/local.rs`), `apply.mid_entry`/`apply.segment_written`/`apply.store_committed`/`durable.files_synced`/`durable.store_committed`/`gc.before_unlink`/`gc.after_unlink` (`apply.rs`), plus R-107's `seg.rolled`/`seg.qidx_written` (`segments/mod.rs`); `init_from_env()` in `run_raft` and embedded boot. `test/raft/crash`: `runner.py` drives a real `raft1` broker over the HTTP wire (push with recorded ids+payload hashes, pop, ack, restart, retry every unanswered push with its original transactionId, drain), emits the shared checker's JSONL and checks it. **Proven** (raft1, push-ack, `QUEEN_RAFT_DURABLE_EVERY_MS=150`, debug binary §0.3): full matrix = 13 points × {nth=1, nth=2} = **26 cells → 22 PASS / 0 FAIL / 4 N/A**, `RESULTS.md` written. Every reachable cell recovered **exactly once** across the kill (answered pushes delivered; unanswered pushes at most once, retries exactly once — dedup survived; one txn→one offset; single healthy leader; no error line but the fault's own). The 4 N/A = `gc.before_unlink`/`gc.after_unlink` at nth={1,2} — a file dies only via retention/delete (WP-2.7), not HTTP-reachable in phase 1; those plus `seg.*` are proven at the Rust level by `each_fault_point_fires_and_the_node_repairs` (9 points fire by SIGKILL, node re-opens and replays to a **byte-equal digest**). Go delivery-at-least-once + payload-hash pass (SKIP not FAIL when the crash preceded any ack). **Numbers**: lib **967 passed / 0 failed / 12 ignored** (24 s, +5 vs WP-1.7c's 962); `rsm::` subset **311/0/5**; harness `pytest` **21 passed** + selftest ok; clippy **0 warnings** in touched files; `rustfmt --edition 2021` clean on the files written; I2 deny-bites **7/7**. **Not proven (owed to the VM, not a blocker)**: durability under dropped-unflushed writes / power loss — SIGKILL keeps the page cache, so this falsifies bookkeeping not unsynced bytes (§13.6 dm-flakey, WP-1.11). No rsm/ defect surfaced. Shared `rsm/mod.rs`: only the `pub mod faults;` line staged. Blockers: none. Files: `server/src/rsm/faults.rs`, `server/src/rsm/mod.rs` (one line), `server/src/rsm/batcher.rs`, `server/src/rsm/replicator/log.rs`, `server/src/rsm/replicator/local.rs`, `server/src/rsm/apply.rs`, `server/src/rsm/segments/mod.rs`, `server/src/rsm/tests/apply_crash.rs`, `server/src/main.rs`, `server/src/embedded/boot.rs`, `test/raft/crash/{runner.py,crashdrv.py,scenarios.py,points.py,test_crashdrv.py,RESULTS.md}`. |
 | WP-1.9 The raft1 test topology and the RAFT PARITY gate | **done** | this commit | **Exists**: the `raft1` topology + RAFT PARITY gate, modelled on run.sh's TENANCY PARITY and pgless's NATIVE PARITY (`6e96e228`). (1) `test/compose/docker-compose.raft1.yml` — ONE broker on `QUEEN_STORAGE=raft`, **NO Postgres** (no `pg` service, no `QUEEN_PG_*`), data on the named volume `raftdata` (wiped by run.sh's `down -v`); tenancy OFF (no raft-tenanted lane in phase 1). (2) `test/run.sh` — `raft1` in `compose_for`, an **opt-in** `--topo raft1` gated by `RAFT_SUITES="js"` (a suite gets a raft1 job only if its runner honours `QUEEN_TEST_STORAGE=raft`, like pgless's opt-in `native`), a `raft1` report column, and a **RAFT PARITY** gate comparing single↔raft1 by **rc + FAILED count only** (never totals, which differ by design — the raft1 lane is a subset by skips); CI is unchanged because raft1 is opt-in. (3) the js runner raft lane (`test-v2/run.js`, `runners/js/entrypoint.sh`, `runner-unit/fatalExit.test.js`): when `QUEEN_TEST_STORAGE=raft` it **skips the Postgres setup/cleanup** and skips every un-ported-route test **LOUDLY**, each printed with a categorised reason; the served/broker-free tests stay green. **Proven** (commit agent re-ran, macOS + Docker, `queen:test` built this run `sha256:572f89ab…`, `queen-test-runner-js` `sha256:811e2740…`): `test/run.sh --suite js --topo raft1` → **PASS js/raft1 (3s)**, matrix **ALL GREEN**; the runner reports **keeping 12 served/broker-free tests, skipping 161** that need a route not in raft phase 1 (each printed), final **12/12 passed, 0/12 failed**, `rc=0`; broker booted on raft with no PG (`INFO rsm: raft facade open (WP-1.7c) dir=/var/lib/queen/raft applied=0`). RAFT PARITY verdict = `rc(single)==rc(raft1) AND failed(single)==failed(raft1)==0`. **Not proven in-session**: the full single↔raft1 gate print was NOT captured here — a sibling's `single` stack was live in this shared checkout, so running `--topo single,raft1` risked colliding with it; I ran raft1 alone (green) and left the single lane byte-identical (my `run.js` changes are inert when the lane is off). **Central finding (reported, NOT an rsm/ fix)**: phase-1 raft serves only push/pop/ack/renew with IMPLICIT queue creation; queue configure/create/delete answers **503** (`handlers/raft.rs raft_fallback`) and is required setup by ~all existing tests, so the JS message-path parity surface is exactly **one** test (`testPushAutoCreatesQueueAndPartition`) — it grows automatically when **WP-2.5** ports queue admin. This is WP-2.5 scope (admin), not rsm/, so it is reported not fixed; no new R-id (not a defect in WP-1.9's own code). **Numbers**: js/raft1 PASS 3s; kept 12 (1 message-path implicit-create + 11 broker-free `logger.*`), skipped 161 by route class (queue configure/create ~WP-2.5, streams ~WP-2.4, transaction ~WP-2.1, kv ~WP-2.2, timers ~WP-2.3, subscription/seek ~WP-2.5, docs/watermark/bootstrap/retention/maintenance = PG-read/seek); go/py lanes deferred (their runners must learn `QUEEN_TEST_STORAGE=raft` — `t.Skip`/conftest plumbing, `go` 12/15 & `py` 16/18 files call Create/Configure; add to `RAFT_SUITES` when done). **DID NOT touch** rsm/ or any sibling's files; staged only the 5 WP paths + this row. The `queen:test` image used includes sibling WP-1.8/1.10 uncommitted edits present in the shared checkout, but the Postgres path is byte-identical and CI rebuilds from the committed tree, so the gate is unaffected. Files: `test/compose/docker-compose.raft1.yml`, `test/run.sh`, `test/runners/js/entrypoint.sh`, `clients/client-js/test-v2/run.js`, `clients/client-js/test-v2/runner-unit/fatalExit.test.js`. Blockers: none to delivery; CI gating on RAFT PARITY (add `--topo single,raft1` to the js suite) left to the coordinator/§14.9 CI WP; go/py raft lanes deferred until their runners honour the storage flag. |
 | WP-1.10 difffuzz v1 + checker v1 | **done** | this commit | **Exists**: `test/raft/difffuzz` v1 drives the whole phase-1 message path against a postgres-oracle broker and a `raft1` broker (`QUEEN_STORAGE=raft`, no PG): push + duplicates; pinned / wildcard / discovery pop, auto and manual ack; ack ok/failed/dlq **by hash and by position** (incl. the batch positional fast path); nack; renew; below-cursor re-ack; DLQ-head via dlq/nack. The **8** phase-2 kinds (txn, kv, timer, configure, seek, group_delete, dlq_move, dlq_purge) stay declared stubs — raft1 `503`s them. Normalization drops wall-clock/node-local values and compares uuid, ts, `partitionId`/`leaseId` by **identity relation** (`normalize.go` `VolatileKeys`/`IdKeys`); `compareAck`/`notePop` absorb the phase-1 envelope gaps at-site, each with a reason. raft1 serves **no** resource view, so `Preflight` asserts `503 raft_phase1_unsupported` and defers the final-view body compare to WP-2.6 (mode already switches when side B answers 200). Added per-side `checker` logs (`-logdir`, `log.go` format), `campaign.sh`, `fixtures/`, `PARITY-NOTES.md`. Touched **no broker source** and no sibling file; the `checker` source is unchanged (validated as-is). **Proven (re-run this session, macOS)**: `GOWORK=off go test -count=1 .` → **10/10 PASS** (0.19 s: generator determinism, normalization identity, comparison names first diff, mix parsing, honest sides do not diverge, changed field caught, flags refuse one-broker-twice / defaults replayable, list-ops covers every planned kind, report renders); `go run . -selftest` **ok**; `go vet .` clean; `gofmt -l *.go` empty. **Proven (impl agent, not re-run here — needs two live brokers)**: 200+ seeded 250-op runs (~50k message-path ops), **0** divergences, **0** unexpected-divergence fixtures after the 7 classified envelope gaps are absorbed; checker at-least-once + payload-hash validated over difffuzz logs on **both** brokers, `-strict`, **10/10** green (needed a settle + long-poll drain to defeat the window_buffer debounce; the same failures hit the postgres oracle first, proving harness-not-raft). **Classified in `PARITY-NOTES.md`** (each reproducible): empty-pop `204`-vs-`200` (facade parity, **R-115**); `partitionId` uuid-vs-pid (WP-1.7c deferral); ack noop/error/success shape (**R-101**); `leaseReleased` attribution (**R-116**); mixed batch-ack DLQ is an **oracle quirk** — postgres broadcasts dlq to completed siblings, raft's WP-1.7c per-item fix is CORRECT, so the oracle is NOT ground truth for that field. **Numbers**: 200+ clean seeds × 250 ops, 0 divergences; checker 10/10 strict (5 seeds × 2 brokers); 10 message-path ops implemented, 8 phase-2 kinds stubbed; seed pace ~12/min (debug broker + a concurrent crash harness SIGKILLing brokers, self-healed via retry). **Blockers**: seed target 2000 not reached (got 200+) — debug broker + a sibling crash-harness repeatedly `kill -9`ing the shared brokers; `campaign.sh` is self-healing and re-runnable on a release broker / uncontended host. Files: `test/raft/difffuzz/{ops,gen,config,run,compare,normalize,main,selftest,difffuzz_test,checkerlog}.go`, `campaign.sh`, `PARITY-NOTES.md`, `fixtures/README.md`, `test/raft/README.md`, `test/raft/.gitignore`. |
-| WP-1.11 raft1 on the VM: regimes vs baseline, flatness, noisy neighbor | **partial** | this commit | **Ran on the Linux VM (164.90.215.224), release broker `rustc 1.98.1` md5 `be80d860b4a1` — byte-identical before/after; the one VM diagnostic edit was reverted; no broker source committed here.** Harnesses committed: `test/raft/vm/measure-raft1.sh` + `test/raft/vm/raft1/{RESULTS.md,flakechk.go,flaky-raft1.sh,flatness-raft1.sh,noisy-raft1.sh}`; re-verified on macOS this session (`bash -n` clean on all 4 shell drivers; `go vet ./flakechk.go` clean; RESULTS.md numbers cross-checked). **PROVEN / PASS — dropped-unflushed-writes durability (discharges R-106 / R-111 / R-114):** 20/20 dm-flakey rounds, every acknowledged push delivered after reopen, **0** error lines; plus an instrumented adversarial round (store reopened at `applied=0`, fsync'd log `replayed=38`, **3000/3000** acks recovered). **DONE:** the 6 regimes at `QUEEN_RAFT_PIPELINE=1` side-by-side with WP-0.2 postgres (push p50/p99 ms — A20k 6.18/175.1 vs 9.15/27.0; A50k 148.5/1105.9 vs 23.2/75.3; B1 3.73/68.1 vs 3.34/14.3; C1000 13.1/138.2 vs 6.62/33.0; D1 3.28/25.0 vs 1.99/4.08; FAT100 push-only ≈72k msg/s ≈ 24% of the 300k pg knee, sheds 12.5M). **⚠ BLOCKER F-1 (correctness, R-117):** at the ratified `QUEEN_RAFT_PIPELINE=4` the batcher stamps `now_us` monotone in **plan** order but `propose` (`batcher.rs:902`) `tokio::spawn`s each `repl.propose()` independently, so the LocalReplicator writer can assign the log index **out of plan order**; apply then sees `now_us` go backwards vs the index and refuses (**I5** `TimeWentBackwards`), the node poisons ("apply thread gone"), all later writes 503. Verified by reading the code + the exact error (`entry now_us …698930 below last applied …699010, index=672 applied=671`); reproduces **only under concurrency** (dies at applied≈33–670 concurrent, survives 400 sequential) — so the strictly-sequential difffuzz/WP-1.10 could not see it. The RESULTS.md notes the code fix has since landed in `batcher.rs` (a sibling's uncommitted tree — **not committed here, not part of this WP**). **F-2 (operational, R-119):** broker holds ~304 open data-file fds (256 buckets + log + store) + a socket per conn; at the default `ulimit -n 1024` it hits `EMFILE` under A50k → needs `LimitNOFILE` (used 262144). **NOT cleanly established (confounded by pipeline=1, deferred to a pipeline=4 re-run):** O14 performance verdict (**BLOCKED** by F-1), flatness I8 (one firm signal only: RSS scales with stored count — empty A20k 8→578 MB vs preloaded 4.4M 2685→3060 MB), noisy-neighbour O19 (quiet p99 121.3→284.7 ms, +134%, with a 2M at-rest backlog — FAIL but confounded); the full 300M/60-min flatness and a true active DLQ-storm generator also deferred. **Diagnosability gap (R-118):** apply-gate refusals bypass `poison()`'s log, so only "apply thread gone" surfaces. VM left clean (no procs/dm/loop/mounts; `/root/raft/wp111`). Blockers: **R-117** (fix owner + adversarial ⚠ review), R-118, R-119. Files: the 6 paths above. |
+| WP-1.11 raft1 on the VM: regimes vs baseline, flatness, noisy neighbor | **partial** | this commit | **Ran on the Linux VM (164.90.215.224), release broker `rustc 1.98.1` md5 `be80d860b4a1` — byte-identical before/after; the one VM diagnostic edit was reverted; no broker source committed here.** Harnesses committed: `test/raft/vm/measure-raft1.sh` + `test/raft/vm/raft1/{RESULTS.md,flakechk.go,flaky-raft1.sh,flatness-raft1.sh,noisy-raft1.sh}`; re-verified on macOS this session (`bash -n` clean on all 4 shell drivers; `go vet ./flakechk.go` clean; RESULTS.md numbers cross-checked). **PROVEN / PASS — dropped-unflushed-writes durability (discharges R-106 / R-111 / R-114):** 20/20 dm-flakey rounds, every acknowledged push delivered after reopen, **0** error lines; plus an instrumented adversarial round (store reopened at `applied=0`, fsync'd log `replayed=38`, **3000/3000** acks recovered). **DONE:** the 6 regimes at `QUEEN_RAFT_PIPELINE=1` side-by-side with WP-0.2 postgres (push p50/p99 ms — A20k 6.18/175.1 vs 9.15/27.0; A50k 148.5/1105.9 vs 23.2/75.3; B1 3.73/68.1 vs 3.34/14.3; C1000 13.1/138.2 vs 6.62/33.0; D1 3.28/25.0 vs 1.99/4.08; FAT100 push-only ≈72k msg/s ≈ 24% of the 300k pg knee, sheds 12.5M). **⚠ BLOCKER F-1 (correctness, R-117):** at the ratified `QUEEN_RAFT_PIPELINE=4` the batcher stamps `now_us` monotone in **plan** order but `propose` (`batcher.rs:902`) `tokio::spawn`s each `repl.propose()` independently, so the LocalReplicator writer can assign the log index **out of plan order**; apply then sees `now_us` go backwards vs the index and refuses (**I5** `TimeWentBackwards`), the node poisons ("apply thread gone"), all later writes 503. Verified by reading the code + the exact error (`entry now_us …698930 below last applied …699010, index=672 applied=671`); reproduces **only under concurrency** (dies at applied≈33–670 concurrent, survives 400 sequential) — so the strictly-sequential difffuzz/WP-1.10 could not see it. The RESULTS.md notes the code fix has since landed in `batcher.rs` (a sibling's uncommitted tree — **not committed here, not part of this WP**). **F-2 (operational, R-119):** broker holds ~304 open data-file fds (256 buckets + log + store) + a socket per conn; at the default `ulimit -n 1024` it hits `EMFILE` under A50k → needs `LimitNOFILE` (used 262144). **NOT cleanly established (confounded by pipeline=1, deferred to a pipeline=4 re-run):** O14 performance verdict (**BLOCKED** by F-1), flatness I8 (one firm signal only: RSS scales with stored count — empty A20k 8→578 MB vs preloaded 4.4M 2685→3060 MB), noisy-neighbour O19 (quiet p99 121.3→284.7 ms, +134%, with a 2M at-rest backlog — FAIL but confounded); the full 300M/60-min flatness and a true active DLQ-storm generator also deferred. **Diagnosability gap (R-118):** apply-gate refusals bypass `poison()`'s log, so only "apply thread gone" surfaces. VM left clean (no procs/dm/loop/mounts; `/root/raft/wp111`). **Night re-run (2026-09-18/19, pipeline=4, F-1-fixed binary `cdc5bb59af27`):** the owed O14 / flatness / O19 pass ran (**M7**) — **O14 FAIL** (push p99 ~6× pg, C1000 fan-out 1.48×, FAT100 ≈31%), **I8 mixed/FAIL** (CPU+disk flat, RSS not flat ~387 B/msg, C1000 +546%), **O19 FAIL** (463/s DLQ storm → cold p99 +90.6%); dropped writes re-proven **99/100** at pipeline=4; **F-1 discharged on the VM** (0 poison, ~200 M+ pushes). New findings **R-120..R-124** (incl. ⚠ R-123 SIGBUS reopen, ⚠ R-121 push admission); `NIGHT-A/B/C-*.md` + `night/` raw added. Blockers cleared: **R-117 fixed (`f8bfa672`)**, R-118 fixed. Owed: R-123 + R-121 fixes, R-119 (`LimitNOFILE`). Files: the 6 paths above + `NIGHT-{A,B,C}-*.md`, `night/`. |
 
 ### Phases 1–6 — the rest, all `not started`
 
@@ -538,7 +580,7 @@ decision or a plan edit (PLAN_RAFT.md is not edited by this task).
 
 | R-id | src | finding | resolution | state |
 |---|---|---|---|---|
-| R-105 | WP-1.3 | **I8 residual, with a number.** §6.1's "the active file's entries in RAM, bounded by one file's worth" is one record **per frame**, not per file. Measured **13 443** frames per 4 MiB for one-message pushes → ~**215k** records per bucket at the 64 MiB `QUEEN_RAFT_SEGMENT_BYTES` default → ~**55M** records × ~75 B ≈ **4 GB** worst case if all 256 buckets are hot **and** every push is a single message. Fat batches are three orders of magnitude cheaper (30 frames per 4 MiB). | Accepted, not fixed here: it is the **ratified** §6.1 design and the fix is a plan change. Levers for **WP-1.4 / WP-1.11**: a smaller `QUEEN_RAFT_SEGMENT_BYTES`, or a partial `.qidx` written at each durable point. | **open** |
+| R-105 | WP-1.3 | **I8 residual, with a number.** §6.1's "the active file's entries in RAM, bounded by one file's worth" is one record **per frame**, not per file. Measured **13 443** frames per 4 MiB for one-message pushes → ~**215k** records per bucket at the 64 MiB `QUEEN_RAFT_SEGMENT_BYTES` default → ~**55M** records × ~75 B ≈ **4 GB** worst case if all 256 buckets are hot **and** every push is a single message. Fat batches are three orders of magnitude cheaper (30 frames per 4 MiB). | Accepted, not fixed here: it is the **ratified** §6.1 design and the fix is a plan change. Levers for **WP-1.4 / WP-1.11**: a smaller `QUEEN_RAFT_SEGMENT_BYTES`, or a partial `.qidx` written at each durable point. **Pipeline=4 (NIGHT-A/B):** ~**387 B/msg** at rest (⅓ below pipeline=1's 610), and RSS is **bounded and reclaimable** — a 50k run plateaued ~10 GB RSS while the store grew to 51 GB on disk, no OOM, `MemAvailable` never below 8.8 GB. But still **linear in stored count** (I8: RSS not flat in any shape), so the concern's shape is confirmed and the worst-case 4 GB is not reached at this store size; the levers stay unexercised. | **open (confirmed favourably at pipeline=4)** |
 | R-106 | WP-1.3 | Durability under **dropped unflushed writes** is not proven: a `kill -9` does not drop the page cache, so the crash tests falsify the bookkeeping (recorded lengths, the seal, the `.qidx`, which file is active) and not unsynced bytes. | Accepted — this is **R-02** restated at the segment layer. The run belongs to the VM regimes, §13.6 / **WP-1.11**. **Discharged by WP-1.11**: 20/20 dm-flakey rounds PASS + adversarial reopen 3000/3000 recovered (`test/raft/vm/raft1/RESULTS.md` §4). | **closed** |
 | R-107 | WP-1.3 | No **crash-point hooks**: the mid-roll kill is driven by timing, not by a fault point, so the crash matrix cannot target a roll deterministically. | Accepted. **WP-1.8** adds `seg.rolled` and `seg.qidx_written` to `rsm/faults.rs` and re-runs the roll cases against them. | **open** |
 | R-108 | WP-1.2 | **Parity risk: a composite name key can exceed LMDB's 511-byte limit.** `(tenant, queue, group)` is three unbounded names and `consumer_groups_metadata.consumer_group` is `TEXT` in postgres, so a key postgres accepts is one the store refuses. | Accepted, not fixed here: the adapter refuses with a typed `KeyTooLong` + metric instead of truncating. **WP-1.5 / WP-1.7 must bound names at the receiver**, or D9 needs heed's `longer-keys` feature — a change to the measured configuration, so **Alice's call**. | **open** |
@@ -565,9 +607,27 @@ decision or a plan edit (PLAN_RAFT.md is not edited by this task).
 
 | R-id | src | finding | resolution | state |
 |---|---|---|---|---|
-| R-117 | WP-1.11 | **⚠ Under `QUEEN_RAFT_PIPELINE=4` the log index can diverge from batcher plan order → apply I5 `TimeWentBackwards` → node poisons under any concurrent load.** The batcher stamps `now_us` monotone in plan order, but `propose` (`batcher.rs:902`) `tokio::spawn`s each `repl.propose()` independently, so the LocalReplicator writer may assign the log index out of plan order; apply sees `now_us` go backwards vs the index, refuses (`entry now_us …698930 below last applied …699010, index=672 applied=671`), and every later write 503s. Reproduces **only under concurrency** (dies at applied≈33–670; survives 400 sequential), so the strictly-sequential WP-1.10 difffuzz could not catch it. Blocks the O14 comparison, the clean flatness I8 result, and the O19 verdict — all owed a pipeline=4 re-run. | Accepted, **not fixed in this WP** (measurement WP, touched no broker source). Fix: make the log index follow the batcher seq/plan order (propose in order, or gate the writer on seq). The RESULTS.md records that such a fix has since landed in a sibling's uncommitted `batcher.rs`; it needs the planner owner + an adversarial ⚠ review with a **deterministic** regression that fails on the old spawn-per-propose form. **Fixed (commit `f8bfa672`):** propose is now submitted INLINE on the one driver task in plan order (no-op-waker first poll drives the future to `LocalReplicator`'s pre-`.await` writer-channel submission; only the local-apply wait is spawned, so up to `pipeline` stay in flight — `step_down_with_four_in_flight` green). Deterministic guard `every_propose_submits_on_the_one_driver_task_in_plan_order` (ONE tokio task Id vs N), plus the in-plan-order and real-log pipeline=4 tests. Adversarial review **could not refute** (I5 guaranteed structurally, not by timing; I3 preserved; noop-waker re-poll sound). **One MINOR finding stays OPEN:** the deterministic guard drives `TaskWitnessReplicator` (a fake that submits in its first-poll prefix by construction) and does not exercise the real `LocalReplicator` submit-before-`.await` contract — a future edit moving `cmd_tx.send` past an `.await` would silently reintroduce F-1 with no deterministic test failing; latent risk flagged for the phase-3 openraft adapter (the `Replicator::propose` doc now states the contract + phase-3 obligation). | **fixed (commit `f8bfa672`)**; one MINOR test-net finding **open** |
+| R-117 | WP-1.11 | **⚠ Under `QUEEN_RAFT_PIPELINE=4` the log index can diverge from batcher plan order → apply I5 `TimeWentBackwards` → node poisons under any concurrent load.** The batcher stamps `now_us` monotone in plan order, but `propose` (`batcher.rs:902`) `tokio::spawn`s each `repl.propose()` independently, so the LocalReplicator writer may assign the log index out of plan order; apply sees `now_us` go backwards vs the index, refuses (`entry now_us …698930 below last applied …699010, index=672 applied=671`), and every later write 503s. Reproduces **only under concurrency** (dies at applied≈33–670; survives 400 sequential), so the strictly-sequential WP-1.10 difffuzz could not catch it. Blocks the O14 comparison, the clean flatness I8 result, and the O19 verdict — all owed a pipeline=4 re-run. | Accepted, **not fixed in this WP** (measurement WP, touched no broker source). Fix: make the log index follow the batcher seq/plan order (propose in order, or gate the writer on seq). The RESULTS.md records that such a fix has since landed in a sibling's uncommitted `batcher.rs`; it needs the planner owner + an adversarial ⚠ review with a **deterministic** regression that fails on the old spawn-per-propose form. **Fixed (commit `f8bfa672`):** propose is now submitted INLINE on the one driver task in plan order (no-op-waker first poll drives the future to `LocalReplicator`'s pre-`.await` writer-channel submission; only the local-apply wait is spawned, so up to `pipeline` stay in flight — `step_down_with_four_in_flight` green). Deterministic guard `every_propose_submits_on_the_one_driver_task_in_plan_order` (ONE tokio task Id vs N), plus the in-plan-order and real-log pipeline=4 tests. Adversarial review **could not refute** (I5 guaranteed structurally, not by timing; I3 preserved; noop-waker re-poll sound). **One MINOR finding stays OPEN:** the deterministic guard drives `TaskWitnessReplicator` (a fake that submits in its first-poll prefix by construction) and does not exercise the real `LocalReplicator` submit-before-`.await` contract — a future edit moving `cmd_tx.send` past an `.await` would silently reintroduce F-1 with no deterministic test failing; latent risk flagged for the phase-3 openraft adapter (the `Replicator::propose` doc now states the contract + phase-3 obligation). **Discharged empirically on the VM (NIGHT-A/B/C, pipeline=4):** 0 poison / 0 `TimeWentBackwards` across the six-regime sweep, a 5-min sustained A20k, a 75-min congestion collapse, a 64-min fill and 100 crash-reopen rounds (~200 M+ pushes) — the first proof the fix holds under the VM scheduler that produced F-1 (it never reproduced on a laptop). | **fixed (`f8bfa672`), discharged on the VM**; one MINOR test-net finding **open** |
 | R-118 | WP-1.11 | **Apply-gate refusals aren't logged.** A gate rejection in `Applier::apply` (`gates(c)?`) bypasses `poison()`'s log line, so the real `ApplyError` (the I5/I18 detail) is lost and only "apply thread gone" surfaces to the operator — the poison that took F-1 down was near-undiagnosable from logs alone. | Accepted, not fixed here (diagnosability, outside a measurement WP). Log the `ApplyError` at `error` before poisoning. **Fixed (commit `f8bfa672`):** `Applier::apply` now matches `gates()` and returns `Err(self.refused(e))`; `refused()` logs the `ApplyError` at `error` with `applied`/`durable` before the node stops, so the I5/gap/bases cause surfaces instead of only the replicator's later "apply thread gone". | **fixed (commit `f8bfa672`)** |
 | R-119 | WP-1.11 | **raft broker fd footprint exceeds the default ulimit.** ~304 open data-file fds (256 buckets + log + store) + one socket per connection; at `ulimit -n 1024` the log append fails `EMFILE` ("Too many open files") under A50k (48 consumers, 512 idle conns) and the node poisons. Inherent to §11.2 (a file per hot bucket). | Accepted, operational. helm/systemd need `LimitNOFILE` (the VM used 262144). | **open** |
+
+### From the WP-1.11 night run (pipeline=4 VM pass, 2026-09-18/19; NIGHT-A/B/C)
+
+The owed pipeline=4 re-run on the F-1-fixed binary (md5 `cdc5bb59af27`). It
+discharged F-1 (R-117) empirically on the VM and produced the O14 / I8 / O19
+verdicts (**M7**); it surfaced five new items. Load-bearing code refs re-verified
+in source this revision: retention `planner/mod.rs:105` (`pub mod retention {}`,
+stub, WP-2.7); dedup default 3600 `facade/real.rs:331`; subscriptionMode not
+threaded `facade/real.rs:702`; `plan_budget_ms` (O17) **consumed** at
+`batcher.rs:470`, `slow_command_ms` (O18) has **no** consumer.
+
+| R-id | src | finding | resolution | state |
+|---|---|---|---|---|
+| R-120 | NIGHT-A/B | **O18 slow-command log + per-kind planner metrics are inert.** `QUEEN_RAFT_SLOW_COMMAND_MS` is read into `PlanConfig` (`batcher.rs:164`) and `CommandKind` exists, but **nothing consumes `slow_command_ms`**: a 5-min A20k at threshold 5 ms with sustained plan times of p50 44 ms emitted **0** slow-command lines. (This is O18 only; the O17 `plan_budget_ms` IS consumed at `batcher.rs:470` — the night reports' "neither is consumed" wording is corrected here.) `StoreMetrics` are also unmapped to any endpoint. | Accepted, observability. Wire the O18 WARN + `queen_raft_plan_seconds{kind}` and map `queen_raft_store_*`; owed to **WP-2.6** / a phase-2 obs WP. Staged, not wired — not a regression. | **owed a WP** |
+| R-121 | NIGHT-B | **⚠ Unbounded push-admission queueing (HIGH, liveness).** At the product default (50k offered, 3600 s window) one node congestion-collapses to **0 achieved throughput at ~min 55 / ~93.5 M rows**: consume never keeps up (**3.8%** popped), goload inflight pins at its 20 000 cap, push p50 runs away 7 → 27 s, a direct `curl` push at min 57 times out (`http=000`). The broker does **not** shed or 503 — it queues without bound (`planner_queue_depth=1024`). 0 poison / 0 error / no OOM: the state machine is healthy; the failure is admission, not a crash. **Confound (disclosed):** no like-for-like postgres oracle exists at 50k for 75 min (WP-0.2's A50k ran 40 s at 6.23/8 cores on this co-resident-loader VM), so the *capacity ceiling* cannot be separated from the VM's own A50k CPU wall; the *defect* (no push-side backpressure → 10 s+ hangs instead of a fast 503) is separately and validly evidenced. | Accepted, defect. §11.4 / D13 (receivers-hold → 503) needs a push-admission reject that turns overload into a fast 503. Owner: admission/facade. **WP-0.4's named deliverable — "probe p99 at 50k, 1 h window" — still does not exist** (run A collapsed, run B was a 15k push-only deviation). | **for Alice / owed a fix** |
+| R-122 | NIGHT-C | **`/health` `storageReady:true` flips before apply-replay finishes (MEDIUM, readiness).** Round 75 reported ready (reopen=317 ms) and then crashed in apply-replay — a doomed reopen looked healthy for ~ms and defeated the harness's own REOPEN_FAIL path; the same early-readiness would fool an operator's health probe. | Accepted, readiness. The readiness signal should not go true until apply-replay has caught up to the log tail. Owed to the health/readiness WP (phase 2/4). | **owed a WP** |
+| R-123 | NIGHT-C | **⚠ SIGBUS on the store mmap at reopen after dropped writes (HIGH, durability/recovery).** 1/100 rounds at pipeline=4 the broker crashes `SIGBUS`/`BUS_ADRERR` on the `store/data.mdb` **read** mmap during apply-replay and **does not reopen** (fault ~52 MiB into the 64 GiB LMDB map, fd 10 = `store/data.mdb`; strace-confirmed, twice by hand). The acked writes are durable in the fsync'd log (`truncated_tail=false`, 680 690 frames) but the torn `MDB_NOSYNC` store crashes before recovery completes, so the round's acks are unrecoverable as-is. **Reproduces deterministically** on the preserved dir (123 MB reproducer under `evidence/`). This is the reproduced + classified WP-0.3 D-01/D-03 "heed store would not reopen"; not pipeline-specific (exposed by the larger stores, orthogonal to pipeline depth). | Accepted, defect. On an unclean shutdown the store must not dereference the un-fsync'd `data.mdb`: validate/repair, or **discard `data.mdb` when it is behind the log's durable point and rebuild from the log** (the log-is-truth recovery already re-scans every frame). Owner: planner/store (§11.5). Needs an adversarial ⚠ review + a **deterministic reopen-after-torn-store regression**. | **for Alice / owed a fix + ⚠ review** |
+| R-124 | NIGHT-B | **The 3600 s dedup window bounds correctness, not memory, in phase 1 (MEDIUM).** A >window id correctly re-enqueues (`queued`, fresh offset — D10 option-(a) semantics; 26/26 early originals expired, a fresh id `duplicate`), but **phase 1 never reclaims the expired rows**: `data.mdb` grows straight through minute 60 (7.78 → 8.17 GB across min 59–62) because the leader retention/txns-purge loop (`planner/mod.rs:105`) is a stub and `retention_enabled` is false by default. At 50k that is ~10.6 GB/hour of dedup index never freed. | Accepted, phase-1 scope gap (not a regression). D-06's "then expiring" frees nothing until **WP-2.7** builds the retention loop; a long-lived cell needs it before the window's footprint is bounded. | **owed a WP (2.7)** |
 
 ---
 
@@ -771,7 +831,8 @@ columns line up under M1. Both classes create queues with `dedup_window=3600`
 and retention off, so the footprint comparison is not confounded.
 
 **Read every regime row as `QUEEN_RAFT_PIPELINE=1`, throughput-capped — NOT the
-O14 comparison, which F-1 blocks.** At pipeline=1 a single in-flight entry
+O14 comparison, which F-1 blocked at this commit (`a04a3abb`, pre-fix; the
+pipeline=4 O14 verdict is M7).** At pipeline=1 a single in-flight entry
 serialises the node: push commits fast (p50 competitive) but the tail explodes
 and consume cannot keep up. Postgres columns are M1 (same VM + loader).
 
@@ -799,13 +860,143 @@ reopen, `missing=0`, 0 error lines; per-cadence 100/500/1000/60000 ms all
 clean. Adversarial round (nothing durable-pointed): store reopens `applied=0`,
 the fsync'd log `replayed=38`, 3000/3000 acks recovered from the log.
 
-**Flatness / O19: INCONCLUSIVE at pipeline=1** (see the G1 checklist) — the one
-firm signal is that resident memory scales with stored count. **F-1 (R-117):**
-`QUEEN_RAFT_PIPELINE=4` poisoned the node under load (I5), fix written and
-uncommitted, pipeline=4 re-run owed. **F-2 (R-119):** ~304 open data-file fds
-(256 buckets + log + store) + one socket per connection cross `ulimit -n 1024`
-at A50k → `EMFILE`; the harness runs `ulimit -n 262144`, the phase-3+ deploy
-unit needs `LimitNOFILE`.
+**Flatness / O19 at pipeline=1: INCONCLUSIVE** — the one firm signal is that
+resident memory scales with stored count; the pipeline=4 verdicts are in **M7**.
+**F-1 (R-117):** `QUEEN_RAFT_PIPELINE=4` poisoned the node under load (I5) at this
+commit; fixed at `f8bfa672` and discharged on the VM (M7 / NIGHT-A/B/C). **F-2
+(R-119):** ~304 open data-file fds (256 buckets + log + store) + one socket per
+connection cross `ulimit -n 1024` at A50k → `EMFILE`; the harness runs
+`ulimit -n 262144`, the phase-3+ deploy unit needs `LimitNOFILE`.
+
+---
+
+### M7 — raft1 message path at pipeline=4 on the VM (WP-1.11 night run)
+
+**Date** 2026-09-18/19 · **host** `root@164.90.215.224` (`queenpgless-01`), Ubuntu
+24.04, 8 vCPU, 15 GB, ext4 · **broker** `queen` release from `raft` @ `29bc7cdd`
+(the F-1 fix `f8bfa672` is in the binary), `rustc 1.98.1`, md5 **`cdc5bb59af27`** —
+**differs from M6's `be80d860b4a1`** (the fix is in the binary) · `QUEEN_STORAGE=raft`,
+`QUEEN_RAFT_PIPELINE=4`, LocalReplicator, no Postgres, `ulimit -n 262144`, dedup
+3600 s, retention off · **loader** `/root/goload` md5 `2c97cccb0d1e` — the exact
+WP-0.2 / M1 / M6 loader. **Like-for-like:** the A20k/A50k/B1/C1000/D1/FAT100 goload
+flags are byte-identical between `measure-raft1.sh` and `measure-baseline.sh`; the
+binary differs only by storage class. Sources: `NIGHT-A-pipeline4.md`,
+`NIGHT-B-dedup.md`, `NIGHT-C-flaky.md`; raw under `night/`.
+
+**Six regimes at pipeline=4 (raft1) vs postgres (M1) and pipeline=1 (M6):**
+
+| regime | raft p4 p50 | pg p50 | raft p4 p99 | pg p99 | raft p4 p999 | raft p1 p50 (M6) | queen cores | queen RSS | disk MB/s |
+|---|---|---|---|---|---|---|---|---|---|
+| A20k  | **6.24** | 9.15 | 162.82 | 27.01 | 197.63 | 6.18 | 1.48 | 254 MB | 72.1 |
+| A50k  | **19.58** | 23.17 | 444.42 | 75.26 | 518.14 | 148.48 | 1.72 | 839 MB | 131.7 |
+| B1    | 4.45 | 3.34 | 36.61 | 14.27 | 85.50 | 3.73 | 1.44 | 843 MB | 49.5 |
+| C1000 | 238.59¹ | 6.62 | 749.57¹ | 33.02 | 831.49 | 13.12 | 1.33 | 908 MB | 43.5 |
+| D1    | 4.26 | 1.99 | 40.19 | 4.08 | 54.02 | 3.28 | 1.03 | 901 MB | 25.5 |
+| FAT100 (push-only) | 4079.62 | 23.17 | 6782.98 | 209.92 | 7045.12 | 5275.65 | 1.42 | 3238 MB | 250.5 |
+
+¹ **C1000 confound:** the six regimes share one broker sequentially; A50k left a
+1.72 M pop backlog draining into C1000, so 238.59/749.57 are **not** a clean fan-out
+datum. The cleanest same-binary/same-pipeline C1000 is the fresh-store flatness run
+below: **p50 9.79 = 1.48× pg 6.62, p99 536.58** — still O14 FAIL, but not 36×.
+
+**O14 verdict per target (Appendix G):**
+
+| line | raft p4 | pg | verdict |
+|---|---|---|---|
+| A20k p50  | 6.24 | 9.15 | PASS (0.68×) |
+| A20k p99  | 162.82 | 27.01 | **FAIL** (6.03×) |
+| A50k p50  | 19.58 | 23.17 | PASS (0.85×) |
+| A50k p99  | 444.42 | 75.26 | **FAIL** (5.91×) |
+| C1000 p50 | 9.79 (fresh) | 6.62 | **FAIL** (1.48×) |
+| C1000 p99 | 536.58 (fresh) | 33.02 | **FAIL** (16.2×) |
+| FAT100 tput | ≈90 043 msg/s ≈ **31%** | 287 363 msg/s | **FAIL** (< 70%) |
+
+**O14: FAIL.** The pipeline lifts A50k enormously over pipeline=1 (p50 148→20,
+p99 1106→444) and keeps push p50 ≤ pg on the A-regimes, but the **p99 tail never
+comes within range of pg**, **C1000 fan-out** does not isolate, and **FAT100**
+stays far below the knee. A 5-min sustained A20k (no pop-lag masking) is worse than
+the burst — p50 44.29 / p99 419.84 — same FAIL, more honest.
+
+**Flatness (I8) at pipeline=4** (8.14 M preload, 1000 partitions, 6-min runs):
+
+| metric | A20k Δ | C1000 Δ | gate |
+|---|---|---|---|
+| p50 | +8.1% PASS | **+545.9% FAIL** | ±15% |
+| p99 | +5.4% PASS | **+15.3% FAIL** | ±15% |
+| p999 | **+155.5% FAIL** | +4.5% PASS | ±15% |
+| ack_rtt | +3.1% PASS | **+121.6% FAIL** | ±15% |
+| cpu_cores | 0.0% PASS | −5.5% PASS | ±15% |
+| disk_mbps | +2.9% PASS | +6.7% PASS | — |
+| RSS drift in-run | 8→1520 / 3003→4279 **FAIL** | 8→1067 / 4250→4718 **FAIL** | ±5% |
+
+**I8: mixed → FAIL on the strict gate.** CPU and disk ARE flat with store size
+(G-3 holds); the A20k median/p99 are isolated from an 8 M cold store; but the p999
+tail, the C1000 fan-out latency and RSS in every shape are not. At rest ~387 B/msg
+(R-105). **Provenance caveat:** `flatness-night.sh` is not committed; the surviving
+`.results`/`compare-*.txt` carry the literal `pipeline=1` label the pipeline sed
+missed (the binary is the fixed `cdc5bb59af27`), so pipeline=4 is the agent's note —
+mechanically consistent (empty-A20k p50 56.58/p99 452.6 matches the committed
+pipeline=4 `fivemin.sh` 44.29/419.8) but not independently checkable from committed
+artifacts.
+
+**Noisy neighbour (O19) at pipeline=4, real active DLQ storm** (`dlqstorm.py`:
+wildcard queue-mode pop + ack `status:"dlq"`; quiet = 3000 msg/s, 200 partitions,
+48 consumers):
+
+| phase | quiet p50 | quiet p99 | Δ p99 vs before | verdict |
+|---|---|---|---|---|
+| before (empty) | 9.28 | 87.55 | — | baseline |
+| during (463/s storm, 45 350 filed) | 13.38 | **166.91** | **+90.6%** | **FAIL** |
+| after (2 M at rest, storm stopped) | 15.30 | **134.14** | **+53.2%** | **FAIL** |
+
+**O19: FAIL.** A light real DLQ storm on one partition nearly doubles the cold
+partitions' p99, and the at-rest 2 M backlog leaves them +53% after the storm stops.
+Quiet throughput never lagged (≈265 k every phase). **Reproducible from committed
+raw** (`night/quiet-{before,during,after}.gl` finals; `storm.out` 45 350/98 s =
+463/s), superseding the WP-1.11 transcription-error cell.
+
+**Dedup at the 3600 s product default (NIGHT-B).** The A50k task run collapsed at
+~min 55 (R-121) before the window could fill or expire; a supplementary
+**push-only 15k / 64-min** fill (`b2`, a stated deviation) gave the window mechanism
+cleanly:
+
+| | A50k (task) | 15k push-only (supplementary) |
+|---|---|---|
+| offered / achieved | 213.8 M / 93.5 M (43.8%) | 57.56 M / 57.56 M (100%) |
+| push p50 / p99 | 6 651 / 23 200 ms | **5.41 / 481 ms** |
+| index at min 60 | 15.2 GB / ~93.5 M rows | 7.89 GB / ~54 M rows |
+| RSS min30 / min60 / peak | 9 991 / 10 025 / 10 872 MB | 4 162 / 7 912 / 8 392 MB |
+| MemAvailable min | 8 837 MB (no OOM) | 13 664 MB |
+| dedup-probe p50 / p99 | admission-bound (1.8–9.3 s/round) | **1.16 / 8.97 ms** (6 300 probes) |
+| expiry @ min 60 | not reached (collapsed) | logical yes / **physical no** (R-124) |
+| poison / error / MAP_FULL | 0 / 0 / 0 | 0 / 0 / 0 |
+
+The lean option-(a) dedup probe is **~1 ms p50 / ~9 ms p99** over a filling 3600 s
+window **as long as the index fits page cache** (15 GB RAM, 8 GB index here); the
+>-RAM regime R-105 warns of needs an index neither run reached (50k collapsed;
+15k/64 min = 57 M rows). RSS is bounded/reclaimable — the store's growth is on disk,
+not anonymous RSS. Expiry is **logical only** in phase 1: a >window id re-enqueues
+but nothing frees the row (R-124). WP-0.4's named 50k / 1 h probe still does not exist.
+
+**Dropped writes at pipeline=4 (NIGHT-C, 100 rounds, dm-flakey, F-1-fixed binary, 16
+partitions, A20k intensity, durable_ms cycling 100/500/1000/60000):**
+
+| durable_ms | PASS rounds | reopen avg | reopen max | note |
+|---|---|---|---|---|
+| 100 | 25 | 317 ms | 319 ms | tail-only replay |
+| 500 | 25 | 354 ms | 625 ms | tail-only replay |
+| 1000 | 24 | 419 ms | 626 ms | tail-only (round 75 FAILED → R-123) |
+| 60000 | 25 | 6 415 ms | 9 248 ms | whole-log replay, scales with push count |
+| **all PASS** | **99** | — | 9 248 ms | every acked push delivered, `missing=0`, ~45.6 M acked |
+
+**99/100 PASS** (the durability property holds, reopen 316 ms–9.2 s tracking the
+replay tail); **the 1 FAIL is R-123** (SIGBUS on the torn store mmap). 0 poison / 0
+`TimeWentBackwards` / 0 `MAP_FULL` across all 100 rounds.
+
+**Harness caveat (disclosed, touches no gated number):** `noisy-night.sh`'s
+broker-RSS sampler read `$QPID` from a subshell forked before the pid was assigned,
+so the O19 broker-RSS side column is missing; the gated O19 numbers come from the
+goload/quiet `overall` p99, which is unaffected.
 
 ---
 
@@ -816,15 +1007,16 @@ discussion. **O21–O23 are new**, from Alice's 2026-09-17 notes (a), (b) and
 (d). PLAN_RAFT.md §17 records these as answered at G0; they are repeated here
 with the data that now exists, because three of them changed. **The decisions
 G1 itself asks for are in the "G1 checklist — what Alice decides" above** (go /
-no-go, the F-1 fix and its re-run, R-115/R-116 parity, and the four decisions
-phase-1 evidence puts in doubt); O14 and O19 below now carry phase-1 numbers.
+no-go now that O14/I8/O19 are measured; R-123 and R-121, the two HIGH night
+defects; R-115/R-116 parity; and the decisions the pipeline=4 evidence flags);
+O14, O18 and O19 below now carry the pipeline=4 numbers (M7).
 
 | id | question | what the data says now | recommended answer |
 |---|---|---|---|
 | O1 | Branch base; drop the per-queue native class (D23). | Branch `raft` @ `fc71b65b`; phase 0 touched **no product code**; pgless parked `2bbd10d1`. | As stated, with D23's amendment (main checkout, no worktree). |
 | O2 | Storage mode per deployment (D1). | — | yes. |
 | O3 | Hold (D13) and election timeouts (D14). | S3: failover **3087/3300/3353 ms**; the election is ~5 ms, detection dominates. GH#2080: with a leader known, the hold never fires and the write **hangs**. | Keep 8 s / 100 ms / 1000–2000 ms **and add a `propose` deadline** (plan change 7). |
-| O4 | 3 pods; PVC sizes; zone anti-affinity. | Dedup at the 1 h product default is **~180 M rows / 10.6 GB logical per voter** at 50k (lean (a)). openraft cannot purge log past the snapshot, so log disk follows snapshot cadence. | 3 pods; PVC = retained bytes × 1.5 **+ the dedup window + the log between snapshots**; fix the number after D-06 and D-10. |
+| O4 | 3 pods; PVC sizes; zone anti-affinity. | Dedup at the 1 h product default is **~180 M rows / 10.6 GB logical per voter** at 50k (lean (a)). openraft cannot purge log past the snapshot, so log disk follows snapshot cadence. **NIGHT-B, measured:** a 15k sustained fill grows `data.mdb` ~130 MB/min → **7.9 GB at 3600 s**; a 50k fill reached **15.2 GB** before it collapsed. Phase 1 frees **none** of it (retention stub, R-124), so the PVC must carry the whole window until WP-2.7. | 3 pods; PVC = retained bytes × 1.5 **+ the whole dedup window + the log between snapshots**; fix the number after D-06/WP-2.7 and D-10. |
 | O5 | Library: 0.10 stable, a pinned commit, or raft-rs. | No 0.10 release exists (#1637 open). raft-rs = 20–27 agent-days vs 6–9. | Pin the rev now; re-confirm at G3. |
 | O6 | Store engine (S1) and dedup (S2). | See the amended D9 and D10. | heed pinned + redb for raft1/embedded; option (a) lean. |
 | O7 | DLQ handoff for `dlq:true` acks inside the transaction entry. | — | yes. |
@@ -834,12 +1026,12 @@ phase-1 evidence puts in doubt); O14 and O19 below now carry phase-1 numbers.
 | O11 | Migration: offline window or online copy. | — | offline first. |
 | O12 | When to remove the postgres class (D22). | GH#2080 is open and reproduced; D22 is its mitigation. | Keep it deployable **to GA**; decide removal after 3 months of GA. |
 | O13 | Three VMs for the final numbers. | Every number so far is single-VM with a co-resident loader (FAT100: 6.08 of 8 vCPU busy, the loader the largest share). | yes for G4; one extra VM for load generation would also clean up G1. |
-| O14 | Performance targets for G1/G2/G4. | Baseline M1 is the comparison point. Failover measured 3.0–3.4 s. **Phase-1 raft1 (M6) is pipeline=1, throughput-capped and NOT the comparison** (F-1 blocks pipeline=4): push p50 competitive (A20k 6.18 vs 9.15 ms), tail explodes (A20k p99 175 vs 27), FAT100 ≈ 24 % of the knee. RSS is 0.9–3.0 GB in one process vs the pg split. | raft1 p50/p99 ≤ postgres at A20k/A50k/C1000; raft3 p50 ≤ raft1 + 2 ms; **failover ≤ 4 s p99**; push-only fat-batch ≥ 70% of postgres. **Re-judge at pipeline=4 after F-1.** |
+| O14 | Performance targets for G1/G2/G4. | **Now measured at pipeline=4 (M7): O14 FAILS.** Push p50 ≤ pg on the A-regimes (A20k 6.24 vs 9.15, A50k 19.58 vs 23.17 — A50k far better than pipeline=1's 148.5) but **p99 ~6× pg** (A20k 162.8, A50k 444); **C1000 fan-out 1.48× pg** on the cleanest fresh-store datum (the shared-broker 36× is a backlog-drain confound); **FAT100 ≈ 31%** of the knee. Failover 3.0–3.4 s. RSS 0.9–3.2 GB in one process vs the pg split. | raft1 p50/p99 ≤ postgres at A20k/A50k/C1000; raft3 p50 ≤ raft1 + 2 ms; **failover ≤ 4 s p99**; push-only fat-batch ≥ 70% of postgres. **Single-node pipeline=4 does not meet these; levers (O23: fill the entry, not deepen the pipeline; R-105; §11.3) before a re-attempt at raft3 / with a load-gen VM (O13).** |
 | O15 | Replicator for embedded mode. | S1 adds: the **engine** for embedded should be redb (no snapshot source in raft1). | LocalReplicator + redb. |
 | O16 | Ack fast path: record the delivered set at claim, or always compute. | S2 risk 5: narrowing what 005 must answer below the cursor would narrow (b)'s gap too. | Record the delivered set in the cursor at claim, bounded by batch size. |
 | O17 | Bounded planning time per batch. | Not measured. PLAN §17 records **5 ms**; this file previously proposed 20 ms. | Confirm the number. `QUEEN_RAFT_PLAN_BUDGET_MS`; a single command that alone exceeds the budget must still be planned, or it can never progress. |
-| O18 | Per-command-kind planner metrics + a slow-command log. | — | yes: `queen_raft_plan_seconds{kind=…}` + WARN above `QUEEN_RAFT_SLOW_COMMAND_MS` (50). |
-| O19 | Noisy-neighbour test: gate condition or advisory? | Phase-1 raft1 run (M6) is **INCONCLUSIVE**: pipeline=1 confounds isolation (a serial shared store slows every partition) and the one delta cell is a known transcription error, so no numeric verdict. Owed at pipeline=4. | Gate at G2 (raft1) and G4 (raft3); a named scenario in `test/raft/flatness`. |
+| O18 | Per-command-kind planner metrics + a slow-command log. | **Plumbed but inert (R-120):** `slow_command_ms` has no consumer (0 lines at threshold 5 ms under p50 44 ms plans); the O17 `plan_budget_ms` IS consumed (`batcher.rs:470`). Store metrics unmapped to any endpoint. | yes: `queen_raft_plan_seconds{kind=…}` + WARN above `QUEEN_RAFT_SLOW_COMMAND_MS` (50). **Wire it (WP-2.6 / a phase-2 obs WP).** |
+| O19 | Noisy-neighbour test: gate condition or advisory? | **Now measured at pipeline=4 (M7): O19 FAILS.** A real 463/s DLQ storm on one partition raised cold-partition p99 **+90.6%** (87.55→166.91); the 2 M backlog at rest **+53.2%** (→134.14) — both blow ±15%, reproducible from committed raw. The single shared replicated log + store does not isolate a hot partition's churn/volume from cold-partition latency. | **Gate at G2 (raft1) and G4 (raft3)**; a named scenario in `test/raft/flatness`. It currently FAILS single-node — a levers question for G2. |
 | O20 | Move DLQ head decompression and duplicate repacking off the planner. | — | yes, receiver-side. |
 | **O21** | **(a) Commit the store every N entries / few ms instead of once per applied entry** (the Raft log is already the durable WAL). | Measured, VM, 20k target: redb **10 046 → 19 539 msg/s** and WA **29.31 → 8.33×** from the cadence alone (a 2×2 isolates it from the keyspaces); fjall and heed move ±2% and ±0.6 points. The knobs in §11.3 are 4 ms / 256 entries. | **Yes — it is already the §11.3 amendment; keep it.** It re-admits redb, which is what makes D9's embedded answer possible. Consequence to accept: local reads that need the very latest entry wait ≤ 4 ms. |
 | **O22** | **(b) Keep the segment index out of the store**, Kafka-style: an immutable `.qidx` per sealed segment file, the active file's index in RAM. | `segments` was the highest-rate keyspace. S1 re-ran the matrix without it (`--shape ratified`): heed's ordered-scan lead over fjall survives the change (41.5 M vs 2.1–2.7 M rows/s over `seg_loc`), and most of the export-size spread (heed 172 vs redb 58.7 MiB) was those rows. `partition_files` keeps one row per (pid, file) at seal. | **Yes — keep the §6.1 amendment.** It removes the store's highest-rate keyspace and makes `seg_loc` (node-local, D8) the only per-segment structure. WP-1.3 owes the `.qidx` format, its checksum and its rebuild-by-scan path. |
@@ -878,10 +1070,19 @@ were shortened on Alice's instruction (10-minute soak, 6-minute dedup window,
 | D-16 | Failure behaviour: peer kill, half-open socket, reconnect reusing a request id; and backpressure (the per-connection mpsc 4096 queues were never exercised — both sides ran at ≤0.21 of 8 cores). | One multiplexed socket makes one failure retry every in-flight command, bounded by D6's recorded outcomes (R-63); reconnect is still unimplemented in the spike. | new `PART=fail` block in `s4-transport/run.sh` | ~30 min VM + harness work |
 | D-17 | **HTTP/2 over the same rustls** as a third configuration. | The one alternative that would remove most of the framing, multiplexing, backpressure and reconnect code D12 obliges us to write (R-64). `h2` is not yet in `server/Cargo.lock`, so it is a new dependency (C-2-compatible, cmake-free). | new configuration in `s4-transport` (hyper's `http2` feature) | ~1 harness day |
 | D-18 | Three brokers sharing one disk (§13.6), and the interaction between the dedup structures and a snapshot install. | Every store and dedup number is one process on a dedicated disk. | three concurrent `s1-store run` / `s2-dedup run` processes on one VM disk | ~30 min VM |
+| D-19 | **Flatness at 100 M / 1 M partitions** (the task's shrink of the plan's 300 M / 60-min). | The night ran **8 M / 1000 partitions / 6-min** — the largest at-rest size leaving headroom on 15 GB. 100 M × ~387 B/msg ≈ **36 GB** resident » 15 GB, and 1 M active partitions multiplies per-frame RAM; infeasible on this VM. | the three-VM O13 rig (a dedicated broker VM), then `flatness-*.sh 60 100000000` | O13 rig |
+| D-20 | A clean **60-minute C1000** (fan-out) at pipeline=4 over a settled store, on a fresh broker. | The night's C1000 numbers are confounded (the six-regime 238.6 by the A50k backlog drain; the flatness fresh-store 9.79 is 6-min, not 60). The fan-out non-isolation (I8/O14) warrants a long window with no prior-regime backlog. | fresh broker, `measure-raft1.sh` C1000 only, 3600 s | ~1 h VM |
+| D-21 | **WP-0.4's 50k / 1 h dedup probe** — still does not exist. | Run A collapsed at ~min 55 (R-121); run B was a 15k push-only deviation (clean probe p50 1.16 / p99 8.97 ms at 15k). The 50k/1h number needs either R-121's push-admission fix, or a like-for-like postgres oracle to separate the defect from the VM's A50k CPU ceiling — ideally on the O13 rig. | R-121 fix + `run.sh` A50k with a probe side-loop, three-VM | O13 rig + fix |
+
+(D-09, the 10 GiB manifest snapshot, and D-12, the dm-delay-on-a-follower / true
+#2080 bridge, remain deferred as before — the night run did not touch consensus.)
 
 ---
 
-*Last revised 2026-09-18 (**G1 packet**): phase 1 built and recorded, the gate
-opened for Alice. Phase 0 was the previous revision (G0 packet). Phase 1 is
-committed on `raft` (`d6500817`..`ee181d91`); the F-1 / R-117 fix is written but
-uncommitted in the working tree. This revision edits `RAFT_STATUS.md` only.*
+*Last revised 2026-09-19 (**G1 packet, pipeline=4 pass**): the owed pipeline=4 VM
+re-run of WP-1.11 on the F-1-fixed binary (NIGHT-A/B/C) is folded in — F-1 fixed
+(`f8bfa672`) and discharged on the VM; O14 FAIL, I8 mixed/FAIL, O19 FAIL, dropped
+writes 99/100 (R-123). Prior revisions: 2026-09-18 the draft G1 packet (`29bc7cdd`,
+pipeline=1) and the G0 packet. Phase 1 is committed on `raft` (`d6500817`..`ee181d91`,
++ `f8bfa672` + `29bc7cdd`). This revision edits `RAFT_STATUS.md` and adds the night
+reports + evidence under `test/raft/vm/raft1/`.*

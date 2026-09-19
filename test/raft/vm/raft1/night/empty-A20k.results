@@ -1,0 +1,10 @@
+# regime=A20k state=empty host=vm-164.90.215.224 commit=cdc5bb59af27
+# duration_s=360 topology=raft1 pipeline=1 command="goload A20k 6min"
+p50_ms             56.58
+p99_ms             452.61
+p999_ms            561.15
+ack_rtt_ms         28.18
+cpu_cores          1.31
+disk_mbps          112.9
+rss_start_mb       8
+rss_end_mb         1520

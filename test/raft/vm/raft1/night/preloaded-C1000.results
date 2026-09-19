@@ -1,0 +1,10 @@
+# regime=C1000 state=preloaded host=vm-164.90.215.224 commit=cdc5bb59af27
+# duration_s=360 topology=raft1 pipeline=1 command="goload C1000 6min"
+p50_ms             63.23
+p99_ms             618.50
+p999_ms            765.95
+ack_rtt_ms         29.23
+cpu_cores          1.38
+disk_mbps          62.1
+rss_start_mb       4250
+rss_end_mb         4718
