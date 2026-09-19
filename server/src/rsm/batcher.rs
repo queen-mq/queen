@@ -74,6 +74,7 @@ use bytes::Bytes;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::MissedTickBehavior;
 
+use crate::rsm::dedup::DedupFront;
 use crate::rsm::effect::Effect;
 use crate::rsm::entry::{encode_entry, Entry, Outcome, RequestId};
 use crate::rsm::planner::Refusal;
@@ -517,6 +518,7 @@ struct PlanOutput {
 /// each occupies; `batch` are the drained commands, in order.
 fn plan_cycle_blocking<S: Store>(
     store: &S,
+    front: &DedupFront,
     folded: Vec<(u64, Arc<Entry>)>,
     batch: Vec<Command>,
     cfg: PlanConfig,
@@ -551,7 +553,7 @@ fn plan_cycle_blocking<S: Store>(
             // retryably (I14).
             .map_err(|_| crate::rsm::store::StoreError::Io("clock read".into()))?;
         ov.mark_cycle_start();
-        let planner = Planner::new(committed, now_us, cfg.clone());
+        let planner = Planner::new(committed, now_us, cfg.clone(), front);
 
         let mut entry = Entry::new(now_us, ov.cycle_pid_base(), ov.cycle_kv_base());
         let mut slots: Vec<Slot> = Vec::with_capacity(batch.len());
@@ -680,11 +682,19 @@ pub struct Batcher<S: Store, R: Replicator> {
     store: Arc<S>,
     repl: Arc<R>,
     cfg: BatcherConfig,
+    /// The persistent dedup front (PERF-B), shared with the blocking planner
+    /// each cycle. One per broker; reset on leadership regain.
+    front: Arc<DedupFront>,
 }
 
 impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
     pub fn new(store: Arc<S>, repl: Arc<R>, cfg: BatcherConfig) -> Batcher<S, R> {
-        Batcher { store, repl, cfg }
+        Batcher {
+            store,
+            repl,
+            cfg,
+            front: Arc::new(DedupFront::from_env()),
+        }
     }
 
     /// Start the driver on the current runtime. Returns the command sender and
@@ -713,6 +723,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             store: self.store,
             repl: self.repl,
             cfg: self.cfg,
+            front: self.front,
             role_rx,
             cmd_rx,
             result_tx,
@@ -777,6 +788,7 @@ struct RunState<S: Store, R: Replicator> {
     store: Arc<S>,
     repl: Arc<R>,
     cfg: BatcherConfig,
+    front: Arc<DedupFront>,
     role_rx: watch::Receiver<Role>,
     cmd_rx: mpsc::Receiver<Submission>,
     result_tx: mpsc::UnboundedSender<(u64, Result<AppliedAt, ProposeError>)>,
@@ -892,9 +904,18 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         let expire_window_us = expire.then(|| self.cfg.request_id_window_s as i64 * 1_000_000);
         let store = self.store.clone();
         let cfg = self.cfg.plan.clone();
+        let front = self.front.clone();
 
         let planned = tokio::task::spawn_blocking(move || {
-            plan_cycle_blocking(&*store, folded, commands, cfg, wall_us, expire_window_us)
+            plan_cycle_blocking(
+                &*store,
+                &front,
+                folded,
+                commands,
+                cfg,
+                wall_us,
+                expire_window_us,
+            )
         })
         .await;
 
@@ -1259,6 +1280,12 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                     // adapter (phase 3) waits on the term's first entry.
                     self.paused = false;
                     self.next_index = self.repl.metrics().last_log_index + 1;
+                    // Leadership regain: a prior leader may have committed
+                    // appends this front never planned, so drop it — every
+                    // partition re-seeds from the committed snapshot this leader
+                    // is guaranteed to hold complete. A single-node
+                    // LocalReplicator never regains, so this is inert in phase 1.
+                    self.front.reset();
                 }
             }
             Role::Stopped => {

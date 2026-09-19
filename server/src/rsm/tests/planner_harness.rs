@@ -20,6 +20,7 @@
 use std::sync::Arc;
 
 use crate::rsm::apply::{Applier, Committed as ApplyCommitted, NoNotify, StateDigest};
+use crate::rsm::dedup::DedupFront;
 use crate::rsm::effect::{CursorRow, Pid, QueueConfig};
 use crate::rsm::entry::{Entry, Outcome, RequestId};
 use crate::rsm::planner::{
@@ -300,6 +301,10 @@ pub struct Cell {
     index: u64,
     term: u64,
     wall: i64,
+    /// Persistent across cycles, exactly like the batcher owns it. Disabled by
+    /// default so existing tests plan precisely as the baseline; `enable_front`
+    /// turns it on for the PERF-B tests.
+    front: DedupFront,
 }
 
 /// What one [`Cell::run`] produced: the per-command results in input order, and
@@ -332,7 +337,20 @@ impl Cell {
             index: 0,
             term: 1,
             wall: BASE_US,
+            front: DedupFront::disabled(),
         }
+    }
+
+    /// Turn the dedup front on for this cell (PERF-B tests). `cap_mb` bounds the
+    /// filter footprint.
+    pub fn enable_front(&mut self, cap_mb: usize) -> &mut Cell {
+        self.front = DedupFront::new(true, cap_mb << 20);
+        self
+    }
+
+    /// The cell's persistent dedup front, for asserting on its stats.
+    pub fn front(&self) -> &DedupFront {
+        &self.front
     }
 
     /// Advance the wall clock the planner stamps from.
@@ -378,6 +396,14 @@ impl Cell {
         c.results.remove(0)
     }
 
+    /// Plan a batch WITHOUT applying it — for measuring the planning step in
+    /// isolation (the dedup front's whole effect is on planning, never apply).
+    /// The persistent front is still consulted and updated, exactly as in a
+    /// real cycle.
+    pub fn plan_only(&self, cmds: &[Cmd]) -> Vec<Planned> {
+        self.plan_cycle(cmds).0
+    }
+
     fn plan_cycle(&self, cmds: &[Cmd]) -> (Vec<Planned>, Option<Entry>, i64) {
         let wall = self.wall;
         self.node
@@ -389,7 +415,7 @@ impl Cell {
                 let committed = Committed::new(r, &d);
                 let mut ov = Overlay::new(r.next_pid()?, r.kv_version_next()?);
                 ov.mark_cycle_start();
-                let planner = Planner::new(committed, now, PlanConfig::default());
+                let planner = Planner::new(committed, now, PlanConfig::default(), &self.front);
 
                 // §7.1 step 3: the request-id lookup FIRST (D6, I6). A committed
                 // or in-flight hit is answered from the recorded outcome and

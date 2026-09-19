@@ -70,6 +70,10 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             let floor = self
                 .now_us
                 .saturating_sub(cfg.dedup_window_seconds as i64 * SEC_US);
+            // Seed the dedup front for this partition on first touch (PERF-B), so
+            // the per-hash probes below can skip the committed LMDB read for
+            // hashes it proves absent.
+            self.front_prepare(ov, pid, floor)?;
             for (i, it) in cmd.items.iter().enumerate() {
                 if let Some(off) = self.dedup_probe_one(ov, pid, &it.hash, floor)? {
                     verdicts[i] = Some(PushVerdict::Duplicate { pid, offset: off });
@@ -163,6 +167,23 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         // Fold the command's effects so a later command in the cycle sees the
         // new partition, the new tail and the new dedup occurrences (§7.2).
         ov.apply_effects(&effects);
+
+        // Keep the dedup front (PERF-B) a superset of the committed index it
+        // fronts: a partition minted here is born seeded, and every planned
+        // survivor's hash is recorded at plan time (before it commits). Only for
+        // a queue that actually dedups.
+        if self.front().enabled() && cfg.dedup_window_seconds > 0 {
+            if existing_pid.is_none() {
+                self.front().note_created(pid);
+            }
+            let floor = self
+                .now_us
+                .saturating_sub(cfg.dedup_window_seconds as i64 * SEC_US);
+            for &i in &survivors {
+                self.front()
+                    .insert(pid, &cmd.items[i].hash, created_at, floor);
+            }
+        }
         Ok(Plan::logged(effects, Outcome::Push(PushOutcome { items })))
     }
 }

@@ -73,7 +73,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use crate::rsm::dedup::{self, AckRes, TxnsRow};
+use crate::rsm::dedup::{self, AckRes, DedupFront, Seed, TxnsRow};
 use crate::rsm::effect::{CursorRow, Effect, GroupMeta, Pid, QueueConfig, SubscriptionMode};
 use crate::rsm::entry::{Entry, Outcome, RequestId};
 use crate::rsm::state::Committed;
@@ -728,6 +728,10 @@ pub struct Planner<'a, R: Reads + ?Sized> {
     committed: Committed<'a, R>,
     now_us: i64,
     cfg: PlanConfig,
+    /// The persistent dedup front (PERF-B). Borrowed for the cycle; the batcher
+    /// owns it across cycles. A [`DedupFront::disabled`] instance makes the
+    /// planner probe exactly as the baseline does.
+    front: &'a DedupFront,
 }
 
 /// A partition merged across committed state and the overlay — the shape the
@@ -767,12 +771,23 @@ struct Seg {
 }
 
 impl<'a, R: Reads + ?Sized> Planner<'a, R> {
-    pub fn new(committed: Committed<'a, R>, now_us: i64, cfg: PlanConfig) -> Planner<'a, R> {
+    pub fn new(
+        committed: Committed<'a, R>,
+        now_us: i64,
+        cfg: PlanConfig,
+        front: &'a DedupFront,
+    ) -> Planner<'a, R> {
         Planner {
             committed,
             now_us,
             cfg,
+            front,
         }
+    }
+
+    /// The dedup front the batcher threads through this cycle.
+    pub fn front(&self) -> &DedupFront {
+        self.front
     }
 
     pub fn now_us(&self) -> i64 {
@@ -1090,8 +1105,17 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         hash: &[u8; 16],
         window_floor_us: i64,
     ) -> Result<Option<u64>, Refusal> {
-        let mut best =
-            dedup::probe_one(self.reads(), pid, hash, window_floor_us).map_err(store_err)?;
+        // The front decides whether the committed LMDB probe is needed: a
+        // "skip" is a proof that the committed index holds no in-window
+        // occurrence of this hash (see [`DedupFront`]). The overlay merge below
+        // is UNCONDITIONAL — the front fronts only the committed read, never the
+        // in-flight state, so an in-flight duplicate is still caught even on a
+        // skip. `front_prepare` must have run for this pid this command.
+        let mut best = if self.front.should_probe(pid, hash, window_floor_us) {
+            dedup::probe_one(self.reads(), pid, hash, window_floor_us).map_err(store_err)?
+        } else {
+            None
+        };
         if let Some(occ) = ov.dedup.get(&(pid, *hash)) {
             for (off, created) in occ {
                 if *created >= window_floor_us {
@@ -1100,6 +1124,77 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             }
         }
         Ok(best)
+    }
+
+    /// Ensure the dedup front can answer for `pid` before the per-hash probe
+    /// loop. A partition it has not seen is seeded from the committed `txns`
+    /// window UNION the overlay's in-flight appends (both filtered to the dedup
+    /// window), or marked always-probe when that union exceeds the seed cap. A
+    /// no-op when the front is disabled or the partition is already seeded,
+    /// fallback, or was born seeded by a create this front-lifetime.
+    pub fn front_prepare(&self, ov: &Overlay, pid: Pid, floor_us: i64) -> Result<(), Refusal> {
+        if !self.front.needs_seed(pid) {
+            return Ok(());
+        }
+        let seed = self.front_collect_seed(ov, pid, floor_us)?;
+        self.front.install_seed(pid, seed, floor_us);
+        Ok(())
+    }
+
+    /// Collect the in-window seed for `pid`: committed `txns` hashes then the
+    /// overlay's in-flight append hashes, in created order, stopping at
+    /// [`dedup::FRONT_SEED_MAX`]. The union is what makes a skip sound for a
+    /// partition whose recent appends are still in flight (not yet in `txns`).
+    fn front_collect_seed(&self, ov: &Overlay, pid: Pid, floor_us: i64) -> Result<Seed, Refusal> {
+        let mut buf: Vec<([u8; 16], i64)> = Vec::new();
+        let prefix = keys::txns_prefix(pid);
+        let mut bad: Option<StoreError> = None;
+        let mut overflow = false;
+        self.reads()
+            .scan_raw(
+                Keyspace::Txns,
+                &prefix,
+                &prefix,
+                usize::MAX,
+                &mut |k, v| match (keys::txns_base_of(k), TxnsRow::decode(v)) {
+                    (Some(_base), Ok(row)) => {
+                        if row.created_at_us >= floor_us {
+                            for h in row.iter_hashes() {
+                                buf.push((h, row.created_at_us));
+                            }
+                            if buf.len() > dedup::FRONT_SEED_MAX {
+                                overflow = true;
+                                return false;
+                            }
+                        }
+                        true
+                    }
+                    _ => {
+                        bad = Some(StoreError::corrupt(Keyspace::Txns, "txns row"));
+                        false
+                    }
+                },
+            )
+            .map_err(store_err)?;
+        if let Some(e) = bad {
+            return Err(store_err(e));
+        }
+        if overflow {
+            return Ok(Seed::Overflow);
+        }
+        if let Some(o) = ov.parts.get(&pid) {
+            for a in &o.appends {
+                if a.created_at_us >= floor_us {
+                    for h in &a.hashes {
+                        buf.push((*h, a.created_at_us));
+                    }
+                    if buf.len() > dedup::FRONT_SEED_MAX {
+                        return Ok(Seed::Overflow);
+                    }
+                }
+            }
+        }
+        Ok(Seed::Complete(buf))
     }
 
     /// Resolve one hash for a hash ack (005): `eff` = MIN over `[lo, hi]`,
