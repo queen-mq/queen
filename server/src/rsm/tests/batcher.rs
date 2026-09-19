@@ -321,9 +321,24 @@ async fn a_propose_error_mid_pipeline_drops_the_whole_depth_four_overlay() {
 
 /// I3: a `Timeout` keeps the entry in flight, so a later command does not
 /// reuse its offset, and the timed-out entry still commits.
+///
+/// This pins the pure propose-future timeout path (`QUEEN_RAFT_DRIVER_NOTIFY`
+/// OFF, the semantics a backend that exposes no applied-index wake takes — the
+/// phase-3 openraft path, GH#2080). There the driver learns the outcome only
+/// from the propose future, which the fake parks to the deadline and answers
+/// `Timeout`, so the waiter retries even though the entry commits late. The
+/// driver-notify ON path answers that same entry `Done` at apply time (see
+/// [`a_timeout_then_commit_is_answered_done_under_driver_notify`]); the offset
+/// safety this test's second push proves holds on both paths.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_timeout_keeps_the_entry_in_flight_without_duplicate_offsets() {
-    let fx = FakeFixture::open("timeout", small_pipeline(2, 60));
+    let fx = FakeFixture::open(
+        "timeout",
+        BatcherConfig {
+            driver_notify: false,
+            ..small_pipeline(2, 60)
+        },
+    );
     // Entry 1: the caller sees Timeout, but the fake commits it late (I3).
     fx.fake
         .push_step(Step::TimeoutThenCommit(Duration::from_millis(15)));
@@ -344,6 +359,40 @@ async fn a_timeout_keeps_the_entry_in_flight_without_duplicate_offsets() {
     assert_eq!(
         offset, 1,
         "the second push allocated the offset after the entry kept in flight"
+    );
+
+    fx.close().await;
+}
+
+/// PERF-G (`QUEEN_RAFT_DRIVER_NOTIFY`, default on): when the applied index
+/// advances past an in-flight entry the driver answers its waiter `Done` off
+/// the applied-index wake, WITHOUT waiting for the propose future — so an entry
+/// that commits + applies well inside the deadline is answered the real
+/// outcome at apply time, not `Retry` at the deadline. The pipeline-safety I3
+/// cares about (no reused offset) still holds: the second push to the same
+/// partition allocates the next offset.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_timeout_then_commit_is_answered_done_under_driver_notify() {
+    // driver_notify defaults on; the fake exposes the applied-index wake.
+    let fx = FakeFixture::open("driver-notify", small_pipeline(2, 5_000));
+    // The fake parks its propose future to the deadline (would answer Timeout),
+    // but commits + advances applied at 15 ms and pulses the applied wake.
+    fx.fake
+        .push_step(Step::TimeoutThenCommit(Duration::from_millis(15)));
+    fx.fake.set_default(Step::Now);
+
+    // The applied-index wake resolves it Done at apply time, not Retry at the
+    // 5 s deadline (the await would have blocked far longer than 15 ms).
+    let first = submit(&fx.tx, push(1, "q", "p0", &["a"])).await;
+    let (_pid, offset) = push_created(&first);
+    assert_eq!(offset, 0, "the entry is answered its real outcome, Done");
+
+    // Offset safety still holds: the next push takes the following offset.
+    let second = submit(&fx.tx, push(2, "q", "p0", &["b"])).await;
+    let (_pid, offset) = push_created(&second);
+    assert_eq!(
+        offset, 1,
+        "no reused offset under the driver-notify fast path"
     );
 
     fx.close().await;
@@ -508,6 +557,7 @@ fn open_repl(dir: &Path, store: Arc<HeedStore>) -> LocalReplicator<HeedStore> {
             apply_cfg: cfg(),
             apply_channel_capacity: 64,
             replay_deadline: Duration::from_secs(30),
+            writer_pipeline: crate::rsm::replicator::local::writer_pipeline_from_env(),
         },
         Arc::new(NoWaker),
         Arc::new(SystemClock),

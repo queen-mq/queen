@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use tokio::sync::watch;
+use tokio::sync::{watch, Notify};
 
 use super::{
     AppliedAt, Membership, MembershipChange, NodeId, ProposeError, ReplError, ReplMetrics,
@@ -54,6 +54,22 @@ struct Shared {
     log: Mutex<Vec<Bytes>>,
     script: Mutex<VecDeque<Step>>,
     default: Mutex<Step>,
+    /// PERF-G: pulsed whenever `applied` advances, so a driver in
+    /// `QUEEN_RAFT_DRIVER_NOTIFY` mode resolves the entry off this signal
+    /// (mirrors `LocalReplicator`, so the batcher tests exercise the same
+    /// path the shipped binary takes).
+    applied_notify: Arc<Notify>,
+}
+
+impl Shared {
+    /// Move `applied`/`committed` up to `index` and wake any driver-notify
+    /// waiter. Every place that advances `applied` goes through here so the
+    /// notify is never missed.
+    fn advance_applied(&self, index: u64) {
+        self.applied.fetch_max(index, Ordering::AcqRel);
+        self.committed.fetch_max(index, Ordering::AcqRel);
+        self.applied_notify.notify_one();
+    }
 }
 
 /// A `Replicator` a test drives step by step.
@@ -78,6 +94,7 @@ impl FakeReplicator {
                 log: Mutex::new(Vec::new()),
                 script: Mutex::new(VecDeque::new()),
                 default: Mutex::new(Step::Now),
+                applied_notify: Arc::new(Notify::new()),
             }),
             role_tx,
             role_rx,
@@ -130,8 +147,7 @@ impl FakeReplicator {
     /// Force the applied index forward (a test committing an entry the caller
     /// left in flight after a `Timeout`).
     pub fn set_applied(&self, index: u64) {
-        self.shared.applied.fetch_max(index, Ordering::AcqRel);
-        self.shared.committed.fetch_max(index, Ordering::AcqRel);
+        self.shared.advance_applied(index);
     }
 
     fn take_step(&self) -> Step {
@@ -150,8 +166,7 @@ impl FakeReplicator {
     }
 
     fn commit(&self, index: u64) {
-        self.shared.applied.fetch_max(index, Ordering::AcqRel);
-        self.shared.committed.fetch_max(index, Ordering::AcqRel);
+        self.shared.advance_applied(index);
     }
 
     fn term(&self) -> u64 {
@@ -202,8 +217,7 @@ impl Replicator for FakeReplicator {
                 let shared = self.shared.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(d).await;
-                    shared.applied.fetch_max(index, Ordering::AcqRel);
-                    shared.committed.fetch_max(index, Ordering::AcqRel);
+                    shared.advance_applied(index);
                 });
                 park_until(deadline).await;
                 Err(ProposeError::Timeout)
@@ -217,6 +231,10 @@ impl Replicator for FakeReplicator {
 
     fn watch_role(&self) -> watch::Receiver<Role> {
         self.role_rx.clone()
+    }
+
+    fn applied_notify(&self) -> Option<Arc<Notify>> {
+        Some(self.shared.applied_notify.clone())
     }
 
     async fn read_barrier(&self, _deadline: Instant) -> Result<u64, ProposeError> {

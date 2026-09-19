@@ -159,6 +159,36 @@ impl FileMeta {
     }
 }
 
+/// A group written to the log but not yet fsynced (PERF-G,
+/// `QUEEN_RAFT_WRITER_PIPELINE`). The writer thread hands one to the syncer
+/// thread, which flushes it and only then acknowledges the group's entries
+/// (I4). It holds a dup of the file the frames landed in, so `sync` flushes the
+/// same inode the writer keeps appending to; fsyncing a dup fd covers every
+/// byte written before the handle was taken.
+pub struct SyncHandle {
+    file: File,
+    fsync: Fsync,
+}
+
+impl SyncHandle {
+    /// Flush the group to the platter, per the log's fsync mode. Times the
+    /// barrier into `log_fsync` (PERF-1), gated on the metrics knob.
+    pub fn sync(&self) -> io::Result<()> {
+        let s0 = crate::rsm::timing::stamp();
+        let r = match self.fsync {
+            Fsync::Off => Ok(()),
+            Fsync::Data => self.file.sync_data(),
+            Fsync::Full => full_fsync(&self.file),
+        };
+        if let Some(s0) = s0 {
+            crate::rsm::timing::metrics()
+                .log_fsync
+                .record_dur(s0.elapsed());
+        }
+        r
+    }
+}
+
 /// The append-only local log. One writer (`&mut self`), owned by the
 /// `LocalReplicator`'s writer thread.
 pub struct LogStore {
@@ -345,14 +375,69 @@ impl LogStore {
         // returned still becomes exactly-once through the log (I4).
         crate::rsm::faults::hit("log.flushed");
 
+        self.advance_after_write(&buf, index);
+        Ok(first_index)
+    }
+
+    /// Write one group's frames but do NOT fsync; return the first index and a
+    /// [`SyncHandle`] the caller flushes (possibly on another thread) before it
+    /// acknowledges the group's entries (PERF-G, `QUEEN_RAFT_WRITER_PIPELINE`).
+    ///
+    /// The handle dups the file the frames landed in, so its `sync` flushes the
+    /// SAME inode this writer keeps appending to — covering every byte written
+    /// up to now, a superset of this group, which is exactly what I4 needs (an
+    /// entry is acked only after a fsync that covered its bytes). The in-memory
+    /// index/size bookkeeping advances here (so the next group is framed at the
+    /// right index); durability is the handle's job, and recovery rebuilds the
+    /// real valid length from the frames on disk, so bookkeeping running ahead
+    /// of the fsync is safe.
+    pub fn append_group_deferred(&mut self, entries: &[&[u8]]) -> io::Result<(u64, SyncHandle)> {
+        if entries.is_empty() {
+            return Ok((
+                self.next_index,
+                SyncHandle {
+                    file: self.active.try_clone()?,
+                    fsync: self.opts.fsync,
+                },
+            ));
+        }
+        if self.active_size > FILE_HEADER_LEN && self.active_size >= self.opts.segment_bytes {
+            self.roll()?;
+        }
+        let first_index = self.next_index;
+        let mut buf: Vec<u8> = Vec::with_capacity(
+            entries
+                .iter()
+                .map(|e| e.len() + FRAME_PREFIX)
+                .sum::<usize>(),
+        );
+        let mut index = self.next_index;
+        for e in entries {
+            encode_frame(&mut buf, index, LOG_TERM, e);
+            index += 1;
+        }
+        self.active.write_all(&buf)?;
+        crate::rsm::faults::hit("log.appended");
+        // Dup the file the group landed in BEFORE any later roll swaps
+        // `self.active`, so the handle always fsyncs the right inode.
+        let handle = SyncHandle {
+            file: self.active.try_clone()?,
+            fsync: self.opts.fsync,
+        };
+        self.advance_after_write(&buf, index);
+        Ok((first_index, handle))
+    }
+
+    /// Advance the in-memory bookkeeping after a group's frames are written
+    /// (shared by the fsync-inline and deferred-fsync append paths).
+    fn advance_after_write(&mut self, buf: &[u8], next_index: u64) {
         let added = buf.len() as u64;
         self.active_size += added;
-        self.next_index = index;
+        self.next_index = next_index;
         self.last_term = LOG_TERM;
         let last = self.files.last_mut().expect("active file meta");
         last.bytes = self.active_size;
         last.last_index = self.next_index - 1;
-        Ok(first_index)
     }
 
     /// Roll to a fresh active file whose first frame will carry `next_index`.

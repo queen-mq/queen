@@ -71,7 +71,7 @@ use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch, Notify};
 use tokio::time::MissedTickBehavior;
 
 use crate::rsm::dedup::DedupFront;
@@ -118,6 +118,15 @@ pub struct BatcherConfig {
     pub command_queue_depth: usize,
     /// The planner's own budget and slow-command threshold (O17, O18).
     pub plan: PlanConfig,
+    /// `QUEEN_RAFT_DRIVER_NOTIFY` (PERF-G, default on): resolve an in-flight
+    /// entry off the replicator's applied-index notify (one cross-thread wake)
+    /// instead of waiting for its per-propose forwarding task to deliver the
+    /// result through the `mpsc`. It only makes the happy-path answer arrive
+    /// sooner — the propose future still runs, so `Timeout`/`Fatal` are
+    /// unchanged and D7/I4 still gate the answer on commit + local apply. Off:
+    /// the pre-PERF-G path (the forwarding task alone). Inert on a backend that
+    /// returns no `applied_notify`.
+    pub driver_notify: bool,
 }
 
 impl Default for BatcherConfig {
@@ -131,6 +140,7 @@ impl Default for BatcherConfig {
             request_expire_every_ms: 10_000,
             command_queue_depth: 1024,
             plan: PlanConfig::default(),
+            driver_notify: true,
         }
     }
 }
@@ -154,6 +164,19 @@ impl BatcherConfig {
         // from the same `QUEEN_RAFT_DEDUP_INDEX`, so they agree; in a facade
         // test the planner runs `txns` while `record` stays `rows` (writes both
         // keyspaces), which the txns reader handles correctly.
+        // A boolean knob: only "0"/"false"/"off"/"no" turns it off (an unset or
+        // malformed value keeps the default-on driver-notify path).
+        fn flag(name: &str, cur: bool) -> bool {
+            std::env::var(name)
+                .ok()
+                .map(|v| {
+                    !matches!(
+                        v.trim().to_ascii_lowercase().as_str(),
+                        "0" | "false" | "off" | "no"
+                    )
+                })
+                .unwrap_or(cur)
+        }
         let index_mode = crate::rsm::dedup::IndexMode::from_env();
         let d = BatcherConfig::default();
         BatcherConfig {
@@ -174,6 +197,7 @@ impl BatcherConfig {
                 slow_command_ms: num("QUEEN_RAFT_SLOW_COMMAND_MS", d.plan.slow_command_ms),
                 index_mode,
             },
+            driver_notify: flag("QUEEN_RAFT_DRIVER_NOTIFY", d.driver_notify),
         }
     }
 }
@@ -729,6 +753,14 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
         let role_rx = self.repl.watch_role();
         let role = *role_rx.borrow();
         let next_index = self.repl.metrics().last_log_index + 1;
+        // PERF-G: the applied-index wake, when the backend and the knob both
+        // offer it. `None` disables the driver-notify select arm and keeps the
+        // per-propose await path.
+        let applied_notify = if self.cfg.driver_notify {
+            self.repl.applied_notify()
+        } else {
+            None
+        };
         let mut st = RunState {
             store: self.store,
             repl: self.repl,
@@ -738,6 +770,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             cmd_rx,
             result_tx,
             result_rx,
+            applied_notify,
             queue: VecDeque::new(),
             inflight: VecDeque::new(),
             next_seq: 1,
@@ -765,6 +798,13 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
                 }
                 Some((seq, res)) = st.result_rx.recv() => {
                     st.on_result(seq, res);
+                }
+                // PERF-G: the applied index advanced (QUEEN_RAFT_DRIVER_NOTIFY).
+                // Resolve every in-flight entry the apply has now passed, so the
+                // freed pipeline slot is reused on this one wake rather than
+                // waiting for each entry's forwarding task.
+                _ = wait_notify(&st.applied_notify), if st.applied_notify.is_some() => {
+                    st.on_applied_wake();
                 }
                 _ = expire.tick() => {
                     st.expire_due = true;
@@ -803,6 +843,9 @@ struct RunState<S: Store, R: Replicator> {
     cmd_rx: mpsc::Receiver<Submission>,
     result_tx: mpsc::UnboundedSender<(u64, Result<AppliedAt, ProposeError>)>,
     result_rx: mpsc::UnboundedReceiver<(u64, Result<AppliedAt, ProposeError>)>,
+    /// PERF-G: the replicator's applied-index wake (`QUEEN_RAFT_DRIVER_NOTIFY`),
+    /// or `None` when the knob is off or the backend does not expose it.
+    applied_notify: Option<Arc<Notify>>,
     queue: VecDeque<Submission>,
     inflight: VecDeque<InFlightEntry>,
     next_seq: u64,
@@ -886,6 +929,10 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         // (the knob is a process-global constant), so `filter_map` keeps them all
         // and `arrivals` stays index-aligned with `slots`.
         let timing_on = crate::rsm::timing::enabled();
+        // PERF-G: `drain_to_propose` measures from here (the moment the cycle
+        // has the batch in hand) to the entry's inline submit below, isolating
+        // the plan + `spawn_blocking` hop + encode from the queue wait.
+        let drain_started = timing_on.then(Instant::now);
         let arrivals: Vec<Instant> = if timing_on {
             let drain_cmds = batch.len() as u64;
             if drain_cmds > 0 {
@@ -893,6 +940,17 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 let tm = crate::rsm::timing::metrics();
                 tm.drain_commands.record(drain_cmds);
                 tm.drain_messages.record(drain_msgs);
+                // PERF-G leg 1: how long each drained command sat in the queue
+                // before this cycle (the pipeline-slot wait). Measured against
+                // `drain_started`, the instant the batch left the queue.
+                if let Some(now) = drain_started {
+                    let qw = &crate::rsm::timing::metrics().queue_wait;
+                    for s in &batch {
+                        if let Some(at) = s.received_at {
+                            qw.record_dur(now.saturating_duration_since(at));
+                        }
+                    }
+                }
             }
             batch.iter().filter_map(|s| s.received_at).collect()
         } else {
@@ -1076,6 +1134,12 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                     hist.record_dur(now.saturating_duration_since(*a));
                 }
             }
+            // PERF-G leg 2: this cycle's drain → its entry proposed.
+            if let Some(started) = drain_started {
+                crate::rsm::timing::metrics()
+                    .drain_to_propose
+                    .record_dur(started.elapsed());
+            }
             self.propose(seq, index, Arc::new(entry), waiters, bytes);
         } else {
             debug_assert!(waiters.is_empty(), "no entry but waiters were attached");
@@ -1239,6 +1303,12 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         match res {
             Ok(at) => {
                 if let Some(e) = self.inflight.iter_mut().find(|e| e.seq == seq) {
+                    // PERF-G: the applied-index wake may already have resolved
+                    // this entry (driver-notify). The forwarding task's late Ok
+                    // is then a no-op.
+                    if e.resolved.is_some() {
+                        return;
+                    }
                     // The predicted index is confirmed; trust the library's.
                     e.index = at.index;
                     if let Some(at0) = e.proposed_at {
@@ -1253,6 +1323,12 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 // I3: keep the entry in flight, answer its waiters Retry, and
                 // hold the pipeline until it applies or the role changes.
                 if let Some(e) = self.inflight.iter_mut().find(|e| e.seq == seq) {
+                    // Already resolved by the applied-index wake: an entry that
+                    // committed cannot also have genuinely timed out, so ignore
+                    // a stale Timeout (PERF-G).
+                    if e.resolved.is_some() {
+                        return;
+                    }
                     e.timed_out = true;
                     e.fail(None);
                     let idx = e.index;
@@ -1335,6 +1411,63 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         }
     }
 
+    /// PERF-G: the applied index advanced (`QUEEN_RAFT_DRIVER_NOTIFY`). Resolve
+    /// every in-flight entry the apply has now passed, so the freed pipeline
+    /// slot is reused on this one wake instead of each entry's forwarding task.
+    fn on_applied_wake(&mut self) {
+        let applied = self.repl.applied_index();
+        self.resolve_applied(applied);
+    }
+
+    /// Resolve, in index order, every in-flight entry whose index the applied
+    /// index has passed. D7/I4 hold: `applied_index` only advances past an
+    /// entry AFTER it committed and applied locally, so answering here is
+    /// answering after local apply. Idempotent with the per-propose result
+    /// path (both guard on `resolved`): whichever reaches an entry first
+    /// resolves it, the other is a no-op.
+    fn resolve_applied(&mut self, applied: u64) {
+        let term = match *self.role_rx.borrow() {
+            Role::Leader { term } => term,
+            _ => 0,
+        };
+        for e in self.inflight.iter_mut() {
+            // In-flight entries are pushed in index order and never reordered,
+            // so the first one above the applied index bounds the rest.
+            if e.index > applied {
+                break;
+            }
+            if e.resolved.is_some() {
+                continue;
+            }
+            if e.timed_out {
+                // Its waiters were already answered `Retry` (I3); mark it
+                // resolved so it leaves the pipeline (mirrors `check_hold`).
+                e.resolved = Some(AppliedAt {
+                    index: e.index,
+                    term,
+                });
+            } else {
+                if let Some(at0) = e.proposed_at {
+                    crate::rsm::timing::metrics()
+                        .propose_roundtrip
+                        .record_dur(at0.elapsed());
+                }
+                e.resolve_ok(AppliedAt {
+                    index: e.index,
+                    term,
+                });
+            }
+        }
+        // Release a pipeline hold whose held entries have now applied (mirrors
+        // `check_hold`, so a timeout followed by an applied-index wake still
+        // resumes planning).
+        if let Some(until) = self.holding_until {
+            if applied >= until {
+                self.holding_until = None;
+            }
+        }
+    }
+
     /// Fail every remaining waiter (`Retry`) — the driver is exiting.
     fn fail_all(&mut self, hint: Option<NodeId>) {
         for mut e in self.inflight.drain(..) {
@@ -1343,6 +1476,19 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         while let Some(sub) = self.queue.pop_front() {
             let _ = sub.reply.send(Reply::Retry { hint });
         }
+    }
+}
+
+/// Await the applied-index wake, when one is present (PERF-G). The guard on the
+/// select arm ensures `n` is `Some` before this is polled; the `unwrap` runs
+/// only under that guard. When absent the arm is disabled, so this never awaits
+/// `None`.
+async fn wait_notify(n: &Option<Arc<Notify>>) {
+    match n {
+        Some(n) => n.notified().await,
+        // Unreachable under the select guard; park forever so a stray poll is
+        // inert rather than a busy spin.
+        None => std::future::pending::<()>().await,
     }
 }
 

@@ -102,6 +102,7 @@ fn child_config(dir: &Path) -> OpenConfig {
         apply_cfg: crate::rsm::apply::ApplyConfig::default(),
         apply_channel_capacity: 128,
         replay_deadline: Duration::from_secs(60),
+        writer_pipeline: crate::rsm::replicator::local::writer_pipeline_from_env(),
     }
 }
 

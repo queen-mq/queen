@@ -48,13 +48,16 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::{oneshot, watch};
+// `apply::Notify` (the apply-side trait) is in scope below, so the tokio
+// primitive is aliased to keep the two names apart (PERF-G).
+use tokio::sync::Notify as ApplyWake;
 
 use crate::rsm::apply::{self, ApplyConfig, ApplyStats, Committed, Notify};
 use crate::rsm::entry::decode_entry;
 use crate::rsm::segments;
 use crate::rsm::store::{Store, TypedReads};
 
-use super::log::{LogOptions, LogStore, LOG_TERM};
+use super::log::{LogOptions, LogStore, SyncHandle, LOG_TERM};
 use super::{
     AppliedAt, Membership, MembershipChange, NodeId, ProposeError, ReplError, ReplMetrics,
     Replicator, Role,
@@ -66,6 +69,15 @@ const GROUP_COMMIT_MAX: usize = 4096;
 const GROUP_COMMIT_BYTES: usize = 4 * 1024 * 1024;
 /// The bounded channel between the writer and the apply thread (§3.3).
 const DEFAULT_APPLY_CHANNEL: usize = 256;
+/// The writer→syncer channel is a rendezvous (capacity 0): the writer hands one
+/// group across only when the syncer is ready to take it, i.e. once the syncer
+/// has finished the PREVIOUS group's fsync (PERF-G, `QUEEN_RAFT_WRITER_PIPELINE`).
+/// This preserves group-commit batching — while the syncer fsyncs group N the
+/// writer BLOCKS on the hand-off of N+1, so the batcher's next in-flight entries
+/// pile in the command channel and the writer drains them all into ONE group N+2
+/// when the syncer frees, instead of racing ahead forming one-entry groups (a
+/// buffered channel let the writer outrun the batcher and lost the batching).
+const WRITER_PIPELINE_DEPTH: usize = 0;
 
 /// Long-poll wakes (§9.5): the apply thread reports work for a
 /// `(tenant, queue, group)`, and the node's parked long-polls on that key
@@ -101,6 +113,10 @@ struct Shared {
     poisoned: Mutex<Option<String>>,
     /// index → the propose waiting on that entry's local apply.
     waiters: Mutex<HashMap<u64, oneshot::Sender<AppliedAt>>>,
+    /// PERF-G (`QUEEN_RAFT_DRIVER_NOTIFY`): pulsed on the apply thread each time
+    /// `applied_index` advances, so the batcher can wake and resolve the freed
+    /// pipeline slots directly. Node-local, never state.
+    applied_notify: Arc<ApplyWake>,
 }
 
 impl Shared {
@@ -145,6 +161,12 @@ impl Notify for ReplNotify {
         if let Some(tx) = self.shared.waiters.lock().expect("waiters").remove(&index) {
             let _ = tx.send(AppliedAt { index, term });
         }
+        // PERF-G: the applied index advanced; wake the driver so it reuses the
+        // freed pipeline slot at once (`QUEEN_RAFT_DRIVER_NOTIFY`). One permit
+        // is stored if the driver is momentarily busy, so no wake is lost, and
+        // the driver reads the atomic — never a per-entry event — so coalesced
+        // advances resolve every passed entry in one pass.
+        self.shared.applied_notify.notify_one();
     }
 
     fn wake(&self, tenant: &str, queue: &str, group: Option<&str>) {
@@ -178,9 +200,30 @@ struct Pending {
 /// point and to notice a disconnected command channel promptly.
 const WRITER_TICK: Duration = Duration::from_millis(100);
 
+/// Where the writer sends a written group. `Direct` fsyncs inline and hands the
+/// entries to apply on the writer thread (the pre-PERF-G path). `Pipelined`
+/// hands the still-unfsynced group to the syncer thread, which fsyncs it and
+/// only then acknowledges it (`QUEEN_RAFT_WRITER_PIPELINE`).
+enum WriterSink {
+    Direct(SyncSender<Committed>),
+    Pipelined(SyncSender<SyncJob>),
+}
+
+/// One group written but not yet fsynced, handed from the writer to the syncer
+/// (PERF-G). It carries the `Pending`s (their waiters and entries) so the
+/// syncer can acknowledge them after the fsync, and the log gauges the syncer
+/// republishes (the writer owns the [`LogStore`], so it reads them off it).
+struct SyncJob {
+    pending: Vec<Pending>,
+    first_index: u64,
+    handle: SyncHandle,
+    log_files: u64,
+    log_bytes: u64,
+}
+
 struct Writer {
     log: LogStore,
-    apply_tx: SyncSender<Committed>,
+    sink: WriterSink,
     shared: Arc<Shared>,
     role_tx: watch::Sender<Role>,
     /// The highest durable index this writer has already truncated behind.
@@ -242,76 +285,80 @@ impl Writer {
         self.last_truncated = durable;
     }
 
-    /// Write one group, fsync once, register waiters, hand entries to apply in
-    /// index order. Returns false when the log or the apply thread failed and
-    /// the node must stop.
+    /// Write one group and, in `Direct` mode, fsync it and hand its entries to
+    /// apply; in `Pipelined` mode write it and hand the unfsynced group to the
+    /// syncer, which flushes and acknowledges it. Returns false when the log,
+    /// the apply thread or the syncer failed and the node must stop.
     fn commit(&mut self, pending: Vec<Pending>) -> bool {
-        let slices: Vec<&[u8]> = pending.iter().map(|p| p.bytes.as_ref()).collect();
-        // PERF-1: this group's size, in entries and bytes. Gated on the knob so
-        // the per-group `group_bytes` sum is not paid when metrics are off.
+        // PERF-1/PERF-G: group size and the writer-pickup leg, before any write.
         if crate::rsm::timing::enabled() {
-            let group_bytes: u64 = slices.iter().map(|s| s.len() as u64).sum();
             let tm = crate::rsm::timing::metrics();
-            tm.group_entries.record(slices.len() as u64);
+            let group_bytes: u64 = pending.iter().map(|p| p.bytes.len() as u64).sum();
+            tm.group_entries.record(pending.len() as u64);
             tm.group_bytes.record(group_bytes);
-        }
-        let first_index = match self.log.append_group(&slices) {
-            Ok(i) => i,
-            Err(e) => {
-                self.fail(&format!("local log append failed: {e}"), pending);
-                return false;
-            }
-        };
-        // The group is fsynced (committed); price the proposed → committed leg
-        // (gated: `proposed_at` is `None` and the clock read skipped when off).
-        if crate::rsm::timing::enabled() {
-            let tm = crate::rsm::timing::metrics();
+            // proposed → the writer dequeued this group and is about to write it
+            // (the wait behind the previous group). ≈ proposed → fsync start.
             for p in &pending {
                 if let Some(at) = p.proposed_at {
-                    tm.proposed_to_committed.record_dur(at.elapsed());
+                    tm.writer_pickup.record_dur(at.elapsed());
                 }
             }
         }
-        let last_index = first_index + pending.len() as u64 - 1;
-        self.shared
-            .last_log_index
-            .store(last_index, Ordering::Release);
-        self.refresh_log_metrics();
 
-        // §13.5 `commit.before_apply`: the group is committed by quorum (a
-        // single voter here) and durable in the log, and not one entry of it
-        // has been applied. A crash here loses nothing: apply replays the
-        // whole group from the log on restart, exactly once (I4, I13).
-        crate::rsm::faults::hit("commit.before_apply");
-
-        let mut index = first_index;
-        for p in pending {
-            // Register BEFORE the send, so `Notify::applied(index)` — which can
-            // only fire after apply consumes this `Committed` — always finds
-            // the waiter.
-            self.shared
-                .waiters
-                .lock()
-                .expect("waiters")
-                .insert(index, p.done);
-            let committed = Committed {
-                index,
-                term: LOG_TERM,
-                entry: p.entry,
-            };
-            // PERF-1: mark the channel depth so the apply thread can read it.
-            crate::rsm::timing::apply_channel_send();
-            if self.apply_tx.send(committed).is_err() {
-                // The apply thread is gone (it refused an entry and stopped,
-                // §12.1 Fatal). The waiter we just registered will never
-                // resolve; drop it so the propose sees a closed channel.
-                self.shared.waiters.lock().expect("waiters").remove(&index);
-                self.poison("apply thread gone");
-                return false;
+        match &self.sink {
+            WriterSink::Direct(_) => {
+                let slices: Vec<&[u8]> = pending.iter().map(|p| p.bytes.as_ref()).collect();
+                let first_index = match self.log.append_group(&slices) {
+                    Ok(i) => i,
+                    Err(e) => {
+                        drop(slices);
+                        self.fail(&format!("local log append failed: {e}"), pending);
+                        return false;
+                    }
+                };
+                drop(slices);
+                self.refresh_log_metrics();
+                let (files, bytes) = (self.log.file_count() as u64, self.log.bytes());
+                let WriterSink::Direct(apply_tx) = &self.sink else {
+                    unreachable!()
+                };
+                if !handoff_group(&self.shared, apply_tx, pending, first_index, files, bytes) {
+                    self.poison("apply thread gone");
+                    return false;
+                }
+                true
             }
-            index += 1;
+            WriterSink::Pipelined(_) => {
+                let slices: Vec<&[u8]> = pending.iter().map(|p| p.bytes.as_ref()).collect();
+                let (first_index, handle) = match self.log.append_group_deferred(&slices) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        drop(slices);
+                        self.fail(&format!("local log append failed: {e}"), pending);
+                        return false;
+                    }
+                };
+                drop(slices);
+                self.refresh_log_metrics();
+                let job = SyncJob {
+                    pending,
+                    first_index,
+                    handle,
+                    log_files: self.log.file_count() as u64,
+                    log_bytes: self.log.bytes(),
+                };
+                let WriterSink::Pipelined(job_tx) = &self.sink else {
+                    unreachable!()
+                };
+                if job_tx.send(job).is_err() {
+                    // The syncer stopped (a fsync or apply failure it already
+                    // poisoned on). Stop the writer too.
+                    self.poison("log syncer gone");
+                    return false;
+                }
+                true
+            }
         }
-        true
     }
 
     /// The log write itself failed: drop the pending waiters (their proposes
@@ -336,6 +383,124 @@ impl Writer {
     }
 }
 
+/// The post-fsync handoff, shared by the direct writer and the pipeline syncer.
+/// The group is now durable in the log (its fsync returned); price the commit
+/// leg, publish the log tip, then register each waiter and hand its entry to
+/// apply IN INDEX ORDER (I4). Returns false when the apply thread is gone, so
+/// the caller poisons and stops.
+fn handoff_group(
+    shared: &Arc<Shared>,
+    apply_tx: &SyncSender<Committed>,
+    pending: Vec<Pending>,
+    first_index: u64,
+    log_files: u64,
+    log_bytes: u64,
+) -> bool {
+    // The group is fsynced (committed); price the proposed → committed leg
+    // (gated: `proposed_at` is `None` and the clock read skipped when off).
+    if crate::rsm::timing::enabled() {
+        let tm = crate::rsm::timing::metrics();
+        for p in &pending {
+            if let Some(at) = p.proposed_at {
+                tm.proposed_to_committed.record_dur(at.elapsed());
+            }
+        }
+    }
+    let last_index = first_index + pending.len() as u64 - 1;
+    shared.last_log_index.store(last_index, Ordering::Release);
+    shared.log_files.store(log_files, Ordering::Release);
+    shared.log_bytes.store(log_bytes, Ordering::Release);
+
+    // §13.5 `commit.before_apply`: the group is committed by quorum (a single
+    // voter here) and durable in the log, and not one entry of it has been
+    // applied. A crash here loses nothing: apply replays the whole group from
+    // the log on restart, exactly once (I4, I13).
+    crate::rsm::faults::hit("commit.before_apply");
+
+    let mut index = first_index;
+    for p in pending {
+        // Register BEFORE the send, so `Notify::applied(index)` — which can
+        // only fire after apply consumes this `Committed` — always finds the
+        // waiter.
+        shared
+            .waiters
+            .lock()
+            .expect("waiters")
+            .insert(index, p.done);
+        let committed = Committed {
+            index,
+            term: LOG_TERM,
+            entry: p.entry,
+        };
+        // PERF-1: mark the channel depth so the apply thread can read it.
+        crate::rsm::timing::apply_channel_send();
+        if apply_tx.send(committed).is_err() {
+            // The apply thread is gone (it refused an entry and stopped, §12.1
+            // Fatal). The waiter we just registered will never resolve; drop it
+            // so the propose sees a closed channel.
+            shared.waiters.lock().expect("waiters").remove(&index);
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// The fsync half of the write/fsync pipeline (PERF-G,
+/// `QUEEN_RAFT_WRITER_PIPELINE`). It owns the apply-channel sender: the writer
+/// hands it a written-but-unfsynced group per index-ordered [`SyncJob`], and it
+/// flushes each group and only then acknowledges its entries — so an entry is
+/// answered only after a fsync that covered its bytes (I4), while the writer
+/// forms and writes the NEXT group during this fsync.
+struct Syncer {
+    apply_tx: SyncSender<Committed>,
+    shared: Arc<Shared>,
+    role_tx: watch::Sender<Role>,
+}
+
+impl Syncer {
+    fn run(self, rx: StdReceiver<SyncJob>) {
+        // Iterates until the writer drops the job sender (a clean shutdown) or
+        // this thread poisons.
+        for job in rx {
+            let SyncJob {
+                pending,
+                first_index,
+                handle,
+                log_files,
+                log_bytes,
+            } = job;
+            if let Err(e) = handle.sync() {
+                // The barrier failed: the group is NOT durable. Drop its
+                // waiters (their proposes see a closed channel → Fatal) and
+                // stop the node — the same disposition the inline writer's
+                // `fail` takes on a write error.
+                drop(pending);
+                self.poison(&format!("local log fsync failed: {e}"));
+                return;
+            }
+            // §13.5 `log.flushed`: the group is durable in the raft log.
+            crate::rsm::faults::hit("log.flushed");
+            if !handoff_group(
+                &self.shared,
+                &self.apply_tx,
+                pending,
+                first_index,
+                log_files,
+                log_bytes,
+            ) {
+                self.poison("apply thread gone");
+                return;
+            }
+        }
+    }
+
+    fn poison(&self, why: &str) {
+        self.shared.poison(why);
+        let _ = self.role_tx.send(Role::Stopped);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The replicator
 // ---------------------------------------------------------------------------
@@ -354,6 +519,14 @@ pub struct OpenConfig {
     /// How long `open` waits for apply to replay the log after the store's
     /// durable index (§11.5). Boot only.
     pub replay_deadline: Duration,
+    /// `QUEEN_RAFT_WRITER_PIPELINE` (PERF-G, **default OFF** — the round-3 A/B
+    /// showed it regresses push p50, see [`writer_pipeline_from_env`]): run the
+    /// log write and its group fsync on two threads, so the writer forms and
+    /// writes group N+1 while the syncer fsyncs group N. Entries are still
+    /// acknowledged only after their own group's fsync (I4), and the syncer
+    /// processes groups in index order (so apply sees them in order). Off (the
+    /// default): the single-thread write-then-fsync writer.
+    pub writer_pipeline: bool,
 }
 
 impl OpenConfig {
@@ -367,7 +540,30 @@ impl OpenConfig {
             apply_cfg: ApplyConfig::from_env(),
             apply_channel_capacity: DEFAULT_APPLY_CHANNEL,
             replay_deadline: Duration::from_secs(120),
+            writer_pipeline: writer_pipeline_from_env(),
         }
+    }
+}
+
+/// Resolve `QUEEN_RAFT_WRITER_PIPELINE`. **Default OFF (PERF-G round 3):** the
+/// laptop A/B showed the write/fsync pipeline REGRESSES push p50 (10.3 → 14.1 ms
+/// at A20k, both channel shapes) because the two-thread split cannot beat the
+/// inline writer's natural group-commit batching, and the finer `writer_pickup`
+/// stage shows there is nothing for it to overlap where it would matter: on the
+/// VM the writer picks a group up in ≈0 ms (PERF-2: proposed→committed ≈
+/// log_fsync), so the whole `proposed→committed` leg IS the fsync, which the
+/// pipeline cannot shorten. It only helps a box whose fsync is expensive enough
+/// to make the writer queue behind it AND whose extra fsyncs are cheap — neither
+/// holds here. Kept as a knob (`=1` turns it on) and proven I2-transparent, for
+/// a box where the trade-off flips. Only "1"/"true"/"on"/"yes" turns it on.
+/// `pub(crate)` so the replicator tests build an `OpenConfig` honouring the knob.
+pub(crate) fn writer_pipeline_from_env() -> bool {
+    match std::env::var("QUEEN_RAFT_WRITER_PIPELINE") {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "on" | "yes"
+        ),
+        Err(_) => false,
     }
 }
 
@@ -380,6 +576,10 @@ pub struct LocalReplicator<S: Store> {
     cmd_tx: StdSender<Pending>,
     /// Kept `Some` until [`LocalReplicator::shutdown`] or `Drop`.
     writer_join: Option<JoinHandle<()>>,
+    /// The write/fsync-pipeline syncer thread (PERF-G), `None` when
+    /// `QUEEN_RAFT_WRITER_PIPELINE` is off. Joined between the writer and the
+    /// apply thread at shutdown.
+    syncer_join: Option<JoinHandle<()>>,
     apply_join: Option<JoinHandle<apply::Result<ApplyStats>>>,
     store: Arc<S>,
     /// The segment reader the apply thread published at open (WP-1.7c). The
@@ -431,6 +631,7 @@ impl<S: Store + 'static> LocalReplicator<S> {
             log_bytes: AtomicU64::new(log.bytes()),
             poisoned: Mutex::new(None),
             waiters: Mutex::new(HashMap::new()),
+            applied_notify: Arc::new(ApplyWake::new()),
         });
 
         // 3. Always leader, term 1, until it stops.
@@ -538,12 +739,30 @@ impl<S: Store + 'static> LocalReplicator<S> {
         );
 
         // 7. Start the writer, which owns the log and accepts proposals from
-        //    here on. `apply_tx` moves into it: it is now the only sender, so
-        //    dropping `cmd_tx` at shutdown drains the writer, which drops
-        //    `apply_tx`, which closes the apply thread.
+        //    here on. In the direct path `apply_tx` moves into the writer: it is
+        //    the only sender, so dropping `cmd_tx` at shutdown drains the
+        //    writer, which drops `apply_tx`, closing the apply thread. In the
+        //    pipeline path the syncer owns `apply_tx` instead, and the shutdown
+        //    chain is `cmd_tx` → writer drops the job sender → syncer drains and
+        //    drops `apply_tx` → apply thread closes (WP-1.11 F-2 order kept).
+        let (sink, syncer_join) = if cfg.writer_pipeline {
+            let (job_tx, job_rx) = std::sync::mpsc::sync_channel::<SyncJob>(WRITER_PIPELINE_DEPTH);
+            let syncer = Syncer {
+                apply_tx,
+                shared: shared.clone(),
+                role_tx: role_tx.clone(),
+            };
+            let syncer_join = std::thread::Builder::new()
+                .name("queen-rsm-sync".into())
+                .spawn(move || syncer.run(job_rx))
+                .map_err(|e| io::Error::other(format!("spawn the log syncer: {e}")))?;
+            (WriterSink::Pipelined(job_tx), Some(syncer_join))
+        } else {
+            (WriterSink::Direct(apply_tx), None)
+        };
         let writer = Writer {
             log,
-            apply_tx,
+            sink,
             shared: shared.clone(),
             role_tx,
             last_truncated: store_durable,
@@ -558,6 +777,7 @@ impl<S: Store + 'static> LocalReplicator<S> {
             role_rx,
             cmd_tx,
             writer_join: Some(writer_join),
+            syncer_join,
             apply_join: Some(apply_join),
             store,
             reader,
@@ -612,6 +832,13 @@ impl<S: Store> LocalReplicator<S> {
             j.join()
                 .map_err(|_| io::Error::other("log writer thread panicked"))?;
         }
+        // The writer has returned and dropped the job sender; the syncer now
+        // drains its remaining groups and drops `apply_tx`, closing the apply
+        // channel. Join it before the apply thread (PERF-G).
+        if let Some(j) = self.syncer_join.take() {
+            j.join()
+                .map_err(|_| io::Error::other("log syncer thread panicked"))?;
+        }
         match self.apply_join.take() {
             Some(j) => match j.join() {
                 Ok(Ok(stats)) => Ok(stats),
@@ -625,7 +852,7 @@ impl<S: Store> LocalReplicator<S> {
 
 impl<S: Store> Drop for LocalReplicator<S> {
     fn drop(&mut self) {
-        if self.writer_join.is_some() || self.apply_join.is_some() {
+        if self.writer_join.is_some() || self.syncer_join.is_some() || self.apply_join.is_some() {
             let _ = self.stop();
         }
     }
@@ -714,6 +941,10 @@ impl<S: Store + 'static> Replicator for LocalReplicator<S> {
 
     fn watch_role(&self) -> watch::Receiver<Role> {
         self.role_rx.clone()
+    }
+
+    fn applied_notify(&self) -> Option<Arc<ApplyWake>> {
+        Some(self.shared.applied_notify.clone())
     }
 
     async fn read_barrier(&self, _deadline: Instant) -> Result<u64, ProposeError> {

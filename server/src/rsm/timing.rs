@@ -331,6 +331,15 @@ pub struct RsmMetrics {
     pub plan: Histogram,
     /// A command's arrival on the facade channel → its entry proposed.
     pub arrival_to_proposed: Histogram,
+    /// PERF-G split of `arrival_to_proposed`, leg 1: a command's arrival on the
+    /// facade channel → the cycle that drained it (time it sat in the driver's
+    /// queue waiting for a pipeline slot). This is the "waited ~4 ms before it
+    /// was proposed" leg the round-3 push-p50 work targets.
+    pub queue_wait: Histogram,
+    /// PERF-G split, leg 2: the cycle drain → its entry proposed (the plan on
+    /// the blocking pool, the `spawn_blocking` hop, the encode, the inline
+    /// submit). Measured once per cycle that proposes an entry.
+    pub drain_to_propose: Histogram,
     /// Entry proposed → its waiters answered (commit + local apply + notify).
     pub propose_roundtrip: Histogram,
     // -- batcher / writer (size) --
@@ -341,6 +350,11 @@ pub struct RsmMetrics {
     // -- replicator log writer --
     /// Entry proposed → its group fsynced (committed).
     pub proposed_to_committed: Histogram,
+    /// PERF-G: entry proposed → the writer begins THIS entry's group fsync
+    /// (time queued at the writer behind the previous group's fsync). With
+    /// `proposed_to_committed` and `log_fsync` this isolates writer queueing
+    /// from the fsync itself: `proposed_to_committed ≈ writer_pickup + fsync`.
+    pub writer_pickup: Histogram,
     /// One group's fsync duration.
     pub log_fsync: Histogram,
     /// Group size, in entries.
@@ -475,12 +489,22 @@ pub fn render_prometheus(out: &mut String) {
     let m = metrics();
 
     // Latency summaries (ns → seconds).
-    let lat: [(&str, &str, &Histogram); 13] = [
+    let lat: [(&str, &str, &Histogram); 16] = [
         ("queen_raft_plan_seconds", "Planner cycle duration", &m.plan),
         (
             "queen_raft_arrival_to_proposed_seconds",
             "Command arrival to its entry proposed",
             &m.arrival_to_proposed,
+        ),
+        (
+            "queen_raft_queue_wait_seconds",
+            "Command arrival to the cycle that drained it (PERF-G leg 1)",
+            &m.queue_wait,
+        ),
+        (
+            "queen_raft_drain_to_propose_seconds",
+            "Cycle drain to its entry proposed (PERF-G leg 2)",
+            &m.drain_to_propose,
         ),
         (
             "queen_raft_propose_roundtrip_seconds",
@@ -491,6 +515,11 @@ pub fn render_prometheus(out: &mut String) {
             "queen_raft_proposed_to_committed_seconds",
             "Entry proposed to its group fsynced",
             &m.proposed_to_committed,
+        ),
+        (
+            "queen_raft_writer_pickup_seconds",
+            "Entry proposed to the writer starting its group fsync (PERF-G)",
+            &m.writer_pickup,
         ),
         (
             "queen_raft_log_fsync_seconds",
@@ -724,7 +753,11 @@ pub fn emit_timing_log(stats: &ApplyStats) {
     let us = |ns: u64| ns as f64 / 1000.0; // ns → µs for a readable line
     let plan = m.plan.snapshot();
     let a2p = m.arrival_to_proposed.snapshot();
+    let qw = m.queue_wait.snapshot();
+    let d2p = m.drain_to_propose.snapshot();
     let rt = m.propose_roundtrip.snapshot();
+    let ptc = m.proposed_to_committed.snapshot();
+    let pickup = m.writer_pickup.snapshot();
     let fsync = m.log_fsync.snapshot();
     let ae = m.apply_entry.snapshot();
     let seg = m.apply_segment.snapshot();
@@ -738,7 +771,11 @@ pub fn emit_timing_log(stats: &ApplyStats) {
         // stages, p50/p99 in microseconds
         plan_us_p50 = us(plan.p50), plan_us_p99 = us(plan.p99),
         arrival_to_proposed_us_p50 = us(a2p.p50), arrival_to_proposed_us_p99 = us(a2p.p99),
+        queue_wait_us_p50 = us(qw.p50), queue_wait_us_p99 = us(qw.p99),
+        drain_to_propose_us_p50 = us(d2p.p50), drain_to_propose_us_p99 = us(d2p.p99),
         roundtrip_us_p50 = us(rt.p50), roundtrip_us_p99 = us(rt.p99),
+        proposed_to_committed_us_p50 = us(ptc.p50), proposed_to_committed_us_p99 = us(ptc.p99),
+        writer_pickup_us_p50 = us(pickup.p50), writer_pickup_us_p99 = us(pickup.p99),
         log_fsync_us_p50 = us(fsync.p50), log_fsync_us_p99 = us(fsync.p99),
         apply_us_p50 = us(ae.p50), apply_us_p99 = us(ae.p99),
         apply_seg_us_p50 = us(seg.p50), apply_seg_us_p99 = us(seg.p99),

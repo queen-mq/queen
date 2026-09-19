@@ -41,7 +41,7 @@ use crate::rsm::entry::encode_entry;
 use crate::rsm::replicator::fake::{FakeReplicator, Step};
 use crate::rsm::replicator::local::{LocalReplicator, NoWaker, OpenConfig};
 use crate::rsm::replicator::log::{Fsync, LogOptions, LogStore};
-use crate::rsm::replicator::{ProposeError, Replicator, Role};
+use crate::rsm::replicator::{AppliedAt, ProposeError, Replicator, Role};
 use crate::rsm::store::{HeedStore, Store};
 
 use super::apply::{cfg, run_workload, seg_opts, store_opts, Node, Workload};
@@ -349,6 +349,7 @@ fn test_config(dir: &Path, log_segment: u64, fsync: Fsync) -> OpenConfig {
         apply_cfg: cfg(),
         apply_channel_capacity: 64,
         replay_deadline: Duration::from_secs(30),
+        writer_pipeline: crate::rsm::replicator::local::writer_pipeline_from_env(),
     }
 }
 
@@ -360,6 +361,22 @@ fn open_repl(dir: &Path, store: Arc<HeedStore>) -> LocalReplicator<HeedStore> {
         Arc::new(SystemClock),
     )
     .expect("open replicator")
+}
+
+/// Open a replicator with the write/fsync pipeline forced on or off, over a
+/// REAL `Data` barrier (so the syncer's fsync actually takes time and the
+/// writer forms the next group during it — PERF-G).
+fn open_repl_wp(
+    dir: &Path,
+    store: Arc<HeedStore>,
+    writer_pipeline: bool,
+) -> LocalReplicator<HeedStore> {
+    let cfg = OpenConfig {
+        writer_pipeline,
+        ..test_config(dir, 16 << 10, Fsync::Data)
+    };
+    LocalReplicator::open(store, cfg, Arc::new(NoWaker), Arc::new(SystemClock))
+        .expect("open replicator")
 }
 
 fn entry_bytes(n: u64) -> Vec<Bytes> {
@@ -463,6 +480,153 @@ async fn a_clean_reopen_reproduces_the_state() {
         );
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// PERF-G: the write/fsync pipeline (`QUEEN_RAFT_WRITER_PIPELINE`) is a pure
+/// scheduling change — an entry is acknowledged only after its own group's
+/// fsync (I4), and the syncer hands groups to apply in index order — so the
+/// committed state it produces is byte-identical to the inline writer's (I2),
+/// over a real `Data` barrier that opens the overlap window. This runs the SAME
+/// entries through both writers and asserts identical digests, and that both
+/// match WP-1.4's reference applier.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_write_fsync_pipeline_reproduces_the_inline_writers_state() {
+    const N: u64 = 120;
+    let want = {
+        let node = Node::new("repl-wp-ref");
+        run_workload(&node, SEED, N, 97)
+    };
+
+    async fn digest_for(tag: &str, n: u64, writer_pipeline: bool) -> apply::StateDigest {
+        let dir = scratch(tag);
+        let store = Arc::new(HeedStore::open(&dir.join("store"), &store_opts()).expect("store"));
+        let repl = open_repl_wp(&dir, store, writer_pipeline);
+        for (i, e) in entry_bytes(n).into_iter().enumerate() {
+            let at = repl.propose(e, deadline()).await.expect("propose");
+            assert_eq!(at.index, i as u64 + 1, "{tag}: indices assigned in order");
+        }
+        assert_eq!(repl.applied_index(), n, "{tag}: every propose applied");
+        let (_s, store) = repl.shutdown().expect("shutdown");
+        let d = digest_and_close(store);
+        let _ = std::fs::remove_dir_all(&dir);
+        d
+    }
+
+    let pipelined = digest_for("repl-wp-on", N, true).await;
+    let inline = digest_for("repl-wp-off", N, false).await;
+    assert_eq!(
+        pipelined.whole,
+        inline.whole,
+        "the pipeline and inline writers must produce identical state, first at {:?}",
+        pipelined.first_difference(&inline),
+    );
+    assert_eq!(
+        pipelined.whole,
+        want.whole,
+        "the pipeline writer must match the reference applier, first at {:?}",
+        pipelined.first_difference(&want),
+    );
+}
+
+/// PERF-G: the write/fsync pipeline under GENUINE concurrent load — many
+/// proposals in flight AT ONCE, so the writer forms and writes group N+1 while
+/// the syncer is still fsyncing group N. This is the overlap the pipeline
+/// exists for, and the one
+/// [`the_write_fsync_pipeline_reproduces_the_inline_writers_state`] does NOT
+/// exercise: it awaits each propose, so only one entry is ever in flight and
+/// every group holds exactly one entry — the syncer never has a next group to
+/// build. Here all N proposals are enqueued before any is answered (propose
+/// enqueues on the writer channel before it awaits), so the writer batches them
+/// into multi-entry groups and the syncer's fsync of group N overlaps the
+/// writer forming group N+1.
+///
+/// The futures are polled in submission order on ONE task, so the writer (which
+/// reads its channel FIFO) still assigns indices 1..=N in that order — the
+/// committed log is the natural order, only the group boundaries and the
+/// write/fsync overlap change. Over a real `Data` barrier this asserts the
+/// overlap is I4/I2-safe: every proposal is answered exactly once with a
+/// gapless index, and the committed state is byte-identical to WP-1.4's
+/// reference applier — which it would NOT be if the syncer ever handed a later
+/// group to apply ahead of an earlier one, or dropped/duplicated a group.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_write_fsync_pipeline_holds_under_concurrent_in_flight_groups() {
+    use std::future::Future;
+    const N: u64 = 200;
+
+    // The reference: WP-1.4's own applier over the same entries, natural order.
+    let want = {
+        let node = Node::new("repl-wp-conc-ref");
+        run_workload(&node, SEED, N, 97)
+    };
+
+    // Pipelined writer, WP on, real Data fsync so the syncer's barrier actually
+    // takes time and the overlap window is real. Small segments (16 KiB) roll
+    // mid-run, exercising the deferred-append dup-fd across a roll too.
+    let dir = scratch("repl-wp-conc");
+    let store = Arc::new(HeedStore::open(&dir.join("store"), &store_opts()).expect("store"));
+    let repl = Arc::new(open_repl_wp(&dir, store, true));
+
+    // One boxed propose future per entry; each owns an Arc clone so the futures
+    // are 'static. `poll_fn` drives them all on this task, polling in order, so
+    // the first pass enqueues all N on the writer channel (propose enqueues
+    // before it awaits) before any resolves — every entry is in flight at once.
+    #[allow(clippy::type_complexity)]
+    let mut futs: Vec<std::pin::Pin<Box<dyn Future<Output = AppliedAt> + Send>>> = entry_bytes(N)
+        .into_iter()
+        .map(|e| {
+            let r = repl.clone();
+            Box::pin(async move { r.propose(e, deadline()).await.expect("propose") })
+                as std::pin::Pin<Box<dyn Future<Output = AppliedAt> + Send>>
+        })
+        .collect();
+    let mut index_of: Vec<u64> = vec![0; futs.len()];
+    let mut done: Vec<bool> = vec![false; futs.len()];
+    std::future::poll_fn(|cx| {
+        let mut all = true;
+        for i in 0..futs.len() {
+            if !done[i] {
+                match futs[i].as_mut().poll(cx) {
+                    std::task::Poll::Ready(at) => {
+                        index_of[i] = at.index;
+                        done[i] = true;
+                    }
+                    std::task::Poll::Pending => all = false,
+                }
+            }
+        }
+        if all {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    })
+    .await;
+    // Release the Arc clones the completed futures still hold.
+    drop(futs);
+
+    // Exactly-once, gapless, in submission order: entry i took index i+1. A
+    // lost, duplicated or reordered index breaks this.
+    let expected: Vec<u64> = (1..=N).collect();
+    assert_eq!(
+        index_of, expected,
+        "every in-flight proposal took its own gapless index in order",
+    );
+
+    let repl = Arc::try_unwrap(repl).unwrap_or_else(|_| panic!("a propose task outlived the join"));
+    assert_eq!(repl.applied_index(), N, "every proposal applied");
+    let (_s, store) = repl.shutdown().expect("shutdown");
+    let pipelined = digest_and_close(store);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // The overlap applied the identical log to the identical state: a syncer
+    // that handed a later group to apply before an earlier one would diverge.
+    assert_eq!(
+        pipelined.whole,
+        want.whole,
+        "the pipeline's concurrent overlap must build the reference state, \
+         first difference at {:?}",
+        pipelined.first_difference(&want),
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

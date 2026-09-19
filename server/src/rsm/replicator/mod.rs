@@ -252,6 +252,27 @@ pub trait Replicator: Send + Sync + 'static {
 
     fn watch_role(&self) -> tokio::sync::watch::Receiver<Role>;
 
+    /// A notification pulsed whenever this node's applied index advances
+    /// (PERF-G, `QUEEN_RAFT_DRIVER_NOTIFY`). A driver in driver-notify mode
+    /// wakes on it and resolves every in-flight entry whose index the applied
+    /// index has now passed — the freed pipeline slot is reused on ONE
+    /// cross-thread wake (the apply thread → the driver), instead of the
+    /// two-hop `oneshot` → forwarding task → `mpsc` path the per-propose await
+    /// takes. It is a pure NODE-LOCAL wake, never state, and it never replaces
+    /// the propose future: that future still runs (it drives commit on a
+    /// backend that resolves it, and it still delivers `Timeout`/`Fatal`),
+    /// so a resolution the notify reaches first only answers the entry's
+    /// waiters sooner — commit + local apply (D7, I4) still gate it, because
+    /// the notify fires only AFTER `applied_index` advanced past the entry.
+    ///
+    /// The default is `None`: a backend that does not expose the signal makes
+    /// the driver keep its per-propose await path, so this is never a
+    /// correctness gap, only the absence of the latency shortcut.
+    /// [`local::LocalReplicator`] and [`fake::FakeReplicator`] override it.
+    fn applied_notify(&self) -> Option<std::sync::Arc<tokio::sync::Notify>> {
+        None
+    }
+
     /// A linearizable read index (§9.4): apply must reach it before a read is
     /// answered. On a single node it is the current applied index.
     async fn read_barrier(&self, deadline: Instant) -> Result<u64, ProposeError>;
