@@ -40,12 +40,95 @@
 //! state, entry) (I2) rather than of something the planner saw.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 
 use crate::rsm::effect::Pid;
 use crate::rsm::store::keys;
 use crate::rsm::store::{Keyspace, Reads, Result, StoreError, Writes};
+
+// ---------------------------------------------------------------------------
+// The dedup index mode (PERF-E, 2026-09-19)
+// ---------------------------------------------------------------------------
+//
+// `QUEEN_RAFT_DEDUP_INDEX` selects which keyspace is the dedup AUTHORITY:
+//
+//   * `txns` (product default) — the authority is the `txns` rows we already
+//     write, one sequential row per `Append`. Apply writes NO per-message
+//     `(pid, hash)` row (the random read-modify-write that PERF-2 blamed for
+//     the RAM growth (R-124) and the durable-point store cost). The planner's
+//     PERF-B bloom front, restructured to carry each generation's OFFSET range,
+//     turns a "maybe" into a bounded ordered range scan of the `txns` rows; a
+//     partition with no warm filter (a restart, a preloaded store) probes the
+//     whole txns window exactly, then warms up. Ack-by-hash (005) resolves by
+//     the same range scan over `[txns_start, batch_end]`.
+//   * `rows` — today's per-message `(pid, hash) → occurrence list` index, kept
+//     verbatim for ablation. `record` writes it AND the txns row; the planner
+//     reads it with [`probe_one`] / [`resolve`].
+//
+// The two indexes are behaviourally EXACT for every reader (the difffuzz in
+// `tests` proves 0 divergences over 50 seeds): the txns rows already carry the
+// same `(offset, created_at)` facts, keyed by append rather than by hash.
+//
+// # How the mode reaches the two sides
+//
+// The planner reads it from `PlanConfig::index_mode`, threaded from the boot
+// seam (`BatcherConfig::from_env`). `record` runs on the apply thread with a
+// fixed call signature (apply.rs owns that call), so it reads a process global
+// resolved ONCE at boot by the same seam — an atomic load, never an env read on
+// the apply path, so I2 (apply is a pure function of committed state + entry)
+// holds exactly as it does for every other boot-resolved knob. The global
+// DEFAULTS to `rows` when the seam never ran (the unit-test harness, which
+// constructs `Applier` directly): that keeps every existing rows-authority test
+// green, while production and the VM go through `from_env` and get `txns`.
+
+/// Which keyspace is the dedup authority. See the module note.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndexMode {
+    /// The `txns` rows are the authority; no per-message `(pid, hash)` row.
+    Txns,
+    /// Today's per-message `(pid, hash)` index (kept for ablation).
+    Rows,
+}
+
+impl IndexMode {
+    /// `QUEEN_RAFT_DEDUP_INDEX` (default `txns`). Anything but a case-insensitive
+    /// `rows` is `txns`, so a typo fails safe to the product default.
+    pub fn from_env() -> IndexMode {
+        match std::env::var("QUEEN_RAFT_DEDUP_INDEX") {
+            Ok(v) if v.trim().eq_ignore_ascii_case("rows") => IndexMode::Rows,
+            _ => IndexMode::Txns,
+        }
+    }
+
+    fn code(self) -> u8 {
+        match self {
+            IndexMode::Rows => 1,
+            IndexMode::Txns => 2,
+        }
+    }
+}
+
+/// The apply-side (`record`) mode. `0` = unresolved → `rows` (the unit-test
+/// default; the boot seam always sets it explicitly for production).
+static RECORD_INDEX_MODE: AtomicU8 = AtomicU8::new(0);
+
+/// Set the apply-side mode. Called ONCE at boot by `BatcherConfig::from_env`
+/// (the WP-1.7 seam) so [`record`] agrees with `PlanConfig::index_mode`. Tests
+/// that drive the real `record` set it too, but the primitive-level tests use
+/// [`record_txns`] / [`record_rows`] directly and never touch this global.
+pub fn set_record_index_mode(mode: IndexMode) {
+    RECORD_INDEX_MODE.store(mode.code(), Ordering::Relaxed);
+}
+
+/// The apply-side mode `record` writes under. Defaults to [`IndexMode::Rows`]
+/// until the boot seam sets it.
+pub fn record_index_mode() -> IndexMode {
+    match RECORD_INDEX_MODE.load(Ordering::Relaxed) {
+        2 => IndexMode::Txns,
+        _ => IndexMode::Rows,
+    }
+}
 
 /// One occurrence: `offset:u64 | created_at_us:i64`, little-endian.
 pub const OCCURRENCE_LEN: usize = 16;
@@ -201,13 +284,52 @@ pub fn check_occurrences(v: &[u8]) -> Result<()> {
 // Record — apply
 // ---------------------------------------------------------------------------
 
-/// Record an `Append`'s hashes: one occurrence per accepted message on its
-/// `(pid, hash)` row, plus ONE `txns` row for the whole append.
+/// Record an `Append`'s hashes. Dispatches on the apply-side index mode
+/// ([`record_index_mode`], resolved at boot): under `txns` (the product
+/// default) it writes ONLY the sequential txns row; under `rows` it also writes
+/// the per-message `(pid, hash)` occurrence rows.
 ///
 /// `accepted` is `(hash, offset)` in frame order; `base` and `end` are the
 /// append's inclusive offset range. Apply calls this for every `Append`
-/// effect, so a follower builds the same index the leader probed.
+/// effect, so a follower builds the same index the leader probed. The call
+/// signature is fixed (apply.rs owns the call); the mode is the process global
+/// the boot seam set, so a follower and the leader write the same rows.
 pub fn record<W: Writes + ?Sized>(
+    writes: &mut W,
+    pid: Pid,
+    base: u64,
+    end: u64,
+    accepted: &[([u8; 16], u64)],
+    created_at_us: i64,
+) -> Result<()> {
+    match record_index_mode() {
+        IndexMode::Txns => record_txns(writes, pid, base, end, accepted, created_at_us),
+        IndexMode::Rows => record_rows(writes, pid, base, end, accepted, created_at_us),
+    }
+}
+
+/// The `txns`-authority record: ONE sequential row per append, no per-message
+/// random write. The txns row already carries every `(offset, created)` fact
+/// (offset = `base + i` for the `i`-th hash), so the planner's txns range scan
+/// and 005's resolve read it directly. This is the PERF-E write path.
+pub fn record_txns<W: Writes + ?Sized>(
+    writes: &mut W,
+    pid: Pid,
+    base: u64,
+    end: u64,
+    accepted: &[([u8; 16], u64)],
+    created_at_us: i64,
+) -> Result<()> {
+    if accepted.is_empty() {
+        return Ok(());
+    }
+    write_txns_row(writes, pid, base, end, accepted, created_at_us)
+}
+
+/// The `rows`-authority record (kept for ablation): one occurrence per accepted
+/// message on its `(pid, hash)` row, plus the txns row. This is today's write
+/// path verbatim.
+pub fn record_rows<W: Writes + ?Sized>(
     writes: &mut W,
     pid: Pid,
     base: u64,
@@ -232,6 +354,18 @@ pub fn record<W: Writes + ?Sized>(
         push_occurrence(&mut v, *off, created_at_us);
         writes.put_raw(Keyspace::Dedup, &k, &v)?;
     }
+    write_txns_row(writes, pid, base, end, accepted, created_at_us)
+}
+
+/// Write the one `txns` row an append leaves — shared by both record paths.
+fn write_txns_row<W: Writes + ?Sized>(
+    writes: &mut W,
+    pid: Pid,
+    base: u64,
+    end: u64,
+    accepted: &[([u8; 16], u64)],
+    created_at_us: i64,
+) -> Result<()> {
     let mut hashes = Vec::with_capacity(accepted.len() * 16);
     for (h, _) in accepted {
         hashes.extend_from_slice(h);
@@ -243,6 +377,151 @@ pub fn record<W: Writes + ?Sized>(
     };
     let k = keys::txns(pid, base);
     writes.put_raw(Keyspace::Txns, &k, &row.encode())
+}
+
+// ---------------------------------------------------------------------------
+// Probe over the txns authority (003) — planning, DEDUP_INDEX=txns
+// ---------------------------------------------------------------------------
+
+/// The push dedup verdict for one hash under `txns`, scanning the given
+/// committed txns OFFSET ranges (each a bloom generation the front matched).
+///
+/// Returns the ORIGINAL offset — `MIN` over the in-window (`created ≥
+/// floor_us`) occurrences the scan finds — or `None` when the hash is a bloom
+/// false positive that no txns row actually holds. Ranges are `(min_base,
+/// max_off)`, ascending and oldest-first, so the first in-window match found is
+/// the global minimum and the scan can stop there.
+pub fn scan_txns_for_hash<R: Reads + ?Sized>(
+    reads: &R,
+    pid: Pid,
+    hash: &[u8; 16],
+    ranges: &[(u64, u64)],
+    floor_us: i64,
+) -> Result<Option<u64>> {
+    for &(min_base, max_off) in ranges {
+        if let Some(off) = scan_txns_range_for_hash(reads, pid, hash, min_base, max_off, floor_us)?
+        {
+            return Ok(Some(off));
+        }
+    }
+    Ok(None)
+}
+
+/// The push dedup verdict for one hash under `txns` with no warm filter: scan
+/// the WHOLE txns window of the partition (exact, unbounded by a generation).
+/// This is what a restart / preloaded partition pays until the front warms.
+pub fn scan_txns_for_hash_whole<R: Reads + ?Sized>(
+    reads: &R,
+    pid: Pid,
+    hash: &[u8; 16],
+    floor_us: i64,
+) -> Result<Option<u64>> {
+    scan_txns_range_for_hash(reads, pid, hash, 0, u64::MAX, floor_us)
+}
+
+/// Scan the txns rows of `pid` whose base is in `[min_base, max_off]` for
+/// `hash`, returning the minimum in-window (`created ≥ floor_us`) offset it
+/// occurs at, or `None`. The scan is ascending, so it stops at the first match.
+fn scan_txns_range_for_hash<R: Reads + ?Sized>(
+    reads: &R,
+    pid: Pid,
+    hash: &[u8; 16],
+    min_base: u64,
+    max_off: u64,
+    floor_us: i64,
+) -> Result<Option<u64>> {
+    let prefix = keys::txns_prefix(pid);
+    let from = keys::txns(pid, min_base);
+    let mut found: Option<u64> = None;
+    let mut bad: Option<&'static str> = None;
+    reads.scan_raw(Keyspace::Txns, &from, &prefix, usize::MAX, &mut |k, v| {
+        let Some(base) = keys::txns_base_of(k) else {
+            bad = Some("txns key");
+            return false;
+        };
+        if base > max_off {
+            return false; // no row past max_off can hold an in-range offset
+        }
+        match TxnsRow::decode(v) {
+            Ok(row) => {
+                if row.created_at_us < floor_us {
+                    return true; // whole append out of window; keep walking
+                }
+                for (i, h) in row.iter_hashes().enumerate() {
+                    if &h == hash {
+                        found = Some(base + i as u64);
+                        return false; // ascending: first hit is the minimum
+                    }
+                }
+                true
+            }
+            Err(e) => {
+                bad = Some(e);
+                false
+            }
+        }
+    })?;
+    if let Some(e) = bad {
+        return Err(StoreError::corrupt(Keyspace::Txns, e));
+    }
+    Ok(found)
+}
+
+/// Resolve one hash for `log_ack_by_hash_v1` (005) over the txns authority: the
+/// same two legs as [`resolve`], computed by an ordered range scan of the txns
+/// rows over `[txns_start, …]` (the below-cursor leg needs occurrences down to
+/// `txns_start`). `lo..=hi` is the `eff` span, `committed` the cursor.
+pub fn resolve_txns<R: Reads + ?Sized>(
+    reads: &R,
+    pid: Pid,
+    hash: &[u8; 16],
+    lo: u64,
+    hi: u64,
+    committed: i64,
+    txns_start: u64,
+) -> Result<AckRes> {
+    // The scan needs to cover both legs: `eff` over [lo, hi] and `below` over
+    // [txns_start, committed]. `lo ≥ txns_start` by construction, so the union
+    // starts at txns_start and ends at max(hi, committed).
+    let upper = hi.max(committed.max(0) as u64);
+    let prefix = keys::txns_prefix(pid);
+    let from = keys::txns(pid, txns_start);
+    let mut res = AckRes::default();
+    let mut bad: Option<&'static str> = None;
+    reads.scan_raw(Keyspace::Txns, &from, &prefix, usize::MAX, &mut |k, v| {
+        let Some(base) = keys::txns_base_of(k) else {
+            bad = Some("txns key");
+            return false;
+        };
+        if base > upper {
+            return false;
+        }
+        match TxnsRow::decode(v) {
+            Ok(row) => {
+                for (i, h) in row.iter_hashes().enumerate() {
+                    if &h != hash {
+                        continue;
+                    }
+                    let off = base + i as u64;
+                    if (off as i64) <= committed {
+                        res.below = true;
+                    }
+                    if off >= lo && off <= hi {
+                        res.eff = Some(res.eff.map_or(off, |b: u64| b.min(off)));
+                    }
+                }
+                true
+            }
+            Err(e) => {
+                bad = Some(e);
+                false
+            }
+        }
+    })?;
+    if let Some(e) = bad {
+        return Err(StoreError::corrupt(Keyspace::Txns, e));
+    }
+    Ok(res)
 }
 
 // ---------------------------------------------------------------------------
@@ -520,6 +799,14 @@ struct FrontGen {
     len: usize,
     cap: usize,
     max_created_us: i64,
+    /// The smallest append BASE offset any hash in this generation came from,
+    /// and the largest message offset — the `[min_base, max_off]` band the txns
+    /// range scan walks on a "maybe" (PERF-E). `min_base` (not the first
+    /// message offset) so the scan starts at the append that CONTAINS that
+    /// message, even when a generation boundary fell mid-append. `u64::MAX /
+    /// 0` until the first insert makes the band empty.
+    min_base: u64,
+    max_off: u64,
 }
 
 impl FrontGen {
@@ -532,6 +819,8 @@ impl FrontGen {
             len: 0,
             cap,
             max_created_us: i64::MIN,
+            min_base: u64::MAX,
+            max_off: 0,
         }
     }
 
@@ -544,7 +833,7 @@ impl FrontGen {
     }
 
     #[inline]
-    fn insert(&mut self, h: u128, created_us: i64) {
+    fn insert(&mut self, h: u128, base_off: u64, msg_off: u64, created_us: i64) {
         let base = self.block_base(h);
         let hi = (h >> 64) as u64;
         for i in 0..7 {
@@ -554,6 +843,12 @@ impl FrontGen {
         self.len += 1;
         if created_us > self.max_created_us {
             self.max_created_us = created_us;
+        }
+        if base_off < self.min_base {
+            self.min_base = base_off;
+        }
+        if msg_off > self.max_off {
+            self.max_off = msg_off;
         }
     }
 
@@ -622,6 +917,20 @@ impl PartFront {
         self.gens.iter().rev().any(|g| g.maybe(h))
     }
 
+    /// Collect the `(min_base, max_off)` band of every generation whose bloom
+    /// says "maybe", OLDEST first (ascending offset), for the txns range scan.
+    /// Oldest-first so the scanner returns the minimum matching offset and can
+    /// stop at the first hit. Returns whether any band was pushed.
+    fn matching_ranges(&self, h: u128, out: &mut Vec<(u64, u64)>) -> bool {
+        let before = out.len();
+        for g in &self.gens {
+            if g.len > 0 && g.maybe(h) {
+                out.push((g.min_base, g.max_off));
+            }
+        }
+        out.len() > before
+    }
+
     fn needs_new_gen(&self) -> bool {
         match self.gens.back() {
             Some(g) => g.len >= g.cap,
@@ -640,9 +949,10 @@ impl PartFront {
         (cap / 32) * 8 * 8 + FRONT_BYTES_PER_GEN
     }
 
-    /// Insert `h`, opening (and tiering) a new generation when the current is
-    /// full. Returns the bytes added (a new generation's, else 0).
-    fn insert(&mut self, h: u128, created_us: i64) -> usize {
+    /// Insert `h` (from append `base_off`, at message offset `msg_off`), opening
+    /// (and tiering) a new generation when the current is full. Returns the
+    /// bytes added (a new generation's, else 0).
+    fn insert(&mut self, h: u128, base_off: u64, msg_off: u64, created_us: i64) -> usize {
         let mut added = 0;
         if self.needs_new_gen() {
             let cap = if self.gen_next_cap == 0 {
@@ -656,7 +966,10 @@ impl PartFront {
             self.bytes += added;
             self.gens.push_back(g);
         }
-        self.gens.back_mut().unwrap().insert(h, created_us);
+        self.gens
+            .back_mut()
+            .unwrap()
+            .insert(h, base_off, msg_off, created_us);
         added
     }
 
@@ -727,13 +1040,36 @@ pub struct DedupFront {
     inserts: AtomicU64,
 }
 
+/// One in-window occurrence the seed scan collected, with everything the front
+/// needs to rebuild a generation: the hash, its stamp, the append BASE it came
+/// from and its own message offset (for the txns range band, PERF-E).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SeedHash {
+    pub hash: [u8; 16],
+    pub created_us: i64,
+    pub base_off: u64,
+    pub msg_off: u64,
+}
+
 /// The seed the planner collected for a pre-existing partition.
 pub enum Seed {
-    /// The full in-window union fit under the cap: `(hash, created_us)` in
-    /// created order.
-    Complete(Vec<([u8; 16], i64)>),
+    /// The full in-window union fit under the cap, in created (= offset) order.
+    Complete(Vec<SeedHash>),
     /// The scan hit [`FRONT_SEED_MAX`]; mark the partition always-probe.
     Overflow,
+}
+
+/// What the front tells the planner to do for one hash under `DEDUP_INDEX=txns`
+/// ([`DedupFront::probe_plan`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProbeVerdict {
+    /// Certainly absent from the committed window — new, no scan.
+    Skip,
+    /// Scan the committed txns offset bands written to the caller's buffer.
+    Ranges,
+    /// No warm filter (unseeded / fallback / front disabled) — scan the whole
+    /// txns window, exact but unbounded, and warm the filter for next time.
+    Whole,
 }
 
 impl DedupFront {
@@ -832,8 +1168,8 @@ impl DedupFront {
             }
             Seed::Complete(hashes) => {
                 let mut pf = PartFront::seeded();
-                for (h, created) in hashes {
-                    if created < floor_us {
+                for sh in hashes {
+                    if sh.created_us < floor_us {
                         continue; // out of window: never a duplicate, skip
                     }
                     let cap = self.byte_cap as u64;
@@ -846,7 +1182,12 @@ impl DedupFront {
                         self.total_bytes.fetch_sub(freed as u64, Ordering::Relaxed);
                         break;
                     }
-                    let added = pf.insert(u128::from_le_bytes(h), created);
+                    let added = pf.insert(
+                        u128::from_le_bytes(sh.hash),
+                        sh.base_off,
+                        sh.msg_off,
+                        sh.created_us,
+                    );
                     if added > 0 {
                         self.total_bytes.fetch_add(added as u64, Ordering::Relaxed);
                     }
@@ -887,11 +1228,64 @@ impl DedupFront {
         issue
     }
 
-    /// Record a planned (survivor) append hash. Keeps the front a superset of
-    /// the committed index it fronts (see the module note). No-op for a
-    /// fallback or unseeded partition.
+    /// The per-message plan under `DEDUP_INDEX=txns`: what the planner should do
+    /// to resolve `(pid, hash)` against the committed txns authority. On
+    /// [`ProbeVerdict::Ranges`] the caller's `out` holds the offset bands to
+    /// scan (oldest-first). Counts every call as a message, and a scan (Ranges
+    /// or Whole) as a probe issued. `front_prepare` must have run for this pid.
     #[inline]
-    pub fn insert(&self, pid: Pid, hash: &[u8; 16], created_us: i64, floor_us: i64) {
+    pub fn probe_plan(
+        &self,
+        pid: Pid,
+        hash: &[u8; 16],
+        floor_us: i64,
+        out: &mut Vec<(u64, u64)>,
+    ) -> ProbeVerdict {
+        out.clear();
+        self.messages.fetch_add(1, Ordering::Relaxed);
+        if !self.enabled {
+            self.probes_issued.fetch_add(1, Ordering::Relaxed);
+            return ProbeVerdict::Whole;
+        }
+        let h = u128::from_le_bytes(*hash);
+        let mut parts = self.parts.lock().unwrap();
+        let verdict = match parts.get_mut(&pid) {
+            None => ProbeVerdict::Whole, // not seeded: the planner seeds first
+            Some(pf) if pf.fallback => ProbeVerdict::Whole,
+            Some(pf) => {
+                let freed = pf.age(floor_us);
+                if freed > 0 {
+                    self.total_bytes.fetch_sub(freed as u64, Ordering::Relaxed);
+                }
+                if pf.matching_ranges(h, out) {
+                    ProbeVerdict::Ranges
+                } else {
+                    ProbeVerdict::Skip
+                }
+            }
+        };
+        if verdict == ProbeVerdict::Skip {
+            self.probes_skipped.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.probes_issued.fetch_add(1, Ordering::Relaxed);
+        }
+        verdict
+    }
+
+    /// Record a planned (survivor) append hash (from append `base_off`, at
+    /// message offset `msg_off`). Keeps the front a superset of the committed
+    /// index it fronts (see the module note) and its generations' offset bands
+    /// current. No-op for a fallback or unseeded partition.
+    #[inline]
+    pub fn insert(
+        &self,
+        pid: Pid,
+        hash: &[u8; 16],
+        base_off: u64,
+        msg_off: u64,
+        created_us: i64,
+        floor_us: i64,
+    ) {
         if !self.enabled {
             return;
         }
@@ -915,7 +1309,7 @@ impl DedupFront {
                 return;
             }
         }
-        let added = pf.insert(h, created_us);
+        let added = pf.insert(h, base_off, msg_off, created_us);
         if added > 0 {
             self.total_bytes.fetch_add(added as u64, Ordering::Relaxed);
         }
@@ -987,7 +1381,7 @@ mod tests {
         f.note_created(7);
         let n = 50_000u64; // spans several tiered generations
         for i in 0..n {
-            f.insert(7, &fh(i), 1_000 + i as i64, i64::MIN);
+            f.insert(7, &fh(i), i, i, 1_000 + i as i64, i64::MIN);
         }
         for i in 0..n {
             assert!(
@@ -999,7 +1393,7 @@ mod tests {
         let f2 = DedupFront::new(true, 64 << 20);
         f2.note_created(1);
         for i in 0..n {
-            f2.insert(1, &fh(i), 1_000, i64::MIN);
+            f2.insert(1, &fh(i), i, i, 1_000, i64::MIN);
         }
         let mut skipped = 0;
         for i in n..(2 * n) {
@@ -1019,8 +1413,8 @@ mod tests {
         let f = DedupFront::disabled();
         assert!(!f.needs_seed(9)); // planner never seeds
         f.note_created(9); // no-op
-        f.insert(9, &fh(1), 1_000, i64::MIN); // no-op
-                                              // Every message probes; nothing is skipped or tracked.
+        f.insert(9, &fh(1), 1, 1, 1_000, i64::MIN); // no-op
+                                                    // Every message probes; nothing is skipped or tracked.
         assert!(f.should_probe(9, &fh(1), i64::MIN));
         assert!(f.should_probe(9, &fh(2), i64::MIN));
         let s = f.stats();
@@ -1037,10 +1431,10 @@ mod tests {
         // Fill exactly one generation (the min cap) with old hashes, then one
         // new hash opens a second generation.
         for i in 0..FRONT_GEN_CAP_MIN as u64 {
-            f.insert(3, &fh(i), 1_000, i64::MIN);
+            f.insert(3, &fh(i), i, i, 1_000, i64::MIN);
         }
         assert!(f.stats().bytes > 0);
-        f.insert(3, &fh(1_000_000), 9_000, i64::MIN); // opens gen1 at t=9000
+        f.insert(3, &fh(1_000_000), 1_000_000, 1_000_000, 9_000, i64::MIN); // opens gen1 at t=9000
         let both = f.stats().bytes; // gen0 (stale) + gen1 (fresh)
                                     // Age with a floor above the old stamps but below the new one: gen0 is
                                     // entirely stale and must be dropped, gen1 kept.
@@ -1069,7 +1463,7 @@ mod tests {
         // instead of exceeding it — always sound, never a wrong verdict.
         let f = DedupFront::new(true, 128); // bytes, < one 8 KiB filter
         f.note_created(5);
-        f.insert(5, &fh(1), 1_000, i64::MIN);
+        f.insert(5, &fh(1), 1, 1, 1_000, i64::MIN);
         let s = f.stats();
         assert_eq!(s.fallback_partitions, 1);
         assert!(s.bytes <= 128);
@@ -1091,7 +1485,14 @@ mod tests {
     #[test]
     fn install_seed_complete_covers_its_hashes() {
         let f = DedupFront::new(true, 64 << 20);
-        let hashes: Vec<([u8; 16], i64)> = (0..1000).map(|i| (fh(i), 1_000 + i as i64)).collect();
+        let hashes: Vec<SeedHash> = (0..1000)
+            .map(|i| SeedHash {
+                hash: fh(i),
+                created_us: 1_000 + i as i64,
+                base_off: i,
+                msg_off: i,
+            })
+            .collect();
         f.install_seed(12, Seed::Complete(hashes), 500);
         assert!(!f.needs_seed(12));
         for i in 0..1000u64 {

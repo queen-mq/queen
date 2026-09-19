@@ -37,6 +37,7 @@ mod apply;
 mod apply_crash;
 mod batcher;
 mod columns;
+mod dedup_txns;
 mod facade;
 mod fuzz;
 mod gates;

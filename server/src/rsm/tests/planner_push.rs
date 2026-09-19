@@ -375,6 +375,8 @@ fn measure_dedup_front_planning() {
             f.insert(
                 pid,
                 &crate::util::txn_hash128(&format!("warm{i}")),
+                i,
+                i,
                 1000,
                 i64::MIN,
             );

@@ -169,7 +169,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         }
         let mut resolved: Vec<Resolved> = Vec::with_capacity(target.items.len());
         for it in &target.items {
-            let r = self.dedup_resolve(ov, pid, &it.hash, lo, hi, committed)?;
+            let r = self.dedup_resolve(ov, pid, &it.hash, lo, hi, committed, txns_start)?;
             resolved.push(Resolved {
                 eff: r.eff.map(|o| o as i64),
                 below: r.below,

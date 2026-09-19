@@ -179,9 +179,10 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             let floor = self
                 .now_us
                 .saturating_sub(cfg.dedup_window_seconds as i64 * SEC_US);
-            for &i in &survivors {
+            for (k, &i) in survivors.iter().enumerate() {
+                let off = base + k as u64;
                 self.front()
-                    .insert(pid, &cmd.items[i].hash, created_at, floor);
+                    .insert(pid, &cmd.items[i].hash, base, off, created_at, floor);
             }
         }
         Ok(Plan::logged(effects, Outcome::Push(PushOutcome { items })))

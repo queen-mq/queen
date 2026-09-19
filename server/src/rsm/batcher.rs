@@ -146,6 +146,15 @@ impl BatcherConfig {
                 .filter(|v| *v > 0)
                 .unwrap_or(cur)
         }
+        // PERF-E: the dedup index authority the planner reads. The apply-side
+        // `record` global is set separately at the production boot seam
+        // (`real_builder`), NOT here — the facade's own unit tests build
+        // `RaftFacade` directly and must NOT flip a process-wide `record` mode
+        // that concurrent apply/store tests depend on. In production both come
+        // from the same `QUEEN_RAFT_DEDUP_INDEX`, so they agree; in a facade
+        // test the planner runs `txns` while `record` stays `rows` (writes both
+        // keyspaces), which the txns reader handles correctly.
+        let index_mode = crate::rsm::dedup::IndexMode::from_env();
         let d = BatcherConfig::default();
         BatcherConfig {
             pipeline: num("QUEEN_RAFT_PIPELINE", d.pipeline as u64) as usize,
@@ -163,6 +172,7 @@ impl BatcherConfig {
                     as usize,
                 plan_budget_ms: num("QUEEN_RAFT_PLAN_MAX_MS", d.plan.plan_budget_ms),
                 slow_command_ms: num("QUEEN_RAFT_SLOW_COMMAND_MS", d.plan.slow_command_ms),
+                index_mode,
             },
         }
     }

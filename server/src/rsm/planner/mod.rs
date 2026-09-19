@@ -73,7 +73,9 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use crate::rsm::dedup::{self, AckRes, DedupFront, Seed, TxnsRow};
+use crate::rsm::dedup::{
+    self, AckRes, DedupFront, IndexMode, ProbeVerdict, Seed, SeedHash, TxnsRow,
+};
 use crate::rsm::effect::{CursorRow, Effect, GroupMeta, Pid, QueueConfig, SubscriptionMode};
 use crate::rsm::entry::{Entry, Outcome, RequestId};
 use crate::rsm::state::Committed;
@@ -127,6 +129,12 @@ pub struct PlanConfig {
     pub plan_budget_ms: u64,
     /// O18.
     pub slow_command_ms: u64,
+    /// `QUEEN_RAFT_DEDUP_INDEX` (PERF-E): which keyspace the dedup probe / 005
+    /// resolve read as the authority. Default [`IndexMode::Rows`] so the
+    /// unit-test harness keeps today's behaviour; `BatcherConfig::from_env`
+    /// sets the product default (`txns`) and keeps `record` (apply side) in
+    /// step via [`dedup::set_record_index_mode`].
+    pub index_mode: IndexMode,
 }
 
 impl Default for PlanConfig {
@@ -135,6 +143,7 @@ impl Default for PlanConfig {
             entry_max_bytes: crate::rsm::entry::ENTRY_MAX_BYTES_DEFAULT,
             plan_budget_ms: PLAN_BUDGET_MS_DEFAULT,
             slow_command_ms: SLOW_COMMAND_MS_DEFAULT,
+            index_mode: IndexMode::Rows,
         }
     }
 }
@@ -1105,16 +1114,24 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         hash: &[u8; 16],
         window_floor_us: i64,
     ) -> Result<Option<u64>, Refusal> {
-        // The front decides whether the committed LMDB probe is needed: a
-        // "skip" is a proof that the committed index holds no in-window
-        // occurrence of this hash (see [`DedupFront`]). The overlay merge below
-        // is UNCONDITIONAL — the front fronts only the committed read, never the
-        // in-flight state, so an in-flight duplicate is still caught even on a
-        // skip. `front_prepare` must have run for this pid this command.
-        let mut best = if self.front.should_probe(pid, hash, window_floor_us) {
-            dedup::probe_one(self.reads(), pid, hash, window_floor_us).map_err(store_err)?
-        } else {
-            None
+        // The front decides whether the committed authority must be read: a
+        // "skip" is a proof that it holds no in-window occurrence of this hash
+        // (see [`DedupFront`]). Under `rows` the read is a single LMDB get on
+        // the `(pid, hash)` row; under `txns` a "maybe" names the generation
+        // offset bands, and the read is a bounded ordered scan of the txns rows
+        // (PERF-E). The overlay merge below is UNCONDITIONAL — the front fronts
+        // only the committed read, never the in-flight state, so an in-flight
+        // duplicate is still caught even on a skip. `front_prepare` must have
+        // run for this pid this command.
+        let mut best = match self.cfg.index_mode {
+            IndexMode::Rows => {
+                if self.front.should_probe(pid, hash, window_floor_us) {
+                    dedup::probe_one(self.reads(), pid, hash, window_floor_us).map_err(store_err)?
+                } else {
+                    None
+                }
+            }
+            IndexMode::Txns => self.dedup_probe_txns(pid, hash, window_floor_us)?,
         };
         if let Some(occ) = ov.dedup.get(&(pid, *hash)) {
             for (off, created) in occ {
@@ -1124,6 +1141,33 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             }
         }
         Ok(best)
+    }
+
+    /// The committed leg of a push probe under `DEDUP_INDEX=txns`: ask the front
+    /// for the offset bands to scan, then scan the txns rows for the hash. A
+    /// warm filter bounds the scan to one generation's band; an unseeded /
+    /// fallback / disabled front scans the whole txns window (exact).
+    fn dedup_probe_txns(
+        &self,
+        pid: Pid,
+        hash: &[u8; 16],
+        window_floor_us: i64,
+    ) -> Result<Option<u64>, Refusal> {
+        let mut ranges: Vec<(u64, u64)> = Vec::new();
+        match self
+            .front
+            .probe_plan(pid, hash, window_floor_us, &mut ranges)
+        {
+            ProbeVerdict::Skip => Ok(None),
+            ProbeVerdict::Ranges => {
+                dedup::scan_txns_for_hash(self.reads(), pid, hash, &ranges, window_floor_us)
+                    .map_err(store_err)
+            }
+            ProbeVerdict::Whole => {
+                dedup::scan_txns_for_hash_whole(self.reads(), pid, hash, window_floor_us)
+                    .map_err(store_err)
+            }
+        }
     }
 
     /// Ensure the dedup front can answer for `pid` before the per-hash probe
@@ -1146,7 +1190,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     /// [`dedup::FRONT_SEED_MAX`]. The union is what makes a skip sound for a
     /// partition whose recent appends are still in flight (not yet in `txns`).
     fn front_collect_seed(&self, ov: &Overlay, pid: Pid, floor_us: i64) -> Result<Seed, Refusal> {
-        let mut buf: Vec<([u8; 16], i64)> = Vec::new();
+        let mut buf: Vec<SeedHash> = Vec::new();
         let prefix = keys::txns_prefix(pid);
         let mut bad: Option<StoreError> = None;
         let mut overflow = false;
@@ -1157,10 +1201,15 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 &prefix,
                 usize::MAX,
                 &mut |k, v| match (keys::txns_base_of(k), TxnsRow::decode(v)) {
-                    (Some(_base), Ok(row)) => {
+                    (Some(base), Ok(row)) => {
                         if row.created_at_us >= floor_us {
-                            for h in row.iter_hashes() {
-                                buf.push((h, row.created_at_us));
+                            for (i, h) in row.iter_hashes().enumerate() {
+                                buf.push(SeedHash {
+                                    hash: h,
+                                    created_us: row.created_at_us,
+                                    base_off: base,
+                                    msg_off: base + i as u64,
+                                });
                             }
                             if buf.len() > dedup::FRONT_SEED_MAX {
                                 overflow = true;
@@ -1185,8 +1234,13 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         if let Some(o) = ov.parts.get(&pid) {
             for a in &o.appends {
                 if a.created_at_us >= floor_us {
-                    for h in &a.hashes {
-                        buf.push((*h, a.created_at_us));
+                    for (i, h) in a.hashes.iter().enumerate() {
+                        buf.push(SeedHash {
+                            hash: *h,
+                            created_us: a.created_at_us,
+                            base_off: a.base,
+                            msg_off: a.base + i as u64,
+                        });
                     }
                     if buf.len() > dedup::FRONT_SEED_MAX {
                         return Ok(Seed::Overflow);
@@ -1199,7 +1253,12 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
 
     /// Resolve one hash for a hash ack (005): `eff` = MIN over `[lo, hi]`,
     /// `below` = any occurrence at or below `committed`. Merges committed and
-    /// overlay occurrences.
+    /// overlay occurrences. Under `txns` the committed legs come from an ordered
+    /// range scan of the txns rows over `[txns_start, …]` (PERF-E); under `rows`
+    /// from the `(pid, hash)` occurrence list.
+    // The 005 span is four scalars (lo/hi/committed/txns_start) the caller has
+    // already computed; bundling them buys nothing but a struct at one call site.
+    #[allow(clippy::too_many_arguments)]
     fn dedup_resolve(
         &self,
         ov: &Overlay,
@@ -1208,9 +1267,17 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         lo: u64,
         hi: u64,
         committed: i64,
+        txns_start: u64,
     ) -> Result<AckRes, Refusal> {
-        let mut res =
-            dedup::resolve(self.reads(), pid, hash, lo, hi, committed).map_err(store_err)?;
+        let mut res = match self.cfg.index_mode {
+            IndexMode::Rows => {
+                dedup::resolve(self.reads(), pid, hash, lo, hi, committed).map_err(store_err)?
+            }
+            IndexMode::Txns => {
+                dedup::resolve_txns(self.reads(), pid, hash, lo, hi, committed, txns_start)
+                    .map_err(store_err)?
+            }
+        };
         if let Some(occ) = ov.dedup.get(&(pid, *hash)) {
             for (off, _created) in occ {
                 if (*off as i64) <= committed {

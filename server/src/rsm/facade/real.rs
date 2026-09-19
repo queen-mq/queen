@@ -1472,6 +1472,13 @@ impl Rsm for RaftFacade {
 /// unit-test binary, so the WP-1.7a seam tests keep the `NotReady` stub and the
 /// integration tests build [`RaftFacade`] directly.
 pub fn real_builder(ctx: &RsmBuildCtx) -> Arc<dyn Rsm> {
+    // PERF-E: pin the apply-side `record` dedup authority ONCE, at the
+    // production boot seam only (unit tests build `RaftFacade` directly and
+    // never reach here, so they keep the `rows` default that the existing
+    // apply/store tests assert against). The planner side is resolved
+    // independently in `BatcherConfig::from_env`; both read the same
+    // `QUEEN_RAFT_DEDUP_INDEX`, so a real node's write and read paths agree.
+    crate::rsm::dedup::set_record_index_mode(crate::rsm::dedup::IndexMode::from_env());
     match RaftFacade::open(ctx) {
         Ok(f) => Arc::new(f),
         Err(e) => crate::obs::fatal(format!("raft storage failed to open: {e}")),
