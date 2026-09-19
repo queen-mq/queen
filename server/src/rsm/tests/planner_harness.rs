@@ -305,6 +305,10 @@ pub struct Cell {
     /// default so existing tests plan precisely as the baseline; `enable_front`
     /// turns it on for the PERF-B tests.
     front: DedupFront,
+    /// `QUEEN_RAFT_CLAIM_FROM_RING` override for this cell (PERF-I): `None` uses
+    /// the environment default (on), `Some(v)` forces the bounded/ baseline claim
+    /// path so the differential A/B runs both in one process.
+    claim_from_ring: Option<bool>,
 }
 
 /// What one [`Cell::run`] produced: the per-command results in input order, and
@@ -338,7 +342,14 @@ impl Cell {
             term: 1,
             wall: BASE_US,
             front: DedupFront::disabled(),
+            claim_from_ring: None,
         }
+    }
+
+    /// Force the PERF-I claim path for this cell (the differential A/B).
+    pub fn claim_from_ring(&mut self, v: bool) -> &mut Cell {
+        self.claim_from_ring = Some(v);
+        self
     }
 
     /// Turn the dedup front on for this cell (PERF-B tests). `cap_mb` bounds the
@@ -415,7 +426,10 @@ impl Cell {
                 let committed = Committed::new(r, &d);
                 let mut ov = Overlay::new(r.next_pid()?, r.kv_version_next()?);
                 ov.mark_cycle_start();
-                let planner = Planner::new(committed, now, PlanConfig::default(), &self.front);
+                let mut planner = Planner::new(committed, now, PlanConfig::default(), &self.front);
+                if let Some(v) = self.claim_from_ring {
+                    planner.set_claim_from_ring(v);
+                }
 
                 // §7.1 step 3: the request-id lookup FIRST (D6, I6). A committed
                 // or in-flight hit is answered from the recorded outcome and

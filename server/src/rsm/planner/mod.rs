@@ -741,6 +741,27 @@ pub struct Planner<'a, R: Reads + ?Sized> {
     /// owns it across cycles. A [`DedupFront::disabled`] instance makes the
     /// planner probe exactly as the baseline does.
     front: &'a DedupFront,
+    /// `QUEEN_RAFT_CLAIM_FROM_RING` (PERF-I, default on): take the O(claimed)
+    /// bounded claim path — one txns scan from the segment covering `wanted`,
+    /// the delivered hashes folded into that pass — instead of the baseline's
+    /// `segs_from(log_start)` full-history scan plus a separate `hashes_in_range`
+    /// scan per claim. Read once from the environment; a test flips it with
+    /// [`Planner::set_claim_from_ring`] to run the differential A/B in-process.
+    /// It changes only which store reads the planner makes; the effects and the
+    /// outcome are identical either way (the property test proves it).
+    claim_from_ring: bool,
+}
+
+/// The process-wide `QUEEN_RAFT_CLAIM_FROM_RING` default (PERF-I), read once.
+/// On unless set to `0`/`false`. The planner is not under the I2 `env`/clock
+/// deny (that is apply's, state's and the store's), so it may read this.
+fn claim_from_ring_default() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("QUEEN_RAFT_CLAIM_FROM_RING")
+            .map(|s| s != "0" && !s.eq_ignore_ascii_case("false"))
+            .unwrap_or(true)
+    })
 }
 
 /// A partition merged across committed state and the overlay — the shape the
@@ -791,7 +812,20 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             now_us,
             cfg,
             front,
+            claim_from_ring: claim_from_ring_default(),
         }
+    }
+
+    /// Override the [`Planner::claim_from_ring`] path for this planner (tests:
+    /// the differential A/B runs the same workload both ways in one process).
+    pub fn set_claim_from_ring(&mut self, v: bool) -> &mut Self {
+        self.claim_from_ring = v;
+        self
+    }
+
+    /// Whether the O(claimed) bounded claim path is active (PERF-I).
+    pub(crate) fn claim_from_ring(&self) -> bool {
+        self.claim_from_ring
     }
 
     /// The dedup front the batcher threads through this cycle.

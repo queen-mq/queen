@@ -36,14 +36,15 @@
 //! * **The delivered set is recorded on the claim** (O16): the distinct hashes
 //!   in the claimed run, so the ack fast path is deterministic.
 
+use crate::rsm::dedup::TxnsRow;
 use crate::rsm::effect::{Effect, GroupMeta, Pid, QueueConfig, SubscriptionMode};
 use crate::rsm::entry::{Outcome, PopClaim, PopOutcome};
 use crate::rsm::store::rows::{cursor_fresh, lease_live, GroupRow};
-use crate::rsm::store::{Reads, TypedReads};
+use crate::rsm::store::{keys, Keyspace, Reads, StoreError, TypedReads};
 
 use super::{
-    group_meta_for_registration, Overlay, PartView, Plan, Planned, Planner, PopCommand, Refusal,
-    Seg, SEC_US,
+    group_meta_for_registration, store_err, Overlay, PartView, Plan, Planned, Planner, PopCommand,
+    Refusal, Seg, SEC_US,
 };
 
 /// The most wildcard/discovery candidates the walk gathers before claiming.
@@ -52,6 +53,30 @@ use super::{
 /// make one pop allocate without limit. A tighter bound (gather near the budget)
 /// is a follow-up, and the same O(ready) the pgless walk had (R-105).
 const CANDIDATE_GATHER_CAP: usize = 65_536;
+
+/// One segment as the claim walk sees it, carrying the per-frame hashes when the
+/// bounded claim path (PERF-I) collected them in the same pass it read the
+/// segment shape. `hashes` is `None` on the baseline (`segs_from`) path and on
+/// an auto-ack claim (whose delivered set is discarded), `Some` when the claim
+/// will record a delivered set on the cursor (O16).
+#[derive(Clone, Debug)]
+struct SegH {
+    base: u64,
+    end: u64,
+    created_at_us: i64,
+    hashes: Option<Vec<[u8; 16]>>,
+}
+
+impl SegH {
+    fn plain(s: Seg) -> SegH {
+        SegH {
+            base: s.base,
+            end: s.end,
+            created_at_us: s.created_at_us,
+            hashes: None,
+        }
+    }
+}
 
 impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     /// A pinned pop of one named partition (`log_pop_specific_v1`). An unknown
@@ -597,11 +622,33 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         };
         let last_offset = part.last_offset;
 
-        // The live segments of the partition (from `txns` + overlay). All are
-        // visible (no `hw`); `fresh_enough` is the delayed_processing gate.
-        let segs = self.segs_from(ov, &part, part.log_start)?;
-        let has_segments = !segs.is_empty();
-        let fresh_enough = |s: &Seg| deadline.is_none_or(|d| s.created_at_us <= d);
+        // The segments the claim needs (from `txns` + overlay), and whether the
+        // partition holds any live segment at all (the empty-partition seal).
+        //
+        // PERF-I: on the steady-state path the O(claimed) BOUNDED gather reads
+        // one txns row per segment the claim actually touches — starting at the
+        // segment covering `wanted`, stopping once the budget is met or a
+        // deferred segment is reached — and folds the delivered hashes into that
+        // same pass. The baseline path scans `segs_from(log_start)`, i.e. the
+        // whole retained history of the partition (unbounded with retention off),
+        // and then reads the delivered set with a SECOND scan (`hashes_in_range`).
+        // The gather is taken only when the shape makes it provably equal to the
+        // baseline: not conflating (which needs the tail), no front retention gap
+        // (`wanted ≥ log_start`), and the partition has live segments — every
+        // other shape falls back and is byte-identical to today.
+        let has_live = last_offset >= part.log_start as i64;
+        let bounded =
+            self.claim_from_ring() && !conflate && has_live && wanted >= part.log_start as i64;
+        let segs: Vec<SegH> = if bounded {
+            self.claim_gather_bounded(ov, &part, wanted, budget, deadline, !cmd.auto_ack)?
+        } else {
+            self.segs_from(ov, &part, part.log_start)?
+                .into_iter()
+                .map(SegH::plain)
+                .collect()
+        };
+        let has_segments = if bounded { has_live } else { !segs.is_empty() };
+        let fresh_enough = |s: &SegH| deadline.is_none_or(|d| s.created_at_us <= d);
 
         let mut taken: i64 = 0;
         let mut start: Option<i64> = None;
@@ -686,7 +733,21 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         } else {
             (start_off, last as u64)
         };
-        let delivered = self.hashes_in_range(ov, pid, read_start, read_end)?;
+        // The delivered set (O16), recorded on the cursor for the ack fast path.
+        // On the bounded path the hashes were read in the gather pass, so there
+        // is NO second scan; the baseline reads them with `hashes_in_range`. An
+        // auto-ack claim discards the delivered set (`cur.delivered = Vec::new()`
+        // below), so the bounded gather never collected it — the baseline still
+        // reads it here, exactly as today, and discards it the same way.
+        let delivered = if bounded {
+            if cmd.auto_ack {
+                Vec::new()
+            } else {
+                delivered_from_gathered(&segs, read_start, read_end)
+            }
+        } else {
+            self.hashes_in_range(ov, pid, read_start, read_end)?
+        };
         let delivery_attempt: u32;
         let lease_expires: Option<i64>;
         if cmd.auto_ack {
@@ -741,6 +802,110 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         }))
     }
 
+    /// The segments a non-conflating claim could touch, gathered FORWARD from
+    /// the segment covering `wanted`, each carrying its per-frame hashes when
+    /// `need_hashes` — the O(claimed) replacement (PERF-I) for
+    /// `segs_from(log_start)` + `hashes_in_range` on the steady-state claim path.
+    ///
+    /// The gather is a strict SUPERSET of the segments the claim arithmetic will
+    /// consume, so feeding it into that arithmetic (unchanged) yields the same
+    /// `(start, last, taken)` as the full `segs_from`, and the same delivered set
+    /// over the claimed range — while reading only the rows the budget reaches.
+    /// It stops at the first segment deferred past the freshness deadline (the
+    /// forward loop breaks there, `created_at` monotone) or once the frames
+    /// available from `wanted` meet the budget. The caller has already gated on
+    /// `wanted ≥ log_start` and the partition having live segments, so the
+    /// covering segment exists and no front retention gap is in play.
+    fn claim_gather_bounded(
+        &self,
+        ov: &Overlay,
+        part: &PartView,
+        wanted: i64,
+        budget: i32,
+        deadline: Option<i64>,
+        need_hashes: bool,
+    ) -> Result<Vec<SegH>, Refusal> {
+        let budget = budget.max(1) as i64;
+        let fresh = |c: i64| deadline.is_none_or(|d| c <= d);
+        let mut out: Vec<SegH> = Vec::new();
+        let mut avail: i64 = 0;
+
+        // The committed segment covering `wanted` (greatest base ≤ wanted), or
+        // `wanted` itself when none does — the caller's gate makes the former the
+        // common case.
+        let start_base = self
+            .seg_base_covering(part.pid, wanted as u64)?
+            .unwrap_or(wanted as u64);
+        let prefix = keys::txns_prefix(part.pid);
+        let from = keys::txns(part.pid, start_base);
+        let mut bad: Option<StoreError> = None;
+        let mut stop = false;
+        self.reads()
+            .scan_raw(Keyspace::Txns, &from, &prefix, usize::MAX, &mut |k, v| {
+                if stop {
+                    return false;
+                }
+                match (keys::txns_base_of(k), TxnsRow::decode(v)) {
+                    (Some(base), Ok(row)) => {
+                        let deferred = !fresh(row.created_at_us);
+                        // frames this segment offers from `wanted` on
+                        let seg_from = (base as i64).max(wanted);
+                        if row.end as i64 >= seg_from {
+                            avail += row.end as i64 - seg_from + 1;
+                        }
+                        out.push(SegH {
+                            base,
+                            end: row.end,
+                            created_at_us: row.created_at_us,
+                            hashes: need_hashes.then(|| row.iter_hashes().collect()),
+                        });
+                        if deferred || avail >= budget {
+                            stop = true;
+                            return false;
+                        }
+                        true
+                    }
+                    _ => {
+                        bad = Some(StoreError::corrupt(Keyspace::Txns, "txns row"));
+                        false
+                    }
+                }
+            })
+            .map_err(store_err)?;
+        if let Some(e) = bad {
+            return Err(store_err(e));
+        }
+
+        // Overlay appends are the tail (base > every committed offset): fold the
+        // ones at or after `start_base`, exactly as `segs_from` does, honouring
+        // the same stop rule. One cycle's appends, so a bounded set.
+        if !stop {
+            if let Some(o) = ov.parts.get(&part.pid) {
+                for a in &o.appends {
+                    if a.base < start_base {
+                        continue;
+                    }
+                    let deferred = !fresh(a.created_at_us);
+                    let seg_from = (a.base as i64).max(wanted);
+                    if a.end as i64 >= seg_from {
+                        avail += a.end as i64 - seg_from + 1;
+                    }
+                    out.push(SegH {
+                        base: a.base,
+                        end: a.end,
+                        created_at_us: a.created_at_us,
+                        hashes: need_hashes.then(|| a.hashes.clone()),
+                    });
+                    if deferred || avail >= budget {
+                        break;
+                    }
+                }
+            }
+        }
+        out.sort_by_key(|s| s.base);
+        Ok(out)
+    }
+
     /// The newest segment of a partition (committed `txns` tail or the last
     /// overlay append), for the window-buffer debounce.
     fn newest_seg(&self, ov: &Overlay, part: &PartView) -> Result<Option<Seg>, Refusal> {
@@ -761,6 +926,30 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             None => Ok(None),
         }
     }
+}
+
+/// The distinct transaction hashes in the inclusive offset range `[lo, hi]`,
+/// read from the segments the bounded claim gather already scanned (PERF-I) —
+/// the same result `Planner::hashes_in_range` produces with a fresh scan, in the
+/// same first-seen order (the gather is base-sorted, committed segments before
+/// overlay appends, frames in offset order within each), so a claim's recorded
+/// delivered set (O16) is byte-identical whichever path produced it.
+fn delivered_from_gathered(segs: &[SegH], lo: u64, hi: u64) -> Vec<[u8; 16]> {
+    if hi < lo {
+        return Vec::new();
+    }
+    let mut seen: std::collections::BTreeSet<[u8; 16]> = std::collections::BTreeSet::new();
+    let mut out: Vec<[u8; 16]> = Vec::new();
+    for s in segs {
+        let Some(hashes) = &s.hashes else { continue };
+        for (i, h) in hashes.iter().enumerate() {
+            let off = s.base + i as u64;
+            if off >= lo && off <= hi && seen.insert(*h) {
+                out.push(*h);
+            }
+        }
+    }
+    out
 }
 
 /// The claims an outcome carries (or empty for a non-pop outcome).

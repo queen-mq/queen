@@ -47,6 +47,7 @@ mod planner_harness;
 mod planner_overlay;
 mod planner_pop;
 mod planner_push;
+mod pop_bounded;
 mod replicator;
 mod replicator_crash;
 mod roundtrip;
