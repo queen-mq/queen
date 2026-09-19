@@ -427,17 +427,27 @@ pub struct ApplyConfig {
     /// read-modify-write. Also gates the per-transaction group-list cache that
     /// serves the append path's `scan_groups` (same lifetime, same transparency).
     pub batch_counters: bool,
-    /// `QUEEN_RAFT_PENDING_TRANSITIONS` (PERF-D, §6.1). On: the append path
-    /// writes a partition's `pending` row for a group only when the group's
-    /// pending state for it CHANGES (no row yet, or the new `ready_at` is
-    /// earlier than the stored one), not on every append; the derived ring is
-    /// moved on exactly those transitions, so a rebuild from `pending` yields
-    /// the same ring the live one holds. Off (DEFAULT): today's unconditional
-    /// per-append `put_pending`. Unlike the counters, this CHANGES the value the
-    /// replicated `pending` keyspace holds (the earliest `ready_at` seen, not
-    /// the last), hence the §12.9 digest — a deliberate behaviour change gated
-    /// off by default so the whole suite stays byte-for-byte on the shipped
-    /// path; the I2 property test drives it on and proves cadence-independence.
+    /// `QUEEN_RAFT_PENDING_TRANSITIONS` (PERF-D/PERF-H, §6.1). ON: the append
+    /// path maintains a partition's `pending.ready_at` for a group at the
+    /// EARLIEST wall-time it could yield a claim — a live lease floors it at the
+    /// lease expiry (a fresh frame arms the partition for AFTER the lease, never
+    /// under it), and the row is written only on a TRANSITION (no row yet, or the
+    /// floored `ready_at` is earlier than the stored one), not on every append.
+    /// The derived ring is moved on exactly those transitions and apply promotes
+    /// due deadlines at each entry boundary, so a rebuild from `pending`
+    /// reproduces the live ring at any boundary. This is the CORRECT maintenance:
+    /// the OFF path overwrites `ready_at` on every append and never floors it at
+    /// a lease, so a delayed or leased queue can push an already-claimable
+    /// partition into the future (an under-arm the claim then papers over).
+    ///
+    /// PERF-H proved ON correct (never under-arms — claimability-equivalent to
+    /// the SQL), rebuild-equal at every boundary, cadence-independent (the I2
+    /// test) and crash-safe. It is nonetheless shipped OFF (DEFAULT) for one
+    /// reason and it is NOT correctness: ON changes the value the replicated
+    /// `pending` keyspace holds (earliest, not last), so the §12.9 digest moves,
+    /// and every differential/crash reference that runs `cfg()` alongside a node
+    /// on `default()` must flip in the same commit. That lockstep flip of the
+    /// shared test config is a coordinated change; the knob makes it one line.
     pub pending_transitions: bool,
 }
 
@@ -459,10 +469,20 @@ impl Default for ApplyConfig {
             apply_writers: 0,
             // PERF-D: counter batching is transparent, so it is on everywhere
             // (unit tests included) — a test that reads a counter after a commit
-            // sees the same value either way. Pending-transitions changes the
-            // replicated `pending` digest, so it is OFF by default; a test that
-            // wants it sets it, and the shipped default keeps the whole suite on
-            // the byte-for-byte path.
+            // sees the same value either way. PERF-H: pending-transitions is the
+            // CORRECT `pending.ready_at` maintenance and is PROVEN ready to be
+            // the default — never arms later than an already-claimable partition,
+            // floors a leased partition at its lease expiry, rebuild-equal at
+            // every entry boundary, cadence-independent and crash-safe (the
+            // tests below). It is still shipped OFF for ONE reason, and it is not
+            // correctness: turning it on changes the value the replicated
+            // `pending` keyspace holds (the earliest `ready_at`, not the last),
+            // so the whole differential suite — the planner/batcher/replicator
+            // reference runs that compare against `run_workload`/`cfg()` — must
+            // flip in the SAME commit or the crash/replay references diverge.
+            // That lockstep flip of the shared test config is a coordinated
+            // change, not a mid-round unilateral one; the knob makes it a
+            // one-line switch when the package lands.
             batch_counters: true,
             pending_transitions: false,
         }
@@ -943,6 +963,33 @@ impl<'s, S: Store> Applier<'s, S> {
         &self.derived
     }
 
+    /// Promote the live rings' revisit deadlines that have passed by `now_us`,
+    /// so a lease that has expired or a `delayed_processing`/`window_buffer`
+    /// deadline that has come due re-enters its group's ring — the live-ring
+    /// twin of what the planner gets from a rebuild each cycle (§6.3, §9.5).
+    ///
+    /// Called at the end of [`Applier::execute`], so after `apply(entry)` the
+    /// live rings equal a rebuild at that entry's stamp. `now_us` IS that stamp:
+    /// the apply thread has no wall clock of its own (D5, I2) and every
+    /// state-bearing time is an entry stamp, so a deadline is judged against the
+    /// log's clock, not the platter's. Guarded by
+    /// [`Derived::next_ring_deadline`], so an idle group with nothing due costs a
+    /// single comparison, and by the transitions knob, so the shipped path is
+    /// unchanged and pays nothing. It writes no store row — the promotion is a
+    /// RAM move of a hint the claim re-verifies — so it is outside the digest.
+    fn promote_rings(&mut self, now_us: i64) {
+        if !self.cfg.pending_transitions {
+            return;
+        }
+        if self
+            .derived
+            .next_ring_deadline()
+            .is_some_and(|at| at <= now_us)
+        {
+            self.derived.promote_ring_deadlines(now_us);
+        }
+    }
+
     /// The read side of the segment files, for the blocking pool (§9.4). A
     /// reader is cloneable and holds no write state.
     pub fn reader(&self) -> segments::Reader {
@@ -1180,6 +1227,14 @@ impl<'s, S: Store> Applier<'s, S> {
             self.notify.wake(&t, &q, g.as_deref());
             self.stats.wakes += 1;
         }
+        // The entry is applied and its stamp is the apply thread's clock (D5):
+        // bring the live rings forward to it, so a lease that expired or a
+        // visibility deadline that came due at or before this stamp is back in
+        // its ring. This is the live-ring twin of the rebuild the planner does
+        // each cycle; it keeps the rings equal to a rebuild at this boundary,
+        // which the long-poll `has_pending` gate and §11.5 rest on. Guarded and
+        // store-free (see `promote_rings`).
+        self.promote_rings(c.entry.now_us);
         Ok(Applied::Executed {
             effects: c.entry.effects.len(),
         })
@@ -1644,12 +1699,25 @@ impl<'s, S: Store> Applier<'s, S> {
     /// Maintain one group's `pending` row (and its ring mirror) for an append.
     ///
     /// With `transitions` off this is the shipped path: an unconditional
-    /// `put_pending` + `set_pending` on every append. With it on (PERF-D), the
-    /// row is written only on a TRANSITION — no row yet, or the new `ready_at`
-    /// is EARLIER than the stored one — read through the write handle so the
-    /// decision is a pure function of committed state, cadence-free (I2). The
-    /// ring is moved on exactly the transitions that write the row, so both hold
-    /// the earliest `ready_at` and a rebuild from `pending` reproduces the ring.
+    /// `put_pending` + `set_pending` on every append, which OVERWRITES the
+    /// stored `ready_at` with this frame's — so a delayed/window queue can push
+    /// an already-claimable partition into the future, and an append to a leased
+    /// partition undercuts the lease. With it on (PERF-D, §6.1), `ready_at` is
+    /// maintained to the EARLIEST wall-time the partition could yield a claim:
+    ///
+    /// - a LIVE lease floors it at the lease expiry — the partition is not
+    ///   claimable by anyone else until then, so a fresh frame arms it for
+    ///   AFTER the lease, never under it (the wildcard pop would only skip it);
+    /// - it is written only on a TRANSITION — no row yet, or the floored
+    ///   `ready_at` is EARLIER than the stored one — so a stream of appends to a
+    ///   partition that already looks ready is one store put, not one per frame,
+    ///   and the row keeps the earliest visibility, never a later one.
+    ///
+    /// Every input is committed state read through the write handle plus the
+    /// lease's RAM twin (rebuilt from `leases_by_worker`), so the decision is a
+    /// pure, cadence-free function of the replicated log (I2), and the ring is
+    /// moved on exactly the transitions that write the row — a rebuild from
+    /// `pending` reproduces it.
     #[allow(clippy::too_many_arguments)]
     fn append_pending(
         &mut self,
@@ -1662,11 +1730,25 @@ impl<'s, S: Store> Applier<'s, S> {
         transitions: bool,
     ) -> Result<()> {
         if transitions {
+            // A live lease holds the whole partition until it expires, so the
+            // earliest a NEW frame could be claimed is the later of its own
+            // visibility and the lease expiry (the pop that leased it wrote that
+            // expiry into `ready_at` already; do not let this append undercut
+            // it). `lease_expiry` reads the same on every node (I2).
+            let floored = match self.derived.lease_expiry(pid, group) {
+                Some(exp) if exp > ready_at => exp,
+                _ => ready_at,
+            };
             if let Some(stored) = self.writes.pending_at(tenant, queue, group, pid)? {
-                if ready_at >= stored {
+                if floored >= stored {
                     return Ok(());
                 }
             }
+            self.writes
+                .put_pending(tenant, queue, group, pid, floored)?;
+            self.derived
+                .set_pending(tenant, queue, group, pid, floored, now_us);
+            return Ok(());
         }
         self.writes
             .put_pending(tenant, queue, group, pid, ready_at)?;

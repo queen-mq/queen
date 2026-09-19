@@ -32,6 +32,54 @@
 //! `pending` keyspace, which apply maintains (one row per (tenant, queue,
 //! group, partition) with work) — so a restart rebuilds them in O(pending)
 //! with one ordered scan, and nothing walks the partitions.
+//!
+//! # Two readers, one truth: `pending.ready_at`
+//!
+//! The rings have TWO readers, and both reduce to the `pending` keyspace:
+//!
+//! - **the planner** does not read the live rings at all. Every plan cycle it
+//!   calls [`Derived::rebuild`] over the committed `pending` keyspace (see
+//!   `rsm/batcher.rs`), landing a partition READY when `ready_at ≤ now` and
+//!   DEFERRED otherwise — so time-based promotion (a lease expiring, a
+//!   `delayed_processing`/`window_buffer` visibility deadline passing) is FREE
+//!   for the planner: the next rebuild picks it up. The wildcard pop then walks
+//!   that fresh ring and re-verifies each candidate against the cursor row.
+//! - **the parked long-poll's `has_pending` gate** (§9.5) reads the LIVE ring
+//!   on the apply thread ([`Committed::has_claimable_pending`]). The live ring
+//!   only moves on events, so the apply loop calls
+//!   [`Derived::promote_ring_deadlines`] at each entry boundary (the apply
+//!   thread's only wall-time source is the entry stamp, D5) to keep it equal to
+//!   a rebuild at that stamp.
+//!
+//! Because both readers reduce to `pending.ready_at`, ring correctness IS
+//! `pending.ready_at` correctness, and the one law is: **`ready_at` must never
+//! be LATER than the earliest wall-time the partition could yield a claim** (an
+//! under-arm strands claimable work); being earlier is harmless (the claim
+//! re-verifies and skips). The event → effect table apply maintains it by:
+//!
+//! | event | `pending` row (transitions ON) | ring / claimability |
+//! |---|---|---|
+//! | append, unleased | `ready_at ← min(stored, created+delay)` | ready at the earliest visibility; a late frame never defers an already-ready partition |
+//! | append, leased | `ready_at ← max(created+delay, lease_expiry)`, kept only if earlier than stored | armed for AFTER the lease, not offered under it |
+//! | pop with backlog left (lease granted) | `ready_at ← lease_expiry` | deferred to lease expiry; rebuild re-arms at expiry |
+//! | ack/nack, backlog left, lease released | `ready_at ← now` (overwrite) | ready now |
+//! | ack draining the partition | row deleted | leaves the ring |
+//! | nack with a retry backoff (future lease) | `ready_at ← lease_expiry` | deferred to the backoff |
+//! | seek backwards (010) | `ready_at ← now`, row (re)written | ready now |
+//! | lease expiry, no ack | (unchanged: already `lease_expiry`) | promoted when `now ≥ lease_expiry` — by the next rebuild for the planner, by `promote_ring_deadlines` for the live ring |
+//! | `delayed_processing`/`window_buffer` deadline | (unchanged: already the visibility time) | promoted the same two ways |
+//! | group create | ring ensured (empty) | a place to seed candidates |
+//! | group delete (014) | rows swept | ring dropped, its global deadline with it |
+//! | partition delete / garbage (§5.2) | rows swept | `forget_partition` leaves every ring and drops its leases |
+//!
+//! The OFF path (`QUEEN_RAFT_PENDING_TRANSITIONS=0`, still the shipped default
+//! this round) OVERWRITES `ready_at` on every append and never floors it at a
+//! live lease, so a delayed or leased queue could push an already-claimable
+//! partition's `ready_at` into the future (an under-arm) — the correctness
+//! reason the transitions path is proven ready to become the default. It is
+//! held OFF only because ON moves the replicated `pending` digest, which must
+//! flip in lockstep with the shared differential-test config (see
+//! `ApplyConfig::pending_transitions`).
 
 // I2, enforced rather than reviewed: `clippy.toml` lists the clock,
 // environment and randomness calls this side of the line may not make,
@@ -276,6 +324,17 @@ pub struct Derived {
     /// `(pid, group) → (expires_at_us, worker)`, so a renew can move exactly
     /// one entry of the set above.
     lease_at: BTreeMap<(Pid, String), (i64, String)>,
+    /// The earliest parked revisit deadline PER RING, in deadline order — the
+    /// global index the apply loop consults to promote due rings in O(due),
+    /// never O(rings), and the §9.5 next-re-check clock for a leased or
+    /// visibility-deferred partition. It mirrors each ring's
+    /// [`ReadyIndex::next_deadline`]; [`Derived::sync_ring_deadline`] keeps it
+    /// in step on every mutation. RAM only — it changes no replicated row, so
+    /// it is out of the digest (I2) and a node may promote at a different wall
+    /// instant than its peer without diverging.
+    ring_deadlines: BTreeSet<(i64, RingKey)>,
+    /// The deadline each ring currently contributes to `ring_deadlines`.
+    ring_deadline_at: BTreeMap<RingKey, i64>,
     /// `pending` rows seen: a size metric, not a source of truth.
     pending_rows: u64,
 }
@@ -361,14 +420,34 @@ impl Derived {
         ready_at_us: i64,
         now_us: i64,
     ) {
-        let ring = self
-            .rings
-            .entry(ring_key(tenant, queue, group))
-            .or_default();
+        let key = ring_key(tenant, queue, group);
+        let ring = self.rings.entry(key.clone()).or_default();
         if ready_at_us <= now_us {
             ring.push(pid);
         } else {
             ring.defer(ready_at_us, pid);
+        }
+        self.sync_ring_deadline(&key);
+    }
+
+    /// Reconcile one ring's contribution to the global [`Derived::ring_deadlines`]
+    /// index with the ring's current earliest parked deadline. O(log rings), and
+    /// a no-op for the common case (a ring that has never deferred — every
+    /// `delayed_processing`/`window_buffer`-free, unleased partition — carries no
+    /// deadline on either side, so `None == None` returns at once).
+    fn sync_ring_deadline(&mut self, key: &RingKey) {
+        let next = self.rings.get(key).and_then(|r| r.next_deadline());
+        let prev = self.ring_deadline_at.get(key).copied();
+        if prev == next {
+            return;
+        }
+        if let Some(at) = prev {
+            self.ring_deadlines.remove(&(at, key.clone()));
+            self.ring_deadline_at.remove(key);
+        }
+        if let Some(at) = next {
+            self.ring_deadlines.insert((at, key.clone()));
+            self.ring_deadline_at.insert(key.clone(), at);
         }
     }
 
@@ -390,9 +469,11 @@ impl Derived {
     /// `pending` row, so neither the candidate nor any revisit deadline it
     /// carried survives — the ring mirrors `pending`, nothing more.
     pub fn clear_pending(&mut self, tenant: &str, queue: &str, group: &str, pid: Pid) {
-        if let Some(ring) = self.rings.get_mut(&ring_key(tenant, queue, group)) {
+        let key = ring_key(tenant, queue, group);
+        if let Some(ring) = self.rings.get_mut(&key) {
             ring.forget(pid);
         }
+        self.sync_ring_deadline(&key);
     }
 
     /// Make sure a ring exists, so a group that has registered but has no
@@ -410,7 +491,11 @@ impl Derived {
 
     /// Forget a group's ring (a group delete, 014).
     pub fn drop_ring(&mut self, tenant: &str, queue: &str, group: &str) {
-        self.rings.remove(&ring_key(tenant, queue, group));
+        let key = ring_key(tenant, queue, group);
+        self.rings.remove(&key);
+        if let Some(at) = self.ring_deadline_at.remove(&key) {
+            self.ring_deadlines.remove(&(at, key));
+        }
     }
 
     /// Record or move a lease deadline (the RAM twin of `leases_by_worker`).
@@ -445,21 +530,81 @@ impl Derived {
         for (p, g) in groups {
             self.clear_lease(p, &g);
         }
-        for ring in self.rings.values_mut() {
-            ring.forget(pid);
+        // A partition delete is O(rings) already (it must leave every group's
+        // ring); reconcile each touched ring's deadline in the same pass.
+        let keys: Vec<RingKey> = self.rings.keys().cloned().collect();
+        for key in &keys {
+            if let Some(ring) = self.rings.get_mut(key) {
+                ring.forget(pid);
+            }
         }
+        for key in &keys {
+            self.sync_ring_deadline(key);
+        }
+    }
+
+    /// The live lease expiry for `(pid, group)`, if it is leased — the RAM twin
+    /// of the cursor row's lease, rebuilt from `leases_by_worker`, so it reads
+    /// the same on every node. The append path floors a leased partition's
+    /// `pending.ready_at` at this so a new frame does not undercut the pop that
+    /// holds the lease (arm the partition for AFTER the lease, §6.1).
+    pub fn lease_expiry(&self, pid: Pid, group: &str) -> Option<i64> {
+        self.lease_at
+            .get(&(pid, group.to_string()))
+            .map(|(at, _)| *at)
     }
 
     /// Promote one ring's deadlines that have passed.
     pub fn promote_due(&mut self, tenant: &str, queue: &str, group: &str, now_us: i64) -> usize {
-        match self.rings.get_mut(&ring_key(tenant, queue, group)) {
+        let key = ring_key(tenant, queue, group);
+        let n = match self.rings.get_mut(&key) {
             Some(ring) => ring.promote_due(now_us),
             None => 0,
-        }
+        };
+        self.sync_ring_deadline(&key);
+        n
     }
 
-    /// Promote every ring. O(rings) by design: it runs on a slow tick, not on
-    /// the pop path, which promotes its own ring inline.
+    /// Promote every ring's due deadlines, in deadline order, touching only the
+    /// rings that actually have one due. O(due), not O(rings): the loop drives
+    /// this from the apply thread on every entry boundary (against the entry
+    /// stamp, D5), guarded by [`Derived::next_ring_deadline`] so a node with
+    /// nothing due pays a single comparison. This is the LIVE-ring twin of what a rebuild does for
+    /// the planner for free (a rebuild reads `pending.ready_at` and lands the
+    /// partition ready or deferred at the rebuild instant); apply runs it at the
+    /// end of each entry, keeping the live rings equal to a rebuild at that
+    /// boundary, which is what the long-poll `has_pending` gate and §11.5
+    /// leadership start rest on.
+    pub fn promote_ring_deadlines(&mut self, now_us: i64) -> usize {
+        let mut promoted = 0;
+        loop {
+            let Some(&(at, ref key)) = self.ring_deadlines.iter().next() else {
+                break;
+            };
+            if at > now_us {
+                break;
+            }
+            let key = key.clone();
+            if let Some(ring) = self.rings.get_mut(&key) {
+                promoted += ring.promote_due(now_us);
+            }
+            // `promote_due` drains everything at or below `now_us`, so the ring's
+            // new earliest deadline is strictly greater (or gone) and this same
+            // `key` cannot be the head again — the loop terminates.
+            self.sync_ring_deadline(&key);
+        }
+        promoted
+    }
+
+    /// The earliest parked ring deadline across every group, for the loop that
+    /// schedules the next re-check and the O(1) promotion guard (§9.5).
+    pub fn next_ring_deadline(&self) -> Option<i64> {
+        self.ring_deadlines.iter().next().map(|(at, _)| *at)
+    }
+
+    /// Promote every ring. O(rings); kept for the digest/reconciliation paths
+    /// and tests, where the whole set is walked anyway. Production promotion is
+    /// [`Derived::promote_ring_deadlines`], which is O(due).
     pub fn tick(&mut self, now_us: i64) -> usize {
         let keys: Vec<RingKey> = self.rings.keys().cloned().collect();
         let mut n = 0;
@@ -467,6 +612,19 @@ impl Derived {
             n += self.promote_due(&t, &q, &g, now_us);
         }
         n
+    }
+
+    /// Whether a group's ring holds a claimable candidate right now — the
+    /// coarse gate a parked long-poll re-checks (§9.5, `has_pending`). It is a
+    /// SUPERSET of what the claim would grant (an entry is "looked claimable
+    /// when last touched"; the claim re-verifies), so it never parks a poll
+    /// while claimable work waits, provided the caller has promoted due
+    /// deadlines first ([`Derived::promote_ring_deadlines`]) — the same
+    /// discipline the apply loop follows before it answers.
+    pub fn ring_has_ready(&self, tenant: &str, queue: &str, group: &str) -> bool {
+        self.ring(tenant, queue, group)
+            .map(|r| r.live_len() > 0)
+            .unwrap_or(false)
     }
 
     // ---------------------------------------------------------------- reads
@@ -613,6 +771,17 @@ impl<'a, R: Reads + ?Sized> Committed<'a, R> {
             Some(r) => r.walk(limit, cb),
             None => 0,
         }
+    }
+
+    /// Whether the group has a partition that looked claimable when the ring
+    /// was last touched — the read a parked long-poll's `has_pending` gate
+    /// makes (§9.5). It shares the candidate walk's ring and the same coarse
+    /// contract, so a gate answered from here is CONSISTENT with what the pop
+    /// walk would then offer: never `false` while the ring holds a ready
+    /// candidate the pop would try. The caller (the apply thread) promotes due
+    /// deadlines before reading, so a lease that has expired reads `true` here.
+    pub fn has_claimable_pending(&self, tenant: &str, queue: &str, group: &str) -> bool {
+        self.derived.ring_has_ready(tenant, queue, group)
     }
 
     /// The request-id window (D6, I6): the recorded outcome of a command that
@@ -916,5 +1085,112 @@ mod tests {
         assert!(!d.ensure_ring("t", "q", "g"));
         d.drop_ring("t", "q", "g");
         assert!(d.ensure_ring("t", "q", "g"));
+    }
+
+    #[test]
+    fn the_global_ring_deadline_index_tracks_the_earliest_across_groups() {
+        let mut d = Derived::default();
+        // Three groups, one deferred partition each, at different deadlines.
+        d.set_pending("t", "q", "g1", 1, 900, 0);
+        d.set_pending("t", "q", "g2", 2, 400, 0);
+        d.set_pending("t", "q", "g3", 3, 700, 0);
+        assert_eq!(
+            d.next_ring_deadline(),
+            Some(400),
+            "the earliest across rings"
+        );
+        // Promote only what is due: at now=500 only g2's 400 fires.
+        assert_eq!(d.promote_ring_deadlines(500), 1);
+        assert!(d.ring("t", "q", "g2").unwrap().contains(2));
+        assert!(!d.ring("t", "q", "g1").unwrap().contains(1));
+        assert!(!d.ring("t", "q", "g3").unwrap().contains(3));
+        assert_eq!(d.next_ring_deadline(), Some(700), "g2 left the index");
+        // A ready partition carries no deadline, so the index tracks only the
+        // remaining two.
+        assert_eq!(d.promote_ring_deadlines(10_000), 2);
+        assert_eq!(d.next_ring_deadline(), None, "nothing parked");
+    }
+
+    #[test]
+    fn promote_ring_deadlines_equals_a_full_tick_over_any_mixture() {
+        // The O(due) promotion must land exactly where the O(rings) `tick`
+        // would, after any sequence of defers, pushes, clears and forgets.
+        let mut a = Derived::default();
+        let groups = ["g0", "g1", "g2"];
+        for round in 0..300u64 {
+            let g = groups[(round % 3) as usize];
+            let pid = round % 11;
+            match round % 5 {
+                0 => a.set_pending("t", "q", g, pid, round as i64 + 1, round as i64),
+                1 => a.set_pending("t", "q", g, pid, round as i64 + 50, round as i64),
+                2 => a.clear_pending("t", "q", g, pid),
+                3 => a.forget_partition(pid),
+                _ => {
+                    a.promote_ring_deadlines(round as i64);
+                }
+            }
+            // A clone driven by the whole-set `tick` must match the incremental
+            // index at the same instant, membership and parked count alike.
+            let mut b = a.clone();
+            let now = round as i64 + 25;
+            let via_index = a.promote_ring_deadlines(now);
+            let via_tick = b.tick(now);
+            for g in groups {
+                let (ra, rb) = (a.ring("t", "q", g), b.ring("t", "q", g));
+                let ready = |r: Option<&ReadyIndex>| {
+                    let mut v = Vec::new();
+                    if let Some(r) = r {
+                        r.walk(usize::MAX, &mut |p| {
+                            v.push(p);
+                            true
+                        });
+                    }
+                    v.sort_unstable();
+                    v
+                };
+                assert_eq!(ready(ra), ready(rb), "round {round} group {g}: ready set");
+                assert_eq!(
+                    ra.map(|r| r.deferred_len()),
+                    rb.map(|r| r.deferred_len()),
+                    "round {round} group {g}: parked count",
+                );
+            }
+            assert_eq!(
+                a.next_ring_deadline(),
+                b.next_ring_deadline(),
+                "round {round}: the index and a full tick disagree on the next deadline",
+            );
+            // The index count and the tick count are both "how many promoted".
+            let _ = (via_index, via_tick);
+        }
+    }
+
+    #[test]
+    fn lease_expiry_reads_the_noted_lease() {
+        let mut d = Derived::default();
+        assert_eq!(d.lease_expiry(1, "g"), None);
+        d.note_lease("w1", 1, "g", 5_000);
+        assert_eq!(d.lease_expiry(1, "g"), Some(5_000));
+        d.note_lease("w1", 1, "g", 9_000); // renew moves it
+        assert_eq!(d.lease_expiry(1, "g"), Some(9_000));
+        d.clear_lease(1, "g");
+        assert_eq!(d.lease_expiry(1, "g"), None);
+    }
+
+    #[test]
+    fn ring_has_ready_is_a_coarse_gate_that_promotion_clears() {
+        // A deferred (leased) partition reads NOT ready until its deadline is
+        // promoted — the long-poll gate the facade `has_pending` will call, and
+        // the discipline is: promote, then read.
+        let mut d = Derived::default();
+        d.set_pending("t", "q", "g", 1, 5_000, 0); // deferred to 5000
+        assert!(
+            !d.ring_has_ready("t", "q", "g"),
+            "leased/deferred: not ready"
+        );
+        d.promote_ring_deadlines(4_000); // not yet due
+        assert!(!d.ring_has_ready("t", "q", "g"));
+        d.promote_ring_deadlines(5_000); // due now
+        assert!(d.ring_has_ready("t", "q", "g"), "promoted at its deadline");
     }
 }
