@@ -404,6 +404,18 @@ pub struct ApplyConfig {
     /// a durable point records nor recovery (I11) — so toggling it is safe on a
     /// live node and never affects correctness, only the tail.
     pub durable_async: bool,
+    /// `QUEEN_RAFT_SEG_BUFFERED` (PERF-C, §11.3). On (default): the apply thread
+    /// buffers an entry's frames per file and writes each file's whole run with
+    /// ONE `write` at the end of the entry, instead of one `write` per message.
+    /// Off: the pre-PERF-C path, one `write` per append. Positions, bytes and
+    /// recorded lengths are byte-identical either way (I2/I11); only the number
+    /// of `write` syscalls changes, so toggling it is safe on a live node.
+    pub seg_buffered: bool,
+    /// `QUEEN_RAFT_APPLY_WRITERS` (PERF-C, §11.3). The size of the segment-write
+    /// pool that flushes those per-file runs off the apply thread (each bucket
+    /// owned by one writer). 0 = the apply thread writes them itself. Implies
+    /// `seg_buffered`. Default `min(4, cores/2)`.
+    pub apply_writers: usize,
 }
 
 impl Default for ApplyConfig {
@@ -416,6 +428,12 @@ impl Default for ApplyConfig {
             gc_per_pass: 32,
             idle_tick_ms: 2,
             durable_async: true,
+            // Buffering is the safe, high-value half of PERF-C and is on by
+            // default; the pool is off in the programmatic default so unit tests
+            // spawn no writer threads. `from_env` (the shipped binary) turns the
+            // pool on.
+            seg_buffered: true,
+            apply_writers: 0,
         }
     }
 }
@@ -439,6 +457,14 @@ impl ApplyConfig {
         fn flag(name: &str, cur: bool) -> bool {
             std::env::var(name).ok().map(|v| v != "0").unwrap_or(cur)
         }
+        // The pool default: min(4, cores/2). A boot-time read of the machine's
+        // parallelism (node-local, not apply state — I2).
+        fn default_apply_writers() -> usize {
+            let cores = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1);
+            (cores / 2).min(4)
+        }
         let d = ApplyConfig::default();
         ApplyConfig {
             store_commit_ms: num("QUEEN_RAFT_STORE_COMMIT_MS", d.store_commit_ms),
@@ -448,6 +474,11 @@ impl ApplyConfig {
             gc_per_pass: d.gc_per_pass,
             idle_tick_ms: d.idle_tick_ms,
             durable_async: flag("QUEEN_RAFT_DURABLE_ASYNC", d.durable_async),
+            seg_buffered: flag("QUEEN_RAFT_SEG_BUFFERED", d.seg_buffered),
+            apply_writers: std::env::var("QUEEN_RAFT_APPLY_WRITERS")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or_else(default_apply_writers),
         }
     }
 }
@@ -653,7 +684,11 @@ impl<'s, S: Store> Applier<'s, S> {
             ))
         })?;
 
-        let (segments, seg_recovery) = Segments::open(seg_root, seg_opts, &recorded)?;
+        let (mut segments, seg_recovery) = Segments::open(seg_root, seg_opts, &recorded)?;
+        // PERF-C: turn on write coalescing and the write pool for this node.
+        // Boot-only and node-local (I2); the pool's threads live and die with
+        // the segment writer, which the apply thread owns.
+        segments.configure_writes(cfg.seg_buffered, cfg.apply_writers);
         let derived = store.read(|r| Derived::rebuild(r, last_now_us))?;
         let rings = derived.rings_len();
         let leases = derived.lease_count();
@@ -905,6 +940,16 @@ impl<'s, S: Store> Applier<'s, S> {
             }
         }
         self.stats.effects += c.entry.effects.len() as u64;
+
+        // PERF-C: flush this entry's buffered segment writes — one `write` per
+        // touched file, on the pool when configured — and publish their index
+        // records. It runs BEFORE the leader answers (I4: a pop's payload bytes
+        // are in this node's files by the time `notify.applied` fires below) and
+        // BEFORE any store commit records the new file lengths (I11): the run
+        // loop only commits after `apply` returns, so this is the boundary that
+        // keeps every recorded length backed by bytes already on the fd. A
+        // no-op when buffering is off.
+        self.segments.flush_writes()?;
 
         // §5.4: every LOGGED command's outcome is recorded, so a retry of a
         // request id inside the window is answered from state and plans

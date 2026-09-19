@@ -111,6 +111,7 @@ use std::os::unix::fs::FileExt;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
@@ -1154,21 +1155,181 @@ impl Reader {
 }
 
 // ---------------------------------------------------------------------------
+// The write pool (PERF-C, QUEEN_RAFT_APPLY_WRITERS)
+// ---------------------------------------------------------------------------
+
+/// A small pool of writer threads that flush an entry's buffered per-bucket
+/// runs off the apply thread. Each bucket is routed to `bucket % n`, so a given
+/// file is only ever written by one thread and its runs stay ordered; the apply
+/// thread joins every job of a flush before that flush returns, so no write is
+/// in flight across a roll, a durable point, or the pool's own drop.
+///
+/// It moves BYTES only — it never touches the store, the RAM indexes or any
+/// bookkeeping (those stay on the apply thread, I1/I2). A raw `write` on the
+/// file's O_APPEND fd lands the run at the file's end in the order the apply
+/// thread reserved. The fd is owned by the `Segments` writer, which outlives
+/// every join, so passing it by raw descriptor is sound.
+struct SegWriters {
+    txs: Vec<mpsc::Sender<WriteMsg>>,
+    results: mpsc::Receiver<(usize, io::Result<Vec<u8>>)>,
+    handles: Vec<std::thread::JoinHandle<()>>,
+}
+
+enum WriteMsg {
+    Job {
+        bucket: usize,
+        fd: RawFd,
+        bytes: Vec<u8>,
+    },
+    Stop,
+}
+
+impl SegWriters {
+    fn spawn(n: usize) -> SegWriters {
+        let (rtx, results) = mpsc::channel::<(usize, io::Result<Vec<u8>>)>();
+        let mut txs = Vec::with_capacity(n);
+        let mut handles = Vec::with_capacity(n);
+        for w in 0..n {
+            let (tx, rx) = mpsc::channel::<WriteMsg>();
+            let rtx = rtx.clone();
+            let h = std::thread::Builder::new()
+                .name(format!("queen-rsm-segwriter-{w}"))
+                .spawn(move || {
+                    while let Ok(msg) = rx.recv() {
+                        match msg {
+                            WriteMsg::Job { bucket, fd, bytes } => {
+                                let t0 = crate::rsm::timing::stamp();
+                                let r = write_all_fd(fd, &bytes);
+                                if let Some(t0) = t0 {
+                                    crate::rsm::timing::record_segment_write(t0.elapsed());
+                                }
+                                let _ = rtx.send((bucket, r.map(|()| bytes)));
+                            }
+                            WriteMsg::Stop => break,
+                        }
+                    }
+                })
+                .expect("spawn a segment writer thread");
+            txs.push(tx);
+            handles.push(h);
+        }
+        SegWriters {
+            txs,
+            results,
+            handles,
+        }
+    }
+
+    /// Scatter one flush's per-bucket runs, wait for all of them, and hand the
+    /// (cleared) buffers back for reuse. The FIRST write error is returned; the
+    /// caller then does not publish any record and stops the node.
+    fn run(&self, jobs: Vec<(usize, RawFd, Vec<u8>)>) -> io::Result<Vec<(usize, Vec<u8>)>> {
+        let n = self.txs.len();
+        let count = jobs.len();
+        for (bucket, fd, bytes) in jobs {
+            self.txs[bucket % n]
+                .send(WriteMsg::Job { bucket, fd, bytes })
+                .expect("segment writer thread alive");
+        }
+        let mut out = Vec::with_capacity(count);
+        let mut first_err: Option<io::Error> = None;
+        for _ in 0..count {
+            let (bucket, r) = self.results.recv().expect("segment writer result");
+            match r {
+                Ok(bytes) => out.push((bucket, bytes)),
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(out),
+        }
+    }
+}
+
+impl Drop for SegWriters {
+    fn drop(&mut self) {
+        for tx in &self.txs {
+            let _ = tx.send(WriteMsg::Stop);
+        }
+        for h in self.handles.drain(..) {
+            let _ = h.join();
+        }
+    }
+}
+
+/// `write(2)` a whole buffer to an O_APPEND fd, looping over short writes and
+/// `EINTR`. The fd is not owned here, so it is never closed.
+fn write_all_fd(fd: RawFd, mut buf: &[u8]) -> io::Result<()> {
+    while !buf.is_empty() {
+        let n = unsafe { libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len()) };
+        if n < 0 {
+            let e = io::Error::last_os_error();
+            if e.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(e);
+        }
+        if n == 0 {
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "write returned 0"));
+        }
+        buf = &buf[n as usize..];
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // The writer
 // ---------------------------------------------------------------------------
 
 struct Active {
     file_id: u32,
     file: File,
+    /// The LOGICAL length: bytes on the fd plus [`Active::pending`] not yet
+    /// written. The offset the next append reserves, and the length a store
+    /// commit records — which is why `pending` MUST be on the fd before any
+    /// commit records this (PERF-C, I11; the apply thread flushes at the end of
+    /// every entry, and [`Segments::durable_point`] flushes defensively).
     len: u64,
-    /// Written since the last durable point.
+    /// Written (or buffered) since the last durable point.
     dirty: bool,
+    /// PERF-C: frame bytes reserved by [`Segments::append`] but not yet written
+    /// to the fd, when buffering is on ([`Segments::configure_writes`]). Empty
+    /// in the inline path. Flushed — one `write` for the whole run — by
+    /// [`Segments::flush_bucket`] / [`Segments::flush_writes`].
+    pending: Vec<u8>,
+    /// The index records of the frames in `pending`, published to the shared
+    /// active index only AFTER their bytes reach the fd (write-before-publish:
+    /// a reader must never locate a frame whose bytes are still in RAM).
+    pending_recs: Vec<Record>,
 }
 
 /// The apply thread's handle: the only writer of the segment files (I1).
 pub struct Segments {
     shared: Arc<Shared>,
     opts: Options,
+    /// PERF-C: coalesce a whole entry's frames per file into ONE `write`
+    /// instead of one per message. Set by [`Segments::configure_writes`] from
+    /// the node-local `QUEEN_RAFT_SEG_BUFFERED` knob; `false` (the inline,
+    /// pre-PERF-C path) is the default a bare `Segments::open` leaves, so every
+    /// segment-level test runs the inline path unchanged.
+    buffered: bool,
+    /// PERF-C: the segment-write pool (`QUEEN_RAFT_APPLY_WRITERS`). `None` = the
+    /// apply thread does the flushes itself. Declared BEFORE `active` so the
+    /// pool's threads are joined (Drop) before the segment files they hold raw
+    /// fds of are closed; every flush also joins before it returns, so no write
+    /// is ever in flight across a roll, a durable point or a drop.
+    writers: Option<SegWriters>,
+    /// Payload `write` syscalls issued, ever — one per append in the inline
+    /// path, one per touched file per entry when buffering. The instrument
+    /// behind PERF-C's "one syscall per file, not per message": divide by
+    /// `apply.appends` for the coalescing ratio. Always maintained (unlike the
+    /// metrics histograms it does not need `QUEEN_RAFT_METRICS`).
+    segment_writes: u64,
     /// One active file per bucket. `None` between a seal and the create that
     /// follows it — and, when that create FAILED (ENOSPC, EMFILE, a name the
     /// disk already holds), until a later call manages to make the file. See
@@ -1327,6 +1488,9 @@ impl Segments {
         let mut segs = Segments {
             shared,
             opts,
+            buffered: false,
+            writers: None,
+            segment_writes: 0,
             active: (0..NBUCKETS).map(|_| None).collect(),
             pending_next: (0..NBUCKETS).map(|_| None).collect(),
             sealed_dirty: Vec::new(),
@@ -1638,6 +1802,8 @@ impl Segments {
                     file,
                     len: meta.bytes,
                     dirty: false,
+                    pending: Vec::new(),
+                    pending_recs: Vec::new(),
                 });
             } else {
                 let next = match highest {
@@ -1710,6 +1876,8 @@ impl Segments {
             file,
             len: 0,
             dirty: false,
+            pending: Vec::new(),
+            pending_recs: Vec::new(),
         });
         self.shared
             .files
@@ -1801,17 +1969,8 @@ impl Segments {
         };
         let file_id = a.file_id;
         let offset = a.len;
-        // PERF-1: the per-append payload write, the entry's real file I/O. The
-        // clock read is gated on the knob (`stamp` is `None` when metrics are
-        // off) so the ablation prices it, not just the histogram write.
-        let w0 = crate::rsm::timing::stamp();
-        a.file.write_all(&self.buf)?;
-        if let Some(w0) = w0 {
-            crate::rsm::timing::record_segment_write(w0.elapsed());
-        }
         a.len += flen;
         a.dirty = true;
-
         let pos = Position {
             bucket,
             file_id,
@@ -1827,11 +1986,31 @@ impl Segments {
             count,
             len: flen as u32,
         };
-        self.shared
-            .active
-            .write()
-            .expect("segment active index poisoned")
-            .insert(bucket, rec);
+        if self.buffered {
+            // PERF-C: reserve only. Buffer the frame's bytes and hold its index
+            // record back; the whole run for this file is written with one
+            // syscall by `flush_writes`/`flush_bucket` at the end of the entry
+            // (or before a roll / durable point), and the record is published
+            // AFTER the bytes reach the fd (write-before-publish).
+            a.pending.extend_from_slice(&self.buf);
+            a.pending_recs.push(rec);
+        } else {
+            // PERF-1: the per-append payload write, the entry's real file I/O.
+            // The clock read is gated on the knob (`stamp` is `None` when
+            // metrics are off) so the ablation prices it, not just the
+            // histogram write.
+            let w0 = crate::rsm::timing::stamp();
+            a.file.write_all(&self.buf)?;
+            if let Some(w0) = w0 {
+                crate::rsm::timing::record_segment_write(w0.elapsed());
+            }
+            self.segment_writes += 1;
+            self.shared
+                .active
+                .write()
+                .expect("segment active index poisoned")
+                .insert(bucket, rec);
+        }
         let dead;
         {
             let mut g = self.shared.files.write().expect("segment files poisoned");
@@ -1859,6 +2038,141 @@ impl Segments {
             self.buf = Vec::with_capacity(1 << 16);
         }
         Ok(pos)
+    }
+
+    // -- PERF-C: write coalescing and the write pool ----------------------
+
+    /// Turn on write coalescing and, optionally, the write pool. Called ONCE at
+    /// boot by [`crate::rsm::apply::Applier::open`] with the node-local knobs
+    /// (`QUEEN_RAFT_SEG_BUFFERED`, `QUEEN_RAFT_APPLY_WRITERS`); a bare
+    /// `Segments::open` leaves the inline, pre-PERF-C path in place, so every
+    /// segment-level test is unaffected. `writers > 0` implies buffering: there
+    /// is nothing to hand a pool without a buffer to flush.
+    pub fn configure_writes(&mut self, buffered: bool, writers: usize) {
+        self.buffered = buffered || writers > 0;
+        self.writers = (writers > 0).then(|| SegWriters::spawn(writers));
+    }
+
+    /// Payload `write` syscalls issued so far (PERF-C's coalescing instrument).
+    pub fn segment_writes(&self) -> u64 {
+        self.segment_writes
+    }
+
+    /// Write one bucket's buffered run to its fd with a single `write`, then
+    /// publish the run's index records (write-before-publish). Inline, on the
+    /// caller's thread — used by `roll`, `durable_point` and the no-pool
+    /// `flush_writes`. A no-op when the bucket has nothing buffered.
+    fn flush_bucket(&mut self, bucket: usize) -> Result<()> {
+        // Move the run out so the shared-index publish below borrows only
+        // `self.shared`, not the `Active`.
+        let (bytes, recs) = match self.active[bucket].as_mut() {
+            Some(a) if !a.pending.is_empty() => (
+                std::mem::take(&mut a.pending),
+                std::mem::take(&mut a.pending_recs),
+            ),
+            _ => return Ok(()),
+        };
+        let w0 = crate::rsm::timing::stamp();
+        // The fd is O_APPEND, so the run lands at the file's end in reserve
+        // order — exactly the offsets `append` recorded.
+        let res = self.active[bucket]
+            .as_mut()
+            .expect("active checked above")
+            .file
+            .write_all(&bytes);
+        if let Some(w0) = w0 {
+            crate::rsm::timing::record_segment_write(w0.elapsed());
+        }
+        // Whatever happened, hand the buffer back for reuse (cleared) so the
+        // hot path does not re-allocate; on error the records are NOT published
+        // (their bytes are not on the fd) and the error stops the node.
+        let mut bytes = bytes;
+        bytes.clear();
+        if let Some(a) = self.active[bucket].as_mut() {
+            if a.pending.is_empty() {
+                a.pending = bytes;
+            }
+        }
+        res?;
+        self.segment_writes += 1;
+        let mut ai = self
+            .shared
+            .active
+            .write()
+            .expect("segment active index poisoned");
+        for rec in recs {
+            ai.insert(bucket as u16, rec);
+        }
+        Ok(())
+    }
+
+    /// Flush every bucket with a buffered run, inline. The correctness floor
+    /// under `durable_point` and the no-pool `flush_writes`.
+    fn flush_all_pending(&mut self) -> Result<()> {
+        for b in 0..NBUCKETS {
+            if self.active[b]
+                .as_ref()
+                .is_some_and(|a| !a.pending.is_empty())
+            {
+                self.flush_bucket(b)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// PERF-C: flush the entry's buffered segment writes. The apply thread calls
+    /// this at the end of every entry (`execute`), before it answers (I4) and
+    /// before any store commit records the new file lengths (I11).
+    ///
+    /// A no-op when buffering is off (nothing is ever buffered). With the pool
+    /// the per-bucket runs are scattered to the writers by bucket — each bucket
+    /// to exactly one writer, so per-file order holds — the apply thread joins
+    /// them all, then publishes their records itself (write-before-publish, on
+    /// the one thread). Both halves of the entry are complete when this returns.
+    pub fn flush_writes(&mut self) -> Result<()> {
+        let Some(writers) = self.writers.as_ref() else {
+            return self.flush_all_pending();
+        };
+        // Gather the runs, taking each bucket's bytes and records out.
+        let mut jobs: Vec<(usize, RawFd, Vec<u8>)> = Vec::new();
+        let mut recs: Vec<(usize, Vec<Record>)> = Vec::new();
+        for b in 0..NBUCKETS {
+            if let Some(a) = self.active[b].as_mut() {
+                if !a.pending.is_empty() {
+                    jobs.push((b, a.file.as_raw_fd(), std::mem::take(&mut a.pending)));
+                    recs.push((b, std::mem::take(&mut a.pending_recs)));
+                }
+            }
+        }
+        if jobs.is_empty() {
+            return Ok(());
+        }
+        let n = jobs.len() as u64;
+        // Scatter and join. The fds outlive the join (the apply thread owns the
+        // files and does not touch them until `run` returns), so the raw writes
+        // are safe.
+        let returned = writers.run(jobs)?;
+        for (b, mut buf) in returned {
+            buf.clear();
+            if let Some(a) = self.active[b].as_mut() {
+                if a.pending.is_empty() {
+                    a.pending = buf;
+                }
+            }
+        }
+        self.segment_writes += n;
+        // Publish now that every write has returned (write-before-publish).
+        let mut ai = self
+            .shared
+            .active
+            .write()
+            .expect("segment active index poisoned");
+        for (b, run) in recs {
+            for rec in run {
+                ai.insert(b as u16, rec);
+            }
+        }
+        Ok(())
     }
 
     /// Seal a bucket's active file and start a new one.
@@ -1897,6 +2211,12 @@ impl Segments {
         if bucket as usize >= NBUCKETS {
             return Err(SegError::Refused("bucket out of range"));
         }
+        // PERF-C: the file about to be sealed must carry its buffered bytes and
+        // publish its records BEFORE `ai.take(bucket)` moves the active index to
+        // `sealed_recent` — otherwise a just-appended, still-buffered frame
+        // would be in neither index and its bytes off the fd. Inline (the apply
+        // thread), never the pool: a roll is a rare, mid-entry structural step.
+        self.flush_bucket(bucket as usize)?;
         let Some(cur_id) = self.active[bucket as usize].as_ref().map(|a| a.file_id) else {
             return Ok(());
         };
@@ -2207,6 +2527,12 @@ impl Segments {
     /// the store — which is why it does NOT retire the seals it is handing
     /// over (see the comment at the end of this function).
     pub fn durable_point(&mut self) -> Result<DurablePoint> {
+        // PERF-C: a durable point fsyncs and records file LENGTHS, so every
+        // buffered byte must be on the fd first (I11). The apply thread already
+        // flushes at the end of each entry, so this is normally a no-op; it is
+        // here so a caller that appends and takes a point directly (the segment
+        // and crash tests) is correct too. Inline, never the pool.
+        self.flush_all_pending()?;
         // NOTHING is marked clean before every barrier has returned. A durable
         // point that fails half way must leave the writer believing it still
         // owes those fsyncs, so a retry re-issues them; clearing the dirty

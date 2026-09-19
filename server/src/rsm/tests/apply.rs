@@ -173,6 +173,11 @@ pub fn cfg() -> ApplyConfig {
         gc_per_pass: 32,
         idle_tick_ms: 2,
         durable_async: true,
+        // PERF-C: exercise write coalescing across the whole apply suite; the
+        // pool is off here (no writer-thread churn per test), and covered by
+        // its own tests that set `apply_writers`.
+        seg_buffered: true,
+        apply_writers: 0,
     }
 }
 
@@ -3590,7 +3595,24 @@ fn an_entry_that_fails_half_way_stops_this_applier_and_lands_nothing() {
     let dir = tmp_dir("poison");
     let mut node = Node::at(dir.clone());
     {
-        let (mut a, _) = open_at(&node);
+        // PERF-C: pin the INLINE write path, the mechanism this test documents
+        // and asserts — the refused entry's prefix reaches the segment FILE and
+        // recovery truncates it. With buffering the prefix is buffered and
+        // never written, so there is nothing to truncate; that path is covered
+        // by `a_buffered_half_entry_leaves_nothing_on_the_disk` and by the
+        // mode-independent end-state asserts below.
+        let inline = ApplyConfig {
+            seg_buffered: false,
+            ..cfg()
+        };
+        let (mut a, _) = Applier::open(
+            node.store(),
+            &node.seg_dir(),
+            seg_opts(),
+            inline,
+            Arc::new(crate::rsm::apply::NoNotify),
+        )
+        .expect("open");
         a.apply(
             &Build::new(BASE_US, 1, 0)
                 .cmd(vec![
@@ -3702,6 +3724,305 @@ fn an_entry_that_fails_half_way_stops_this_applier_and_lands_nothing() {
         rec.segments.truncated.len() == 1,
         "the bytes the failed entry appended are truncated away: {:?}",
         rec.segments.truncated
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PERF-C: write coalescing and the write pool
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_buffered_entry_coalesces_writes_per_file_and_reads_back() {
+    // One entry that appends four frames across three buckets costs ONE `write`
+    // per touched file (PERF-C), not one per message, and every frame is
+    // readable through the position the store recorded — bytes and offsets are
+    // identical to the inline path. Run with the write pool on, so the pooled
+    // write plus the apply-thread record publish is exercised, and reopened, so
+    // the coalesced bytes are shown durable.
+    let dir = tmp_dir("perfc-coalesce");
+    {
+        let mut node = Node::at(dir.clone());
+        let with_pool = ApplyConfig {
+            seg_buffered: true,
+            apply_writers: 2,
+            ..cfg()
+        };
+        let blobs: Vec<Vec<u8>> = (0..4u8).map(|i| vec![i + 1; 40]).collect();
+        {
+            let (mut a, _) = Applier::open(
+                node.store(),
+                &node.seg_dir(),
+                seg_opts(),
+                with_pool,
+                Arc::new(crate::rsm::apply::NoNotify),
+            )
+            .expect("open");
+
+            a.apply(
+                &Build::new(BASE_US, 1, 0)
+                    .cmd(vec![
+                        Effect::QueueUpsert {
+                            tenant: TENANT.into(),
+                            queue: QUEUE.into(),
+                            cfg: queue_config(BASE_US),
+                        },
+                        Effect::PartitionCreate {
+                            pid: 1,
+                            uuid: uuid(1),
+                            tenant: TENANT.into(),
+                            queue: QUEUE.into(),
+                            partition: "p1".into(),
+                            created_at_us: BASE_US,
+                        },
+                        Effect::PartitionCreate {
+                            pid: 2,
+                            uuid: uuid(2),
+                            tenant: TENANT.into(),
+                            queue: QUEUE.into(),
+                            partition: "p2".into(),
+                            created_at_us: BASE_US,
+                        },
+                        Effect::PartitionCreate {
+                            pid: 3,
+                            uuid: uuid(3),
+                            tenant: TENANT.into(),
+                            queue: QUEUE.into(),
+                            partition: "p3".into(),
+                            created_at_us: BASE_US,
+                        },
+                    ])
+                    .at(1, 1),
+            )
+            .expect("setup");
+            let writes_before = a.segments().segment_writes();
+
+            // Two appends to bucket 1, one each to buckets 2 and 3 — one entry.
+            // pid_base is 4: entry 1 assigned pids 1..=3, so `next_pid` is 4.
+            a.apply(
+                &Build::new(BASE_US + 10, 4, 10)
+                    .cmd(vec![
+                        Effect::Append {
+                            pid: 1,
+                            bucket: 1,
+                            base_offset: 0,
+                            count: 1,
+                            created_at_us: BASE_US + 10,
+                            hashes: hashes(10, 1),
+                            blob: blobs[0].clone(),
+                        },
+                        Effect::Append {
+                            pid: 1,
+                            bucket: 1,
+                            base_offset: 1,
+                            count: 1,
+                            created_at_us: BASE_US + 11,
+                            hashes: hashes(11, 1),
+                            blob: blobs[1].clone(),
+                        },
+                        Effect::Append {
+                            pid: 2,
+                            bucket: 2,
+                            base_offset: 0,
+                            count: 1,
+                            created_at_us: BASE_US + 12,
+                            hashes: hashes(12, 1),
+                            blob: blobs[2].clone(),
+                        },
+                        Effect::Append {
+                            pid: 3,
+                            bucket: 3,
+                            base_offset: 0,
+                            count: 1,
+                            created_at_us: BASE_US + 13,
+                            hashes: hashes(13, 1),
+                            blob: blobs[3].clone(),
+                        },
+                    ])
+                    .at(2, 1),
+            )
+            .expect("append");
+
+            let writes = a.segments().segment_writes() - writes_before;
+            assert_eq!(
+                writes, 3,
+                "one write per touched file (3), not one per message (4)"
+            );
+
+            a.commit().expect("commit");
+
+            // Every frame reads back through the position the store recorded.
+            for (pid, off, blob) in [
+                (1u64, 0u64, &blobs[0]),
+                (1, 1, &blobs[1]),
+                (2, 0, &blobs[2]),
+                (3, 0, &blobs[3]),
+            ] {
+                let pos = node
+                    .store()
+                    .read(|r| r.seg_loc(pid, off))
+                    .expect("read")
+                    .expect("a seg_loc row");
+                let frame = a
+                    .reader()
+                    .read(segments::Position {
+                        bucket: pos.bucket,
+                        file_id: pos.file_id,
+                        offset: pos.offset,
+                        len: pos.len,
+                    })
+                    .expect("read frame");
+                assert_eq!(&frame.blob, blob, "pid {pid} off {off} reads back");
+            }
+            a.durable_point().expect("durable point");
+        }
+        node.keep();
+        node.close();
+    }
+
+    // Reopen: the coalesced bytes are on the platter, nothing is truncated, and
+    // the tails are whole.
+    let node = Node::at(dir);
+    let (a, rec) = Applier::open(
+        node.store(),
+        &node.seg_dir(),
+        seg_opts(),
+        cfg(),
+        Arc::new(crate::rsm::apply::NoNotify),
+    )
+    .expect("reopen");
+    assert_eq!(rec.applied_index, 2, "both entries are durable");
+    assert!(
+        rec.segments.truncated.is_empty(),
+        "the coalesced writes were on the fd before the point recorded them: {:?}",
+        rec.segments.truncated
+    );
+    for (pid, last) in [(1u64, 1i64), (2, 0), (3, 0)] {
+        let p = node
+            .store()
+            .read(|r| Ok(r.partition(pid)?.expect("partition")))
+            .expect("read");
+        assert_eq!(p.last_offset, last, "pid {pid} tail survives the reopen");
+    }
+    // A frame still reads back after recovery.
+    let pos = node
+        .store()
+        .read(|r| r.seg_loc(1, 1))
+        .expect("read")
+        .expect("seg_loc");
+    let frame = a
+        .reader()
+        .read(segments::Position {
+            bucket: pos.bucket,
+            file_id: pos.file_id,
+            offset: pos.offset,
+            len: pos.len,
+        })
+        .expect("read frame after reopen");
+    assert_eq!(frame.blob, vec![2u8; 40]);
+}
+
+#[test]
+fn a_buffered_half_entry_leaves_nothing_on_the_disk() {
+    // The buffered counterpart of the poison test: a refused entry's valid
+    // prefix is BUFFERED, so the failure (before the end-of-entry flush) means
+    // its bytes never reach the fd at all — nothing is written, nothing is
+    // truncated, and the committed state is the one before the entry.
+    let dir = tmp_dir("perfc-halfentry");
+    {
+        let mut node = Node::at(dir.clone());
+        {
+            // Buffering on, pool off: the prefix is held in RAM and discarded.
+            let (mut a, _) = Applier::open(
+                node.store(),
+                &node.seg_dir(),
+                seg_opts(),
+                cfg(),
+                Arc::new(crate::rsm::apply::NoNotify),
+            )
+            .expect("open");
+            a.apply(
+                &Build::new(BASE_US, 1, 0)
+                    .cmd(vec![
+                        Effect::PartitionCreate {
+                            pid: 1,
+                            uuid: uuid(1),
+                            tenant: TENANT.into(),
+                            queue: QUEUE.into(),
+                            partition: "p0".into(),
+                            created_at_us: BASE_US,
+                        },
+                        Effect::Append {
+                            pid: 1,
+                            bucket: 5,
+                            base_offset: 0,
+                            count: 1,
+                            created_at_us: BASE_US,
+                            hashes: hashes(1, 1),
+                            blob: vec![1; 64],
+                        },
+                    ])
+                    .at(1, 1),
+            )
+            .expect("apply");
+            a.durable_point().expect("durable point");
+
+            let err = a
+                .apply(
+                    &Build::new(BASE_US + 10, 2, 100)
+                        .cmd(vec![
+                            Effect::Append {
+                                pid: 1,
+                                bucket: 5,
+                                base_offset: 1,
+                                count: 1,
+                                created_at_us: BASE_US + 10,
+                                hashes: hashes(2, 1),
+                                blob: vec![2; 64],
+                            },
+                            Effect::Append {
+                                pid: 99,
+                                bucket: 5,
+                                base_offset: 0,
+                                count: 1,
+                                created_at_us: BASE_US + 10,
+                                hashes: hashes(3, 1),
+                                blob: vec![3; 64],
+                            },
+                        ])
+                        .at(2, 1),
+                )
+                .expect_err("the second effect must refuse");
+            assert!(matches!(err, ApplyError::Inconsistent { .. }), "{err}");
+        }
+        node.keep();
+        node.close();
+    }
+
+    let node = Node::at(dir);
+    let (_a, rec) = Applier::open(
+        node.store(),
+        &node.seg_dir(),
+        seg_opts(),
+        cfg(),
+        Arc::new(crate::rsm::apply::NoNotify),
+    )
+    .expect("reopen");
+    assert_eq!(
+        rec.applied_index, 1,
+        "the failed entry left no applied index"
+    );
+    assert!(
+        rec.segments.truncated.is_empty(),
+        "the buffered prefix never reached the fd, so there is nothing to truncate: {:?}",
+        rec.segments.truncated
+    );
+    let p = node
+        .store()
+        .read(|r| Ok(r.partition(1)?.expect("partition")))
+        .expect("read");
+    assert_eq!(
+        p.last_offset, 0,
+        "the half entry's append is not in the state"
     );
 }
 
