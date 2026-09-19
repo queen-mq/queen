@@ -1,0 +1,17 @@
+host: queenpgless-01 Linux 6.8.0-124-generic 8 vCPU
+binary: /root/raft/perf/queen/server/target/release/queen  md5 a2208d19ad18
+loader: /root/goload  md5 2c97cccb0d1e
+regime: A20k   perf window: 60s @ 99Hz
+extra broker env: <none>
+started: 2026-09-19T08:14:16+00:00
+broker pid 338942 storageReady on 6699
+goload A20k for 75s: -rate 20000 -push-batch 10 -partitions 100 -consumers 32 -pop-batch 200 -manual-ack -payload 256 -ramp-sec 5
+perf record -g -F 99 -p 338942 -- sleep 60
+[final] offered=127722 achieved=127659 shed=0 (msgs: offered=1277220 achieved=1276590 shed=0) pushErr=0 | pushed=1276590 popped=1135870 lag=140720 | popErr=0 empty=149968 | overall p50=9.02 p99=232.45 p999=288.77 ms | acked=1131620 ackErr=0 ackLag=144970 ackAvg=11.89ms
+---- top 40 by SELF ----
+
+---- top 40 by INCLUSIVE ----
+
+broker errors: 0
+results in: /root/raft/perf/runs/A20k
+finished: 2026-09-19T08:15:25+00:00

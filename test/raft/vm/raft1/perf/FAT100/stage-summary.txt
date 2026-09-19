@@ -1,0 +1,75 @@
+ts                             1789806198
+plan_p50                            8.389 ms
+plan_p99                            8.389 ms
+plan_max                           14.319 ms
+plan_count                     3273
+arrival_to_proposed_p50            16.777 ms
+arrival_to_proposed_p99          1073.742 ms
+arrival_to_proposed_max          1015.192 ms
+arrival_to_proposed_count      58201
+propose_roundtrip_p50              33.554 ms
+propose_roundtrip_p99            1073.742 ms
+propose_roundtrip_max            1091.856 ms
+propose_roundtrip_count        3269
+proposed_to_committed_p50           8.389 ms
+proposed_to_committed_p99          33.554 ms
+proposed_to_committed_max          45.594 ms
+proposed_to_committed_count    3272
+log_fsync_p50                       4.194 ms
+log_fsync_p99                      16.777 ms
+log_fsync_max                      45.267 ms
+log_fsync_count                2945
+apply_entry_p50                     8.389 ms
+apply_entry_p99                    16.777 ms
+apply_entry_max                    18.712 ms
+apply_entry_count              3269
+apply_segment_p50                   0.033 ms
+apply_segment_p99                   0.524 ms
+apply_segment_max                  11.961 ms
+apply_segment_count            58142
+apply_other_p50                     4.194 ms
+apply_other_p99                    16.777 ms
+apply_other_max                    14.078 ms
+apply_other_count              3269
+store_commit_p50                    8.389 ms
+store_commit_p99                   16.777 ms
+store_commit_max                   27.534 ms
+store_commit_count             2738
+durable_point_p50                1073.742 ms
+durable_point_p99                1073.742 ms
+durable_point_max                1004.949 ms
+durable_point_count            64
+durable_seg_fsync_p50             134.218 ms
+durable_seg_fsync_p99             268.435 ms
+durable_seg_fsync_max             200.333 ms
+durable_seg_fsync_count        64
+durable_dir_fsync_p50               0.000 ms
+durable_dir_fsync_p99               4.194 ms
+durable_dir_fsync_max               3.554 ms
+durable_dir_fsync_count        64
+pop_read_p50                        0.000 ms
+pop_read_p99                        0.000 ms
+pop_read_max                        0.000 ms
+pop_read_count                 0
+drain_commands_p50             127
+drain_commands_p99             127
+drain_commands_count           3273
+drain_messages_p50             16383
+drain_messages_p99             16383
+drain_messages_count           3273
+group_entries_p50              1
+group_entries_p99              3
+group_entries_count            2946
+group_bytes_p50                1048575
+group_bytes_p99                2097151
+group_bytes_count              2946
+apply_channel_depth_p50        3
+apply_channel_depth_p99        7
+apply_channel_depth_count      3270
+slow_commands_total            0
+apply_receives_total           3270
+apply_entries                  3074
+apply_appends                  54401
+apply_messages                 5440100
+apply_commits                  2609
+apply_durable_points           59

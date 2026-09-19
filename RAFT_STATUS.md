@@ -108,6 +108,51 @@ Against the gate criterion (PLAN §15: *message-path parity, crash matrix,
 differential and flatness results, raft1 performance vs postgres against the
 O14 targets*). Numbers, not adjectives; what failed is stated plainly.
 
+**Performance package, rounds 1–2 (2026-09-19) — the durable-point wall is down,
+two of three O14 targets move, C1000 stays bounded upstream (M8 / M9).** In plain
+words, what changed and by how much:
+
+- **The tail (A20k).** Round 1's levers (PERF-A/B/C) did **not** move it — the
+  durable point stayed **268 ms** on the apply thread. Round 2 removed what loaded
+  it (the per-message dedup read-modify-write → PERF-E; the per-append counter and
+  pending writes → PERF-D; the 256-file fsync fan-out → PERF-F at buckets=1) and the
+  durable point **collapsed 268 → 16.8 ms** (16×), confirmed pop-independent. A20k
+  push p99 fell **203 → 16.5–29.8 ms**: p50 is **0.72× pg**; p99 is at **parity**
+  with postgres (0.61× lightly-consumed / **1.10× consume-matched**), not the clean
+  beat the first draft claimed — a review corrected the A/B for unequal pop load.
+  RSS fell 348 → 141 MB.
+- **The many-partition shape (C1000).** **Unchanged, and it was never round-2's
+  target.** Round 2 halved its durable point (134 → 67 ms) but C1000's bound is
+  `arrival→proposed` **≈ 1073 ms**, identical old↔new↔every bucket — the per-partition
+  propose/ingress serialization, **upstream** of everything the store levers touch.
+  Best push p50 **164.86 ms = 24.9× pg**; the 60 s window is consume-saturated (lag
+  climbs, p50 flat not settling), so no long run was warranted.
+- **Throughput (FAT100).** **3× — 86 k → 265 k msg/s = 30% → 92% of the 287 k
+  postgres knee.** `mdb_page_flush` (round-1's dominant 13.3% CPU) is gone from the
+  profile; FAT is now allocator-bound on the per-message JSON `Value` parse, not
+  fsync-bound.
+
+**O14 gate (raft1 p50 AND p99 ≤ pg; fat-batch ≥ 70% of the knee), best bucket = 1:**
+
+| target | best (b=1) | postgres | ratio / % | verdict |
+|---|---|---|---|---|
+| A20k p50 | 6.62 | 9.15 | 0.72× | **PASS** |
+| A20k p99 (consume-matched) | 29.82 | 27.01 | 1.10× | **borderline miss** on `≤ pg`; PASS the 2× gate |
+| C1000 p50 | 164.86 | 6.62 | 24.9× | **FAIL** |
+| FAT100 tput | 265,158 | 287,363 | 92% | **PASS** (> 70%) |
+
+`proceed=false` by the letter of the gate (C1000 p50 fails at every bucket); the
+long PERF-5 runs were **not** run — Alice's rule, do not run long tests if the short
+ones are bad. **What still bounds each symptom, and the next lever:** A20k is solved
+(nothing left for the gate); FAT's next lever is the per-message `serde_json::Value`
+allocation, **not** the store; C1000's next lever is the ingress/propose per-partition
+parallelism, upstream of apply — a separate work item. **Defaults after round 2:**
+the round-1 writer pool `QUEEN_RAFT_APPLY_WRITERS` is now **adaptive** (inline when an
+entry touches ≤ 2 files or carries < 64 KiB, else the pool), and `QUEEN_RAFT_BUCKETS`
+defaults to **16** (b=1 and b=16 are co-best within single-run noise; b=256 is the
+loser). One short A/B is owed before ranking round 2 a consume win — `DEDUP_INDEX=txns`
+vs `rows` steady-state consume (R-130).
+
 | criterion | verdict | evidence |
 |---|---|---|
 | message-path parity (differential fuzzer) | **PASS** | thousands of 250-op seeds, **0 divergence** in message-path responses once 7 classified envelope gaps are absorbed; per-side checker (at-least-once + payload-hash) green on **both** brokers. `PARITY-NOTES.md`. Caveat: the 2000-seed target was not reached (200+; a contended shared checkout with a concurrent crash harness), re-runnable on a release broker. |
@@ -116,7 +161,7 @@ O14 targets*). Numbers, not adjectives; what failed is stated plainly.
 | dropped-unflushed-writes durability | **PASS (with one HIGH defect, R-123)** | discharges **R-106 / R-111 / R-114**. pipeline=1: 20/20 dm-flakey rounds, ~73k acked, `missing=0`. pipeline=4 (NIGHT-C, F-1-fixed binary): **99/100** rounds every acked push delivered after reopen (`acked==ledger==delivered`, `missing=0`), reopen 316 ms–9.2 s, ~45.6 M acked, 0 poison. The **1 FAIL (round 75) is R-123**: `SIGBUS`/`BUS_ADRERR` on the `store/data.mdb` read mmap during apply-replay — the fsync'd log is intact (`truncated_tail=false`, 680 690 frames), but the torn `MDB_NOSYNC` store crashes the process before recovery completes. The durability *property* (log-is-truth) holds; the store-reopen path has a hazard. `NIGHT-C-flaky.md`. |
 | flatness (I8, §13.6) | **mixed — FAIL on the strict gate** | pipeline=4, 8.14 M at-rest / 6-min runs (NIGHT-A §2). **CPU and disk ARE flat** with store size (G-3's core claim holds: A20k CPU +0.0%, disk +2.9%). The **A20k** shape's p50/p99 **are isolated** from an 8 M cold store (+8.1%/+5.4% PASS) — but its **p999 +155%** and RSS are not. The **C1000** (1000-single-message-partition, fan-out) shape is **NOT isolated**: p50 **+546%**, ack **+122%**, p99 +15% — all FAIL. **RSS is not flat in any shape**: ~**387 B/msg** at rest (8.14 M → ~3.0 GB), lower than pipeline=1's 610 (R-105) but still **linear in stored count**, and it climbs within every run (the 3600 s dedup index retains every push). **Provenance caveat:** `flatness-night.sh` is not committed and the surviving `.results`/`compare-*.txt` carry the literal `pipeline=1` label the sed missed; pipeline=4 is the agent's note (mechanically consistent — empty-A20k p50 56.58/p99 452.6 matches the committed pipeline=4 `fivemin.sh` 44.29/419.8 — but not independently checkable from committed artifacts). |
 | noisy neighbour (O19) | **FAIL** | pipeline=4, a **real** active DLQ storm (NIGHT-A §3, `dlqstorm.py`: wildcard queue-mode pop + ack `status:"dlq"`). A light storm on one hot partition — **463/s**, 45 350 rows filed — raised the cold partitions' p99 **+90.6%** (87.55 → 166.91 ms); the 2 M backlog **at rest** (storm stopped) still held it **+53.2%** (→ 134.14). Both blow ±15%. Quiet throughput never lagged; only its latency did. **Reproducible from committed raw** (`night/quiet-{before,during,after}.gl` finals; `storm.out` 45350/98 s = 463/s) — the WP-1.11 transcription-error cell is superseded by a clean numeric verdict. |
-| raft1 performance vs O14 | **FAIL** | pipeline=4 on the fixed binary (NIGHT-A §1, M7). O14 wants raft1 p50 **and** p99 ≤ postgres at A20k/A50k/C1000 and fat-batch ≥ 70% of the knee. **Push p50 beats/matches pg** (A20k 6.24 vs 9.15, A50k 19.58 vs 23.17 — and A50k is far better than pipeline=1's 148.5) **but the p99 tail is ~6× pg** (A20k 162.8 vs 27.0 = 6.03×; A50k 444 vs 75 = 5.9×), **C1000 fan-out FAILS** (cleanest fresh-store p50 **9.79** = 1.48× pg 6.62; the §1 shared-broker 238.6/36× is **confounded** by the A50k 1.72 M backlog drain, not a valid fan-out datum), and **FAT100 ≈ 90k msg/s ≈ 31%** of the postgres knee (287k). Like-for-like: byte-identical goload flags, same loader md5 `2c97cccb0d1e`, binary differs only by storage class. Levers if G1 wants a re-attempt: R-105 active-index RAM, the dedup row cost, the §11.3 cadence, `QUEEN_RAFT_ENTRY_MAX_BYTES`/batch caps (O23) before raising the pipeline. |
+| raft1 performance vs O14 | **still FAIL on the gate (C1000 p50), but rounds 1–2 moved the tail and throughput** | M7 (round 0, no levers) was push p99 ~6× pg and FAT ≈31% of the knee. **Round 1 (M8)** — the store levers PERF-A/B/C did **not** move the O14 numbers (durable point stayed 268 ms on the apply thread); PERF-B alone earned its place (8 M-loaded C1000 flatness +546%→+50%). **Round 2 (M9)** — PERF-D+E+F collapsed the durable point **268→16.8 ms** (16×), so **A20k p99 203→16.5–29.8 ms** (p50 **0.72× pg**, p99 **parity** with pg: 0.61× lightly-consumed / **1.10× consume-matched**) and **FAT100 86k→265k msg/s = 92%** of the 287k knee (**PASS >70%**). **C1000 is unchanged (24.9× pg p50)** — its bound is `arrival→proposed` ≈1073 ms, upstream of the store, so `proceed=false`. Best bucket = 1 (default 16; b=256 worst); the round-1 writer pool is now adaptive. Long PERF-5 runs not run (Alice's iterate rule). Like-for-like: byte-identical goload flags, loader md5 `2c97cccb0d1e`. Next levers: FAT = the per-message `serde_json::Value` alloc; C1000 = ingress/propose per-partition parallelism; A20k = solved. |
 
 **F-1 / R-117 is fixed and discharged; the standing concerns are now R-123 and
 R-121.** F-1 — the batcher `tokio::spawn`ed each `repl.propose()` independently, so
@@ -144,16 +189,21 @@ crash).
 
 ### G1 checklist — what Alice decides (in priority order)
 
-1. **G1 go / no-go, now that the numbers exist.** Parity, crash safety and
-   dropped-write durability are PROVEN and F-1 is fixed (`f8bfa672`) and discharged
-   on the VM. But at pipeline=4 **O14 FAILS** (push p99 ~6× pg, C1000 fan-out
-   1.48× pg fresh-store, FAT100 ≈31% of the knee), **I8 is mixed** (CPU/disk flat,
-   A20k median isolated, but RSS not flat and C1000 not isolated) and **O19 FAILS**
-   (a 463/s DLQ storm lifts cold-partition p99 +90.6%). Either **(a)** hold G1 open
-   until the levers below close the O14 gap, or **(b)** ratify G1 on parity + crash
-   + durability + F-1, accept that single-node pipeline=4 does not yet meet O14/O19,
-   and carry the levers + R-121 / R-123 as G2 deliverables. The one-VM co-resident-
-   loader caveat (O13) applies to every number.
+1. **G1 go / no-go, now that the numbers exist and the performance package ran.**
+   Parity, crash safety and dropped-write durability are PROVEN and F-1 is fixed
+   (`f8bfa672`) and discharged on the VM. The package (M8/M9) **closed the
+   durable-point wall**: A20k push p99 is now parity with pg (was ~6×) and FAT100 is
+   92% of the knee (was 31%) — **two of three O14 targets move**. What remains is
+   **C1000** (best p50 24.9× pg), whose bound is `arrival→proposed` ≈1073 ms
+   **upstream of the store** (per-partition propose serialization), so `proceed=false`
+   by the letter of the gate; **I8 is still mixed** (CPU/disk flat, A20k median
+   isolated, RSS not flat, C1000 not isolated) and **O19 still FAILS** (a 463/s DLQ
+   storm lifts cold-partition p99 +90.6%). Either **(a)** hold G1 open until an
+   ingress/propose work item closes C1000, or **(b)** ratify G1 on parity + crash +
+   durability + F-1 + the A20k-tail/FAT wins, accept that C1000 and O19 are not yet
+   met single-node, and carry the C1000 ingress lever + R-121 / R-123 as G2
+   deliverables. The one-VM co-resident-loader caveat (O13) applies to every number,
+   and one short consume A/B is owed (R-130) before ranking round 2 a consume win.
 2. **R-123 (HIGH — SIGBUS on store reopen).** 1/100 dropped-writes rounds the broker
    crashes on the torn `MDB_NOSYNC` `store/data.mdb` mmap during apply-replay and
    does not reopen (the reproduced WP-0.3 D-01/D-03). The log is truth and intact;
@@ -168,9 +218,11 @@ crash).
    Advisory, or a G2 gate?
 4. **Decisions the pipeline=4 evidence flags** — see *"Phase-1 evidence: decisions
    now in doubt"* below, now with numbers: **D4** (the pipeline of 4 is correct and
-   lifts A50k p50 148→20 ms, but the p99 tail and C1000 fan-out are the O14 miss),
-   **D9 / R-105** (per-frame active-index RAM — ~387 B/msg at rest, bounded and
-   reclaimable, but linear in stored count), **§11.3 cadence**, and **O14** itself
+   lifts A50k p50 148→20 ms; after the performance package the A20k p99 tail is
+   fixed — the remaining O14 miss is C1000, bounded upstream of the store), **D9 /
+   R-105** (per-frame active-index RAM — ~387 B/msg at rest, bounded and reclaimable,
+   but linear in stored count; note PERF-E's `DEDUP_INDEX=txns` retires the
+   per-message `(pid,hash)` index, R-129), **§11.3 cadence**, and **O14** itself
    (reachable single-node, or only at raft3 / with an extra load-gen VM per O13?).
 5. **The two client-visible parity gaps.** **R-115** (empty pop 200+body vs a
    bodiless 204) is a one-line WP-1.7 facade fix. **R-116** (`leaseReleased`
@@ -471,6 +523,21 @@ to beat are **M7** (`NIGHT-A-pipeline4.md`).
 | PERF-F the bucket count as a knob, one write and one fsync per entry | **done** (this commit) | `QUEEN_RAFT_BUCKETS` (power-of-two 1..=256, default **16**; pinned in a per-tree `seg/MANIFEST` at creation, refused on mismatch at open — a data dir keeps its count for life, a legacy manifest-less tree is adopted as 256) + `QUEEN_RAFT_APPLY_WRITERS` (0 = inline; adaptive: an entry flushes inline when it touches <=2 files OR carries <64 KiB, else the pool) | **Bucket count as a runtime knob; one write + one fsync per entry at buckets=1.** NBUCKETS (was the 256 constant in `rsm/segments`) is now `QUEEN_RAFT_BUCKETS`. The planner's `bucket_of` (0..256) is **UNTOUCHED** (PERF-E owns the planner); the logical bucket is **folded** into the local count on both the write path (`append`) and the read path (`Shared::locate`/`pin`/`has_file`). The fold is exact because every legal count divides 256 (`(h%256)%n == h%n`) and idempotent on already-local buckets, so `nbuckets` is purely node-local — never in an effect or digest (**I1/I2** intact). The durable-point contract and recovery are unchanged (**I10/I11**); manifest pins the count so a reopen can never reinterpret existing files. With `buckets=1` every entry is one file => one `write` and the durable point one `fsync`. **BUG FOUND+FIXED:** the initial write-only fold left the read path out-of-bounds (caught by the facade tests); write and read now fold consistently. Module doc gained a bucket-count section incl. retention/compaction implications of few buckets. **Numbers — laptop fan-out smoke** (fsync files at the durable point ; `write()`s per entry), buckets 256/16/1: **C1000** 251/16/1 files ; 5.0/5.0/1.0 writes (the seg-fsync-dominated fan-out killer collapses to a single fsync); **A20k** 100/16/1 ; 3.0/3.0/1.0; **FAT100** 100/16/1 ; 12.0/11.7/1.0. **Tests:** 6 new bucket tests (open/append/read/roll/seal/.qidx/recover/GC at 1/16/256, manifest mismatch refused, legacy tree adopted as 256, clamp+fold exactness) + apply-crash cells for `apply.segment_written` and `durable.files_synced` at buckets 1 and 16 + a laptop fan-out smoke; `cargo test -p queen-engine --lib rsm::` = **361 passed / 0 failed / 11 ignored** (segments 75 incl. 6 new buckets; apply unit 41; apply_crash incl. the buckets-1/16 cell). `rustfmt --edition 2021` + clippy clean on touched files; **I2** deny-gate green. `strace -c` and the `queen_raft_apply_segment_seconds` histogram over the 60s goload A20k/C1000/FAT100 smokes are the VM pass (strace is Linux-only); segment_writes + durable files_synced are the exact laptop proxy. `apply.rs` product code untouched. **Scope note:** `rsm/tests/replicator_crash.rs` took a one-line mechanical `nbuckets` field add forced by the Options struct change. See **R-128**. Files: `server/src/rsm/segments/mod.rs`, `rsm/segments/tests/buckets.rs`, `rsm/segments/tests/measure.rs`, `rsm/segments/tests/mod.rs`, `rsm/tests/apply.rs`, `rsm/tests/apply_crash.rs`, `rsm/tests/replicator_crash.rs`. |
 | PERF-E dedup authority in the txns rows, bloom generations in front | **done** (this commit) | `QUEEN_RAFT_DEDUP_INDEX` (`txns`\|`rows`, default **txns**) — must be stable per store and identical across nodes (a txns-written store has no `Dedup` rows; a later rows-mode boot would miss dups) | **Dedup authority relocated into the sequential txns rows + PERF-B's bloom generations.** Under `txns`, apply's `dedup::record` writes **ONLY** the sequential txns row (the append's hash list, sequential key) — the per-message `(pid,hash)` random read-modify-write index is **gone**; the txns rows plus PERF-B's bloom (now time+offset-sliced generations) are the sole committed authority. A bloom `maybe` names a generation's `(min_base,max_off)` band; the planner scans just those txns rows and returns the min in-window offset; an unseeded/fallback/front-off partition scans the whole txns window **exact** (warms on first touch); the 005 ack-by-hash path resolves by the same range scan over `[txns_start,batch_end]`. `record` keeps its fixed `apply.rs` signature — it dispatches on a boot-resolved global set ONLY at the production `real_builder` seam (facade/apply unit tests keep the `rows` default, so no shared-global race); the planner reads the mode per-instance via `PlanConfig.index_mode` from `BatcherConfig::from_env`. Overlay/in-flight dedup unchanged. **I1/I2/I4/I5/I8/I10/I11/I15** intact — the txns rows are already replicated effects, the bloom is planner-only advisory, apply stays deterministic in what it commits. **Numbers — laptop isolated dedup micro-measurement** (release, A20k shape 50k msgs / 5000 appends / batch 10, `rsm::tests::dedup_txns::measure_probe_cost --ignored`): store dedup **ops/msg 2.10 (rows) → 0.10 (txns) = 21× fewer** (`Dedup` rows written 0 vs 50000; Txns 5000 both); probe **WARM** front-bounded p50 **917 ns** / p99 **87.7 µs**; probe **COLD** whole-window (restart/unseeded) p50 **140 µs** / p99 **167 µs** (linear in the txns window, warms after first touch); filter **11.96 B/hash** resident (transient over-provisioned top generation, amortizes toward ~2 B/hash at scale under the 512 MB global cap); **49.9%** of probes Skipped (bloom only, no scan). `difffuzz_txns_vs_rows_50_seeds`: **0 divergences** (probe+resolve, warm+cold fronts, with prune). Debug-build same run: warm p50 5.3 µs / p99 1.99 ms, cold p50 3.4 ms. **Tests:** new `rsm/tests/dedup_txns.rs` — 50-seed diff-fuzz rows-vs-txns + exactness cases (multi-occurrence, in/out-of-window, ack-below-cursor, retention-deleted-segment, restart-cold-filter, mid-append generation boundary) all pass; `cargo test -p queen-engine --lib rsm::` = **361 passed / 0 failed / 11 ignored** (32 s). `rustfmt --edition 2021` + clippy clean on touched files; **I2** deny-gate green. VM ablation of `QUEEN_RAFT_DEDUP_INDEX` txns-vs-rows is the coordinator's combined-binary pass (needs PERF-F's NBUCKETS segments + the release broker). Old `Dedup` rows from a prior rows-mode store are left in place under txns (never written or read) — a reclaim sweep is owed. See **R-129**. Files: `server/src/rsm/dedup.rs`, `rsm/planner/mod.rs`, `rsm/planner/push.rs`, `rsm/planner/ack.rs`, `rsm/batcher.rs`, `rsm/facade/real.rs`, `rsm/tests/dedup_txns.rs`, `rsm/tests/mod.rs`, `rsm/tests/planner_push.rs`. |
 
+**Measurement outcome (2026-09-19).** The package was measured on the VM in two
+rounds (**M8** round 1, **M9** round 2). **Round 1** (PERF-A/B/C, `5de30164`): the
+store levers did **not** move the O14 numbers — the durable-point LMDB `data.mdb`
+env-sync stayed on the apply thread (268 ms A20k) and remained the wall; only PERF-B
+earned its keep (8 M-loaded C1000 flatness +546%→+50%). **Round 2** (PERF-D/E/F on
+top, `431171e4`): removing the per-message dedup RMW (PERF-E), the per-append
+counter/pending writes (PERF-D) and the 256-file fsync fan-out (PERF-F at buckets=1)
+**collapsed the durable point 268→16.8 ms** — **A20k push p99 203→16.5–29.8 ms**
+(p99 parity with pg), **FAT100 86k→265k msg/s (92% of the knee)**, **C1000 unchanged**
+(bounded upstream at `arrival→proposed` ≈1073 ms). **`proceed=false`** on the C1000 p50
+gate; the long PERF-5 runs were skipped (Alice's iterate rule). Post-round-2 defaults:
+`QUEEN_RAFT_APPLY_WRITERS` adaptive, `QUEEN_RAFT_BUCKETS`=16 (b=1/b=16 co-best),
+`QUEEN_RAFT_DEDUP_INDEX`=txns, `QUEEN_RAFT_BATCH_COUNTERS`=1, `QUEEN_RAFT_PENDING_TRANSITIONS`=0.
+Full tables in `test/raft/vm/raft1/PERF-{2,3,4}-*.md`; the open follow-ups are R-127..R-130.
+
 ### Phases 1–6 — the rest, all `not started`
 
 The WP list is PLAN_RAFT.md §15. Apart from WP-1.1 and WP-1.3 above none has
@@ -651,6 +718,7 @@ threaded `facade/real.rs:702`; `plan_budget_ms` (O17) **consumed** at
 | R-127 | PERF-D | **`QUEEN_RAFT_PENDING_TRANSITIONS` defaults OFF — a coordinator decision, not a defect.** The lever is deterministic and rebuild-equivalent (`pending_transitions_rebuild_from_pending_equals_the_live_rings`), but it changes the replicated pending keyspace **value** (earliest `ready_at` vs today's last), hence the 12.9 digest. Flipping it default-on for the VM ablation needs any cross-node / oracle pending-parity check (the postgres-oracle / 928-matrix) re-baselined — outside this checkout's lib suite. `QUEEN_RAFT_BATCH_COUNTERS` stays default-on (transparent, digest unchanged). | Accepted, decision owed to the coordinator before default-on: re-baseline the pending-parity oracle, or keep off for the ablation and measure knob 1 vs 0 on the VM. | **for the coordinator / re-baseline before default-on** |
 | R-128 | PERF-F | **The bucket count is node-local, not replicated — one fsync/entry (buckets=1) is measured on the laptop as write/fsync counts, not latency; the strace + histogram pass is VM-owed (accepted).** `QUEEN_RAFT_BUCKETS` folds the planner's 0..256 logical bucket into a node-local count via an exact divisor fold (`(h%256)%n==h%n`), pinned per-tree in `seg/MANIFEST`; it is never in an effect or digest, so nodes may run different counts without divergence. On the laptop the win is shown as durable-point fsync files and `write()`s per entry (C1000 251→1 fsync, 5.0→1.0 writes at buckets 1); `strace -c` and the `queen_raft_apply_segment_seconds` histogram over the 60s goload A20k/C1000/FAT100 smokes are Linux-only and belong to the VM pass. Few buckets trade the fan-out fsync cost for coarser retention/compaction granularity (documented in the module doc). `rsm/tests/replicator_crash.rs` took a one-line mechanical `nbuckets` field add forced by the Options struct change (not a PERF-owned planner file). | Accepted, not a defect: the fold is exact and idempotent, the count is node-local and manifest-pinned, `apply.rs` product code untouched. The retention/compaction implication of very few buckets and the default (16) are the coordinator's to weigh against the VM ablation of `QUEEN_RAFT_BUCKETS` 256/16/1. | **for the coordinator / VM ablates buckets + reads latency** |
 | R-129 | PERF-E | **Dedup authority is the txns rows + the RAM bloom; `QUEEN_RAFT_DEDUP_INDEX` must be stable per store and identical across nodes, and orphaned `Dedup` rows are left in place (accepted / follow-ups owed).** Under the default `txns`, `dedup::record` stops writing the per-message `(pid,hash)` index; a store written in `txns` has no `Dedup` rows, so a later `rows`-mode boot of the same store would miss duplicates, and a cross-node mode mismatch diverges the (unread) `Dedup` keyspace. Phase 1 is single-node so this is moot now — a config-stability pin owed for phase 3 (treat like PERF-F's `QUEEN_RAFT_BUCKETS`: fix per store, identical across nodes). Two more caveats: (a) a real duplicate landing deep in a large tiered generation scans a big band up to the hit (`FRONT_GEN_CAP_MAX=1<<20`), giving the warm p99 tail of 87.7 µs — the dominant new-hash shape Skips on the bloom alone; a smaller gen cap would bound the tail at the cost of more bloom checks (tuning follow-up, not done); (b) old `Dedup` rows from a prior rows-mode store are never written or read under txns and are left in place — a reclaim sweep is owed. | Accepted, not a defect on the single-node phase-1 path: the txns rows are already replicated effects and the bloom is planner-only; `record`'s apply signature and I1/I2 are unchanged. Owed to the coordinator: (1) pin `QUEEN_RAFT_DEDUP_INDEX` per store / cross-node before any multi-node run; (2) a `Dedup`-row reclaim sweep; (3) optional gen-cap tuning for the warm p99 tail. | **for the coordinator / config pin + reclaim sweep owed** |
+| R-130 | PERF-4 / round-2 review | **The round-2 A20k push-latency A/B was not consume-matched, and the new-dedup consume rate is unexplained (report-framing correction + one owed short A/B — not a product defect).** (a) In the 60 s A20k measure, new-b1 popped **218 k (~3.6 k/s)** in the same push window where "old" popped **552 k (~9.2 k/s)**, so new-b1's push p99 was measured under ~2.5× lighter apply contention — the first draft's "A20k beats postgres, p99 0.61× pg" headline is **overstated**. The consume-matched, fully-drained profile run reads push **p99 29.82 ms = 1.10× pg 27.01** → **A20k p99 is at parity with pg, not under it**. Both figures clear the 2× proceed gate, so `proceed=false` (on C1000) is **unchanged**. (b) The low new-b1 pop rate is **flat across all three windows** with elevated empty polls (222 k vs old 181 k) — the mechanism is identified (the `DEDUP_INDEX=txns` planner does a txns-window scan on a bloom "maybe"/unseeded partition, PERF-E) but whether it is warm-up or a steady-state regression is **NOT settled**. (c) "Best bucket = 1" is a single-run claim: b=1 and b=16 are co-best within log2 noise; only C1000 is monotonic (b=1 165 < b=16 218 < b=256 297). **Corrected in `PERF-4-short.md`** (no product code changed — the dedup/NBUCKETS/counter code is sound). | Accepted, measurement-validity correction, not a defect. What stands corroborated: durable-point collapse 268→16.8 ms (pop-independent), C1000 1073 ms upstream diagnosis, FAT 3×, `proceed=false`. **Owed short A/Bs before ranking round 2 a consume win:** (1) a consume-matched A20k old-vs-new-b1 push A/B; (2) a steady-state `DEDUP_INDEX=txns` vs `rows` consume A/B; (3) ≥3× repetition per bucket before ranking b=1 vs b=16. | **for the coordinator / owed 3 short A/Bs before the consume claim** |
 
 ---
 
@@ -1020,6 +1088,102 @@ replay tail); **the 1 FAIL is R-123** (SIGBUS on the torn store mmap). 0 poison 
 broker-RSS sampler read `$QPID` from a subshell forked before the pid was assigned,
 so the O19 broker-RSS side column is missing; the gated O19 numbers come from the
 goload/quiet `overall` p99, which is unaffected.
+
+### M8 — phase-1 performance package, round 1 (PERF-2 baseline + PERF-3 ablation)
+
+**Date** 2026-09-19 08:14–12:05Z · **host** `root@164.90.215.224`, Ubuntu 24.04,
+8 vCPU, 15 GB, ext4 · **binaries** PERF-2 profile @ `raft` `1a9dcf63` (md5
+`a2208d19ad18`), PERF-3 ablation @ `5de30164` (PERF-C tip, md5 `9a463fcd5a51`),
+`rustc 1.98.1` · **loader** `/root/goload` md5 `2c97cccb0d1e` (the M1/M7 loader) ·
+`QUEEN_STORAGE=raft`, `QUEEN_RAFT_PIPELINE=4`, LocalReplicator, no Postgres, dedup
+3600 s, retention off. Sources: `PERF-2-baseline.md`, `PERF-3-measure.md` (its
+20-min timeline was cut short by the coordinator); CSV + folded tops under `perf/`
+and `perf/perf3/`. **Round 1's store levers (PERF-A/B/C) did NOT move the O14
+targets** — the durable-point LMDB `data.mdb` env-sync on the apply thread was
+untouched and stayed the wall.
+
+**PERF-2 — where the durable point spends (p50 legs, fresh store; the tail is the
+durable point stalling the one apply thread, and it equals push p99):**
+
+| regime | durable_point | seg-fsync leg | ⇒ LMDB env-sync leg | tail (arrival→proposed p99) |
+|---|---|---|---|---|
+| A20k | 268 ms | 67 ms (inline) | ~211 ms | 268 ms |
+| A50k | 537 ms | 67 ms | ~409 ms | 537 ms (propose_roundtrip) |
+| C1000 | 134 ms | 134 ms (seg-dominated) | ~94 ms | fan-out over 256 bucket files |
+| FAT100 | 1074 ms | 134 ms | ~1000 ms | 1074 ms |
+
+CPU top self: `mdb_page_flush` 4.3% (A20k) / 8.7% (A50k) / **13.2% (FAT100,
+dominant)**; C1000's top is `store::keys::read_name` **10.5%** (the per-partition
+store-key codec) with a read txn per partition. Cold 8 M store roughly doubles the
+durable-point count and widens the tail ~6× at `max`, but A20k's median is isolated
+(p50 9.0→9.9) — the cold penalty is the tail, not the median.
+
+**PERF-3 — ablation (all levers vs each minus-one vs all-off, 75 s fresh store):**
+
+| target | all levers | postgres | ratio | verdict |
+|---|---|---|---|---|
+| A20k p50 / p99 | 9.02 / 264.19 | 9.15 / 27.01 | 0.99× / 9.78× | p50 PASS, p99 **FAIL** |
+| C1000 p50 / p99 | 152.58 [all-off 60.67] | 6.62 / 33.02 | 23.0× / 22.2× | **FAIL** |
+| FAT100 tput | 86,107 [all-off 88,123] | 287,363 | 30% | **FAIL** (<70%) |
+
+**Levers neutral on the gate.** PERF-A cut only the seg-fsync leg (A20k 67→33,
+C1000 134→17); the LMDB env-sync leg it cannot touch (R-125) is the wall. PERF-A+C
+even *regress* C1000 warm-up (all-off 60.7 ms ≪ all-on 152.6 — the continuous
+pre-flush + writer pool contend with the 256-file fan-out). **The one keeper is
+PERF-B:** at 6-min steady state on an 8 M-loaded store, C1000 push p50 rises only
+**+49.8%** vs empty — against M7's **+545.9%** — the dedup front skips the committed
+LMDB probe that paged in from the loaded store. The numbers' recommendation: keep
+PERF-B on, retune/gate PERF-A, default the writer pool off, and attack the
+durable-point LMDB env-sync directly → round 2's PERF-D/E/F.
+
+### M9 — phase-1 performance package, round 2 (PERF-4 short measure + bucket knob)
+
+**Date** 2026-09-19 ~14:38–15:00Z · **host** same VM · **binary** `queen` release @
+`raft` HEAD `431171e4` (PERF-E tip; D/E/F = `1d017f7d` / `431171e4` / `e669dcc2` on
+top of PERF-C `5de30164`), md5 `dc9d8fdee6d0`, `rustc 1.98.1` · **loader**
+`/root/goload` md5 `2c97cccb0d1e` · `QUEEN_RAFT_PIPELINE=4`, LocalReplicator, no
+Postgres, dedup 3600 s, retention off · fresh store per run, three regimes × three
+bucket counts, **60 s SHORT measure only** — Alice's iterate rule: the long PERF-5
+runs were **skipped** because the short measure did not pass its thresholds. Source:
+`PERF-4-short.md`; CSVs under `perf/perf4/`. No product code changed in the measure;
+it sets only the knobs. New config = `DEDUP_INDEX=txns BATCH_COUNTERS=1
+PENDING_TRANSITIONS=1 DEDUP_FRONT=1 DURABLE_ASYNC=1 SEG_BUFFERED=1 BUCKETS=N`
+(writers adaptive); "old" = the round-1 all-levers config (`DEDUP_INDEX=rows`,
+counters/pending off, buckets 256).
+
+**Round 2 demolished the durable-point wall round 1 could not move:**
+
+| regime | metric | old (round-1) | new b=1 | new b=16 | new b=256 | pg M1 |
+|---|---|---|---|---|---|---|
+| A20k | durable pt p50 ms | 268 | **16.8** | 16.8 | 67.1 | — |
+| A20k | push p99 ms | 203.78 | **16.51 / 29.82¹** | 22.14 | 40.19 | 27.01 |
+| A20k | push p50 ms | 7.26 | **6.62** | 6.62 | 6.62 | 9.15 |
+| A20k | RSS MB | 348 | **141** | 152 | 166 | 55 |
+| C1000 | push p50 ms | 173.06 | **164.86** | 218.11 | 296.96 | 6.62 |
+| C1000 | arrival→proposed p99 ms | 1073 | 1073 | 1073 | 1073 | — |
+| FAT100 | rate msg/s | 86,107 | **265,158** | 261,470 | 243,875 | 287,363 |
+| FAT100 | % of 287k knee | 30% | **92.3%** | 91.0% | 84.9% | 100% |
+
+¹ 16.51 = the 60 s run (**under-consumed**, not consume-matched: new-b1 popped 218 k
+vs old 552 k in the same push window); **29.82 = the consume-matched drained profile
+run** (R-130). A20k p99 is at **parity** with pg (1.10× consume-matched), not a beat.
+
+**O14 verdict (best bucket = 1):** A20k p50 **PASS** (0.72×); A20k p99 borderline
+miss on `≤ pg` (1.10× consume-matched) but **PASS** the 2× proceed gate; C1000 p50
+**FAIL** (24.9×, upstream `arrival→proposed` bound, unchanged by any store lever);
+FAT100 **PASS** (92% > 70%). **`proceed=false`** — C1000 p50 fails at every bucket
+count. The C1000 60 s window is consume-saturated (lag climbs, windowed p50 flat not
+settling), so no long run was warranted.
+
+**Bucket comparison:** fewer buckets = smaller seg-fsync leg; **b=256 is
+consistently worst** (fan-out); **b=1 and b=16 are co-best within single-run noise**
+(only C1000 is monotonic b=1 < b=16 < b=256), so the default is **16** and a ≥3×
+repeat is owed before ranking b=1 strictly best. Profiles: `mdb_page_flush`
+(round-1's dominant 13.3%) is **gone from the top** — FAT is now allocator-bound on
+the per-message `serde_json::Value` parse (~47% in malloc/free), the next FAT lever.
+**PERF-5 (the long runs — 6-min flatness, 20-min timeline, cold-`drop_caches` pass)
+did NOT run.** Open follow-ups: R-130 (consume A/B owed), R-127 (pending default),
+R-129 (dedup-index pin + reclaim).
 
 ---
 

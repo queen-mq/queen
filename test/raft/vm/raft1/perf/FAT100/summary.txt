@@ -1,0 +1,17 @@
+host: queenpgless-01 Linux 6.8.0-124-generic 8 vCPU
+binary: /root/raft/perf/queen/server/target/release/queen  md5 a2208d19ad18
+loader: /root/goload  md5 2c97cccb0d1e
+regime: FAT100   perf window: 60s @ 99Hz
+extra broker env: <none>
+started: 2026-09-19T08:22:12+00:00
+broker pid 358854 storageReady on 6699
+goload FAT100 for 75s: -rate 300000 -push-batch 100 -partitions 100 -consumers 0 -payload 256 -ramp-sec 5 -max-inflight 4096 -idle-conns 4096
+perf record -g -F 99 -p 358854 -- sleep 60
+[final] offered=191486 achieved=60519 shed=126875 (msgs: offered=19148600 achieved=6051900 shed=12687500) pushErr=0 | pushed=6051900 popped=0 lag=6051900 | popErr=0 empty=0 | overall p50=4489.22 p99=6586.37 p999=7045.12 ms
+---- top 40 by SELF ----
+
+---- top 40 by INCLUSIVE ----
+
+broker errors: 0
+results in: /root/raft/perf/runs/FAT100
+finished: 2026-09-19T08:23:21+00:00
