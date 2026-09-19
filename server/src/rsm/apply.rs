@@ -88,7 +88,7 @@
 // on.
 #![deny(clippy::disallowed_methods)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::sync::Arc;
@@ -416,6 +416,29 @@ pub struct ApplyConfig {
     /// owned by one writer). 0 = the apply thread writes them itself. Implies
     /// `seg_buffered`. Default `min(4, cores/2)`.
     pub apply_writers: usize,
+    /// `QUEEN_RAFT_BATCH_COUNTERS` (PERF-D, §6.4/D16). On (default): every
+    /// counter bump and stamp an entry makes is accumulated in a per-transaction
+    /// RAM map and written to the store ONCE per key at commit (and before a
+    /// durable point, a digest, or any counter read through the store), instead
+    /// of a read-modify-write per bump. It is TRANSPARENT (I2): the committed
+    /// counter rows after any entry boundary are identical to the per-bump path
+    /// — additive counters fold by sum, stamps by max — so the digest is
+    /// unchanged and toggling it is safe on a live node. Off: today's per-bump
+    /// read-modify-write. Also gates the per-transaction group-list cache that
+    /// serves the append path's `scan_groups` (same lifetime, same transparency).
+    pub batch_counters: bool,
+    /// `QUEEN_RAFT_PENDING_TRANSITIONS` (PERF-D, §6.1). On: the append path
+    /// writes a partition's `pending` row for a group only when the group's
+    /// pending state for it CHANGES (no row yet, or the new `ready_at` is
+    /// earlier than the stored one), not on every append; the derived ring is
+    /// moved on exactly those transitions, so a rebuild from `pending` yields
+    /// the same ring the live one holds. Off (DEFAULT): today's unconditional
+    /// per-append `put_pending`. Unlike the counters, this CHANGES the value the
+    /// replicated `pending` keyspace holds (the earliest `ready_at` seen, not
+    /// the last), hence the §12.9 digest — a deliberate behaviour change gated
+    /// off by default so the whole suite stays byte-for-byte on the shipped
+    /// path; the I2 property test drives it on and proves cadence-independence.
+    pub pending_transitions: bool,
 }
 
 impl Default for ApplyConfig {
@@ -434,6 +457,14 @@ impl Default for ApplyConfig {
             // pool on.
             seg_buffered: true,
             apply_writers: 0,
+            // PERF-D: counter batching is transparent, so it is on everywhere
+            // (unit tests included) — a test that reads a counter after a commit
+            // sees the same value either way. Pending-transitions changes the
+            // replicated `pending` digest, so it is OFF by default; a test that
+            // wants it sets it, and the shipped default keeps the whole suite on
+            // the byte-for-byte path.
+            batch_counters: true,
+            pending_transitions: false,
         }
     }
 }
@@ -479,6 +510,8 @@ impl ApplyConfig {
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or_else(default_apply_writers),
+            batch_counters: flag("QUEEN_RAFT_BATCH_COUNTERS", d.batch_counters),
+            pending_transitions: flag("QUEEN_RAFT_PENDING_TRANSITIONS", d.pending_transitions),
         }
     }
 }
@@ -561,6 +594,139 @@ pub struct Recovered {
 }
 
 // ---------------------------------------------------------------------------
+// PERF-D: the per-transaction counter overlay and group-list cache
+// ---------------------------------------------------------------------------
+
+/// The per-transaction counter overlay (§6.4, D16, PERF-D).
+///
+/// Apply makes many counter bumps per entry — an `Append` alone touches the
+/// partition, queue and tenant `pushed` and `retained_bytes`, the per-group
+/// `pending`, and the push stamp — and today each one is a read-modify-write of
+/// the store. Because the write transaction stays open ACROSS entries (§11.3),
+/// those bumps re-read and re-write the same handful of counter rows over and
+/// over inside one transaction. This overlay accumulates them in RAM and writes
+/// each key ONCE, at [`CounterCache::flush`], which apply calls before every
+/// commit and every durable point; a read in between folds the pending delta in
+/// ([`CounterCache::read`]), and a sweep drops it ([`CounterCache::forget_prefix`]).
+///
+/// I2 holds because the fold is EXACT: additive counters accumulate by sum,
+/// stamps ("last time") by max, and a given key is only ever one or the other,
+/// so the committed value after any entry boundary equals the per-bump path's,
+/// whatever the commit cadence or the (irrelevant) hash-map flush order. With
+/// `enabled == false` every call is the per-bump store path, unchanged.
+#[derive(Debug, Default)]
+struct CounterCache {
+    enabled: bool,
+    /// Additive deltas since the last flush, by counter key.
+    adds: HashMap<Box<[u8]>, i64>,
+    /// Stamp maxima since the last flush, by counter key.
+    stamps: HashMap<Box<[u8]>, i64>,
+}
+
+impl CounterCache {
+    fn new(enabled: bool) -> CounterCache {
+        CounterCache {
+            enabled,
+            adds: HashMap::new(),
+            stamps: HashMap::new(),
+        }
+    }
+
+    /// Add `delta` to a counter: RAM when enabled, a store read-modify-write
+    /// otherwise. A zero delta is a no-op either way (as `Applier::bump` was).
+    fn add<W: Writes + ?Sized>(
+        &mut self,
+        writes: &mut W,
+        key: &[u8],
+        delta: i64,
+    ) -> crate::rsm::store::Result<()> {
+        if delta == 0 {
+            return Ok(());
+        }
+        if self.enabled {
+            *self.adds.entry(Box::from(key)).or_insert(0) += delta;
+            Ok(())
+        } else {
+            writes.add_counter(key, delta).map(|_| ())
+        }
+    }
+
+    /// Move a "latest time" stamp up to `at`: RAM max when enabled, the store
+    /// read-compare-set otherwise. Monotone either way (D16, §6.4).
+    fn stamp<W: Writes + ?Sized>(
+        &mut self,
+        writes: &mut W,
+        key: &[u8],
+        at: i64,
+    ) -> crate::rsm::store::Result<()> {
+        if self.enabled {
+            let e = self.stamps.entry(Box::from(key)).or_insert(at);
+            if at > *e {
+                *e = at;
+            }
+            Ok(())
+        } else {
+            if writes.counter_at(key)? < at {
+                writes.set_counter(key, at)?;
+            }
+            Ok(())
+        }
+    }
+
+    /// The value a reader INSIDE the transaction must see: the committed row
+    /// folded with the pending delta or stamp. A key is in at most one map, so
+    /// the fold is unambiguous.
+    fn read<R: Reads + ?Sized>(&self, reads: &R, key: &[u8]) -> crate::rsm::store::Result<i64> {
+        let base = reads.counter_at(key)?;
+        if !self.enabled {
+            return Ok(base);
+        }
+        if let Some(s) = self.stamps.get(key) {
+            return Ok(base.max(*s));
+        }
+        Ok(base + self.adds.get(key).copied().unwrap_or(0))
+    }
+
+    /// Drop every pending delta and stamp whose key starts with `prefix`: the
+    /// store rows under it are about to be swept (a queue, group or partition
+    /// delete), and a later flush must not recreate them — including a counter
+    /// bumped this window that was never committed.
+    fn forget_prefix(&mut self, prefix: &[u8]) {
+        if !self.enabled {
+            return;
+        }
+        self.adds.retain(|k, _| !k.starts_with(prefix));
+        self.stamps.retain(|k, _| !k.starts_with(prefix));
+    }
+
+    /// Write every accumulated delta and stamp into the open transaction and
+    /// empty the overlay. Called before a commit and a durable point (and so
+    /// before the digest, which reads committed state). Per-key order does not
+    /// affect the committed value, so the hash-map iteration order is immaterial
+    /// (I2).
+    fn flush<W: Writes + ?Sized>(&mut self, writes: &mut W) -> crate::rsm::store::Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        // Every key the overlay holds got at least one non-zero bump (`add`
+        // skips a zero one before it ever inserts), so the per-bump path had
+        // WRITTEN it — creating the row on the first bump — even when the bumps
+        // since cancel to a net zero. Writing it here too keeps the committed
+        // ROWS identical (a `0` row is not an absent one to the §12.9 digest),
+        // which is what I2 asks of the batched path.
+        for (key, delta) in self.adds.drain() {
+            writes.add_counter(&key, delta)?;
+        }
+        for (key, at) in self.stamps.drain() {
+            if writes.counter_at(&key)? < at {
+                writes.set_counter(&key, at)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The applier
 // ---------------------------------------------------------------------------
 
@@ -573,6 +739,18 @@ pub struct Applier<'s, S: Store> {
     derived: Derived,
     cfg: ApplyConfig,
     notify: Arc<dyn Notify>,
+
+    /// PERF-D: the per-transaction counter overlay (§6.4). Flushed at every
+    /// commit and durable point; folded into every counter read in between.
+    counters: CounterCache,
+    /// PERF-D: the group list of a queue, cached for the life of the write
+    /// transaction so the append path does not re-`scan_groups` per append.
+    /// Keyed by `(tenant, queue)`, cleared at every commit and invalidated on
+    /// any group create/delete of the queue. A NODE-LOCAL read cache that
+    /// returns exactly what the scan would, so the effects it drives (the
+    /// per-group `pending` rows and `pending` counter) are unchanged (I2). Only
+    /// populated while `cfg.batch_counters` is on.
+    groups_cache: HashMap<(String, String), Arc<Vec<String>>>,
 
     applied_index: u64,
     applied_term: u64,
@@ -699,6 +877,8 @@ impl<'s, S: Store> Applier<'s, S> {
             writes,
             segments,
             derived,
+            counters: CounterCache::new(cfg.batch_counters),
+            groups_cache: HashMap::new(),
             cfg,
             notify,
             applied_index,
@@ -1047,6 +1227,9 @@ impl<'s, S: Store> Applier<'s, S> {
                 };
                 self.writes.put_group(tenant, queue, group, &row)?;
                 self.derived.ensure_ring(tenant, queue, group);
+                // PERF-D: the queue's group set changed; the append path's
+                // cached list must be rebuilt from the store next time.
+                self.invalidate_groups(tenant, queue);
                 Ok(())
             }
             Effect::GroupDelete {
@@ -1063,8 +1246,10 @@ impl<'s, S: Store> Applier<'s, S> {
                 // otherwise inherit a dead group's pending, completed,
                 // consumed and failed, and report lag from its history.
                 let prefix = counter_one_group_prefix(tenant, queue, group);
-                self.sweep(Keyspace::Counters, &prefix)?;
+                self.ctr_sweep(&prefix)?;
                 self.derived.drop_ring(tenant, queue, group);
+                // PERF-D: the queue's group set changed.
+                self.invalidate_groups(tenant, queue);
                 Ok(())
             }
 
@@ -1366,7 +1551,8 @@ impl<'s, S: Store> Applier<'s, S> {
         }
 
         // Counters (§6.4, D16): O(1) per effect at partition, queue and tenant
-        // scope, plus O(subscribed groups) below.
+        // scope, plus O(subscribed groups) below. The overlay makes each of
+        // these a RAM fold (PERF-D), flushed once per commit.
         let n = count as i64;
         self.bump(pid, &tenant, &queue, None, Counter::Pushed, n)?;
         self.bump(
@@ -1380,19 +1566,15 @@ impl<'s, S: Store> Applier<'s, S> {
         self.stamp(pid, &tenant, &queue, Counter::LastPushUs, created_at_us)?;
 
         // `pending`, one row per subscribed group (§6.1): the ready rings
-        // rebuild from it in O(pending), so nothing here walks partitions.
+        // rebuild from it in O(pending), so nothing here walks partitions. The
+        // group list is cached for the life of the transaction (PERF-D), so a
+        // stream of appends to a queue does not re-`scan_groups` per append.
         let ready_at = self.ready_at(&tenant, &queue, created_at_us)?;
-        let mut groups: Vec<String> = Vec::new();
-        self.writes
-            .scan_groups(&tenant, &queue, usize::MAX, &mut |g, _row| {
-                groups.push(g.to_string());
-                true
-            })?;
-        for g in &groups {
-            self.writes.put_pending(&tenant, &queue, g, pid, ready_at)?;
-            self.derived
-                .set_pending(&tenant, &queue, g, pid, ready_at, now_us);
-            self.writes.add_counter(
+        let groups = self.groups_of(&tenant, &queue)?;
+        let transitions = self.cfg.pending_transitions;
+        for g in groups.iter() {
+            self.append_pending(&tenant, &queue, g, pid, ready_at, now_us, transitions)?;
+            self.ctr_add(
                 &keys::counter_group(&tenant, &queue, g, Counter::Pending),
                 n,
             )?;
@@ -1417,6 +1599,80 @@ impl<'s, S: Store> Applier<'s, S> {
         };
         let delay = cfg.delayed_processing.max(cfg.window_buffer).max(0) as i64;
         Ok(created_at_us.saturating_add(delay.saturating_mul(1_000_000)))
+    }
+
+    /// The queue's subscribed group names (PERF-D). With `batch_counters` on
+    /// they are cached for the life of the write transaction, so a stream of
+    /// appends to one queue costs one `scan_groups`, not one per append; the
+    /// cache is invalidated on any group create/delete of the queue and cleared
+    /// at every commit, and returns exactly what the scan would — the set that
+    /// decides the `pending` rows and `pending` counter (I2). With it off it is
+    /// a fresh scan each call, exactly as before.
+    fn groups_of(&mut self, tenant: &str, queue: &str) -> Result<Arc<Vec<String>>> {
+        if !self.cfg.batch_counters {
+            return Ok(Arc::new(self.scan_group_names(tenant, queue)?));
+        }
+        let key = (tenant.to_string(), queue.to_string());
+        if let Some(cached) = self.groups_cache.get(&key) {
+            return Ok(cached.clone());
+        }
+        let arc = Arc::new(self.scan_group_names(tenant, queue)?);
+        self.groups_cache.insert(key, arc.clone());
+        Ok(arc)
+    }
+
+    /// One ordered scan of a queue's groups into a fresh `Vec` (the cache miss
+    /// and the ablation path).
+    fn scan_group_names(&self, tenant: &str, queue: &str) -> Result<Vec<String>> {
+        let mut groups: Vec<String> = Vec::new();
+        self.writes
+            .scan_groups(tenant, queue, usize::MAX, &mut |g, _row| {
+                groups.push(g.to_string());
+                true
+            })?;
+        Ok(groups)
+    }
+
+    /// Drop the cached group list of a queue after its group set changed.
+    fn invalidate_groups(&mut self, tenant: &str, queue: &str) {
+        if self.cfg.batch_counters {
+            self.groups_cache
+                .remove(&(tenant.to_string(), queue.to_string()));
+        }
+    }
+
+    /// Maintain one group's `pending` row (and its ring mirror) for an append.
+    ///
+    /// With `transitions` off this is the shipped path: an unconditional
+    /// `put_pending` + `set_pending` on every append. With it on (PERF-D), the
+    /// row is written only on a TRANSITION — no row yet, or the new `ready_at`
+    /// is EARLIER than the stored one — read through the write handle so the
+    /// decision is a pure function of committed state, cadence-free (I2). The
+    /// ring is moved on exactly the transitions that write the row, so both hold
+    /// the earliest `ready_at` and a rebuild from `pending` reproduces the ring.
+    #[allow(clippy::too_many_arguments)]
+    fn append_pending(
+        &mut self,
+        tenant: &str,
+        queue: &str,
+        group: &str,
+        pid: Pid,
+        ready_at: i64,
+        now_us: i64,
+        transitions: bool,
+    ) -> Result<()> {
+        if transitions {
+            if let Some(stored) = self.writes.pending_at(tenant, queue, group, pid)? {
+                if ready_at >= stored {
+                    return Ok(());
+                }
+            }
+        }
+        self.writes
+            .put_pending(tenant, queue, group, pid, ready_at)?;
+        self.derived
+            .set_pending(tenant, queue, group, pid, ready_at, now_us);
+        Ok(())
     }
 
     // -- cursors -----------------------------------------------------------
@@ -1471,7 +1727,7 @@ impl<'s, S: Store> Applier<'s, S> {
         let delta = row.committed - old_committed;
         if delta != 0 {
             self.bump(pid, &tenant, &queue, Some(group), Counter::Completed, delta)?;
-            self.writes.add_counter(
+            self.ctr_add(
                 &keys::counter_group(&tenant, &queue, group, Counter::Pending),
                 -delta,
             )?;
@@ -1726,16 +1982,15 @@ impl<'s, S: Store> Applier<'s, S> {
         // [`Applier::partition_delete`] is for: `add_counter` would otherwise
         // recreate a swept row holding a negative number.
         for c in [Counter::RetainedBytes, Counter::DlqCount] {
-            let held = self.writes.queue_counter(tenant, queue, c)?;
+            let held = self.ctr_read(&keys::counter_queue(tenant, queue, c))?;
             if held != 0 {
-                self.writes
-                    .add_counter(&keys::counter_tenant(tenant, c), -held)?;
+                self.ctr_add(&keys::counter_tenant(tenant, c), -held)?;
             }
         }
         let prefix = counter_queue_prefix(tenant, queue);
-        self.sweep(Keyspace::Counters, &prefix)?;
+        self.ctr_sweep(&prefix)?;
         let prefix = counter_group_prefix(tenant, queue);
-        self.sweep(Keyspace::Counters, &prefix)?;
+        self.ctr_sweep(&prefix)?;
         let mut groups: Vec<String> = Vec::new();
         self.writes
             .scan_groups(tenant, queue, usize::MAX, &mut |g, _row| {
@@ -1748,6 +2003,8 @@ impl<'s, S: Store> Applier<'s, S> {
             self.sweep(Keyspace::Pending, &prefix)?;
             self.derived.drop_ring(tenant, queue, g);
         }
+        // PERF-D: the queue and its group set are gone.
+        self.invalidate_groups(tenant, queue);
         let prefix = keys::partitions_by_key_prefix(tenant, queue);
         self.sweep(Keyspace::PartitionsByKey, &prefix)?;
         let prefix = keys::queue_partitions_prefix(tenant, queue);
@@ -1763,7 +2020,7 @@ impl<'s, S: Store> Applier<'s, S> {
             return Ok(());
         };
         let (tenant, queue) = (p.tenant.clone(), p.queue.clone());
-        let retained = self.writes.partition_counter(pid, Counter::RetainedBytes)?;
+        let retained = self.ctr_read(&keys::counter_partition(pid, Counter::RetainedBytes))?;
         // The chunked path settled this partition's share of every group's
         // `pending` gauge at its `GarbageAdd`, while the cursors were still
         // there to say what it was; a direct `PartitionDelete` (006 cleanup)
@@ -1823,7 +2080,7 @@ impl<'s, S: Store> Applier<'s, S> {
         self.sweep(Keyspace::Dedup, &keys::dedup_prefix(pid))?;
         self.sweep(Keyspace::Txns, &keys::txns_prefix(pid))?;
         self.sweep(Keyspace::PartitionFiles, &keys::partition_files_prefix(pid))?;
-        self.sweep(Keyspace::Counters, &keys::counter_partition_prefix(pid))?;
+        self.ctr_sweep(&keys::counter_partition_prefix(pid))?;
 
         // While the QUEUE still exists, its retained bytes and the tenant's
         // have to lose this partition's share: it is the number the proxy's
@@ -1833,11 +2090,11 @@ impl<'s, S: Store> Applier<'s, S> {
         // [`Applier::queue_delete`], and adding here would resurrect a swept
         // row holding a negative number.
         if retained != 0 && self.queue_gauges_live(pid, &tenant, &queue)? {
-            self.writes.add_counter(
+            self.ctr_add(
                 &keys::counter_queue(&tenant, &queue, Counter::RetainedBytes),
                 -retained,
             )?;
-            self.writes.add_counter(
+            self.ctr_add(
                 &keys::counter_tenant(&tenant, Counter::RetainedBytes),
                 -retained,
             )?;
@@ -2030,6 +2287,10 @@ impl<'s, S: Store> Applier<'s, S> {
                 }
                 COUNTERS => {
                     let prefix = keys::counter_partition_prefix(pid);
+                    // PERF-D: drop any pending counter delta of this partition
+                    // too, so a flush cannot recreate a row this chunk sweeps
+                    // (including one bumped this window that never committed).
+                    self.counters.forget_prefix(&prefix);
                     self.sweep_step(Keyspace::Counters, &prefix, &from, left)?
                 }
                 _ => return Ok((spent, None)),
@@ -2249,6 +2510,34 @@ impl<'s, S: Store> Applier<'s, S> {
 
     // -- counters ----------------------------------------------------------
 
+    /// Add `delta` to a counter, through the per-transaction overlay (PERF-D).
+    /// The two fields borrow disjointly, so this is one RAM update on the hot
+    /// path with `batch_counters` on.
+    fn ctr_add(&mut self, key: &[u8], delta: i64) -> Result<()> {
+        self.counters.add(&mut self.writes, key, delta)?;
+        Ok(())
+    }
+
+    /// Move a "latest time" stamp up to `at`, through the overlay (PERF-D).
+    fn ctr_stamp(&mut self, key: &[u8], at: i64) -> Result<()> {
+        self.counters.stamp(&mut self.writes, key, at)?;
+        Ok(())
+    }
+
+    /// A counter read that sees the overlay's pending deltas (PERF-D): the
+    /// value apply itself must observe inside the transaction (a settle that
+    /// subtracts a queue's held bytes from the tenant, for instance).
+    fn ctr_read(&self, key: &[u8]) -> Result<i64> {
+        Ok(self.counters.read(&self.writes, key)?)
+    }
+
+    /// Sweep a counter prefix AND drop the overlay's pending deltas under it,
+    /// so a later flush cannot recreate a row this delete just removed (PERF-D).
+    fn ctr_sweep(&mut self, prefix: &[u8]) -> Result<usize> {
+        self.counters.forget_prefix(prefix);
+        self.sweep(Keyspace::Counters, prefix)
+    }
+
     /// One counter at partition, queue and tenant scope, plus the group scope
     /// when the effect names a group (§6.4, D16).
     fn bump(
@@ -2263,15 +2552,11 @@ impl<'s, S: Store> Applier<'s, S> {
         if delta == 0 {
             return Ok(());
         }
-        self.writes
-            .add_counter(&keys::counter_partition(pid, c), delta)?;
-        self.writes
-            .add_counter(&keys::counter_queue(tenant, queue, c), delta)?;
-        self.writes
-            .add_counter(&keys::counter_tenant(tenant, c), delta)?;
+        self.ctr_add(&keys::counter_partition(pid, c), delta)?;
+        self.ctr_add(&keys::counter_queue(tenant, queue, c), delta)?;
+        self.ctr_add(&keys::counter_tenant(tenant, c), delta)?;
         if let Some(g) = group {
-            self.writes
-                .add_counter(&keys::counter_group(tenant, queue, g, c), delta)?;
+            self.ctr_add(&keys::counter_group(tenant, queue, g, c), delta)?;
         }
         Ok(())
     }
@@ -2333,15 +2618,13 @@ impl<'s, S: Store> Applier<'s, S> {
             return Ok(());
         }
         let queue_alive = self.queue_gauges_live(pid, tenant, queue)?;
-        self.writes
-            .add_counter(&keys::counter_partition(pid, Counter::DlqCount), -gone)?;
+        self.ctr_add(&keys::counter_partition(pid, Counter::DlqCount), -gone)?;
         if queue_alive {
-            self.writes.add_counter(
+            self.ctr_add(
                 &keys::counter_queue(tenant, queue, Counter::DlqCount),
                 -gone,
             )?;
-            self.writes
-                .add_counter(&keys::counter_tenant(tenant, Counter::DlqCount), -gone)?;
+            self.ctr_add(&keys::counter_tenant(tenant, Counter::DlqCount), -gone)?;
         }
         Ok(())
     }
@@ -2384,7 +2667,7 @@ impl<'s, S: Store> Applier<'s, S> {
                 .unwrap_or(-1);
             let share = p.last_offset - committed;
             if share != 0 {
-                self.writes.add_counter(
+                self.ctr_add(
                     &keys::counter_group(&tenant, &queue, g, Counter::Pending),
                     -share,
                 )?;
@@ -2396,14 +2679,8 @@ impl<'s, S: Store> Applier<'s, S> {
     /// A "latest time" counter: monotone, so an out-of-order effect cannot
     /// make a queue look idle.
     fn stamp(&mut self, pid: Pid, tenant: &str, queue: &str, c: Counter, at_us: i64) -> Result<()> {
-        for key in [
-            keys::counter_partition(pid, c),
-            keys::counter_queue(tenant, queue, c),
-        ] {
-            if self.writes.counter_at(&key)? < at_us {
-                self.writes.set_counter(&key, at_us)?;
-            }
-        }
+        self.ctr_stamp(&keys::counter_partition(pid, c), at_us)?;
+        self.ctr_stamp(&keys::counter_queue(tenant, queue, c), at_us)?;
         Ok(())
     }
 
@@ -2443,6 +2720,12 @@ impl<'s, S: Store> Applier<'s, S> {
     fn commit_inner(&mut self) -> Result<()> {
         self.record_files()?;
         let seals = self.record_seals()?;
+        // PERF-D: fold the transaction's accumulated counter deltas into the
+        // store before it commits, so the committed rows (and the digest a
+        // reader takes after) are exactly the per-bump path's; then drop the
+        // group-list cache, which is scoped to the transaction.
+        self.counters.flush(&mut self.writes)?;
+        self.groups_cache.clear();
         self.writes.commit()?;
         // §13.5 `apply.store_committed`: the (non-durable) store commit that
         // carries the applied index and the segment file lengths has landed;
@@ -2497,6 +2780,12 @@ impl<'s, S: Store> Applier<'s, S> {
         }
         self.record_files()?;
         let seals = self.record_seals()?;
+        // PERF-D: the durable point must carry every counter delta on the
+        // platter — a reader (and the digest) takes committed state after it —
+        // so fold the overlay in before the durable commit, and drop the
+        // transaction-scoped group cache.
+        self.counters.flush(&mut self.writes)?;
+        self.groups_cache.clear();
         self.writes
             .set_meta_u64(meta::DURABLE_INDEX, self.applied_index)?;
         self.writes

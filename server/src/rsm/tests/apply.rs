@@ -178,6 +178,10 @@ pub fn cfg() -> ApplyConfig {
         // its own tests that set `apply_writers`.
         seg_buffered: true,
         apply_writers: 0,
+        // PERF-D: batch counters everywhere (transparent), keep pending on the
+        // shipped byte-for-byte path; the transition tests opt in per-test.
+        batch_counters: true,
+        pending_transitions: false,
     }
 }
 
@@ -637,6 +641,377 @@ pub fn settle<S: Store>(a: &mut Applier<'_, S>) {
         a.gc_pass().expect("gc");
         a.durable_point().expect("durable point");
     }
+}
+
+/// PERF-D laptop smoke: store puts per append and apply time under the A20k and
+/// C1000 shapes, with the batching levers off (before), counters on, and both
+/// on (after). Prints the numbers PERF-D reports; run with:
+///   cargo test -p queen-engine --lib rsm::tests::apply::perf_d_store_ops_per_append \
+///     -- --ignored --nocapture
+#[test]
+#[ignore = "measurement, not a gate; run with --ignored --nocapture"]
+fn perf_d_store_ops_per_append() {
+    // One shape: `parts` partitions, `batch` messages per append, `groups`
+    // subscribed groups. Returns (puts/append, ns/append) over `windows` × 256
+    // append entries applied after setup, committing every 256 (the shipped
+    // store-commit cadence), so the counter flush at each commit is amortised in.
+    fn run(
+        parts: u64,
+        batch: u32,
+        groups: u64,
+        batch_counters: bool,
+        pending_transitions: bool,
+        windows: u64,
+    ) -> (f64, f64) {
+        let node = Node::new("perfd");
+        let cfg = ApplyConfig {
+            batch_counters,
+            pending_transitions,
+            ..cfg()
+        };
+        let (mut a, _) = Applier::open(
+            node.store(),
+            &node.seg_dir(),
+            seg_opts(),
+            cfg,
+            Arc::new(crate::rsm::apply::NoNotify),
+        )
+        .expect("open");
+        let mut now = BASE_US;
+        let mut ids = 0u64;
+
+        // Setup: one entry creates the queue, the groups and every partition.
+        let mut effects = vec![Effect::QueueUpsert {
+            tenant: TENANT.into(),
+            queue: QUEUE.into(),
+            cfg: queue_config(now),
+        }];
+        for g in 0..groups {
+            effects.push(Effect::GroupUpsert {
+                tenant: TENANT.into(),
+                queue: QUEUE.into(),
+                group: format!("g{g}"),
+                meta: group_meta(g, now),
+            });
+        }
+        for p in 0..parts {
+            effects.push(Effect::PartitionCreate {
+                pid: 1 + p,
+                uuid: uuid(1 + p),
+                tenant: TENANT.into(),
+                queue: QUEUE.into(),
+                partition: format!("p{p}"),
+                created_at_us: now,
+            });
+        }
+        let setup = {
+            let b = Build::new(now, 1, ids).cmd(effects);
+            ids += 1;
+            b.at(1, 1)
+        };
+        a.apply(&setup).expect("setup");
+        a.commit().expect("commit setup");
+
+        let pid_base = 1 + parts;
+        let mut last_off = vec![-1i64; parts as usize];
+        let mut k = 0u64;
+        let mut idx = 1u64;
+
+        let puts0 = crate::rsm::store::StoreMetrics::get(&node.store().metrics().rows_put);
+        let t0 = std::time::Instant::now();
+        for _ in 0..windows {
+            for _ in 0..256 {
+                now += 1000;
+                idx += 1;
+                ids += 1;
+                let pi = (k % parts) as usize;
+                let base = (last_off[pi] + 1) as u64;
+                last_off[pi] += batch as i64;
+                let app = Effect::Append {
+                    pid: 1 + pi as u64,
+                    bucket: (pi % 8) as u16,
+                    base_offset: base,
+                    count: batch,
+                    created_at_us: now,
+                    hashes: hashes(k, batch),
+                    blob: vec![0xAB; 24 * batch as usize],
+                };
+                let c = Build::new(now, pid_base, ids).cmd(vec![app]).at(idx, 1);
+                a.apply(&c).expect("append");
+                k += 1;
+            }
+            a.commit().expect("commit window");
+        }
+        let dt = t0.elapsed();
+        let puts1 = crate::rsm::store::StoreMetrics::get(&node.store().metrics().rows_put);
+        let puts_per = (puts1 - puts0) as f64 / k as f64;
+        let ns_per = dt.as_nanos() as f64 / k as f64;
+        (puts_per, ns_per)
+    }
+
+    for (name, parts, batch, groups, windows) in [
+        ("A20k", 100u64, 10u32, 1u64, 40u64),
+        ("C1000", 1000, 1, 1, 40),
+    ] {
+        let off = run(parts, batch, groups, false, false, windows);
+        let ctr = run(parts, batch, groups, true, false, windows);
+        let both = run(parts, batch, groups, true, true, windows);
+        println!(
+            "{name} ({parts} parts, batch {batch}, {groups} grp): \
+             puts/append off={:.2} counters={:.2} counters+pending={:.2} | \
+             ns/append off={:.0} counters={:.0} both={:.0}",
+            off.0, ctr.0, both.0, off.1, ctr.1, both.1
+        );
+    }
+}
+
+/// I2 for PERF-D: the committed replicated state after the same entries, and at
+/// every entry boundary, must be identical whatever the store-commit cadence —
+/// the batched counters (and, with `pending_transitions` on, the transition
+/// `pending` writes) must fold to a cadence-free result. Run at commit cadences
+/// of 1, 3 and 1000 entries and compare the digest snapshot taken at every
+/// boundary (a boundary forces a commit and reads committed state).
+fn cadence_independence(pending_transitions: bool) {
+    let m = 90u64;
+    let mut w = Workload::new(0x1D2);
+    let entries: Vec<Committed> = (0..m).map(|_| w.next()).collect();
+    let cfg = ApplyConfig {
+        pending_transitions,
+        ..cfg()
+    };
+
+    let snapshots = |cadence: usize| -> Vec<u128> {
+        let node = Node::new("cad");
+        let mut digests = Vec::new();
+        {
+            let (mut a, _) = Applier::open(
+                node.store(),
+                &node.seg_dir(),
+                seg_opts(),
+                cfg.clone(),
+                Arc::new(crate::rsm::apply::NoNotify),
+            )
+            .expect("open");
+            for (i, c) in entries.iter().enumerate() {
+                a.apply(c).expect("apply");
+                if (i + 1) % cadence == 0 {
+                    a.commit().expect("commit");
+                }
+                if (i + 1) % 10 == 0 {
+                    // The observation boundary: commit whatever is open and read
+                    // the committed state. The result must not depend on the
+                    // intermediate cadence.
+                    a.commit().expect("commit");
+                    digests.push(
+                        node.store()
+                            .read(|r| Ok(state_digest(r).expect("digest").whole))
+                            .expect("read"),
+                    );
+                }
+            }
+        }
+        digests
+    };
+
+    let d1 = snapshots(1);
+    let d3 = snapshots(3);
+    let d1000 = snapshots(1000);
+    assert_eq!(
+        d1, d3,
+        "cadence 1 vs 3 diverged (pending_transitions={pending_transitions})"
+    );
+    assert_eq!(
+        d1, d1000,
+        "cadence 1 vs 1000 diverged (pending_transitions={pending_transitions})"
+    );
+}
+
+#[test]
+fn batched_counters_are_independent_of_the_commit_cadence() {
+    cadence_independence(false);
+}
+
+#[test]
+fn pending_transitions_are_independent_of_the_commit_cadence() {
+    cadence_independence(true);
+}
+
+#[test]
+fn pending_transitions_rebuild_from_pending_equals_the_live_rings() {
+    // PERF-D: with transitions on, the ring is moved only on the transitions
+    // that write the `pending` row, so a rebuild of the ready rings from the
+    // committed `pending` keyspace (what a reopen / leadership start does) is
+    // byte-for-byte the live ring — the same ready candidates in order and the
+    // same parked deadlines. The workload's delay is 0 and its lease deadlines
+    // are 30 s out, so nothing is due for promotion between the two.
+    use crate::rsm::state::{Derived, ReadyIndex};
+
+    // The ready MEMBERSHIP (sorted), the deferred count and the next deadline —
+    // not the FIFO walk order, which a rebuild resets to pid order on BOTH the
+    // transitions-on and the shipped path (the ring is a hint, coarse by
+    // contract). Equal membership is what "the same rings" means here.
+    fn summary(d: &Derived) -> Vec<(String, Vec<Pid>, usize, Option<i64>)> {
+        let mut out = Vec::new();
+        for g in ["g1", "g2"] {
+            let (mut ready, mut deferred, mut next) = (Vec::new(), 0usize, None);
+            if let Some(r) = d.ring(TENANT, QUEUE, g) {
+                let r: &ReadyIndex = r;
+                r.walk(usize::MAX, &mut |pid| {
+                    ready.push(pid);
+                    true
+                });
+                ready.sort_unstable();
+                deferred = r.deferred_len();
+                next = r.next_deadline();
+            }
+            out.push((g.to_string(), ready, deferred, next));
+        }
+        out
+    }
+
+    let cfg = ApplyConfig {
+        pending_transitions: true,
+        ..cfg()
+    };
+    let node = Node::new("pend-rebuild");
+    let mut w = Workload::new(0xBEEF);
+    let live = {
+        let (mut a, _) = Applier::open(
+            node.store(),
+            &node.seg_dir(),
+            seg_opts(),
+            cfg.clone(),
+            Arc::new(crate::rsm::apply::NoNotify),
+        )
+        .expect("open");
+        for _ in 0..80 {
+            let c = w.next();
+            a.apply(&c).expect("apply");
+        }
+        a.commit().expect("commit"); // so the rebuild sees the committed pending
+                                     // Also check pending is in step with outstanding work per group.
+        node.store()
+            .read(|r| {
+                for pid in 1..=4u64 {
+                    let Some(p) = r.partition(pid)? else { continue };
+                    for g in ["g1", "g2"] {
+                        let committed = r.cursor(pid, g)?.map(|c| c.committed).unwrap_or(-1);
+                        let has_work = committed < p.last_offset;
+                        let has_row = r.pending_at(TENANT, QUEUE, g, pid)?.is_some();
+                        assert_eq!(
+                            has_row, has_work,
+                            "pid {pid} g {g}: pending row {has_row} but outstanding work {has_work}"
+                        );
+                    }
+                }
+                Ok(())
+            })
+            .expect("read");
+        summary(a.derived())
+    };
+    let rebuilt = node
+        .store()
+        .read(|r| {
+            let now = r.last_now_us()?;
+            Ok(summary(&Derived::rebuild(r, now)?))
+        })
+        .expect("read");
+    assert_eq!(live, rebuilt, "the rebuilt rings differ from the live ones");
+}
+
+#[test]
+fn batched_counters_survive_a_crash_at_a_non_durable_commit() {
+    crash_at_non_durable_commit(false);
+    crash_at_non_durable_commit(true);
+}
+
+/// The `replicator_crash` shape in process: apply a prefix with periodic
+/// NON-DURABLE commits (no durable point, so `durable_index` stays 0), then a
+/// tail with no commit, then drop the applier — the open transaction AND the
+/// per-transaction overlay (counters, and with transitions on the `pending`
+/// decisions) go with it. Reopen at the committed prefix and replay the whole
+/// stream (the prefix is skipped), then settle. The state must equal a clean
+/// run of the same stream (PERF-D: the overlay is transparent across a crash at
+/// a non-durable commit).
+fn crash_at_non_durable_commit(pending_transitions: bool) {
+    let cfg = ApplyConfig {
+        pending_transitions,
+        ..cfg()
+    };
+    let m = 60u64;
+    let mut w = Workload::new(0xC0FFEE);
+    let entries: Vec<Committed> = (0..m).map(|_| w.next()).collect();
+
+    let clean = Node::new("ctr-crash-ref");
+    {
+        let (mut a, _) = Applier::open(
+            clean.store(),
+            &clean.seg_dir(),
+            seg_opts(),
+            cfg.clone(),
+            Arc::new(crate::rsm::apply::NoNotify),
+        )
+        .expect("open");
+        for (i, c) in entries.iter().enumerate() {
+            a.apply(c).expect("apply");
+            if i % 5 == 4 {
+                a.commit().expect("commit");
+            }
+        }
+        settle(&mut a);
+    }
+    let want = clean.digest();
+
+    let node = Node::new("ctr-crash");
+    {
+        let (mut a, _) = Applier::open(
+            node.store(),
+            &node.seg_dir(),
+            seg_opts(),
+            cfg.clone(),
+            Arc::new(crate::rsm::apply::NoNotify),
+        )
+        .expect("open");
+        for (i, c) in entries.iter().take(20).enumerate() {
+            a.apply(c).expect("apply");
+            if i % 5 == 4 {
+                a.commit().expect("commit"); // non-durable
+            }
+        }
+        // A tail with no commit, then the applier (and the overlay) is dropped.
+        for c in entries.iter().take(40).skip(20) {
+            a.apply(c).expect("apply");
+        }
+        assert_eq!(a.durable_index(), 0, "no durable point in the prefix");
+    }
+    {
+        let (mut a, rec) = Applier::open(
+            node.store(),
+            &node.seg_dir(),
+            seg_opts(),
+            cfg.clone(),
+            Arc::new(crate::rsm::apply::NoNotify),
+        )
+        .expect("open");
+        assert!(
+            rec.applied_index > 0 && rec.applied_index <= 20 && rec.durable_index == 0,
+            "reopened at a non-durable commit inside the prefix, got applied {} durable {}",
+            rec.applied_index,
+            rec.durable_index
+        );
+        for c in &entries {
+            a.apply(c).expect("apply"); // the prefix is skipped
+        }
+        settle(&mut a);
+    }
+    let got = node.digest();
+    assert_eq!(
+        got.whole,
+        want.whole,
+        "state diverged across the crash (pending_transitions={pending_transitions}), \
+         first at {:?}",
+        got.first_difference(&want),
+    );
 }
 
 // ---------------------------------------------------------------------------
