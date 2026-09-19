@@ -123,3 +123,112 @@ fn measure_index_overhead_and_lookup() {
     report_boot("fat batch 500x256B", 500, 500 * 256);
     report_boot("one 256B message", 1, 256);
 }
+
+// ---------------------------------------------------------------------------
+// PERF-F: the bucket-count fan-out, on the laptop
+// ---------------------------------------------------------------------------
+//
+// The number strace -c would count on the VM — write(2) per entry and fsync(2)
+// per durable point — measured here directly and exactly, since `segment_writes`
+// is the write() count the segment path issues and a durable point's
+// `files_synced` is its fsync fan-out. strace itself is Linux-only, and the
+// A20k/C1000/FAT100 60 s goload smokes with `strace -c` and the Prometheus
+// `queen_raft_apply_segment_seconds` histogram are the VM pass; this is the
+// laptop proxy that proves the lever moves the counts. The three regimes are run
+// at `QUEEN_RAFT_BUCKETS` 256 (before), 16 (the new default) and 1: at 1 an
+// entry's frames are one buffered run, one write, and the point one fsync.
+struct Shape {
+    label: &'static str,
+    parts: usize,
+    batch: u32,
+    appends_per_entry: usize,
+    blob: usize,
+}
+
+fn fanout_report(shape: &Shape, nbuckets: usize) {
+    let d = TmpDir::new("measure-fanout");
+    // Large files so rolls are rare and the numbers are steady-state fan-out,
+    // not roll churn; buffering + the adaptive pool, the shipped write path.
+    let (mut s, _) = Segments::open(&d.seg(), Options::testing_buckets(64 << 20, nbuckets), &[])
+        .expect("open the fan-out tree");
+    s.configure_writes(true, 4);
+    let writes0 = s.segment_writes();
+    let entries = 300u64;
+    let durable_every = 60u64;
+    let mut base = vec![0u64; shape.parts];
+    let mut cursor = 0usize;
+    let mut durable_files = 0u64;
+    let mut durable_pts = 0u64;
+    for e in 0..entries {
+        for _ in 0..shape.appends_per_entry {
+            let p = cursor % shape.parts;
+            cursor += 1;
+            let logical = (p % LOGICAL_BUCKETS) as u16;
+            let pid = p as u64 + 1;
+            s.append(
+                logical,
+                pid,
+                base[p],
+                shape.batch,
+                1_700_000_000_000_000 + base[p] as i64,
+                &hashes(pid, shape.batch),
+                &blob(pid, shape.blob * shape.batch as usize),
+            )
+            .expect("append");
+            base[p] += shape.batch as u64;
+        }
+        s.flush_writes().expect("flush the entry");
+        if e % durable_every == durable_every - 1 {
+            let dp = s.durable_point().expect("durable point");
+            durable_files += dp.files_synced;
+            durable_pts += 1;
+            let _ = s.take_touched();
+        }
+    }
+    let writes = s.segment_writes() - writes0;
+    let appends = entries * shape.appends_per_entry as u64;
+    println!(
+        "{:8} buckets {nbuckets:3}: {entries} entries, {appends} appends  →  \
+         write()s {writes:6} ({:.2}/entry, {:.2}/append)   \
+         fsync fan-out {:.1} files/durable over {durable_pts} points",
+        shape.label,
+        writes as f64 / entries as f64,
+        writes as f64 / appends as f64,
+        durable_files as f64 / durable_pts.max(1) as f64,
+    );
+}
+
+#[test]
+#[ignore = "a measurement, not an assertion"]
+fn measure_bucket_fanout() {
+    println!();
+    let shapes = [
+        Shape {
+            label: "A20k",
+            parts: 100,
+            batch: 10,
+            appends_per_entry: 3,
+            blob: 32,
+        },
+        Shape {
+            label: "C1000",
+            parts: 1000,
+            batch: 1,
+            appends_per_entry: 5,
+            blob: 32,
+        },
+        Shape {
+            label: "FAT100",
+            parts: 100,
+            batch: 100,
+            appends_per_entry: 12,
+            blob: 32,
+        },
+    ];
+    for shape in &shapes {
+        for nbuckets in [256usize, 16, 1] {
+            fanout_report(shape, nbuckets);
+        }
+        println!();
+    }
+}

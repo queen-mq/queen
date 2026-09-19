@@ -19,6 +19,7 @@
 //! and every file the tests make is a few kilobytes: this laptop has ~10 GiB
 //! free and the standing rule is no large fixtures.
 
+mod buckets;
 mod crash;
 mod files;
 mod frames;

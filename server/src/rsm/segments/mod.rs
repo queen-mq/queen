@@ -2,21 +2,58 @@
 //!
 //! ```text
 //! $QUEEN_RAFT_DIR/sm-<index>-<term>/seg/
+//!   MANIFEST                  the bucket count this tree was created with
 //!   b000/ f0000000000.seg   append-only frames (§11.2)
 //!         f0000000000.qidx  the sealed file's index (§6.1 amendment)
 //!         f0000000001.seg   the ACTIVE file: its index is in RAM
 //!   b001/ …
-//!   b255/
+//!   b00F/                     16 buckets by default (QUEEN_RAFT_BUCKETS)
 //! ```
 //!
 //! # What this module is
 //!
 //! The bytes of every message live here; everything else lives in the ordered
-//! store. One directory per bucket — `xxh3(tenant ␟ queue ␟ partition) % 256`,
-//! computed by the planner and carried in
+//! store. One directory per bucket — the planner reduces
+//! `xxh3(tenant ␟ queue ␟ partition) % 256` and carries it in
 //! [`crate::rsm::effect::Effect::Append`] so every node files the bytes the
-//! same way. Files are append-only, roll at `QUEEN_RAFT_SEGMENT_BYTES`, and a
-//! sealed file never changes again.
+//! same way, and each node FOLDS that logical bucket into its own directory
+//! count ([`Options::nbuckets`], see [`LOGICAL_BUCKETS`]). Files are
+//! append-only, roll at `QUEEN_RAFT_SEGMENT_BYTES`, and a sealed file never
+//! changes again.
+//!
+//! # The bucket count (PERF-F, `QUEEN_RAFT_BUCKETS`)
+//!
+//! How many bucket directories a node keeps is a node-local knob, a power of two
+//! in `1..=256`, default 16. It is written to the tree's `MANIFEST` at creation
+//! and a reopen with a different value is refused: a data dir keeps its count
+//! for life, because the count decides which local bucket a name folds into and
+//! changing it would send every position already written to the wrong file. The
+//! count is pure layout — it never enters an effect or a digest (I7), so it is
+//! not part of the replicated state and two nodes could even differ and each
+//! stay self-consistent.
+//!
+//! It is the durable point's fan-out knob. A durable point fsyncs every bucket
+//! FILE touched since the last one; a shape that writes to every bucket each
+//! second (C1000: 1000 partitions) makes that all `nbuckets` files plus their
+//! directories. Fewer buckets means fewer fsyncs per point — and with
+//! `nbuckets = 1` an entry's frames are one buffered run, one `write`, and the
+//! point one file fsync — at the cost of less write parallelism and coarser
+//! retention:
+//!
+//! - **Retention/compaction (§11.7) get coarser.** A file is unlinked only when
+//!   every frame in it is dead. With fewer buckets, one file mixes the frames of
+//!   more partitions, so it stays alive until the LONGEST-lived of them is
+//!   released — a slow partition pins the payloads of fast ones sharing its
+//!   bucket for longer, and time-based retention still drops whole files but on a
+//!   coarser boundary. A future copy-forward compaction (moving the few live
+//!   frames of a mostly-dead file) does more work per file for the same reason.
+//!   The counters that feed compaction ([`FileMeta::retained_frames`] /
+//!   `retained_bytes`) are still exact; only the granularity of what can be
+//!   dropped changes. Time-based, whole-file retention is unaffected.
+//! - **Rolls are more frequent per bucket** (more bytes funnel through each
+//!   active file), so `.qidx` writes and seals happen oftener per bucket, but
+//!   the total across the tree is unchanged — it follows the bytes, not the
+//!   bucket count.
 //!
 //! The apply thread is the ONLY writer (I1) and it writes without fsync: the
 //! Raft log is the write-ahead log, and durability comes from the durable
@@ -120,8 +157,43 @@ use crate::rsm::effect::Pid;
 pub use frame::FrameError;
 pub use index::{IndexError, Record};
 
-/// Buckets, fixed by the format: `xxh3(names) % 256` (§0.4, D9).
-pub const NBUCKETS: usize = 256;
+/// The FORMAT's logical bucket space: `xxh3(names) % 256`, the modulus the
+/// leader's `planner::bucket_of` reduces the three names into and the range the
+/// effect's `Append.bucket` field carries (§0.4, D9). It is fixed at 256 so the
+/// replicated effect is the same on every node and across versions.
+///
+/// It is NOT how many bucket DIRECTORIES a node keeps: that is the node-local
+/// [`Options::nbuckets`] (PERF-F, `QUEEN_RAFT_BUCKETS`), pinned in the tree's
+/// manifest for the life of the data dir. A node FOLDS the logical bucket into
+/// its own count in [`Segments::append`] — `logical % nbuckets` — and records
+/// the folded (local) bucket in the position it hands back, so nothing
+/// downstream (`seg_loc`, reads, the file table) ever sees the logical index
+/// again. With a count that DIVIDES 256 (every power of two `1..=256`) the fold
+/// is exact: `(h % 256) % n == h % n` because `n | 256`, so the folded bucket
+/// is identical to reducing the name hash by `n` directly, which is what
+/// "bucket_of = hash mod that count" means. The fold — rather than teaching
+/// `bucket_of` the count — keeps `nbuckets` a purely node-local layout choice:
+/// it never enters an effect or a digest (I7), so two nodes may even hold
+/// different counts and each stays self-consistent (positions are node-local).
+pub const LOGICAL_BUCKETS: usize = 256;
+
+/// The legacy fixed bucket count and the default a bare `Options::default` /
+/// `Options::testing` opens with, so the format tests written against 256 bucket
+/// directories keep running unchanged. The SHIPPED default is
+/// [`DEFAULT_BUCKETS`], resolved by [`Options::from_env`].
+pub const NBUCKETS: usize = LOGICAL_BUCKETS;
+
+/// The default node-local bucket count `QUEEN_RAFT_BUCKETS` resolves to when
+/// unset (PERF-F). 16 spreads a durable point's fan-out over 16 files instead of
+/// 256 while keeping some parallelism; 1 makes an entry one write and one fsync.
+pub const DEFAULT_BUCKETS: usize = 16;
+
+/// The name of the tree's format manifest, beside the bucket directories. It
+/// pins the bucket count a data dir was created with (PERF-F): a reopen with a
+/// different `QUEEN_RAFT_BUCKETS` is refused, because the count decides which
+/// local bucket a name folds into and a changed count would send old positions
+/// to the wrong directory.
+const MANIFEST_NAME: &str = "MANIFEST";
 
 /// `QUEEN_RAFT_SEGMENT_BYTES` (Appendix H).
 pub const DEFAULT_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
@@ -330,6 +402,14 @@ pub struct Options {
     /// proportional to the number of BUCKETS touched, not to bytes, so the
     /// fan-out is the knob; WP-1.4 tunes it against the cadence.
     pub fsync_threads: usize,
+    /// PERF-F: how many bucket DIRECTORIES this node keeps (`QUEEN_RAFT_BUCKETS`,
+    /// a power of two in `1..=256`). The logical bucket the planner puts in an
+    /// effect (0..[`LOGICAL_BUCKETS`]) is folded into this range by
+    /// [`Segments::append`]. A data dir keeps its count for life (pinned in the
+    /// tree's manifest); a reopen with a different value is refused. Fewer
+    /// buckets means fewer files per durable point (with 1, an entry is one
+    /// write and the point one fsync) at the cost of coarser retention/GC.
+    pub nbuckets: usize,
 }
 
 impl Default for Options {
@@ -338,6 +418,10 @@ impl Default for Options {
             segment_bytes: DEFAULT_SEGMENT_BYTES,
             fsync: FsyncMode::Full,
             fsync_threads: 4,
+            // The LEGACY count: a bare `default`/`testing` opens 256 directories
+            // so the format tests written against 256 are unchanged. The shipped
+            // binary resolves `DEFAULT_BUCKETS` (16) through `from_env`.
+            nbuckets: NBUCKETS,
         }
     }
 }
@@ -353,17 +437,55 @@ impl Options {
         {
             o.segment_bytes = v.max(MIN_SEGMENT_BYTES);
         }
+        o.nbuckets = resolve_buckets_env();
         o
     }
 
-    /// Everything a test wants: small files and no drive barrier.
+    /// Everything a test wants: small files, no drive barrier, and the legacy
+    /// 256-bucket layout so the format tests are unchanged.
     #[cfg(test)]
     pub fn testing(segment_bytes: u64) -> Options {
+        Options::testing_buckets(segment_bytes, NBUCKETS)
+    }
+
+    /// Like [`Options::testing`] but with a chosen bucket count, for the PERF-F
+    /// tests that open the same tree at 1, 16 and 256 buckets.
+    #[cfg(test)]
+    pub fn testing_buckets(segment_bytes: u64, nbuckets: usize) -> Options {
         Options {
             segment_bytes: segment_bytes.max(MIN_SEGMENT_BYTES),
             fsync: FsyncMode::Data,
             fsync_threads: 1,
+            nbuckets: clamp_buckets(nbuckets),
         }
+    }
+}
+
+/// Coerce a requested bucket count into a legal one: a power of two in
+/// `1..=256`. Anything else is rounded DOWN to the nearest power of two (and up
+/// to 1, down to 256), so the fold `(h % 256) % n == h % n` stays exact
+/// (`n | 256`) and a typo cannot silently pick a non-uniform count. Pure, so it
+/// runs the same on every node.
+fn clamp_buckets(n: usize) -> usize {
+    let n = n.clamp(1, LOGICAL_BUCKETS);
+    if n.is_power_of_two() {
+        n
+    } else {
+        // The greatest power of two <= n (n >= 2 here, so this is >= 2).
+        1usize << (usize::BITS - 1 - n.leading_zeros())
+    }
+}
+
+/// Read `QUEEN_RAFT_BUCKETS` (default [`DEFAULT_BUCKETS`]) and clamp it. Boot
+/// only; the resolved count is pinned in the tree manifest at creation.
+#[allow(clippy::disallowed_methods)]
+fn resolve_buckets_env() -> usize {
+    match std::env::var("QUEEN_RAFT_BUCKETS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        Some(v) => clamp_buckets(v),
+        None => DEFAULT_BUCKETS,
     }
 }
 
@@ -682,6 +804,119 @@ fn create_dir_reporting(path: &Path) -> io::Result<bool> {
 }
 
 // ---------------------------------------------------------------------------
+// The bucket-count manifest (PERF-F)
+// ---------------------------------------------------------------------------
+
+fn manifest_path(root: &Path) -> PathBuf {
+    root.join(MANIFEST_NAME)
+}
+
+/// The bucket count a tree was created with, if it recorded one. `None` on a
+/// tree with no manifest — a fresh tree, or one created before PERF-F (which is
+/// the legacy 256-bucket format).
+fn read_manifest_buckets(root: &Path) -> Result<Option<usize>> {
+    match std::fs::read_to_string(manifest_path(root)) {
+        Ok(s) => {
+            for line in s.lines() {
+                if let Some(v) = line.trim().strip_prefix("buckets=") {
+                    let n = v.trim().parse::<usize>().map_err(|_| {
+                        SegError::Refused("the segment manifest's bucket count is not a number")
+                    })?;
+                    return Ok(Some(n));
+                }
+            }
+            Err(SegError::Refused(
+                "the segment manifest has no bucket count",
+            ))
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(SegError::Io(e)),
+    }
+}
+
+/// Write the manifest and make it durable (the format decision must outlive the
+/// first frame). Atomic: a temp file, an fsync, a rename, and a directory
+/// barrier, so a crash never leaves a half-written count.
+fn write_manifest_buckets(root: &Path, nbuckets: usize, fsync: FsyncMode) -> Result<()> {
+    let dst = manifest_path(root);
+    let tmp = root.join(format!("{MANIFEST_NAME}.tmp"));
+    let body = format!("version=1\nbuckets={nbuckets}\n");
+    {
+        let mut f = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp)
+            .map_err(SegError::Io)?;
+        f.write_all(body.as_bytes()).map_err(SegError::Io)?;
+        fsync_fd(f.as_raw_fd(), fsync).map_err(SegError::Io)?;
+    }
+    std::fs::rename(&tmp, &dst).map_err(SegError::Io)?;
+    fsync_dir(root, fsync).map_err(SegError::Io)?;
+    Ok(())
+}
+
+/// Reconcile the requested bucket count with what the tree was created with, and
+/// return the count this open must use (PERF-F). The manifest, once written, is
+/// the authority: a data dir keeps its count for life.
+///
+/// - A tree with a manifest: the recorded count wins, and a `requested` that
+///   differs is REFUSED (folding into a different count would misfile every
+///   position the old count wrote).
+/// - A fresh tree (`root_is_new`, or an empty one with no bucket dirs and no
+///   manifest): the requested count is written and pinned.
+/// - A tree with bucket directories but no manifest: the legacy 256-bucket
+///   format. It is adopted as 256 (and a manifest is written to pin it), and a
+///   `requested` other than 256 is refused rather than silently re-folding a
+///   populated tree.
+fn resolve_buckets(
+    root: &Path,
+    root_is_new: bool,
+    requested: usize,
+    fsync: FsyncMode,
+) -> Result<usize> {
+    let requested = clamp_buckets(requested);
+    if let Some(recorded) = read_manifest_buckets(root)? {
+        let recorded = clamp_buckets(recorded);
+        if recorded != requested {
+            return Err(SegError::Refused(
+                "QUEEN_RAFT_BUCKETS does not match the bucket count this data dir was created with (a data dir keeps its count for life)",
+            ));
+        }
+        return Ok(recorded);
+    }
+    // No manifest. Either a brand-new tree, or a legacy one from before PERF-F.
+    let legacy = !root_is_new && has_bucket_dirs(root)?;
+    if legacy {
+        if requested != NBUCKETS {
+            return Err(SegError::Refused(
+                "this data dir was created before QUEEN_RAFT_BUCKETS existed (legacy 256-bucket format); it can only be reopened with QUEEN_RAFT_BUCKETS=256",
+            ));
+        }
+        write_manifest_buckets(root, NBUCKETS, fsync)?;
+        return Ok(NBUCKETS);
+    }
+    // A brand-new (or empty) tree: pin the requested count for life.
+    write_manifest_buckets(root, requested, fsync)?;
+    Ok(requested)
+}
+
+/// Whether the tree already has at least one `bNNN` bucket directory: the test
+/// for a legacy (pre-manifest) tree that is not empty.
+fn has_bucket_dirs(root: &Path) -> Result<bool> {
+    for ent in std::fs::read_dir(root).map_err(SegError::Io)?.flatten() {
+        let name = ent.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if let Some(rest) = name.strip_prefix('b') {
+            if rest.len() == 3 && rest.bytes().all(|c| c.is_ascii_digit()) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+// ---------------------------------------------------------------------------
 // The shared read side
 // ---------------------------------------------------------------------------
 
@@ -702,6 +937,13 @@ struct Caches {
 
 struct Shared {
     root: PathBuf,
+    /// PERF-F: this tree's bucket count, so the read side (a [`Reader`] on the
+    /// blocking pool) can fold a logical bucket the planner handed it — via
+    /// `bucket_of` — into the local one the frames were filed under, the same
+    /// fold [`Segments::append`] does on the write side. Folding is idempotent
+    /// on an already-local bucket (`local % nbuckets == local`), so a caller
+    /// that passes a `Position`'s local bucket is unaffected.
+    nbuckets: usize,
     /// The index of every bucket's ACTIVE file. One lock, not 256 (§3.5).
     active: RwLock<index::ActiveIndexes>,
     /// The index of a file that has JUST been sealed and that the caller may
@@ -763,6 +1005,15 @@ impl std::fmt::Debug for Pin {
 }
 
 impl Shared {
+    /// Fold a logical bucket (the planner's `bucket_of`, 0..[`LOGICAL_BUCKETS`])
+    /// into this node's local range (PERF-F). Idempotent on an already-local
+    /// bucket: `local % nbuckets == local` since `local < nbuckets`, so a caller
+    /// that passes a stored `Position`'s bucket gets it back unchanged.
+    #[inline]
+    fn fold(&self, bucket: u16) -> u16 {
+        (bucket as usize % self.nbuckets) as u16
+    }
+
     fn known(&self, key: (u16, u32)) -> bool {
         self.files
             .read()
@@ -919,6 +1170,13 @@ impl Shared {
         sealed_files: &[u32],
         dl: Option<Instant>,
     ) -> Result<Option<Located>> {
+        // PERF-F: the planner hands the read path the LOGICAL bucket
+        // (`bucket_of`); fold it into this node's local range before touching
+        // the active index, the sealed-recent map or a `.qidx`, the same fold
+        // the write path did, so the read finds the frames where they were
+        // filed. The `Located`/`Position` returned therefore carries the local
+        // bucket, which is exactly what a following `read` needs.
+        let bucket = self.fold(bucket);
         if let Some((file_id, rec)) = self
             .active
             .read()
@@ -1121,7 +1379,9 @@ impl Reader {
     /// bytes were held, and the read that followed answered `MissingFile` —
     /// exactly the guarantee §11.7 asks the pin for.
     pub fn pin(&self, bucket: u16, file_id: u32) -> Option<Pin> {
-        let key = (bucket, file_id);
+        // PERF-F: fold the planner's logical bucket to the local one the file
+        // table and the pins map are keyed by (idempotent on a local bucket).
+        let key = (self.0.fold(bucket), file_id);
         let mut pins = self.0.pins.lock().expect("segment pins poisoned");
         if !self
             .0
@@ -1141,7 +1401,8 @@ impl Reader {
 
     /// Does this node still hold the file?
     pub fn has_file(&self, bucket: u16, file_id: u32) -> bool {
-        self.0.known((bucket, file_id))
+        // PERF-F: fold the planner's logical bucket to the local key.
+        self.0.known((self.0.fold(bucket), file_id))
     }
 
     /// `(frames read, bytes read, indexes opened)`.
@@ -1157,6 +1418,20 @@ impl Reader {
 // ---------------------------------------------------------------------------
 // The write pool (PERF-C, QUEEN_RAFT_APPLY_WRITERS)
 // ---------------------------------------------------------------------------
+
+/// PERF-F: an entry that touches at most this many segment files flushes them
+/// inline, even when the pool exists. The round-1 VM pass showed the pool's
+/// scatter/join costs more than it saves on the narrow shape (C1000: 1 file per
+/// entry, A20k apply_entry 65→524 µs), and with `QUEEN_RAFT_BUCKETS=1` every
+/// entry touches exactly one file, so this keeps the one-message and few-bucket
+/// shapes on the cheap inline path.
+const WRITER_INLINE_MAX_FILES: usize = 2;
+
+/// PERF-F: an entry whose buffered bytes total less than this flushes inline
+/// regardless of how many files it touches — the pool only repays its overhead
+/// on the fat, wide shape (FAT100). 64 KiB is well under a single 64 MiB segment
+/// and above a handful of small frames.
+const WRITER_INLINE_MIN_BYTES: usize = 64 * 1024;
 
 /// A small pool of writer threads that flush an entry's buffered per-bucket
 /// runs off the apply thread. Each bucket is routed to `bucket % n`, so a given
@@ -1312,6 +1587,12 @@ struct Active {
 pub struct Segments {
     shared: Arc<Shared>,
     opts: Options,
+    /// PERF-F: how many bucket directories this tree keeps, pinned by the
+    /// manifest at creation. Every `0..nbuckets` walk and every fold of a
+    /// logical bucket uses it; `opts.nbuckets` is the requested value and this
+    /// is the reconciled one (they agree unless the manifest overruled a legacy
+    /// tree).
+    nbuckets: usize,
     /// PERF-C: coalesce a whole entry's frames per file into ONE `write`
     /// instead of one per message. Set by [`Segments::configure_writes`] from
     /// the node-local `QUEEN_RAFT_SEG_BUFFERED` knob; `false` (the inline,
@@ -1455,6 +1736,11 @@ impl Segments {
     ) -> Result<(Segments, Recovery)> {
         let root_is_new = !root.exists();
         std::fs::create_dir_all(root)?;
+        // PERF-F: the bucket count this tree keeps for life. Resolved (and, on a
+        // fresh or legacy tree, pinned) before any file table is read, so the
+        // fold and every `0..nbuckets` walk below use the one authoritative
+        // value. A reopen whose `QUEEN_RAFT_BUCKETS` disagrees is refused here.
+        let nbuckets = resolve_buckets(root, root_is_new, opts.nbuckets, opts.fsync)?;
         let mut files = BTreeMap::new();
         for r in recorded {
             if r.len > 0 && r.sealed && r.frames == 0 {
@@ -1467,11 +1753,17 @@ impl Segments {
                     "a recorded segment file claims more live frames than it ever held",
                 ));
             }
+            if r.bucket as usize >= nbuckets {
+                return Err(SegError::Refused(
+                    "a recorded segment file names a bucket outside this tree's bucket count",
+                ));
+            }
             files.insert((r.bucket, r.file_id), r.meta());
         }
         let shared = Arc::new(Shared {
             root: root.to_path_buf(),
-            active: RwLock::new(index::ActiveIndexes::new(NBUCKETS)),
+            nbuckets,
+            active: RwLock::new(index::ActiveIndexes::new(nbuckets)),
             sealed_recent: RwLock::new(BTreeMap::new()),
             files: RwLock::new(files),
             pins: Mutex::new(HashMap::new()),
@@ -1488,11 +1780,12 @@ impl Segments {
         let mut segs = Segments {
             shared,
             opts,
+            nbuckets,
             buffered: false,
             writers: None,
             segment_writes: 0,
-            active: (0..NBUCKETS).map(|_| None).collect(),
-            pending_next: (0..NBUCKETS).map(|_| None).collect(),
+            active: (0..nbuckets).map(|_| None).collect(),
+            pending_next: (0..nbuckets).map(|_| None).collect(),
             sealed_dirty: Vec::new(),
             sealed_staged: Vec::new(),
             qidx_owed: BTreeMap::new(),
@@ -1554,6 +1847,13 @@ impl Segments {
         self.opts
     }
 
+    /// How many bucket directories this tree keeps (PERF-F), pinned by its
+    /// manifest. The reconciled count, which is `opts.nbuckets` unless a legacy
+    /// tree overruled it.
+    pub fn nbuckets(&self) -> usize {
+        self.nbuckets
+    }
+
     pub fn root(&self) -> &Path {
         &self.shared.root
     }
@@ -1588,7 +1888,7 @@ impl Segments {
         //    only here, so one barrier per created level, at boot, closes it
         //    for good.
         let mut made_bucket_dir = false;
-        for b in 0..NBUCKETS as u16 {
+        for b in 0..self.nbuckets as u16 {
             made_bucket_dir |= create_dir_reporting(&bucket_dir(&root, b))?;
         }
         if made_bucket_dir || root_is_new {
@@ -1610,7 +1910,7 @@ impl Segments {
         //    unlinking a `.seg` and its `.qidx` (§11.7) leaves an orphan
         //    index, which nothing would ever remove otherwise.
         let mut on_disk: BTreeSet<(u16, u32)> = BTreeSet::new();
-        for b in 0..NBUCKETS as u16 {
+        for b in 0..self.nbuckets as u16 {
             for ent in std::fs::read_dir(bucket_dir(&root, b))?.flatten() {
                 let name = ent.file_name();
                 let Some(name) = name.to_str() else { continue };
@@ -1770,10 +2070,11 @@ impl Segments {
         }
 
         // 6. Open (or create) each bucket's active file. `recorded` is sorted
-        //    by (bucket, file id), so one cursor walks it — not 256 scans,
-        //    which on a node with many files would make the boot quadratic.
+        //    by (bucket, file id), so one cursor walks it — not one scan per
+        //    bucket, which on a node with many files would make the boot
+        //    quadratic.
         let mut at = 0usize;
-        for b in 0..NBUCKETS as u16 {
+        for b in 0..self.nbuckets as u16 {
             let from = at;
             while at < recorded.len() && recorded[at].0 .0 == b {
                 at += 1;
@@ -1935,9 +2236,18 @@ impl Segments {
         hashes: &[u8],
         blob: &[u8],
     ) -> Result<Position> {
-        if bucket as usize >= NBUCKETS {
+        // The caller passes the LOGICAL bucket the planner put in the effect
+        // (0..LOGICAL_BUCKETS). Guard the format range, then FOLD it into this
+        // node's directory count (PERF-F). For a count that divides 256 — every
+        // legal `nbuckets` — `logical % nbuckets == (name_hash % 256) % nbuckets
+        // == name_hash % nbuckets`, so the local bucket is exactly what reducing
+        // the name by `nbuckets` would give. From here on `bucket` is local: the
+        // position returned, the active index, the file table and every read use
+        // the folded value, so the logical index never appears downstream.
+        if bucket as usize >= LOGICAL_BUCKETS {
             return Err(SegError::Refused("bucket out of range"));
         }
+        let bucket = (bucket as usize % self.nbuckets) as u16;
         self.buf.clear();
         let flen = frame::encode_into(
             &mut self.buf,
@@ -2109,7 +2419,7 @@ impl Segments {
     /// Flush every bucket with a buffered run, inline. The correctness floor
     /// under `durable_point` and the no-pool `flush_writes`.
     fn flush_all_pending(&mut self) -> Result<()> {
-        for b in 0..NBUCKETS {
+        for b in 0..self.nbuckets {
             if self.active[b]
                 .as_ref()
                 .is_some_and(|a| !a.pending.is_empty())
@@ -2130,13 +2440,38 @@ impl Segments {
     /// them all, then publishes their records itself (write-before-publish, on
     /// the one thread). Both halves of the entry are complete when this returns.
     pub fn flush_writes(&mut self) -> Result<()> {
-        let Some(writers) = self.writers.as_ref() else {
+        if self.writers.is_none() {
             return self.flush_all_pending();
-        };
+        }
+        // PERF-F: the pool is ADAPTIVE. Price this entry's flush first — how many
+        // files it touches and how many bytes it carries — and send it to the
+        // pool only when it is wide AND fat enough to repay the scatter/join. A
+        // narrow entry (<= WRITER_INLINE_MAX_FILES files, e.g. every entry when
+        // QUEEN_RAFT_BUCKETS=1) or a small one (< WRITER_INLINE_MIN_BYTES) is
+        // cheaper written inline on the apply thread. The knob keeps its meaning:
+        // 0 spawns no pool and never reaches here; a positive value spawns the
+        // pool but only the fat, wide shape actually uses it.
+        let mut touched = 0usize;
+        let mut total_bytes = 0usize;
+        for b in 0..self.nbuckets {
+            if let Some(a) = self.active[b].as_ref() {
+                if !a.pending.is_empty() {
+                    touched += 1;
+                    total_bytes += a.pending.len();
+                }
+            }
+        }
+        if touched == 0 {
+            return Ok(());
+        }
+        if touched <= WRITER_INLINE_MAX_FILES || total_bytes < WRITER_INLINE_MIN_BYTES {
+            return self.flush_all_pending();
+        }
+        let writers = self.writers.as_ref().expect("writers checked above");
         // Gather the runs, taking each bucket's bytes and records out.
         let mut jobs: Vec<(usize, RawFd, Vec<u8>)> = Vec::new();
         let mut recs: Vec<(usize, Vec<Record>)> = Vec::new();
-        for b in 0..NBUCKETS {
+        for b in 0..self.nbuckets {
             if let Some(a) = self.active[b].as_mut() {
                 if !a.pending.is_empty() {
                     jobs.push((b, a.file.as_raw_fd(), std::mem::take(&mut a.pending)));
@@ -2208,7 +2543,9 @@ impl Segments {
     ///    active file and none is owed" — for the life of the process, long
     ///    after the operator had freed the disk.
     pub fn roll(&mut self, bucket: u16) -> Result<()> {
-        if bucket as usize >= NBUCKETS {
+        // `roll` takes a LOCAL bucket (the fold happened in `append`; `seal_all`
+        // walks `0..nbuckets`), so it is bounded by this node's count.
+        if bucket as usize >= self.nbuckets {
             return Err(SegError::Refused("bucket out of range"));
         }
         // PERF-C: the file about to be sealed must carry its buffered bytes and
@@ -2403,7 +2740,7 @@ impl Segments {
     /// not worth a seal and would only make a `.qidx` with no records.
     pub fn seal_all(&mut self) -> Result<usize> {
         let mut n = 0;
-        for b in 0..NBUCKETS as u16 {
+        for b in 0..self.nbuckets as u16 {
             if self.active[b as usize].as_ref().is_some_and(|a| a.len > 0) {
                 self.roll(b)?;
                 n += 1;
@@ -3047,7 +3384,8 @@ impl Segments {
     /// cut did — let a pin be granted for a file this call was already
     /// unlinking.
     pub fn unlink(&mut self, bucket: u16, file_id: u32) -> Result<bool> {
-        if bucket as usize >= NBUCKETS {
+        // A LOCAL bucket, from the file table (`FileState::bucket`).
+        if bucket as usize >= self.nbuckets {
             return Err(SegError::Refused("bucket out of range"));
         }
         if self.active[bucket as usize]

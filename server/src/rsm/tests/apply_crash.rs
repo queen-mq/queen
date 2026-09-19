@@ -49,13 +49,17 @@ use crate::rsm::apply::{Applier, Committed, NoNotify, StateDigest};
 use crate::rsm::effect::{Effect, Pid};
 
 use super::apply::{
-    cfg, fresh_cursor, group_meta, hashes, queue_config, seg_opts, settle, uuid, Build, Node,
-    Workload, BASE_US, QUEUE, TENANT,
+    cfg, fresh_cursor, group_meta, hashes, queue_config, seg_opts, seg_opts_buckets, settle, uuid,
+    Build, Node, Workload, BASE_US, QUEUE, TENANT,
 };
 
 const CRASH_DIR_ENV: &str = "QUEEN_RSM_APPLY_CRASH_DIR";
 const CRASH_N_ENV: &str = "QUEEN_RSM_APPLY_CRASH_N";
 const CRASH_SEED_ENV: &str = "QUEEN_RSM_APPLY_CRASH_SEED";
+/// PERF-F: the bucket count the fault child opens its segment tree at. Unset =
+/// the legacy 256, so every existing cell is unchanged; the small-count cells
+/// set it to 1 and 16.
+const CRASH_BUCKETS_ENV: &str = "QUEEN_RSM_APPLY_CRASH_BUCKETS";
 const CHILD_TEST: &str = "rsm::tests::apply_crash::crash_child_applier";
 
 /// Entries per round. Enough that the child is still applying when the kill
@@ -411,7 +415,7 @@ fn crash_child_fault_applier() {
     let (mut a, _rec) = Applier::open(
         &store,
         &dir.join("seg"),
-        seg_opts(),
+        child_seg_opts(),
         cfg(),
         Arc::new(NoNotify),
     )
@@ -436,26 +440,46 @@ fn crash_child_fault_applier() {
     std::process::exit(3);
 }
 
+/// The segment options the fault child opens with: the small-file testing
+/// options at the bucket count [`CRASH_BUCKETS_ENV`] names (PERF-F), or the
+/// legacy 256 when it is unset.
+fn child_seg_opts() -> crate::rsm::segments::Options {
+    match std::env::var(CRASH_BUCKETS_ENV)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        Some(n) => seg_opts_buckets(n),
+        None => seg_opts(),
+    }
+}
+
 /// Spawn the fault child with one point armed over `n` entries, and let it
 /// abort itself.
 fn spawn_fault_child(dir: &Path, fault: &str, n: u64) -> Child {
+    spawn_fault_child_buckets(dir, fault, n, None)
+}
+
+/// [`spawn_fault_child`] with an explicit bucket count for the PERF-F cells.
+fn spawn_fault_child_buckets(dir: &Path, fault: &str, n: u64, nbuckets: Option<usize>) -> Child {
     let exe = std::env::current_exe().expect("test binary");
-    Command::new(&exe)
-        .args([
-            "--exact",
-            FAULT_CHILD_TEST,
-            "--nocapture",
-            "--test-threads",
-            "1",
-        ])
-        .env(CRASH_DIR_ENV, dir)
-        .env(CRASH_SEED_ENV, SEED.to_string())
-        .env(CRASH_N_ENV, n.to_string())
-        .env(FAULT_ENV, fault)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn the fault child")
+    let mut cmd = Command::new(&exe);
+    cmd.args([
+        "--exact",
+        FAULT_CHILD_TEST,
+        "--nocapture",
+        "--test-threads",
+        "1",
+    ])
+    .env(CRASH_DIR_ENV, dir)
+    .env(CRASH_SEED_ENV, SEED.to_string())
+    .env(CRASH_N_ENV, n.to_string())
+    .env(FAULT_ENV, fault)
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
+    if let Some(n) = nbuckets {
+        cmd.env(CRASH_BUCKETS_ENV, n.to_string());
+    }
+    cmd.spawn().expect("spawn the fault child")
 }
 
 /// A clean run of `n` entries, replicated and node-local digests: the state
@@ -551,6 +575,112 @@ fn each_fault_point_fires_and_the_node_repairs() {
             "{fault}: the repaired node-local state differs, first at {:?}",
             got_local.first_difference(&want_local)
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PERF-F: the same crash + repair at a small bucket count
+// ---------------------------------------------------------------------------
+//
+// The fold and the smaller durable-point file set (`QUEEN_RAFT_BUCKETS` = 1 and
+// 16) change the segment layout and what a durable point fsyncs, so recovery has
+// to reconcile a folded tree against the recorded lengths just the same. This
+// arms the two points that matter for that — `apply.segment_written` (the append
+// crashed with its bytes in a folded bucket file, unrecorded) and
+// `durable.files_synced` (crashed mid durable point) — at buckets 1 and 16, and
+// proves the aborted node reopens CONSISTENT (I11: no disagreement, applied ≥
+// durable) and replays its tail to completion. The bucket count is pinned in the
+// tree manifest by the child, so the parent reopens at the same count.
+
+#[test]
+fn segment_written_and_durable_points_repair_at_small_bucket_counts() {
+    use std::os::unix::process::ExitStatusExt;
+
+    // Fires on the FIRST append and the FIRST durable point, so each child dies
+    // early — these cells are cheap even across two bucket counts.
+    let points = ["apply.segment_written", "durable.files_synced"];
+    for nbuckets in [1usize, 16] {
+        for point in points {
+            let n = ENTRIES;
+            let fault = format!("{point}:1");
+            let dir = std::env::temp_dir().join(format!(
+                "queen-rsm-fault-b{nbuckets}-{}-{}",
+                std::process::id(),
+                point.replace('.', "_"),
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("fault dir");
+
+            let mut child = spawn_fault_child_buckets(&dir, &fault, n, Some(nbuckets));
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let status = loop {
+                if let Some(s) = child.try_wait().expect("try_wait") {
+                    break s;
+                }
+                if Instant::now() > deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("{fault} @ b{nbuckets}: the point never fired within 60s");
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            assert_eq!(
+                status.signal(),
+                Some(9),
+                "{fault} @ b{nbuckets}: the child exited {status:?}, not by SIGKILL"
+            );
+
+            // Reopen the aborted state at the SAME count (the manifest pins it),
+            // replay every entry after the durable index, prove it reaches the
+            // end. `Applier::open` returning Ok is itself the I11 check: a folded
+            // tree that did not reconcile is a disagreement, an error, not Ok.
+            let store =
+                crate::rsm::store::HeedStore::open(&dir.join("store"), &super::apply::store_opts())
+                    .expect("reopen store");
+            let (mut a, rec) = Applier::open(
+                &store,
+                &dir.join("seg"),
+                seg_opts_buckets(nbuckets),
+                cfg(),
+                Arc::new(NoNotify),
+            )
+            .expect("reopen applier: the folded tree reconciles (I11)");
+            assert_eq!(
+                a.segments_mut().nbuckets(),
+                nbuckets,
+                "{fault} @ b{nbuckets}: the manifest pinned the count"
+            );
+            assert!(
+                rec.applied_index >= rec.durable_index,
+                "{fault} @ b{nbuckets}: reopened at {} behind durable {}",
+                rec.applied_index,
+                rec.durable_index
+            );
+            let mut w = Workload::new(SEED);
+            let mut replayed = 0u64;
+            for i in 1..=n {
+                let c = w.next();
+                if i <= rec.replay_after {
+                    continue;
+                }
+                if let crate::rsm::apply::Applied::Executed { .. } = a.apply(&c).expect("replay") {
+                    replayed += 1;
+                }
+                a.gc_pass().expect("gc");
+            }
+            settle(&mut a);
+            assert!(
+                replayed > 0,
+                "{fault} @ b{nbuckets}: nothing was left to replay"
+            );
+            assert_eq!(
+                a.segments_mut().saturated_releases(),
+                0,
+                "{fault} @ b{nbuckets}: a segment claim was released twice"
+            );
+            drop(a);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }
 

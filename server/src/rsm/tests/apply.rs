@@ -157,10 +157,17 @@ pub fn store_opts() -> StoreOpts {
 /// and the GC paths are all exercised; `Data` keeps the tests off macOS's
 /// serialized `F_FULLFSYNC`.
 pub fn seg_opts() -> segments::Options {
+    seg_opts_buckets(segments::NBUCKETS)
+}
+
+/// PERF-F: the same small-file options with a chosen bucket count, for the
+/// crash-harness cells that run apply at `QUEEN_RAFT_BUCKETS` = 1 and 16.
+pub fn seg_opts_buckets(nbuckets: usize) -> segments::Options {
     segments::Options {
         segment_bytes: 8 << 10,
         fsync: FsyncMode::Data,
         fsync_threads: 1,
+        nbuckets,
     }
 }
 

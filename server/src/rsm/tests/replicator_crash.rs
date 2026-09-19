@@ -97,6 +97,7 @@ fn child_config(dir: &Path) -> OpenConfig {
             segment_bytes: 32 << 10,
             fsync: segments::FsyncMode::Data,
             fsync_threads: 1,
+            nbuckets: segments::NBUCKETS,
         },
         apply_cfg: crate::rsm::apply::ApplyConfig::default(),
         apply_channel_capacity: 128,
