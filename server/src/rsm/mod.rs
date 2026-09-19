@@ -159,5 +159,10 @@ pub mod local_metrics {}
 /// Crash points (§13.5), from the pgless `native/faults.rs`. Owner: WP-1.8.
 pub mod faults;
 
+/// Node-local timing metrics (O18, D17, PERF-1): the lock-free `queen_raft_*`
+/// histograms and counters the pipeline feeds and `/metrics/prometheus` reads.
+/// Not replicated; gated by `QUEEN_RAFT_METRICS` (default on).
+pub mod timing;
+
 #[cfg(test)]
 mod tests;

@@ -329,7 +329,16 @@ impl LogStore {
         // frame, so the entry is unanswered (its propose never returned) and
         // at-most-once (I4).
         crate::rsm::faults::hit("log.appended");
+        // PERF-1: the one group fsync per commit — the write barrier that
+        // stands behind the p99 tail. The clock read is gated on the knob
+        // (`stamp` is `None` when metrics are off) so the ablation prices it.
+        let s0 = crate::rsm::timing::stamp();
         self.fsync_active()?;
+        if let Some(s0) = s0 {
+            crate::rsm::timing::metrics()
+                .log_fsync
+                .record_dur(s0.elapsed());
+        }
         // §13.5 `log.flushed`: the group is durable in the raft log. It is
         // committed on a single voter (quorum of one); a crash here means the
         // entry WILL replay on restart, so a write whose propose had not yet

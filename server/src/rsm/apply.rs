@@ -2691,11 +2691,33 @@ pub fn run<S: Store>(
 ) -> Result<()> {
     let mut last_commit = clock.now();
     let mut last_durable = last_commit;
+    let mut last_timing = last_commit;
+    let timing_interval = crate::rsm::timing::timing_log_interval();
     let tick = Duration::from_millis(applier.cfg.idle_tick_ms.max(1));
     loop {
         match rx.recv_timeout(tick) {
             Ok(c) => {
+                // PERF-1: the apply-channel depth at receive, then the per-entry
+                // apply duration split into its segment `write_all` portion and
+                // the rest — all timed through the INJECTED clock, because
+                // apply.rs holds no clock of its own (I2). The knob gates the
+                // clock reads THEMSELVES (`probe` is `None` when metrics are off),
+                // not just the histogram write, so `QUEEN_RAFT_METRICS=0` pays
+                // for neither `clock.now()` here nor the depth/segment gauges.
+                let probe = crate::rsm::timing::enabled().then(|| {
+                    crate::rsm::timing::apply_channel_recv();
+                    (crate::rsm::timing::segment_write_ns_total(), clock.now())
+                });
                 applier.apply(&c)?;
+                if let Some((seg_before, t0)) = probe {
+                    let total = clock.now().duration_since(t0);
+                    let total_ns = total.as_nanos().min(u64::MAX as u128) as u64;
+                    let seg =
+                        crate::rsm::timing::segment_write_ns_total().saturating_sub(seg_before);
+                    let tm = crate::rsm::timing::metrics();
+                    tm.apply_entry.record_dur(total);
+                    tm.apply_other.record(total_ns.saturating_sub(seg));
+                }
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
@@ -2703,16 +2725,35 @@ pub fn run<S: Store>(
                 return Ok(());
             }
         }
+        // `now` drives the commit/durable/timing CADENCE (load-bearing); the
+        // extra `clock.now()` around each stage is metrics-only, so it is gated
+        // on the knob (`t0` is `None` when metrics are off).
         let now = clock.now();
         if applier.durable_due(now.duration_since(last_durable)) {
+            let t0 = crate::rsm::timing::enabled().then(|| clock.now());
             applier.durable_point()?;
+            if let Some(t0) = t0 {
+                crate::rsm::timing::metrics()
+                    .durable_point
+                    .record_dur(clock.now().duration_since(t0));
+            }
             last_durable = now;
             last_commit = now;
         } else if applier.commit_due(now.duration_since(last_commit)) {
+            let t0 = crate::rsm::timing::enabled().then(|| clock.now());
             applier.commit()?;
+            if let Some(t0) = t0 {
+                crate::rsm::timing::metrics()
+                    .store_commit
+                    .record_dur(clock.now().duration_since(t0));
+            }
             last_commit = now;
         }
         applier.gc_pass()?;
+        if !timing_interval.is_zero() && now.duration_since(last_timing) >= timing_interval {
+            crate::rsm::timing::emit_timing_log(&applier.stats());
+            last_timing = now;
+        }
     }
 }
 

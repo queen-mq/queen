@@ -167,6 +167,11 @@ struct Pending {
     bytes: Bytes,
     entry: crate::rsm::entry::Entry,
     done: oneshot::Sender<AppliedAt>,
+    /// When `propose` submitted this (PERF-1): the `proposed_to_committed`
+    /// histogram measures from here to the group's fsync. `None` when the
+    /// instrumentation is off (`QUEEN_RAFT_METRICS=0`), so the knob prices the
+    /// clock read at propose too, not just the histogram write.
+    proposed_at: Option<std::time::Instant>,
 }
 
 /// How often the writer wakes when idle, to drop log files behind a durable
@@ -242,6 +247,14 @@ impl Writer {
     /// the node must stop.
     fn commit(&mut self, pending: Vec<Pending>) -> bool {
         let slices: Vec<&[u8]> = pending.iter().map(|p| p.bytes.as_ref()).collect();
+        // PERF-1: this group's size, in entries and bytes. Gated on the knob so
+        // the per-group `group_bytes` sum is not paid when metrics are off.
+        if crate::rsm::timing::enabled() {
+            let group_bytes: u64 = slices.iter().map(|s| s.len() as u64).sum();
+            let tm = crate::rsm::timing::metrics();
+            tm.group_entries.record(slices.len() as u64);
+            tm.group_bytes.record(group_bytes);
+        }
         let first_index = match self.log.append_group(&slices) {
             Ok(i) => i,
             Err(e) => {
@@ -249,6 +262,16 @@ impl Writer {
                 return false;
             }
         };
+        // The group is fsynced (committed); price the proposed → committed leg
+        // (gated: `proposed_at` is `None` and the clock read skipped when off).
+        if crate::rsm::timing::enabled() {
+            let tm = crate::rsm::timing::metrics();
+            for p in &pending {
+                if let Some(at) = p.proposed_at {
+                    tm.proposed_to_committed.record_dur(at.elapsed());
+                }
+            }
+        }
         let last_index = first_index + pending.len() as u64 - 1;
         self.shared
             .last_log_index
@@ -276,6 +299,8 @@ impl Writer {
                 term: LOG_TERM,
                 entry: p.entry,
             };
+            // PERF-1: mark the channel depth so the apply thread can read it.
+            crate::rsm::timing::apply_channel_send();
             if self.apply_tx.send(committed).is_err() {
                 // The apply thread is gone (it refused an entry and stopped,
                 // §12.1 Fatal). The waiter we just registered will never
@@ -658,6 +683,7 @@ impl<S: Store + 'static> Replicator for LocalReplicator<S> {
             bytes: entry,
             entry: decoded,
             done: done_tx,
+            proposed_at: crate::rsm::timing::stamp(),
         };
         // Enqueue BEFORE awaiting the deadline, so even a past deadline still
         // puts the entry in flight (I3: a timed-out entry may still commit).

@@ -811,9 +811,19 @@ impl RaftFacade {
         let deadline = ctx.deadline;
 
         let rendered = tokio::task::spawn_blocking(move || {
-            render_pop_blocking(
+            // PERF-1: pop payload read latency — the blocking segment render.
+            // The clock read is gated on the knob (`stamp` is `None` when
+            // metrics are off) so the ablation prices it, not just the record.
+            let r0 = crate::rsm::timing::stamp();
+            let out = render_pop_blocking(
                 &store, &reader, &tenant, &queue, &group, &worker, auto_ack, &claims, deadline,
-            )
+            );
+            if let Some(r0) = r0 {
+                crate::rsm::timing::metrics()
+                    .pop_read
+                    .record_dur(r0.elapsed());
+            }
+            out
         })
         .await
         .map_err(|e| RsmError::Internal(format!("pop render task: {e}")))?;

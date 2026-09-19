@@ -380,6 +380,10 @@ pub(crate) async fn handle_prometheus(
     let adm = st.admission.snapshot();
     body.push_str("# HELP queen_admission_budget Write-transaction admission budget\n# TYPE queen_admission_budget gauge\n");
     body.push_str(&format!("queen_admission_budget {}\n", adm.budget));
+    // PERF-1 (O18): the node-local rsm timing histograms and counters. Empty
+    // (all-zero) until the pipeline has done work, and skipped entirely when
+    // QUEEN_RAFT_METRICS is off.
+    crate::rsm::timing::render_prometheus(&mut body);
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],

@@ -469,3 +469,250 @@ async fn a_forced_dlq_ack_files_the_transaction_id() {
     facade.shutdown().await;
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// PERF-1 (O18): the queen_raft_* timing surface is reachable and non-zero after
+// a real push/pop/ack cycle, and the Prometheus exporter renders the families.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn timing_histograms_are_reachable_and_nonzero() {
+    use crate::rsm::planner::CommandKind;
+    use crate::rsm::timing;
+
+    let dir = scratch("timing");
+    let facade = RaftFacade::open(&build_ctx(&dir)).expect("open facade");
+
+    // -- push three messages (payload bytes → segment write_all) --------------
+    let push = facade
+        .push(
+            ctx(),
+            PushReq {
+                raw: br#"{"items":[
+                    {"queue":"t","payload":{"n":1},"transactionId":"a1"},
+                    {"queue":"t","payload":{"n":2},"transactionId":"a2"},
+                    {"queue":"t","payload":{"n":3},"transactionId":"a3"}
+                ]}"#
+                .to_vec(),
+            },
+        )
+        .await
+        .expect("push");
+    assert_eq!(parse(&push.body).as_array().map(|a| a.len()), Some(3));
+
+    // -- pop them (pop payload read off the files) ----------------------------
+    let popped = facade
+        .pop_wildcard(
+            ctx(),
+            PopReq {
+                queue: "t".into(),
+                group: None,
+                batch: 10,
+                auto_ack: false,
+                wait: false,
+                timeout_ms: 1000,
+            },
+        )
+        .await
+        .expect("pop");
+    assert!(!popped.empty, "the pop claims the backlog");
+    let pop = parse(&popped.body);
+    let pid = pop["partitionId"].as_str().unwrap().to_string();
+    let lease = pop["leaseId"].as_str().unwrap().to_string();
+
+    // -- ack them (advances the cursor; exercises the ack planner) ------------
+    let ack_body = format!(
+        r#"{{"consumerGroup":"__QUEUE_MODE__","acknowledgments":[
+            {{"transactionId":"a1","partitionId":"{pid}","status":"completed","leaseId":"{lease}"}},
+            {{"transactionId":"a2","partitionId":"{pid}","status":"completed","leaseId":"{lease}"}},
+            {{"transactionId":"a3","partitionId":"{pid}","status":"completed","leaseId":"{lease}"}}
+        ]}}"#
+    );
+    facade
+        .ack(
+            ctx(),
+            AckReq {
+                queue: Some("t".into()),
+                group: "__QUEUE_MODE__".into(),
+                raw: ack_body.into_bytes(),
+            },
+        )
+        .await
+        .expect("ack");
+
+    // Give the store-commit cadence (~4 ms) a moment so store_commit fires.
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let m = timing::metrics();
+    // Every stage the cycle drives must have recorded at least once.
+    let checks: [(&str, u64); 12] = [
+        ("plan", m.plan.snapshot().count),
+        ("drain_commands", m.drain_commands.snapshot().count),
+        ("drain_messages", m.drain_messages.snapshot().count),
+        (
+            "arrival_to_proposed",
+            m.arrival_to_proposed.snapshot().count,
+        ),
+        ("propose_roundtrip", m.propose_roundtrip.snapshot().count),
+        (
+            "proposed_to_committed",
+            m.proposed_to_committed.snapshot().count,
+        ),
+        ("log_fsync", m.log_fsync.snapshot().count),
+        ("group_entries", m.group_entries.snapshot().count),
+        ("apply_entry", m.apply_entry.snapshot().count),
+        ("apply_segment", m.apply_segment.snapshot().count),
+        (
+            "apply_channel_depth",
+            m.apply_channel_depth.snapshot().count,
+        ),
+        ("pop_read", m.pop_read.snapshot().count),
+    ];
+    for (name, count) in checks {
+        assert!(count > 0, "histogram {name} was never recorded (count 0)");
+    }
+    // The push planner counter moved.
+    assert!(
+        m.kinds.planned(CommandKind::Push) > 0,
+        "the push planner counter is zero",
+    );
+
+    // The exporter renders the families with precomputed quantiles.
+    let mut body = String::new();
+    timing::render_prometheus(&mut body);
+    for needle in [
+        "queen_raft_apply_entry_seconds",
+        "queen_raft_plan_seconds",
+        "queen_raft_pop_read_seconds",
+        "queen_raft_planner_commands_total{kind=\"push\"}",
+        "queen_raft_apply_stats{field=\"entries\"}",
+        "quantile=\"0.99\"",
+    ] {
+        assert!(body.contains(needle), "exporter missing {needle}\n{body}");
+    }
+
+    facade.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// PERF-1 overhead microbench (#[ignore]; run explicitly). Mirrors the FULL
+// per-cycle + per-entry instrumentation the leader pipeline does for one entry
+// (the A20k shape: ~10 messages/entry, taken as 10 one-message commands and 10
+// segment appends), in a tight loop, so the added cost can be priced with
+// QUEEN_RAFT_METRICS on vs off — the "A20k with and without" delta, isolated
+// from the fsync/network the real smoke is bound by. Run:
+//   cargo test -p queen-engine --release --lib \
+//     rsm::tests::facade::perf1_instrumentation_overhead -- --ignored --nocapture
+// ONCE with QUEEN_RAFT_METRICS unset (on) and ONCE =0 (off); the lever's cost is
+// the ON-minus-OFF delta in per_entry_ns.
+//
+// The refutation of the first version: it fed every `record_dur` a CONSTANT
+// `Duration` and took no clock inside the measured loop, so it priced the
+// histogram writes but NOT the ~dozens of `Instant::now()`/`elapsed()` per entry
+// the real path takes to PRODUCE those durations — and, with the fix, those
+// clock reads are exactly what the knob now ablates. So every stamp here goes
+// through `timing::stamp()` (a real clock read when on, `None` when off) and its
+// `elapsed()`, at the same call COUNT per entry as production: one per command
+// at facade INGRESS (the `Submission::new` arrival stamp — the second refutation
+// caught this one missing: it is per-command, not per-entry, and on the off path
+// production used to pay it too, so both axes were wrong) and one per planned
+// command (O18), one per segment append, plus plan / arrival→proposed / apply
+// (×2 via the injected clock) / log-fsync / proposed→committed / propose-
+// roundtrip. The recorded VALUES are meaningless (near-zero elapseds); only the
+// CPU of the stamp+record calls is under test, which is the whole point.
+#[test]
+#[ignore]
+fn perf1_instrumentation_overhead() {
+    use crate::rsm::planner::CommandKind;
+    use crate::rsm::timing;
+    use std::time::Instant;
+
+    let m = timing::metrics();
+    const CMDS_PER_ENTRY: u64 = 10; // 1-message pushes, the A20k shape
+    const MSGS_PER_ENTRY: u64 = 10; // one segment append per message
+    const ITERS: u64 = 2_000_000; // "entries"
+
+    // Warm the LazyLock and buckets before timing.
+    for _ in 0..1000 {
+        if let Some(s) = timing::stamp() {
+            m.plan.record_dur(s.elapsed());
+        }
+    }
+
+    let t0 = Instant::now();
+    for i in 0..ITERS {
+        // per command at facade ingress: the arrival stamp `Submission::new`
+        // takes and stores in `received_at` (PERF-1 refutation). It is the
+        // highest-frequency timing read — ONE per command, not per entry — and,
+        // now gated through `timing::stamp()`, it is what the knob ablates on the
+        // hot ingress path. Its `elapsed()` is charged later at propose
+        // (arrival→proposed). `black_box` keeps the read from being elided.
+        for _ in 0..CMDS_PER_ENTRY {
+            std::hint::black_box(timing::stamp());
+        }
+        // per command: the O18 per-kind planning stamp + counter.
+        for _ in 0..CMDS_PER_ENTRY {
+            if let Some(s) = timing::stamp() {
+                m.kinds.record(CommandKind::Push, s.elapsed(), false);
+            }
+        }
+        // per cycle: drain sizes (no clock), plan duration, arrival→proposed
+        // (one clock read at propose, one sample per proposed command).
+        m.drain_commands.record(CMDS_PER_ENTRY);
+        m.drain_messages.record(CMDS_PER_ENTRY);
+        if let Some(s) = timing::stamp() {
+            m.plan.record_dur(s.elapsed());
+        }
+        if let Some(now) = timing::stamp() {
+            for _ in 0..CMDS_PER_ENTRY {
+                m.arrival_to_proposed.record_dur(now.elapsed());
+            }
+        }
+        // per entry: the writer group, the segment appends, the apply split.
+        timing::apply_channel_send();
+        timing::apply_channel_recv();
+        let before = timing::segment_write_ns_total();
+        for _ in 0..MSGS_PER_ENTRY {
+            if let Some(s) = timing::stamp() {
+                timing::record_segment_write(s.elapsed());
+            }
+        }
+        // apply reads the injected clock twice (t0, then total) — modelled here
+        // with two `stamp`s so the ablation prices both.
+        if let (Some(t0e), Some(_probe)) = (timing::stamp(), timing::stamp()) {
+            let total = t0e.elapsed();
+            let seg = timing::segment_write_ns_total().saturating_sub(before);
+            m.apply_entry.record_dur(total);
+            m.apply_other
+                .record((total.as_nanos() as u64).saturating_sub(seg));
+        }
+        if let Some(s) = timing::stamp() {
+            m.log_fsync.record_dur(s.elapsed());
+        }
+        m.group_entries.record(1);
+        m.group_bytes.record(4096 * MSGS_PER_ENTRY);
+        if let Some(s) = timing::stamp() {
+            m.proposed_to_committed.record_dur(s.elapsed());
+        }
+        if let Some(s) = timing::stamp() {
+            m.propose_roundtrip.record_dur(s.elapsed());
+        }
+        std::hint::black_box(i);
+    }
+    let el = t0.elapsed();
+    let per_entry_ns = el.as_nanos() as f64 / ITERS as f64;
+    // At A20k (~10 messages/entry) the leader plans ~2000 entries/s.
+    let cpu_per_s_at_a20k_us = per_entry_ns * 2000.0 / 1000.0;
+    println!(
+        "PERF1_OVERHEAD metrics_enabled={} iters={ITERS} elapsed={:?} per_entry_ns={:.1} \
+         cmds/entry={CMDS_PER_ENTRY} msgs/entry={MSGS_PER_ENTRY} \
+         => instrumentation_cpu_at_A20k={:.1}us/s ({:.4}% of one core). \
+         Cost of the lever = this ns/entry with QUEEN_RAFT_METRICS on MINUS off.",
+        timing::enabled(),
+        el,
+        per_entry_ns,
+        cpu_per_s_at_a20k_us,
+        cpu_per_s_at_a20k_us / 1_000_000.0 * 100.0,
+    );
+}

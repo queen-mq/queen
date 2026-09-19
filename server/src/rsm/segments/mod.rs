@@ -1768,7 +1768,14 @@ impl Segments {
         };
         let file_id = a.file_id;
         let offset = a.len;
+        // PERF-1: the per-append payload write, the entry's real file I/O. The
+        // clock read is gated on the knob (`stamp` is `None` when metrics are
+        // off) so the ablation prices it, not just the histogram write.
+        let w0 = crate::rsm::timing::stamp();
         a.file.write_all(&self.buf)?;
+        if let Some(w0) = w0 {
+            crate::rsm::timing::record_segment_write(w0.elapsed());
+        }
         a.len += flen;
         a.dirty = true;
 
@@ -2152,11 +2159,26 @@ impl Segments {
             }
         }
         let files_synced = fds.len() as u64;
+        // PERF-1: the durable point's segment-file fsync and directory fsync
+        // portions (§11.4 step 1), measured where the syscalls are. The clock
+        // reads are gated on the knob so the ablation prices them.
+        let f0 = crate::rsm::timing::stamp();
         self.fsync_all(&fds)?;
+        if let Some(f0) = f0 {
+            crate::rsm::timing::metrics()
+                .durable_seg_fsync
+                .record_dur(f0.elapsed());
+        }
 
         let dirs_synced = self.dirty_dirs.len() as u64;
+        let d0 = crate::rsm::timing::stamp();
         for b in &self.dirty_dirs {
             fsync_dir(&bucket_dir(&self.shared.root, *b), self.opts.fsync)?;
+        }
+        if let Some(d0) = d0 {
+            crate::rsm::timing::metrics()
+                .durable_dir_fsync
+                .record_dur(d0.elapsed());
         }
 
         // Past here every barrier has returned.

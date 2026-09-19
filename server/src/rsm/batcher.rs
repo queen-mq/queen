@@ -239,6 +239,36 @@ impl Command {
         }
     }
 
+    /// How many messages this command carries, for the `drain_messages`
+    /// histogram (PERF-1): a push's items, an ack's items, one for the rest.
+    fn message_count(&self) -> u64 {
+        match self {
+            Command::Push(c) => c.items.len() as u64,
+            Command::Ack(c) => c.targets.iter().map(|t| t.items.len() as u64).sum(),
+            _ => 1,
+        }
+    }
+
+    /// The `(tenant, queue)` for the O18 slow-command log. Renew is
+    /// worker-scoped and has no queue.
+    fn label(&self) -> (&str, &str) {
+        match self {
+            Command::Push(c) => (&c.tenant, &c.queue),
+            Command::PopPinned(c) | Command::PopWildcard(c) | Command::PopDiscover(c) => {
+                (&c.tenant, &c.queue)
+            }
+            Command::Ack(c) => c
+                .targets
+                .first()
+                .map(|t| (t.tenant.as_str(), t.queue.as_str()))
+                .unwrap_or(("", "")),
+            Command::AckPositional(c) => (&c.tenant, &c.queue),
+            Command::Nack(c) => (&c.tenant, &c.queue),
+            Command::Renew(_) => ("", ""),
+            Command::DlqHead(c) => (&c.tenant, &c.queue),
+        }
+    }
+
     /// Dispatch to the matching `plan_*`. The planner folds a `Logged` plan's
     /// effects into the overlay before returning, so the next command in the
     /// cycle sees them (§7.2).
@@ -282,12 +312,32 @@ pub enum Reply {
 pub struct Submission {
     pub command: Command,
     pub reply: oneshot::Sender<Reply>,
+    /// When the facade handed this to the channel (PERF-1, O18): the arrival
+    /// stamp the `arrival_to_proposed` histogram measures from. A budget-cut
+    /// command re-queued for the next cycle restamps here (its wait resets).
+    ///
+    /// `None` when the instrumentation is off (`QUEEN_RAFT_METRICS=0`): this is
+    /// the highest-frequency timing read (one per COMMAND, at facade ingress),
+    /// so it is taken through [`crate::rsm::timing::stamp`] like every other
+    /// hot-path clock read — the knob removes the `Instant::now()` itself, not
+    /// just the histogram write, so the VM ablation prices the whole lever (the
+    /// PERF-1 refutation: a bare `Instant::now()` here left the arrival clock on
+    /// even with the knob off). Its only consumer, the `arrivals` collection,
+    /// already runs only when metrics are on, so every stamp there is `Some`.
+    pub received_at: Option<Instant>,
 }
 
 impl Submission {
     pub fn new(command: Command) -> (Submission, oneshot::Receiver<Reply>) {
         let (tx, rx) = oneshot::channel();
-        (Submission { command, reply: tx }, rx)
+        (
+            Submission {
+                command,
+                reply: tx,
+                received_at: crate::rsm::timing::stamp(),
+            },
+            rx,
+        )
     }
 }
 
@@ -334,6 +384,11 @@ struct InFlightEntry {
     /// A `Timeout` kept this entry in flight (I3): its waiters were already
     /// answered `Retry`, and it stays folded into the overlay until it applies.
     timed_out: bool,
+    /// When `propose` was submitted (PERF-1): the `propose_roundtrip`
+    /// histogram measures from here to the moment the result arrives. `None`
+    /// when the instrumentation is off (`QUEEN_RAFT_METRICS=0`), so the knob
+    /// prices the clock read at propose too, not just the histogram write.
+    proposed_at: Option<Instant>,
 }
 
 impl InFlightEntry {
@@ -410,6 +465,44 @@ enum Slot {
     Deferred(Box<Command>),
 }
 
+impl Slot {
+    /// Does this drained command become a waiter on the entry proposed THIS
+    /// cycle — i.e. is its answer gated on that entry committing? Only these get
+    /// an `arrival_to_proposed` sample (PERF-1): a `Logged` command and a
+    /// `SameCycle` retry both wait on the new entry, and an `Empty` read that
+    /// barriered on it (its `barrier_seq` is this entry's `seq`) is answered when
+    /// it commits. Everything else drained this cycle was NOT proposed here — an
+    /// `Immediate` answer, a `Deferred` re-queue, an `InFlightHit` on an OLDER
+    /// entry, or an `Empty` read barriered on an older entry — so it must not be
+    /// priced against this entry's propose (the metric counted every drained
+    /// submission before). The caller has confirmed an entry was proposed, so an
+    /// `Empty` with no barrier cannot reach here.
+    fn waits_on_new_entry(&self, seq: u64, barrier_seq: Option<u64>) -> bool {
+        match self {
+            Slot::Logged(_) | Slot::SameCycle(_) => true,
+            Slot::Empty(_) => barrier_seq == Some(seq),
+            Slot::Immediate(_) | Slot::InFlightHit { .. } | Slot::Deferred(_) => false,
+        }
+    }
+}
+
+/// The arrival stamps of exactly the drained commands whose round-trip is the
+/// entry proposed this cycle (see [`Slot::waits_on_new_entry`]). `slots` and
+/// `arrivals` are in the same (plan) order; a shorter `arrivals` (the knob is
+/// off, so it is empty) yields nothing.
+fn proposed_arrivals(
+    slots: &[Slot],
+    arrivals: &[Instant],
+    seq: u64,
+    barrier_seq: Option<u64>,
+) -> Vec<Instant> {
+    slots
+        .iter()
+        .zip(arrivals)
+        .filter_map(|(slot, at)| slot.waits_on_new_entry(seq, barrier_seq).then_some(*at))
+        .collect()
+}
+
 /// What one blocking cycle produced.
 struct PlanOutput {
     store_applied: u64,
@@ -466,6 +559,7 @@ fn plan_cycle_blocking<S: Store>(
         // second waiter rather than a second command (§5.4; `Entry::validate`
         // forbids two commands sharing an id).
         let mut seen: HashMap<RequestId, ()> = HashMap::new();
+        let batch_len = batch.len() as u64;
         let start = Instant::now();
         let budget = Duration::from_millis(cfg.plan_budget_ms);
         let mut cut = false;
@@ -481,6 +575,11 @@ fn plan_cycle_blocking<S: Store>(
                 cut = start.elapsed() > budget;
                 continue;
             }
+            // O18: per-command planning time, per-kind counter and the slow log.
+            // The clock read is gated on the knob (`stamp` is `None` when metrics
+            // are off), so the ablation prices the whole per-command O18 leg —
+            // the two clock reads and the record — not just the histogram write.
+            let cmd_started = crate::rsm::timing::stamp();
             let slot = match planner.lookup_request_id(&ov, &id) {
                 Err(refusal) => Slot::Immediate(Reply::Refused(refusal)),
                 Ok(Lookup::Committed(outcome)) => {
@@ -509,7 +608,33 @@ fn plan_cycle_blocking<S: Store>(
                 },
             };
             slots.push(slot);
+            if let Some(cmd_started) = cmd_started {
+                let dur = cmd_started.elapsed();
+                let kind = cmd.kind();
+                let slow = cfg.slow_command_ms > 0 && dur.as_millis() as u64 >= cfg.slow_command_ms;
+                let tm = crate::rsm::timing::metrics();
+                tm.kinds.record(kind, dur, slow);
+                if slow {
+                    tm.slow_commands
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let (tenant, queue) = cmd.label();
+                    tracing::warn!(
+                        target: "rsm",
+                        kind = kind.name(),
+                        tenant,
+                        queue,
+                        duration_ms = dur.as_millis() as u64,
+                        batch = batch_len,
+                        "O18 slow command",
+                    );
+                }
+            }
             cut = start.elapsed() > budget;
+        }
+        if crate::rsm::timing::enabled() {
+            crate::rsm::timing::metrics()
+                .plan
+                .record_dur(start.elapsed());
         }
 
         // §10.1 request-id expiry: a leader-loop step is one command with its
@@ -728,6 +853,30 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             crate::rsm::faults::hit("batcher.drained");
         }
 
+        // PERF-1 drain sizes and the arrival stamps (the unzip below drops
+        // `received_at`, so capture it first). All of it — the per-cycle
+        // `message_count` sum AND the `arrivals` allocation — is behind the knob,
+        // so `QUEEN_RAFT_METRICS=0` pays for none of it (`arrivals` stays empty,
+        // and the arrival→proposed selection below is skipped in step with it).
+        // Each `received_at` is itself the gated `timing::stamp()` taken at
+        // ingress, so with the knob off it is `None` and no arrival clock was
+        // ever read; with it on every submission in the batch stamped `Some`
+        // (the knob is a process-global constant), so `filter_map` keeps them all
+        // and `arrivals` stays index-aligned with `slots`.
+        let timing_on = crate::rsm::timing::enabled();
+        let arrivals: Vec<Instant> = if timing_on {
+            let drain_cmds = batch.len() as u64;
+            if drain_cmds > 0 {
+                let drain_msgs: u64 = batch.iter().map(|s| s.command.message_count()).sum();
+                let tm = crate::rsm::timing::metrics();
+                tm.drain_commands.record(drain_cmds);
+                tm.drain_messages.record(drain_msgs);
+            }
+            batch.iter().filter_map(|s| s.received_at).collect()
+        } else {
+            Vec::new()
+        };
+
         // Split the submissions: commands go to the blocking planner, reply
         // senders stay here in the same order.
         let (commands, replies): (Vec<Command>, Vec<oneshot::Sender<Reply>>) =
@@ -824,6 +973,16 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 .map(|e| e.seq)
         };
 
+        // PERF-1: capture the arrivals of the commands that will wait on THIS
+        // entry BEFORE the routing loop consumes `out.slots`; they are recorded
+        // against the propose instant below. Empty unless an entry is being
+        // proposed and the knob is on (`arrivals` is otherwise empty too).
+        let proposed_arr = if timing_on && has_entry {
+            proposed_arrivals(&out.slots, &arrivals, seq, barrier_seq)
+        } else {
+            Vec::new()
+        };
+
         let mut waiters: Vec<Waiter> = Vec::new();
         let mut deferred: Vec<Submission> = Vec::new();
 
@@ -835,6 +994,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 Slot::Deferred(command) => deferred.push(Submission {
                     command: *command,
                     reply,
+                    received_at: crate::rsm::timing::stamp(),
                 }),
                 Slot::Logged(request_id) | Slot::SameCycle(request_id) => {
                     waiters.push(Waiter::Command { request_id, reply });
@@ -867,6 +1027,24 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         }
 
         if let (Some(bytes), Some(entry)) = (encoded, out.entry) {
+            // PERF-1: arrival → proposed, for the commands actually proposed in
+            // THIS entry (`proposed_arrivals`) — not every drained submission,
+            // which over-counted `Immediate`/`Deferred`/`InFlightHit`/older-
+            // barrier reads that never went into this entry. The selection tracks
+            // this entry's waiter set exactly.
+            debug_assert!(
+                !timing_on || proposed_arr.len() == waiters.len(),
+                "arrival_to_proposed selection ({}) must match this entry's waiters ({})",
+                proposed_arr.len(),
+                waiters.len(),
+            );
+            if !proposed_arr.is_empty() {
+                let now = Instant::now();
+                let hist = &crate::rsm::timing::metrics().arrival_to_proposed;
+                for a in &proposed_arr {
+                    hist.record_dur(now.saturating_duration_since(*a));
+                }
+            }
             self.propose(seq, index, Arc::new(entry), waiters, bytes);
         } else {
             debug_assert!(waiters.is_empty(), "no entry but waiters were attached");
@@ -889,6 +1067,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 Slot::Deferred(command) => self.queue.push_front(Submission {
                     command: *command,
                     reply,
+                    received_at: crate::rsm::timing::stamp(),
                 }),
                 Slot::Immediate(r) => {
                     let _ = reply.send(r);
@@ -944,6 +1123,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             waiters,
             resolved: None,
             timed_out: false,
+            proposed_at: crate::rsm::timing::stamp(),
         });
         // §13.5 `propose.sent`: the entry is about to reach the replicator; the
         // client is still waiting and the outcome is UNKNOWN (D6, I6). A crash
@@ -1030,6 +1210,11 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 if let Some(e) = self.inflight.iter_mut().find(|e| e.seq == seq) {
                     // The predicted index is confirmed; trust the library's.
                     e.index = at.index;
+                    if let Some(at0) = e.proposed_at {
+                        crate::rsm::timing::metrics()
+                            .propose_roundtrip
+                            .record_dur(at0.elapsed());
+                    }
                     e.resolve_ok(at);
                 }
             }
@@ -1131,4 +1316,102 @@ fn now_micros() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_micros() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod perf1_arrival_tests {
+    //! PERF-1 refutation: `arrival_to_proposed` must price only the commands
+    //! actually proposed in the new entry, not every drained submission. This
+    //! pins [`Slot::waits_on_new_entry`] / [`proposed_arrivals`], the selection
+    //! the leader cycle uses, over a mixed batch. It reads no global metric
+    //! registry (that singleton is shared across the whole parallel test binary,
+    //! so an exact count on it is not observable), it exercises the selection
+    //! directly. Reverting the selection to "every drained submission" makes the
+    //! `assert_eq!`s below read 5 instead of 3 / 2, so the test fails.
+    use super::{proposed_arrivals, Command, Outcome, Reply, Slot, Submission};
+    use crate::rsm::planner::RenewCommand;
+    use std::time::Instant;
+
+    #[test]
+    fn received_at_follows_the_metrics_knob() {
+        // PERF-1 refutation: the arrival stamp `Submission.received_at` is the
+        // highest-frequency timing read (one per COMMAND, at facade ingress), so
+        // it must be gated by the SAME knob every other timing read is — taken
+        // through `timing::stamp()`, `None` when `QUEEN_RAFT_METRICS=0`. Before
+        // the fix it was a bare `Instant::now()` in `Submission::new`, an
+        // ungated clock read the off path still paid, so the VM ablation could
+        // not price it. The stamp is present exactly when the instrumentation is
+        // on. (Reverting the fix to a bare `Instant` breaks this at compile.)
+        let cmd = Command::Renew(RenewCommand {
+            request_id: [7u8; 16],
+            worker: "w".into(),
+            seconds: 30,
+        });
+        let (sub, _rx) = Submission::new(cmd);
+        assert_eq!(
+            sub.received_at.is_some(),
+            crate::rsm::timing::enabled(),
+            "the arrival stamp must follow the QUEEN_RAFT_METRICS knob, \
+             like every other hot-path clock read",
+        );
+    }
+
+    fn mixed_batch() -> Vec<Slot> {
+        // One logged command, one same-cycle retry of it (both wait on the new
+        // entry), one duplicate answered at once, one hit on an OLDER in-flight
+        // entry, and one empty read (its disposition depends on the barrier).
+        vec![
+            Slot::Logged([1u8; 16]),
+            Slot::SameCycle([1u8; 16]),
+            Slot::Immediate(Reply::Retry { hint: None }),
+            Slot::InFlightHit {
+                request_id: [2u8; 16],
+                outcome: Outcome::Empty,
+            },
+            Slot::Empty(Outcome::Empty),
+        ]
+    }
+
+    #[test]
+    fn arrival_to_proposed_prices_only_the_proposed_commands() {
+        let slots = mixed_batch();
+        let now = Instant::now();
+        let arrivals = vec![now; slots.len()];
+        let seq = 9u64;
+
+        // The empty read barriered on THIS entry (barrier_seq == seq): Logged,
+        // SameCycle and Empty are the three that wait on it — not the Immediate
+        // answer nor the older-entry InFlightHit.
+        let on_this = proposed_arrivals(&slots, &arrivals, seq, Some(seq));
+        assert_eq!(
+            on_this.len(),
+            3,
+            "only the commands proposed in THIS entry are priced (not all 5 drained)",
+        );
+
+        // The empty read barriered on an OLDER in-flight entry: it is answered by
+        // that entry's commit, so it is NOT this entry's arrival→proposed sample.
+        let on_older = proposed_arrivals(&slots, &arrivals, seq, Some(seq - 1));
+        assert_eq!(
+            on_older.len(),
+            2,
+            "an empty read on an older barrier is not priced against this entry",
+        );
+    }
+
+    #[test]
+    fn waits_on_new_entry_classifies_every_slot() {
+        let seq = 4u64;
+        assert!(Slot::Logged([0u8; 16]).waits_on_new_entry(seq, Some(seq)));
+        assert!(Slot::SameCycle([0u8; 16]).waits_on_new_entry(seq, Some(seq)));
+        assert!(Slot::Empty(Outcome::Empty).waits_on_new_entry(seq, Some(seq)));
+        // Not proposed in this entry:
+        assert!(!Slot::Empty(Outcome::Empty).waits_on_new_entry(seq, Some(seq - 1)));
+        assert!(!Slot::Immediate(Reply::Retry { hint: None }).waits_on_new_entry(seq, Some(seq)));
+        assert!(!Slot::InFlightHit {
+            request_id: [0u8; 16],
+            outcome: Outcome::Empty,
+        }
+        .waits_on_new_entry(seq, Some(seq)));
+    }
 }
