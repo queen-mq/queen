@@ -396,6 +396,14 @@ pub struct ApplyConfig {
     /// maintenance step. Never longer than the store-commit cadence, or an
     /// idle node would hold the last entry uncommitted.
     pub idle_tick_ms: u64,
+    /// `QUEEN_RAFT_DURABLE_ASYNC` (§11.4). On (default): a helper thread pushes
+    /// the segment files' dirty pages to the device between durable points, so
+    /// the point on the apply thread has little left to flush and blocks the
+    /// pipeline for less. Off: the durable point flushes everything inline, the
+    /// pre-WP behaviour. It is a pure pre-flush warm-up — it changes neither what
+    /// a durable point records nor recovery (I11) — so toggling it is safe on a
+    /// live node and never affects correctness, only the tail.
+    pub durable_async: bool,
 }
 
 impl Default for ApplyConfig {
@@ -407,6 +415,7 @@ impl Default for ApplyConfig {
             durable_every_bytes: 256 << 20,
             gc_per_pass: 32,
             idle_tick_ms: 2,
+            durable_async: true,
         }
     }
 }
@@ -425,6 +434,11 @@ impl ApplyConfig {
                 .filter(|v| *v > 0)
                 .unwrap_or(cur)
         }
+        // A boolean knob: only "0" turns it off, so an unset or malformed value
+        // keeps the default-on async pre-flush.
+        fn flag(name: &str, cur: bool) -> bool {
+            std::env::var(name).ok().map(|v| v != "0").unwrap_or(cur)
+        }
         let d = ApplyConfig::default();
         ApplyConfig {
             store_commit_ms: num("QUEEN_RAFT_STORE_COMMIT_MS", d.store_commit_ms),
@@ -433,6 +447,7 @@ impl ApplyConfig {
             durable_every_bytes: num("QUEEN_RAFT_DURABLE_EVERY_BYTES", d.durable_every_bytes),
             gc_per_pass: d.gc_per_pass,
             idle_tick_ms: d.idle_tick_ms,
+            durable_async: flag("QUEEN_RAFT_DURABLE_ASYNC", d.durable_async),
         }
     }
 }
@@ -723,6 +738,12 @@ impl<'s, S: Store> Applier<'s, S> {
     /// snapshot build sealing every bucket (§11.6), the crash matrix.
     pub fn segments_mut(&mut self) -> &mut Segments {
         &mut self.segments
+    }
+
+    /// The segment tree, read-only. The apply loop reads it to drive the async
+    /// durable-point pre-flush (§11.4); it mutates nothing.
+    pub fn segments(&self) -> &Segments {
+        &self.segments
     }
 
     // -- the entry ---------------------------------------------------------
@@ -2676,6 +2697,76 @@ impl<'s, S: Store> Applier<'s, S> {
 }
 
 // ---------------------------------------------------------------------------
+// The async durable-point pre-flush helper (§11.4, QUEEN_RAFT_DURABLE_ASYNC)
+// ---------------------------------------------------------------------------
+
+/// A helper thread that pushes the segment files' dirty pages to the device
+/// between durable points, so the point on the apply thread finds little left
+/// to flush and stalls the pipeline for less (PERF-A, §11.4).
+///
+/// It is a page-cache writeback warm-up and NOTHING else: it never records a
+/// durable index, never advances the segment tree's bookkeeping, and never
+/// touches the store. The durable point on the apply thread remains the only
+/// recorded flush and re-fsyncs every file itself, so a crash between a
+/// pre-flush and a point behaves exactly as if the helper never ran (I11). This
+/// is why the helper needs no error channel back to apply: a failed warm-up
+/// costs only a slower point, never correctness.
+pub(crate) struct Preflusher {
+    tx: SyncSender<PreflushMsg>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+
+enum PreflushMsg {
+    Batch(segments::PreflushBatch),
+    Stop,
+}
+
+impl Preflusher {
+    fn spawn() -> Preflusher {
+        // A small bounded queue: submissions are best-effort, so when the
+        // helper falls behind the apply thread drops the warm-up (`try_send`)
+        // rather than blocking — the durable point still flushes everything.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<PreflushMsg>(4);
+        let join = std::thread::Builder::new()
+            .name("queen-rsm-preflush".into())
+            .spawn(move || {
+                while let Ok(msg) = rx.recv() {
+                    match msg {
+                        PreflushMsg::Batch(b) => b.sync(),
+                        PreflushMsg::Stop => break,
+                    }
+                }
+            })
+            .expect("spawn the durable pre-flush thread");
+        Preflusher {
+            tx,
+            join: Some(join),
+        }
+    }
+
+    /// Hand the helper a snapshot of the dirty segment handles. Dropped on the
+    /// floor if the helper is still busy with the last one (best-effort).
+    fn submit(&self, batch: segments::PreflushBatch) {
+        if batch.is_empty() {
+            return;
+        }
+        let _ = self.tx.try_send(PreflushMsg::Batch(batch));
+    }
+}
+
+impl Drop for Preflusher {
+    fn drop(&mut self) {
+        // A blocking send: the queue is tiny and the helper only ever fsyncs,
+        // so Stop lands promptly. Joining keeps the thread from outliving the
+        // store whose files it holds dup'd handles to.
+        let _ = self.tx.send(PreflushMsg::Stop);
+        if let Some(j) = self.join.take() {
+            let _ = j.join();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The thread
 // ---------------------------------------------------------------------------
 
@@ -2684,16 +2775,32 @@ impl<'s, S: Store> Applier<'s, S> {
 /// It blocks — on the channel, on the store, on fsync — and that is correct:
 /// this is a `std` thread of its own, never a tokio worker (I15). The park is
 /// bounded by `idle_tick_ms` so the cadences run on an idle node too.
-pub fn run<S: Store>(
+///
+/// `preflush` is the async durable-point helper (§11.4); `None` runs every
+/// durable point fully inline (`QUEEN_RAFT_DURABLE_ASYNC=0`, and the crash
+/// matrix, which drives points by hand).
+pub(crate) fn run<S: Store>(
     applier: &mut Applier<'_, S>,
     rx: &Receiver<Committed>,
     clock: &dyn Clock,
+    preflush: Option<&Preflusher>,
 ) -> Result<()> {
     let mut last_commit = clock.now();
     let mut last_durable = last_commit;
     let mut last_timing = last_commit;
+    let mut last_preflush = last_commit;
     let timing_interval = crate::rsm::timing::timing_log_interval();
     let tick = Duration::from_millis(applier.cfg.idle_tick_ms.max(1));
+    // The async warm-up (§11.4) fires on whichever comes first: every
+    // `preflush_step` bytes (so a point due by BYTES — a fat push run — still
+    // meets flushed files) or every `preflush_interval` (so a point due by TIME
+    // does too, at any throughput). Both are a fraction of the durable triggers,
+    // so each point finds most of its bytes already on the device. It is only a
+    // warm-up: the point still fsyncs everything, so the cadence is a tuning
+    // knob, never a correctness one.
+    let preflush_step = (applier.cfg.durable_every_bytes / 16).clamp(1 << 20, 8 << 20);
+    let preflush_interval = Duration::from_millis((applier.cfg.durable_every_ms / 8).max(20));
+    let mut next_preflush = preflush_step;
     loop {
         match rx.recv_timeout(tick) {
             Ok(c) => {
@@ -2729,6 +2836,21 @@ pub fn run<S: Store>(
         // extra `clock.now()` around each stage is metrics-only, so it is gated
         // on the knob (`t0` is `None` when metrics are off).
         let now = clock.now();
+        // Between points, push what has been written so far to the device on the
+        // helper thread, so the point below has little left to flush. Checked
+        // AFTER apply and BEFORE the point, so the last chunk of an interval is
+        // warmed too; `unsynced_bytes` resets to 0 at the point, and both
+        // thresholds follow it back down there.
+        if let Some(pf) = preflush {
+            let unsynced = applier.segments().unsynced_bytes();
+            let by_bytes = unsynced >= next_preflush;
+            let by_time = unsynced > 0 && now.duration_since(last_preflush) >= preflush_interval;
+            if by_bytes || by_time {
+                pf.submit(applier.segments().preflush_batch());
+                next_preflush = unsynced.saturating_add(preflush_step);
+                last_preflush = now;
+            }
+        }
         if applier.durable_due(now.duration_since(last_durable)) {
             let t0 = crate::rsm::timing::enabled().then(|| clock.now());
             applier.durable_point()?;
@@ -2737,6 +2859,8 @@ pub fn run<S: Store>(
                     .durable_point
                     .record_dur(clock.now().duration_since(t0));
             }
+            // The point cleared `unsynced_bytes`; the warm-up threshold follows.
+            next_preflush = preflush_step;
             last_durable = now;
             last_commit = now;
         } else if applier.commit_due(now.duration_since(last_commit)) {
@@ -2806,13 +2930,18 @@ pub fn spawn_with_reader<S: Store + 'static>(
                 // replicator, so this sets exactly once.
                 let _ = sink.set(applier.reader());
             }
+            // The async durable-point helper (§11.4). Spawned per apply thread,
+            // dropped (Stop + join) when `run` returns, so it never outlives the
+            // segment handles it holds dup'd copies of.
+            let preflush = cfg.durable_async.then(Preflusher::spawn);
             tracing::info!(
                 target: "rsm",
                 replay_after = rec.replay_after,
                 applied = rec.applied_index,
+                durable_async = cfg.durable_async,
                 "rsm apply thread started",
             );
-            run(&mut applier, &rx, clock.as_ref())?;
+            run(&mut applier, &rx, clock.as_ref(), preflush.as_ref())?;
             Ok(applier.stats())
         })
         .expect("spawn the apply thread")

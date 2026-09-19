@@ -550,6 +550,39 @@ pub struct DurablePoint {
     pub dirs_synced: u64,
 }
 
+/// A snapshot of the segment handles that hold unflushed bytes, taken by
+/// [`Segments::preflush_batch`] for the async durable-point helper (§11.4).
+///
+/// It is deliberately NOT a durability barrier and carries no lengths or index:
+/// [`PreflushBatch::sync`] issues a plain `fdatasync`/`fsync` (never the
+/// drive-cache barrier a durable point uses), so the pages reach the device
+/// ahead of the point and the point's own fsync finds little left. A power loss
+/// between a pre-flush and the point behaves as if the pre-flush never happened.
+pub struct PreflushBatch {
+    files: Vec<File>,
+}
+
+impl PreflushBatch {
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Push each handle's dirty pages to the device. Best-effort: an error is
+    /// swallowed, because the durable point on the apply thread is the real
+    /// barrier and re-fsyncs every one of these files. Uses [`FsyncMode::Data`]
+    /// (Linux `fdatasync`, macOS `fsync`, NEVER `F_FULLFSYNC`) on purpose: a
+    /// warm-up must not serialize on the drive's cache the way a point does.
+    pub fn sync(&self) {
+        for f in &self.files {
+            let _ = fsync_fd(f.as_raw_fd(), FsyncMode::Data);
+        }
+    }
+}
+
 /// What one file's scan found.
 #[derive(Clone, Debug, Default)]
 pub struct Scan {
@@ -2093,6 +2126,46 @@ impl Segments {
     /// `QUEEN_RAFT_DURABLE_EVERY_BYTES` trigger of §11.4.
     pub fn unsynced_bytes(&self) -> u64 {
         self.unsynced_bytes
+    }
+
+    /// Dup the OS handle of every file that has bytes not yet flushed, so the
+    /// async durable-point helper (§11.4, `QUEEN_RAFT_DURABLE_ASYNC`) can push
+    /// them to the device from its own thread, spread over the interval, and
+    /// leave the durable point with little to flush.
+    ///
+    /// `&self`: it reads the writer's handles and changes NOTHING — not the
+    /// touched set, not `unsynced_bytes`, not `durable_bytes`. The pre-flush is
+    /// a page-cache writeback warm-up, never a recorded barrier: the only flush
+    /// recovery trusts is the one [`Segments::durable_point`] takes on the apply
+    /// thread, which still fsyncs every one of these files itself (I11). A crash
+    /// between a pre-flush and the next durable point is therefore exactly as if
+    /// the pre-flush never ran.
+    ///
+    /// The dup'd handle shares the file's open description (and its offset, which
+    /// [`PreflushBatch::sync`] never touches), so the helper's `fdatasync` and
+    /// the apply thread's `write_all` on the original handle do not race.
+    pub fn preflush_batch(&self) -> PreflushBatch {
+        let mut files = Vec::new();
+        for (_, _, seg, qidx) in &self.sealed_dirty {
+            if let Some(s) = seg {
+                if let Ok(c) = s.try_clone() {
+                    files.push(c);
+                }
+            }
+            if let Some(q) = qidx {
+                if let Ok(c) = q.try_clone() {
+                    files.push(c);
+                }
+            }
+        }
+        for a in self.active.iter().flatten() {
+            if a.dirty {
+                if let Ok(c) = a.file.try_clone() {
+                    files.push(c);
+                }
+            }
+        }
+        PreflushBatch { files }
     }
 
     /// Every file whose length OR liveness changed since the last drain, with

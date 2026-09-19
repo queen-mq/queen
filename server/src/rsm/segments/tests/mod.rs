@@ -25,6 +25,7 @@ mod frames;
 mod gc;
 mod indexes;
 mod measure;
+mod preflush;
 mod recovery;
 
 use std::path::{Path, PathBuf};

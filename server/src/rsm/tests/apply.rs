@@ -172,6 +172,7 @@ pub fn cfg() -> ApplyConfig {
         durable_every_bytes: 256 << 20,
         gc_per_pass: 32,
         idle_tick_ms: 2,
+        durable_async: true,
     }
 }
 
@@ -1911,6 +1912,205 @@ fn the_thread_applies_in_order_and_flushes_when_the_channel_closes() {
     assert_eq!(store.read(|r| r.durable_index()).expect("read"), 50);
     store.close();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_async_durable_knob_leaves_the_same_state_and_reopens_clean() {
+    // `QUEEN_RAFT_DURABLE_ASYNC` is a page-cache warm-up, not a change to what a
+    // durable point records: the same log, driven through the real apply thread
+    // with the helper on and with it off, must leave the SAME committed state
+    // (I11), and each must reopen with recovery reconciling nothing. A tight
+    // 15 ms durable cadence over 200 entries makes the loop take many points
+    // under continuous appends — the shape the lever exists for.
+    fn run(tag: &str, durable_async: bool) -> (StateDigest, StateDigest, u64) {
+        let mut node = Node::new(tag);
+        let dir = node.path().to_path_buf();
+        let seg = node.seg_dir();
+        node.keep();
+        node.close();
+        drop(node);
+
+        let store = Arc::new(HeedStore::open(&dir.join("store"), &store_opts()).expect("open"));
+        let rec = Arc::new(Recorder::default());
+        let (tx, rx) = crate::rsm::apply::channel(8);
+        let clock = Arc::new(crate::rsm::apply::SystemClock);
+        let handle = crate::rsm::apply::spawn(
+            store.clone(),
+            seg,
+            seg_opts(),
+            ApplyConfig {
+                durable_every_ms: 15,
+                durable_async,
+                ..cfg()
+            },
+            rec.clone(),
+            clock,
+            rx,
+        );
+        let mut w = Workload::new(9);
+        for _ in 0..200 {
+            tx.send(w.next()).expect("send");
+        }
+        drop(tx);
+        let stats = handle.join().expect("join").expect("the loop");
+        assert_eq!(stats.entries, 200);
+        assert!(stats.durable_points >= 1, "{tag}: {stats:?}");
+
+        let store = Arc::try_unwrap(store)
+            .ok()
+            .expect("the apply thread released the store");
+        let digest = store
+            .read(|r| Ok(state_digest(r).expect("digest")))
+            .expect("read");
+        store.close();
+
+        // Reopen from the platter: nothing to truncate or delete (I11).
+        let node = Node::at(dir.clone());
+        {
+            let (a, rerec) = open_at(&node);
+            assert!(
+                rerec.segments.truncated.is_empty() && rerec.segments.deleted.is_empty(),
+                "{tag}: a clean reopen, got {:?}",
+                rerec.segments
+            );
+            drop(a);
+        }
+        let redigest = node.digest();
+        drop(node);
+        let _ = std::fs::remove_dir_all(&dir);
+        (digest, redigest, stats.durable_points)
+    }
+
+    let (on, on_re, on_points) = run("async-on", true);
+    let (off, off_re, _off_points) = run("async-off", false);
+    assert_eq!(
+        on.whole, off.whole,
+        "the async knob does not change committed state"
+    );
+    assert_eq!(on.whole, on_re.whole, "state survives a reopen (async on)");
+    assert_eq!(
+        off.whole, off_re.whole,
+        "state survives a reopen (async off)"
+    );
+    assert!(
+        on_points >= 1,
+        "the async run took durable points: {on_points}"
+    );
+}
+
+/// The laptop before/after of PERF-A. Not a gate (macOS `fsync` is not the VM's
+/// `fdatasync`, §0.3), printed on demand:
+///
+/// ```text
+/// QUEEN_RAFT_METRICS=1 QUEEN_RAFT_DURABLE_ASYNC=0 \
+///   cargo test -p queen-engine --lib -- --ignored --nocapture measure_async_durable_point
+/// QUEEN_RAFT_METRICS=1 QUEEN_RAFT_DURABLE_ASYNC=1 \
+///   cargo test -p queen-engine --lib -- --ignored --nocapture measure_async_durable_point
+/// ```
+///
+/// Each run is a fresh process, so the global histograms hold one config only.
+/// It drives a sustained-append workload through the real apply thread and
+/// prints the durable-point, its segment-fsync leg, and the per-entry apply
+/// histograms — the "durable point under continuous appends" numbers.
+#[test]
+#[ignore = "measurement, not a gate; run with --ignored --nocapture"]
+fn measure_async_durable_point() {
+    let durable_async = std::env::var("QUEEN_RAFT_DURABLE_ASYNC")
+        .map(|v| v != "0")
+        .unwrap_or(true);
+    let entries: u64 = std::env::var("MEASURE_ENTRIES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20_000);
+
+    let node = Node::new("measure-async");
+    let dir = node.path().to_path_buf();
+    let seg = node.seg_dir();
+    let mut node = node;
+    node.close();
+    drop(node);
+
+    let store = Arc::new(HeedStore::open(&dir.join("store"), &store_opts()).expect("open"));
+    let rec = Arc::new(Recorder::default());
+    let (tx, rx) = crate::rsm::apply::channel(64);
+    let clock = Arc::new(crate::rsm::apply::SystemClock);
+    // A tight 50 ms durable cadence over many small-file appends: lots of
+    // points under continuous writes, which is what the lever is for.
+    let handle = crate::rsm::apply::spawn(
+        store.clone(),
+        seg,
+        seg_opts(),
+        ApplyConfig {
+            durable_every_ms: 50,
+            durable_async,
+            ..cfg()
+        },
+        rec.clone(),
+        clock,
+        rx,
+    );
+
+    let t0 = std::time::Instant::now();
+    let mut w = Workload::new(1);
+    for _ in 0..entries {
+        tx.send(w.next()).expect("send");
+    }
+    drop(tx);
+    let stats = handle.join().expect("join").expect("the loop");
+    let wall = t0.elapsed();
+
+    let m = crate::rsm::timing::metrics();
+    let dp = m.durable_point.snapshot();
+    let seg_fsync = m.durable_seg_fsync.snapshot();
+    let ae = m.apply_entry.snapshot();
+    let ms = |ns: u64| ns as f64 / 1e6;
+    let mean = |s: crate::rsm::timing::HistSnapshot| {
+        if s.count == 0 {
+            0.0
+        } else {
+            s.sum as f64 / s.count as f64 / 1e6
+        }
+    };
+    let store = Arc::try_unwrap(store).ok().expect("released");
+    store.close();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    println!(
+        "\n== measure_async_durable_point  QUEEN_RAFT_DURABLE_ASYNC={} ==",
+        durable_async as u8
+    );
+    println!(
+        "entries {entries}  wall {:.2}s  durable_points {}  appends {}  bytes_appended {}",
+        wall.as_secs_f64(),
+        stats.durable_points,
+        stats.appends,
+        stats.bytes_appended,
+    );
+    println!(
+        "durable_point     mean {:.3}  p50 {:.3}  p99 {:.3}  max {:.3} ms  (n={})",
+        mean(dp),
+        ms(dp.p50),
+        ms(dp.p99),
+        ms(dp.max),
+        dp.count
+    );
+    println!(
+        "durable_seg_fsync mean {:.3}  p50 {:.3}  p99 {:.3}  max {:.3} ms  (n={})",
+        mean(seg_fsync),
+        ms(seg_fsync.p50),
+        ms(seg_fsync.p99),
+        ms(seg_fsync.max),
+        seg_fsync.count
+    );
+    println!(
+        "apply_entry       mean {:.4}  p50 {:.3}  p99 {:.3}  max {:.3} ms  (n={})",
+        mean(ae),
+        ms(ae.p50),
+        ms(ae.p99),
+        ms(ae.max),
+        ae.count
+    );
+    assert!(stats.durable_points >= 1, "the run took durable points");
 }
 
 #[test]
