@@ -123,17 +123,30 @@ pub(crate) async fn dispatch_push(
     tenant: &str,
     body: axum::body::Bytes,
 ) -> Response {
-    // Name-length guard: parse just the item queue/partition names generically
-    // (the packing/dedup pre-work is WP-1.7c). A body that will not parse is a
-    // 400 the same as the Postgres handler's own first step.
-    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) {
-        if let Some(items) = v.get("items").and_then(|x| x.as_array()) {
-            for it in items {
-                let q = it.get("queue").and_then(|x| x.as_str()).unwrap_or("");
-                let p = it.get("partition").and_then(|x| x.as_str());
-                if let Err(e) = facade::check_message_key_names(tenant, q, None, p) {
-                    return err_response(e);
-                }
+    // Name-length guard: parse ONLY the item queue/partition names, borrowed,
+    // skipping the payload. serde ignores the unknown fields (payload, txn, ...)
+    // without building a `serde_json::Value` tree, so this no longer pays the
+    // per-message allocator cost the fat-batch profile charged to
+    // `Value::deserialize` (PERF-N). A body that will not parse is a 400 the same
+    // as the Postgres handler's own first step; the facade re-checks per item.
+    #[derive(serde::Deserialize)]
+    struct NameGuardItem<'a> {
+        #[serde(borrow, default)]
+        queue: Option<&'a str>,
+        #[serde(borrow, default)]
+        partition: Option<&'a str>,
+    }
+    #[derive(serde::Deserialize)]
+    struct NameGuardBody<'a> {
+        #[serde(borrow, default)]
+        items: Vec<NameGuardItem<'a>>,
+    }
+    if let Ok(v) = serde_json::from_slice::<NameGuardBody>(&body) {
+        for it in &v.items {
+            if let Err(e) =
+                facade::check_message_key_names(tenant, it.queue.unwrap_or(""), None, it.partition)
+            {
+                return err_response(e);
             }
         }
     }
