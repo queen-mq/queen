@@ -138,10 +138,20 @@ pub(crate) async fn dispatch_push(
         }
     }
     let ctx = ReqCtx::new(tenant, deadline_for(st.pop_default_timeout_ms));
-    match st.rsm.push(ctx, PushReq { raw: body.to_vec() }).await {
+    // PERF-J: the whole push handler, push-only. Compared to goload's per-request
+    // latency this isolates the server-side cost from the loader / axum-accept /
+    // auth+tenant middleware wrapper (the ~200 ms C1000 gap PERF-J localizes).
+    let _t_total = crate::rsm::timing::stamp();
+    let resp = match st.rsm.push(ctx, PushReq { raw: body.to_vec() }).await {
         Ok(out) => json(StatusCode::CREATED, out.body),
         Err(e) => err_response(e),
+    };
+    if let Some(t) = _t_total {
+        crate::rsm::timing::metrics()
+            .push_h_total
+            .record_dur(t.elapsed());
     }
+    resp
 }
 
 /// `GET /api/v1/pop/queue/:queue` (wildcard). Fields are extracted by the guard
@@ -172,10 +182,19 @@ pub(crate) async fn dispatch_pop(
     // NOTE(WP-1.7c): on an empty claim with `wait`, park on `st.rsm.notifier()`
     // and re-poll (§9.5). The stub never returns Ok, so there is nothing to park
     // on yet.
-    match st.rsm.pop_wildcard(ctx, req).await {
+    // PERF-J: the whole pop handler, pop-only — confirms the empty polling pops
+    // are cheap and dominate the mixed `arrival_to_proposed` p50.
+    let _t_total = crate::rsm::timing::stamp();
+    let resp = match st.rsm.pop_wildcard(ctx, req).await {
         Ok(out) => json(StatusCode::OK, out.body),
         Err(e) => err_response(e),
+    };
+    if let Some(t) = _t_total {
+        crate::rsm::timing::metrics()
+            .pop_h_total
+            .record_dur(t.elapsed());
     }
+    resp
 }
 
 /// `GET /api/v1/pop/queue/:queue/partition/:partition` (pinned).

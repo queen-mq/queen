@@ -228,6 +228,8 @@ struct Writer {
     role_tx: watch::Sender<Role>,
     /// The highest durable index this writer has already truncated behind.
     last_truncated: u64,
+    /// PERF-K trace: when the previous group finished, for the inter-group gap.
+    last_group_at: Option<Instant>,
 }
 
 impl Writer {
@@ -305,9 +307,21 @@ impl Writer {
             }
         }
 
+        // PERF-K: one GROUPTRACE line per fsync group (Direct path times the
+        // whole append_group = write + fsync barrier; the write is a memcpy, so
+        // this is fsync-dominated). Gated on QUEEN_RAFT_CYCLE_TRACE.
+        let trace = crate::rsm::timing::cycle_trace_enabled();
+        let group_len = pending.len();
+        let group_bytes_t: u64 = if trace {
+            pending.iter().map(|p| p.bytes.len() as u64).sum()
+        } else {
+            0
+        };
+
         match &self.sink {
             WriterSink::Direct(_) => {
                 let slices: Vec<&[u8]> = pending.iter().map(|p| p.bytes.as_ref()).collect();
+                let fsync_started = trace.then(Instant::now);
                 let first_index = match self.log.append_group(&slices) {
                     Ok(i) => i,
                     Err(e) => {
@@ -316,6 +330,22 @@ impl Writer {
                         return false;
                     }
                 };
+                if let Some(started) = fsync_started {
+                    let now = Instant::now();
+                    let gap = self
+                        .last_group_at
+                        .map(|t| now.saturating_duration_since(t).as_micros() as u64)
+                        .unwrap_or(0);
+                    self.last_group_at = Some(now);
+                    crate::rsm::timing::cycle_trace_line(format!(
+                        "GROUPTRACE t={} entries={} bytes={} write_fsync_us={} gap_us={}",
+                        crate::rsm::timing::trace_now_us(),
+                        group_len,
+                        group_bytes_t,
+                        started.elapsed().as_micros() as u64,
+                        gap,
+                    ));
+                }
                 drop(slices);
                 self.refresh_log_metrics();
                 let (files, bytes) = (self.log.file_count() as u64, self.log.bytes());
@@ -460,6 +490,8 @@ struct Syncer {
 
 impl Syncer {
     fn run(self, rx: StdReceiver<SyncJob>) {
+        let trace = crate::rsm::timing::cycle_trace_enabled();
+        let mut last_group_at: Option<Instant> = None;
         // Iterates until the writer drops the job sender (a clean shutdown) or
         // this thread poisons.
         for job in rx {
@@ -470,6 +502,15 @@ impl Syncer {
                 log_files,
                 log_bytes,
             } = job;
+            let (group_len, group_bytes_t) = if trace {
+                (
+                    pending.len(),
+                    pending.iter().map(|p| p.bytes.len() as u64).sum::<u64>(),
+                )
+            } else {
+                (0, 0)
+            };
+            let fsync_started = trace.then(Instant::now);
             if let Err(e) = handle.sync() {
                 // The barrier failed: the group is NOT durable. Drop its
                 // waiters (their proposes see a closed channel → Fatal) and
@@ -481,6 +522,21 @@ impl Syncer {
             }
             // §13.5 `log.flushed`: the group is durable in the raft log.
             crate::rsm::faults::hit("log.flushed");
+            if let Some(started) = fsync_started {
+                let now = Instant::now();
+                let gap = last_group_at
+                    .map(|t| now.saturating_duration_since(t).as_micros() as u64)
+                    .unwrap_or(0);
+                last_group_at = Some(now);
+                crate::rsm::timing::cycle_trace_line(format!(
+                    "GROUPTRACE t={} entries={} bytes={} write_fsync_us={} gap_us={} pipelined=1",
+                    crate::rsm::timing::trace_now_us(),
+                    group_len,
+                    group_bytes_t,
+                    started.elapsed().as_micros() as u64,
+                    gap,
+                ));
+            }
             if !handoff_group(
                 &self.shared,
                 &self.apply_tx,
@@ -766,6 +822,7 @@ impl<S: Store + 'static> LocalReplicator<S> {
             shared: shared.clone(),
             role_tx,
             last_truncated: store_durable,
+            last_group_at: None,
         };
         let writer_join = std::thread::Builder::new()
             .name("queen-rsm-log".into())

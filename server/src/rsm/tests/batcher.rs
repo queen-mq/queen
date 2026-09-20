@@ -1076,3 +1076,61 @@ async fn every_propose_submits_on_the_one_driver_task_in_plan_order() {
     handle.await.expect("driver join");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// PERF-K / I3: the pipeline bounds UNAPPLIED entries at `pipeline`
+// ---------------------------------------------------------------------------
+//
+// D4/I3 (PLAN_RAFT.md:319): "At most QUEEN_RAFT_PIPELINE (4) entries in flight
+// on the leader ... queen_raft_inflight ≤ 4." An entry leaves the pipeline only
+// when it APPLIES locally (or leadership is lost); a commit does NOT free a
+// propose slot. `queen_raft_inflight` is `last_log_index - applied_index`, so a
+// propose-ahead that let committed-but-unapplied entries pile up past `pipeline`
+// breaks the invariant. PERF-K's `continuous` shape did exactly that (it freed a
+// propose slot at COMMIT and proposed ahead to a `max_inflight` cap of unapplied
+// entries); the round-4 refutation showed that violated the ratified I3 bound
+// (and its own A/B showed it a regression), so the shape was removed. This guard
+// fails if any such commit-frees-the-slot propose-ahead is reintroduced.
+//
+// The `FakeReplicator` commits an entry the instant it is appended and applies
+// it only after the scripted delay, so `Step::After(long)` is exactly "commit
+// is instant, apply is stalled": if the batcher freed a slot at commit it would
+// propose far past `pipeline`; bound to APPLY it holds at `pipeline`.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_pipeline_holds_at_pipeline_unapplied_entries_when_apply_stalls() {
+    const PIPELINE: usize = 2;
+    let cfg = BatcherConfig {
+        pipeline: PIPELINE,
+        batch_max_cmds: 1,
+        request_expire_every_ms: 3_600_000,
+        ..BatcherConfig::default()
+    };
+    let fx = FakeFixture::open("i3-pipeline-bound", cfg);
+    // Commit is instant (append); apply is stalled well past the observation
+    // window, so nothing frees a slot by APPLYING during the measurement.
+    fx.fake.set_default(Step::After(Duration::from_millis(400)));
+
+    // Submit many more than `pipeline` without awaiting.
+    let mut rxs = Vec::with_capacity(12);
+    for i in 0..12u64 {
+        let (sub, rx) = Submission::new(push(2000 + i, "q", &format!("p{i}"), &[&format!("t{i}")]));
+        fx.tx.send(sub).await.expect("send");
+        rxs.push(rx);
+    }
+    // Let the driver drain the queue and propose as far as I3 allows.
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let proposed = fx.fake.proposal_count();
+
+    assert_eq!(
+        proposed, PIPELINE as u64,
+        "I3: at most `pipeline` UNAPPLIED entries in flight — a slot frees only on \
+         apply (stalled here), never on commit (queen_raft_inflight ≤ pipeline). \
+         A commit-frees-the-slot propose-ahead (the removed continuous shape) would \
+         propose past `pipeline` here."
+    );
+
+    // Do not wait 400 ms per in-flight entry: abort the driver and clean up.
+    fx.handle.abort();
+    let _ = std::fs::remove_dir_all(&fx.dir);
+}
