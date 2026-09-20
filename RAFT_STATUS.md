@@ -3,10 +3,10 @@
 The working record of PLAN_RAFT.md (Queen without Postgres: one replicated
 log). The plan itself is never edited for progress; everything that is done,
 decided, found or measured is recorded here. Created by WP-0.1 on 2026-09-17;
-the G0 packet closed phase 0 (2026-09-18); this revision (2026-09-19) is the
+the G0 packet closed phase 0 (2026-09-18); this revision (2026-09-20) is the
 **G1 packet, pipeline=4 pass**: phase 1 built and measured on the VM at the
 ratified pipeline after the F-1 fix and the night run, now with the
-**performance package run to round 3** (M8/M9/M10) folded in.
+**performance package run to round 4** (M8/M9/M10/M11) folded in.
 
 Base: branch `raft` in `/Users/alice/Work/queen`, cut from `fc71b65b`
 (master, 1.6.0). The pgless hardening tree is parked as `2bbd10d1` on branch
@@ -63,7 +63,7 @@ still the oracle; nothing in phase 1 changes that.
 | gate | state | date | decision | evidence |
 |---|---|---|---|---|
 | G0 | **RATIFIED** | 2026-09-18 | D9 heed everywhere (+ pins, §11.5 repair); D10 option (a) lean; D11 openraft `54094270` + raft-log 0.4.6 with the seven plan changes; D12 framed TCP + sequenced per-frame MAC; §11.4/§11.8 defaults as proposed; O1–O23 as recommended (O14 failover ≤ 4 s, D14 kept); evidence gaps accepted, phase 1 approved. See the note at the top. | WP-0.2 `test/raft/vm/baseline/RESULTS.md`; WP-0.3 `test/raft/spikes/s1-store/MEMO.md`; WP-0.4 `s2-dedup/MEMO.md`; WP-0.5 `s3-consensus/MEMO.md`; WP-0.6 `s4-transport/MEMO.md`; WP-0.7 `test/raft/README.md`; Findings R-01..R-64 below |
-| G1 | **phase 1 built & measured at pipeline=4 — open for Alice** | 2026-09-19 | Message-path parity **PASS** (difffuzz clean after 7 documented envelope gaps; RAFT PARITY js lane green); crash matrix **22/22** reachable cells PASS; dropped-writes durability **PASS** (pipeline=1 20/20; pipeline=4 **99/100**, the 1 FAIL is R-123). **F-1 fixed (`f8bfa672`) and discharged on the VM** (0 poison across every pipeline=4 run). At pipeline=4: **O14 FAIL** (A-regime push p50 ≤ pg, but p99 ~6× pg; C1000 fan-out FAIL, cleanest fresh-store p50 **9.79** = 1.48× pg 6.62; FAT100 ≈**31%** of the knee); **I8 flatness mixed/FAIL** (CPU+disk flat, A20k p50/p99 isolated, but RSS not flat ~**387 B/msg** and C1000 p50 **+546%**); **O19 FAIL** (a 463/s DLQ storm lifts cold-partition p99 **+90.6%**, **+53.2%** at rest). New: R-121 (push admission), R-123 (SIGBUS reopen). See the G1 checklist. | crash `test/raft/crash/RESULTS.md`; difffuzz `PARITY-NOTES.md`; pipeline=1 `vm/raft1/RESULTS.md` + **M6**; pipeline=4 `vm/raft1/NIGHT-{A,B,C}-*.md` + **M7**; Findings R-101..R-124 |
+| G1 | **phase 1 built & measured at pipeline=4 — open for Alice** | 2026-09-19 | Message-path parity **PASS** (difffuzz clean after 7 documented envelope gaps; RAFT PARITY js lane green); crash matrix **22/22** reachable cells PASS; dropped-writes durability **PASS** (pipeline=1 20/20; pipeline=4 **99/100**, the 1 FAIL is R-123). **F-1 fixed (`f8bfa672`) and discharged on the VM** (0 poison across every pipeline=4 run). At pipeline=4: **O14 FAIL** (A-regime push p50 ≤ pg, but p99 ~6× pg; C1000 fan-out FAIL, cleanest fresh-store p50 **9.79** = 1.48× pg 6.62; FAT100 ≈**31%** of the knee) — the perf package (M8–M11) then moved two of three: A20k p99 to **parity**, FAT100 to **94%** of the knee; **C1000 p50 still FAILS** (round-4 156.67 ms, 23.7× M1 / 10.4× the same-load control), see the G1 checklist; **I8 flatness mixed/FAIL** (CPU+disk flat, A20k p50/p99 isolated, but RSS not flat ~**387 B/msg** and C1000 p50 **+546%**); **O19 FAIL** (a 463/s DLQ storm lifts cold-partition p99 **+90.6%**, **+53.2%** at rest). New: R-121 (push admission), R-123 (SIGBUS reopen). See the G1 checklist. | crash `test/raft/crash/RESULTS.md`; difffuzz `PARITY-NOTES.md`; pipeline=1 `vm/raft1/RESULTS.md` + **M6**; pipeline=4 `vm/raft1/NIGHT-{A,B,C}-*.md` + **M7**; Findings R-101..R-124 |
 | G2 | not reached | — | Full parity on raft1 (RAFT PARITY identical to `single`), differential clean, crash matrix and flatness pass, performance vs O14. | — |
 | G3 | not reached | — | Confirm the consensus library, re-checking its release status and the open issues (openraft GH#2080 still OPEN on 2026-09-18). | — |
 | G4 | not reached | — | raft3 parity; kill matrix with zero acknowledged loss and failover within target; equal digests; performance within the O14 budget. | — |
@@ -109,69 +109,104 @@ Against the gate criterion (PLAN §15: *message-path parity, crash matrix,
 differential and flatness results, raft1 performance vs postgres against the
 O14 targets*). Numbers, not adjectives; what failed is stated plainly.
 
-**Performance package, rounds 1–3 (2026-09-19) — the durable-point wall is down, the
-consume "regression" is settled as a non-regression, and both remaining O14 misses are
-the propose path, upstream of everything the store and claim levers touch (M8 / M9 /
-M10).** In plain words, what changed and by how much:
+**Performance package, rounds 1–4 (2026-09-19/20) — the durable-point wall is down, the
+consume "regression" is settled as a non-regression, the C1000 cause is finally named (and
+the earlier "per-partition propose lock" is RETRACTED, R-133), and both remaining O14 misses
+are the same propose/ingress path, upstream of everything the store and claim levers touch
+(M8 / M9 / M10 / M11).** In plain words, round by round, what changed and by how much:
 
-- **The push tail (A20k).** Round 1's store levers (PERF-A/B/C) did **not** move it —
-  the durable point stayed **268 ms** on the apply thread. Round 2 removed what loaded it
-  (the per-message dedup RMW → PERF-E; the per-append counter/pending writes → PERF-D; the
-  256-file fsync fan-out → PERF-F) and the durable point **collapsed 268 → 16.8 ms** (16×),
-  pop-independent; A20k push p99 fell **203 → 16.5–29.8 ms**, RSS 348 → 141 MB. Round 3's
-  scheduling lever (PERF-G) reads **p99 17.28 / p999 25.22 ms** at a parity p50 **6.05** —
-  but the **push-p50 floor did not move**: it is `arrival→proposed` **p50 4.19 ms**, the
-  batcher holding a command ~4 ms before it is proposed, structural to the single-plan-cycle
-  batcher and untouched by G/H/I. p50 is **0.66–0.72× pg**, p99 **parity** with pg (a review
-  corrected round 2's A/B for unequal pop load; the clean round-3 tail is run-to-run, not a
-  demonstrated PERF-G gain — minus-G reads the same p999).
-- **The consume path (A20k pop).** Round 2 left an open worry (a "new" config popped
-  3.6 k/s vs 9.2 k/s "old"). Round 3's A/B (**AB-0 / PERF-6**) settles it: **not a
-  regression.** The *identical* config popped 3.4 k/s then 11.4 k/s on two replicates (3.35×,
-  nothing changed); the 2×2 knob ordering sign-flips run to run; stage histograms are
-  byte-identical where pop rates differ most; all 8 runs fully drain (~11–12 k/s once push is
-  lifted). `DEDUP_INDEX=txns` does **not** regress consume (it helps push; one small
-  consistent empty-poll signature, ~12%, changes no verdict); the ring re-arms correctly
-  (**PERF-H** confirmed the planner rebuilds the ring from `pending` every cycle). There is
-  **no ring pathology to fix** — the low pop rate is the ordinary under-consume split of the
-  single apply thread, run-to-run variable.
-- **The many-partition shape (C1000).** **Unchanged across all three rounds, by design** —
-  its bound was never the store. Round 3's O(claimed) wildcard pop (PERF-I) took the plan
-  cost off the claim path (`pop_wildcard` plan p99 1.05 ms, flat in history), but push **p50
-  211.97 ms = 32× pg** is bound by `arrival→proposed` **≈ 1073 ms**, identical
-  old↔round-3↔every knob — the per-partition propose serialization, **upstream** of the store
-  and the claim. PIPELINE=8 makes A20k worse (apply-thread-bound, not slot-starved), so 4 is
-  the right default.
-- **Throughput (FAT100).** **3× — 86 k → 265 k msg/s** in round 2, held in round 3 at
-  **260 k = 90.7% of the 287 k postgres knee.** `mdb_page_flush` (round-1's dominant 13.3%
-  CPU) is gone from the profile; FAT is now allocator-bound on the per-message JSON `Value`
-  parse, not fsync-bound.
+- **Round 1 — the store levers (PERF-A/B/C).** Did **not** move the O14 numbers: the durable
+  point stayed **268 ms** on the apply thread. Only PERF-B (the dedup probe front) earned its
+  keep on flatness (8 M-loaded C1000 +546%→+50%).
+- **Round 2 — the durable point (PERF-D counters, PERF-E dedup rows, PERF-F buckets).**
+  Removing the per-message dedup RMW (dedup authority moved into the sequential **txns rows**),
+  the per-append **counter**/pending writes (batched per commit), and the 256-file fsync fan-out
+  (**buckets**=1 → one write + one fsync/entry) **collapsed the durable point 268 → 16.8 ms**
+  (16×), pop-independent. A20k push p99 fell **203 → 16.5–29.8 ms** (parity with pg), RSS
+  348 → 141 MB; FAT100 **86 k → 265 k msg/s** (92% of the knee). C1000 unchanged — its bound
+  was never the store.
+- **Round 3 — the wildcard pop and scheduling (PERF-G/H/I).** PERF-I made the **wildcard pop
+  O(claimed)**, not O(history) (plan p99 1.05 ms, flat in store size); PERF-G tuned the
+  batcher/writer schedule (DRIVER_NOTIFY); PERF-H proved the ready ring re-arms automatically
+  (the planner rebuilds `Derived` from `pending` every cycle). AB-0/PERF-6 **settled the consume
+  worry as a non-regression** (identical config 3.4↔11.4 k/s run-to-run; all cells drain).
+  A20k **p50 6.05 / p99 17.28** (O14-strict PASS both), FAT100 90.7%, C1000 **211.97 / 790.53**
+  — regressing nothing, but moving neither push-latency bound.
+- **Round 4 — the C1000 cause, the cycle shape, honest metrics (PERF-9/10/11; PERF-J committed,
+  PERF-K blocked).**
+  - **The C1000 cause, named (PERF-9).** A C1000 push spends only ~10 ms in the RSM stages at
+    the median while goload reports ~210 ms. Round 3 blamed a "per-partition propose lock" and
+    time "outside the RSM". **Both are wrong.** There is **no per-partition propose lock in the
+    code** (grep of `facade/real.rs` and `batcher.rs` is clean; no `std::Mutex` across `.await`
+    on the propose path), and the missing ~200 ms is **inside** the RSM, mis-measured —
+    `Submission.received_at` was restamped on every defer, so `arrival→proposed` only ever
+    showed the final re-plan leg (16.8 ms). The true bound is the **single serial command
+    pipeline** every message command shares (one `cmd_tx` → one `Batcher` → one ordered log →
+    one apply thread; push, pop and ack all funnel through it, I1/I3): C1000's 64 wildcard-pop
+    consumers (a pop plans ~0.5 ms, 100× a push's 4 µs) make each cycle bursty, the FIFO
+    equilibrates ~760 deep, pushes wait ~270 ms behind it. Postgres has no such pipeline (each
+    request is its own pooled txn), so its same-box 64-consumer control (E6) drains at 15 ms.
+    Retracted with evidence in **R-133**.
+  - **The metric-honesty fix (PERF-J, committed `1a3de800`).** `received_at` is no longer
+    restamped on defer, so `arrival→proposed` now reports the true whole-command wait (C1000
+    67 ms p50 / 1073 ms p99); plus two knobbed levers, `POP_FASTPATH_EMPTY` (keeps provably-empty
+    wildcard pops out of the serial batcher) and `PUSH_PRIORITY` (push-first drain), both
+    default-on (PP **provisional**, R-134).
+  - **The cycle shape (PERF-10 / task PERF-K).** The A20k "plan-4-then-fsync-the-group"
+    hypothesis is **wrong on one load-bearing point**: the writer fsyncs entries **one at a
+    time** (`group_entries` p50 = 1), so the 6 ms median is four serialized ~1 ms fsyncs, not a
+    lockstep burst. A `continuous` shape (free the propose slot on **commit**, not apply)
+    **cannot move the A20k median on a single node** (commit ≈ local apply, 65 µs apart), and it
+    **regresses C1000** (p50 375 → 733 ms) — it is a **phase-3 lever** (it needs commit to
+    precede local apply by a network RTT). Verdict: do not default it in phase 1. Its commit is
+    **BLOCKED / uncommitted** (the working tree diverges from the task notes); only the default-off
+    `CYCLE_TRACE` diagnostic is kept. See **R-135**.
+  - **The measure (PERF-11).** A uniform, regression-free step over round 3 — A20k p50
+    6.05 → 5.54, C1000 p50 212 → 157, FAT100 90.7% → 94.3% — but it moves **neither
+    push-latency bound to the aggressive gate**. A coordinator review corrected four framings
+    (R-134, folded in below): A20k is **under-consumed** (pop ~10.5 k/s vs 20 k push), so its
+    O14 "PASS" is **not like-for-like** with postgres M1; the C1000 157-vs-212 win is
+    **directional-within-spread** (142–230 ms), fastpath-supported, not a firm 26%;
+    `PUSH_PRIORITY` moved no number (held provisional); FAT100's 271 k is
+    **achieved-under-3.3%-shed** vs postgres's sustained 287 k.
 
-**O14 gate (raft1 p50 AND p99 ≤ pg; fat-batch ≥ 70% of the knee), round-3 defaults:**
+**O14 gate (raft1 p50 AND p99 ≤ pg; fat-batch ≥ 70% of the knee), round-4 defaults:**
 
-| target | round 3 | postgres | ratio / % | verdict |
+| target | round 4 | postgres | ratio / % | verdict |
 |---|---|---|---|---|
-| A20k p50 | 6.05 | 9.15 | 0.66× | **PASS** (O14 strict; misses only the round-3 aggressive ≤ 4 ms gate) |
-| A20k p99 | 17.28 | 27.01 | 0.64× | **PASS** |
-| A20k pop/s (drained) | 6.3 k | — | — | **n/e** on one run (drained=yes; 6.3 k inside PERF-6's 3.4–11.4 k) |
-| C1000 p50 | 211.97 | 6.62 | 32.0× | **FAIL** |
-| C1000 p99 | 790.53 | 33.02 | 23.9× | **FAIL** |
-| FAT100 tput | 260,498 | 287,363 | 90.7% | **PASS** (> 70%) |
+| A20k p50 | 5.54 | 9.15 (M1) | 0.61× | **PASS** O14-strict — but **under-consumed, not like-for-like** (below); misses the aggressive ≤ 4 ms gate |
+| A20k p99 | 15.04 | 27.01 (M1) | 0.56× | **PASS** (same under-consumed caveat) |
+| A20k drained | phase-2 −517k | — | — | **phase-2 catch-up only**; steady-state pop ~10.5 k/s ≈ ½ the 20 k push offer |
+| C1000 p50 | 156.67 | 6.62 (M1) / 15.04 (E6) | 23.7× / **10.4×** | **FAIL** (directional-within-spread) |
+| C1000 p99 | 733.18 | 33.02 (M1) | 22.2× | **FAIL** |
+| C1000 drained | lag 1 | — | — | **PASS** (window property, not round-4 code) |
+| FAT100 tput | 271,130 | 287,363 (sustained) | 0.94 | **PASS** (> 70%, ≥ 250 k; achieved-under-3.3%-shed) |
 
-`proceed=false` by the letter of the gate (C1000 p50/p99 fail; A20k passes O14 strict on
-both p50 and p99). The long **PERF-8** runs were **not** run — Alice's rule, do not run long
-tests if the short ones are bad. **What still bounds each symptom, and the next lever:** A20k
-p50 = the ~4 ms `arrival→proposed` batcher hold, structural to the single-plan-cycle batcher →
-the propose path is next (deepening the pipeline regresses it); FAT's next lever is the
-per-message `serde_json::Value` parse (receiver-side JSON), **not** the store; C1000 = the
-per-partition propose serialization → per-partition propose parallelism, upstream of apply, a
-separate work item. **Defaults after round 3:** `QUEEN_RAFT_DRIVER_NOTIFY`=on and
-`QUEEN_RAFT_CLAIM_FROM_RING`=on; `QUEEN_RAFT_WRITER_PIPELINE` and
-`QUEEN_RAFT_PENDING_TRANSITIONS` **off** (R-131 — the pending-transitions flip is one
-coordinated commit), on top of round 2's adaptive `QUEEN_RAFT_APPLY_WRITERS`,
-`QUEEN_RAFT_BUCKETS`=16 and `QUEEN_RAFT_DEDUP_INDEX`=txns. G/H/I regress nothing and are
-correctness/scaling hardening; the owed consume A/B (R-130) is now **discharged** (PERF-6:
-non-regression, no ring pathology).
+`proceed=false` by the letter of the gate (C1000 p50/p99 fail; A20k passes O14-strict on both
+p50 and p99 but under a lighter effective load than its baseline, and misses the aggressive
+4 ms p50 gate). The long **PERF-8** runs were **not** run — Alice's rule. **What still bounds
+each failing / aggressive-miss target, and the next lever:**
+- **A20k p50 (5.54, misses ≤ 4 ms).** The batcher **group-commit cycle** on a ~1 ms fsync:
+  `arrival→proposed` p50 ~2.1 ms (plan-cycle / freed-slot wait) folded into the commit
+  round-trip → `push_h_await` 4.19 ms → goload 5.54. Structural to the single-plan-cycle Drain
+  batcher; neither round-4 knob nor round-3 G/H/I moves it, and PIPELINE=8 makes it worse.
+- **C1000 p50/p99 (23.7× / 10.4× and 22.2×).** The **command-queue → single serialized
+  fsync ingress**: the HTTP push blocks in `push_h_submit` (p99 537 ms) waiting for room in the
+  bounded command channel, then `arrival→proposed` 67 / 1073 ms to be proposed; every
+  downstream stage is cheap (commit 1 ms, pop plan 33 µs). The broker sustains only ~735
+  committed entries/s under 1000-partition combined push+pop. The fastpath buys ~26% p50
+  (directional) but cannot lift the entry-rate ceiling.
+- **The next lever for both** is the same code work item — **batched / parallel propose+fsync
+  across partitions at the ingress** — not a knob, not the store, not deeper pipeline. FAT100
+  (PASS) is achieved-under-shed; its remaining throughput lever is the per-message
+  `serde_json::Value` parse (receiver-side JSON).
+
+**Defaults after round 4** (round 3 + the two new knobs): `QUEEN_RAFT_POP_FASTPATH_EMPTY`=on,
+`QUEEN_RAFT_PUSH_PRIORITY`=on (**provisional** — moved no number in its own ablation, kept for
+its sound mechanism pending a moving-number ablation, R-134), `QUEEN_RAFT_CYCLE_TRACE`=off
+(diagnostic); on top of `DRIVER_NOTIFY`=on, `CLAIM_FROM_RING`=on, `BUCKETS`=16,
+`DEDUP_INDEX`=txns, `BATCH_COUNTERS`=1, `WRITER_PIPELINE`=0, `PENDING_TRANSITIONS`=0 (R-131).
+The `received_at` restamp fix is unconditional.
 
 | criterion | verdict | evidence |
 |---|---|---|
@@ -181,7 +216,7 @@ non-regression, no ring pathology).
 | dropped-unflushed-writes durability | **PASS (with one HIGH defect, R-123)** | discharges **R-106 / R-111 / R-114**. pipeline=1: 20/20 dm-flakey rounds, ~73k acked, `missing=0`. pipeline=4 (NIGHT-C, F-1-fixed binary): **99/100** rounds every acked push delivered after reopen (`acked==ledger==delivered`, `missing=0`), reopen 316 ms–9.2 s, ~45.6 M acked, 0 poison. The **1 FAIL (round 75) is R-123**: `SIGBUS`/`BUS_ADRERR` on the `store/data.mdb` read mmap during apply-replay — the fsync'd log is intact (`truncated_tail=false`, 680 690 frames), but the torn `MDB_NOSYNC` store crashes the process before recovery completes. The durability *property* (log-is-truth) holds; the store-reopen path has a hazard. `NIGHT-C-flaky.md`. |
 | flatness (I8, §13.6) | **mixed — FAIL on the strict gate** | pipeline=4, 8.14 M at-rest / 6-min runs (NIGHT-A §2). **CPU and disk ARE flat** with store size (G-3's core claim holds: A20k CPU +0.0%, disk +2.9%). The **A20k** shape's p50/p99 **are isolated** from an 8 M cold store (+8.1%/+5.4% PASS) — but its **p999 +155%** and RSS are not. The **C1000** (1000-single-message-partition, fan-out) shape is **NOT isolated**: p50 **+546%**, ack **+122%**, p99 +15% — all FAIL. **RSS is not flat in any shape**: ~**387 B/msg** at rest (8.14 M → ~3.0 GB), lower than pipeline=1's 610 (R-105) but still **linear in stored count**, and it climbs within every run (the 3600 s dedup index retains every push). **Provenance caveat:** `flatness-night.sh` is not committed and the surviving `.results`/`compare-*.txt` carry the literal `pipeline=1` label the sed missed; pipeline=4 is the agent's note (mechanically consistent — empty-A20k p50 56.58/p99 452.6 matches the committed pipeline=4 `fivemin.sh` 44.29/419.8 — but not independently checkable from committed artifacts). |
 | noisy neighbour (O19) | **FAIL** | pipeline=4, a **real** active DLQ storm (NIGHT-A §3, `dlqstorm.py`: wildcard queue-mode pop + ack `status:"dlq"`). A light storm on one hot partition — **463/s**, 45 350 rows filed — raised the cold partitions' p99 **+90.6%** (87.55 → 166.91 ms); the 2 M backlog **at rest** (storm stopped) still held it **+53.2%** (→ 134.14). Both blow ±15%. Quiet throughput never lagged; only its latency did. **Reproducible from committed raw** (`night/quiet-{before,during,after}.gl` finals; `storm.out` 45350/98 s = 463/s) — the WP-1.11 transcription-error cell is superseded by a clean numeric verdict. |
-| raft1 performance vs O14 | **still FAIL on the gate (C1000 p50/p99), but rounds 1–3 moved the tail and throughput and settled the consume worry** | M7 (round 0, no levers) was push p99 ~6× pg and FAT ≈31% of the knee. **Round 1 (M8)** — the store levers PERF-A/B/C did **not** move the O14 numbers (durable point stayed 268 ms on the apply thread); PERF-B alone earned its place (8 M-loaded C1000 flatness +546%→+50%). **Round 2 (M9)** — PERF-D+E+F collapsed the durable point **268→16.8 ms** (16×), so **A20k p99 203→16.5–29.8 ms** (p50 **0.72× pg**, p99 **parity** with pg: 0.61× lightly-consumed / **1.10× consume-matched**) and **FAT100 86k→265k msg/s = 92%** of the 287k knee (**PASS >70%**). **C1000 is unchanged (24.9× pg p50)** — its bound is `arrival→proposed` ≈1073 ms, upstream of the store, so `proceed=false`. **Round 3 (M10)** — G/H/I (batcher/writer scheduling, ring re-arm, O(claimed) wildcard pop) are correctness/scaling hardening: A20k **p50 6.05 / p99 17.28** (both ≤ pg, O14-strict PASS), FAT100 **90.7%**, C1000 **p50 211.97 / p99 790.53** — performance-neutral-to-parity vs round 2, regressing nothing, but they move **neither push-latency bound** (A20k `arrival→proposed` p50 4.19 ms batcher hold; C1000 p99 1073 ms per-partition propose). **AB-0 (PERF-6)** discharges R-130: the consume rate is a **non-regression** (identical config 3.4↔11.4 k/s run-to-run; all 8 cells drain; no ring pathology; `DEDUP_INDEX=txns` helps push, not hurts consume). PIPELINE=8 regresses A20k (apply-thread-bound), so 4 stays default. C1000 p50 32× pg still bounds the gate, so `proceed=false`; long **PERF-8** skipped. Like-for-like: byte-identical goload flags, loader md5 `2c97cccb0d1e`. Next levers: FAT = per-message `serde_json::Value` alloc; C1000 = per-partition propose parallelism; A20k p50 = the propose path. |
+| raft1 performance vs O14 | **still FAIL on the gate (C1000 p50/p99), but rounds 1–4 moved the tail and throughput and settled the consume worry** | M7 (round 0, no levers) was push p99 ~6× pg and FAT ≈31% of the knee. **Round 1 (M8)** — the store levers PERF-A/B/C did **not** move the O14 numbers (durable point stayed 268 ms on the apply thread); PERF-B alone earned its place (8 M-loaded C1000 flatness +546%→+50%). **Round 2 (M9)** — PERF-D+E+F collapsed the durable point **268→16.8 ms** (16×), so **A20k p99 203→16.5–29.8 ms** (p50 **0.72× pg**, p99 **parity** with pg: 0.61× lightly-consumed / **1.10× consume-matched**) and **FAT100 86k→265k msg/s = 92%** of the 287k knee (**PASS >70%**). **C1000 is unchanged (24.9× pg p50)** — its bound is `arrival→proposed` ≈1073 ms, upstream of the store, so `proceed=false`. **Round 3 (M10)** — G/H/I (batcher/writer scheduling, ring re-arm, O(claimed) wildcard pop) are correctness/scaling hardening: A20k **p50 6.05 / p99 17.28** (both ≤ pg, O14-strict PASS), FAT100 **90.7%**, C1000 **p50 211.97 / p99 790.53** — performance-neutral-to-parity vs round 2, regressing nothing, but they move **neither push-latency bound** (A20k `arrival→proposed` p50 4.19 ms batcher hold; C1000 p99 1073 ms — the shared serial push/pop/ack pipeline, retracting round-3's "per-partition propose lock" (R-133)). **AB-0 (PERF-6)** discharges R-130: the consume rate is a **non-regression** (identical config 3.4↔11.4 k/s run-to-run; all 8 cells drain; no ring pathology; `DEDUP_INDEX=txns` helps push, not hurts consume). PIPELINE=8 regresses A20k (apply-thread-bound), so 4 stays default. C1000 p50 32× pg still bounds the gate, so `proceed=false`; long **PERF-8** skipped. **Round 4 (M11, `1a3de800` + the uncommitted PERF-K tree)** — A20k **p50 5.54 / p99 15.04** (O14-strict ≤ pg but **under-consumed**, pop ~10.5 k/s vs 20 k push — not like-for-like), C1000 **p50 156.67 / p99 733.18** (23.7× the contractual M1 6.62, **10.4×** the same-load control E6 15.04; directional-within-spread), FAT100 **271 k = 94.3%** (achieved-under-3.3%-shed). PERF-J's diagnostics fix makes `arrival→proposed` honest, and **PERF-9 retracts round-3's 'per-partition propose lock' (R-133): the bound is the single serial push/pop/ack pipeline, not a lock**; the `continuous` cycle shape is a phase-3 lever (PERF-10, R-135). Like-for-like: byte-identical goload flags, loader md5 `2c97cccb0d1e`. Next levers: C1000 & A20k p50 = batched/parallel propose+fsync across partitions at the ingress (R-133, not a per-partition lock); FAT = per-message `serde_json::Value` alloc. |
 
 **F-1 / R-117 is fixed and discharged; the standing concerns are now R-123 and
 R-121.** F-1 — the batcher `tokio::spawn`ed each `repl.propose()` independently, so
@@ -210,21 +245,21 @@ crash).
 ### G1 checklist — what Alice decides (in priority order)
 
 1. **G1 go / no-go, now that the numbers exist and the performance package ran to
-   round 3.** Parity, crash safety and dropped-write durability are PROVEN and F-1 is
-   fixed (`f8bfa672`) and discharged on the VM. The package (M8/M9/M10) **closed the
+   round 4.** Parity, crash safety and dropped-write durability are PROVEN and F-1 is
+   fixed (`f8bfa672`) and discharged on the VM. The package (M8/M9/M10/M11) **closed the
    durable-point wall**: A20k push p99 is now parity with pg (was ~6×) and FAT100 is
    ~91% of the knee (was 31%) — **two of three O14 targets move**. **Round 3 (M10)**
    added the scheduling / ring-re-arm / O(claimed)-wildcard-pop hardening (G/H/I):
    performance-neutral-to-parity, regresses nothing, and **AB-0 (PERF-6) discharged
    R-130** — the consume rate is a **non-regression** (run-to-run variance, no ring
-   pathology; `DEDUP_INDEX=txns` helps push, not hurts consume). What remains is
-   **C1000** (p50 32× pg), whose bound is `arrival→proposed` ≈1073 ms **upstream of the
-   store** (per-partition propose serialization), unmoved by G/H/I, plus the A20k p50
+   pathology; `DEDUP_INDEX=txns` helps push, not hurts consume). **Round 4 (M11)** re-measured with two new knobs (`POP_FASTPATH_EMPTY` on, `PUSH_PRIORITY` provisional), named the C1000 cause (PERF-9) and **retracted the "per-partition propose lock" (R-133)**, and priced the `continuous` cycle shape as a phase-3 lever (PERF-10, R-135, its commit BLOCKED): A20k p50 5.54 (under-consumed, not like-for-like), C1000 p50 157 (directional-within-spread), FAT 94.3%; neither push-latency bound moved to the gate. What remains is
+   **C1000** (round-4 p50 156.67 ms — 23.7× the contractual pg M1 6.62, 10.4× the same-load control E6 15.04), whose bound is `arrival→proposed` ≈1073 ms **upstream of the
+   store** (PERF-9 retracts round-3's "per-partition propose lock", R-133 — the bound is the single serial push/pop/ack command pipeline at the ingress), unmoved by G/H/I and nudged only ~26% by round-4's empty-pop fastpath, plus the A20k p50
    ~4 ms batcher hold — both the propose path, and neither is what round 3 did; so
    `proceed=false` by the letter of the gate. **I8 is still mixed** (CPU/disk flat, A20k
    median isolated, RSS not flat, C1000 not isolated) and **O19 still FAILS** (a 463/s
    DLQ storm lifts cold-partition p99 +90.6%). Either **(a)** hold G1 open until a
-   per-partition-propose work item closes C1000, or **(b)** ratify G1 on parity + crash
+   batched/parallel-propose (ingress) work item closes C1000, or **(b)** ratify G1 on parity + crash
    + durability + F-1 + the A20k-tail/FAT wins + the settled consume story, accept that
    C1000 and O19 are not yet met single-node, and carry the C1000 propose lever + R-121
    / R-123 as G2 deliverables. The one-VM co-resident-loader caveat (O13) applies to
@@ -552,9 +587,10 @@ to beat are **M7** (`NIGHT-A-pipeline4.md`).
 
 | PERF-I the wildcard pop claims from RAM, no store scan per claim | **partial** (this commit) | `QUEEN_RAFT_CLAIM_FROM_RING` (default **on**; off = the baseline `segs_from` scan) | **O(claimed) claim, round 3 direction (3).** Root cause: `claim_one` scanned the partition's WHOLE txns history from `log_start` on every claim (`segs_from`) — unbounded with retention off — plus a 2nd scan (`hashes_in_range`) and a reverse scan. The bounded path reads ONE txns pass from the segment covering `wanted`, stopping at budget/deferred, folding the delivered hash set (**O16**, byte-identical, no semantic change) into that single pass; auto-ack skips the fold. Effect-identical to the baseline with **automatic fallback** on conflation, a front retention gap, or no live segments (conflation deliberately stays on the `segs_from` path, documented in code). **I1/I2/I4/I5** intact — planner-only read change, no effect/digest touched. **NOT done (owed, R-132):** eliminating the per-claim partition+cursor POINT reads needs the planner to read a persistent apply-maintained `Derived`, but `batcher.rs` rebuilds `Derived` from `pending` every cycle (outside this WP's ownership: planner/state/apply/facade), so the ring-entry-facts / part-2 delivered-RANGE-to-facade design is a documented follow-up. **Numbers — in-process bench** (fresh group, 30-frame budget, growing history): baseline **42.1 / 78.6 / 224.0 / 800.4 us/pop** at 50/200/800/3200 segments (linear in history); bounded **FLAT 31.1 / 31.3 / 31.1 / 31.5 us** — **25x at 3200 segs**, and unbounded-history-flat (retention off). Differential fuzzer: 50 seeds, ~1300 claims, **0 divergences** (identical pop outcomes + cursor rows on vs off); deep-history lagging-consumer test identical. **Live C1000 smoke** (release md5 `141b8a403f06`, local APFS, round-2 best cfg `BATCH_COUNTERS=1 DEDUP_INDEX=txns DEDUP_FRONT=1 DURABLE_ASYNC=1 SEG_BUFFERED=1 BUCKETS=16 PIPELINE=4`, vary only `CLAIM_FROM_RING`): 1000-part 45s plan p50 **1.049->0.524 ms**, plan max 7.41->5.44; 100-part 40s plan p50 0.066->0.016, plan p99 **8.389->4.194**, `arrival_to_proposed` p99 **16.78->8.39 ms**. End-to-end pop throughput is fsync-bound (`durable_point` p50 67 ms) and closed-loop-confounded (+-40% run-to-run: OFF 8.6-15.7k, ON 7.6-22.1k over 3 pairs), ON avg >= OFF -> **no regression**. Reproduce the bench: `cargo test -p queen-engine --lib rsm::tests::pop_bounded -- --nocapture`. **Tests:** the differential `bounded_and_baseline_agree_on_random_workloads` + `a_lagging_consumer_claims_identically_both_ways`; `cargo test -p queen-engine --lib rsm::` = **376 passed / 0 failed / 12 ignored**. `rustfmt --edition 2021` + clippy clean on touched files; **I2** deny-gate green. **Canonical end-to-end A/B is OWED on the VM** — the local goload is an older closed-loop `-mode max` build lacking `-rate/-ramp-sec`, so it can't reproduce the rate-3000 C1000 regime (the 'different consume load' pitfall); needs `/root/goload` openloop on the VM (VM not touched this run). See **R-132**. Files: `server/src/rsm/planner/pop.rs`, `rsm/planner/mod.rs`, `rsm/tests/pop_bounded.rs`, `rsm/tests/planner_harness.rs`, `rsm/tests/mod.rs`. |
 | PERF-J the C1000 push latency outside the state machine, and the 1 s stall | **done** (this commit) | `QUEEN_RAFT_POP_FASTPATH_EMPTY`, `QUEEN_RAFT_PUSH_PRIORITY` (both default **on**); diagnostics fix unconditional | **The round-3 premise is stale; the win is modest and the metric-honesty fix is the keeper (round-4 direction).** Three correctness-preserving changes, measured on the VM before/after. **(1)** `POP_FASTPATH_EMPTY`: `pop_run` does a cheap committed-state pre-check (`wildcard_pop_provably_empty`: queue exists + group registered + not conflating + no ready pending row) on the blocking pool (**I15**); a provably-empty wildcard pop never enters the serial batcher. Same `pending.ready_at` truth the long-poll gate uses, so it can only skip when the planner would return `Plan::Empty`; a later push re-arms the ring and wakes the park, so no claim is stranded. **(2)** `PUSH_PRIORITY`: `drain_batch` round-robins push-first (`interleave_push_first`) so a cheap push is never budget-cut behind pops; per-partition push order preserved, no lane starves. **(3)** Diagnostics (unconditional): `received_at` is no longer restamped on defer (`arrival_to_proposed` is now the true whole wait); `enqueued_at` carries the per-cycle `queue_wait` leg. **Finding**: pop plan is now 16–33 µs p50 / 1 ms p99 (CLAIM_FROM_RING/PERF-I), **not** the 0.5 ms the diagnosis assumed, so removing empty pops (pop cmds into the batcher −40%, 104k→63k) yields only a modest push win (p50 ~272→~216 ms; p99 ~790→~735), at the edge of run-to-run spread. The real C1000 bound is the single-log fsync entry rate (~690 entries/s, ~1 ms serialized) under combined push+pop load, not pop plan cost; the fastpath also only catches caught-up polls (~60% of empties are lost-claim races where the pending row looks ready). Fix #3 is confirmed valuable: `arrival_to_proposed` now reports 134–268 ms (== `push_h_await`), unmasking the round-3 16.8 ms artifact. **Numbers** (VM root@164.90.215.224, binary md5-12 `9b1b246bdcf4`, C1000 75 s + 40 s drain, round-3 knobs PIPELINE=4 DN=1 WP=0 PT=0 CFR=1 DEDUP_INDEX=txns; runner `/root/raft/perf8/jfix/jfixrun.sh`): BEFORE (knobs off) run1 push p50 259.07 / p99 790.53 / p999 831.49 ms, run2 284.67 / 790.53 / 831.49; pop_wildcard into batcher 104489 / 100633; empty pops 83392 / 80324; drained (lag 0/1). AFTER (knobs on) run1 p50 238.59 / p99 749.57 / p999 774.14, run2 193.54 / 724.99 / 823.30; pop_wildcard into batcher 62530 / 87735; empty pops 99721 / 139522; drained (lag 15/−1). pops/s ~2940, acks/s ~2940, all consume-matched (lag ~0), ERRLINES=0, CPU 1.5–1.7 cores, disk 30 MB/s. HTTP decomposition (after): push_h_prep 0.004 ms p50, push_h_submit 0.001 ms p50 / 537 ms p99 (channel fill), push_h_await 134 ms p50 / 1073 ms p99; proposed_to_committed 1 ms, log_fsync 1 ms, apply_entry 0.066 ms, durable_point 67 ms (async); entries ~50–57k/75 s (~690/s), appends ~202k (~2700/s), same before and after. STALL p99: `queue_wait` / `arrival_to_proposed` p99 = 1073 ms (the ~1 s log2 bucket) in BOTH before and after — the periodic ~1 s tail is the deep-queue tail bucket, unchanged, not the pop plan. **Tests**: fail on pre-fix code; `cargo test -p queen-engine --lib rsm::` = **383 passed / 0 failed / 12 ignored**; clippy/fmt clean on touched files; **D13** (503 + Retry-After, no silent drop) and **I15** upheld. **Files**: `server/src/rsm/facade/real.rs`, `server/src/rsm/planner/pop.rs`, `server/src/rsm/batcher.rs`, `server/src/rsm/timing.rs`, `server/src/rsm/tests/planner_pop.rs`. |
+| PERF-K the A20k cycle shape — diagnosis + a knobbed prototype | **diagnosis done (PERF-10); code BLOCKED / uncommitted** | `QUEEN_RAFT_CYCLE_TRACE` (default **off**, diagnostic); the `continuous` shape (`QUEEN_RAFT_CYCLE_SHAPE` / `GROUP_MAX_US` / `MAX_INFLIGHT`) is a **phase-3 lever, not defaulted** | **The A20k cycle-shape hypothesis, round-4 direction (PERF-10).** The round-3 mental model (plan-4-then-fsync-the-group) is wrong on one load-bearing point: the writer fsyncs entries **one at a time** (`group_entries` p50 = 1, mean 1.50), so the 6 ms A20k median is `queue_wait` 2.1 ms + own `proposed→committed` 2.1 ms ≈ four serialized ~1 ms fsyncs. A `continuous` shape (free the propose slot on **commit**, not apply) **cannot move the A20k median on a single node** (commit ≈ local apply, 65 µs apart), **regresses C1000** (push p50 375 → 733 ms) and is a wash for FAT100 — it is a phase-3 lever (needs commit to precede local apply by a network RTT). PERF-10 also found **A20k does not drain at steady state in any variant** (phase-1 lag 750 k–940 k), so round 3's "A20k consume-matched / drained" was the phase-2 catch-up window, not steady-state matching. **Verdict:** do not default `continuous` in phase 1; keep the knobs I2-clean for a phase-3 A/B; keep `CYCLE_TRACE` default-off. **Commit status: BLOCKED.** The uncommitted working tree (`server/src/handlers/raft.rs` +23, `server/src/rsm/replicator/local.rs` +57, `server/src/rsm/tests/batcher.rs` +58) **diverges from the task notes** (the notes describe `CYCLE_SHAPE` / `committed_notify` / 3 continuous tests; the tree holds a partial, different change), so the commit agent refused to commit "from the notes" rather than fabricate the SSOT — these three files remain **uncommitted on `raft`**, owned by no landed WP, and were **not staged by this report commit**. See **R-135**. **Numbers:** PERF-11 measured PERF-J's committed binary (`1a3de800`) + this uncommitted tree (md5-12 `e2467156dc41`; see **M11**). Files (uncommitted, not staged): `server/src/handlers/raft.rs`, `server/src/rsm/replicator/local.rs`, `server/src/rsm/tests/batcher.rs`. |
 
-**Measurement outcome (2026-09-19).** The package was measured on the VM in three
-rounds (**M8** round 1, **M9** round 2, **M10** round 3). **Round 1** (PERF-A/B/C,
+**Measurement outcome (2026-09-20).** The package was measured on the VM in four
+rounds (**M8** round 1, **M9** round 2, **M10** round 3, **M11** round 4). **Round 1** (PERF-A/B/C,
 `5de30164`): the store levers did **not** move the O14 numbers — the durable-point LMDB
 `data.mdb` env-sync stayed on the apply thread (268 ms A20k) and remained the wall; only
 PERF-B earned its keep (8 M-loaded C1000 flatness +546%→+50%). **Round 2** (PERF-D/E/F on
@@ -567,13 +603,13 @@ counter/pending writes (PERF-D) and the 256-file fsync fan-out (PERF-F at bucket
 6.05 / p99 17.28** (O14-strict PASS both), FAT100 **90.7%**, C1000 **211.97 / 790.53** —
 performance-neutral-to-parity, regressing nothing, but moving **neither push-latency
 bound** (A20k `arrival→proposed` p50 4.19 ms; C1000 p99 1073 ms); **AB-0 (PERF-6)**
-settled the consume worry as a **non-regression** (R-130 discharged). **`proceed=false`**
-on the C1000 p50/p99 gate across all three rounds; the long PERF-5/PERF-8 runs were
-skipped (Alice's iterate rule). Post-round-3 defaults: `QUEEN_RAFT_APPLY_WRITERS`
+settled the consume worry as a **non-regression** (R-130 discharged). **Round 4** (PERF-9/10/11, `f22bf1e19c3f`→`1a3de800`): PERF-9 named the C1000 cause and **retracted the "per-partition propose lock"** (R-133 — it is the single serial push/pop/ack command pipeline, mis-measured by a `received_at` restamp that PERF-J fixed); PERF-J's `POP_FASTPATH_EMPTY` / `PUSH_PRIORITY` (both default-on, PP provisional — R-134) landed at `1a3de800` (C1000 p50 212→157, directional-within-spread; A20k p50 6.05→5.54, under-consumed / not like-for-like; FAT100 90.7%→94.3%, achieved-under-shed); PERF-10 priced the `continuous` cycle shape as a phase-3 lever (not defaulted) and its commit is **BLOCKED** (R-135). **`proceed=false`**
+on the C1000 p50/p99 gate across all four rounds; the long PERF-5/PERF-8 runs were
+skipped (Alice's iterate rule). Post-round-4 defaults: `QUEEN_RAFT_APPLY_WRITERS`
 adaptive, `QUEEN_RAFT_BUCKETS`=16, `QUEEN_RAFT_DEDUP_INDEX`=txns,
 `QUEEN_RAFT_BATCH_COUNTERS`=1, `QUEEN_RAFT_DRIVER_NOTIFY`=1, `QUEEN_RAFT_CLAIM_FROM_RING`=1,
-`QUEEN_RAFT_WRITER_PIPELINE`=0, `QUEEN_RAFT_PENDING_TRANSITIONS`=0. Full tables in
-`test/raft/vm/raft1/PERF-{2,3,4,6,7}-*.md`; the open follow-ups are R-127..R-132.
+`QUEEN_RAFT_WRITER_PIPELINE`=0, `QUEEN_RAFT_PENDING_TRANSITIONS`=0, plus round 4's `QUEEN_RAFT_POP_FASTPATH_EMPTY`=1 and `QUEEN_RAFT_PUSH_PRIORITY`=1 (provisional, R-134), `QUEEN_RAFT_CYCLE_TRACE`=0 (diagnostic). Full tables in
+`test/raft/vm/raft1/PERF-{2,3,4,6,7,9,10,11}-*.md`; the open follow-ups are R-127..R-135.
 
 ### Phases 1–6 — the rest, all `not started`
 
@@ -758,6 +794,9 @@ threaded `facade/real.rs:702`; `plan_budget_ms` (O17) **consumed** at
 | R-130 | PERF-4 / round-2 review | **The round-2 A20k push-latency A/B was not consume-matched, and the new-dedup consume rate is unexplained (report-framing correction + one owed short A/B — not a product defect).** (a) In the 60 s A20k measure, new-b1 popped **218 k (~3.6 k/s)** in the same push window where "old" popped **552 k (~9.2 k/s)**, so new-b1's push p99 was measured under ~2.5× lighter apply contention — the first draft's "A20k beats postgres, p99 0.61× pg" headline is **overstated**. The consume-matched, fully-drained profile run reads push **p99 29.82 ms = 1.10× pg 27.01** → **A20k p99 is at parity with pg, not under it**. Both figures clear the 2× proceed gate, so `proceed=false` (on C1000) is **unchanged**. (b) The low new-b1 pop rate is **flat across all three windows** with elevated empty polls (222 k vs old 181 k) — the mechanism is identified (the `DEDUP_INDEX=txns` planner does a txns-window scan on a bloom "maybe"/unseeded partition, PERF-E) but whether it is warm-up or a steady-state regression is **NOT settled**. (c) "Best bucket = 1" is a single-run claim: b=1 and b=16 are co-best within log2 noise; only C1000 is monotonic (b=1 165 < b=16 218 < b=256 297). **Corrected in `PERF-4-short.md`** (no product code changed — the dedup/NBUCKETS/counter code is sound). | Accepted, measurement-validity correction, not a defect. What stands corroborated: durable-point collapse 268→16.8 ms (pop-independent), C1000 1073 ms upstream diagnosis, FAT 3×, `proceed=false`. **Owed short A/Bs before ranking round 2 a consume win:** (1) a consume-matched A20k old-vs-new-b1 push A/B; (2) a steady-state `DEDUP_INDEX=txns` vs `rows` consume A/B; (3) ≥3× repetition per bucket before ranking b=1 vs b=16. | **for the coordinator / owed 3 short A/Bs before the consume claim** |
 | R-131 | PERF-H | **`QUEEN_RAFT_PENDING_TRANSITIONS` is proven correct but left OFF this round; the flip to default-on is one coordinated commit, and `has_pending` is still a facade stub (accepted, not a defect).** PERF-H proved the ready-ring re-arm path: the planner already rebuilds `Derived` from `pending` every cycle (so lease-expiry / visibility re-arm is automatic — AB-0 confirmed, no consume regression), the transitions-path append maintenance now never under-arms a delayed/leased/appended-under-lease partition (the OFF path overwrote), and the previously-unwired live-ring promotion is wired (O(1)-guarded ring-deadline index, promote at each entry boundary). ON is claimability-equivalent to SQL, cadence-independent, rebuild==live-rings and crash-safe. It is **not** made default because ON moves the replicated `pending` digest (earliest vs last `ready_at`): flipping `ApplyConfig::default()` alone makes `replicator_crash`'s child (default=ON) diverge from its reference (`run_workload`→`cfg()`=OFF). Two owed items: (1) the default-on flip must set `ApplyConfig::default()` **and** the shared `tests/apply.rs::cfg()` (used by the planner/batcher/replicator suites) in lockstep, in one commit; (2) `has_pending` (`facade/real.rs`) is still a stub returning `Ok(true)` — the correct read is exposed at the state layer (`Committed::has_claimable_pending`), a later WP wires the facade to the promoted live ring for the §9.5 long-poll gate. | Accepted, not a defect: the lever is fully proven and knob-gated (default unchanged), apply stays deterministic (**I1/I2/I4/I5/I15** intact). Owed to the coordinator: (1) the single coordinated default-on commit (`default()` + shared test `cfg()` together); (2) the facade `has_pending` wiring WP. | **for the coordinator / one coordinated flip + facade wiring owed** |
 | R-132 | PERF-I | **The `CLAIM_FROM_RING` bounded claim does not yet reach 'zero store reads per claim', and the canonical end-to-end throughput A/B is owed on the VM (accepted, not a defect).** PERF-I makes the txns scan O(claimed) instead of O(history) and is effect-identical (50-seed differential 0 divergences, auto-fallback on conflation / front gap / no live segments; conflation stays on the `segs_from` path by design). Two open items: (1) the planner still does 2 POINT reads (partition, cursor) + 1 bounded scan per claim; eliminating the point reads needs the planner to consume a persistent apply-maintained `Derived` (committed/tail/lease/versions), but `batcher.rs` (outside this WP's ownership) rebuilds `Derived` from `pending` every plan cycle — that plus part-2 (record delivered RANGE not hashes; facade attaches delivered hashes to the pop outcome + ack path, moving the replicated CursorRow/ack wire, re-gated in lockstep) is a separate coordinated change. (2) The end-to-end A/B is confounded on the laptop (fsync-bound `durable_point` p50 67 ms, +-40% closed-loop noise) and the local goload is an older `-mode max` closed-loop build lacking `-rate/-ramp-sec`, so the rate-3000 C1000 regime needs `/root/goload` openloop on the VM (VM not touched this run). Plan-stage wins are clean (C1000 plan p50 1.049->0.524 ms, `arrival_to_proposed` p99 16.78->8.39 ms). | Accepted, not a defect: knob-gated (default on), effect-identical with fallback, **I1/I2/I4/I5** intact. Owed to the coordinator: (1) the ring-entry-facts / delivered-range-to-facade change to drop the per-claim point reads (batcher + facade + wire, one coordinated gate); (2) the VM openloop end-to-end C1000 A/B on `CLAIM_FROM_RING`. | **for the coordinator / owed the point-read elimination + VM A/B** |
+| R-133 | PERF-9 / round-4 | **The round-3 "per-partition propose lock" is RETRACTED — there is no such lock; the C1000 bound is the single serial push/pop/ack command pipeline, mis-measured by a `received_at` restamp.** Rounds 1–3 explained C1000's push p50 (and "the missing ~200 ms outside the RSM") as a per-partition propose serialization / "1 partition = 1 propose lock". **Neither exists:** `grep` of `facade/real.rs` and `batcher.rs` shows no per-partition lock on the propose path and no `std::sync::Mutex` held across `.await` there. The gap is **inside** the RSM, hidden because `Submission.received_at` was restamped on every defer/re-queue (`batcher.rs:1083`, `1162`), so `arrival→proposed`/`queue_wait` measured only the final re-plan leg (16.8 ms). The real bound is the **single serial command pipeline** (one `cmd_tx` → one `Batcher` → one ordered log → one apply thread; push, pop and ack share it, I1/I3): C1000's 64 wildcard-pop consumers make each cycle bursty (a pop plans ~0.5 ms vs a push's 4 µs), the FIFO equilibrates ~760 deep, pushes wait ~270 ms. Evidence: push-only 1.90 ms (E3a); same-box 64-consumer postgres 15.04 ms and drains (E6); deeper PIPELINE worse (E8/E9); admission not in the raft path; request-id expiry exonerated (E5). PERF-J's unconditional fix stops the restamp, so round-4 `arrival→proposed` now reports the true 67 ms p50 / 1073 ms p99. | Retraction recorded; **no product defect** — the code was always correct, the *metric* was wrong (now fixed). The fix direction (keep push off the pops' serial path; batched/parallel propose+fsync across partitions at the ingress) is a code work item owed to a later WP; PERF-J's fastpath is a ~26% (directional) down payment. | **retracted; the ingress work item is owed a WP** |
+| R-134 | PERF-11 / coordinator review | **Round-4 measurement framings corrected (attribution, not defects); code claims verified.** Four corrections: (1) **A20k is under-consumed** — it pops ~10.5 k/s against a 20 k push offer (steady-state lag 570 k–940 k), so its push p50 5.54 was measured under a lighter effective load than the postgres M1 baseline (32 consumers keeping up, shed 0); its O14-strict "PASS" and "drained" (a phase-2 catch-up) are **not like-for-like** with M1. Reconciles PERF-10 vs PERF-11: *drained* = phase-1 steady-state lag ≈ 0 while pushing — by that definition A20k does not drain; the −517 k is phase-2. (2) **C1000 O14 denominator** — report both M1 6.62 (23.7×, contractual, no busy consumers) and the same-box same-load control **E6 15.04 (10.4×)**; E6 is like-for-like, so the architecture gap is ~10×. (3) **`PUSH_PRIORITY` default-on is unjustified by its own ablation** (min-PP moved no number on A20k or C1000) — held **provisional**: sound mechanism, kept default-on pending an ablation that moves a number; only `POP_FASTPATH_EMPTY` is ablation-supported (min-FP C1000 230 vs 157). (4) **FAT100 271 k is achieved-under-3.3%-shed** (sheds 573 700) vs postgres's sustained 287 k — not "% of the knee"; still clears ≥ 250 k / ≥ 70%. | Accepted, framing corrections folded into **M11** and the G1 arc; the **gate verdict is unchanged** (`proceed=false`). Code verified sound and I2-clean: `received_at` preserved across both defer sites (only `enqueued_at` restamped), no per-partition lock / no `std::Mutex` across `.await` on the propose path, both round-4 knobs default-on, loader shapes byte-identical (A20k 32 / C1000 64 consumers). Owed to the coordinator: the recommended VM re-measures (C1000 ×3 replicates to test 157 against the 142–230 spread; A20k with enough consumers for phase-1 lag ≈ 0) — need the perf8 VM lock, not run this round. | **for the coordinator / framing corrected, VM re-measures owed** |
+| R-135 | PERF-10 / task PERF-K | **The `continuous` cycle shape is a phase-3 lever (not defaulted); its commit is BLOCKED — three files remain uncommitted on `raft`.** PERF-10 proved `continuous` (free the propose slot on commit, not apply) cannot move the A20k median on a single node (commit ≈ local apply, 65 µs apart), regresses C1000 and is a wash for FAT100; it only pays off once commit precedes local apply by a network RTT (phase 3). Verdict: do not default it in phase 1; keep `CYCLE_TRACE` (default off) as a diagnostic. **The PERF-K commit is BLOCKED:** the uncommitted working tree (`server/src/handlers/raft.rs` +23, `server/src/rsm/replicator/local.rs` +57, `server/src/rsm/tests/batcher.rs` +58) **diverges from the task notes** (which describe `QUEEN_RAFT_CYCLE_SHAPE` / `GROUP_MAX_US` / `MAX_INFLIGHT`, a `committed_notify`/`committed_index` on the `Replicator` trait for Local+Fake, and 3 new continuous tests; the tree holds a different, partial change), so committing "from the notes" would fabricate the SSOT — the commit agent refused. | Accepted, not a defect: the shape verdict is sound and the diagnosis (M11) is committed. Owed to the coordinator: **decide the disposition of the three uncommitted files** (finish PERF-K to the intended excise-continuous / keep-`CYCLE_TRACE` shape and commit it, or discard the tree) before the next round — they are not staged by this report commit and belong to no landed WP. The round-4 shipped product change is **PERF-J only** (`1a3de800`). | **for the coordinator / disposition of the uncommitted PERF-K tree owed** |
 
 ---
 
@@ -1297,9 +1336,8 @@ A20k passes O14 strict (p50 AND p99 ≤ pg); it misses only the round-3-invented
 4 ms/9 k gate that sits on work round 3 did not do. C1000 fails O14 on the same upstream bound
 as round 2. **What still bounds each symptom, and the next lever:** A20k p50 = the ~4 ms
 `arrival→proposed` batcher hold (structural to the single-plan-cycle batcher, unmoved by
-G/H/I) → the propose path is next; C1000 p50/p99 = the per-partition propose serialization
-(`arrival→proposed` p99 1073 ms, 1 partition = 1 propose lock) → per-partition propose
-parallelism, a separate work item; FAT100 = the per-message `serde_json::Value` parse
+G/H/I) → the propose path is next; C1000 p50/p99 = the propose/fsync ingress [**Round-4 correction (M11, R-133): retracted** — NOT a "per-partition propose lock"; the bound is the single serial push/pop/ack command pipeline, and round-3's `arrival→proposed` p50 was a `received_at` restamp artifact]
+(`arrival→proposed` p99 1073 ms) → batched/parallel ingress propose+fsync, a separate work item; FAT100 = the per-message `serde_json::Value` parse
 (receiver-side JSON), the remaining throughput lever. Provenance caveats: a first
 build-writeback batch (A20k push p99 1318 ms, the durable fdatasync stalling behind the build's
 3.7 GB `target/` writeback) was **discarded** and every number is the settle-guarded rerun
@@ -1308,6 +1346,113 @@ per cell on PERF-7 (A20k pop is 3.4–11.4 k run-to-run). 0 broker error/panic l
 kept run. Open follow-ups: R-130 (AB-0 answered here — non-regression), R-131
 (`PENDING_TRANSITIONS` default-on = one coordinated commit), R-132 (PERF-I per-claim point-read
 elimination + the VM openloop C1000 A/B).
+
+### M11 — phase-1 performance package, round 4 (PERF-9/10 diagnoses + PERF-11 short measure)
+
+**Date** 2026-09-19/20 · **host** same VM (`root@164.90.215.224`, Ubuntu 24.04, 8 vCPU,
+15 GB, ext4) · **binary** `queen` release @ `raft` **HEAD `1a3de800`** (PERF-J committed)
+**plus the uncommitted PERF-K working tree** (`handlers/raft.rs`, `rsm/replicator/local.rs`,
+`rsm/tests/batcher.rs`), md5-12 `e2467156dc41` (the diagnosis binaries were PERF-9
+`cb827a77cef5`, PERF-10 `5ce3c2552539`) · **loader** `/root/goload` md5 `2c97cccb0d1e` (the
+M1/M7–M10 loader), `-mode openloop`, coordinated-omission · round-3 defaults +
+`POP_FASTPATH_EMPTY=1 PUSH_PRIORITY=1`, LocalReplicator, no Postgres, dedup 3600 s, retention
+off. Sources: `PERF-9-c1000-diagnosis.md`, `PERF-10-a20k-diagnosis.md`, `PERF-11-short.md`;
+raw run dirs on the VM under `/root/raft/perf8` (not synced into the checkout). **60/75/60 s
+consume-matched short measures + a one-knob-off ablation** — Alice's iterate rule; the long
+PERF-8 runs were **not** run (the gate did not pass). No product code changed in the measure;
+PERF-11 sets only knobs. Round-4 direction: find where the C1000 ~200 ms actually goes, test
+the A20k cycle-shape hypothesis, and re-measure under the two round-4 knobs.
+
+**The C1000 cause, named — and the round-3 "per-partition propose lock" RETRACTED (PERF-9,
+R-133).** A C1000 push spends only ~10 ms in the RSM stages at the median while goload reports
+~210 ms. Round 3 attributed the gap to a **per-partition propose lock** and to time
+**outside** the RSM. **Both are wrong:** there is no per-partition propose lock in the code
+(`grep` of `facade/real.rs` and `batcher.rs` is clean; no `std::sync::Mutex` across `.await`
+on the propose path), and the missing ~200 ms is **inside** the RSM, mis-measured —
+`Submission.received_at` was restamped on every defer (`batcher.rs:1083`, `1162`), so
+`arrival→proposed`/`queue_wait` only ever showed the final re-plan leg (16.8 ms). The real
+bound is the **single serial command pipeline** every message command shares (one `cmd_tx` →
+one `Batcher` → one ordered log → one apply thread, I1/I3): push, pop and ack all funnel
+through it, and C1000's 64 wildcard-pop consumers (a pop plans ~0.5 ms, 100× a push's 4 µs)
+make each cycle's service bursty, so the FIFO equilibrates ~760 deep and pushes wait ~270 ms
+behind it. Experiments close it: push-only (`-consumers 0`) = **1.90 ms** (E3a); postgres on
+the same box under the same 64-consumer load = **15.04 ms and it fully drains** (E6); deeper
+PIPELINE (8/16) is **worse** (apply-serial-bound, E8/E9); request-id expiry and admission are
+exonerated (E5; admission is not in the raft path at all). The ~1 s p99 stall is not a periodic
+event — it is the log2 bucket the deep-queue tail lands in.
+
+**The A20k cycle shape — a phase-3 lever, not the median (PERF-10 / task PERF-K, R-135).** The
+round-3 hypothesis (plan-4-then-fsync-as-a-group) is **wrong on one load-bearing point**: the
+writer fsyncs entries **one at a time** (`group_entries` p50 = 1, mean 1.50), so the 6 ms
+median is `queue_wait` 2.1 ms + own `proposed→committed` 2.1 ms ≈ four serialized ~1 ms fsyncs,
+not a lockstep burst. A `continuous` shape (free the propose slot on **commit**, not apply)
+**cannot move the A20k median on a single node** — on `LocalReplicator` an entry applies ~65 µs
+after it commits, so freeing on commit is only ~65 µs earlier — and it **regresses C1000**
+(push p50 375 → 733 ms) and is a wash for FAT100. Measured A/B: `continuous`+`GROUP_MAX_US=300`
+moves A20k p50 6.11 → 6.43 (worse), p99 15.04 → 13.76 (better), drain +9%. **Verdict:** do not
+default `continuous` in phase 1 — it is a phase-3 lever (it needs commit to precede local apply
+by a network RTT). PERF-10 also found **A20k does not drain at steady state in any variant**
+(phase-1 lag 750 k–940 k), contradicting round 3's "A20k consume-matched / drained" — which was
+the phase-2 catch-up window, not steady-state matching. The `continuous` prototype's commit is
+**BLOCKED / uncommitted** (see R-135); only the default-off `CYCLE_TRACE` diagnostic is kept.
+
+**The measure (PERF-11), round-4 defaults `POP_FASTPATH_EMPTY=1 PUSH_PRIORITY=1`:**
+
+| regime | metric | pg M1 | round 3 (M10) | round 4 |
+|---|---|---|---|---|
+| A20k | push p50 / p99 / p999 ms | 9.15 / 27.01 / 52.48 | 6.05 / 17.28 / 25.22 | **5.54 / 15.04 / 22.91** |
+| A20k | arrival→proposed p50 ms | — | 4.19 (restamp artifact) | **2.10** (honest) |
+| A20k | pop /s ph1 · drained | — | 6.3 k · yes | **10.5 k · phase-2 only** (steady-state ≈ ½ the 20 k push offer — under-consumed) |
+| C1000 | push p50 / p99 / p999 ms | 6.62 / 33.02 / 54.02 | 211.97 / 790.53 / 831.49 | **156.67 / 733.18 / 831.49** |
+| C1000 | arrival→proposed p50 / p99 ms | — | 8.39* / 1073 | **67.1 / 1073** (honest; * round-3 restamp artifact) |
+| C1000 | push_h_submit p99 ms (channel fill) | — | — | **537** |
+| C1000 | ph1 pushed/popped/lag · drained | — | 220490/220490/0 · yes | **220491/220490/1 · yes** (window property) |
+| FAT100 | msg/s · vs 287 363 pg | 287363 · 100% | 260498 · 90.7% | **271130 · 0.94** (achieved-under-3.3%-shed, sheds 573 700) |
+
+**Ablation (one-knob-off, C1000).** `POP_FASTPATH_EMPTY=0` regresses C1000 p50 156.67 →
+**230.40** (provably-empty wildcard pops re-enter the serial batcher: `pop_wildcard` planned
+105 878 vs 97 186), so the ~26% C1000 p50 gain is the **fastpath** — mechanism-supported but
+**single-run and inside C1000's 142–230 ms spread**, i.e. **directional**, not a firm 26%.
+`PUSH_PRIORITY=0` leaves C1000 p50 **identical** (156.67) and A20k within noise — it **moved no
+measured number**, so it is **held provisional as default-on** (sound mechanism, no ablation
+support yet — R-134). Neither knob touches A20k (all three columns bucket-identical).
+
+**O14 verdict — `proceed=false`, the same two bounds as round 3, now measured honestly:**
+
+| target | round 4 | pg | O14 ratio | verdict |
+|---|---|---|---|---|
+| A20k p50 | 5.54 | 9.15 (M1) | 0.61× | **PASS** O14-strict — but **under-consumed, not like-for-like**; misses the aggressive ≤ 4 ms gate |
+| A20k p99 | 15.04 | 27.01 (M1) | 0.56× | **PASS** (same caveat) |
+| A20k drained | phase-2 −517k | — | — | phase-2 catch-up only; steady-state pop ≈ ½ offer |
+| C1000 p50 | 156.67 | 6.62 (M1) / 15.04 (E6) | 23.7× / **10.4×** | **FAIL** (directional-within-spread) |
+| C1000 p99 | 733.18 | 33.02 (M1) | 22.2× | **FAIL** |
+| C1000 drained | lag 1 | — | — | PASS (window property) |
+| FAT100 tput | 271,130 | 287,363 | 0.94 | **PASS** (> 70%, ≥ 250 k) |
+
+**Round-4 review corrections (folded in above, R-134):** (a) A20k is **not steady-state
+consume-matched** — it consumes ~10.5 k/s against a 20 k push offer, so its push p50 5.54 was
+measured under a **lighter effective load** than the postgres M1 baseline (which kept up, shed
+0); "0.61× / 0.56× of pg, O14-strict PASS" is drawn from an under-consumed run; re-label as
+under-consumed. (b) The C1000 O14 denominator: **report both** the contractual M1 6.62 (23.7×)
+and the same-box same-load control E6 15.04 (**10.4×**) — E6 is the like-for-like number, so the
+raft-vs-postgres *architecture* gap is ~10×, not ~24×. (c) `PUSH_PRIORITY` default-on is **not**
+justified by its own ablation (moved no number); hold provisional. (d) FAT's 271 k is
+**achieved-under-3.3%-shed** vs postgres's sustained 287 k, not "% of the knee". **The gate
+verdict is unchanged** (`proceed=false`) and the **code claims are verified** (`received_at` no
+longer restamped; no per-partition lock and no `std::Mutex` across `.await` on the propose path;
+loader shapes byte-identical, A20k 32 / C1000 64 consumers).
+
+**What still bounds each failing / aggressive-miss target.** A20k p50 = the batcher
+group-commit cycle on a ~1 ms fsync (`arrival→proposed` ~2.1 ms + commit round-trip); C1000
+p50/p99 = the command-queue → single serialized fsync ingress (~735 committed entries/s under
+1000-partition combined push+pop). Both close on the **same** code work item — batched/parallel
+propose+fsync across partitions at the ingress — not a knob, not the store, not deeper pipeline.
+**Provenance caveats:** single VM, co-resident loader (O13); one replicate per cell (C1000 p50
+142–230 ms run-to-run); histograms log2-bucket (± one bucket); the recommended VM re-measures
+(C1000 ×3 replicates; A20k with enough consumers for phase-1 lag ≈ 0) need the perf8 VM lock and
+were **not run** — the corrections above are from in-hand evidence. 0 broker error/panic lines in
+every kept run. Open follow-ups: R-133 (the retraction), R-134 (round-4 review corrections),
+R-135 (PERF-K cycle-shape blocked / phase-3 lever).
 
 ---
 
@@ -1337,7 +1482,7 @@ O14, O18 and O19 below now carry the pipeline=4 numbers (M7).
 | O11 | Migration: offline window or online copy. | — | offline first. |
 | O12 | When to remove the postgres class (D22). | GH#2080 is open and reproduced; D22 is its mitigation. | Keep it deployable **to GA**; decide removal after 3 months of GA. |
 | O13 | Three VMs for the final numbers. | Every number so far is single-VM with a co-resident loader (FAT100: 6.08 of 8 vCPU busy, the loader the largest share). | yes for G4; one extra VM for load generation would also clean up G1. |
-| O14 | Performance targets for G1/G2/G4. | **Measured at pipeline=4, M7→M10.** M7 (round 0): p99 ~6× pg, FAT ≈31%. After the package (M8/M9/M10): **A20k p50 6.05 / p99 17.28 both ≤ pg** (O14-strict PASS), **FAT100 90.7%** of the knee (PASS > 70%), but **C1000 p50 32× / p99 24× pg** — its `arrival→proposed` ≈1073 ms per-partition propose serialization is upstream of the store and unmoved by any of the ten levers, so **O14 still FAILS on C1000**; the A20k p50 ~4 ms batcher hold is the other propose-path bound. AB-0 (M10/PERF-6) settled the consume rate as a non-regression. Failover 3.0–3.4 s. | raft1 p50/p99 ≤ postgres at A20k/A50k/C1000; raft3 p50 ≤ raft1 + 2 ms; **failover ≤ 4 s p99**; push-only fat-batch ≥ 70% of postgres. **A20k and FAT now meet it single-node; C1000 does not — the next lever is per-partition propose parallelism (not the store, not deeper pipeline: PIPELINE=8 regresses), before a re-attempt at raft3 / with a load-gen VM (O13).** |
+| O14 | Performance targets for G1/G2/G4. | **Measured at pipeline=4, M7→M11.** M7 (round 0): p99 ~6× pg, FAT ≈31%. After the package (M8/M9/M10/M11): **A20k p50 5.54 / p99 15.04 both ≤ pg** (O14-strict PASS, but **under-consumed / not like-for-like**, R-134), **FAT100 94.3%** (PASS > 70%, achieved-under-shed), but **C1000 p50 156.67 ms (23.7× the contractual M1, 10.4× the same-load control) / p99 733.18** — its bound is the **single serial push/pop/ack command pipeline at the ingress** (`arrival→proposed` p99 1073 ms; **PERF-9 retracts the round-3 "per-partition propose lock", R-133**), unmoved by any lever and only nudged ~26% by round-4's empty-pop fastpath, so **O14 still FAILS on C1000**; the A20k p50 ~2 ms batcher-cycle hold is the other propose-path bound. AB-0 (M10/PERF-6) settled the consume rate as a non-regression. Failover 3.0–3.4 s. | raft1 p50/p99 ≤ postgres at A20k/A50k/C1000; raft3 p50 ≤ raft1 + 2 ms; **failover ≤ 4 s p99**; push-only fat-batch ≥ 70% of postgres. **A20k and FAT now meet it single-node; C1000 does not — the next lever is batched/parallel propose+fsync at the ingress (R-133 retracts the "per-partition propose lock"; not the store, not deeper pipeline: PIPELINE=8 regresses), before a re-attempt at raft3 / with a load-gen VM (O13).** |
 | O15 | Replicator for embedded mode. | S1 adds: the **engine** for embedded should be redb (no snapshot source in raft1). | LocalReplicator + redb. |
 | O16 | Ack fast path: record the delivered set at claim, or always compute. | S2 risk 5: narrowing what 005 must answer below the cursor would narrow (b)'s gap too. **PERF-I (round 3, M10) refined the "always compute" path** — the delivered hash set is now folded into ONE bounded O(claimed) txns pass (byte-identical, `pop_wildcard` plan p99 1.05 ms, R-132), but it is still recomputed each claim, not recorded. Moving to "record at claim" is R-132's owed **part-2** (facade attaches the delivered range to the pop outcome + ack path — moves the replicated CursorRow/ack wire, re-gated in lockstep). | Record the delivered set in the cursor at claim, bounded by batch size — the R-132 part-2 change, a coordinated decision for Alice. |
 | O17 | Bounded planning time per batch. | Not measured. PLAN §17 records **5 ms**; this file previously proposed 20 ms. | Confirm the number. `QUEEN_RAFT_PLAN_BUDGET_MS`; a single command that alone exceeds the budget must still be planned, or it can never progress. |
@@ -1390,14 +1535,19 @@ were shortened on Alice's instruction (10-minute soak, 6-minute dedup window,
 
 ---
 
-*Last revised 2026-09-19 (**G1 packet — performance rounds 1–3 folded in**): the
-phase-1 performance package ran to round 3 on the VM. Round 3 (M10) added PERF-G
-(batcher/writer schedule, `9e1ebff8`), PERF-H (ring re-arm, `c65c8c2c`) and PERF-I
-(O(claimed) wildcard pop, `f006c3d4`) — correctness/scaling hardening,
-performance-neutral-to-parity, moving neither push-latency bound; AB-0 (PERF-6) settled
-the consume rate as a non-regression (R-130 discharged). O14 still FAILS on C1000
-(propose bound), `proceed=false`; long PERF-8 skipped. Prior revisions: 2026-09-19 the
-pipeline=4 night pass (NIGHT-A/B/C, F-1 fixed `f8bfa672`; O14/I8/O19 FAIL, dropped writes
-99/100 R-123); 2026-09-18 the draft G1 packet (`29bc7cdd`, pipeline=1) and the G0 packet.
-This revision edits `RAFT_STATUS.md` and adds `test/raft/vm/raft1/PERF-6-consume-ab.md`
-and `PERF-7-short.md`.*
+*Last revised 2026-09-20 (**G1 packet — performance rounds 1–4 folded in**): the
+phase-1 performance package ran to **round 4** on the VM (M11). Round 4 (PERF-9/10/11)
+**named the C1000 cause and retracted the round-3 "per-partition propose lock" (R-133)** — it
+is the single serial push/pop/ack command pipeline, mis-measured by a `received_at` restamp
+PERF-J fixed; PERF-J's `POP_FASTPATH_EMPTY`/`PUSH_PRIORITY` (default-on, PP provisional R-134)
+landed at `1a3de800` (C1000 p50 212→157, directional-within-spread; A20k 6.05→5.54,
+under-consumed / not like-for-like; FAT 90.7%→94.3%, achieved-under-shed); PERF-10 priced the
+`continuous` cycle shape as a phase-3 lever (not defaulted) with its commit **BLOCKED** (R-135,
+the three uncommitted `raft.rs`/`local.rs`/`batcher.rs` files are NOT staged by this commit).
+O14 still FAILS on C1000 (the ingress bound), `proceed=false`; long PERF-8 skipped. Prior
+revisions: 2026-09-19 rounds 1–3 (M8/M9/M10, PERF-G `9e1ebff8` / H `c65c8c2c` / I `f006c3d4`;
+AB-0 non-regression R-130); the pipeline=4 night pass (NIGHT-A/B/C, F-1 fixed `f8bfa672`;
+O14/I8/O19 FAIL, dropped writes 99/100 R-123); 2026-09-18 the draft G1 packet (`29bc7cdd`,
+pipeline=1) and the G0 packet. This revision edits `RAFT_STATUS.md` and adds
+`test/raft/vm/raft1/PERF-9-c1000-diagnosis.md`, `PERF-10-a20k-diagnosis.md` and
+`PERF-11-short.md`.*
