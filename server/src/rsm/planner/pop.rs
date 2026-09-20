@@ -36,6 +36,7 @@
 //! * **The delivered set is recorded on the claim** (O16): the distinct hashes
 //!   in the claimed run, so the ack fast path is deterministic.
 
+use crate::rsm::dedup::IndexMode;
 use crate::rsm::dedup::TxnsRow;
 use crate::rsm::effect::{Effect, GroupMeta, Pid, QueueConfig, SubscriptionMode};
 use crate::rsm::entry::{Outcome, PopClaim, PopOutcome};
@@ -910,59 +911,104 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         let mut out: Vec<SegH> = Vec::new();
         let mut avail: i64 = 0;
 
-        // The committed segment covering `wanted` (greatest base ≤ wanted), or
-        // `wanted` itself when none does — the caller's gate makes the former the
-        // common case.
-        let start_base = self
-            .seg_base_covering(part.pid, wanted as u64)?
-            .unwrap_or(wanted as u64);
-        let prefix = keys::txns_prefix(part.pid);
-        let from = keys::txns(part.pid, start_base);
-        let mut bad: Option<StoreError> = None;
         let mut stop = false;
-        self.reads()
-            .scan_raw(Keyspace::Txns, &from, &prefix, usize::MAX, &mut |k, v| {
-                if stop {
-                    return false;
-                }
-                match (keys::txns_base_of(k), TxnsRow::decode(v)) {
-                    (Some(base), Ok(row)) => {
-                        let deferred = !fresh(row.created_at_us);
-                        // frames this segment offers from `wanted` on
-                        let seg_from = (base as i64).max(wanted);
-                        if row.end as i64 >= seg_from {
-                            avail += row.end as i64 - seg_from + 1;
-                        }
-                        out.push(SegH {
-                            base,
-                            end: row.end,
-                            created_at_us: row.created_at_us,
-                            hashes: need_hashes.then(|| row.iter_hashes().collect()),
-                        });
-                        if deferred || avail >= budget {
-                            stop = true;
-                            return false;
-                        }
-                        true
+        if self.cfg.index_mode == IndexMode::Segment {
+            // O(claimed) forward walk of the segment index from `wanted`: it
+            // reads — and, for a delivered set (`need_hashes`), `pread`s — ONLY
+            // the ≤ budget frames the claim consumes, never the whole cursor→tail
+            // span. This is the PERF-I-equivalent for segment-authority dedup:
+            // the delivered-set cost is independent of how far the cursor lags.
+            // (`wanted >= log_start` is the caller's gate, so the range is
+            // contiguous; `claim_frames` stops at a deferred frame or budget.)
+            if let Some((reader, ctx)) = self.seg_read(part.pid)? {
+                reader
+                    .claim_frames(
+                        ctx.bucket,
+                        part.pid,
+                        wanted as u64,
+                        ctx.committed_end,
+                        &ctx.sealed,
+                        need_hashes,
+                        &mut |base, end_incl, created, hashes| {
+                            let deferred = !fresh(created);
+                            let seg_from = (base as i64).max(wanted);
+                            if end_incl as i64 >= seg_from {
+                                avail += end_incl as i64 - seg_from + 1;
+                            }
+                            out.push(SegH {
+                                base,
+                                end: end_incl,
+                                created_at_us: created,
+                                hashes: hashes.map(|h| {
+                                    h.chunks_exact(16)
+                                        .map(|c| <[u8; 16]>::try_from(c).unwrap())
+                                        .collect()
+                                }),
+                            });
+                            if deferred || avail >= budget {
+                                stop = true;
+                                return false;
+                            }
+                            true
+                        },
+                    )
+                    .map_err(|e| {
+                        Refusal::retry("unavailable", format!("segment claim walk: {e}"))
+                    })?;
+            }
+        } else {
+            // The committed segment covering `wanted` (greatest base ≤ wanted),
+            // or `wanted` when none does — the txns scan starts there.
+            let start_base = self
+                .seg_base_covering(part.pid, wanted as u64)?
+                .unwrap_or(wanted as u64);
+            let prefix = keys::txns_prefix(part.pid);
+            let from = keys::txns(part.pid, start_base);
+            let mut bad: Option<StoreError> = None;
+            self.reads()
+                .scan_raw(Keyspace::Txns, &from, &prefix, usize::MAX, &mut |k, v| {
+                    if stop {
+                        return false;
                     }
-                    _ => {
-                        bad = Some(StoreError::corrupt(Keyspace::Txns, "txns row"));
-                        false
+                    match (keys::txns_base_of(k), TxnsRow::decode(v)) {
+                        (Some(base), Ok(row)) => {
+                            let deferred = !fresh(row.created_at_us);
+                            // frames this segment offers from `wanted` on
+                            let seg_from = (base as i64).max(wanted);
+                            if row.end as i64 >= seg_from {
+                                avail += row.end as i64 - seg_from + 1;
+                            }
+                            out.push(SegH {
+                                base,
+                                end: row.end,
+                                created_at_us: row.created_at_us,
+                                hashes: need_hashes.then(|| row.iter_hashes().collect()),
+                            });
+                            if deferred || avail >= budget {
+                                stop = true;
+                                return false;
+                            }
+                            true
+                        }
+                        _ => {
+                            bad = Some(StoreError::corrupt(Keyspace::Txns, "txns row"));
+                            false
+                        }
                     }
-                }
-            })
-            .map_err(store_err)?;
-        if let Some(e) = bad {
-            return Err(store_err(e));
+                })
+                .map_err(store_err)?;
+            if let Some(e) = bad {
+                return Err(store_err(e));
+            }
         }
 
-        // Overlay appends are the tail (base > every committed offset): fold the
-        // ones at or after `start_base`, exactly as `segs_from` does, honouring
-        // the same stop rule. One cycle's appends, so a bounded set.
+        // Overlay appends are the tail (base > every committed offset, so always
+        // >= `wanted`): fold the ones the claim can reach, honouring the same
+        // stop rule. One cycle's appends, so a bounded set.
         if !stop {
             if let Some(o) = ov.parts.get(&part.pid) {
                 for a in &o.appends {
-                    if a.base < start_base {
+                    if (a.base as i64) < wanted {
                         continue;
                     }
                     let deferred = !fresh(a.created_at_us);

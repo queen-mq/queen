@@ -196,7 +196,11 @@ impl RaftFacade {
         );
         let reader = repl.reader();
 
-        let batcher = Batcher::new(store.clone(), repl.clone(), BatcherConfig::from_env());
+        // PERF-E `DEDUP_INDEX=segment`: the planner serves the committed dedup
+        // authority from the segments, so hand the batcher a cloned segment
+        // reader (the default modes never read it).
+        let batcher = Batcher::new(store.clone(), repl.clone(), BatcherConfig::from_env())
+            .with_reader(reader.clone());
         let (cmd_tx, batcher_join) = batcher.spawn();
 
         tracing::info!(

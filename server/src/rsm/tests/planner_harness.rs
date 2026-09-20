@@ -426,7 +426,8 @@ impl Cell {
                 let committed = Committed::new(r, &d);
                 let mut ov = Overlay::new(r.next_pid()?, r.kv_version_next()?);
                 ov.mark_cycle_start();
-                let mut planner = Planner::new(committed, now, PlanConfig::default(), &self.front);
+                let mut planner =
+                    Planner::new(committed, now, PlanConfig::default(), &self.front, None);
                 if let Some(v) = self.claim_from_ring {
                     planner.set_claim_from_ring(v);
                 }

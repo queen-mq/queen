@@ -887,6 +887,15 @@ impl<'s, S: Store> Applier<'s, S> {
         // Boot-only and node-local (I2); the pool's threads live and die with
         // the segment writer, which the apply thread owns.
         segments.configure_writes(cfg.seg_buffered, cfg.apply_writers);
+        // STORAGE_V2 Lever 2: when this node serves the committed dedup authority
+        // from the segments (`DEDUP_INDEX=segment`), keep each active frame's
+        // hash list in the active index's RAM so the planner's committed dedup
+        // scan reads it without a disk hit. The mode is pinned by the boot seam
+        // (`real_builder`) before this open, so `record_index_mode()` is
+        // authoritative here; the default modes leave it off (no RAM cost).
+        if dedup::record_index_mode() == dedup::IndexMode::Segment {
+            segments.retain_active_hashes(true);
+        }
         let derived = store.read(|r| Derived::rebuild(r, last_now_us))?;
         let rings = derived.rings_len();
         let leases = derived.lease_count();
@@ -1981,6 +1990,16 @@ impl<'s, S: Store> Applier<'s, S> {
     /// deleting them early would answer "new" for a transaction id the
     /// postgres oracle still calls a duplicate.
     fn expire_hashes(&mut self, pid: Pid, from: u64, to: u64) -> Result<()> {
+        // STORAGE_V2 Lever 2 (`DEDUP_INDEX=segment`): there are NO `Txns` (or
+        // `Dedup`) rows to expire — `record` wrote none. The dedup window is
+        // enforced entirely by the segment scan's `created >= floor` filter and
+        // by segment-file GC (a frame's hashes stay readable until its file is
+        // unlinked, which happens at `txns_start` via the `Release::Window`
+        // path, i.e. exactly the dedup window). So this is a no-op: no store
+        // write on the retention path.
+        if dedup::record_index_mode() == dedup::IndexMode::Segment {
+            return Ok(());
+        }
         if to <= from {
             return Ok(());
         }

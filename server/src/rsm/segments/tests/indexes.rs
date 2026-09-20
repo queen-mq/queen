@@ -181,9 +181,9 @@ fn the_active_index_answers_the_file_and_the_record_together() {
     let mut a = ActiveIndexes::new(4);
     assert_eq!(a.probe(0, 1, 0), None, "no active file yet");
     a.open(0, 12);
-    a.insert(0, rec(1, 0, 5, 0));
-    a.insert(0, rec(1, 5, 5, 300));
-    a.insert(0, rec(2, 0, 5, 600));
+    a.insert(0, rec(1, 0, 5, 0), &[]);
+    a.insert(0, rec(1, 5, 5, 300), &[]);
+    a.insert(0, rec(2, 0, 5, 600), &[]);
     assert_eq!(a.len(), 3);
     assert_eq!(a.bucket_len(0), 3);
     assert_eq!(a.bucket_len(1), 0);

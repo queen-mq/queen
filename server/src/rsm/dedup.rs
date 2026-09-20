@@ -89,14 +89,23 @@ pub enum IndexMode {
     Txns,
     /// Today's per-message `(pid, hash)` index (kept for ablation).
     Rows,
+    /// PERF-E / STORAGE_V2 Lever 2: NO store keyspace is the authority. Apply
+    /// writes neither `Dedup` nor `Txns` rows; the committed dedup facts are
+    /// served from the SEGMENT files (frame hashes + the `.qidx`/RAM active
+    /// index), bounded to the committed partition `last_offset`. The single
+    /// scattered per-append `Txns` write — STORAGE_V2's biggest per-append
+    /// value — is gone. Read side lives in the planner + `segments::Reader`.
+    Segment,
 }
 
 impl IndexMode {
-    /// `QUEEN_RAFT_DEDUP_INDEX` (default `txns`). Anything but a case-insensitive
-    /// `rows` is `txns`, so a typo fails safe to the product default.
+    /// `QUEEN_RAFT_DEDUP_INDEX` (default `txns`). A case-insensitive `rows` or
+    /// `segment` selects those; anything else is `txns`, so a typo fails safe
+    /// to the product default.
     pub fn from_env() -> IndexMode {
         match std::env::var("QUEEN_RAFT_DEDUP_INDEX") {
             Ok(v) if v.trim().eq_ignore_ascii_case("rows") => IndexMode::Rows,
+            Ok(v) if v.trim().eq_ignore_ascii_case("segment") => IndexMode::Segment,
             _ => IndexMode::Txns,
         }
     }
@@ -105,6 +114,7 @@ impl IndexMode {
         match self {
             IndexMode::Rows => 1,
             IndexMode::Txns => 2,
+            IndexMode::Segment => 3,
         }
     }
 }
@@ -126,6 +136,7 @@ pub fn set_record_index_mode(mode: IndexMode) {
 pub fn record_index_mode() -> IndexMode {
     match RECORD_INDEX_MODE.load(Ordering::Relaxed) {
         2 => IndexMode::Txns,
+        3 => IndexMode::Segment,
         _ => IndexMode::Rows,
     }
 }
@@ -305,6 +316,13 @@ pub fn record<W: Writes + ?Sized>(
     match record_index_mode() {
         IndexMode::Txns => record_txns(writes, pid, base, end, accepted, created_at_us),
         IndexMode::Rows => record_rows(writes, pid, base, end, accepted, created_at_us),
+        // STORAGE_V2 Lever 2: the segment append (apply.rs, just before this
+        // call) already persisted pid/base/count/created/hashes/blob into the
+        // frame, which IS the committed dedup authority in this mode. So apply
+        // writes ZERO store rows here — no `Txns` row (the biggest scattered
+        // per-append value), no `Dedup` row. The planner serves every dedup
+        // read from the segments, bounded to the committed tail.
+        IndexMode::Segment => Ok(()),
     }
 }
 
@@ -522,6 +540,78 @@ pub fn resolve_txns<R: Reads + ?Sized>(
         return Err(StoreError::corrupt(Keyspace::Txns, e));
     }
     Ok(res)
+}
+
+// ---------------------------------------------------------------------------
+// Probe / resolve over the SEGMENT authority (PERF-E, DEDUP_INDEX=segment)
+// ---------------------------------------------------------------------------
+//
+// Under `segment` the planner reconstructs a partition's committed `txns` rows
+// from the SEGMENT files — bounded to the committed `last_offset`, see
+// `segments::Reader::committed_dedup_rows` — into a base-sorted
+// `[(base, TxnsRow)]` slice, then answers every dedup question from it. The
+// per-hash logic is IDENTICAL to the `txns`-keyspace scans above
+// (`scan_txns_range_for_hash` / `resolve_txns`); only the source differs (a RAM
+// slice vs an ordered store scan), so the verdicts are exact — the differential
+// fuzzer proves 0 divergences. `TxnsRow::end` here is INCLUSIVE (the last
+// offset), exactly as a stored `txns` row carries it (the planner converts the
+// segment frame's exclusive end when it builds the slice).
+
+/// The push dedup verdict for one hash over the committed segment rows: the MIN
+/// in-window (`created >= floor_us`) offset it occurs at, or `None`. `rows` is
+/// ascending by base offset (as `committed_dedup_rows` returns), so the first
+/// in-window match is the global minimum and the scan stops there — the exact
+/// behaviour of [`scan_txns_for_hash_whole`].
+pub fn scan_seg_rows_for_hash(
+    rows: &[(u64, TxnsRow)],
+    hash: &[u8; 16],
+    floor_us: i64,
+) -> Option<u64> {
+    for (base, row) in rows {
+        if row.created_at_us < floor_us {
+            continue; // whole append out of window; keep walking
+        }
+        for (i, h) in row.iter_hashes().enumerate() {
+            if &h == hash {
+                return Some(base + i as u64); // ascending: first hit is the minimum
+            }
+        }
+    }
+    None
+}
+
+/// Resolve one hash for `log_ack_by_hash_v1` (005) over the committed segment
+/// rows: the same two legs as [`resolve_txns`] — `eff` = MIN over `[lo, hi]`,
+/// `below` = any occurrence at or below `committed` — reading occurrences at or
+/// above `txns_start` (the scan floor). Sourced from the segment rows instead of
+/// the `txns` keyspace.
+pub fn resolve_seg_rows(
+    rows: &[(u64, TxnsRow)],
+    hash: &[u8; 16],
+    lo: u64,
+    hi: u64,
+    committed: i64,
+    txns_start: u64,
+) -> AckRes {
+    let mut res = AckRes::default();
+    for (base, row) in rows {
+        if *base < txns_start {
+            continue; // below the txns window floor (the txns scan starts there)
+        }
+        for (i, h) in row.iter_hashes().enumerate() {
+            if &h != hash {
+                continue;
+            }
+            let off = base + i as u64;
+            if (off as i64) <= committed {
+                res.below = true;
+            }
+            if off >= lo && off <= hi {
+                res.eff = Some(res.eff.map_or(off, |b: u64| b.min(off)));
+            }
+        }
+    }
+    res
 }
 
 // ---------------------------------------------------------------------------

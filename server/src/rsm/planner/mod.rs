@@ -71,16 +71,19 @@
 // carry. Determinism is apply's; the planner's job is to hand apply effects
 // that make it deterministic.
 
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
+use std::rc::Rc;
 
 use crate::rsm::dedup::{
     self, AckRes, DedupFront, IndexMode, ProbeVerdict, Seed, SeedHash, TxnsRow,
 };
 use crate::rsm::effect::{CursorRow, Effect, GroupMeta, Pid, QueueConfig, SubscriptionMode};
 use crate::rsm::entry::{Entry, Outcome, RequestId};
+use crate::rsm::segments::Reader;
 use crate::rsm::state::Committed;
 use crate::rsm::store::rows::GroupRow;
-use crate::rsm::store::{keys, Keyspace, Reads, StoreError};
+use crate::rsm::store::{keys, Keyspace, Reads, StoreError, TypedReads};
 
 pub mod ack;
 pub mod pop;
@@ -750,6 +753,28 @@ pub struct Planner<'a, R: Reads + ?Sized> {
     /// It changes only which store reads the planner makes; the effects and the
     /// outcome are identical either way (the property test proves it).
     claim_from_ring: bool,
+    /// PERF-E `DEDUP_INDEX=segment`: the segment read side, shared with the pop
+    /// payload path. `Some` in production (the facade hands the batcher a
+    /// cloned `Reader`); `None` for a planner built without segments — legal
+    /// only in the `txns`/`rows` modes, which never touch it.
+    reader: Option<Reader>,
+    /// PERF-E: the per-pid committed dedup rows reconstructed from the segments
+    /// (bounded to the committed `last_offset`), materialized once per pid per
+    /// cycle and shared across every committed `Txns`-authority read of that pid
+    /// this cycle. `TxnsRow::end` is INCLUSIVE, like a stored `txns` row. Empty
+    /// / unused outside `segment` mode. The planner runs on one blocking thread
+    /// per cycle, so the `RefCell` is never contended.
+    seg_cache: RefCell<HashMap<Pid, Rc<CommittedTxnsRows>>>,
+    /// PERF-E: the committed segment SHAPE (`(base, end, created)`, NO hashes)
+    /// for the pop walk and the segment-covering probe, which never read the
+    /// hashes. Built without the per-frame `.seg` reads the hash cache pays, so
+    /// a pop does not `pread` the whole committed window. Same per-cycle scope
+    /// as `seg_cache`.
+    seg_shape_cache: RefCell<HashMap<Pid, Rc<Vec<Seg>>>>,
+    /// PERF-E: the per-pid committed segment context (bucket, committed bound,
+    /// sealed-file list), cached so both the shape read and the bounded pop hash
+    /// read reuse one `partition_files` scan. `None` = no committed frames.
+    seg_ctx_cache: RefCell<HashMap<Pid, Option<Rc<SegCtx>>>>,
 }
 
 /// The process-wide `QUEEN_RAFT_CLAIM_FROM_RING` default (PERF-I), read once.
@@ -784,6 +809,23 @@ struct PartView {
     created_at_us: i64,
 }
 
+/// A partition's committed dedup rows reconstructed from the segment files
+/// (PERF-E `DEDUP_INDEX=segment`), base-sorted, with `TxnsRow::end` INCLUSIVE
+/// (the stored-`txns`-row shape every reader expects).
+type CommittedTxnsRows = Vec<(u64, TxnsRow)>;
+
+/// The committed segment context of a partition (PERF-E): its logical bucket,
+/// the committed offset bound (`committed last_offset + 1`, from the RoTxn), and
+/// its committed sealed-file list (`partition_files`). Cached per pid per cycle
+/// so a pop that reads shape then a bounded hash range scans `partition_files`
+/// once, not twice. `None` when the partition is unknown or has no committed
+/// frames.
+struct SegCtx {
+    bucket: u16,
+    committed_end: u64,
+    sealed: Vec<u32>,
+}
+
 impl PartView {
     /// The first offset a pop can still be served (`log_start - 1`, the "last
     /// acked" form the cursor arithmetic uses).
@@ -806,6 +848,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         now_us: i64,
         cfg: PlanConfig,
         front: &'a DedupFront,
+        reader: Option<Reader>,
     ) -> Planner<'a, R> {
         Planner {
             committed,
@@ -813,6 +856,10 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             cfg,
             front,
             claim_from_ring: claim_from_ring_default(),
+            reader,
+            seg_cache: RefCell::new(HashMap::new()),
+            seg_shape_cache: RefCell::new(HashMap::new()),
+            seg_ctx_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -1001,33 +1048,48 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         from_base: u64,
     ) -> Result<Vec<Seg>, Refusal> {
         let mut segs: Vec<Seg> = Vec::new();
-        let prefix = keys::txns_prefix(part.pid);
-        let from = keys::txns(part.pid, from_base);
-        let mut bad: Option<StoreError> = None;
-        self.reads()
-            .scan_raw(
-                Keyspace::Txns,
-                &from,
-                &prefix,
-                usize::MAX,
-                &mut |k, v| match (keys::txns_base_of(k), TxnsRow::decode(v)) {
-                    (Some(base), Ok(row)) => {
-                        segs.push(Seg {
-                            base,
-                            end: row.end,
-                            created_at_us: row.created_at_us,
-                        });
-                        true
-                    }
-                    _ => {
-                        bad = Some(StoreError::corrupt(Keyspace::Txns, "txns row"));
-                        false
-                    }
-                },
-            )
-            .map_err(store_err)?;
-        if let Some(e) = bad {
-            return Err(store_err(e));
+        // The committed segments: `segment` mode reconstructs them from the
+        // committed segment rows (RAM-cached per pid this cycle); `txns`/`rows`
+        // scan the `txns` keyspace. Both yield the same `(base, end, created)`
+        // shape for `base >= from_base`, `end` inclusive.
+        if self.cfg.index_mode == IndexMode::Segment {
+            // Shape only — the pop walk never reads the hashes, so no per-frame
+            // `.seg` read.
+            let shape = self.committed_seg_shape(part.pid)?;
+            for s in shape.iter() {
+                if s.base >= from_base {
+                    segs.push(*s);
+                }
+            }
+        } else {
+            let prefix = keys::txns_prefix(part.pid);
+            let from = keys::txns(part.pid, from_base);
+            let mut bad: Option<StoreError> = None;
+            self.reads()
+                .scan_raw(
+                    Keyspace::Txns,
+                    &from,
+                    &prefix,
+                    usize::MAX,
+                    &mut |k, v| match (keys::txns_base_of(k), TxnsRow::decode(v)) {
+                        (Some(base), Ok(row)) => {
+                            segs.push(Seg {
+                                base,
+                                end: row.end,
+                                created_at_us: row.created_at_us,
+                            });
+                            true
+                        }
+                        _ => {
+                            bad = Some(StoreError::corrupt(Keyspace::Txns, "txns row"));
+                            false
+                        }
+                    },
+                )
+                .map_err(store_err)?;
+            if let Some(e) = bad {
+                return Err(store_err(e));
+            }
         }
         if let Some(o) = ov.parts.get(&part.pid) {
             for a in &o.appends {
@@ -1065,41 +1127,75 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 out.push(h);
             }
         };
-        // committed txns rows overlapping [lo, hi]
-        let prefix = keys::txns_prefix(pid);
-        // start at the row that may cover `lo`: the greatest base <= lo.
-        let start_base = self.seg_base_covering(pid, lo)?.unwrap_or(lo);
-        let from = keys::txns(pid, start_base);
-        let mut bad: Option<StoreError> = None;
-        let mut stop = false;
-        self.reads()
-            .scan_raw(Keyspace::Txns, &from, &prefix, usize::MAX, &mut |k, v| {
-                if stop {
-                    return false;
-                }
-                match (keys::txns_base_of(k), TxnsRow::decode(v)) {
-                    (Some(base), Ok(row)) => {
-                        if base > hi {
-                            stop = true;
-                            return false;
-                        }
-                        for (i, h) in row.iter_hashes().enumerate() {
-                            let off = base + i as u64;
-                            if off >= lo && off <= hi {
-                                push(h);
+        // committed rows overlapping [lo, hi]. `segment` mode reads the cached
+        // committed segment rows; `txns`/`rows` scan the `txns` keyspace from the
+        // row that may cover `lo` (the greatest base <= lo).
+        if self.cfg.index_mode == IndexMode::Segment {
+            // O(claimed) walk from the segment covering `lo`, STOPPING at `hi`:
+            // only the `[lo, hi]` frames are read (and their hashes `pread`),
+            // never the whole history.
+            if let Some((reader, ctx)) = self.seg_read(pid)? {
+                reader
+                    .claim_frames(
+                        ctx.bucket,
+                        pid,
+                        lo,
+                        ctx.committed_end,
+                        &ctx.sealed,
+                        true,
+                        &mut |base, _end_incl, _created, hashes| {
+                            if base > hi {
+                                return false; // past the range: nothing more overlaps
                             }
+                            let hs = hashes.unwrap_or_default();
+                            for (i, chunk) in hs.chunks_exact(16).enumerate() {
+                                let off = base + i as u64;
+                                if off >= lo && off <= hi {
+                                    push(<[u8; 16]>::try_from(chunk).unwrap());
+                                }
+                            }
+                            true
+                        },
+                    )
+                    .map_err(|e| {
+                        Refusal::retry("unavailable", format!("segment claim walk: {e}"))
+                    })?;
+            }
+        } else {
+            let prefix = keys::txns_prefix(pid);
+            let start_base = self.seg_base_covering(pid, lo)?.unwrap_or(lo);
+            let from = keys::txns(pid, start_base);
+            let mut bad: Option<StoreError> = None;
+            let mut stop = false;
+            self.reads()
+                .scan_raw(Keyspace::Txns, &from, &prefix, usize::MAX, &mut |k, v| {
+                    if stop {
+                        return false;
+                    }
+                    match (keys::txns_base_of(k), TxnsRow::decode(v)) {
+                        (Some(base), Ok(row)) => {
+                            if base > hi {
+                                stop = true;
+                                return false;
+                            }
+                            for (i, h) in row.iter_hashes().enumerate() {
+                                let off = base + i as u64;
+                                if off >= lo && off <= hi {
+                                    push(h);
+                                }
+                            }
+                            true
                         }
-                        true
+                        _ => {
+                            bad = Some(StoreError::corrupt(Keyspace::Txns, "txns row"));
+                            false
+                        }
                     }
-                    _ => {
-                        bad = Some(StoreError::corrupt(Keyspace::Txns, "txns row"));
-                        false
-                    }
-                }
-            })
-            .map_err(store_err)?;
-        if let Some(e) = bad {
-            return Err(store_err(e));
+                })
+                .map_err(store_err)?;
+            if let Some(e) = bad {
+                return Err(store_err(e));
+            }
         }
         if let Some(o) = ov.parts.get(&pid) {
             for a in &o.appends {
@@ -1118,6 +1214,17 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     /// or `None` when no committed segment does. Overlay appends are the tail;
     /// the caller adds them.
     fn seg_base_covering(&self, pid: Pid, off: u64) -> Result<Option<u64>, Refusal> {
+        // `segment` mode: the greatest committed base <= off from the cache
+        // (base-sorted); `txns`/`rows`: a one-step reverse scan of the keyspace.
+        if self.cfg.index_mode == IndexMode::Segment {
+            let shape = self.committed_seg_shape(pid)?;
+            let found = shape
+                .iter()
+                .map(|s| s.base)
+                .take_while(|base| *base <= off)
+                .last();
+            return Ok(found);
+        }
         let prefix = keys::txns_prefix(pid);
         let from = keys::txns(pid, off);
         let mut found: Option<u64> = None;
@@ -1135,6 +1242,152 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             return Err(store_err(e));
         }
         Ok(found)
+    }
+
+    // ---- the committed dedup authority from the SEGMENTS (PERF-E) ----------
+
+    /// The committed dedup rows of `pid` reconstructed from the segment files
+    /// (`DEDUP_INDEX=segment`), materialized ONCE per pid per cycle and shared
+    /// across every committed `Txns`-authority read of that pid this cycle
+    /// (`segs_from`, `hashes_in_range`, `seg_base_covering`, the dedup probe /
+    /// resolve, the front seed, the bounded pop gather). Base-sorted, with
+    /// `TxnsRow::end` INCLUSIVE (like a stored `txns` row); bounded to the
+    /// committed tail by [`segments::Reader::committed_dedup_rows`].
+    ///
+    /// THE committed bound is read HERE, from the COMMITTED partition row via
+    /// the RoTxn (never the overlay-merged `PartView`, whose `last_offset`
+    /// includes in-flight appends): `committed_end = committed last_offset + 1`.
+    /// The overlay carries `(committed, in_flight]`, so the committed leg must
+    /// stop at the committed tail — this is the exactly-once invariant.
+    fn committed_txns_rows(&self, pid: Pid) -> Result<Rc<CommittedTxnsRows>, Refusal> {
+        if let Some(hit) = self.seg_cache.borrow().get(&pid) {
+            return Ok(hit.clone());
+        }
+        let rows = self.build_committed_txns_rows(pid)?;
+        let rc = Rc::new(rows);
+        self.seg_cache.borrow_mut().insert(pid, rc.clone());
+        Ok(rc)
+    }
+
+    /// The WHOLE committed window (from_base 0): the dedup probe/resolve/seed
+    /// authority, cached per pid per cycle. It is bloom-gated (a probe reads it
+    /// only on a "maybe"), so its O(window) hash reads are acceptable there. The
+    /// POP delivered set does NOT use this — it walks the segment index O(claimed)
+    /// via [`segments::Reader::claim_frames`], never the whole window.
+    fn build_committed_txns_rows(&self, pid: Pid) -> Result<CommittedTxnsRows, Refusal> {
+        let Some(reader) = self.reader.as_ref() else {
+            return Err(Refusal::retry(
+                "unavailable",
+                "DEDUP_INDEX=segment planner has no segment reader",
+            ));
+        };
+        let Some(ctx) = self.seg_ctx(pid)? else {
+            return Ok(Vec::new());
+        };
+        let frames = reader
+            .committed_dedup_rows(ctx.bucket, pid, 0, ctx.committed_end, &ctx.sealed)
+            .map_err(|e| Refusal::retry("unavailable", format!("segment dedup read: {e}")))?;
+        Ok(frames
+            .into_iter()
+            .map(|f| {
+                (
+                    f.base_offset,
+                    TxnsRow {
+                        end: f.end - 1,
+                        created_at_us: f.created_at_us,
+                        hashes: f.hashes,
+                    },
+                )
+            })
+            .collect())
+    }
+
+    /// The committed segment SHAPE of `pid` (`(base, end, created)`, NO hashes),
+    /// cached per pid per cycle. Built over the WHOLE window without any per-frame
+    /// `.seg` read (the pop walk and the segment-covering probe never touch the
+    /// hashes), so it is cheap even at from_base 0. Same committed-bounding as the
+    /// rows cache.
+    fn committed_seg_shape(&self, pid: Pid) -> Result<Rc<Vec<Seg>>, Refusal> {
+        if let Some(hit) = self.seg_shape_cache.borrow().get(&pid) {
+            return Ok(hit.clone());
+        }
+        let segs = self.build_committed_seg_shape(pid)?;
+        let rc = Rc::new(segs);
+        self.seg_shape_cache.borrow_mut().insert(pid, rc.clone());
+        Ok(rc)
+    }
+
+    fn build_committed_seg_shape(&self, pid: Pid) -> Result<Vec<Seg>, Refusal> {
+        let Some(reader) = self.reader.as_ref() else {
+            return Err(Refusal::retry(
+                "unavailable",
+                "DEDUP_INDEX=segment planner has no segment reader",
+            ));
+        };
+        let Some(ctx) = self.seg_ctx(pid)? else {
+            return Ok(Vec::new());
+        };
+        let frames = reader
+            .committed_dedup_shape(ctx.bucket, pid, 0, ctx.committed_end, &ctx.sealed)
+            .map_err(|e| Refusal::retry("unavailable", format!("segment shape read: {e}")))?;
+        Ok(frames
+            .into_iter()
+            .map(|f| Seg {
+                base: f.base_offset,
+                end: f.end - 1, // exclusive -> inclusive, the `Seg`/`txns` shape
+                created_at_us: f.created_at_us,
+            })
+            .collect())
+    }
+
+    /// The committed segment context for `pid` (bucket, committed offset bound,
+    /// sealed-file list), cached per pid per cycle. The committed bound is
+    /// derived HERE, ONCE, from the COMMITTED partition row via the RoTxn — NEVER
+    /// the overlay, which would include in-flight appends. `None` when the
+    /// partition is unknown or has no committed frames.
+    fn seg_ctx(&self, pid: Pid) -> Result<Option<Rc<SegCtx>>, Refusal> {
+        if let Some(hit) = self.seg_ctx_cache.borrow().get(&pid) {
+            return Ok(hit.clone());
+        }
+        let ctx = self.build_seg_ctx(pid)?;
+        self.seg_ctx_cache.borrow_mut().insert(pid, ctx.clone());
+        Ok(ctx)
+    }
+
+    fn build_seg_ctx(&self, pid: Pid) -> Result<Option<Rc<SegCtx>>, Refusal> {
+        let Some(cpart) = self.committed.partition(pid).map_err(store_err)? else {
+            return Ok(None);
+        };
+        let committed_end = (cpart.last_offset + 1).max(0) as u64;
+        if committed_end == 0 {
+            return Ok(None);
+        }
+        let bucket = bucket_of(&cpart.tenant, &cpart.queue, &cpart.partition);
+        let mut sealed: Vec<u32> = Vec::new();
+        self.reads()
+            .scan_partition_files(pid, usize::MAX, &mut |f| {
+                sealed.push(f);
+                true
+            })
+            .map_err(store_err)?;
+        Ok(Some(Rc::new(SegCtx {
+            bucket,
+            committed_end,
+            sealed,
+        })))
+    }
+
+    /// The segment `Reader` and cached context for an O(claimed) pop walk
+    /// ([`segments::Reader::claim_frames`]). `None` when the partition has no
+    /// committed frames.
+    fn seg_read(&self, pid: Pid) -> Result<Option<(&Reader, Rc<SegCtx>)>, Refusal> {
+        let Some(reader) = self.reader.as_ref() else {
+            return Err(Refusal::retry(
+                "unavailable",
+                "DEDUP_INDEX=segment planner has no segment reader",
+            ));
+        };
+        Ok(self.seg_ctx(pid)?.map(|ctx| (reader, ctx)))
     }
 
     // ---- dedup (committed txns + overlay) ---------------------------------
@@ -1166,6 +1419,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 }
             }
             IndexMode::Txns => self.dedup_probe_txns(pid, hash, window_floor_us)?,
+            IndexMode::Segment => self.dedup_probe_segment(pid, hash, window_floor_us)?,
         };
         if let Some(occ) = ov.dedup.get(&(pid, *hash)) {
             for (off, created) in occ {
@@ -1204,6 +1458,31 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         }
     }
 
+    /// The committed leg of a push probe under `DEDUP_INDEX=segment`: the front
+    /// still decides Skip vs scan (its seed and inserts are mode-agnostic — the
+    /// same in-window hashes either way), and a scan reads the committed segment
+    /// rows (RAM-cached per pid this cycle), returning the exact MIN in-window
+    /// offset. A "maybe" band is a sound over-approximation, so scanning the
+    /// whole committed cache for the exact minimum matches the `txns` verdict.
+    fn dedup_probe_segment(
+        &self,
+        pid: Pid,
+        hash: &[u8; 16],
+        window_floor_us: i64,
+    ) -> Result<Option<u64>, Refusal> {
+        let mut ranges: Vec<(u64, u64)> = Vec::new();
+        match self
+            .front
+            .probe_plan(pid, hash, window_floor_us, &mut ranges)
+        {
+            ProbeVerdict::Skip => Ok(None),
+            ProbeVerdict::Ranges | ProbeVerdict::Whole => {
+                let rows = self.committed_txns_rows(pid)?;
+                Ok(dedup::scan_seg_rows_for_hash(&rows, hash, window_floor_us))
+            }
+        }
+    }
+
     /// Ensure the dedup front can answer for `pid` before the per-hash probe
     /// loop. A partition it has not seen is seeded from the committed `txns`
     /// window UNION the overlay's in-flight appends (both filtered to the dedup
@@ -1225,45 +1504,68 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     /// partition whose recent appends are still in flight (not yet in `txns`).
     fn front_collect_seed(&self, ov: &Overlay, pid: Pid, floor_us: i64) -> Result<Seed, Refusal> {
         let mut buf: Vec<SeedHash> = Vec::new();
-        let prefix = keys::txns_prefix(pid);
-        let mut bad: Option<StoreError> = None;
-        let mut overflow = false;
-        self.reads()
-            .scan_raw(
-                Keyspace::Txns,
-                &prefix,
-                &prefix,
-                usize::MAX,
-                &mut |k, v| match (keys::txns_base_of(k), TxnsRow::decode(v)) {
-                    (Some(base), Ok(row)) => {
-                        if row.created_at_us >= floor_us {
-                            for (i, h) in row.iter_hashes().enumerate() {
-                                buf.push(SeedHash {
-                                    hash: h,
-                                    created_us: row.created_at_us,
-                                    base_off: base,
-                                    msg_off: base + i as u64,
-                                });
+        // The committed leg. Under `segment` the in-window hashes come from the
+        // committed segment rows (bounded to the committed tail) instead of the
+        // `txns` keyspace; the SEED and the front are otherwise identical, so a
+        // partition seeded either way answers the same skip verdicts.
+        if self.cfg.index_mode == IndexMode::Segment {
+            let rows = self.committed_txns_rows(pid)?;
+            for (base, row) in rows.iter() {
+                if row.created_at_us >= floor_us {
+                    for (i, h) in row.iter_hashes().enumerate() {
+                        buf.push(SeedHash {
+                            hash: h,
+                            created_us: row.created_at_us,
+                            base_off: *base,
+                            msg_off: base + i as u64,
+                        });
+                    }
+                    if buf.len() > dedup::FRONT_SEED_MAX {
+                        return Ok(Seed::Overflow);
+                    }
+                }
+            }
+        } else {
+            let prefix = keys::txns_prefix(pid);
+            let mut bad: Option<StoreError> = None;
+            let mut overflow = false;
+            self.reads()
+                .scan_raw(
+                    Keyspace::Txns,
+                    &prefix,
+                    &prefix,
+                    usize::MAX,
+                    &mut |k, v| match (keys::txns_base_of(k), TxnsRow::decode(v)) {
+                        (Some(base), Ok(row)) => {
+                            if row.created_at_us >= floor_us {
+                                for (i, h) in row.iter_hashes().enumerate() {
+                                    buf.push(SeedHash {
+                                        hash: h,
+                                        created_us: row.created_at_us,
+                                        base_off: base,
+                                        msg_off: base + i as u64,
+                                    });
+                                }
+                                if buf.len() > dedup::FRONT_SEED_MAX {
+                                    overflow = true;
+                                    return false;
+                                }
                             }
-                            if buf.len() > dedup::FRONT_SEED_MAX {
-                                overflow = true;
-                                return false;
-                            }
+                            true
                         }
-                        true
-                    }
-                    _ => {
-                        bad = Some(StoreError::corrupt(Keyspace::Txns, "txns row"));
-                        false
-                    }
-                },
-            )
-            .map_err(store_err)?;
-        if let Some(e) = bad {
-            return Err(store_err(e));
-        }
-        if overflow {
-            return Ok(Seed::Overflow);
+                        _ => {
+                            bad = Some(StoreError::corrupt(Keyspace::Txns, "txns row"));
+                            false
+                        }
+                    },
+                )
+                .map_err(store_err)?;
+            if let Some(e) = bad {
+                return Err(store_err(e));
+            }
+            if overflow {
+                return Ok(Seed::Overflow);
+            }
         }
         if let Some(o) = ov.parts.get(&pid) {
             for a in &o.appends {
@@ -1310,6 +1612,10 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             IndexMode::Txns => {
                 dedup::resolve_txns(self.reads(), pid, hash, lo, hi, committed, txns_start)
                     .map_err(store_err)?
+            }
+            IndexMode::Segment => {
+                let rows = self.committed_txns_rows(pid)?;
+                dedup::resolve_seg_rows(&rows, hash, lo, hi, committed, txns_start)
             }
         };
         if let Some(occ) = ov.dedup.get(&(pid, *hash)) {

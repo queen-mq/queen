@@ -373,6 +373,13 @@ impl View {
         (lo, hi)
     }
 
+    /// Every record of `pid`, ascending by base offset. For the committed
+    /// segment dedup scan ([`super::Reader::committed_dedup_rows`]).
+    pub fn records_of(&self, pid: u64) -> Vec<Record> {
+        let (lo, hi) = self.span_of(pid);
+        (lo..hi).map(|i| self.record(i)).collect()
+    }
+
     /// `records.partition_point(pred)` over the mapped array: the number of
     /// leading records for which `pred` holds. The array is sorted by
     /// `(pid, base_offset)`, so every predicate used here is monotone.
@@ -446,6 +453,13 @@ pub struct ActiveIndexes {
 struct Bucket {
     file_id: Option<u32>,
     recs: BTreeMap<(u64, u64), Record>,
+    /// PERF-E `DEDUP_INDEX=segment`: the per-frame hash list (`16 * count`
+    /// bytes, frame order), keyed like `recs`. Retained ONLY when the node
+    /// serves dedup from the segments ([`ActiveIndexes::insert`] is handed the
+    /// hashes then, `&[]` otherwise), so the default `txns`/`rows` modes pay no
+    /// RAM. Bounded exactly as `recs` is — one active file's frames per bucket
+    /// — and dropped with the records when the file seals ([`take`]).
+    hashes: BTreeMap<(u64, u64), Vec<u8>>,
 }
 
 impl ActiveIndexes {
@@ -460,17 +474,30 @@ impl ActiveIndexes {
         let b = &mut self.buckets[bucket as usize];
         b.file_id = Some(file_id);
         b.recs.clear();
+        b.hashes.clear();
     }
 
-    pub fn insert(&mut self, bucket: u16, rec: Record) {
-        self.buckets[bucket as usize].recs.insert(rec.key(), rec);
+    /// Publish one active frame's index record. `hashes` is the frame's
+    /// `16 * count`-byte hash list when the node serves dedup from the segments
+    /// (`DEDUP_INDEX=segment`), or `&[]` otherwise; a non-empty list is retained
+    /// in RAM keyed like the record so [`dedup_frames_of`] can serve it without
+    /// a disk read.
+    pub fn insert(&mut self, bucket: u16, rec: Record, hashes: &[u8]) {
+        let b = &mut self.buckets[bucket as usize];
+        b.recs.insert(rec.key(), rec);
+        if !hashes.is_empty() {
+            b.hashes.insert(rec.key(), hashes.to_vec());
+        }
     }
 
     /// Take the whole index of a bucket's active file and forget the file: what
     /// a roll does, right before writing it out as the sealed file's `.qidx`.
+    /// The retained hashes go with it — a sealed frame's hashes are read from
+    /// the `.seg` on demand, never kept in RAM.
     pub fn take(&mut self, bucket: u16) -> Vec<Record> {
         let b = &mut self.buckets[bucket as usize];
         b.file_id = None;
+        b.hashes.clear();
         std::mem::take(&mut b.recs).into_values().collect()
     }
 
@@ -479,6 +506,32 @@ impl ActiveIndexes {
         let b = &mut self.buckets[bucket as usize];
         b.file_id = None;
         b.recs.clear();
+        b.hashes.clear();
+    }
+
+    /// The retained hash list of one active frame `(pid, base_offset)`, if the
+    /// active file holds it and its hashes were retained (`DEDUP_INDEX=segment`).
+    /// `None` for a sealed frame (read from the `.seg` instead) or when hashes
+    /// were not retained. For the O(claimed) delivered-set walk
+    /// ([`super::Reader::claim_frames`]).
+    pub fn hashes_of(&self, bucket: u16, pid: u64, base: u64) -> Option<Vec<u8>> {
+        self.buckets[bucket as usize]
+            .hashes
+            .get(&(pid, base))
+            .cloned()
+    }
+
+    /// The active file's frames of `pid`, ascending by base offset, each paired
+    /// with the hash list retained at append time (`DEDUP_INDEX=segment`). An
+    /// empty hash list means it was not retained (the default modes), and the
+    /// caller reads the hashes from the `.seg` instead. For the committed
+    /// segment dedup scan ([`super::Reader::committed_dedup_rows`]).
+    pub fn dedup_frames_of(&self, bucket: u16, pid: u64, out: &mut Vec<(Record, Vec<u8>)>) {
+        let b = &self.buckets[bucket as usize];
+        for (key, rec) in b.recs.range((pid, 0)..=(pid, u64::MAX)) {
+            let hashes = b.hashes.get(key).cloned().unwrap_or_default();
+            out.push((*rec, hashes));
+        }
     }
 
     /// The active file id of a bucket, as the index knows it.

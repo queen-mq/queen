@@ -83,6 +83,7 @@ use crate::rsm::planner::{
     Plan, PlanConfig, Planned, Planner, PopCommand, PushCommand, RenewCommand,
 };
 use crate::rsm::replicator::{AppliedAt, NodeId, ProposeError, Replicator, Role};
+use crate::rsm::segments::Reader;
 use crate::rsm::state::{Committed, Derived};
 use crate::rsm::store::{Reads, Store, TypedReads};
 
@@ -581,9 +582,13 @@ struct PlanOutput {
 /// Plan one cycle inside ONE store read transaction (I15: on the blocking
 /// pool). `folded` are the in-flight entries, in index order, with the index
 /// each occupies; `batch` are the drained commands, in order.
+// The cycle inputs are eight scalars/handles the driver has already gathered;
+// bundling them into a struct buys nothing at the single call site.
+#[allow(clippy::too_many_arguments)]
 fn plan_cycle_blocking<S: Store>(
     store: &S,
     front: &DedupFront,
+    reader: Option<Reader>,
     folded: Vec<(u64, Arc<Entry>)>,
     batch: Vec<Command>,
     cfg: PlanConfig,
@@ -618,7 +623,7 @@ fn plan_cycle_blocking<S: Store>(
             // retryably (I14).
             .map_err(|_| crate::rsm::store::StoreError::Io("clock read".into()))?;
         ov.mark_cycle_start();
-        let planner = Planner::new(committed, now_us, cfg.clone(), front);
+        let planner = Planner::new(committed, now_us, cfg.clone(), front, reader.clone());
 
         let mut entry = Entry::new(now_us, ov.cycle_pid_base(), ov.cycle_kv_base());
         let mut slots: Vec<Slot> = Vec::with_capacity(batch.len());
@@ -750,6 +755,10 @@ pub struct Batcher<S: Store, R: Replicator> {
     /// The persistent dedup front (PERF-B), shared with the blocking planner
     /// each cycle. One per broker; reset on leadership regain.
     front: Arc<DedupFront>,
+    /// PERF-E `DEDUP_INDEX=segment`: the segment read side the planner serves the
+    /// committed dedup authority from. `None` until the facade hands it in with
+    /// [`Batcher::with_reader`]; only `segment` mode reads it.
+    reader: Option<Reader>,
 }
 
 impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
@@ -759,7 +768,17 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             repl,
             cfg,
             front: Arc::new(DedupFront::from_env()),
+            reader: None,
         }
+    }
+
+    /// Hand the batcher the segment [`Reader`] the planner uses to serve the
+    /// committed dedup authority under `DEDUP_INDEX=segment` (PERF-E). The
+    /// facade owns the `Segments`/apply and clones a `Reader` for the planner
+    /// side; the default modes never read it.
+    pub fn with_reader(mut self, reader: Reader) -> Batcher<S, R> {
+        self.reader = Some(reader);
+        self
     }
 
     /// Start the driver on the current runtime. Returns the command sender and
@@ -797,6 +816,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             repl: self.repl,
             cfg: self.cfg,
             front: self.front,
+            reader: self.reader,
             role_rx,
             cmd_rx,
             result_tx,
@@ -891,6 +911,9 @@ struct RunState<S: Store, R: Replicator> {
     repl: Arc<R>,
     cfg: BatcherConfig,
     front: Arc<DedupFront>,
+    /// PERF-E: the segment reader for `DEDUP_INDEX=segment`, cloned into each
+    /// blocking plan cycle. `None` outside `segment` mode.
+    reader: Option<Reader>,
     role_rx: watch::Receiver<Role>,
     cmd_rx: mpsc::Receiver<Submission>,
     result_tx: mpsc::UnboundedSender<(u64, Result<AppliedAt, ProposeError>)>,
@@ -1071,11 +1094,13 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         let store = self.store.clone();
         let cfg = self.cfg.plan.clone();
         let front = self.front.clone();
+        let reader = self.reader.clone();
 
         let planned = tokio::task::spawn_blocking(move || {
             plan_cycle_blocking(
                 &*store,
                 &front,
+                reader,
                 folded,
                 commands,
                 cfg,

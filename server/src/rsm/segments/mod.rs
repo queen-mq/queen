@@ -594,6 +594,23 @@ pub struct Located {
     pub record: Record,
 }
 
+/// One append's committed dedup facts, served from the segment files for
+/// `DEDUP_INDEX=segment` — the segment-file equivalent of a `txns` row
+/// (`(base_offset) → (end, created_at, hashes)`). Produced by
+/// [`Reader::committed_dedup_rows`], already bounded to the committed tail
+/// (`end <= committed_end`) so an applied-but-uncommitted frame never appears.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DedupFrame {
+    pub base_offset: u64,
+    /// Exclusive end (`base_offset + count`), as the `.qidx`/`txns` row stores.
+    pub end: u64,
+    pub created_at_us: i64,
+    /// `16 * count` bytes in frame order — exactly what a `txns` row's `hashes`
+    /// field holds (from RAM for an active frame, read from the `.seg` for a
+    /// sealed one).
+    pub hashes: Vec<u8>,
+}
+
 /// What a release retires. A file lives while EITHER of them is above zero
 /// (§11.7): the hash lists outlive the segments retention deletes, because the
 /// dedup probe (003) and ack-by-hash below the cursor (005) still read them
@@ -710,6 +727,11 @@ impl PreflushBatch {
 #[derive(Clone, Debug, Default)]
 pub struct Scan {
     pub records: Vec<Record>,
+    /// PERF-E `DEDUP_INDEX=segment`: each record's `16 * count`-byte hash list,
+    /// index-aligned with `records`. Filled by [`Segments::scan_range`] so a
+    /// recovery rescan of an ACTIVE file can repopulate the active index's RAM
+    /// hash map (a sealed file's hashes are read from disk on demand instead).
+    pub hashes: Vec<Vec<u8>>,
     /// Where the last whole, verified frame ends.
     pub valid_bytes: u64,
     /// The first frame that did not decode or verify, if any.
@@ -1238,6 +1260,219 @@ impl Shared {
             None => Ok(index::Probe::Missing),
         }
     }
+
+    /// Read one sealed frame's hash list — `HEADER_LEN + count * 16` bytes at
+    /// `offset`, NEVER the blob (PERF-E `DEDUP_INDEX=segment`). Parses the
+    /// header and cross-checks it against the `(pid, base_offset, count)` the
+    /// index promised; that field cross-check is the integrity guard (the full
+    /// frame checksum covers the blob, which is deliberately not read here),
+    /// exactly as [`Reader::read_at_within`] cross-checks a located frame.
+    fn read_hashes(&self, bucket: u16, file_id: u32, rec: &Record) -> Result<Vec<u8>> {
+        let key = (bucket, file_id);
+        let f = self.reader_for(key)?;
+        let want = frame::HEADER_LEN + rec.count as usize * frame::HASH_LEN;
+        let mut buf = vec![0u8; want];
+        f.read_exact_at(&mut buf, rec.offset)
+            .map_err(SegError::Io)?;
+        let header = frame::parse_header(&buf).map_err(|why| SegError::Damaged {
+            bucket,
+            file_id,
+            offset: rec.offset,
+            why,
+        })?;
+        if header.pid != rec.pid
+            || header.base_offset != rec.base_offset
+            || header.count != rec.count
+        {
+            return Err(SegError::IndexMismatch {
+                position: Position {
+                    bucket,
+                    file_id,
+                    offset: rec.offset,
+                    len: header.frame_len() as u32,
+                },
+                want: (rec.pid, rec.base_offset),
+                got: (header.pid, header.base_offset),
+            });
+        }
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        self.read_bytes.fetch_add(want as u64, Ordering::Relaxed);
+        buf.drain(..frame::HEADER_LEN);
+        Ok(buf)
+    }
+
+    /// The hash list of one located frame: from the active index's RAM when the
+    /// frame is still active (retained, no syscall), or a bounded `.seg` `pread`
+    /// when it has sealed. `bucket`/`file_id` are the LOCAL position `locate`
+    /// returned. For the O(claimed) delivered-set walk ([`Reader::claim_frames`]).
+    fn hashes_for(&self, bucket: u16, file_id: u32, rec: &Record) -> Result<Vec<u8>> {
+        if let Some(h) = self
+            .active
+            .read()
+            .expect("segment active index poisoned")
+            .hashes_of(bucket, rec.pid, rec.base_offset)
+        {
+            if !h.is_empty() {
+                return Ok(h);
+            }
+        }
+        self.read_hashes(bucket, file_id, rec)
+    }
+
+    /// Serve the committed dedup authority of `pid` from the segment files
+    /// (PERF-E `DEDUP_INDEX=segment`), ascending by base offset, each append's
+    /// `(base, end, created_at, hashes)` — the segment equivalent of the
+    /// partition's committed `txns` rows.
+    ///
+    /// The sources are exactly the ones [`Shared::locate`] consults — the active
+    /// file's RAM index (hashes from RAM), the just-sealed `sealed_recent`
+    /// files, and the caller's committed `sealed` list (`partition_files`) —
+    /// deduplicated by base offset (a frame is unique per pid, and one file may
+    /// be in both `sealed_recent` and `partition_files` during the record
+    /// handover), so every committed frame is served exactly once.
+    ///
+    /// `with_hashes` gates the ONLY expensive step: reading each SEALED frame's
+    /// hash list from its `.seg` (one bounded `pread` per frame). Callers that
+    /// need only the segment SHAPE (offset spans + stamps — the pop walk and the
+    /// segment-covering probe) pass `false` and pay no per-frame read; the dedup
+    /// probe / resolve / seed and the delivered set pass `true`.
+    ///
+    /// `from_base` is the LOWER offset bound: a frame whose whole span is below
+    /// it (`end <= from_base`) is dropped BEFORE its hash `pread`. The whole-
+    /// window dedup reads pass `0`; the pop-path delivered-set read passes the
+    /// covering base of the claimed range, so a caught-up consumer reads (and
+    /// `pread`s) only the frames near the tail it actually delivers — never the
+    /// whole committed history. The result is unchanged: frames below `from_base`
+    /// were filtered out by every caller anyway.
+    fn committed_dedup_frames(
+        &self,
+        bucket: u16,
+        pid: Pid,
+        from_base: u64,
+        committed_end: u64,
+        sealed: &[u32],
+        with_hashes: bool,
+    ) -> Result<Vec<DedupFrame>> {
+        // PERF-F: fold the planner's logical bucket to this node's local range,
+        // the same fold `locate`/`append` do.
+        let bucket = self.fold(bucket);
+
+        // Candidate records, deduplicated by base offset (first source wins;
+        // the same frame from a second source carries identical facts). Each
+        // is tagged with where its hashes come from: RAM (active, retained) or
+        // the `.seg` header (sealed).
+        enum HashSrc {
+            Ram(Vec<u8>),
+            Disk(u32),
+        }
+        let mut cand: BTreeMap<u64, (Record, HashSrc)> = BTreeMap::new();
+
+        // (a) The active file: records and (retained) hashes from RAM.
+        {
+            let active = self.active.read().expect("segment active index poisoned");
+            let active_id = active.file_id(bucket);
+            let mut frames: Vec<(Record, Vec<u8>)> = Vec::new();
+            active.dedup_frames_of(bucket, pid, &mut frames);
+            drop(active);
+            for (rec, hashes) in frames {
+                if rec.end <= from_base {
+                    continue; // wholly below the requested range: no read
+                }
+                let src = if hashes.is_empty() {
+                    // Hashes were not retained; fall back to the `.seg` header.
+                    match active_id {
+                        Some(id) => HashSrc::Disk(id),
+                        None => continue,
+                    }
+                } else {
+                    HashSrc::Ram(hashes)
+                };
+                cand.entry(rec.base_offset).or_insert((rec, src));
+            }
+        }
+
+        // (b) Sealed files: the union of the just-sealed `sealed_recent` copies
+        //     (kept until the caller records them) and the caller's committed
+        //     `partition_files` list, deduplicated by file id so a frame in both
+        //     is read once.
+        let mut sealed_ids: BTreeSet<u32> = sealed.iter().copied().collect();
+        let recent: Vec<(u32, Arc<Vec<Record>>)> = {
+            let g = self
+                .sealed_recent
+                .read()
+                .expect("segment sealed index poisoned");
+            g.range((bucket, 0)..=(bucket, u32::MAX))
+                .map(|((_, id), recs)| (*id, recs.clone()))
+                .collect()
+        };
+        for (id, recs) in &recent {
+            sealed_ids.remove(id); // served here; skip the `.qidx` open below
+            for rec in pid_records(recs, pid) {
+                if rec.end <= from_base {
+                    continue;
+                }
+                cand.entry(rec.base_offset)
+                    .or_insert((rec, HashSrc::Disk(*id)));
+            }
+        }
+        for id in sealed_ids {
+            let Some(view) = self.index_for((bucket, id))? else {
+                continue;
+            };
+            let recs = view.records_of(pid);
+            // A `.qidx` whose highest base for this pid is below `from_base`
+            // holds nothing the caller asked for — skip its records entirely.
+            if recs.last().is_some_and(|r| r.end <= from_base) {
+                continue;
+            }
+            for rec in recs {
+                if rec.end <= from_base {
+                    continue;
+                }
+                cand.entry(rec.base_offset)
+                    .or_insert((rec, HashSrc::Disk(id)));
+            }
+        }
+
+        // THE ONE CORRECTNESS INVARIANT (exactly-once): the segment files hold
+        // frames for entries that are APPLIED BUT NOT YET STORE-COMMITTED (the
+        // `store_commit_ms` window) and in-flight writes. Those are NOT part of
+        // the planner's committed snapshot and ARE covered by its Overlay, so a
+        // frame whose span reaches past the committed tail MUST be dropped from
+        // the committed leg — reading it here would double-count against the
+        // overlay and corrupt the dedup verdict. `committed_end` is the
+        // committed partition row's `last_offset + 1` (exclusive), read by the
+        // planner via the RoTxn; a frame is committed iff `end <= committed_end`.
+        let mut out: Vec<DedupFrame> = Vec::with_capacity(cand.len());
+        for (_, (rec, src)) in cand {
+            if rec.end > committed_end {
+                continue;
+            }
+            let hashes = if with_hashes {
+                match src {
+                    HashSrc::Ram(h) => h,
+                    HashSrc::Disk(id) => self.read_hashes(bucket, id, &rec)?,
+                }
+            } else {
+                Vec::new() // shape only: skip the per-frame `.seg` read
+            };
+            out.push(DedupFrame {
+                base_offset: rec.base_offset,
+                end: rec.end,
+                created_at_us: rec.created_at_us,
+                hashes,
+            });
+        }
+        Ok(out)
+    }
+}
+
+/// Records of `pid` in a `(pid, base_offset)`-sorted slice (a `sealed_recent`
+/// file's RAM index), ascending by base offset.
+fn pid_records(recs: &[Record], pid: Pid) -> impl Iterator<Item = Record> + '_ {
+    let lo = recs.partition_point(|r| r.pid < pid);
+    let hi = recs.partition_point(|r| r.pid <= pid);
+    recs[lo..hi].iter().copied()
 }
 
 /// Is the caller's budget already spent (I15)?
@@ -1413,6 +1648,103 @@ impl Reader {
             self.0.index_opens.load(Ordering::Relaxed),
         )
     }
+
+    /// The committed dedup rows of `pid` served from the segment files
+    /// (PERF-E `DEDUP_INDEX=segment`): every append whose whole span is
+    /// committed (`end <= committed_end`), ascending by base offset, with its
+    /// hash list — the segment equivalent of the partition's committed `txns`
+    /// rows, bounded to the committed tail. `sealed` is the partition's
+    /// committed `partition_files` list; `committed_end` is the committed
+    /// partition row's `last_offset + 1`. `from_base` is the LOWER offset bound
+    /// (`0` = the whole committed window): frames whose whole span is below it
+    /// are dropped before their hash `pread`, so a pop reads only the frames near
+    /// its claimed range. See [`Shared::committed_dedup_frames`] for the sources
+    /// and the committed-bounding invariant.
+    pub fn committed_dedup_rows(
+        &self,
+        bucket: u16,
+        pid: Pid,
+        from_base: u64,
+        committed_end: u64,
+        sealed: &[u32],
+    ) -> Result<Vec<DedupFrame>> {
+        self.0
+            .committed_dedup_frames(bucket, pid, from_base, committed_end, sealed, true)
+    }
+
+    /// The committed segment SHAPE of `pid` — the same bounded, base-sorted set
+    /// as [`Reader::committed_dedup_rows`] but with EMPTY hash lists and NO
+    /// per-frame `.seg` read (the pop walk and the segment-covering probe need
+    /// only `(base, end, created_at)`). `from_base` bounds the lower end as in
+    /// [`Reader::committed_dedup_rows`].
+    pub fn committed_dedup_shape(
+        &self,
+        bucket: u16,
+        pid: Pid,
+        from_base: u64,
+        committed_end: u64,
+        sealed: &[u32],
+    ) -> Result<Vec<DedupFrame>> {
+        self.0
+            .committed_dedup_frames(bucket, pid, from_base, committed_end, sealed, false)
+    }
+
+    /// Walk `pid`'s committed frames FORWARD from `from_offset`, in offset order,
+    /// invoking `cb(base, end_inclusive, created_at, hashes)` for each until it
+    /// returns `false` (the pop budget) or the committed tail is reached — the
+    /// O(claimed) delivered-set / claim walk (PERF-I equivalent for
+    /// `DEDUP_INDEX=segment`). It reads and `pread`s only the frames the claim
+    /// actually consumes (≤ budget), NEVER the whole cursor→tail span.
+    ///
+    /// Each step is one segment-index `locate` (active RAM first, then a binary
+    /// search of the sealed files), so the range the pop reads MUST be
+    /// contiguous — which it is: retention is a prefix delete (`log_start`
+    /// advances, no interior holes), and the caller gates `wanted >= log_start`,
+    /// so a `locate` miss means the committed tail, not a gap. `hashes` is
+    /// `Some(16*count bytes)` when `want_hashes` (from RAM for an active frame, a
+    /// bounded `.seg` `pread` for a sealed one), else `None`. `end_inclusive`
+    /// (`record.end - 1`) matches the stored-`txns`-row / `Seg` shape. Bounded by
+    /// the committed tail (`committed_end`), the exactly-once invariant.
+    // The walk's inputs are the location keys plus the callback; bundling them
+    // into a struct buys nothing at the two call sites.
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_frames(
+        &self,
+        bucket: u16,
+        pid: Pid,
+        from_offset: u64,
+        committed_end: u64,
+        sealed: &[u32],
+        want_hashes: bool,
+        cb: &mut dyn FnMut(u64, u64, i64, Option<Vec<u8>>) -> bool,
+    ) -> Result<()> {
+        let mut cur = from_offset;
+        while cur < committed_end {
+            // `locate` takes the logical bucket and folds it; the `Located`'s
+            // position carries the LOCAL bucket the hash read needs.
+            let Some(l) = self.0.locate(bucket, pid, cur, sealed, None)? else {
+                break; // past the committed tail (the range is contiguous)
+            };
+            let rec = l.record;
+            if rec.end > committed_end {
+                break; // uncommitted frame: the overlay covers it (the invariant)
+            }
+            let hashes = if want_hashes {
+                Some(
+                    self.0
+                        .hashes_for(l.position.bucket, l.position.file_id, &rec)?,
+                )
+            } else {
+                None
+            };
+            let keep = cb(rec.base_offset, rec.end - 1, rec.created_at_us, hashes);
+            if !keep {
+                break;
+            }
+            cur = rec.end; // contiguous: the next frame starts here
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1581,6 +1913,10 @@ struct Active {
     /// active index only AFTER their bytes reach the fd (write-before-publish:
     /// a reader must never locate a frame whose bytes are still in RAM).
     pending_recs: Vec<Record>,
+    /// PERF-E `DEDUP_INDEX=segment`: the hash list of each buffered frame,
+    /// index-aligned with `pending_recs`, published into the active index's RAM
+    /// hash map alongside its record. Empty when hashes are not retained.
+    pending_hashes: Vec<Vec<u8>>,
 }
 
 /// The apply thread's handle: the only writer of the segment files (I1).
@@ -1599,6 +1935,12 @@ pub struct Segments {
     /// pre-PERF-C path) is the default a bare `Segments::open` leaves, so every
     /// segment-level test runs the inline path unchanged.
     buffered: bool,
+    /// PERF-E `DEDUP_INDEX=segment`: keep each active frame's hash list in the
+    /// active index's RAM (so the planner serves the committed dedup authority
+    /// from the segments, not the `Txns` keyspace). Set once at boot by
+    /// [`Segments::retain_active_hashes`] when the node runs segment-authority
+    /// dedup; `false` (no RAM, the `txns`/`rows` default) otherwise.
+    retain_active_hashes: bool,
     /// PERF-C: the segment-write pool (`QUEEN_RAFT_APPLY_WRITERS`). `None` = the
     /// apply thread does the flushes itself. Declared BEFORE `active` so the
     /// pool's threads are joined (Drop) before the segment files they hold raw
@@ -1782,6 +2124,7 @@ impl Segments {
             opts,
             nbuckets,
             buffered: false,
+            retain_active_hashes: false,
             writers: None,
             segment_writes: 0,
             active: (0..nbuckets).map(|_| None).collect(),
@@ -2062,8 +2405,16 @@ impl Segments {
                         .write()
                         .expect("segment active index poisoned");
                     ai.open(b, id);
-                    for r in &scan.records {
-                        ai.insert(b, *r);
+                    for (i, r) in scan.records.iter().enumerate() {
+                        // PERF-E: repopulate the RAM hashes only when the node
+                        // retains them (segment-authority dedup); otherwise the
+                        // aligned `scan.hashes` are dropped.
+                        let h: &[u8] = if self.retain_active_hashes {
+                            scan.hashes.get(i).map(Vec::as_slice).unwrap_or(&[])
+                        } else {
+                            &[]
+                        };
+                        ai.insert(b, *r, h);
                     }
                 }
             }
@@ -2105,6 +2456,7 @@ impl Segments {
                     dirty: false,
                     pending: Vec::new(),
                     pending_recs: Vec::new(),
+                    pending_hashes: Vec::new(),
                 });
             } else {
                 let next = match highest {
@@ -2179,6 +2531,7 @@ impl Segments {
             dirty: false,
             pending: Vec::new(),
             pending_recs: Vec::new(),
+            pending_hashes: Vec::new(),
         });
         self.shared
             .files
@@ -2304,6 +2657,14 @@ impl Segments {
             // AFTER the bytes reach the fd (write-before-publish).
             a.pending.extend_from_slice(&self.buf);
             a.pending_recs.push(rec);
+            // PERF-E: hold the frame's hashes to publish into the active index's
+            // RAM alongside its record (segment-authority dedup); empty when not
+            // retained, so the default modes buffer nothing extra.
+            a.pending_hashes.push(if self.retain_active_hashes {
+                hashes.to_vec()
+            } else {
+                Vec::new()
+            });
         } else {
             // PERF-1: the per-append payload write, the entry's real file I/O.
             // The clock read is gated on the knob (`stamp` is `None` when
@@ -2315,11 +2676,16 @@ impl Segments {
                 crate::rsm::timing::record_segment_write(w0.elapsed());
             }
             self.segment_writes += 1;
+            let retained: &[u8] = if self.retain_active_hashes {
+                hashes
+            } else {
+                &[]
+            };
             self.shared
                 .active
                 .write()
                 .expect("segment active index poisoned")
-                .insert(bucket, rec);
+                .insert(bucket, rec, retained);
         }
         let dead;
         {
@@ -2363,6 +2729,14 @@ impl Segments {
         self.writers = (writers > 0).then(|| SegWriters::spawn(writers));
     }
 
+    /// PERF-E: retain each active frame's hash list in the active index's RAM
+    /// (`DEDUP_INDEX=segment`). Called once at boot by [`crate::rsm::apply`] when
+    /// the node serves the committed dedup authority from the segments; a bare
+    /// `Segments::open` leaves it off, so the default modes pay no RAM.
+    pub fn retain_active_hashes(&mut self, on: bool) {
+        self.retain_active_hashes = on;
+    }
+
     /// Payload `write` syscalls issued so far (PERF-C's coalescing instrument).
     pub fn segment_writes(&self) -> u64 {
         self.segment_writes
@@ -2375,10 +2749,11 @@ impl Segments {
     fn flush_bucket(&mut self, bucket: usize) -> Result<()> {
         // Move the run out so the shared-index publish below borrows only
         // `self.shared`, not the `Active`.
-        let (bytes, recs) = match self.active[bucket].as_mut() {
+        let (bytes, recs, hashes) = match self.active[bucket].as_mut() {
             Some(a) if !a.pending.is_empty() => (
                 std::mem::take(&mut a.pending),
                 std::mem::take(&mut a.pending_recs),
+                std::mem::take(&mut a.pending_hashes),
             ),
             _ => return Ok(()),
         };
@@ -2410,8 +2785,11 @@ impl Segments {
             .active
             .write()
             .expect("segment active index poisoned");
-        for rec in recs {
-            ai.insert(bucket as u16, rec);
+        // PERF-E: `pending_hashes` is index-aligned with `recs` (both pushed in
+        // `append`), and empty per frame when hashes are not retained.
+        for (i, rec) in recs.into_iter().enumerate() {
+            let h = hashes.get(i).map(Vec::as_slice).unwrap_or(&[]);
+            ai.insert(bucket as u16, rec, h);
         }
         Ok(())
     }
@@ -2470,12 +2848,16 @@ impl Segments {
         let writers = self.writers.as_ref().expect("writers checked above");
         // Gather the runs, taking each bucket's bytes and records out.
         let mut jobs: Vec<(usize, RawFd, Vec<u8>)> = Vec::new();
-        let mut recs: Vec<(usize, Vec<Record>)> = Vec::new();
+        let mut recs: Vec<(usize, Vec<Record>, Vec<Vec<u8>>)> = Vec::new();
         for b in 0..self.nbuckets {
             if let Some(a) = self.active[b].as_mut() {
                 if !a.pending.is_empty() {
                     jobs.push((b, a.file.as_raw_fd(), std::mem::take(&mut a.pending)));
-                    recs.push((b, std::mem::take(&mut a.pending_recs)));
+                    recs.push((
+                        b,
+                        std::mem::take(&mut a.pending_recs),
+                        std::mem::take(&mut a.pending_hashes),
+                    ));
                 }
             }
         }
@@ -2502,9 +2884,10 @@ impl Segments {
             .active
             .write()
             .expect("segment active index poisoned");
-        for (b, run) in recs {
-            for rec in run {
-                ai.insert(b as u16, rec);
+        for (b, run, run_hashes) in recs {
+            for (i, rec) in run.into_iter().enumerate() {
+                let h = run_hashes.get(i).map(Vec::as_slice).unwrap_or(&[]);
+                ai.insert(b as u16, rec, h);
             }
         }
         Ok(())
@@ -3128,6 +3511,12 @@ impl Segments {
                 break;
             }
             out.records.push(Record::of_frame(&header, pos));
+            // PERF-E: capture the verified hash list (never the blob) so a
+            // rescan can repopulate the active index's RAM hashes; only the
+            // active-file rescan keeps it, sealed files read hashes from disk.
+            let hstart = frame::HEADER_LEN;
+            let hend = hstart + header.hashes_len();
+            out.hashes.push(body[hstart..hend].to_vec());
             pos += total as u64;
             out.valid_bytes = pos;
         }
