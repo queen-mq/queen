@@ -136,6 +136,9 @@ pub struct BatcherConfig {
     /// push order is preserved (the partition is stable, and the push lane is
     /// consumed in order). Off: the pre-PERF-J FIFO drain.
     pub push_priority: bool,
+    /// `QUEEN_RAFT_DRAIN_GREEDY` (PERF-L): pull the whole channel into one
+    /// batch before planning, so one entry carries many commands.
+    pub drain_greedy: bool,
 }
 
 impl Default for BatcherConfig {
@@ -151,6 +154,7 @@ impl Default for BatcherConfig {
             plan: PlanConfig::default(),
             driver_notify: true,
             push_priority: true,
+            drain_greedy: true,
         }
     }
 }
@@ -209,6 +213,7 @@ impl BatcherConfig {
             },
             driver_notify: flag("QUEEN_RAFT_DRIVER_NOTIFY", d.driver_notify),
             push_priority: flag("QUEEN_RAFT_PUSH_PRIORITY", d.push_priority),
+            drain_greedy: flag("QUEEN_RAFT_DRAIN_GREEDY", d.drain_greedy),
         }
     }
 }
@@ -851,7 +856,19 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
                 maybe = st.cmd_rx.recv() => {
                     st.note_wake("arrival");
                     match maybe {
-                        Some(sub) => st.queue.push_back(sub),
+                        Some(sub) => {
+                            st.queue.push_back(sub);
+                            // PERF-L level-1 fusion: pull everything already
+                            // queued in the channel into this cycle's batch so
+                            // one log entry (hence one fsync) carries many
+                            // commands, instead of ~one per select wake. Order
+                            // preserved; drain_batch still applies the caps.
+                            if st.cfg.drain_greedy {
+                                while let Ok(more) = st.cmd_rx.try_recv() {
+                                    st.queue.push_back(more);
+                                }
+                            }
+                        }
                         None => st.closing = true,
                     }
                 }
