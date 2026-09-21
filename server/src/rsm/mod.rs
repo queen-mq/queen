@@ -102,6 +102,14 @@ pub mod store;
 /// file in its own `.qidx` beside it (§6.1 amendment). Owner: WP-1.3.
 pub mod segments;
 
+/// The per-queue append-only log store of `ALICE_PGLESS_NEWARCH.md` §3
+/// (Phase A). ISOLATED: dead code, wired into nothing, changing no live
+/// behaviour until a later phase swaps the byte store over to it. Record codec
+/// (extends `segments/frame.rs`, with the leader `seq` and the Phase-B txn
+/// envelope), per-queue writer with group commit, sparse `.qidx` index,
+/// read/scan, recovery with torn-tail truncation, and unlink-dead retention.
+pub mod qlog;
+
 /// Dedup, option (a) in the lean encoding (D10): a store index per hash
 /// `(pid, hash) → (offset, created_at)`, pruned by the txns window, whose hash
 /// lists outlive the segments retention deletes. Owner: WP-1.2.
