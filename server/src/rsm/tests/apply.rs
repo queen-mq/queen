@@ -188,7 +188,7 @@ pub fn cfg() -> ApplyConfig {
         // PERF-D: batch counters everywhere (transparent), keep pending on the
         // shipped byte-for-byte path; the transition tests opt in per-test.
         batch_counters: true,
-        pending_transitions: false,
+        pending_transitions: true, // P2.1: lockstep with ApplyConfig::default()
         // Phase A1: the shadow qlog is off across the shared apply suite, so
         // every existing test runs today's exact path; the qlog tests opt in.
         qlog: false,
@@ -1147,7 +1147,11 @@ fn the_shipped_default_overwrites_a_leased_partitions_ready_at() {
         node.store(),
         &node.seg_dir(),
         seg_opts(),
-        cfg(), // pending_transitions: false — the pre-PERF-H shipped path
+        // The OFF path, explicitly: PLAN_RAFT_DRAIN_FIX P2.1 made ON the default.
+        ApplyConfig {
+            pending_transitions: false,
+            ..cfg()
+        },
         Arc::new(crate::rsm::apply::NoNotify),
     )
     .expect("open");
@@ -2133,9 +2137,11 @@ fn a_cursor_carries_its_lease_index_and_wakes_on_release() {
         .expect("read");
 
     let wakes = rec.wakes.lock().unwrap().clone();
-    // One for the append, one for the released lease.
-    assert_eq!(wakes.len(), 2, "{wakes:?}");
-    assert_eq!(wakes[1].2, Some("g1".to_string()));
+    // One for the append. The release DRAINED the partition (committed ==
+    // last offset), so it wakes nobody: there is nothing left to claim
+    // (PLAN_RAFT_DRAIN_FIX P2.2 — a wake now releases one parked pop).
+    assert_eq!(wakes.len(), 1, "{wakes:?}");
+    assert_eq!(wakes[0].2, Some("g1".to_string()));
 }
 
 #[test]

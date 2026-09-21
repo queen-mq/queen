@@ -175,6 +175,7 @@ fn pop_base(id: u64, queue: &str, group: &str, worker: &str) -> PopCommand {
         namespace: String::new(),
         task: String::new(),
         create_cfg: Some(qcfg()),
+        deadline_us: 0,
     }
 }
 

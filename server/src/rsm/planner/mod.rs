@@ -350,6 +350,11 @@ pub struct PopCommand {
     /// The config a wildcard pop uses if it must create the queue (004 ≈1046);
     /// `None` disables implicit creation (pinned never creates).
     pub create_cfg: Option<QueueConfig>,
+    /// Wall-clock µs after which nobody is waiting for this pop's answer
+    /// (`0` = no deadline). The planner refuses to CLAIM for a pop that cannot
+    /// be answered in time, so a request that timed out while queued behind
+    /// the pipeline never leaves an orphaned lease (PLAN_RAFT_DRAIN_FIX P1.2).
+    pub deadline_us: i64,
 }
 
 /// The status an ack item carries (005). `Ok` covers the SQL's
@@ -1298,6 +1303,11 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             return Ok(Vec::new());
         };
         let frames = self.committed_frames_of(pid, &ctx, 0, true)?;
+        {
+            use crate::rsm::dbgctr::{inc, C};
+            inc(&C.push_dedup_build, 1);
+            inc(&C.push_dedup_records, frames.len() as u64);
+        }
         Ok(frames
             .into_iter()
             .map(|f| {
@@ -1541,10 +1551,16 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
 
     /// The committed leg of a push probe under `DEDUP_INDEX=segment`: the front
     /// still decides Skip vs scan (its seed and inserts are mode-agnostic — the
-    /// same in-window hashes either way), and a scan reads the committed segment
-    /// rows (RAM-cached per pid this cycle), returning the exact MIN in-window
-    /// offset. A "maybe" band is a sound over-approximation, so scanning the
-    /// whole committed cache for the exact minimum matches the `txns` verdict.
+    /// same in-window hashes either way), and a scan returns the exact MIN
+    /// in-window offset.
+    ///
+    /// PLAN_RAFT_DRAIN_FIX P3.1: with the qlog on, a `Ranges` verdict reads ONLY
+    /// the committed records overlapping the generation bands the front matched
+    /// ([`Planner::dedup_probe_qlog_bands`]) — O(band), not O(partition
+    /// history). `Whole` (unseeded / fallback / disabled front) and the segment
+    /// source keep the whole committed window (RAM-cached per pid this cycle); a
+    /// "maybe" band is a sound over-approximation, so the whole-window minimum
+    /// matches the `txns` verdict.
     fn dedup_probe_segment(
         &self,
         pid: Pid,
@@ -1557,11 +1573,59 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             .probe_plan(pid, hash, window_floor_us, &mut ranges)
         {
             ProbeVerdict::Skip => Ok(None),
+            ProbeVerdict::Ranges if self.qlog_reader.is_some() => {
+                self.dedup_probe_qlog_bands(pid, hash, &ranges, window_floor_us)
+            }
             ProbeVerdict::Ranges | ProbeVerdict::Whole => {
                 let rows = self.committed_txns_rows(pid)?;
                 Ok(dedup::scan_seg_rows_for_hash(&rows, hash, window_floor_us))
             }
         }
+    }
+
+    /// PLAN_RAFT_DRAIN_FIX P3.1: the band-limited committed probe over the qlog.
+    /// Reads only the committed records that overlap a band
+    /// (`base <= hi && end > lo`), bounded by `ctx.committed_end` exactly as the
+    /// whole-window read (an uncommitted record is the overlay's, which
+    /// [`Planner::dedup_probe_one`] merges unconditionally), hashes only and
+    /// cross-cycle cached (P3.2/P3.3), and returns the MIN in-window occurrence
+    /// among them.
+    ///
+    /// SOUND: every committed in-window occurrence of `hash` was inserted into a
+    /// live front generation (seed or plan-time insert; a generation ages out
+    /// only once wholly below the floor), whose bloom therefore says "maybe" and
+    /// whose `(min_base, max_off)` band holds the occurrence's record — so the
+    /// band read sees every occurrence the whole-window scan would, and returns
+    /// the same minimum.
+    fn dedup_probe_qlog_bands(
+        &self,
+        pid: Pid,
+        hash: &[u8; 16],
+        bands: &[(u64, u64)],
+        window_floor_us: i64,
+    ) -> Result<Option<u64>, Refusal> {
+        let Some(ql) = self.qlog_reader.as_ref() else {
+            return Err(Refusal::retry(
+                "unavailable",
+                "qlog band probe without a qlog reader",
+            ));
+        };
+        let Some(ctx) = self.seg_ctx(pid)? else {
+            return Ok(None); // no committed frames: nothing committed to probe
+        };
+        let frames = ql
+            .committed_hashes_in_bands(ctx.queue_id, pid, bands, ctx.committed_end)
+            .map_err(|e| Refusal::retry("unavailable", format!("qlog dedup band read: {e}")))?;
+        {
+            use crate::rsm::dbgctr::{inc, C};
+            inc(&C.push_dedup_build, 1);
+            inc(&C.push_dedup_records, frames.len() as u64);
+        }
+        Ok(crate::rsm::qlog::min_in_window_offset(
+            &frames,
+            hash,
+            window_floor_us,
+        ))
     }
 
     /// Ensure the dedup front can answer for `pid` before the per-hash probe

@@ -85,10 +85,13 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             stale_hashes: hashes.iter().map(|i| i.hash).collect(),
         };
 
+        use crate::rsm::dbgctr::{inc, C};
         let Some(part) = self.partition(ov, pid)? else {
+            inc(&C.ack_reject, 1);
             return Ok((reject(-1, &target.items), Vec::new()));
         };
         let Some(cur0) = self.cursor(ov, pid, group)? else {
+            inc(&C.ack_reject, 1);
             return Ok((reject(-1, &target.items), Vec::new()));
         };
         // The lease is validated ONLY when a non-empty leaseId was supplied; a
@@ -97,6 +100,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             && (cur0.worker.as_deref() != Some(worker.as_str())
                 || cur0.lease_expires_at_us.is_none_or(|e| e < now))
         {
+            inc(&C.ack_reject, 1);
             return Ok((reject(cur0.committed, &target.items), Vec::new()));
         }
 
@@ -157,6 +161,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             } else {
                 Vec::new()
             };
+            inc(&C.ack_fast, 1);
             return Ok((res, effs));
         }
 
@@ -360,6 +365,13 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         }
 
         let lease_released = cur.worker.is_none() && cur0.worker.is_some();
+        if !has_lease {
+            inc(&C.ack_slow_nolease, 1);
+        } else if cur.worker.is_none() {
+            inc(&C.ack_slow_released, 1);
+        } else {
+            inc(&C.ack_slow_kept, 1);
+        }
         let res = AckResult {
             pid,
             committed: cur.committed,

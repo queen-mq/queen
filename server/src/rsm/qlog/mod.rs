@@ -77,21 +77,26 @@
 //! - compaction of partially-live files (Phase C) — [`QLog::unlink_dead_files`]
 //!   drops WHOLE dead files only; see the `TODO(phase-C-compaction)` there;
 //! - parallel per-queue writers (Phase E) — one writer per queue is fine;
-//! - handle caching / read deadlines — a read opens the file fresh; the raft
-//!   class's `Reader` cache and I15 deadlines are a later concern.
+//! - read deadlines — I15 deadlines are a later concern. (Read fds ARE cached
+//!   per log, and committed hash blocks too — PLAN_RAFT_DRAIN_FIX P3, see
+//!   [`ReadCache`].)
 
 pub mod index;
 pub mod record;
 pub mod set;
 
 #[cfg(test)]
+mod band_tests;
+#[cfg(test)]
 mod tests;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// The `.qlog` file header magic (§3): `QNQLOG1\0`. Distinct from the raft
 /// log's `QNRLOG1\0` and the segment index's `QQIDX1`.
@@ -256,6 +261,38 @@ pub struct CommittedFrame {
     pub hashes: Vec<u8>,
 }
 
+/// PLAN_RAFT_DRAIN_FIX P3.1: one committed record's dedup facts as the BAND read
+/// ([`QLog::committed_hashes_in_bands`]) returns them — the [`CommittedFrame`]
+/// shape, with the hash block SHARED with the read cache (P3.3) instead of
+/// copied. `end` is EXCLUSIVE (`base_offset + count`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BandFrame {
+    pub base_offset: u64,
+    pub end: u64,
+    pub created_at_us: i64,
+    /// `16 * count` bytes in frame order (empty for a shape-only read).
+    pub hashes: Arc<[u8]>,
+}
+
+/// PLAN_RAFT_DRAIN_FIX P3.1: the push dedup verdict over band frames — the MIN
+/// in-window (`created >= floor_us`) offset `hash` occurs at, or `None`.
+/// `frames` ascend by base (as [`QLog::committed_hashes_in_bands`] returns them),
+/// so the first in-window hit is the minimum: exactly
+/// [`crate::rsm::dedup::scan_seg_rows_for_hash`] over the same records.
+pub fn min_in_window_offset(frames: &[BandFrame], hash: &[u8; 16], floor_us: i64) -> Option<u64> {
+    for f in frames {
+        if f.created_at_us < floor_us {
+            continue; // whole append out of window; keep walking
+        }
+        for (i, h) in f.hashes.chunks_exact(record::HASH_LEN).enumerate() {
+            if h == &hash[..] {
+                return Some(f.base_offset + i as u64);
+            }
+        }
+    }
+    None
+}
+
 /// One record's metadata as [`QLog::scan_from`] walks a partition. The index
 /// entry plus the file it is in; the callback reads the bytes itself (via
 /// [`QLog::read_record`]) only if it wants them.
@@ -340,6 +377,9 @@ pub struct QLog {
     active_index: index::ActiveIndex,
     /// Sealed files' immutable indexes, mmap'd, keyed by file id.
     sealed: BTreeMap<u64, index::View>,
+    /// PLAN_RAFT_DRAIN_FIX P3.2/P3.3: read fds + committed hash blocks, shared
+    /// with in-flight reads that finish after the read guard is dropped.
+    cache: Arc<ReadCache>,
 }
 
 impl QLog {
@@ -461,6 +501,7 @@ impl QLog {
         rec.bytes = files.iter().map(|f| f.bytes).sum();
         rec.records = files.iter().map(|f| f.records).sum();
 
+        let cache = Arc::new(ReadCache::new(dir.clone()));
         let qlog = QLog {
             dir,
             queue_id,
@@ -469,6 +510,7 @@ impl QLog {
             active,
             active_index,
             sealed,
+            cache,
         };
         tracing::info!(
             target: "rsm",
@@ -731,8 +773,8 @@ impl QLog {
     /// come from a [`Loc`] returned by [`QLog::append_group`], or from a
     /// [`ScanEntry`]. The record's own `len` bounds the read.
     pub fn read_record(&self, file_id: u64, offset: u64) -> io::Result<OwnedRecord> {
-        let path = file_path(&self.dir, file_id);
-        let f = File::open(&path)?;
+        // P3.2: a cached fd, no open() per read.
+        let f = self.cache.file(file_id)?;
         // Read the fixed prefix to learn the record length, then the whole
         // record. `record_len` is bounded by `parse_header` (≤ 4 + the body
         // cap), so a lie allocates nothing unbounded.
@@ -798,16 +840,23 @@ impl QLog {
         None
     }
 
-    /// Read one located index record's hashes (the `16 * count` bytes), with the
-    /// same `len`-match guard [`QLog::read_located`] applies.
+    /// Read one located COMMITTED index record's hashes (the `16 * count`
+    /// bytes). PLAN_RAFT_DRAIN_FIX P3: from the hash cache, else a hashes-only
+    /// `pread` through the cached fd ([`pread_hashes`], header cross-checked
+    /// against the index), cached while there is room. Callers pass only records
+    /// bounded by the committed tail (the cache holds committed blocks only).
     fn read_record_hashes(&self, file_id: u64, rec: &index::Record) -> io::Result<Vec<u8>> {
-        let loc = Located {
-            file_id,
-            offset: rec.offset,
-            len: rec.len,
-            count: rec.count,
-        };
-        Ok(self.read_located(&loc)?.hashes)
+        if rec.count == 0 {
+            return Ok(Vec::new());
+        }
+        if let Some(h) = self.cache.hash_get(rec.pid, rec.base_offset) {
+            return Ok(h.to_vec());
+        }
+        let f = self.cache.file(file_id)?;
+        let h = pread_hashes(&f, &self.dir, file_id, rec, &mut Vec::new())?;
+        self.cache
+            .hash_put_many(&[(rec.pid, rec.base_offset, h.clone())], CachePut::IfRoom);
+        Ok(h.to_vec())
     }
 
     /// Walk partition `pid`'s committed records FORWARD from `from_offset`, in
@@ -883,6 +932,23 @@ impl QLog {
         committed_end: u64,
         with_hashes: bool,
     ) -> io::Result<Vec<CommittedFrame>> {
+        let plan = self.committed_frames_plan(pid, from_base, committed_end, with_hashes)?;
+        Ok(committed_of(plan.finish()?))
+    }
+
+    /// The candidate walk of [`QLog::committed_frames`], as a [`HashPlan`]: the
+    /// index work + cache probes under the caller's read guard, the misses'
+    /// `pread`s in [`HashPlan::finish`] (possibly after the guard is dropped —
+    /// [`set::QLogReader::committed_frames`]). The whole-window read must not
+    /// flush the band working set, so its misses are cached only while there is
+    /// room (P3.3).
+    fn committed_frames_plan(
+        &self,
+        pid: u64,
+        from_base: u64,
+        committed_end: u64,
+        with_hashes: bool,
+    ) -> io::Result<HashPlan> {
         // (base_offset) -> (file_id, record), first source wins; the active file
         // is inserted first so a replayed duplicate resolves to it.
         let mut cand: BTreeMap<u64, (u64, index::Record)> = BTreeMap::new();
@@ -900,47 +966,131 @@ impl QLog {
                 }
             }
         }
-        let mut out: Vec<CommittedFrame> = Vec::with_capacity(cand.len());
-        for (_, (file_id, rec)) in cand {
-            let hashes = if with_hashes {
-                self.read_record_hashes(file_id, &rec)?
-            } else {
-                Vec::new()
-            };
-            out.push(CommittedFrame {
-                base_offset: rec.base_offset,
-                end: rec.end,
-                created_at_us: rec.created_at_us,
-                hashes,
+        self.hash_plan(cand.into_values(), with_hashes, CachePut::IfRoom)
+    }
+
+    /// PLAN_RAFT_DRAIN_FIX P3.1: the committed records of `pid` that overlap ANY
+    /// of `bands` — inclusive offset bands `(lo, hi)`, the `(min_base, max_off)`
+    /// of each dedup-front generation whose bloom said "maybe" — with their hash
+    /// blocks, ascending by base offset. A record `[base, end)` overlaps `(lo, hi)`
+    /// iff `base <= hi && end > lo`.
+    ///
+    /// Bounded to the committed tail (`end <= committed_end`) exactly as
+    /// [`QLog::committed_frames`] — the exactly-once invariant: an uncommitted
+    /// record is the overlay's. Duplicate `(pid, base_offset)` resolve active
+    /// first, first source wins, as there. Hashes come from the cross-cycle cache
+    /// (P3.3) or a hashes-only `pread` through a cached fd (P3.2), never the
+    /// payload; misses are cached with clear-when-full eviction (this is the hot
+    /// path the cache exists for).
+    pub fn committed_hashes_in_bands(
+        &self,
+        pid: u64,
+        bands: &[(u64, u64)],
+        committed_end: u64,
+    ) -> io::Result<Vec<BandFrame>> {
+        self.band_plan(pid, bands, committed_end)?.finish()
+    }
+
+    /// The candidate walk of [`QLog::committed_hashes_in_bands`] as a
+    /// [`HashPlan`]: O(log n + band) per file via the index, never a partition's
+    /// whole run.
+    fn band_plan(
+        &self,
+        pid: u64,
+        bands: &[(u64, u64)],
+        committed_end: u64,
+    ) -> io::Result<HashPlan> {
+        let mut cand: BTreeMap<u64, (u64, index::Record)> = BTreeMap::new();
+        if committed_end > 0 {
+            let active_id = self.active_index.file_id();
+            for (lo, hi) in merge_bands(bands) {
+                // A committed record ends at or below `committed_end`, so it
+                // starts below it: nothing above `committed_end - 1` can qualify.
+                if lo >= committed_end {
+                    continue;
+                }
+                let hi = hi.min(committed_end - 1);
+                if let Some(active_id) = active_id {
+                    for r in self.active_index.records_overlapping(pid, lo, hi) {
+                        if r.end <= committed_end {
+                            cand.entry(r.base_offset).or_insert((active_id, r));
+                        }
+                    }
+                }
+                for (file_id, view) in &self.sealed {
+                    for r in view.records_overlapping(pid, lo, hi) {
+                        if r.end <= committed_end {
+                            cand.entry(r.base_offset).or_insert((*file_id, r));
+                        }
+                    }
+                }
+            }
+        }
+        self.hash_plan(cand.into_values(), true, CachePut::Evict)
+    }
+
+    /// Resolve the hash block of each candidate: a cache hit (one lock for the
+    /// whole batch), or a miss carrying the fd its `pread` will use (resolved
+    /// HERE, under the caller's read guard, so a file retention unlinks later is
+    /// still readable). `with_hashes == false` is a shape-only plan.
+    fn hash_plan(
+        &self,
+        cand: impl IntoIterator<Item = (u64, index::Record)>,
+        with_hashes: bool,
+        put: CachePut,
+    ) -> io::Result<HashPlan> {
+        let cand: Vec<(u64, index::Record)> = cand.into_iter().collect();
+        let mut items: Vec<(index::Record, Slot)> = Vec::with_capacity(cand.len());
+        if !with_hashes {
+            items.extend(cand.into_iter().map(|(_, r)| (r, Slot::Shape)));
+            return Ok(HashPlan {
+                cache: self.cache.clone(),
+                put,
+                items,
             });
         }
-        Ok(out)
+        let mut misses: Vec<usize> = Vec::new();
+        {
+            let hc = self.cache.hashes.lock().expect("qlog hash cache poisoned");
+            for (file_id, r) in &cand {
+                let slot = if r.count == 0 {
+                    Slot::Shape
+                } else if let Some(h) = hc.map.get(&(r.pid, r.base_offset)) {
+                    Slot::Hit(h.clone())
+                } else {
+                    misses.push(items.len());
+                    Slot::Miss(*file_id, None)
+                };
+                items.push((*r, slot));
+            }
+        }
+        // One fd per distinct file, from the fd cache (or opened for this read
+        // alone when the process-wide fd cap is reached).
+        let mut fds: HashMap<u64, Arc<File>> = HashMap::new();
+        for i in misses {
+            if let Slot::Miss(file_id, fd) = &mut items[i].1 {
+                let f = match fds.get(file_id) {
+                    Some(f) => f.clone(),
+                    None => {
+                        let f = self.cache.file(*file_id)?;
+                        fds.insert(*file_id, f.clone());
+                        f
+                    }
+                };
+                *fd = Some(f);
+            }
+        }
+        Ok(HashPlan {
+            cache: self.cache.clone(),
+            put,
+            items,
+        })
     }
 
     /// The whole record at a located position, with the `len`-match guard.
     fn read_located(&self, loc: &Located) -> io::Result<OwnedRecord> {
-        if (loc.len as usize) < record::FIXED_PREFIX {
-            return Err(corrupt(
-                &file_path(&self.dir, loc.file_id),
-                "located len is shorter than a record header",
-            ));
-        }
-        let path = file_path(&self.dir, loc.file_id);
-        let f = File::open(&path)?;
-        let mut buf = vec![0u8; loc.len as usize];
-        f.read_exact_at(&mut buf, loc.offset)?;
-        let rr = record::decode(&buf).map_err(io::Error::from)?;
-        if rr.header.record_len() != loc.len as usize {
-            return Err(corrupt(
-                &path,
-                &format!(
-                    "located len {} != record len {}",
-                    loc.len,
-                    rr.header.record_len()
-                ),
-            ));
-        }
-        Ok(owned_from(&rr))
+        let f = self.cache.file(loc.file_id)?; // P3.2: cached fd, no open() per read
+        read_located_in(&f, &self.dir, loc)
     }
 
     /// Walk partition `pid`'s records in offset order from `from_offset`,
@@ -999,10 +1149,17 @@ impl QLog {
         }
         for id in &victims {
             self.sealed.remove(id);
+            // P3.2: drop the cached read fd (an in-flight read keeps its own
+            // `Arc<File>`, so the unlinked inode stays readable until it ends).
+            self.cache.forget_file(*id);
             remove_if_present(&file_path(&self.dir, *id))?;
             remove_if_present(&qidx_path(&self.dir, *id))?;
             remove_if_present(&qidx_tmp_path(&self.dir, *id))?;
         }
+        // P3.3: the dropped records' hash blocks are unreachable (no index entry
+        // names them); retention is rare, so free them all rather than track
+        // which file each block came from.
+        self.cache.clear_hashes();
         self.files.retain(|m| !victims.contains(&m.id));
         sync_dir(&self.dir)?;
         tracing::debug!(
@@ -1060,6 +1217,380 @@ fn owned_from(rr: &record::RecordRef<'_>) -> OwnedRecord {
         }),
         hashes: rr.hashes.to_vec(),
         payload: rr.payload.to_vec(),
+    }
+}
+
+/// Band frames in the [`CommittedFrame`] shape (hash blocks copied out of the
+/// cache's `Arc`; a shape-only frame's block is empty and copies nothing).
+fn committed_of(frames: Vec<BandFrame>) -> Vec<CommittedFrame> {
+    frames
+        .into_iter()
+        .map(|f| CommittedFrame {
+            base_offset: f.base_offset,
+            end: f.end,
+            created_at_us: f.created_at_us,
+            hashes: f.hashes.to_vec(),
+        })
+        .collect()
+}
+
+/// Sort and coalesce overlapping / adjacent inclusive bands (the front's
+/// generation bands overlap where a generation boundary fell mid-append), so the
+/// overlap walk visits each record once per coalesced band. Empty bands
+/// (`lo > hi`, a generation with no insert) are dropped.
+fn merge_bands(bands: &[(u64, u64)]) -> Vec<(u64, u64)> {
+    let mut v: Vec<(u64, u64)> = bands.iter().copied().filter(|(lo, hi)| lo <= hi).collect();
+    v.sort_unstable();
+    let mut out: Vec<(u64, u64)> = Vec::with_capacity(v.len());
+    for (lo, hi) in v {
+        match out.last_mut() {
+            Some(last) if lo <= last.1.saturating_add(1) => last.1 = last.1.max(hi),
+            _ => out.push((lo, hi)),
+        }
+    }
+    out
+}
+
+/// The whole record at a located position in an open file, checksum-verified,
+/// with the `len`-match guard (a position one byte too long would
+/// checksum-verify and leak the head of the next record — the raft class's
+/// `LenMismatch` guard).
+fn read_located_in(f: &File, dir: &Path, loc: &Located) -> io::Result<OwnedRecord> {
+    if (loc.len as usize) < record::FIXED_PREFIX {
+        return Err(corrupt(
+            &file_path(dir, loc.file_id),
+            "located len is shorter than a record header",
+        ));
+    }
+    let mut buf = vec![0u8; loc.len as usize];
+    f.read_exact_at(&mut buf, loc.offset)?;
+    let rr = record::decode(&buf).map_err(io::Error::from)?;
+    if rr.header.record_len() != loc.len as usize {
+        return Err(corrupt(
+            &file_path(dir, loc.file_id),
+            &format!(
+                "located len {} != record len {}",
+                loc.len,
+                rr.header.record_len()
+            ),
+        ));
+    }
+    Ok(owned_from(&rr))
+}
+
+/// PLAN_RAFT_DRAIN_FIX P3.2: the hash block of one located record from ONLY its
+/// header + hash block — one `pread` of [`record::hashes_prefix_len`] bytes, the
+/// payload is never read. The record checksum covers the payload and so cannot
+/// be checked here; instead the header is cross-checked against the index entry
+/// that located it (`len`, `pid`, `base_offset`, `count`, `created_at`) — the
+/// position guard the full read's `len`-match gives. The records this serves
+/// are committed: fsync'd, and either scanned + verified at open or written by
+/// this process. A txn-envelope record (Phase B) falls back to the full,
+/// checksum-verified read.
+fn pread_hashes(
+    f: &File,
+    dir: &Path,
+    file_id: u64,
+    rec: &index::Record,
+    scratch: &mut Vec<u8>,
+) -> io::Result<Arc<[u8]>> {
+    let want = record::hashes_prefix_len(rec.count);
+    if (rec.len as usize) < want {
+        return Err(corrupt(
+            &file_path(dir, file_id),
+            "located len is shorter than its header + hashes",
+        ));
+    }
+    scratch.clear();
+    scratch.resize(want, 0);
+    f.read_exact_at(&mut scratch[..], rec.offset)?;
+    match record::hashes_from_prefix(&scratch[..]).map_err(io::Error::from)? {
+        Some((h, hashes)) => {
+            if h.record_len() != rec.len as usize
+                || h.pid != rec.pid
+                || h.base_offset != rec.base_offset
+                || h.count != rec.count
+                || h.created_at_us != rec.created_at_us
+            {
+                return Err(corrupt(
+                    &file_path(dir, file_id),
+                    &format!(
+                        "record header at byte {} disagrees with its index entry",
+                        rec.offset
+                    ),
+                ));
+            }
+            Ok(Arc::from(hashes))
+        }
+        None => {
+            let loc = Located {
+                file_id,
+                offset: rec.offset,
+                len: rec.len,
+                count: rec.count,
+            };
+            Ok(Arc::from(read_located_in(f, dir, &loc)?.hashes))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Read caches (PLAN_RAFT_DRAIN_FIX P3.2 / P3.3)
+// ---------------------------------------------------------------------------
+
+/// Default process-wide cap on cached read fds (`QUEEN_RAFT_QLOG_FD_CACHE`; 0
+/// disables the fd cache).
+const FD_CACHE_DEFAULT: usize = 256;
+
+/// Default process-wide budget for cached hash blocks, in MiB
+/// (`QUEEN_RAFT_QLOG_HASH_CACHE_MB`; 0 disables the hash cache).
+const HASH_CACHE_DEFAULT_MB: usize = 64;
+
+/// What one cached hash block is charged beyond its bytes (key, fat pointer,
+/// table slot, `Arc` header) — rough, so the budget tracks RAM.
+const HASH_CACHE_ENTRY_OVERHEAD: usize = 64;
+
+/// Read fds cached across every queue log.
+static FDS_CACHED: AtomicUsize = AtomicUsize::new(0);
+
+/// Hash-block bytes (with overhead) cached across every queue log.
+static HASH_BYTES_CACHED: AtomicUsize = AtomicUsize::new(0);
+
+/// Read-side knobs: they bound fds and RAM, never a byte on disk (I2 is the
+/// writer's, and the writer still reads no environment). Read once.
+#[allow(clippy::disallowed_methods)]
+fn env_usize(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+}
+
+fn fd_cache_cap() -> usize {
+    static V: OnceLock<usize> = OnceLock::new();
+    *V.get_or_init(|| env_usize("QUEEN_RAFT_QLOG_FD_CACHE").unwrap_or(FD_CACHE_DEFAULT))
+}
+
+fn hash_cache_cap() -> usize {
+    static V: OnceLock<usize> = OnceLock::new();
+    *V.get_or_init(|| {
+        env_usize("QUEEN_RAFT_QLOG_HASH_CACHE_MB")
+            .unwrap_or(HASH_CACHE_DEFAULT_MB)
+            .saturating_mul(1 << 20)
+    })
+}
+
+/// How a read may spend the hash-cache budget (P3.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CachePut {
+    /// Insert; when the budget is full, clear THIS log's blocks first (crude
+    /// clear-when-full). The band read — the hot path the cache is for.
+    Evict,
+    /// Insert only while there is room: the whole-window and claim reads, which
+    /// must not flush the band working set.
+    IfRoom,
+}
+
+/// PLAN_RAFT_DRAIN_FIX P3.2/P3.3: the read-side state one queue log shares with
+/// its readers — open read fds by file id, and the hash blocks of COMMITTED
+/// records by `(pid, base_offset)`. A committed record is immutable (a crash
+/// replay re-appends identical bytes), so a cached block never goes stale.
+/// Behind an `Arc` so a read can finish its `pread`s after the queue's `RwLock`
+/// read guard is dropped. Both caches are bounded PROCESS-WIDE (fds by count,
+/// hash blocks by bytes), so N queues never multiply the budget; a log that
+/// finds the hash budget full clears its own blocks (crude: a cold log's residue
+/// is reclaimed only on its own next insert, a retention unlink, or its drop).
+struct ReadCache {
+    dir: PathBuf,
+    fds: Mutex<HashMap<u64, Arc<File>>>,
+    hashes: Mutex<HashCache>,
+}
+
+#[derive(Default)]
+struct HashCache {
+    map: HashMap<(u64, u64), Arc<[u8]>>,
+    /// Charged bytes (blocks + per-entry overhead), mirrored in
+    /// [`HASH_BYTES_CACHED`].
+    bytes: usize,
+}
+
+impl ReadCache {
+    fn new(dir: PathBuf) -> ReadCache {
+        ReadCache {
+            dir,
+            fds: Mutex::new(HashMap::new()),
+            hashes: Mutex::new(HashCache::default()),
+        }
+    }
+
+    /// A read fd for `file_id`: cached, or opened and cached while the
+    /// process-wide cap allows. At the cap, this log's oldest cached file yields
+    /// its slot to a newer one; otherwise the fd serves the caller alone. The
+    /// open runs outside the lock (a concurrent reader may win the insert).
+    fn file(&self, file_id: u64) -> io::Result<Arc<File>> {
+        if let Some(f) = self
+            .fds
+            .lock()
+            .expect("qlog fd cache poisoned")
+            .get(&file_id)
+        {
+            return Ok(f.clone());
+        }
+        let f = Arc::new(File::open(file_path(&self.dir, file_id))?);
+        let mut fds = self.fds.lock().expect("qlog fd cache poisoned");
+        if let Some(won) = fds.get(&file_id) {
+            return Ok(won.clone());
+        }
+        if FDS_CACHED.load(Ordering::Relaxed) >= fd_cache_cap() {
+            match fds.keys().min().copied() {
+                // The slot passes to `file_id`: the process-wide count is unchanged.
+                Some(oldest) if oldest < file_id => {
+                    fds.remove(&oldest);
+                }
+                _ => return Ok(f),
+            }
+        } else {
+            FDS_CACHED.fetch_add(1, Ordering::Relaxed);
+        }
+        fds.insert(file_id, f.clone());
+        Ok(f)
+    }
+
+    /// Forget the fd of a file retention unlinked.
+    fn forget_file(&self, file_id: u64) {
+        if self
+            .fds
+            .lock()
+            .expect("qlog fd cache poisoned")
+            .remove(&file_id)
+            .is_some()
+        {
+            FDS_CACHED.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    fn hash_get(&self, pid: u64, base_offset: u64) -> Option<Arc<[u8]>> {
+        self.hashes
+            .lock()
+            .expect("qlog hash cache poisoned")
+            .map
+            .get(&(pid, base_offset))
+            .cloned()
+    }
+
+    /// Cache freshly read COMMITTED hash blocks `(pid, base_offset, block)`, one
+    /// lock for the batch, spending the budget as `put` allows.
+    fn hash_put_many(&self, blocks: &[(u64, u64, Arc<[u8]>)], put: CachePut) {
+        if blocks.is_empty() {
+            return;
+        }
+        let cap = hash_cache_cap();
+        // Declared before the guard so a cleared cache is freed after the unlock.
+        let mut evicted: Vec<HashCache> = Vec::new();
+        let mut hc = self.hashes.lock().expect("qlog hash cache poisoned");
+        for (pid, base, h) in blocks {
+            let add = h.len() + HASH_CACHE_ENTRY_OVERHEAD;
+            if add > cap || hc.map.contains_key(&(*pid, *base)) {
+                continue;
+            }
+            if HASH_BYTES_CACHED.load(Ordering::Relaxed) + add > cap {
+                if put == CachePut::IfRoom || hc.bytes == 0 {
+                    continue;
+                }
+                // Clear-when-full: a committed block re-reads cheaply (hashes only).
+                let old = std::mem::take(&mut *hc);
+                HASH_BYTES_CACHED.fetch_sub(old.bytes, Ordering::Relaxed);
+                evicted.push(old);
+                if HASH_BYTES_CACHED.load(Ordering::Relaxed) + add > cap {
+                    continue; // the budget is held by other logs
+                }
+            }
+            hc.map.insert((*pid, *base), h.clone());
+            hc.bytes += add;
+            HASH_BYTES_CACHED.fetch_add(add, Ordering::Relaxed);
+        }
+        drop(hc);
+        drop(evicted);
+    }
+
+    /// Free every cached hash block of this log (retention).
+    fn clear_hashes(&self) {
+        let old = std::mem::take(&mut *self.hashes.lock().expect("qlog hash cache poisoned"));
+        HASH_BYTES_CACHED.fetch_sub(old.bytes, Ordering::Relaxed);
+    }
+
+    /// Hash blocks this log holds (tests).
+    #[cfg(test)]
+    fn cached_blocks(&self) -> usize {
+        self.hashes
+            .lock()
+            .expect("qlog hash cache poisoned")
+            .map
+            .len()
+    }
+}
+
+impl Drop for ReadCache {
+    fn drop(&mut self) {
+        let fds = self.fds.get_mut().unwrap_or_else(|p| p.into_inner()).len();
+        FDS_CACHED.fetch_sub(fds, Ordering::Relaxed);
+        let bytes = self
+            .hashes
+            .get_mut()
+            .unwrap_or_else(|p| p.into_inner())
+            .bytes;
+        HASH_BYTES_CACHED.fetch_sub(bytes, Ordering::Relaxed);
+    }
+}
+
+/// One candidate's hash block, as [`QLog::hash_plan`] resolved it.
+enum Slot {
+    /// No block wanted (a shape-only read) or none exists (`count == 0`).
+    Shape,
+    /// Served from the cache (P3.3).
+    Hit(Arc<[u8]>),
+    /// To `pread` from file `.0` through the fd resolved under the read guard.
+    Miss(u64, Option<Arc<File>>),
+}
+
+/// PLAN_RAFT_DRAIN_FIX P3: a committed-hashes read split in two. The PLAN (the
+/// index walk, the cache probes, an fd per miss) is built under the queue's read
+/// guard; [`HashPlan::finish`] runs the misses' hashes-only `pread`s, which may
+/// happen AFTER the guard is dropped — the records are committed (immutable) and
+/// each miss holds its own fd — so a cold read never holds the applier's append
+/// behind its I/O.
+struct HashPlan {
+    cache: Arc<ReadCache>,
+    put: CachePut,
+    /// Ascending by base offset (the candidate map's order).
+    items: Vec<(index::Record, Slot)>,
+}
+
+impl HashPlan {
+    fn finish(self) -> io::Result<Vec<BandFrame>> {
+        let empty: Arc<[u8]> = Arc::from(&[][..]);
+        let mut scratch: Vec<u8> = Vec::new();
+        let mut fresh: Vec<(u64, u64, Arc<[u8]>)> = Vec::new();
+        let mut out: Vec<BandFrame> = Vec::with_capacity(self.items.len());
+        for (rec, slot) in self.items {
+            let hashes = match slot {
+                Slot::Shape => empty.clone(),
+                Slot::Hit(h) => h,
+                Slot::Miss(file_id, fd) => {
+                    let f = fd.expect("hash_plan resolves every miss's fd");
+                    let h = pread_hashes(&f, &self.cache.dir, file_id, &rec, &mut scratch)?;
+                    fresh.push((rec.pid, rec.base_offset, h.clone()));
+                    h
+                }
+            };
+            out.push(BandFrame {
+                base_offset: rec.base_offset,
+                end: rec.end,
+                created_at_us: rec.created_at_us,
+                hashes,
+            });
+        }
+        self.cache.hash_put_many(&fresh, self.put);
+        Ok(out)
     }
 }
 

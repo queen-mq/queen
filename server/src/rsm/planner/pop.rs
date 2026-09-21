@@ -159,11 +159,32 @@ pub fn wildcard_pop_provably_empty<R: TypedReads + ?Sized>(
     Ok(boundary || scanned < cap)
 }
 
+/// PLAN_RAFT_DRAIN_FIX P1.2: the time an answer needs after the plan (propose,
+/// commit, apply, reply). A pop whose waiter's deadline falls inside it is
+/// answered EMPTY instead of claiming: a claim nobody receives is a lease
+/// nobody acks, and it freezes the partition for the whole lease
+/// (`QUEEN_RAFT_POP_REPLY_MARGIN_MS`, default 50 ms).
+static POP_REPLY_MARGIN_US: std::sync::LazyLock<i64> = std::sync::LazyLock::new(|| {
+    std::env::var("QUEEN_RAFT_POP_REPLY_MARGIN_MS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(50)
+        .saturating_mul(1000)
+});
+
+/// Whether nobody can receive this pop's answer any more (P1.2).
+fn pop_expired(cmd: &PopCommand, now_us: i64) -> bool {
+    cmd.deadline_us > 0 && now_us.saturating_add(*POP_REPLY_MARGIN_US) > cmd.deadline_us
+}
+
 impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     /// A pinned pop of one named partition (`log_pop_specific_v1`). An unknown
     /// partition answers EMPTY and is never provisioned — only a push
     /// materialises one.
     pub fn plan_pop_pinned(&self, ov: &mut Overlay, cmd: &PopCommand) -> Planned {
+        if pop_expired(cmd, self.now_us) {
+            return Ok(Plan::Empty(Outcome::Pop(PopOutcome::default())));
+        }
         let partition = cmd
             .partition
             .as_deref()
@@ -249,6 +270,9 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     /// `max_parts` partitions from the candidate ring in FIFO order, sharing one
     /// budget.
     pub fn plan_pop_wildcard(&self, ov: &mut Overlay, cmd: &PopCommand) -> Planned {
+        if pop_expired(cmd, self.now_us) {
+            return Ok(Plan::Empty(Outcome::Pop(PopOutcome::default())));
+        }
         let cfg = match self.queue_cfg(ov, &cmd.tenant, &cmd.queue)? {
             Some(c) => c,
             None => {
@@ -285,6 +309,9 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     /// (`log_pop_discover_*_v1`): the wildcard walk over each matching queue,
     /// sharing the pop's budget and `max_parts` across all of them.
     pub fn plan_pop_discover(&self, ov: &mut Overlay, cmd: &PopCommand) -> Planned {
+        if pop_expired(cmd, self.now_us) {
+            return Ok(Plan::Empty(Outcome::Pop(PopOutcome::default())));
+        }
         // Resolve the queues of the tenant whose namespace/task match. The
         // group registers per (queue, group), like the SQL's discovery group.
         let mut queues: Vec<(String, QueueConfig)> = Vec::new();
@@ -373,6 +400,12 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             group_row.as_ref(),
         )?;
 
+        {
+            use crate::rsm::dbgctr::{inc, C};
+            inc(&C.pop_over_queue, 1);
+            inc(&C.pop_cands, candidates.len() as u64);
+        }
+        let n_cands = candidates.len();
         let mut remaining = cmd.budget.max(1);
         let max_parts = if cmd.max_parts <= 0 {
             i32::MAX
@@ -398,6 +431,18 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 remaining -= took;
                 claimed += 1;
                 claims.push(claim);
+            }
+        }
+        {
+            use crate::rsm::dbgctr::{inc, C};
+            if claims.is_empty() {
+                if n_cands == 0 {
+                    inc(&C.pop_empty_nocand, 1);
+                } else {
+                    inc(&C.pop_empty_allfail, 1);
+                }
+            } else {
+                inc(&C.pop_claims, claims.len() as u64);
             }
         }
         self.finish_pop(ov, effects, claims)
@@ -649,8 +694,10 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         pid: Pid,
         budget: i32,
     ) -> Result<Option<PopClaim>, Refusal> {
+        use crate::rsm::dbgctr::{inc, C};
         let budget = budget.max(1);
         let Some(part) = self.partition(ov, pid)? else {
+            inc(&C.claim_none_nopart, 1);
             return Ok(None);
         };
         let now = self.now_us;
@@ -669,6 +716,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             let win = cfg.window_buffer as i64 * SEC_US;
             if let Some(newest) = self.newest_seg(ov, &part)? {
                 if newest.created_at_us > now - win {
+                    inc(&C.claim_none_window, 1);
                     return Ok(None);
                 }
             }
@@ -681,6 +729,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             Some(c) => {
                 if lease_live(&c, now) {
                     // Held by a live lease (this worker or another): skip.
+                    inc(&C.claim_none_leased, 1);
                     return Ok(None);
                 }
                 c
@@ -788,6 +837,13 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             // the moving tail).
             let sealed = last_offset > cur.committed && !has_segments;
             if sealed {
+                inc(&C.claim_none_sealed, 1);
+            } else if segs.is_empty() {
+                inc(&C.claim_none_taken0_nosegs, 1);
+            } else {
+                inc(&C.claim_none_taken0_segs, 1);
+            }
+            if sealed {
                 cur.committed = last_offset;
                 let e = Effect::CursorSet {
                     pid,
@@ -871,6 +927,8 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             group: cmd.group.clone(),
             row: cur,
         });
+        inc(&C.claim_ok, 1);
+        inc(&C.claim_ok_msgs, taken.max(0) as u64);
 
         Ok(Some(PopClaim {
             pid,

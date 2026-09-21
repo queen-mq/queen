@@ -848,6 +848,7 @@ pub fn render_prometheus(out: &mut String) {
             "queen_raft_apply_stats{{field=\"{field}\"}} {v}\n"
         ));
     }
+    crate::rsm::dbgctr::render(out);
 }
 
 fn render_summary(

@@ -221,12 +221,12 @@ fn codec_rejects_unknown_txn_kind() {
     let mut buf = Vec::new();
     record::encode_into(&mut buf, 1, 1, 0, 1, 0, None, &hashes(1, 1), &payload(1, 8))
         .expect("encode");
-    buf[48] = 2; // an unknown txn_kind
+    buf[48] = 0x7F; // an unknown txn_kind (2 is REC_ENTRY since 8c9e0c4e)
     let sum = xxhash_rust::xxh3::xxh3_64(&buf[record::UNCHECKED_PREFIX..]);
     buf[4..12].copy_from_slice(&sum.to_le_bytes());
     assert!(matches!(
         record::decode(&buf),
-        Err(record::RecordError::BadTxnKind(2))
+        Err(record::RecordError::BadTxnKind(0x7F))
     ));
 }
 

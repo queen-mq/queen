@@ -390,6 +390,47 @@ pub fn verify(frame: &[u8], header: &Header) -> Result<(), RecordError> {
     Ok(())
 }
 
+/// PLAN_RAFT_DRAIN_FIX P3.2: how many leading bytes hold the header AND the hash
+/// block of a record with no txn envelope — the only bytes a dedup read needs.
+/// `hashes` sits right after the fixed prefix, before the payload.
+pub fn hashes_prefix_len(count: u32) -> usize {
+    FIXED_PREFIX + count as usize * HASH_LEN
+}
+
+/// PLAN_RAFT_DRAIN_FIX P3.2: split the hash block out of a record's leading
+/// [`hashes_prefix_len`] bytes, WITHOUT the payload. `Ok(None)` when the record
+/// carries a txn envelope (its hash block sits after a variable-length
+/// participant array): the caller reads and [`decode`]s the whole record.
+///
+/// The checksum covers the payload too, so it CANNOT be verified from a prefix;
+/// the caller must cross-check the header against the index record that located
+/// it (position, `len`, `pid`, `base_offset`, `count`).
+pub fn hashes_from_prefix(buf: &[u8]) -> Result<Option<(Header, &[u8])>, RecordError> {
+    let header = parse_header(buf)?;
+    match header.txn_kind {
+        // REC_ENTRY carries count 0: an empty hash block.
+        TXN_NONE | REC_ENTRY => {
+            let end = FIXED_PREFIX + header.hashes_len();
+            if end > header.record_len() {
+                return Err(RecordError::Stride {
+                    count: header.count,
+                    txn_bytes: 0,
+                    body: header.body_len,
+                });
+            }
+            if buf.len() < end {
+                return Err(RecordError::Truncated {
+                    need: end,
+                    have: buf.len(),
+                });
+            }
+            Ok(Some((header, &buf[FIXED_PREFIX..end])))
+        }
+        TXN_CROSS_QUEUE => Ok(None),
+        other => Err(RecordError::BadTxnKind(other)),
+    }
+}
+
 /// Parse, verify and split one record. `buf` must start at the record; anything
 /// past it is ignored. No caller ever sees bytes whose checksum has not
 /// matched, and the transaction envelope, hash list and payload are split only

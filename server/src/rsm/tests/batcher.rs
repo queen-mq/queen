@@ -100,6 +100,7 @@ fn pop_pinned(id: u64, queue: &str, partition: &str, group: &str, worker: &str) 
         namespace: String::new(),
         task: String::new(),
         create_cfg: Some(qcfg()),
+        deadline_us: 0,
     })
 }
 

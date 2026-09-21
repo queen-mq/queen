@@ -350,6 +350,30 @@ impl View {
         (lo..hi).map(|i| self.record(i)).collect()
     }
 
+    /// PLAN_RAFT_DRAIN_FIX P3.1: the records of `pid` overlapping the inclusive
+    /// offset band `[lo, hi]` (`base <= hi && end > lo`), ascending. Binary search
+    /// to the record at or below `lo` (it may straddle it), then a forward walk
+    /// that stops past `hi` — O(log n + band), never the partition's whole run.
+    pub fn records_overlapping(&self, pid: u64, lo: u64, hi: u64) -> Vec<Record> {
+        let (s, e) = self.span_of(pid);
+        let mut out = Vec::new();
+        if s == e || lo > hi {
+            return out;
+        }
+        let at = self.partition_point(|r| (r.pid, r.base_offset) <= (pid, lo));
+        let start = if at > s { at - 1 } else { s };
+        for i in start..e {
+            let r = self.record(i);
+            if r.base_offset > hi {
+                break;
+            }
+            if r.end > lo {
+                out.push(r);
+            }
+        }
+        out
+    }
+
     /// The half-open range of records belonging to `pid`.
     fn span_of(&self, pid: u64) -> (usize, usize) {
         let lo = self.partition_point(|r| r.pid < pid);
@@ -475,6 +499,27 @@ impl ActiveIndex {
             .map(|(_, r)| *r)
             .filter(|r| r.end > from_offset)
             .collect()
+    }
+
+    /// PLAN_RAFT_DRAIN_FIX P3.1: the active file's records of `pid` overlapping
+    /// the inclusive band `[lo, hi]` (`base <= hi && end > lo`), ascending — the
+    /// [`View::records_overlapping`] twin over the RAM map.
+    pub fn records_overlapping(&self, pid: u64, lo: u64, hi: u64) -> Vec<Record> {
+        let mut out = Vec::new();
+        if self.file_id.is_none() || lo > hi {
+            return out;
+        }
+        // The record at or below `lo` may straddle it.
+        if let Some((_, r)) = self.recs.range((pid, 0)..=(pid, lo)).next_back() {
+            if r.end > lo {
+                out.push(*r);
+            }
+        }
+        // Every later record starts in (lo, hi], so it overlaps.
+        if lo < hi {
+            out.extend(self.recs.range((pid, lo + 1)..=(pid, hi)).map(|(_, r)| *r));
+        }
+        out
     }
 
     /// Records held by the active file.

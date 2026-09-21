@@ -75,7 +75,7 @@ use tokio::sync::{mpsc, oneshot, watch, Notify};
 use tokio::time::MissedTickBehavior;
 
 use crate::rsm::dedup::DedupFront;
-use crate::rsm::effect::Effect;
+use crate::rsm::effect::{Effect, Pid};
 use crate::rsm::entry::{encode_entry, Entry, Outcome, RequestId};
 use crate::rsm::planner::Refusal;
 use crate::rsm::planner::{
@@ -461,9 +461,16 @@ struct InFlightEntry {
 
 impl InFlightEntry {
     /// Answer every waiter from this entry's committed outcome (`Ok`).
-    fn resolve_ok(&mut self, at: AppliedAt) {
+    ///
+    /// PLAN_RAFT_DRAIN_FIX P1.3: returns the `(pid, group, worker)` of every
+    /// LEASED pop claim whose waiter is gone (timed out, disconnected). Nobody
+    /// will ack those leases; the driver releases them at once instead of
+    /// letting them freeze their partitions for the whole lease.
+    fn resolve_ok(&mut self, at: AppliedAt) -> Vec<(Pid, String, String)> {
+        let mut undelivered: Vec<crate::rsm::entry::PopOutcome> = Vec::new();
         self.resolved = Some(at);
-        for w in self.waiters.drain(..) {
+        let waiters = std::mem::take(&mut self.waiters);
+        for w in waiters {
             let (tx, msg) = match w {
                 Waiter::Command { request_id, reply } => {
                     let outcome = self
@@ -491,8 +498,49 @@ impl InFlightEntry {
                     },
                 ),
             };
-            let _ = tx.send(msg);
+            if let Err(Reply::Done {
+                outcome: Outcome::Pop(pop),
+                ..
+            }) = tx.send(msg)
+            {
+                undelivered.push(pop);
+            }
         }
+        undelivered
+            .iter()
+            .flat_map(|pop| self.leased_of(&pop.claims))
+            .collect()
+    }
+
+    /// `(pid, group, worker)` of every LEASED claim in `claims`; the group is
+    /// on the `CursorSet` this entry wrote for that claim.
+    fn leased_of(&self, claims: &[crate::rsm::entry::PopClaim]) -> Vec<(Pid, String, String)> {
+        claims
+            .iter()
+            .filter(|c| c.lease_expires_at_us.is_some())
+            .filter_map(|c| {
+                self.entry.effects.iter().find_map(|e| match e {
+                    Effect::CursorSet { pid, group, row }
+                        if *pid == c.pid && row.worker.as_deref() == Some(c.worker.as_str()) =>
+                    {
+                        Some((c.pid, group.clone(), c.worker.clone()))
+                    }
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
+    /// Every leased claim of every pop this entry carries — for an entry whose
+    /// waiters were all answered `Retry` (a propose timeout) but that applied.
+    fn leased_claims(&self) -> Vec<(Pid, String, String)> {
+        let mut out = Vec::new();
+        for c in &self.entry.commands {
+            if let Outcome::Pop(pop) = &c.outcome {
+                out.extend(self.leased_of(&pop.claims));
+            }
+        }
+        out
     }
 
     /// Fail every waiter (`Retry`), dropping this entry's overlay contribution.
@@ -597,6 +645,25 @@ fn plan_cycle_blocking<S: Store>(
     wall_us: i64,
     expire_window_us: Option<i64>,
 ) -> crate::rsm::store::Result<PlanOutput> {
+    // P4: the rings this batch's wildcard pops walk — the only part of
+    // `Derived` the planner reads. A discovery pop spans queues: every ring.
+    let ring_keys: Option<Vec<crate::rsm::state::RingKey>> =
+        if batch.iter().any(|c| matches!(c, Command::PopDiscover(_))) {
+            None
+        } else {
+            let mut keys: Vec<crate::rsm::state::RingKey> = batch
+                .iter()
+                .filter_map(|c| match c {
+                    Command::PopWildcard(p) => {
+                        Some((p.tenant.clone(), p.queue.clone(), p.group.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            keys.sort_unstable();
+            keys.dedup();
+            Some(keys)
+        };
     store.read(|r| {
         let store_applied = r.applied_index()?;
         let base_pid = r.next_pid()?;
@@ -606,7 +673,8 @@ fn plan_cycle_blocking<S: Store>(
         // base the overlay lifts above.
         let empty = Derived::default();
         let base_now = Committed::new(r, &empty).plan_now(wall_us)?;
-        let derived = Derived::rebuild(r, base_now)?;
+        let derived = Derived::rebuild_rings(r, base_now, ring_keys.as_deref())?;
+        crate::rsm::dbgctr::maybe_dump(r, base_now);
         let committed = Committed::new(r, &derived);
 
         // Fold every in-flight entry the committed read does not yet reflect
@@ -1514,7 +1582,8 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                             .propose_roundtrip
                             .record_dur(at0.elapsed());
                     }
-                    e.resolve_ok(at);
+                    let orphans = e.resolve_ok(at);
+                    self.release_orphans(orphans);
                 }
             }
             Err(ProposeError::Timeout) => {
@@ -1597,14 +1666,18 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                 Role::Leader { term } => term,
                 _ => 0,
             };
+            let mut orphans: Vec<(Pid, String, String)> = Vec::new();
             for e in self.inflight.iter_mut() {
                 if e.timed_out && e.resolved.is_none() && e.index <= applied {
                     e.resolved = Some(AppliedAt {
                         index: e.index,
                         term,
                     });
+                    // P1.3: answered `Retry`, yet applied — its leases are orphans.
+                    orphans.extend(e.leased_claims());
                 }
             }
+            self.release_orphans(orphans);
             self.holding_until = None;
         }
     }
@@ -1635,6 +1708,7 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             Role::Leader { term } => term,
             _ => 0,
         };
+        let mut orphans: Vec<(Pid, String, String)> = Vec::new();
         for e in self.inflight.iter_mut() {
             // In-flight entries are pushed in index order and never reordered,
             // so the first one above the applied index bounds the rest.
@@ -1651,18 +1725,22 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
                     index: e.index,
                     term,
                 });
+                // P1.3: those waiters got `Retry`, yet the entry applied — every
+                // lease it granted is an orphan.
+                orphans.extend(e.leased_claims());
             } else {
                 if let Some(at0) = e.proposed_at {
                     crate::rsm::timing::metrics()
                         .propose_roundtrip
                         .record_dur(at0.elapsed());
                 }
-                e.resolve_ok(AppliedAt {
+                orphans.extend(e.resolve_ok(AppliedAt {
                     index: e.index,
                     term,
-                });
+                }));
             }
         }
+        self.release_orphans(orphans);
         // Release a pipeline hold whose held entries have now applied (mirrors
         // `check_hold`, so a timeout followed by an applied-index wake still
         // resumes planning).
@@ -1670,6 +1748,26 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
             if applied >= until {
                 self.holding_until = None;
             }
+        }
+    }
+
+    /// PLAN_RAFT_DRAIN_FIX P1.3: release every orphaned lease through the
+    /// ordinary planner path — a `Nack` (lease released, cursor unmoved, no
+    /// retry charged), queued at the FRONT so the partition is claimable again
+    /// within one cycle instead of after the whole lease. Its own answer goes
+    /// nowhere (an `Ack` outcome, so it can never orphan anything itself).
+    fn release_orphans(&mut self, orphans: Vec<(Pid, String, String)>) {
+        for (pid, group, worker) in orphans {
+            crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.orphan_released, 1);
+            let (sub, _rx) = Submission::new(Command::Nack(NackCommand {
+                request_id: crate::util::uuidv7_bytes(),
+                pid,
+                tenant: String::new(),
+                queue: String::new(),
+                group,
+                worker,
+            }));
+            self.queue.push_front(sub);
         }
     }
 

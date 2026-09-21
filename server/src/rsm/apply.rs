@@ -528,7 +528,7 @@ impl Default for ApplyConfig {
             // change, not a mid-round unilateral one; the knob makes it a
             // one-line switch when the package lands.
             batch_counters: true,
-            pending_transitions: false,
+            pending_transitions: true, // PLAN_RAFT_DRAIN_FIX P2.1: ON by default
             // Phase A1 shadow: off by default, so an unset knob is byte-for-byte
             // today's behaviour and no `qlog/` directory is ever created.
             qlog: false,
@@ -1406,11 +1406,11 @@ impl<'s, S: Store> Applier<'s, S> {
         // bytes of a pop's payload are already in this node's files; a reader
         // that needs the ROWS waits for the next store commit (≤ 4 ms, §11.3).
         self.notify.applied(c.index, c.term, &c.entry.commands);
-        // One wake per (tenant, queue, group) the entry touched, in key order:
-        // a batch of forty pushes to one queue is one wake per group, not
-        // forty, and the order does not depend on where in the entry they sat.
+        // One wake per EVENT (a partition made claimable for a group), in key
+        // order: the raft gates release ONE parked pop per wake (PLAN_RAFT_DRAIN_FIX
+        // P2.2), so an entry that armed sixteen partitions must wake sixteen
+        // pops, not one. The order does not depend on where in the entry they sat.
         wakes.sort_unstable();
-        wakes.dedup();
         for (t, q, g) in wakes {
             self.notify.wake(&t, &q, g.as_deref());
             self.stats.wakes += 1;
@@ -1900,7 +1900,18 @@ impl<'s, S: Store> Applier<'s, S> {
                 &keys::counter_group(&tenant, &queue, g, Counter::Pending),
                 n,
             )?;
-            wakes.push((tenant.clone(), queue.clone(), Some(g.clone())));
+            // P2.2: a frame appended under a live lease is not claimable by
+            // anyone (the transitions path floors it at the lease); the lease's
+            // own release wakes a pop, so waking one here would only burn a
+            // pipeline trip on a pop that must come back empty.
+            let leased = transitions
+                && self
+                    .derived
+                    .lease_expiry(pid, g)
+                    .is_some_and(|exp| exp > now_us);
+            if !leased {
+                wakes.push((tenant.clone(), queue.clone(), Some(g.clone())));
+            }
         }
 
         self.stats.appends += 1;
@@ -2113,8 +2124,9 @@ impl<'s, S: Store> Applier<'s, S> {
         }
 
         // A released lease is the other half of a wake (§9.5): the partition
-        // became claimable for whoever is parked on it.
-        if had_lease && !has_lease {
+        // became claimable for whoever is parked on it — only if it still holds
+        // work (P2.2: a drained partition would wake a pop into an empty trip).
+        if had_lease && !has_lease && row.committed < p.last_offset {
             wakes.push((tenant, queue, Some(group.to_string())));
         }
         Ok(())

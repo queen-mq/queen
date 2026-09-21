@@ -80,6 +80,7 @@ fn wildcard(id: u64, group: &str, worker: &str, f: impl FnOnce(&mut PopCommand))
         namespace: String::new(),
         task: String::new(),
         create_cfg: Some(qcfg()),
+        deadline_us: 0,
     };
     f(&mut c);
     Cmd::PopWildcard(c)
@@ -113,6 +114,7 @@ fn pinned(
         namespace: String::new(),
         task: String::new(),
         create_cfg: Some(qcfg()),
+        deadline_us: 0,
     };
     f(&mut c);
     Cmd::PopPinned(c)

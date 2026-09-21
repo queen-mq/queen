@@ -172,5 +172,8 @@ pub mod faults;
 /// Not replicated; gated by `QUEEN_RAFT_METRICS` (default on).
 pub mod timing;
 
+/// TEMPORARY claim-scarcity diagnostics (2026-09-21). Not for merge.
+pub mod dbgctr;
+
 #[cfg(test)]
 mod tests;

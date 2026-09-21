@@ -408,6 +408,42 @@ impl Derived {
         Ok(d)
     }
 
+    /// PLAN_RAFT_DRAIN_FIX P4: the planner reads ONLY rings from `Derived`
+    /// (never the lease index), and only the rings its wildcard pops walk. So a
+    /// plan cycle builds exactly those, each from its own `pending` prefix —
+    /// O(pending of the popped groups) instead of O(all pending + all leases)
+    /// on every cycle. `None` builds every ring (a discovery pop spans queues).
+    pub fn rebuild_rings<R: Reads + ?Sized>(
+        reads: &R,
+        now_us: i64,
+        keys: Option<&[RingKey]>,
+    ) -> Result<Derived> {
+        let mut d = Derived::default();
+        match keys {
+            None => {
+                reads.scan_pending(&[], usize::MAX, &mut |t, q, g, pid, ready_at| {
+                    d.set_pending_inner(t, q, g, pid, ready_at, now_us);
+                    d.pending_rows += 1;
+                    true
+                })?;
+            }
+            Some(keys) => {
+                for (t, q, g) in keys {
+                    let prefix = crate::rsm::store::keys::pending_prefix(t, q, g);
+                    reads.scan_pending(&prefix, usize::MAX, &mut |tt, qq, gg, pid, ready_at| {
+                        if tt != t || qq != q || gg != g {
+                            return false; // past this group's rows
+                        }
+                        d.set_pending_inner(tt, qq, gg, pid, ready_at, now_us);
+                        d.pending_rows += 1;
+                        true
+                    })?;
+                }
+            }
+        }
+        Ok(d)
+    }
+
     // ------------------------------------------------------------- mutators
     // Apply only (I1).
 

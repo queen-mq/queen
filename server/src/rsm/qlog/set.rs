@@ -64,7 +64,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use crate::rsm::qlog::{CommittedFrame, OwnedRecord, QLog, QLogOptions, RecordInput};
+use crate::rsm::qlog::{BandFrame, CommittedFrame, OwnedRecord, QLog, QLogOptions, RecordInput};
 
 /// The shared map of per-queue logs. The applier owns the [`QLogSet`] that
 /// writes them; a [`QLogReader`] clones this `Arc` and reads them. The outer
@@ -476,6 +476,11 @@ impl QLogReader {
     /// `from_base`, bounded to `committed_end` — the dedup probe / resolve / seed
     /// authority. The qlog twin of `segments::Reader::committed_dedup_rows` /
     /// `committed_dedup_shape`. Empty when the queue is unknown.
+    ///
+    /// PLAN_RAFT_DRAIN_FIX P3: the index walk + cache probes run under the
+    /// queue's read lock; the misses' hashes-only `pread`s run AFTER it is
+    /// released (committed records are immutable, each miss holds its fd), so a
+    /// whole-window read never holds the applier's append behind its I/O.
     pub fn committed_frames(
         &self,
         queue_id: u64,
@@ -485,12 +490,39 @@ impl QLogReader {
         with_hashes: bool,
     ) -> io::Result<Vec<CommittedFrame>> {
         match self.log(queue_id) {
-            Some(l) => l.read().expect("qlog poisoned").committed_frames(
-                pid,
-                from_base,
-                committed_end,
-                with_hashes,
-            ),
+            Some(l) => {
+                let plan = l.read().expect("qlog poisoned").committed_frames_plan(
+                    pid,
+                    from_base,
+                    committed_end,
+                    with_hashes,
+                )?;
+                Ok(super::committed_of(plan.finish()?))
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// PLAN_RAFT_DRAIN_FIX P3.1: the committed records of `pid` overlapping any
+    /// of the dedup front's `(min_base, max_off)` bands, bounded to
+    /// `committed_end`, with their hash blocks — see
+    /// [`QLog::committed_hashes_in_bands`]. Same lock split as
+    /// [`QLogReader::committed_frames`]. Empty when the queue is unknown.
+    pub fn committed_hashes_in_bands(
+        &self,
+        queue_id: u64,
+        pid: u64,
+        bands: &[(u64, u64)],
+        committed_end: u64,
+    ) -> io::Result<Vec<BandFrame>> {
+        match self.log(queue_id) {
+            Some(l) => {
+                let plan = l
+                    .read()
+                    .expect("qlog poisoned")
+                    .band_plan(pid, bands, committed_end)?;
+                plan.finish()
+            }
             None => Ok(Vec::new()),
         }
     }

@@ -98,17 +98,87 @@ const QUEUE_MODE_GROUP: &str = "__QUEUE_MODE__";
 /// every pop parked on that queue's gate on this node.
 struct NotifierWaker {
     notifier: Arc<Notifier>,
+    gates: Arc<WaitGates>,
 }
 
 impl Waker for NotifierWaker {
-    fn wake(&self, tenant: &str, queue: &str, _group: Option<&str>) {
-        // The gate is per (tenant, queue), not per group (see the SELECTIVE WAKE
-        // note in `notify.rs`), so the group is not part of the key. An empty
-        // partition hint means "re-scan the queue".
+    fn wake(&self, tenant: &str, queue: &str, group: Option<&str>) {
+        // Raft pops park on the per-group gates (P2.2): one wake = one partition
+        // became claimable = one parked pop. The queue-wide notifier still fires
+        // for any other waiter on this node (it is a no-op when nobody parked).
+        self.gates.wake_one(tenant, queue, group);
         let qkey = crate::handlers::tenant_queue_key(tenant, queue);
         self.notifier.wake_local_hint(&qkey, "");
     }
 }
+
+/// PLAN_RAFT_DRAIN_FIX P2.2: long-poll gates per `(tenant, queue, group)`.
+/// Apply knows exactly which group's partition became claimable, so each wake
+/// releases ONE parked pop of that group (`notify_one`) instead of every pop of
+/// the queue — the O(parked) re-plan storm (18.6 re-plans per wake, measured)
+/// dies. `notify_one` banks a single permit when nobody is parked, which only
+/// makes the next parker re-poll once.
+#[derive(Default)]
+struct WaitGates {
+    map: std::sync::RwLock<
+        std::collections::HashMap<(String, String, String), Arc<tokio::sync::Notify>>,
+    >,
+}
+
+impl WaitGates {
+    fn gate(&self, key: &(String, String, String)) -> Arc<tokio::sync::Notify> {
+        if let Some(g) = self.map.read().expect("gates poisoned").get(key) {
+            return g.clone();
+        }
+        self.map
+            .write()
+            .expect("gates poisoned")
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Notify::new()))
+            .clone()
+    }
+
+    /// Park until woken or `dur` elapses; true on a wake.
+    async fn wait(&self, key: &(String, String, String), dur: Duration) -> bool {
+        let gate = self.gate(key);
+        let notified = gate.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        tokio::time::timeout(dur, notified).await.is_ok()
+    }
+
+    fn wake_one(&self, tenant: &str, queue: &str, group: Option<&str>) {
+        let map = self.map.read().expect("gates poisoned");
+        match group {
+            Some(g) => {
+                let key = (tenant.to_string(), queue.to_string(), g.to_string());
+                if let Some(gate) = map.get(&key) {
+                    gate.notify_one();
+                }
+            }
+            // No group named: one pop of every group of the queue.
+            None => {
+                for ((t, q, _), gate) in map.iter() {
+                    if t == tenant && q == queue {
+                        gate.notify_one();
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// P1.1: the least deadline a long-poll RE-poll must still have to be submitted
+/// (`QUEEN_RAFT_POP_SUBMIT_MIN_MS`, default 100 ms). Below it the pop answers
+/// empty: submitting would claim for a waiter that is about to time out.
+static POP_SUBMIT_MIN: std::sync::LazyLock<Duration> = std::sync::LazyLock::new(|| {
+    Duration::from_millis(
+        std::env::var("QUEEN_RAFT_POP_SUBMIT_MIN_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(100),
+    )
+});
 
 // ---------------------------------------------------------------------------
 // The facade
@@ -136,6 +206,8 @@ pub struct RaftFacade {
     /// The long-poll notifier (§9.5), shared with the receiver and driven by
     /// [`NotifierWaker`].
     notifier: Arc<Notifier>,
+    /// P2.2: the per-group long-poll gates raft pops park on.
+    gates: Arc<WaitGates>,
     /// The batcher task handle, kept so [`RaftFacade::shutdown`] can join it.
     batcher_join: tokio::task::JoinHandle<()>,
     /// `QUEEN_RAFT_POP_FASTPATH_EMPTY` (PERF-J, default on): answer a wildcard
@@ -188,8 +260,10 @@ impl RaftFacade {
                 .map_err(|e| format!("open store at {}/store: {e}", dir.display()))?,
         );
 
+        let gates = Arc::new(WaitGates::default());
         let waker: Arc<dyn Waker> = Arc::new(NotifierWaker {
             notifier: ctx.notifier.clone(),
+            gates: gates.clone(),
         });
         let repl = Arc::new(
             LocalReplicator::open(
@@ -229,6 +303,7 @@ impl RaftFacade {
             qlog_reader,
             cmd_tx,
             notifier: ctx.notifier.clone(),
+            gates,
             batcher_join,
             pop_fastpath_empty: env_flag("QUEEN_RAFT_POP_FASTPATH_EMPTY", true),
         })
@@ -247,6 +322,7 @@ impl RaftFacade {
             qlog_reader,
             cmd_tx,
             notifier: _,
+            gates: _,
             batcher_join,
             pop_fastpath_empty: _,
         } = self;
@@ -825,9 +901,28 @@ impl RaftFacade {
         };
         let worker = uuid_bytes_to_string(&uuidv7_bytes());
         let budget = batch.min(i32::MAX as u32) as i32;
-        let qkey = crate::handlers::tenant_queue_key(&ctx.tenant, &queue);
+        let gate_key = (ctx.tenant.clone(), queue.clone(), group.clone());
+        let mut attempt: u32 = 0;
+        // P2.2: set when the last park ended on a WAKE. Wakes fire right after
+        // apply, before the store commit, so the committed-state fast path could
+        // still read the partition as unclaimable and swallow the one wake meant
+        // for it; a woken pop therefore goes straight to the planner, whose
+        // overlay folds every applied-but-uncommitted entry.
+        let mut woke = false;
 
         loop {
+            // PLAN_RAFT_DRAIN_FIX P1.1: a re-poll that cannot come back before the
+            // deadline is not started — a pop that times out while queued still
+            // CLAIMS, and nobody would ever ack that lease.
+            if attempt > 0 && ctx.deadline.remaining() < *POP_SUBMIT_MIN {
+                return self
+                    .render_claims(ctx, &queue, &group, &worker, auto_ack, Vec::new())
+                    .await;
+            }
+            attempt += 1;
+            // P1.2: the planner refuses to claim once nobody can receive the answer.
+            let deadline_us = wall_micros()
+                .saturating_add(ctx.deadline.remaining().as_micros().min(i64::MAX as u128) as i64);
             let cmd = PopCommand {
                 request_id: uuidv7_bytes(), // a fresh command per attempt (§5.4)
                 tenant: ctx.tenant.clone(),
@@ -855,6 +950,7 @@ impl RaftFacade {
                 } else {
                     None
                 },
+                deadline_us,
             };
             let command = match &partition {
                 Some(_) => Command::PopPinned(cmd),
@@ -870,6 +966,7 @@ impl RaftFacade {
             // that lands meanwhile re-arms the ring and wakes the park, so no
             // claim is stranded (§9.5).
             let claims = if self.pop_fastpath_empty
+                && !woke
                 && matches!(command, Command::PopWildcard(_))
                 && self
                     .wildcard_would_be_empty(&ctx.tenant, &queue, &group)
@@ -911,7 +1008,7 @@ impl RaftFacade {
                     .await;
             }
             let park = remaining.min(Duration::from_millis(500));
-            let _woke = self.notifier.wait_queue(&qkey, park).await;
+            woke = self.gates.wait(&gate_key, park).await;
             if ctx.deadline.expired() {
                 return self
                     .render_claims(ctx, &queue, &group, &worker, auto_ack, Vec::new())
@@ -996,7 +1093,40 @@ fn render_pop_blocking(
     deadline: super::Deadline,
 ) -> Result<PopOut, String> {
     // Resolve every claimed pid's partition row + sealed files in one read txn.
+    //
+    // PLAN_RAFT_DRAIN_FIX P1.4: the pop is answered right after APPLY, which can
+    // precede the store commit by a few ms (I4: the payload is in the files, the
+    // ROWS wait for the next commit). A partition CREATED in that window has no
+    // committed row yet; skipping its claim sent the client a batch without
+    // those messages, so they were never acked and the lease froze the
+    // partition for its whole length (measured: ~48 partitions at startup). Wait
+    // for the commit instead (bounded), and count what still misses.
     let mut infos: std::collections::HashMap<Pid, PartInfo> = std::collections::HashMap::new();
+    for attempt in 0..50u32 {
+        if attempt > 0 {
+            crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.render_part_retry, 1);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        render_part_infos(store, tenant, claims, &mut infos)?;
+        if claims.iter().all(|c| infos.contains_key(&c.pid)) {
+            break;
+        }
+    }
+    let missing = claims.iter().filter(|c| !infos.contains_key(&c.pid)).count();
+    if missing > 0 {
+        crate::rsm::dbgctr::inc(&crate::rsm::dbgctr::C.render_part_missing, missing as u64);
+    }
+    render_pop_body(qlog_reader, reader, tenant, top_queue, group, worker, auto_ack, claims, deadline, &infos)
+}
+
+/// Fill `infos` with the committed partition row + sealed files of every claim
+/// not resolved yet (one read txn).
+fn render_part_infos(
+    store: &HeedStore,
+    tenant: &str,
+    claims: &[PopClaim],
+    infos: &mut std::collections::HashMap<Pid, PartInfo>,
+) -> Result<(), String> {
     store
         .read(|r| {
             for c in claims {
@@ -1024,8 +1154,23 @@ fn render_pop_blocking(
             }
             Ok(())
         })
-        .map_err(|e| format!("pop render read: {e}"))?;
+        .map_err(|e| format!("pop render read: {e}"))
+}
 
+/// Render the pop wire body from the resolved partition infos.
+#[allow(clippy::too_many_arguments)]
+fn render_pop_body(
+    qlog_reader: Option<&QLogReader>,
+    reader: &segments::Reader,
+    tenant: &str,
+    top_queue: &str,
+    group: &str,
+    worker: &str,
+    auto_ack: bool,
+    claims: &[PopClaim],
+    deadline: super::Deadline,
+    infos: &std::collections::HashMap<Pid, PartInfo>,
+) -> Result<PopOut, String> {
     let lease_id = if auto_ack || claims.is_empty() {
         ""
     } else {
