@@ -75,6 +75,16 @@ POINTS = [
     Point("apply.store_committed", "log and apply",
           "the store commit carrying the applied index landed; files may be unsynced",
           "I11"),
+    # --- qlog WAL durability (ALICE_PGLESS_NEWARCH.md §5, Phase A3a) -------
+    # NOT §13.5: these fire only with QUEEN_RAFT_QLOG on, inside the store
+    # commit's qlog block, and prove the per-queue qlog is durable AT the store
+    # commit (so A3b can remove the raft-log payload). raft1 only in phase 1.
+    Point("qlog.record_written", "qlog WAL durability",
+          "this commit's qlog records are on the page cache; the qlog fsync has NOT run",
+          "NA-QLOG-I1", ("raft1", "raft3")),
+    Point("qlog.record_fsynced", "qlog WAL durability",
+          "the qlog is fsynced through this commit's records; the store commit has NOT landed",
+          "NA-QLOG-I1", ("raft1", "raft3")),
     # --- durable points ---------------------------------------------------
     Point("durable.files_synced", "durable points",
           "segment files are fsynced, the store commit that records their lengths has not landed",

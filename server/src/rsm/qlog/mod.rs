@@ -304,6 +304,18 @@ pub struct QLogRecovery {
     pub rebuilt_indexes: usize,
     /// Records scanned during recovery (torn-tail scan + index rebuilds).
     pub scanned_records: u64,
+    /// The highest record `seq` (the leader's order stamp = the entry index)
+    /// that survived recovery — the qlog's DURABLE TAIL (A3a,
+    /// `ALICE_PGLESS_NEWARCH.md` §5). It is the max over `(active file's
+    /// `first_seq`, the highest verified `seq` in the active file)`: the active
+    /// file is always the newest, so its records (or, for an empty active file
+    /// left by a crash between a roll and its first write, its `first_seq`,
+    /// which is strictly above every sealed record's `seq`) bound the whole
+    /// queue's tail with no sealed-file read. `0` for a queue that never took a
+    /// durable record. The applier reconciles this against the store's recorded
+    /// qlog-durable index (`meta::QLOG_DURABLE_INDEX`): the qlog must be AHEAD of
+    /// or EQUAL to it, never behind, or a committed record was lost (NA-QLOG-I1).
+    pub max_seq: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -399,6 +411,16 @@ impl QLog {
                 }
                 meta.records = scan.records.len() as u64;
                 rec.scanned_records += scan.records.len() as u64;
+                // The durable tail (A3a): the active file is the newest, so its
+                // records dominate every sealed file's `seq`. When it holds
+                // records, its highest verified `seq` is the whole queue's tail;
+                // when a crash between a roll and its first write left it EMPTY,
+                // its `first_seq` (the seq of the record it was created for) is
+                // strictly above every sealed record's `seq` and is a sound tail
+                // bound — the never-written record was never committed to the
+                // store, so the store's qlog-durable index is at most one below
+                // it. Either way no sealed file is re-read for this.
+                rec.max_seq = first_seq.max(scan.max_seq);
                 files.push(meta);
             } else {
                 // A SEALED file. Use its `.qidx` if it is present, matches this
@@ -1042,6 +1064,12 @@ struct ScanOut {
     /// the active file this is the torn tail; for a sealed file it is
     /// corruption.
     torn: Option<(u64, record::RecordError)>,
+    /// The highest `seq` (the leader's order stamp) among the verified records,
+    /// or `0` when none verified. The index (`.qidx`) is keyed by `(pid,
+    /// base_offset)` and does not carry `seq`, so it is captured here from the
+    /// record headers this scan already parses — it is what recovery uses to
+    /// report the queue's durable tail (A3a).
+    max_seq: u64,
 }
 
 /// Scan a file's records from its header to `upto`, verifying each. The engine
@@ -1057,6 +1085,7 @@ fn scan_file(path: &Path, upto: u64) -> io::Result<ScanOut> {
         records: Vec::new(),
         valid_bytes: FILE_HEADER_LEN,
         torn: None,
+        max_seq: 0,
     };
     let mut prefix = [0u8; record::FIXED_PREFIX];
     let mut body: Vec<u8> = Vec::new();
@@ -1116,6 +1145,7 @@ fn scan_file(path: &Path, upto: u64) -> io::Result<ScanOut> {
             out.torn = Some((pos, e));
             break;
         }
+        out.max_seq = out.max_seq.max(header.seq);
         out.records.push(index::Record::of_header(&header, pos));
         pos += total as u64;
         out.valid_bytes = pos;

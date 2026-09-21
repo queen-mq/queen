@@ -330,6 +330,14 @@ pub mod meta {
     /// `u64`: the index the last DURABLE point (§11.4) covered. Recovery
     /// reads it to know how far the segment file lengths below are trusted.
     pub const DURABLE_INDEX: &[u8] = b"durable_index";
+    /// `u64`: the highest record `seq` the per-queue qlog was fsync'd through as
+    /// of the store commit that carries this key (`QUEEN_RAFT_QLOG`,
+    /// `ALICE_PGLESS_NEWARCH.md` §5, Phase A3a). NODE-LOCAL, like
+    /// [`DURABLE_INDEX`]: it names this node's qlog platter, not cluster state,
+    /// so it is kept OUT of the §12.9 digest. Recovery reconciles the reopened
+    /// qlog's durable tail against it — the qlog must be AHEAD of or EQUAL to it,
+    /// never behind for a committed record (NA-QLOG-I1).
+    pub const QLOG_DURABLE_INDEX: &[u8] = b"qlog_durable_index";
     /// `u64`: the next partition id the planner may assign (I18, §5.1).
     pub const NEXT_PID: &[u8] = b"next_pid";
     /// `u64`: the next KV version (I18, §5.1).

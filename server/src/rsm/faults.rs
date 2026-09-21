@@ -41,11 +41,19 @@
 //! | `commit.before_apply` | [`replicator`] committed, not yet applied here | I4, I13 |
 //! | `apply.mid_entry` | [`apply`] some effects applied, the rest not | I1, I11 |
 //! | `apply.segment_written` | [`apply`] payload bytes in a file, store not committed | I11 |
+//! | `qlog.record_written` | [`apply`] qlog records on the page cache, pre-fsync | NA-QLOG-I1 |
+//! | `qlog.record_fsynced` | [`apply`] qlog records fsynced, pre-store-commit | NA-QLOG-I1 |
 //! | `apply.store_committed` | [`apply`] the store commit landed, files unsynced | I11 |
 //! | `durable.files_synced` | [`apply`] files fsynced, durable commit not landed | I11 |
 //! | `durable.store_committed` | [`apply`] the durable point is complete | I11 |
 //! | `gc.before_unlink` | [`apply`] a file is unreferenced, still on disk | I10 |
 //! | `gc.after_unlink` | [`apply`] the file is unlinked | I10 |
+//!
+//! The two `qlog.*` points are NOT §13.5: they are the `ALICE_PGLESS_NEWARCH.md`
+//! §5 (Phase A3a) crash cells that prove the per-queue qlog is durable AT the
+//! store commit, so A3b can later remove the raft-log payload. They fire only
+//! when `QUEEN_RAFT_QLOG` is on (inside the `commit_inner` qlog block, around the
+//! commit fsync); with the knob off the block is skipped and neither is reached.
 //!
 //! Two extra points serve the segment layer's own roll tests (R-107), so a
 //! `kill` around a roll is deterministic instead of timing-driven; they are not
@@ -77,6 +85,9 @@ pub const POINTS: &[&str] = &[
     "commit.before_apply",
     "apply.mid_entry",
     "apply.segment_written",
+    // qlog WAL durability (ALICE_PGLESS_NEWARCH.md §5, Phase A3a; QUEEN_RAFT_QLOG)
+    "qlog.record_written",
+    "qlog.record_fsynced",
     "apply.store_committed",
     // durable points
     "durable.files_synced",
@@ -220,6 +231,16 @@ mod tests {
             assert!(POINTS.contains(&m), "matrix point {m} is not registered");
         }
         assert_eq!(matrix.len(), 13);
+    }
+
+    #[test]
+    fn the_two_qlog_wal_points_are_registered() {
+        // ALICE_PGLESS_NEWARCH.md §5 (Phase A3a): the qlog WAL durability cells.
+        // Not §13.5; they fire only with QUEEN_RAFT_QLOG on. The harness's
+        // `points.py` MUST list the same two names (the catalogue contract).
+        for p in ["qlog.record_written", "qlog.record_fsynced"] {
+            assert!(POINTS.contains(&p), "qlog point {p} is not registered");
+        }
     }
 
     #[test]

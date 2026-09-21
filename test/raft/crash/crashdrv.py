@@ -167,7 +167,8 @@ def selftest(out=None) -> int:
             failures.append(f"{name}: {exc}")
 
     def every_point_has_a_stage():
-        assert len(points.POINTS) == 24, f"§13.5 lists 24 points, the catalogue has {len(points.POINTS)}"
+        # 24 §13.5 points + 2 ALICE_PGLESS_NEWARCH §5 (Phase A3a) qlog points = 26.
+        assert len(points.POINTS) == 26, f"24 §13.5 + 2 qlog points = 26, the catalogue has {len(points.POINTS)}"
         for p in points.POINTS:
             assert p.stage and p.invariant, f"{p.name} has no stage or no invariant"
             assert p.topology, f"{p.name} names no topology"
@@ -216,11 +217,12 @@ def selftest(out=None) -> int:
 
     def the_run_matrix_covers_the_wired_phase_one_points():
         wired = [p for p in points.POINTS if p.phase == 1 and "raft1" in p.topology]
-        # 13 §13.5 phase-1 points are wired; 11 are push-ack-reachable, 2 (gc.*)
-        # need retention. The matrix arms all 13 and reports the 2 as N/A.
-        assert len(wired) == 13, f"{len(wired)} wired phase-1 raft1 points, want 13"
+        # 13 §13.5 phase-1 points + 2 A3a qlog points = 15 wired; 13 are
+        # push-ack-reachable (11 §13.5 + the 2 qlog cells), 2 (gc.*) need
+        # retention. The matrix arms all 15 and reports the 2 gc.* as N/A.
+        assert len(wired) == 15, f"{len(wired)} wired phase-1 raft1 points, want 15"
         reachable = [p for p in wired if p.name in runner.PUSHACK_REACHABLE]
-        assert len(reachable) == 11, f"{len(reachable)} push-ack-reachable, want 11"
+        assert len(reachable) == 13, f"{len(reachable)} push-ack-reachable, want 13"
 
     check("every point has a stage", every_point_has_a_stage)
     check("fault spec format", spec_format)
@@ -235,7 +237,7 @@ def selftest(out=None) -> int:
         print(f"selftest FAILED: {f}", file=sys.stderr)
     if failures:
         return 2
-    print("crashdrv selftest ok (24 points, plan, matrix, refusals, phase-1 run matrix)", file=out)
+    print("crashdrv selftest ok (26 points, plan, matrix, refusals, phase-1 run matrix)", file=out)
     return 0
 
 
@@ -381,6 +383,14 @@ def _results_header_lines(broker_bin, run_dir, late_nth):
                  "the broker's stderr tail — when it does not.")
     lines.append(f"- **cadence** `QUEEN_RAFT_DURABLE_EVERY_MS=150` so a later hit crosses a "
                  "durable point quickly (§13.6: cover every periodic boundary)")
+    lines.append(f"- **qlog** `QUEEN_RAFT_QLOG=1` (ALICE_PGLESS_NEWARCH.md §5, Phase A3a): the "
+                 "per-queue qlog is a WAL — fsynced at EACH store commit (before the commit) and "
+                 "at each durable point, with a recorded `QLOG_DURABLE_INDEX` recovery reconciles "
+                 "against. This run proves (a) the two new `qlog.record_written` / "
+                 "`qlog.record_fsynced` cells recover, and (b) every EXISTING §13.5 cell still "
+                 "recovers with the knob on (the raft log is still the WAL in A3a; qlog durability "
+                 "is ADDED, nothing removed). With the knob on, pop reads the payload FROM the "
+                 "qlog, so the cells also cross \"acked records are readable from the qlog\".")
     lines.append(f"- **nth** each point armed at `nth=1` and `nth={late_nth}` (a later hit)")
     lines.append(f"- **run dir** `{run_dir}` (data dirs, per-cell `run.jsonl`, `pre.stderr`, "
                  "`post.stderr`)")

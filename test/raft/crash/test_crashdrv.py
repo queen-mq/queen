@@ -25,10 +25,11 @@ import scenarios  # noqa: E402
 # --- the catalogue ------------------------------------------------------------
 
 def test_every_point_of_section_135_is_declared():
-    # The 24 points §13.5 lists, by name. This test is the contract with
-    # rsm/faults.rs: when a point is renamed there, it is renamed here, and the
-    # diff shows up in review instead of a silently untested code path.
-    expected = {
+    # The 24 points §13.5 lists, by name, PLUS the 2 ALICE_PGLESS_NEWARCH §5
+    # (Phase A3a) qlog WAL points. This test is the contract with rsm/faults.rs:
+    # when a point is renamed there, it is renamed here, and the diff shows up in
+    # review instead of a silently untested code path.
+    section_135 = {
         "batcher.drained", "planner.planned", "propose.sent",
         "log.appended", "log.flushed", "commit.before_apply", "apply.mid_entry",
         "apply.segment_written", "apply.store_committed",
@@ -38,7 +39,8 @@ def test_every_point_of_section_135_is_declared():
         "gc.before_unlink", "gc.after_unlink", "compaction.copied", "compaction.loc_committed",
         "transfer.started", "identity.written", "membership.learner_added", "membership.changed",
     }
-    assert set(points.BY_NAME) == expected
+    qlog_a3a = {"qlog.record_written", "qlog.record_fsynced"}
+    assert set(points.BY_NAME) == section_135 | qlog_a3a
 
 
 def test_every_point_names_a_stage_and_an_invariant():
@@ -162,7 +164,8 @@ def test_push_ack_is_implemented_and_has_a_runner():
     assert crashdrv.IMPLEMENTED_RUNNERS.get("push-ack") is runner.run_push_ack
 
 
-def test_phase_marks_the_thirteen_wired_points():
+def test_phase_marks_the_wired_phase_one_points():
+    # 13 §13.5 phase-1 points + 2 ALICE_PGLESS_NEWARCH §5 (Phase A3a) qlog points.
     wired = [p for p in points.POINTS if p.phase == 1]
     names = {p.name for p in wired}
     assert names == {
@@ -171,6 +174,7 @@ def test_phase_marks_the_thirteen_wired_points():
         "apply.segment_written", "apply.store_committed",
         "durable.files_synced", "durable.store_committed",
         "gc.before_unlink", "gc.after_unlink",
+        "qlog.record_written", "qlog.record_fsynced",
     }
 
 

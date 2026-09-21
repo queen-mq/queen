@@ -1,12 +1,13 @@
 # Crash matrix — WP-1.8 (PLAN_RAFT.md §13.5)
 
-- **date** 2026-09-18 19:13:04Z
+- **date** 2026-09-21 06:29:36Z
 - **topology** raft1 (single voter, `QUEEN_STORAGE=raft`, no Postgres)
 - **scenario** push-ack: pushes with recorded ids + payload hashes to a JUDGED queue (`orders`, never popped before the crash); pops+acks a WARM queue every round so a COMPLETION crosses the armed pipeline BEFORE the crash; and pops-and-never-acks a HELD queue every round so a bare CLAIM/LEASE crosses it. One retry of every unanswered push with its original transactionId. After recovery, when a claim or completion crossed the crash, the harness waits the 60 s facade lease out and re-drains, so the ack/claim recovery outcome is observable instead of hidden behind a live lease (the WP-1.8 refutation fix).
 - **broker** `/Users/alice/Work/queen/server/target/debug/queen` (debug — crash injection is a correctness test, so a debug binary is faithful; §0.3 reserves release/VM for measurements). MUST be a raft-aware build: the driver makes it prove it booted raft mode (`/health` `engine:raft`, `storageReady:true`) before any cell runs, and aborts the whole run — echoing the broker's stderr tail — when it does not.
 - **cadence** `QUEEN_RAFT_DURABLE_EVERY_MS=150` so a later hit crosses a durable point quickly (§13.6: cover every periodic boundary)
+- **qlog** `QUEEN_RAFT_QLOG=1` (ALICE_PGLESS_NEWARCH.md §5, Phase A3a): the per-queue qlog is a WAL — fsynced at EACH store commit (before the commit) and at each durable point, with a recorded `QLOG_DURABLE_INDEX` recovery reconciles against. This run proves (a) the two new `qlog.record_written` / `qlog.record_fsynced` cells recover, and (b) every EXISTING §13.5 cell still recovers with the knob on (the raft log is still the WAL in A3a; qlog durability is ADDED, nothing removed). With the knob on, pop reads the payload FROM the qlog, so the cells also cross "acked records are readable from the qlog".
 - **nth** each point armed at `nth=1` and `nth=2` (a later hit)
-- **run dir** `/private/tmp/claude-502/-Users-alice-Work-queen/e561891e-3c5f-4589-8141-dd6b961a2d37/scratchpad/matrix` (data dirs, per-cell `run.jsonl`, `pre.stderr`, `post.stderr`)
+- **run dir** `/var/folders/8w/phmp5hgd4nz3z4h3b9zksy5c0000gp/T/crashdrv-1789971905` (data dirs, per-cell `run.jsonl`, `pre.stderr`, `post.stderr`)
 
 > **What this does NOT test.** `faults::hit` dies by SIGKILL, which leaves the OS page cache intact, so a frame written but not yet fsynced is fully present at restart and replays. This matrix therefore proves recovery BOOKKEEPING (offsets, cursors, completion, dedup across the kill), NOT unsynced-byte loss (I11's dropped-unflushed-writes clause). That needs a fault-injecting block device (dm-flakey) on the Linux VM and is WP-1.11.
 
@@ -43,10 +44,14 @@
 | `apply.segment_written` | 2 | True | -9 | **PASS** | 2 | 2 | 0 | 0 | — |  |
 | `apply.store_committed` | 1 | True | -9 | **PASS** | 1 | 2 | 0 | 0 | — |  |
 | `apply.store_committed` | 2 | True | -9 | **PASS** | 2 | 2 | 0 | 0 | — |  |
-| `durable.files_synced` | 1 | True | -9 | **PASS** | 14 | 6 | 10 | 8 | yes |  |
-| `durable.files_synced` | 2 | True | -9 | **PASS** | 31 | 14 | 16 | 8 | yes |  |
-| `durable.store_committed` | 1 | True | -9 | **PASS** | 15 | 8 | 10 | 8 | yes |  |
-| `durable.store_committed` | 2 | True | -9 | **PASS** | 30 | 14 | 16 | 8 | yes |  |
+| `qlog.record_written` | 1 | True | -9 | **PASS** | 1 | 2 | 0 | 0 | — |  |
+| `qlog.record_written` | 2 | True | -9 | **PASS** | 2 | 2 | 0 | 0 | — |  |
+| `qlog.record_fsynced` | 1 | True | -9 | **PASS** | 1 | 2 | 0 | 0 | — |  |
+| `qlog.record_fsynced` | 2 | True | -9 | **PASS** | 2 | 2 | 0 | 0 | — |  |
+| `durable.files_synced` | 1 | True | -9 | **PASS** | 8 | 4 | 8 | 8 | yes |  |
+| `durable.files_synced` | 2 | True | -9 | **PASS** | 22 | 10 | 12 | 8 | yes |  |
+| `durable.store_committed` | 1 | True | -9 | **PASS** | 7 | 4 | 8 | 8 | yes |  |
+| `durable.store_committed` | 2 | True | -9 | **PASS** | 21 | 10 | 12 | 8 | yes |  |
 | `gc.before_unlink` | 1 | False | — | **N/A** | — | — | — | — | — | not reachable by a phase-1 push/pop/ack workload (no retention or delete route yet; §10.3, WP-2.7) |
 | `gc.before_unlink` | 2 | False | — | **N/A** | — | — | — | — | — | not reachable by a phase-1 push/pop/ack workload (no retention or delete route yet; §10.3, WP-2.7) |
 | `gc.after_unlink` | 1 | False | — | **N/A** | — | — | — | — | — | not reachable by a phase-1 push/pop/ack workload (no retention or delete route yet; §10.3, WP-2.7) |
@@ -276,14 +281,62 @@ RESIDUAL, disclosed: the first ENTRIES of any run are unavoidably pushes (a clai
 - raft1-leader-and-monotone-applied: PASS
 - no-unexpected-error-lines: PASS
 
+### `qlog.record_written` nth=1 — PASS
+- go:delivery-at-least-once: SKIP
+- go:payload-hash: PASS
+- exactly-one-offset-per-txn: PASS
+- delivered-exactly-once: PASS
+- answered-then-delivered: PASS (2 judged)
+- claim-redelivered-after-lease: N/A (no claim crossed the crash)
+- acked-not-redelivered: N/A (no completion crossed the crash)
+- payload-hash-python: PASS
+- raft1-leader-and-monotone-applied: PASS
+- no-unexpected-error-lines: PASS
+
+### `qlog.record_written` nth=2 — PASS
+- go:delivery-at-least-once: PASS
+- go:payload-hash: PASS
+- exactly-one-offset-per-txn: PASS
+- delivered-exactly-once: PASS
+- answered-then-delivered: PASS (2 judged)
+- claim-redelivered-after-lease: N/A (no claim crossed the crash)
+- acked-not-redelivered: N/A (no completion crossed the crash)
+- payload-hash-python: PASS
+- raft1-leader-and-monotone-applied: PASS
+- no-unexpected-error-lines: PASS
+
+### `qlog.record_fsynced` nth=1 — PASS
+- go:delivery-at-least-once: PASS
+- go:payload-hash: PASS
+- exactly-one-offset-per-txn: PASS
+- delivered-exactly-once: PASS
+- answered-then-delivered: PASS (2 judged)
+- claim-redelivered-after-lease: N/A (no claim crossed the crash)
+- acked-not-redelivered: N/A (no completion crossed the crash)
+- payload-hash-python: PASS
+- raft1-leader-and-monotone-applied: PASS
+- no-unexpected-error-lines: PASS
+
+### `qlog.record_fsynced` nth=2 — PASS
+- go:delivery-at-least-once: PASS
+- go:payload-hash: PASS
+- exactly-one-offset-per-txn: PASS
+- delivered-exactly-once: PASS
+- answered-then-delivered: PASS (2 judged)
+- claim-redelivered-after-lease: N/A (no claim crossed the crash)
+- acked-not-redelivered: N/A (no completion crossed the crash)
+- payload-hash-python: PASS
+- raft1-leader-and-monotone-applied: PASS
+- no-unexpected-error-lines: PASS
+
 ### `durable.files_synced` nth=1 — PASS
 - go:delivery-at-least-once: PASS
 - go:payload-hash: PASS
 - exactly-one-offset-per-txn: PASS
 - delivered-exactly-once: PASS
-- answered-then-delivered: PASS (6 judged)
+- answered-then-delivered: PASS (4 judged)
 - claim-redelivered-after-lease: PASS (8 claims redelivered exactly once after the lease)
-- acked-not-redelivered: PASS (10 completions absent after the lease expired; the held control confirmed the window is past the lease)
+- acked-not-redelivered: PASS (8 completions absent after the lease expired; the held control confirmed the window is past the lease)
 - payload-hash-python: PASS
 - raft1-leader-and-monotone-applied: PASS
 - no-unexpected-error-lines: PASS
@@ -293,9 +346,9 @@ RESIDUAL, disclosed: the first ENTRIES of any run are unavoidably pushes (a clai
 - go:payload-hash: PASS
 - exactly-one-offset-per-txn: PASS
 - delivered-exactly-once: PASS
-- answered-then-delivered: PASS (14 judged)
+- answered-then-delivered: PASS (10 judged)
 - claim-redelivered-after-lease: PASS (8 claims redelivered exactly once after the lease)
-- acked-not-redelivered: PASS (16 completions absent after the lease expired; the held control confirmed the window is past the lease)
+- acked-not-redelivered: PASS (12 completions absent after the lease expired; the held control confirmed the window is past the lease)
 - payload-hash-python: PASS
 - raft1-leader-and-monotone-applied: PASS
 - no-unexpected-error-lines: PASS
@@ -305,9 +358,9 @@ RESIDUAL, disclosed: the first ENTRIES of any run are unavoidably pushes (a clai
 - go:payload-hash: PASS
 - exactly-one-offset-per-txn: PASS
 - delivered-exactly-once: PASS
-- answered-then-delivered: PASS (8 judged)
+- answered-then-delivered: PASS (4 judged)
 - claim-redelivered-after-lease: PASS (8 claims redelivered exactly once after the lease)
-- acked-not-redelivered: PASS (10 completions absent after the lease expired; the held control confirmed the window is past the lease)
+- acked-not-redelivered: PASS (8 completions absent after the lease expired; the held control confirmed the window is past the lease)
 - payload-hash-python: PASS
 - raft1-leader-and-monotone-applied: PASS
 - no-unexpected-error-lines: PASS
@@ -317,9 +370,9 @@ RESIDUAL, disclosed: the first ENTRIES of any run are unavoidably pushes (a clai
 - go:payload-hash: PASS
 - exactly-one-offset-per-txn: PASS
 - delivered-exactly-once: PASS
-- answered-then-delivered: PASS (14 judged)
+- answered-then-delivered: PASS (10 judged)
 - claim-redelivered-after-lease: PASS (8 claims redelivered exactly once after the lease)
-- acked-not-redelivered: PASS (16 completions absent after the lease expired; the held control confirmed the window is past the lease)
+- acked-not-redelivered: PASS (12 completions absent after the lease expired; the held control confirmed the window is past the lease)
 - payload-hash-python: PASS
 - raft1-leader-and-monotone-applied: PASS
 - no-unexpected-error-lines: PASS

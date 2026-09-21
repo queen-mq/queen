@@ -108,6 +108,17 @@ pub struct QLogSet {
     /// an un-fsync'd tail, fsync'd together at the durable point. Apply-thread
     /// only.
     dirty: std::collections::BTreeSet<u64>,
+    /// A3a durable index (`ALICE_PGLESS_NEWARCH.md` §5). The highest record `seq`
+    /// (the leader's order stamp = the entry index) that [`QLogSet::flush`] has
+    /// written to a file (page cache), across every queue. Apply-thread only.
+    written_seq: u64,
+    /// The highest `seq` that [`QLogSet::sync`] has made DURABLE (fsync'd). Every
+    /// queue [`QLogSet::flush`] wrote is marked `dirty` and [`QLogSet::sync`]
+    /// fsyncs all of them, so once a sync returns every written record is on the
+    /// platter and this equals `written_seq`. The applier records it into the
+    /// store (`meta::QLOG_DURABLE_INDEX`) in the SAME commit that follows the
+    /// sync, so recovery can reconcile the qlog's durable tail against it.
+    durable_seq: u64,
 }
 
 impl QLogSet {
@@ -122,7 +133,17 @@ impl QLogSet {
             logs: Arc::new(RwLock::new(BTreeMap::new())),
             pending: BTreeMap::new(),
             dirty: std::collections::BTreeSet::new(),
+            written_seq: 0,
+            durable_seq: 0,
         }
+    }
+
+    /// The A3a durable index: the highest record `seq` fsync'd by
+    /// [`QLogSet::sync`] (`ALICE_PGLESS_NEWARCH.md` §5). The applier writes it to
+    /// `meta::QLOG_DURABLE_INDEX` in the commit that follows the sync; recovery
+    /// reconciles the reopened qlog's durable tail against it.
+    pub fn durable_seq(&self) -> u64 {
+        self.durable_seq
     }
 
     /// The stable per-queue id: `xxh3_64(tenant ␟ queue)`, the two-name twin of
@@ -155,10 +176,16 @@ impl QLogSet {
     /// Each is [`QLog::open`] — torn-tail truncate on the active file, `.qidx`
     /// rebuild on the sealed files. A missing root (a node that never turned the
     /// knob on) is not an error: there is simply nothing to reopen.
-    pub fn reopen_all(&mut self) -> io::Result<()> {
+    ///
+    /// Returns the qlog's DURABLE TAIL (A3a, `ALICE_PGLESS_NEWARCH.md` §5): the
+    /// highest record `seq` that survived recovery across every queue. The
+    /// applier reconciles it against the store's `meta::QLOG_DURABLE_INDEX`, and
+    /// this seeds `written_seq`/`durable_seq` so the next commit's recorded index
+    /// never goes backwards over the reopened tail.
+    pub fn reopen_all(&mut self) -> io::Result<u64> {
         let rd = match std::fs::read_dir(&self.root) {
             Ok(rd) => rd,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
             Err(e) => return Err(e),
         };
         let mut ids: Vec<u64> = Vec::new();
@@ -176,6 +203,7 @@ impl QLogSet {
             }
         }
         ids.sort_unstable();
+        let mut tail = 0u64;
         for id in ids {
             // Only the apply thread mutates the map (this call is at open, before
             // any reader thread exists), so a check-then-open-then-insert is
@@ -189,13 +217,19 @@ impl QLogSet {
             {
                 continue;
             }
-            let (log, _rec) = QLog::open(&self.root, id, self.opts)?;
+            let (log, rec) = QLog::open(&self.root, id, self.opts)?;
+            tail = tail.max(rec.max_seq);
             self.logs
                 .write()
                 .expect("qlog set poisoned")
                 .insert(id, Arc::new(RwLock::new(log)));
         }
-        Ok(())
+        // The reopened tail is on the platter (it was fsync'd at or before the
+        // last commit), so the next commit's recorded durable index starts here,
+        // never below it.
+        self.written_seq = self.written_seq.max(tail);
+        self.durable_seq = self.durable_seq.max(tail);
+        Ok(tail)
     }
 
     /// Buffer one `Append` for its queue (a shadow of the `segments.append`
@@ -248,7 +282,9 @@ impl QLogSet {
             .collect();
         for qid in qids {
             let bufs = std::mem::take(self.pending.get_mut(&qid).expect("pending queue present"));
-            let log = self.get_or_open(qid)?;
+            // The highest `seq` in this group advances the A3a written watermark
+            // (the buffer is filled in apply order, so the last is the highest).
+            let group_max_seq = bufs.iter().map(|b| b.seq).max().unwrap_or(0);
             let inputs: Vec<RecordInput<'_>> = bufs
                 .iter()
                 .map(|b| RecordInput {
@@ -262,8 +298,10 @@ impl QLogSet {
                     payload: &b.payload,
                 })
                 .collect();
+            let log = self.get_or_open(qid)?;
             log.write().expect("qlog poisoned").write_group(&inputs)?;
             self.dirty.insert(qid);
+            self.written_seq = self.written_seq.max(group_max_seq);
         }
         Ok(())
     }
@@ -280,6 +318,12 @@ impl QLogSet {
                 log.write().expect("qlog poisoned").sync()?;
             }
         }
+        // Every queue `flush` wrote was marked dirty and is now fsync'd, so
+        // everything written is durable: the A3a durable index catches up to the
+        // written watermark. If a `sync` above returned early on an I/O error the
+        // applier poisons and never records the index, so this line is reached
+        // only when the whole set is durable.
+        self.durable_seq = self.written_seq;
         Ok(())
     }
 

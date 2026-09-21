@@ -50,6 +50,7 @@ mod planner_push;
 mod pop_bounded;
 mod qlog_read;
 mod qlog_shadow;
+mod qlog_wal;
 mod replicator;
 mod replicator_crash;
 mod roundtrip;

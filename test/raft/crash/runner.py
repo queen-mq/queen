@@ -3,8 +3,10 @@
 `crashdrv.py` owns the catalogue, the plan and the dry run; this module is what
 `--run` calls once a scenario is `implemented`. It:
 
-  1. starts a raft1 broker (`QUEEN_STORAGE=raft`, NO Postgres) with one crash
-     point armed through `QUEEN_TEST_FAULTS` (rsm/faults.rs);
+  1. starts a raft1 broker (`QUEEN_STORAGE=raft`, NO Postgres, and — for Phase
+     A3a — `QUEEN_RAFT_QLOG=1` so the per-queue qlog is a WAL: fsynced at each
+     store commit, read by pop) with one crash point armed through
+     `QUEEN_TEST_FAULTS` (rsm/faults.rs);
   2. drives a workload over the HTTP wire that RECORDS what it sent and what it
      was answered into a run log (test/raft/checker's JSONL, so the shared Go
      checker judges this harness too — the §13.6 lesson: console output cannot
@@ -94,7 +96,22 @@ PUSHACK_REACHABLE = {
     "apply.store_committed",
     "durable.files_synced",
     "durable.store_committed",
+    # ALICE_PGLESS_NEWARCH.md §5 (Phase A3a): the qlog WAL durability cells. They
+    # fire in the store commit's qlog block (a push crosses it every round with
+    # QUEEN_RAFT_QLOG on — see QLOG_KNOB below), so the push/pop/ack workload
+    # reaches them exactly as it reaches apply.store_committed.
+    "qlog.record_written",
+    "qlog.record_fsynced",
 }
+
+# ALICE_PGLESS_NEWARCH.md §5 (Phase A3a): the crash matrix runs with the per-queue
+# qlog ON, so (a) the two `qlog.*` cells have a qlog to crash, and (b) every
+# EXISTING §13.5 cell is proven to still recover with the knob on (the raft log is
+# still the WAL in A3a; the qlog is ADDED durability, nothing is removed). With the
+# knob on, pop reads the payload FROM the qlog (facade `read_owned`), so the cells
+# also exercise "the acked records are readable from the qlog" across the crash.
+# Overridable from the harness environment for a knob-off control run.
+QLOG_KNOB = os.environ.get("QUEEN_RAFT_QLOG", "1")
 
 # The default consumer group a plain queue pop uses (handlers/data.rs).
 QUEUE_MODE_GROUP = "__QUEUE_MODE__"
@@ -258,6 +275,10 @@ class Broker:
         # points are reached in under a second, and so a kill lands at every
         # periodic boundary (§13.6). Node-local timing only (Appendix H).
         env["QUEEN_RAFT_DURABLE_EVERY_MS"] = "150"
+        # ALICE_PGLESS_NEWARCH.md §5 (Phase A3a): run with the per-queue qlog on,
+        # so the qlog.* cells have a qlog to crash and every existing cell is
+        # proven to still recover with the knob on (default "1"; see QLOG_KNOB).
+        env["QUEEN_RAFT_QLOG"] = QLOG_KNOB
         # Keep the log buffers out of /var/lib (a benign WARN otherwise, but it
         # keeps the error scan's input clean).
         env["FILE_BUFFER_DIR"] = str(self.log_dir / "buffers")

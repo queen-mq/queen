@@ -885,6 +885,7 @@ impl<'s, S: Store> Applier<'s, S> {
             kv_version_next,
             last_now_us,
             max_created_at_us,
+            qlog_durable_index,
             recorded,
         ) = store.read(|r| {
             let mut recorded: Vec<FileState> = Vec::new();
@@ -911,6 +912,9 @@ impl<'s, S: Store> Applier<'s, S> {
                 r.kv_version_next()?,
                 r.last_now_us()?,
                 r.max_created_at_us()?,
+                // A3a: the qlog-durable index the last commit recorded (0 when a
+                // node never ran with `QUEEN_RAFT_QLOG` on). Node-local.
+                r.meta_u64(meta::QLOG_DURABLE_INDEX)?.unwrap_or(0),
                 recorded,
             ))
         })?;
@@ -938,7 +942,36 @@ impl<'s, S: Store> Applier<'s, S> {
                 .parent()
                 .unwrap_or_else(|| std::path::Path::new("."));
             let mut set = QLogSet::new(data_dir.join("qlog"), opts);
-            set.reopen_all().map_err(ApplyError::Qlog)?;
+            let qlog_tail = set.reopen_all().map_err(ApplyError::Qlog)?;
+            // A3a recovery cross-check (NA-QLOG-I1, `ALICE_PGLESS_NEWARCH.md`
+            // §5). The qlog is fsync'd BEFORE each store commit records
+            // `QLOG_DURABLE_INDEX` (`commit_inner`/`durable_point_inner`), so
+            // every record the store counts as qlog-durable was on the platter
+            // before that commit and MUST be present now. The reopened qlog's
+            // durable tail is therefore AHEAD of or EQUAL to what the store
+            // recorded — never behind. Behind means a committed record is missing
+            // from the qlog: silent data loss once A3b makes the qlog the sole
+            // payload store, so refuse to start rather than serve a hole. (The
+            // qlog may be AHEAD — records for entries the store rolled back and
+            // the raft log will replay, or an un-fsync'd tail a SIGKILL left in
+            // the page cache; both are benign, see the `qlog/mod.rs` recovery
+            // note.) This is a watermark check, not a per-record scan: the exact
+            // per-record proof is the coordinator's VM difffuzz.
+            if qlog_tail < qlog_durable_index {
+                return Err(ApplyError::Disagreement {
+                    detail: format!(
+                        "qlog durable tail seq {qlog_tail} is BEHIND the store's \
+                         recorded qlog-durable index {qlog_durable_index}: a committed \
+                         record is missing from the qlog (NA-QLOG-I1)"
+                    ),
+                });
+            }
+            tracing::info!(
+                target: "rsm",
+                qlog_tail,
+                qlog_durable_index,
+                "rsm qlog recovery reconciled (tail ≥ store's qlog-durable index)",
+            );
             Some(set)
         } else {
             None
@@ -2949,12 +2982,37 @@ impl<'s, S: Store> Applier<'s, S> {
         // group-list cache, which is scoped to the transaction.
         self.counters.flush(&mut self.writes)?;
         self.groups_cache.clear();
-        // The qlog is NOT touched here: A2 writes each entry's records to the
-        // qlog file + index in `execute` (before the leader answers), so by the
-        // time this commit makes them committed they are already readable, and
-        // the fsync is batched to the durable point. Nothing to do at a
-        // non-durable store commit — the segment payload is likewise only fsync'd
-        // at the durable point, so the two stay in lock-step.
+        // A3a (`ALICE_PGLESS_NEWARCH.md` §5): the qlog is a WAL — fsync every
+        // touched queue's records BEFORE the store commit records the applied
+        // index, so the qlog record of every entry this commit makes committed is
+        // ALREADY on the platter (independently crash-survivable at commit, the
+        // twin of the raft log's group-commit fsync). The records themselves were
+        // written per entry in `execute` (the A2 read invariant); this is the
+        // added barrier, plus the recorded durable index recovery reconciles
+        // against. It adds fsyncs at the store-commit cadence — a perf cost
+        // deferred to Phase E; correctness first. A no-op / today's path when the
+        // knob is off.
+        let qlog_durable = if let Some(qlog) = self.qlog.as_mut() {
+            // §A3a `qlog.record_written`: this commit's records are on the page
+            // cache (written in `execute`), the qlog fsync has NOT run. A power
+            // loss here drops the un-fsync'd tail — the records are unanswered
+            // (their store commit never landed). A `kill -9` keeps the page cache,
+            // so the tail survives and the raft log (still the WAL in A3a) replays
+            // it; recovery reconciles it as AHEAD of the store's durable index.
+            crate::rsm::faults::hit("qlog.record_written");
+            qlog.sync().map_err(ApplyError::Qlog)?;
+            // §A3a `qlog.record_fsynced`: the qlog is fsync'd through this
+            // commit's records, the store commit has NOT landed. The records are
+            // durable in the qlog; the store reopens at the PREVIOUS applied
+            // index and replays. This is the durability the qlog gains in A3a.
+            crate::rsm::faults::hit("qlog.record_fsynced");
+            Some(qlog.durable_seq())
+        } else {
+            None
+        };
+        if let Some(qd) = qlog_durable {
+            self.writes.set_meta_u64(meta::QLOG_DURABLE_INDEX, qd)?;
+        }
         self.writes.commit()?;
         // §13.5 `apply.store_committed`: the (non-durable) store commit that
         // carries the applied index and the segment file lengths has landed;
@@ -3003,9 +3061,16 @@ impl<'s, S: Store> Applier<'s, S> {
         // WRITTEN to the qlog per entry in `execute` (that is the read
         // invariant); this is only the batched barrier, the qlog twin of the
         // segment durable point above. Off/empty when the knob is off.
-        if let Some(qlog) = self.qlog.as_mut() {
+        let qlog_durable = if let Some(qlog) = self.qlog.as_mut() {
             qlog.sync().map_err(ApplyError::Qlog)?;
-        }
+            // A3a: the durable point's store commit records the qlog-durable
+            // index too, so recovery reconciles against the highest seq the qlog
+            // is fsync'd through (§5). At a durable point that is every record up
+            // to `applied_index`, so it moves in lock-step with `DURABLE_INDEX`.
+            Some(qlog.durable_seq())
+        } else {
+            None
+        };
         // §13.5 `durable.files_synced`: every segment file written since the
         // last point is fsynced (step 1, §11.4), the durable store commit that
         // records their lengths (step 2) has NOT landed. A crash here reopens
@@ -3026,6 +3091,9 @@ impl<'s, S: Store> Applier<'s, S> {
         self.groups_cache.clear();
         self.writes
             .set_meta_u64(meta::DURABLE_INDEX, self.applied_index)?;
+        if let Some(qd) = qlog_durable {
+            self.writes.set_meta_u64(meta::QLOG_DURABLE_INDEX, qd)?;
+        }
         self.writes
             .set_applied(self.applied_index, self.applied_term)?;
         match self.writes.durable_commit() {
@@ -3636,8 +3704,9 @@ fn digest_of<R: Reads + ?Sized>(
         let mut h = Xxh3::new();
         let mut rows = 0u64;
         reads.scan_raw(ks, &[], &[], usize::MAX, &mut |k, v| {
-            // `durable_index` is this node's platter, not the cluster's state.
-            if ks == Keyspace::Meta && k == meta::DURABLE_INDEX {
+            // `durable_index` and the qlog's `qlog_durable_index` are this
+            // node's platter, not the cluster's state.
+            if ks == Keyspace::Meta && (k == meta::DURABLE_INDEX || k == meta::QLOG_DURABLE_INDEX) {
                 return true;
             }
             h.update(&(k.len() as u64).to_le_bytes());
