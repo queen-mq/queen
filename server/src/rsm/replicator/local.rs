@@ -642,6 +642,12 @@ pub struct LocalReplicator<S: Store> {
     /// facade reads pop payloads through it, off the SAME file set the writer
     /// keeps appending to (§7.5). Always set once `open` returns.
     reader: segments::Reader,
+    /// The per-queue-log reader the apply thread published at open (Phase A2),
+    /// `Some` only when `QUEEN_RAFT_QLOG` is on. The facade reads pop payloads
+    /// and the planner reads the `DEDUP_INDEX=segment` dedup authority through it
+    /// instead of the segments/LMDB, off the SAME live logs the applier appends
+    /// to. Set once `open` returns.
+    qlog_reader: Option<crate::rsm::qlog::set::QLogReader>,
 }
 
 impl<S: Store + 'static> LocalReplicator<S> {
@@ -705,6 +711,10 @@ impl<S: Store + 'static> LocalReplicator<S> {
         // WP-1.7c). Set once, before the first entry replays.
         let reader_sink: Arc<std::sync::OnceLock<segments::Reader>> =
             Arc::new(std::sync::OnceLock::new());
+        // Phase A2: the qlog reader (or `None` when the knob is off), published
+        // by the apply thread at the same point as the segment reader.
+        let qlog_reader_sink: Arc<std::sync::OnceLock<Option<crate::rsm::qlog::set::QLogReader>>> =
+            Arc::new(std::sync::OnceLock::new());
         let apply_join = apply::spawn_with_reader(
             store.clone(),
             cfg.seg_root.clone(),
@@ -714,6 +724,7 @@ impl<S: Store + 'static> LocalReplicator<S> {
             clock,
             apply_rx,
             Some(reader_sink.clone()),
+            Some(qlog_reader_sink.clone()),
         );
 
         // 5. Replay: every entry after the store's durable index, in order.
@@ -781,6 +792,35 @@ impl<S: Store + 'static> LocalReplicator<S> {
                 std::thread::sleep(Duration::from_millis(1));
             }
         };
+        // Phase A2: the qlog reader, published by the apply thread right after the
+        // segment reader (both before the first entry replays). The two sinks are
+        // independent `OnceLock`s with no cross-barrier, so spin for this one too
+        // rather than assume the segment reader's arrival ordered it. The sink is
+        // ALWAYS set once (to `Some(reader)` with the knob on, `Some(None)` with
+        // it off), so `.get().is_some()` is the ready signal in both cases.
+        let qlog_reader = {
+            let end = Instant::now() + cfg.replay_deadline;
+            loop {
+                if let Some(r) = qlog_reader_sink.get() {
+                    break r.clone();
+                }
+                if apply_join.is_finished() {
+                    drop(apply_tx);
+                    let _ = apply_join.join();
+                    return Err(io::Error::other(
+                        "apply thread exited before it published the qlog reader",
+                    ));
+                }
+                if Instant::now() >= end {
+                    drop(apply_tx);
+                    let _ = apply_join.join();
+                    return Err(io::Error::other(
+                        "apply thread did not publish the qlog reader in time",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
 
         tracing::info!(
             target: "rsm",
@@ -838,6 +878,7 @@ impl<S: Store + 'static> LocalReplicator<S> {
             apply_join: Some(apply_join),
             store,
             reader,
+            qlog_reader,
         })
     }
 
@@ -850,6 +891,14 @@ impl<S: Store + 'static> LocalReplicator<S> {
     /// `Send + Sync`; the facade clones one per blocking-pool read.
     pub fn reader(&self) -> segments::Reader {
         self.reader.clone()
+    }
+
+    /// The per-queue-log reader for pop payloads and the `DEDUP_INDEX=segment`
+    /// dedup authority (Phase A2), `Some` only when `QUEEN_RAFT_QLOG` is on.
+    /// Cloneable and `Send + Sync`; the facade clones one per blocking-pop read
+    /// and hands one to the batcher for the planner.
+    pub fn qlog_reader(&self) -> Option<crate::rsm::qlog::set::QLogReader> {
+        self.qlog_reader.clone()
     }
 
     /// The last index the log holds (fsynced).

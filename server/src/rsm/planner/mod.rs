@@ -80,7 +80,8 @@ use crate::rsm::dedup::{
 };
 use crate::rsm::effect::{CursorRow, Effect, GroupMeta, Pid, QueueConfig, SubscriptionMode};
 use crate::rsm::entry::{Entry, Outcome, RequestId};
-use crate::rsm::segments::Reader;
+use crate::rsm::qlog::set::{QLogReader, QLogSet};
+use crate::rsm::segments::{DedupFrame, Reader};
 use crate::rsm::state::Committed;
 use crate::rsm::store::rows::GroupRow;
 use crate::rsm::store::{keys, Keyspace, Reads, StoreError, TypedReads};
@@ -758,6 +759,13 @@ pub struct Planner<'a, R: Reads + ?Sized> {
     /// cloned `Reader`); `None` for a planner built without segments — legal
     /// only in the `txns`/`rows` modes, which never touch it.
     reader: Option<Reader>,
+    /// Phase A2 (`QUEEN_RAFT_QLOG`): the per-queue-log read side. When `Some` AND
+    /// `index_mode == Segment`, the committed dedup authority (the probe, the
+    /// resolve, the seed, the delivered-set claim walk) reads the per-append
+    /// hashes from the queue log instead of the `.seg` files — SAME committed
+    /// bound (`SegCtx::committed_end`), SAME O(claimed) walk. `None` is today's
+    /// segment path.
+    qlog_reader: Option<QLogReader>,
     /// PERF-E: the per-pid committed dedup rows reconstructed from the segments
     /// (bounded to the committed `last_offset`), materialized once per pid per
     /// cycle and shared across every committed `Txns`-authority read of that pid
@@ -824,6 +832,11 @@ struct SegCtx {
     bucket: u16,
     committed_end: u64,
     sealed: Vec<u32>,
+    /// Phase A2: the per-queue-log id (`xxh3(tenant ␟ queue)`), so the qlog dedup
+    /// read keys the same partition's records the segment read reaches by
+    /// `(bucket, sealed)`. Derived from the COMMITTED partition row, like every
+    /// other field here.
+    queue_id: u64,
 }
 
 impl PartView {
@@ -857,6 +870,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             front,
             claim_from_ring: claim_from_ring_default(),
             reader,
+            qlog_reader: None,
             seg_cache: RefCell::new(HashMap::new()),
             seg_shape_cache: RefCell::new(HashMap::new()),
             seg_ctx_cache: RefCell::new(HashMap::new()),
@@ -867,6 +881,15 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     /// the differential A/B runs the same workload both ways in one process).
     pub fn set_claim_from_ring(&mut self, v: bool) -> &mut Self {
         self.claim_from_ring = v;
+        self
+    }
+
+    /// Point the committed `DEDUP_INDEX=segment` dedup reads at the per-queue log
+    /// (Phase A2, `QUEEN_RAFT_QLOG`). `Some` reads the committed hashes from the
+    /// qlog (same committed bound, same O(claimed) walk); `None` keeps the
+    /// segment read path. The batcher sets it once per cycle from its handle.
+    pub fn set_qlog_reader(&mut self, reader: Option<QLogReader>) -> &mut Self {
+        self.qlog_reader = reader;
         self
     }
 
@@ -1131,35 +1154,31 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
         // committed segment rows; `txns`/`rows` scan the `txns` keyspace from the
         // row that may cover `lo` (the greatest base <= lo).
         if self.cfg.index_mode == IndexMode::Segment {
-            // O(claimed) walk from the segment covering `lo`, STOPPING at `hi`:
-            // only the `[lo, hi]` frames are read (and their hashes `pread`),
-            // never the whole history.
-            if let Some((reader, ctx)) = self.seg_read(pid)? {
-                reader
-                    .claim_frames(
-                        ctx.bucket,
-                        pid,
-                        lo,
-                        ctx.committed_end,
-                        &ctx.sealed,
-                        true,
-                        &mut |base, _end_incl, _created, hashes| {
-                            if base > hi {
-                                return false; // past the range: nothing more overlaps
+            // O(claimed) walk from the record covering `lo`, STOPPING at `hi`:
+            // only the `[lo, hi]` records are read (and their hashes `pread`),
+            // never the whole history. The source is the QLOG when the knob is on
+            // (Phase A2), else the segments — same bounded walk, same committed
+            // tail (`ctx.committed_end`).
+            if let Some(ctx) = self.seg_ctx(pid)? {
+                self.claim_frames_of(
+                    pid,
+                    &ctx,
+                    lo,
+                    true,
+                    &mut |base, _end_incl, _created, hashes| {
+                        if base > hi {
+                            return false; // past the range: nothing more overlaps
+                        }
+                        let hs = hashes.unwrap_or_default();
+                        for (i, chunk) in hs.chunks_exact(16).enumerate() {
+                            let off = base + i as u64;
+                            if off >= lo && off <= hi {
+                                push(<[u8; 16]>::try_from(chunk).unwrap());
                             }
-                            let hs = hashes.unwrap_or_default();
-                            for (i, chunk) in hs.chunks_exact(16).enumerate() {
-                                let off = base + i as u64;
-                                if off >= lo && off <= hi {
-                                    push(<[u8; 16]>::try_from(chunk).unwrap());
-                                }
-                            }
-                            true
-                        },
-                    )
-                    .map_err(|e| {
-                        Refusal::retry("unavailable", format!("segment claim walk: {e}"))
-                    })?;
+                        }
+                        true
+                    },
+                )?;
             }
         } else {
             let prefix = keys::txns_prefix(pid);
@@ -1275,18 +1294,10 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     /// POP delivered set does NOT use this — it walks the segment index O(claimed)
     /// via [`segments::Reader::claim_frames`], never the whole window.
     fn build_committed_txns_rows(&self, pid: Pid) -> Result<CommittedTxnsRows, Refusal> {
-        let Some(reader) = self.reader.as_ref() else {
-            return Err(Refusal::retry(
-                "unavailable",
-                "DEDUP_INDEX=segment planner has no segment reader",
-            ));
-        };
         let Some(ctx) = self.seg_ctx(pid)? else {
             return Ok(Vec::new());
         };
-        let frames = reader
-            .committed_dedup_rows(ctx.bucket, pid, 0, ctx.committed_end, &ctx.sealed)
-            .map_err(|e| Refusal::retry("unavailable", format!("segment dedup read: {e}")))?;
+        let frames = self.committed_frames_of(pid, &ctx, 0, true)?;
         Ok(frames
             .into_iter()
             .map(|f| {
@@ -1300,6 +1311,95 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
                 )
             })
             .collect())
+    }
+
+    /// The committed dedup frames of `pid` from `from_base`, bounded to the
+    /// committed tail — from the QLOG when `QUEEN_RAFT_QLOG` is on (Phase A2),
+    /// else the segments (lever 1). Either source returns the SAME
+    /// `(base, end-exclusive, created_at, hashes)` shape and the SAME committed
+    /// bound (`ctx.committed_end`, the committed partition row's `last_offset + 1`
+    /// — the exactly-once invariant), so off-vs-on is byte-identical.
+    /// `with_hashes == false` reads the shape only (no per-record hash read).
+    fn committed_frames_of(
+        &self,
+        pid: Pid,
+        ctx: &SegCtx,
+        from_base: u64,
+        with_hashes: bool,
+    ) -> Result<Vec<DedupFrame>, Refusal> {
+        if let Some(ql) = self.qlog_reader.as_ref() {
+            let frames = ql
+                .committed_frames(ctx.queue_id, pid, from_base, ctx.committed_end, with_hashes)
+                .map_err(|e| Refusal::retry("unavailable", format!("qlog dedup read: {e}")))?;
+            return Ok(frames
+                .into_iter()
+                .map(|f| DedupFrame {
+                    base_offset: f.base_offset,
+                    end: f.end,
+                    created_at_us: f.created_at_us,
+                    hashes: f.hashes,
+                })
+                .collect());
+        }
+        let Some(reader) = self.reader.as_ref() else {
+            return Err(Refusal::retry(
+                "unavailable",
+                "DEDUP_INDEX=segment planner has no segment reader",
+            ));
+        };
+        if with_hashes {
+            reader
+                .committed_dedup_rows(ctx.bucket, pid, from_base, ctx.committed_end, &ctx.sealed)
+                .map_err(|e| Refusal::retry("unavailable", format!("segment dedup read: {e}")))
+        } else {
+            reader
+                .committed_dedup_shape(ctx.bucket, pid, from_base, ctx.committed_end, &ctx.sealed)
+                .map_err(|e| Refusal::retry("unavailable", format!("segment shape read: {e}")))
+        }
+    }
+
+    /// The O(claimed) forward claim walk of `pid` from `from_offset`, bounded to
+    /// `ctx.committed_end` — from the QLOG when the knob is on, else the segments.
+    /// Reuses lever 1's bounded walk (O(claimed), not O(window)); the qlog twin
+    /// stops at the SAME committed tail (never reads an uncommitted record in the
+    /// committed leg — the overlay covers those).
+    fn claim_frames_of(
+        &self,
+        pid: Pid,
+        ctx: &SegCtx,
+        from_offset: u64,
+        want_hashes: bool,
+        cb: &mut dyn FnMut(u64, u64, i64, Option<Vec<u8>>) -> bool,
+    ) -> Result<(), Refusal> {
+        if let Some(ql) = self.qlog_reader.as_ref() {
+            return ql
+                .claim_frames(
+                    ctx.queue_id,
+                    pid,
+                    from_offset,
+                    ctx.committed_end,
+                    want_hashes,
+                    cb,
+                )
+                .map_err(|e| Refusal::retry("unavailable", format!("qlog claim walk: {e}")));
+        }
+        let Some(reader) = self.reader.as_ref() else {
+            return Err(Refusal::retry(
+                "unavailable",
+                "DEDUP_INDEX=segment planner has no segment reader",
+            ));
+        };
+        reader
+            .claim_frames(
+                ctx.bucket,
+                pid,
+                from_offset,
+                ctx.committed_end,
+                &ctx.sealed,
+                want_hashes,
+                cb,
+            )
+            .map_err(|e| Refusal::retry("unavailable", format!("segment claim walk: {e}")))
     }
 
     /// The committed segment SHAPE of `pid` (`(base, end, created)`, NO hashes),
@@ -1318,18 +1418,10 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
     }
 
     fn build_committed_seg_shape(&self, pid: Pid) -> Result<Vec<Seg>, Refusal> {
-        let Some(reader) = self.reader.as_ref() else {
-            return Err(Refusal::retry(
-                "unavailable",
-                "DEDUP_INDEX=segment planner has no segment reader",
-            ));
-        };
         let Some(ctx) = self.seg_ctx(pid)? else {
             return Ok(Vec::new());
         };
-        let frames = reader
-            .committed_dedup_shape(ctx.bucket, pid, 0, ctx.committed_end, &ctx.sealed)
-            .map_err(|e| Refusal::retry("unavailable", format!("segment shape read: {e}")))?;
+        let frames = self.committed_frames_of(pid, &ctx, 0, false)?;
         Ok(frames
             .into_iter()
             .map(|f| Seg {
@@ -1363,6 +1455,7 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             return Ok(None);
         }
         let bucket = bucket_of(&cpart.tenant, &cpart.queue, &cpart.partition);
+        let queue_id = QLogSet::queue_id_of(&cpart.tenant, &cpart.queue);
         let mut sealed: Vec<u32> = Vec::new();
         self.reads()
             .scan_partition_files(pid, usize::MAX, &mut |f| {
@@ -1374,20 +1467,8 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
             bucket,
             committed_end,
             sealed,
+            queue_id,
         })))
-    }
-
-    /// The segment `Reader` and cached context for an O(claimed) pop walk
-    /// ([`segments::Reader::claim_frames`]). `None` when the partition has no
-    /// committed frames.
-    fn seg_read(&self, pid: Pid) -> Result<Option<(&Reader, Rc<SegCtx>)>, Refusal> {
-        let Some(reader) = self.reader.as_ref() else {
-            return Err(Refusal::retry(
-                "unavailable",
-                "DEDUP_INDEX=segment planner has no segment reader",
-            ));
-        };
-        Ok(self.seg_ctx(pid)?.map(|ctx| (reader, ctx)))
     }
 
     // ---- dedup (committed txns + overlay) ---------------------------------

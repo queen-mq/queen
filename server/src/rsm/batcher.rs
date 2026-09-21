@@ -82,6 +82,7 @@ use crate::rsm::planner::{
     AckCommand, AckPositionalCommand, CommandKind, DlqHeadCommand, Lookup, NackCommand, Overlay,
     Plan, PlanConfig, Planned, Planner, PopCommand, PushCommand, RenewCommand,
 };
+use crate::rsm::qlog::set::QLogReader;
 use crate::rsm::replicator::{AppliedAt, NodeId, ProposeError, Replicator, Role};
 use crate::rsm::segments::Reader;
 use crate::rsm::state::{Committed, Derived};
@@ -589,6 +590,7 @@ fn plan_cycle_blocking<S: Store>(
     store: &S,
     front: &DedupFront,
     reader: Option<Reader>,
+    qlog_reader: Option<QLogReader>,
     folded: Vec<(u64, Arc<Entry>)>,
     batch: Vec<Command>,
     cfg: PlanConfig,
@@ -623,7 +625,12 @@ fn plan_cycle_blocking<S: Store>(
             // retryably (I14).
             .map_err(|_| crate::rsm::store::StoreError::Io("clock read".into()))?;
         ov.mark_cycle_start();
-        let planner = Planner::new(committed, now_us, cfg.clone(), front, reader.clone());
+        let mut planner = Planner::new(committed, now_us, cfg.clone(), front, reader.clone());
+        // Phase A2: when the qlog knob is on, the planner reads the committed
+        // `DEDUP_INDEX=segment` dedup authority from the per-queue log instead of
+        // the `.seg` files (same committed bound, same O(claimed) walk). `None`
+        // leaves the segment path untouched.
+        planner.set_qlog_reader(qlog_reader.clone());
 
         let mut entry = Entry::new(now_us, ov.cycle_pid_base(), ov.cycle_kv_base());
         let mut slots: Vec<Slot> = Vec::with_capacity(batch.len());
@@ -759,6 +766,10 @@ pub struct Batcher<S: Store, R: Replicator> {
     /// committed dedup authority from. `None` until the facade hands it in with
     /// [`Batcher::with_reader`]; only `segment` mode reads it.
     reader: Option<Reader>,
+    /// Phase A2 (`QUEEN_RAFT_QLOG`): the per-queue-log read side. When present
+    /// AND `DEDUP_INDEX=segment`, the planner reads the committed dedup authority
+    /// from the qlog instead of the `.seg` files. `None` when the knob is off.
+    qlog_reader: Option<QLogReader>,
 }
 
 impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
@@ -769,6 +780,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             cfg,
             front: Arc::new(DedupFront::from_env()),
             reader: None,
+            qlog_reader: None,
         }
     }
 
@@ -778,6 +790,15 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
     /// side; the default modes never read it.
     pub fn with_reader(mut self, reader: Reader) -> Batcher<S, R> {
         self.reader = Some(reader);
+        self
+    }
+
+    /// Hand the batcher the per-queue-log [`QLogReader`] (Phase A2). When present
+    /// and `DEDUP_INDEX=segment`, the planner reads the committed dedup authority
+    /// from the qlog instead of the segments; `None` (the knob off) keeps the
+    /// segment path.
+    pub fn with_qlog_reader(mut self, qlog_reader: Option<QLogReader>) -> Batcher<S, R> {
+        self.qlog_reader = qlog_reader;
         self
     }
 
@@ -817,6 +838,7 @@ impl<S: Store + 'static, R: Replicator> Batcher<S, R> {
             cfg: self.cfg,
             front: self.front,
             reader: self.reader,
+            qlog_reader: self.qlog_reader,
             role_rx,
             cmd_rx,
             result_tx,
@@ -914,6 +936,10 @@ struct RunState<S: Store, R: Replicator> {
     /// PERF-E: the segment reader for `DEDUP_INDEX=segment`, cloned into each
     /// blocking plan cycle. `None` outside `segment` mode.
     reader: Option<Reader>,
+    /// Phase A2: the per-queue-log reader, cloned into each blocking plan cycle
+    /// when `QUEEN_RAFT_QLOG` is on. The planner reads the committed dedup
+    /// authority from it (under `DEDUP_INDEX=segment`) instead of the segments.
+    qlog_reader: Option<QLogReader>,
     role_rx: watch::Receiver<Role>,
     cmd_rx: mpsc::Receiver<Submission>,
     result_tx: mpsc::UnboundedSender<(u64, Result<AppliedAt, ProposeError>)>,
@@ -1095,12 +1121,14 @@ impl<S: Store + 'static, R: Replicator> RunState<S, R> {
         let cfg = self.cfg.plan.clone();
         let front = self.front.clone();
         let reader = self.reader.clone();
+        let qlog_reader = self.qlog_reader.clone();
 
         let planned = tokio::task::spawn_blocking(move || {
             plan_cycle_blocking(
                 &*store,
                 &front,
                 reader,
+                qlog_reader,
                 folded,
                 commands,
                 cfg,

@@ -913,48 +913,45 @@ impl<'a, R: Reads + ?Sized> Planner<'a, R> {
 
         let mut stop = false;
         if self.cfg.index_mode == IndexMode::Segment {
-            // O(claimed) forward walk of the segment index from `wanted`: it
+            // O(claimed) forward walk of the committed index from `wanted`: it
             // reads — and, for a delivered set (`need_hashes`), `pread`s — ONLY
             // the ≤ budget frames the claim consumes, never the whole cursor→tail
             // span. This is the PERF-I-equivalent for segment-authority dedup:
             // the delivered-set cost is independent of how far the cursor lags.
             // (`wanted >= log_start` is the caller's gate, so the range is
-            // contiguous; `claim_frames` stops at a deferred frame or budget.)
-            if let Some((reader, ctx)) = self.seg_read(part.pid)? {
-                reader
-                    .claim_frames(
-                        ctx.bucket,
-                        part.pid,
-                        wanted as u64,
-                        ctx.committed_end,
-                        &ctx.sealed,
-                        need_hashes,
-                        &mut |base, end_incl, created, hashes| {
-                            let deferred = !fresh(created);
-                            let seg_from = (base as i64).max(wanted);
-                            if end_incl as i64 >= seg_from {
-                                avail += end_incl as i64 - seg_from + 1;
-                            }
-                            out.push(SegH {
-                                base,
-                                end: end_incl,
-                                created_at_us: created,
-                                hashes: hashes.map(|h| {
-                                    h.chunks_exact(16)
-                                        .map(|c| <[u8; 16]>::try_from(c).unwrap())
-                                        .collect()
-                                }),
-                            });
-                            if deferred || avail >= budget {
-                                stop = true;
-                                return false;
-                            }
-                            true
-                        },
-                    )
-                    .map_err(|e| {
-                        Refusal::retry("unavailable", format!("segment claim walk: {e}"))
-                    })?;
+            // contiguous; the walk stops at a deferred frame or budget.) The
+            // source is the QUEUE LOG when `QUEEN_RAFT_QLOG` is on (Phase A2), the
+            // `.seg` files otherwise — SAME committed bound (`ctx.committed_end`),
+            // SAME O(claimed) walk, so the delivered set is identical.
+            if let Some(ctx) = self.seg_ctx(part.pid)? {
+                self.claim_frames_of(
+                    part.pid,
+                    &ctx,
+                    wanted as u64,
+                    need_hashes,
+                    &mut |base, end_incl, created, hashes| {
+                        let deferred = !fresh(created);
+                        let seg_from = (base as i64).max(wanted);
+                        if end_incl as i64 >= seg_from {
+                            avail += end_incl as i64 - seg_from + 1;
+                        }
+                        out.push(SegH {
+                            base,
+                            end: end_incl,
+                            created_at_us: created,
+                            hashes: hashes.map(|h| {
+                                h.chunks_exact(16)
+                                    .map(|c| <[u8; 16]>::try_from(c).unwrap())
+                                    .collect()
+                            }),
+                        });
+                        if deferred || avail >= budget {
+                            stop = true;
+                            return false;
+                        }
+                        true
+                    },
+                )?;
             }
         } else {
             // The committed segment covering `wanted` (greatest base ≤ wanted),

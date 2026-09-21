@@ -48,6 +48,7 @@ mod planner_overlay;
 mod planner_pop;
 mod planner_push;
 mod pop_bounded;
+mod qlog_read;
 mod qlog_shadow;
 mod replicator;
 mod replicator_crash;

@@ -216,6 +216,7 @@ fn qlog_shadow_write_is_byte_identical_to_the_effect() {
         let log = set
             .log(qid)
             .unwrap_or_else(|| panic!("no qlog opened for queue {}", e.queue));
+        let log = log.read().expect("qlog lock");
         let loc = log.locate(e.pid, e.base_offset).unwrap_or_else(|| {
             panic!("record (pid {}, base {}) not located", e.pid, e.base_offset)
         });
@@ -264,7 +265,7 @@ fn qlog_shadow_write_is_byte_identical_to_the_effect() {
     // active files, not just the active RAM index.
     let rolled = [Q1, Q2].iter().any(|q| {
         set.log(QLogSet::queue_id_of(TENANT, q))
-            .is_some_and(|l| l.file_count() > 1)
+            .is_some_and(|l| l.read().expect("qlog lock").file_count() > 1)
     });
     assert!(
         rolled,

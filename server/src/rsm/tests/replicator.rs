@@ -437,6 +437,69 @@ async fn propose_applies_through_the_real_apply_thread() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Open a replicator with `QUEEN_RAFT_QLOG` ON (Phase A2), everything else the
+/// shared test config.
+fn open_repl_qlog(dir: &Path, store: Arc<HeedStore>) -> LocalReplicator<HeedStore> {
+    let ocfg = OpenConfig {
+        apply_cfg: apply::ApplyConfig {
+            qlog: true,
+            ..cfg()
+        },
+        ..test_config(dir, 16 << 10, Fsync::Off)
+    };
+    LocalReplicator::open(store, ocfg, Arc::new(NoWaker), Arc::new(SystemClock))
+        .expect("open replicator (qlog on)")
+}
+
+/// Phase A2: the full replicator + apply path with the qlog knob ON. Proves the
+/// apply thread PUBLISHES the qlog reader (the `OnceLock` spin-wait in
+/// `LocalReplicator::open` completes rather than hanging), the
+/// flush-before-store-commit ordering runs on every commit and durable point,
+/// and the resulting REPLICATED state is byte-identical to the reference — the
+/// shadow perturbs nothing, proven through the real threads, not only the unit
+/// applier. The qlog READ equality itself is `qlog_read.rs`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn qlog_on_drives_the_real_apply_thread_and_publishes_a_reader() {
+    const N: u64 = 80;
+    // The reference: the same entries with the knob OFF (today's exact path).
+    let want = {
+        let node = Node::new("repl-qlog-ref");
+        run_workload(&node, SEED, N, 97)
+    };
+
+    let dir = scratch("repl-qlog");
+    let store = Arc::new(HeedStore::open(&dir.join("store"), &store_opts()).expect("store"));
+    let repl = open_repl_qlog(&dir, store);
+    // The apply thread published a qlog reader (knob on). `open` returning at all
+    // means the spin-wait succeeded; this asserts it is actually `Some`.
+    assert!(
+        repl.qlog_reader().is_some(),
+        "the qlog reader was not published with the knob on"
+    );
+
+    let entries = entry_bytes(N);
+    for (i, e) in entries.into_iter().enumerate() {
+        let at = repl.propose(e, deadline()).await.expect("propose");
+        assert_eq!(at.index, i as u64 + 1, "indices are assigned in order");
+    }
+    assert_eq!(repl.applied_index(), N);
+
+    let (_stats, store) = repl.shutdown().expect("shutdown");
+    let got = digest_and_close(store);
+    assert_eq!(
+        got.whole,
+        want.whole,
+        "qlog-on replicated state differs from the knob-off reference, first at {:?}",
+        got.first_difference(&want),
+    );
+    // The shadow really was written, so the equality above is not vacuous.
+    assert!(
+        dir.join("qlog").exists(),
+        "the knob was on but no qlog/ directory was created"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_clean_reopen_reproduces_the_state() {
     const N: u64 = 60;

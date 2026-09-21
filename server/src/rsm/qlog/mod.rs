@@ -19,14 +19,37 @@
 //!   truncate-below-the-durable-point (§5: the log is the store; it is
 //!   reclaimed only by retention).
 //!
-//! # ISOLATED — dead code until a later phase
+//! # Read-authoritative when `QUEEN_RAFT_QLOG` is on (Phase A2)
 //!
-//! Nothing here is wired into apply, pop, the replicator or the facade. It
-//! changes no live behaviour. A later phase (§10 Phase A) swaps the byte store
-//! over to it; until then it exists only to be reviewed and crash-tested. The
-//! transaction fields are in the record format ([`record`]) but transactions
-//! are NOT implemented (Phase B): a `txn_kind == 1` record round-trips, and
-//! nothing acts on it.
+//! A0 built this store; A1 wired the SHADOW write ([`set`]); A2 switches the
+//! READS over: with the knob on, pop reads the payload from the queue log
+//! ([`QLog::read_owned`]) and the `DEDUP_INDEX=segment` dedup authority reads the
+//! per-append hashes from it ([`QLog::committed_frames`] / [`QLog::claim_walk`]),
+//! instead of the `.seg` files and the `txns`/`dedup` keyspaces. The knob is
+//! still OFF by default (segments/LMDB authoritative), and the segments and the
+//! raft-log blob are still written (removed in A3), so off-vs-on is behaviourally
+//! identical. The transaction fields are in the record format ([`record`]) but
+//! transactions are NOT implemented (Phase B): a `txn_kind == 1` record
+//! round-trips, and nothing acts on it.
+//!
+//! The reads run on OTHER threads than the applier's single writer (the pop
+//! render on the blocking pool, the dedup probe on the batcher), so the applier
+//! owns each queue's [`QLog`] behind an `RwLock` and hands the facade + planner a
+//! cloneable reader ([`set::QLogReader`]); see [`set`].
+//!
+//! ## Recovery note — the A2 shadow's replay duplicates are benign for reads
+//!
+//! The qlog is fsynced at the store-commit cadence but is NOT truncated below the
+//! store's durable point on reopen (it is a shadow; the segments/store are still
+//! authoritative in A2). So after a crash the qlog can hold records for entries
+//! the store rolled back and the replayed log re-appends, leaving a SECOND record
+//! for a `(pid, base_offset)` already present. This does not corrupt a read: the
+//! index is keyed by `(pid, base_offset)` and the newer append overwrites the
+//! active-index entry (a sealed twin is shadowed because [`QLog::locate_record`]
+//! checks the active file first), and the replayed bytes are byte-identical to
+//! the originals, so `locate`/`read` resolve to a correct record and the dead
+//! copy is only wasted space (reclaimed by A3's compaction). The residue is
+//! flagged for the coordinator's crash matrix.
 //!
 //! # Determinism (I2)
 //!
@@ -49,7 +72,8 @@
 //!
 //! - transactions / present-in-all (Phase B) — the fields exist, the machinery
 //!   does not;
-//! - wiring into apply/pop/replicator/facade — dead code;
+//! - removing the segments / the raft-log blob (A3) — both still written and the
+//!   fallback when the knob is off;
 //! - compaction of partially-live files (Phase C) — [`QLog::unlink_dead_files`]
 //!   drops WHOLE dead files only; see the `TODO(phase-C-compaction)` there;
 //! - parallel per-queue writers (Phase E) — one writer per queue is fine;
@@ -210,6 +234,26 @@ pub struct Located {
     pub offset: u64,
     pub len: u32,
     pub count: u32,
+}
+
+/// One append's committed dedup facts, served from the queue log for the
+/// `DEDUP_INDEX=segment` read path when `QUEEN_RAFT_QLOG` is on (Phase A2). The
+/// qlog twin of [`crate::rsm::segments::DedupFrame`]: `(base_offset) -> (end,
+/// created_at, hashes)`, with `end` EXCLUSIVE (`base_offset + count`), exactly
+/// the stored-`txns`-row / `.qidx` shape every dedup reader expects. Produced by
+/// [`QLog::committed_frames`] / [`QLog::claim_walk`], already bounded to the
+/// committed tail (`end <= committed_end`) so an applied-but-uncommitted record
+/// never appears — the exactly-once invariant (lever 1, `ALICE_PGLESS_NEWARCH.md`
+/// §9).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommittedFrame {
+    pub base_offset: u64,
+    /// Exclusive end (`base_offset + count`).
+    pub end: u64,
+    pub created_at_us: i64,
+    /// `16 * count` bytes in frame order, or empty when the caller asked for the
+    /// shape only.
+    pub hashes: Vec<u8>,
 }
 
 /// One record's metadata as [`QLog::scan_from`] walks a partition. The index
@@ -445,10 +489,28 @@ impl QLog {
         self.files.last().map_or(0, |m| m.bytes)
     }
 
-    /// Append one group of records and fsync ONCE. Returns each record's
-    /// `(file_id, byte_offset)` in order. The whole group is one `write_all`
-    /// and one barrier — what amortizes the flush.
+    /// Append one group of records (one `write_all`) and fsync ONCE. Returns each
+    /// record's `(file_id, byte_offset)` in order. This is the durable
+    /// convenience wrapper — [`QLog::write_group`] then [`QLog::sync`] — kept for
+    /// direct callers and the A0 tests. The A2 apply path instead calls
+    /// `write_group` PER ENTRY (so the record is page-cache readable before the
+    /// leader answers, exactly as `segments.flush_writes`) and `sync` at the
+    /// durable point (so the fsync stays batched).
     pub fn append_group(&mut self, records: &[RecordInput<'_>]) -> io::Result<Vec<Loc>> {
+        let locs = self.write_group(records)?;
+        self.sync()?;
+        Ok(locs)
+    }
+
+    /// Append one group of records with ONE `write_all` and NO fsync: the bytes
+    /// reach the page cache and the RAM index at once, so a reader sees the
+    /// record immediately, but it is not durable until [`QLog::sync`]. This is
+    /// the A2 write path — the leader answers a pop right after apply, before the
+    /// commit that fsyncs, so the payload MUST be readable without waiting for the
+    /// barrier (the segment path does the same: `flush_writes` per entry, fsync
+    /// per durable point). A crash before the sync leaves an un-fsync'd tail that
+    /// [`QLog::open`] truncates; the record was never acknowledged durable.
+    pub fn write_group(&mut self, records: &[RecordInput<'_>]) -> io::Result<Vec<Loc>> {
         if records.is_empty() {
             return Ok(Vec::new());
         }
@@ -507,12 +569,13 @@ impl QLog {
 
         let f = self.active.as_mut().expect("active file");
         f.write_all(&buf)?;
-        fsync_file(f, self.opts.fsync)?;
 
-        // Bookkeeping advances only after the fsync returns. Recovery rebuilds
-        // the real valid length from the bytes on disk, so if a crash lands
-        // before this, the un-fsync'd tail is truncated and the records are
-        // simply unanswered (their propose never returned).
+        // Bookkeeping advances only after the write returns (the sync is
+        // separate — [`QLog::sync`]). Recovery rebuilds the real valid length
+        // from the bytes on disk, so if a crash lands before the sync, the
+        // un-fsync'd tail is truncated and the records are simply unanswered
+        // (their propose never returned, or the authoritative segment/store the
+        // A2 shadow rides did not commit them).
         let added = buf.len() as u64;
         {
             let meta = self.files.last_mut().expect("active meta");
@@ -526,6 +589,17 @@ impl QLog {
             self.active_index.insert(r);
         }
         Ok(locs)
+    }
+
+    /// Fsync the active file, making every record [`QLog::write_group`] wrote
+    /// since the last sync durable (§5). A no-op when the queue has no active
+    /// file (nothing was written). Sealed files were fsync'd at their roll, so
+    /// only the active file's tail is ever un-synced.
+    pub fn sync(&mut self) -> io::Result<()> {
+        if let Some(f) = self.active.as_ref() {
+            fsync_file(f, self.opts.fsync)?;
+        }
+        Ok(())
     }
 
     /// Create a fresh active file id `id` whose header records `first_seq`.
@@ -559,6 +633,17 @@ impl QLog {
     /// Seal the active file — write its `.qidx`, map it, mark it sealed — and
     /// create the next active file whose first record will carry `first_seq`.
     fn roll(&mut self, first_seq: u64) -> io::Result<()> {
+        // Fsync the outgoing active file's DATA before sealing it. A sealed file
+        // must be FULLY durable: [`QLog::open`] treats a torn or damaged record
+        // in a sealed file as corruption (it is surfaced, never truncated),
+        // because only the active file can carry a torn tail. Since
+        // [`QLog::write_group`] defers the per-record fsync to the durable point
+        // ([`QLog::sync`]), the roll is where a file about to become sealed must
+        // reach the platter — otherwise its unsynced tail would seal, and a power
+        // loss would corrupt it. A no-op under `Fsync::Off`.
+        if let Some(f) = self.active.as_ref() {
+            fsync_file(f, self.opts.fsync)?;
+        }
         let (old_id, old_bytes) = {
             let m = self.files.last().expect("active meta");
             (m.id, m.bytes)
@@ -643,6 +728,157 @@ impl QLog {
             Some(loc) => Ok(Some(self.read_located(&loc)?.hashes)),
             None => Ok(None),
         }
+    }
+
+    /// The whole record holding `(pid, offset)`, checksum-verified with the
+    /// `len`-match guard — what the pop payload read reads (Phase A2). `None` if
+    /// no live file holds it. Unlike [`QLog::read_payload`] it returns the
+    /// header too (`base_offset`, `count`, `created_at_us`), which the pop render
+    /// needs to unpack and stamp the frame exactly as the segment read did.
+    pub fn read_owned(&self, pid: u64, offset: u64) -> io::Result<Option<OwnedRecord>> {
+        match self.locate(pid, offset) {
+            Some(loc) => Ok(Some(self.read_located(&loc)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Locate `(pid, offset)` returning the FULL index record (base offset, end,
+    /// created_at and the node-local position) plus its file id — what the
+    /// O(claimed) claim walk needs and [`QLog::locate`] drops. Active file first
+    /// (a roll can only add a newer record for a base that is not yet claimable),
+    /// then a binary search of the sealed files. A `Hole` in a file's span means
+    /// no other file can hold it (retention deleted it).
+    fn locate_record(&self, pid: u64, offset: u64) -> Option<(u64, index::Record)> {
+        if let Some((file_id, r)) = self.active_index.probe(pid, offset) {
+            return Some((file_id, r));
+        }
+        for (file_id, view) in &self.sealed {
+            match view.probe(pid, offset) {
+                index::Probe::Hit(r) => return Some((*file_id, r)),
+                index::Probe::Hole => return None,
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Read one located index record's hashes (the `16 * count` bytes), with the
+    /// same `len`-match guard [`QLog::read_located`] applies.
+    fn read_record_hashes(&self, file_id: u64, rec: &index::Record) -> io::Result<Vec<u8>> {
+        let loc = Located {
+            file_id,
+            offset: rec.offset,
+            len: rec.len,
+            count: rec.count,
+        };
+        Ok(self.read_located(&loc)?.hashes)
+    }
+
+    /// Walk partition `pid`'s committed records FORWARD from `from_offset`, in
+    /// offset order, invoking `cb(base, end_inclusive, created_at, hashes)` for
+    /// each until it returns `false` (the pop budget) or the committed tail is
+    /// reached — the O(claimed) delivered-set / claim walk, the qlog twin of
+    /// [`crate::rsm::segments::Reader::claim_frames`] for `DEDUP_INDEX=segment`.
+    ///
+    /// It reads (and, when `want_hashes`, `pread`s) only the records the claim
+    /// actually consumes (≤ budget), NEVER the whole cursor→tail span: each step
+    /// is one [`QLog::locate_record`] (a binary search of the index), advancing
+    /// `cur` to the record's exclusive `end`. The range MUST be contiguous, which
+    /// it is on the pop path (retention is a prefix delete, no interior holes, and
+    /// the caller gates `wanted >= log_start`), so a `locate` miss means the
+    /// committed tail, not a gap.
+    ///
+    /// THE ONE CORRECTNESS INVARIANT (exactly-once, lever 1): the walk stops at
+    /// the committed tail. A record whose exclusive `end` reaches PAST
+    /// `committed_end` is applied-but-not-committed (or in flight); it is NOT part
+    /// of the planner's committed snapshot and IS covered by its overlay, so
+    /// reading it here would double-count. `committed_end` is the committed
+    /// partition row's `last_offset + 1`, read by the planner via the RoTxn.
+    pub fn claim_walk(
+        &self,
+        pid: u64,
+        from_offset: u64,
+        committed_end: u64,
+        want_hashes: bool,
+        cb: &mut dyn FnMut(u64, u64, i64, Option<Vec<u8>>) -> bool,
+    ) -> io::Result<()> {
+        let mut cur = from_offset;
+        while cur < committed_end {
+            let Some((file_id, rec)) = self.locate_record(pid, cur) else {
+                break; // past the committed tail (the range is contiguous)
+            };
+            if rec.end > committed_end {
+                break; // uncommitted record: the overlay covers it (the invariant)
+            }
+            let hashes = if want_hashes {
+                Some(self.read_record_hashes(file_id, &rec)?)
+            } else {
+                None
+            };
+            let keep = cb(rec.base_offset, rec.end - 1, rec.created_at_us, hashes);
+            if !keep {
+                break;
+            }
+            cur = rec.end; // contiguous: the next record starts here
+        }
+        Ok(())
+    }
+
+    /// Every committed record of `pid` whose span reaches above `from_base`, in
+    /// base-offset order, with its hash list (when `with_hashes`) — the qlog twin
+    /// of [`crate::rsm::segments::Reader::committed_dedup_rows`] /
+    /// `committed_dedup_shape` for the dedup probe / resolve / seed authority.
+    /// Bounded to the committed tail (`end <= committed_end`), the exactly-once
+    /// invariant. `from_base = 0` is the whole committed window (bloom-gated, so
+    /// its O(window) hash reads are acceptable there); a positive `from_base`
+    /// drops records wholly below it before their hash `pread`.
+    ///
+    /// Unlike [`QLog::claim_walk`] this gathers the candidate records from the
+    /// index directly (active file, then the sealed files) rather than a
+    /// contiguous forward walk, so it is robust to a future interior hole exactly
+    /// as the segment `committed_dedup_frames` is. A `(pid, base_offset)` present
+    /// in both the active and a sealed file (only after a crash-and-replay, which
+    /// re-appends an identical record — see the module recovery note) is taken
+    /// from the ACTIVE file, first-source-wins, matching the segment path.
+    pub fn committed_frames(
+        &self,
+        pid: u64,
+        from_base: u64,
+        committed_end: u64,
+        with_hashes: bool,
+    ) -> io::Result<Vec<CommittedFrame>> {
+        // (base_offset) -> (file_id, record), first source wins; the active file
+        // is inserted first so a replayed duplicate resolves to it.
+        let mut cand: BTreeMap<u64, (u64, index::Record)> = BTreeMap::new();
+        if let Some(active_id) = self.active_index.file_id() {
+            for r in self.active_index.records_of_from(pid, from_base) {
+                if r.end <= committed_end {
+                    cand.entry(r.base_offset).or_insert((active_id, r));
+                }
+            }
+        }
+        for (file_id, view) in &self.sealed {
+            for r in view.records_of(pid) {
+                if r.end > from_base && r.end <= committed_end {
+                    cand.entry(r.base_offset).or_insert((*file_id, r));
+                }
+            }
+        }
+        let mut out: Vec<CommittedFrame> = Vec::with_capacity(cand.len());
+        for (_, (file_id, rec)) in cand {
+            let hashes = if with_hashes {
+                self.read_record_hashes(file_id, &rec)?
+            } else {
+                Vec::new()
+            };
+            out.push(CommittedFrame {
+                base_offset: rec.base_offset,
+                end: rec.end,
+                created_at_us: rec.created_at_us,
+                hashes,
+            });
+        }
+        Ok(out)
     }
 
     /// The whole record at a located position, with the `len`-match guard.

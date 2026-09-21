@@ -67,6 +67,7 @@ use crate::rsm::planner::{
     bucket_of, AckCommand, AckItem, AckStatus, AckTarget, DlqSnapshot, PopCommand, PushCommand,
     PushItem, RenewCommand, SubIntent,
 };
+use crate::rsm::qlog::set::QLogReader;
 use crate::rsm::replicator::local::{LocalReplicator, OpenConfig, Waker};
 use crate::rsm::replicator::Replicator;
 use crate::rsm::segments;
@@ -124,6 +125,11 @@ pub struct RaftFacade {
     repl: Arc<LocalReplicator<HeedStore>>,
     /// The segment reader for pop payloads (§7.5), off the live file set.
     reader: segments::Reader,
+    /// The per-queue-log reader for pop payloads (Phase A2, `QUEEN_RAFT_QLOG`),
+    /// `Some` only when the knob is on. When present the pop render reads the
+    /// payload from the queue log instead of the segments; the segments are still
+    /// written (removed in A3), so off-vs-on is byte-identical.
+    qlog_reader: Option<QLogReader>,
     /// The command channel the batcher drains (§7.1). Bounded; back-pressure
     /// reaches the receiver.
     cmd_tx: CommandTx,
@@ -195,12 +201,18 @@ impl RaftFacade {
             .map_err(|e| format!("open the local replicator at {}: {e}", dir.display()))?,
         );
         let reader = repl.reader();
+        // Phase A2: the per-queue-log reader (or `None` when `QUEEN_RAFT_QLOG` is
+        // off), published by the apply thread alongside the segment reader.
+        let qlog_reader = repl.qlog_reader();
 
         // PERF-E `DEDUP_INDEX=segment`: the planner serves the committed dedup
         // authority from the segments, so hand the batcher a cloned segment
-        // reader (the default modes never read it).
+        // reader (the default modes never read it). Phase A2: also hand it the
+        // qlog reader, so with the knob on the planner reads that authority from
+        // the queue log instead.
         let batcher = Batcher::new(store.clone(), repl.clone(), BatcherConfig::from_env())
-            .with_reader(reader.clone());
+            .with_reader(reader.clone())
+            .with_qlog_reader(qlog_reader.clone());
         let (cmd_tx, batcher_join) = batcher.spawn();
 
         tracing::info!(
@@ -214,6 +226,7 @@ impl RaftFacade {
             store,
             repl,
             reader,
+            qlog_reader,
             cmd_tx,
             notifier: ctx.notifier.clone(),
             batcher_join,
@@ -231,6 +244,7 @@ impl RaftFacade {
             store,
             repl,
             reader,
+            qlog_reader,
             cmd_tx,
             notifier: _,
             batcher_join,
@@ -239,6 +253,7 @@ impl RaftFacade {
         drop(cmd_tx); // the batcher sees a closed channel, drains, and exits
         let _ = batcher_join.await; // its Arc<repl>/Arc<store> drop here
         drop(reader); // the segment Shared reference the facade held
+        drop(qlog_reader); // the qlog Shared reference the facade held
         match Arc::try_unwrap(repl) {
             Ok(r) => {
                 // Joins the apply and writer threads; returns the sole store Arc.
@@ -919,6 +934,7 @@ impl RaftFacade {
     ) -> Result<PopOut, RsmError> {
         let store = self.store.clone();
         let reader = self.reader.clone();
+        let qlog_reader = self.qlog_reader.clone();
         let tenant = ctx.tenant.clone();
         let queue = queue.to_string();
         let group = group.to_string();
@@ -931,7 +947,16 @@ impl RaftFacade {
             // metrics are off) so the ablation prices it, not just the record.
             let r0 = crate::rsm::timing::stamp();
             let out = render_pop_blocking(
-                &store, &reader, &tenant, &queue, &group, &worker, auto_ack, &claims, deadline,
+                &store,
+                &reader,
+                qlog_reader.as_ref(),
+                &tenant,
+                &queue,
+                &group,
+                &worker,
+                auto_ack,
+                &claims,
+                deadline,
             );
             if let Some(r0) = r0 {
                 crate::rsm::timing::metrics()
@@ -961,6 +986,7 @@ struct PartInfo {
 fn render_pop_blocking(
     store: &HeedStore,
     reader: &segments::Reader,
+    qlog_reader: Option<&QLogReader>,
     tenant: &str,
     top_queue: &str,
     group: &str,
@@ -1036,25 +1062,50 @@ fn render_pop_blocking(
         };
         let attempt = claim.delivery_attempt.max(1);
         let partition_id = claim.pid.to_string();
+        // Phase A2: the queue-log id for this partition's queue, when the qlog
+        // read path is on. The claimed offsets are all committed (the claim came
+        // from a committed plan), and the qlog is flushed BEFORE the store commit
+        // that made them committed, so the record is always present — a `None`
+        // here is a genuine gap, exactly as a segment miss.
+        let qlog_qid = qlog_reader.map(|_| QLogReader::queue_id_of(tenant, &info.queue));
         let mut off = claim.start_offset;
         while off <= claim.end_offset {
-            let frame = match reader.read_at_within(info.bucket, claim.pid, off, &info.sealed, dl) {
-                Ok(Some(f)) => f,
-                Ok(None) => {
+            // The payload bytes: from the QUEUE LOG when the knob is on (Phase
+            // A2), else the segment files. Both return the same `(base_offset,
+            // created_at, count, blob)` for a committed offset, so the rendered
+            // wire body is byte-identical.
+            let popped: Option<(u64, i64, u32, Vec<u8>)> = match (qlog_reader, qlog_qid) {
+                (Some(ql), Some(qid)) => match ql.read_owned(qid, claim.pid, off) {
+                    Ok(Some(r)) => Some((r.base_offset, r.created_at_us, r.count, r.payload)),
+                    Ok(None) => None,
+                    Err(e) => {
+                        return Err(format!(
+                            "read pop payload (qlog) at pid {} off {off}: {e}",
+                            claim.pid
+                        ))
+                    }
+                },
+                _ => match reader.read_at_within(info.bucket, claim.pid, off, &info.sealed, dl) {
+                    Ok(Some(f)) => Some((f.base_offset, f.created_at_us, f.count, f.blob)),
+                    Ok(None) => None,
+                    Err(e) => {
+                        return Err(format!(
+                            "read pop payload at pid {} off {off}: {e}",
+                            claim.pid
+                        ))
+                    }
+                },
+            };
+            let (base, created_at_us, frame_count, blob) = match popped {
+                Some(t) => t,
+                None => {
                     // A gap (retention passed it, or not yet visible): skip one.
                     off += 1;
                     continue;
                 }
-                Err(e) => {
-                    return Err(format!(
-                        "read pop payload at pid {} off {off}: {e}",
-                        claim.pid
-                    ))
-                }
             };
-            let base = frame.base_offset;
-            let seg_created = iso_from_us(frame.created_at_us);
-            let frames = unpack_frames_ref(&frame.blob);
+            let seg_created = iso_from_us(created_at_us);
+            let frames = unpack_frames_ref(&blob);
             if let Some(frames) = frames {
                 for (i, fr) in frames.iter().enumerate() {
                     let msg_off = base + i as u64;
@@ -1111,7 +1162,7 @@ fn render_pop_blocking(
                 }
             }
             // Advance past this whole segment; a claim range is a run of segments.
-            off = base + frame.count as u64;
+            off = base + frame_count as u64;
         }
         // silence the unused warning on info.queue (kept for a future
         // per-partition top-level queue on discovery).

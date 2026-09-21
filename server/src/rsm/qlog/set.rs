@@ -1,33 +1,53 @@
-//! `rsm/qlog/set.rs` — the applier-owned per-queue [`QLog`] registry
-//! (`ALICE_PGLESS_NEWARCH.md` §1–§5, Phase A1).
+//! `rsm/qlog/set.rs` — the applier-owned per-queue [`QLog`] registry and the
+//! cloneable [`QLogReader`] the facade + planner read through
+//! (`ALICE_PGLESS_NEWARCH.md` §1–§5, Phase A1 write / Phase A2 read).
 //!
-//! # SHADOW write only — not yet authoritative (Phase A1)
+//! # A1 write, A2 read
 //!
-//! Phase A0 built the per-queue store ([`QLog`]); this registry is Phase A1,
-//! the FIRST wiring of it into apply, and it is a SHADOW: gated behind
-//! `QUEEN_RAFT_QLOG` (default off), it writes every `Append` a SECOND time —
-//! into its queue's log — alongside the segment write that is still
-//! authoritative. Pop, dedup and recovery still read the segments and LMDB;
-//! nothing here is read back except by the A1 match test. A2 switches the
-//! reads over; until then the registry exists only to prove the write path is
-//! byte-faithful (the match test) and to pay nothing when the knob is off (the
-//! no-op test).
+//! A0 built the per-queue store ([`QLog`]); A1 made this registry SHADOW-write
+//! every `Append` a second time (behind `QUEEN_RAFT_QLOG`, default off) into its
+//! queue's log, alongside the still-authoritative segment write. A2 switches the
+//! READS over: with the knob on, the pop payload read and the
+//! `DEDUP_INDEX=segment` dedup authority read from the queue log instead of the
+//! `.seg` files and the LMDB keyspaces. The segments and the raft-log blob are
+//! still written (removed in A3), so off-vs-on stays behaviourally identical.
 //!
-//! # What it owns, and when it writes
+//! # The single writer, and the concurrent readers
 //!
-//! One [`QLog`] per queue, opened lazily under `<data_dir>/qlog/q<queue_id>/`
-//! (sibling to `seg/`, `log/`, `store/`) on the first FLUSH that carries a
-//! record for that queue. The applier owns the set exactly as it owns
-//! [`crate::rsm::segments::Segments`].
+//! One [`QLog`] per queue, opened under `<data_dir>/qlog/q<queue_id>/` (sibling
+//! to `seg/`, `log/`, `store/`). The applier is the SINGLE writer (`buffer` +
+//! `flush`, on the apply thread), exactly as it is the single writer of
+//! [`crate::rsm::segments::Segments`]. But the READS run on OTHER threads — the
+//! pop render on the blocking pool, the dedup probe on the batcher — so each
+//! queue's [`QLog`] lives behind an `RwLock`, and the map of them behind another,
+//! shared with a cloneable [`QLogReader`] the way `Segments::reader()` shares the
+//! segment file set. A write takes the queue's write lock only for its one
+//! `append_group` (one `write` + one fsync); a read takes the read lock.
+//!
+//! # Reopen on restart (A2)
+//!
+//! [`QLogSet::reopen_all`] discovers every existing `q<id>/` directory at
+//! `Applier::open` and reopens it ([`QLog::open`] — torn-tail truncate + `.qidx`
+//! rebuild), so a reopened node serves reads from the qlog immediately, before
+//! any new append. A genuinely new queue is still opened lazily on its first
+//! flush; A0's `QLog::open` reopens an existing directory rather than
+//! `create_new`-colliding with it, so the lazy path and the reopen path share one
+//! constructor.
+//!
+//! # An `Append` is buffered, written per entry, fsync'd per durable point
 //!
 //! An `Append` is [`QLogSet::buffer`]ed — copied into an owned record keyed by
 //! its queue — during `apply`, because the effect's `hashes`/`blob` borrow the
-//! entry and are freed when `apply` returns, while the write happens later, at
-//! the transaction boundary. [`QLogSet::flush`] then drains each queue's buffer
-//! into ONE [`QLog::append_group`] per queue — one `write` + one fsync — and
-//! the applier calls it at every store commit AND every durable point (§11.3/
-//! §11.4), so the buffer never holds more than one store-commit window and a
-//! durable point always leaves every buffered record fsynced (§5).
+//! entry and are freed when `apply` returns. [`QLogSet::flush`] then drains each
+//! queue's buffer into ONE [`QLog::write_group`] (a `write`, NO fsync) at the END
+//! of that entry's apply — right after `segments.flush_writes`, before the leader
+//! answers. That per-entry write is the A2 read invariant: the leader answers a
+//! pop right after apply, and a pop can claim (through the overlay) an offset an
+//! in-flight push appended in the SAME uncommitted commit window, so the record
+//! MUST be readable from the qlog the moment the entry is applied — not one store
+//! commit later. The segment path does exactly this (`flush_writes` per entry).
+//! [`QLogSet::sync`] fsyncs the queues written since the last durable point, so
+//! the barrier stays batched, the qlog twin of the segment durable point.
 //!
 //! # Determinism (I2)
 //!
@@ -39,12 +59,19 @@
 //! state), but keeping it a pure function of the two names keeps the shadow
 //! path free of any environment the I2 deny-gate forbids.
 
-use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 
-use crate::rsm::qlog::{QLog, QLogOptions, RecordInput};
+use crate::rsm::qlog::{CommittedFrame, OwnedRecord, QLog, QLogOptions, RecordInput};
+
+/// The shared map of per-queue logs. The applier owns the [`QLogSet`] that
+/// writes them; a [`QLogReader`] clones this `Arc` and reads them. The outer
+/// `RwLock` guards the MAP (opens/removes, rare, apply-thread only); each inner
+/// `RwLock` guards ONE queue's [`QLog`] (its writes are the applier's, its reads
+/// the pool's / the batcher's).
+type SharedLogs = Arc<RwLock<BTreeMap<u64, Arc<RwLock<QLog>>>>>;
 
 /// One `Append` buffered until the next flush, OWNING its bytes.
 ///
@@ -62,33 +89,39 @@ struct Buffered {
     payload: Vec<u8>,
 }
 
-/// The per-queue [`QLog`] registry (Phase A1 shadow). One instance per applier;
-/// every method takes `&mut self` (the applier is the single writer).
+/// The per-queue [`QLog`] registry (Phase A1 shadow write / A2 read). One
+/// instance per applier; the write methods take `&mut self` (the applier is the
+/// single writer). Reads go through a [`QLogReader`] clone, off other threads.
 pub struct QLogSet {
     /// `<data_dir>/qlog`. Each queue's files live under `q<queue_id>/` below it.
     root: PathBuf,
     /// Roll size + fsync mode, mirrored from the segment writer's options so the
     /// shadow rolls and fsyncs on the same terms the authoritative store does.
     opts: QLogOptions,
-    /// One open log per queue id. `BTreeMap` so the flush order is deterministic
-    /// (I2 hygiene — the order does not reach replicated state, but the shadow
-    /// path keeps no incidental nondeterminism either).
-    logs: BTreeMap<u64, QLog>,
-    /// Records buffered since the last flush, per queue id. Drained whole at
-    /// each commit/durable point.
+    /// One open log per queue id, shared with every [`QLogReader`].
+    logs: SharedLogs,
+    /// Records buffered within ONE entry, per queue id. Drained (written to the
+    /// file + index) at the end of that entry's apply by [`QLogSet::flush`], so a
+    /// record is readable before the leader answers. Apply-thread only.
     pending: BTreeMap<u64, Vec<Buffered>>,
+    /// Queue ids written since the last [`QLogSet::sync`]: their active file has
+    /// an un-fsync'd tail, fsync'd together at the durable point. Apply-thread
+    /// only.
+    dirty: std::collections::BTreeSet<u64>,
 }
 
 impl QLogSet {
     /// A fresh registry rooted at `root` (`<data_dir>/qlog`). Opens no file yet;
-    /// each queue's log is created on the first flush that carries a record for
-    /// it.
+    /// call [`QLogSet::reopen_all`] to pick up an existing directory's queues,
+    /// and each genuinely new queue's log is created on the first flush that
+    /// carries a record for it.
     pub fn new(root: PathBuf, opts: QLogOptions) -> QLogSet {
         QLogSet {
             root,
             opts,
-            logs: BTreeMap::new(),
+            logs: Arc::new(RwLock::new(BTreeMap::new())),
             pending: BTreeMap::new(),
+            dirty: std::collections::BTreeSet::new(),
         }
     }
 
@@ -105,6 +138,64 @@ impl QLogSet {
         buf.push(0x1F);
         buf.extend_from_slice(queue.as_bytes());
         xxhash_rust::xxh3::xxh3_64(&buf)
+    }
+
+    /// A cloneable reader over this set's per-queue logs, for the pop payload
+    /// read (facade) and the `DEDUP_INDEX=segment` dedup read (planner). It
+    /// shares the applier's live logs, so it sees every append the moment
+    /// [`QLogSet::flush`] lands it — the qlog twin of `Segments::reader()`.
+    pub fn reader(&self) -> QLogReader {
+        QLogReader {
+            logs: self.logs.clone(),
+        }
+    }
+
+    /// Reopen every existing `q<id>/` directory under the root (A2 recovery), so
+    /// a reopened applier serves reads from the qlog before it writes anything.
+    /// Each is [`QLog::open`] — torn-tail truncate on the active file, `.qidx`
+    /// rebuild on the sealed files. A missing root (a node that never turned the
+    /// knob on) is not an error: there is simply nothing to reopen.
+    pub fn reopen_all(&mut self) -> io::Result<()> {
+        let rd = match std::fs::read_dir(&self.root) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        let mut ids: Vec<u64> = Vec::new();
+        for entry in rd {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if let Some(rest) = name.strip_prefix('q') {
+                if let Ok(id) = rest.parse::<u64>() {
+                    ids.push(id);
+                }
+            }
+        }
+        ids.sort_unstable();
+        for id in ids {
+            // Only the apply thread mutates the map (this call is at open, before
+            // any reader thread exists), so a check-then-open-then-insert is
+            // race-free; open OUTSIDE the map lock so a reader never blocks on
+            // the recovery scan of a queue it is not asking about.
+            if self
+                .logs
+                .read()
+                .expect("qlog set poisoned")
+                .contains_key(&id)
+            {
+                continue;
+            }
+            let (log, _rec) = QLog::open(&self.root, id, self.opts)?;
+            self.logs
+                .write()
+                .expect("qlog set poisoned")
+                .insert(id, Arc::new(RwLock::new(log)));
+        }
+        Ok(())
     }
 
     /// Buffer one `Append` for its queue (a shadow of the `segments.append`
@@ -135,15 +226,19 @@ impl QLogSet {
         });
     }
 
-    /// Drain every queue's buffer into ONE [`QLog::append_group`] per queue —
-    /// one `write` and one fsync each — opening the queue's log lazily. Called
-    /// at each store commit and each durable point, so no buffer outlives a
-    /// commit window and a durable point leaves every buffered record fsynced.
+    /// Drain every queue's buffer into ONE [`QLog::write_group`] per queue — one
+    /// `write` each, NO fsync — opening a genuinely new queue's log lazily. Apply
+    /// calls it at the END of every entry (right after `segments.flush_writes`,
+    /// before the leader answers), so a record is page-cache readable the moment
+    /// the entry is applied — which is what a pop rendered right after apply, and
+    /// a planner claim over committed state, both need (the A2 read invariant).
+    /// The fsync is deferred to [`QLogSet::sync`] at the durable point, exactly as
+    /// the segment path fsyncs per durable point, not per entry.
     ///
-    /// A group is taken out of `pending` BEFORE the (fallible) open/append, so a
+    /// A group is taken out of `pending` BEFORE the (fallible) open/write, so a
     /// mid-flush I/O error does not leave a half-written group buffered for a
-    /// retry: the applier poisons and is dropped, and the shadow log — which no
-    /// reader depends on in A1 — is reopened (torn tail truncated) on restart.
+    /// retry: the applier poisons and is dropped, and the shadow log is reopened
+    /// (torn tail truncated) on restart.
     pub fn flush(&mut self) -> io::Result<()> {
         let qids: Vec<u64> = self
             .pending
@@ -153,13 +248,7 @@ impl QLogSet {
             .collect();
         for qid in qids {
             let bufs = std::mem::take(self.pending.get_mut(&qid).expect("pending queue present"));
-            let log = match self.logs.entry(qid) {
-                Entry::Occupied(o) => o.into_mut(),
-                Entry::Vacant(v) => {
-                    let (log, _rec) = QLog::open(&self.root, qid, self.opts)?;
-                    v.insert(log)
-                }
-            };
+            let log = self.get_or_open(qid)?;
             let inputs: Vec<RecordInput<'_>> = bufs
                 .iter()
                 .map(|b| RecordInput {
@@ -173,26 +262,167 @@ impl QLogSet {
                     payload: &b.payload,
                 })
                 .collect();
-            log.append_group(&inputs)?;
+            log.write().expect("qlog poisoned").write_group(&inputs)?;
+            self.dirty.insert(qid);
         }
         Ok(())
     }
 
-    /// Drop a deleted queue's log handle and any records still buffered for it
-    /// (§NA-I5: a log for a dropped queue is GC'd). A1 drops only the in-RAM
-    /// handle and buffer; unlinking the on-disk `q<id>/` directory is retention
-    /// (§3.3), a later phase — and the shadow is never read in A1, so a stale
-    /// directory left behind harms nothing here.
-    pub fn remove(&mut self, tenant: &str, queue: &str) {
-        let qid = Self::queue_id_of(tenant, queue);
-        self.logs.remove(&qid);
-        self.pending.remove(&qid);
+    /// Fsync every queue written since the last sync (§5: a durable point leaves
+    /// every buffered record fsync'd). One fsync per touched queue, batched across
+    /// the entries since the last durable point — the qlog twin of the segment
+    /// durable point, not a per-entry barrier. Apply calls it at the durable point
+    /// only.
+    pub fn sync(&mut self) -> io::Result<()> {
+        let dirty = std::mem::take(&mut self.dirty);
+        for qid in dirty {
+            if let Some(log) = self.logs.read().expect("qlog set poisoned").get(&qid) {
+                log.write().expect("qlog poisoned").sync()?;
+            }
+        }
+        Ok(())
     }
 
-    /// The open log for a queue id, for the A1 match test. Test-only: the
-    /// product reads nothing from the shadow set until A2.
+    /// The open log for `qid`, opening it (and inserting it into the shared map)
+    /// if it is new. The `QLog::open` runs OUTSIDE the map lock — only the apply
+    /// thread writes the map, and a genuinely new queue has no committed offset a
+    /// reader could be asking for yet, so no reader misses a claimable record
+    /// during the open.
+    fn get_or_open(&self, qid: u64) -> io::Result<Arc<RwLock<QLog>>> {
+        if let Some(l) = self.logs.read().expect("qlog set poisoned").get(&qid) {
+            return Ok(l.clone());
+        }
+        let (log, _rec) = QLog::open(&self.root, qid, self.opts)?;
+        let arc = Arc::new(RwLock::new(log));
+        self.logs
+            .write()
+            .expect("qlog set poisoned")
+            .insert(qid, arc.clone());
+        Ok(arc)
+    }
+
+    /// Drop a deleted queue's log handle and any records still buffered for it
+    /// (§NA-I5: a log for a dropped queue is GC'd). A1/A2 drop only the in-RAM
+    /// handle and buffer; unlinking the on-disk `q<id>/` directory is retention
+    /// (§3.3), a later phase.
+    pub fn remove(&mut self, tenant: &str, queue: &str) {
+        let qid = Self::queue_id_of(tenant, queue);
+        self.logs.write().expect("qlog set poisoned").remove(&qid);
+        self.pending.remove(&qid);
+        self.dirty.remove(&qid);
+    }
+
+    /// The open log for a queue id, for the read-match / reopen tests. Test-only:
+    /// the product reads the shadow set through a [`QLogReader`].
     #[cfg(test)]
-    pub fn log(&self, queue_id: u64) -> Option<&QLog> {
-        self.logs.get(&queue_id)
+    pub fn log(&self, queue_id: u64) -> Option<Arc<RwLock<QLog>>> {
+        self.logs
+            .read()
+            .expect("qlog set poisoned")
+            .get(&queue_id)
+            .cloned()
+    }
+}
+
+/// A cloneable, `Send + Sync` reader over an applier's per-queue logs (Phase
+/// A2). The facade clones one for each blocking pop render; the batcher clones
+/// one for the planner's `DEDUP_INDEX=segment` dedup read. Every method keys by
+/// `queue_id` ([`QLogSet::queue_id_of`]) and reads under the queue's read lock,
+/// off the SAME live logs the applier appends to.
+#[derive(Clone)]
+pub struct QLogReader {
+    logs: SharedLogs,
+}
+
+impl QLogReader {
+    /// The open log for `queue_id`, or `None` when the applier has never written
+    /// (or has removed) that queue. Clones the inner `Arc` so the caller reads
+    /// without holding the map lock across the read.
+    fn log(&self, queue_id: u64) -> Option<Arc<RwLock<QLog>>> {
+        self.logs
+            .read()
+            .expect("qlog set poisoned")
+            .get(&queue_id)
+            .cloned()
+    }
+
+    /// The whole record holding `(pid, offset)` — the pop payload read. `None`
+    /// when the queue is unknown or no live file holds the offset (a gap the pop
+    /// render skips, exactly as a segment `read_at_within` miss).
+    pub fn read_owned(
+        &self,
+        queue_id: u64,
+        pid: u64,
+        offset: u64,
+    ) -> io::Result<Option<OwnedRecord>> {
+        match self.log(queue_id) {
+            Some(l) => l.read().expect("qlog poisoned").read_owned(pid, offset),
+            None => Ok(None),
+        }
+    }
+
+    /// The O(claimed) forward claim walk of `pid` from `from_offset`, bounded to
+    /// `committed_end` (the exactly-once invariant), for the dedup delivered set
+    /// / resolve. The qlog twin of `segments::Reader::claim_frames`. A no-op when
+    /// the queue is unknown.
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_frames(
+        &self,
+        queue_id: u64,
+        pid: u64,
+        from_offset: u64,
+        committed_end: u64,
+        want_hashes: bool,
+        cb: &mut dyn FnMut(u64, u64, i64, Option<Vec<u8>>) -> bool,
+    ) -> io::Result<()> {
+        match self.log(queue_id) {
+            Some(l) => l.read().expect("qlog poisoned").claim_walk(
+                pid,
+                from_offset,
+                committed_end,
+                want_hashes,
+                cb,
+            ),
+            None => Ok(()),
+        }
+    }
+
+    /// The committed dedup rows (or shape, when `!with_hashes`) of `pid` from
+    /// `from_base`, bounded to `committed_end` — the dedup probe / resolve / seed
+    /// authority. The qlog twin of `segments::Reader::committed_dedup_rows` /
+    /// `committed_dedup_shape`. Empty when the queue is unknown.
+    pub fn committed_frames(
+        &self,
+        queue_id: u64,
+        pid: u64,
+        from_base: u64,
+        committed_end: u64,
+        with_hashes: bool,
+    ) -> io::Result<Vec<CommittedFrame>> {
+        match self.log(queue_id) {
+            Some(l) => l.read().expect("qlog poisoned").committed_frames(
+                pid,
+                from_base,
+                committed_end,
+                with_hashes,
+            ),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// `queue_id` for a `(tenant, queue)`, so a caller that holds the names can
+    /// key the reads without reaching for [`QLogSet`].
+    pub fn queue_id_of(tenant: &str, queue: &str) -> u64 {
+        QLogSet::queue_id_of(tenant, queue)
+    }
+
+    /// Whether the reader has an open log for `queue_id` — for the reopen test,
+    /// which asserts a restart rebuilt the map.
+    #[cfg(test)]
+    pub fn has_queue(&self, queue_id: u64) -> bool {
+        self.logs
+            .read()
+            .expect("qlog set poisoned")
+            .contains_key(&queue_id)
     }
 }

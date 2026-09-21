@@ -458,14 +458,19 @@ pub struct ApplyConfig {
     /// on `default()` must flip in the same commit. That lockstep flip of the
     /// shared test config is a coordinated change; the knob makes it one line.
     pub pending_transitions: bool,
-    /// `QUEEN_RAFT_QLOG` (`ALICE_PGLESS_NEWARCH.md` Phase A1). OFF (default):
-    /// exactly today's behaviour — apply keeps no per-queue log and touches no
-    /// `qlog/` directory. ON: apply ALSO shadow-writes every `Append` into its
-    /// queue's log (`rsm/qlog`), fsynced at each durable point ALONGSIDE the
-    /// segments. The shadow is NOT authoritative in A1 — pop/dedup/recovery
-    /// still read the segments and LMDB — so turning it on changes nothing the
-    /// replicated digest can see (it only adds files under `qlog/`); it exists
-    /// to prove the write path byte-faithful before A2 switches reads to it.
+    /// `QUEEN_RAFT_QLOG` (`ALICE_PGLESS_NEWARCH.md` Phase A1 write / A2 read).
+    /// OFF (default): exactly today's behaviour — apply keeps no per-queue log
+    /// and touches no `qlog/` directory. ON: apply writes every `Append` into its
+    /// queue's log (`rsm/qlog`), fsynced at each store commit and durable point
+    /// (A2 flushes it BEFORE the store commit, so a committed offset is always
+    /// already in the qlog); AND the pop payload read and the
+    /// `DEDUP_INDEX=segment` dedup authority read FROM the qlog instead of the
+    /// `.seg` files and the LMDB `txns`/`dedup` keyspaces (`Applier::qlog_reader`,
+    /// threaded to the facade + planner). The segments and the raft-log blob are
+    /// STILL written (removed in A3), so turning it on changes nothing the
+    /// replicated digest can see (it only adds files under `qlog/`) and off-vs-on
+    /// is behaviourally identical — the segment/txns read and the qlog read
+    /// return byte-identical bytes and verdicts (the read-match test).
     pub qlog: bool,
 }
 
@@ -910,11 +915,16 @@ impl<'s, S: Store> Applier<'s, S> {
             ))
         })?;
 
-        // Phase A1 shadow: mirror the segment writer's roll size and fsync mode
-        // into the qlog options (built BEFORE `seg_opts` is moved into
+        // Phase A1/A2: mirror the segment writer's roll size and fsync mode into
+        // the qlog options (built BEFORE `seg_opts` is moved into
         // `Segments::open`), so the shadow rolls and fsyncs on the same terms as
-        // the authoritative store. `None` unless `QUEEN_RAFT_QLOG` is on.
-        let qlog = cfg.qlog.then(|| {
+        // the authoritative store. `None` unless `QUEEN_RAFT_QLOG` is on. A2:
+        // REOPEN every existing `q<id>/` directory now (torn-tail truncate +
+        // `.qidx` rebuild), so a reopened node serves reads from the qlog
+        // immediately, before any new append — and so the lazy open on the first
+        // flush is only ever a genuinely new queue, never a `create_new`
+        // collision with a directory a previous run left.
+        let qlog = if cfg.qlog {
             let opts = crate::rsm::qlog::QLogOptions {
                 segment_bytes: seg_opts.segment_bytes,
                 fsync: match seg_opts.fsync {
@@ -927,8 +937,12 @@ impl<'s, S: Store> Applier<'s, S> {
             let data_dir = seg_root
                 .parent()
                 .unwrap_or_else(|| std::path::Path::new("."));
-            QLogSet::new(data_dir.join("qlog"), opts)
-        });
+            let mut set = QLogSet::new(data_dir.join("qlog"), opts);
+            set.reopen_all().map_err(ApplyError::Qlog)?;
+            Some(set)
+        } else {
+            None
+        };
         let (mut segments, seg_recovery) = Segments::open(seg_root, seg_opts, &recorded)?;
         // PERF-C: turn on write coalescing and the write pool for this node.
         // Boot-only and node-local (I2); the pool's threads live and die with
@@ -1051,6 +1065,15 @@ impl<'s, S: Store> Applier<'s, S> {
     /// reader is cloneable and holds no write state.
     pub fn reader(&self) -> segments::Reader {
         self.segments.reader()
+    }
+
+    /// The read side of the per-queue logs (`QUEEN_RAFT_QLOG`, Phase A2), for the
+    /// facade's pop payload read and the planner's `DEDUP_INDEX=segment` dedup
+    /// read. `None` when the knob is off (today's path). Cloneable and holds no
+    /// write state; it shares the applier's live logs, so it sees every append
+    /// the moment [`QLogSet::flush`] lands it.
+    pub fn qlog_reader(&self) -> Option<crate::rsm::qlog::set::QLogReader> {
+        self.qlog.as_ref().map(|s| s.reader())
     }
 
     /// The segment writer, for a caller that owns a step apply does not: a
@@ -1242,6 +1265,21 @@ impl<'s, S: Store> Applier<'s, S> {
         // keeps every recorded length backed by bytes already on the fd. A
         // no-op when buffering is off.
         self.segments.flush_writes()?;
+
+        // Phase A1 write / A2 read: write this entry's buffered qlog records to
+        // the file + RAM index NOW — one `write` per touched queue, NO fsync —
+        // at the SAME boundary the segment payload becomes readable, and BEFORE
+        // the leader answers below (`notify.applied`). This is the A2 read
+        // invariant, and the bug it fixes: a pop is rendered right after apply,
+        // and it can claim (via the overlay) an offset an in-flight push appended
+        // in this same, not-yet-committed commit window — so the payload MUST be
+        // in the qlog the moment the entry is applied, exactly as it is in the
+        // segment file, not one store commit later. The fsync is batched to the
+        // durable point (`durable_point_inner` → `qlog.sync`). `None`/empty when
+        // the knob is off, so this is exactly today's path then.
+        if let Some(qlog) = self.qlog.as_mut() {
+            qlog.flush().map_err(ApplyError::Qlog)?;
+        }
 
         // §5.4: every LOGGED command's outcome is recorded, so a retry of a
         // request id inside the window is answered from state and plans
@@ -2911,6 +2949,12 @@ impl<'s, S: Store> Applier<'s, S> {
         // group-list cache, which is scoped to the transaction.
         self.counters.flush(&mut self.writes)?;
         self.groups_cache.clear();
+        // The qlog is NOT touched here: A2 writes each entry's records to the
+        // qlog file + index in `execute` (before the leader answers), so by the
+        // time this commit makes them committed they are already readable, and
+        // the fsync is batched to the durable point. Nothing to do at a
+        // non-durable store commit — the segment payload is likewise only fsync'd
+        // at the durable point, so the two stay in lock-step.
         self.writes.commit()?;
         // §13.5 `apply.store_committed`: the (non-durable) store commit that
         // carries the applied index and the segment file lengths has landed;
@@ -2926,12 +2970,6 @@ impl<'s, S: Store> Applier<'s, S> {
         // no longer the only place their frames can be found.
         for (b, id) in seals {
             self.segments.forget_sealed(b, id);
-        }
-        // Phase A1 SHADOW: drain the qlog buffer at every store commit — one
-        // `append_group` (one fsync) per touched queue — so the buffer never
-        // grows past a commit window. `None`/empty when the knob is off.
-        if let Some(qlog) = self.qlog.as_mut() {
-            qlog.flush().map_err(ApplyError::Qlog)?;
         }
         Ok(())
     }
@@ -2959,6 +2997,15 @@ impl<'s, S: Store> Applier<'s, S> {
 
     fn durable_point_inner(&mut self) -> Result<u64> {
         let point = self.segments.durable_point()?;
+        // Phase A1 write / A2 read: fsync every qlog queue written since the last
+        // durable point, alongside the segment files (§5: a durable point leaves
+        // every buffered record fsynced). The records themselves were already
+        // WRITTEN to the qlog per entry in `execute` (that is the read
+        // invariant); this is only the batched barrier, the qlog twin of the
+        // segment durable point above. Off/empty when the knob is off.
+        if let Some(qlog) = self.qlog.as_mut() {
+            qlog.sync().map_err(ApplyError::Qlog)?;
+        }
         // §13.5 `durable.files_synced`: every segment file written since the
         // last point is fsynced (step 1, §11.4), the durable store commit that
         // records their lengths (step 2) has NOT landed. A crash here reopens
@@ -2993,16 +3040,6 @@ impl<'s, S: Store> Applier<'s, S> {
                 );
                 return Err(e.into());
             }
-        }
-        // Phase A1 SHADOW: flush + fsync every touched queue's qlog as part of
-        // completing the durable point (§5: a durable point leaves every
-        // buffered record fsynced). `append_group` fsyncs per group, so this is
-        // one fsync per touched queue. Placed after the durable store commit and
-        // before the durable index is reported, so a shadow-write failure stops
-        // the node here rather than after it has announced durability. Off/empty
-        // when the knob is off.
-        if let Some(qlog) = self.qlog.as_mut() {
-            qlog.flush().map_err(ApplyError::Qlog)?;
         }
         self.entries_since_commit = 0;
         self.dirty = false;
@@ -3430,7 +3467,9 @@ pub fn spawn<S: Store + 'static>(
     clock: Arc<dyn Clock>,
     rx: Receiver<Committed>,
 ) -> std::thread::JoinHandle<Result<ApplyStats>> {
-    spawn_with_reader(store, seg_root, seg_opts, cfg, notify, clock, rx, None)
+    spawn_with_reader(
+        store, seg_root, seg_opts, cfg, notify, clock, rx, None, None,
+    )
 }
 
 /// [`spawn`], plus a one-shot sink the thread publishes the segment
@@ -3455,6 +3494,7 @@ pub fn spawn_with_reader<S: Store + 'static>(
     clock: Arc<dyn Clock>,
     rx: Receiver<Committed>,
     reader_sink: Option<Arc<std::sync::OnceLock<segments::Reader>>>,
+    qlog_reader_sink: Option<Arc<std::sync::OnceLock<Option<crate::rsm::qlog::set::QLogReader>>>>,
 ) -> std::thread::JoinHandle<Result<ApplyStats>> {
     std::thread::Builder::new()
         .name("queen-rsm-apply".into())
@@ -3464,6 +3504,13 @@ pub fn spawn_with_reader<S: Store + 'static>(
                 // First-write-wins; there is only ever one apply thread per
                 // replicator, so this sets exactly once.
                 let _ = sink.set(applier.reader());
+            }
+            if let Some(sink) = &qlog_reader_sink {
+                // Phase A2: publish the qlog reader (or `None` when the knob is
+                // off) the same way and at the same point as the segment reader,
+                // so the facade + planner read pop payloads and dedup hashes off
+                // the SAME live logs the applier appends to.
+                let _ = sink.set(applier.qlog_reader());
             }
             // The async durable-point helper (§11.4). Spawned per apply thread,
             // dropped (Stop + join) when `run` returns, so it never outlives the
