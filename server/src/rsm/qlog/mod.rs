@@ -58,6 +58,7 @@
 
 pub mod index;
 pub mod record;
+pub mod set;
 
 #[cfg(test)]
 mod tests;

@@ -189,6 +189,9 @@ pub fn cfg() -> ApplyConfig {
         // shipped byte-for-byte path; the transition tests opt in per-test.
         batch_counters: true,
         pending_transitions: false,
+        // Phase A1: the shadow qlog is off across the shared apply suite, so
+        // every existing test runs today's exact path; the qlog tests opt in.
+        qlog: false,
     }
 }
 

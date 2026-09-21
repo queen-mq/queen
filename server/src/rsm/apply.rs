@@ -97,6 +97,7 @@ use std::time::{Duration, Instant};
 use crate::rsm::dedup;
 use crate::rsm::effect::{Assigns, CodecError, Effect, GarbageScope, Kind, Pid};
 use crate::rsm::entry::{CommandRecord, Entry, RequestId};
+use crate::rsm::qlog::set::QLogSet;
 use crate::rsm::segments::{self, FileState, Position, Release, SegError, Segments};
 use crate::rsm::state::Derived;
 use crate::rsm::store::keys::{self, Counter};
@@ -183,6 +184,13 @@ pub enum ApplyError {
     /// snapshot (raft1); neither exists before WP-4.6, so phase 1 refuses to
     /// start rather than serving a partition whose tail is gone.
     Disagreement { detail: String },
+    /// The SHADOW per-queue log (`QUEEN_RAFT_QLOG`, Phase A1) could not be
+    /// written or fsynced. The shadow is not authoritative in A1, but a failure
+    /// on the write path this phase exists to prove must surface LOUDLY rather
+    /// than silently diverging what A2 will read — so, like a segment I/O error,
+    /// it is fatal for the node (the authoritative store/segments already
+    /// committed; the node stops and replays from its durable point).
+    Qlog(std::io::Error),
 }
 
 impl ApplyError {
@@ -251,6 +259,7 @@ impl std::fmt::Display for ApplyError {
                 f,
                 "apply: I11: the store and the segment files disagree: {detail}"
             ),
+            ApplyError::Qlog(e) => write!(f, "apply: qlog (shadow): {e}"),
         }
     }
 }
@@ -449,6 +458,15 @@ pub struct ApplyConfig {
     /// on `default()` must flip in the same commit. That lockstep flip of the
     /// shared test config is a coordinated change; the knob makes it one line.
     pub pending_transitions: bool,
+    /// `QUEEN_RAFT_QLOG` (`ALICE_PGLESS_NEWARCH.md` Phase A1). OFF (default):
+    /// exactly today's behaviour — apply keeps no per-queue log and touches no
+    /// `qlog/` directory. ON: apply ALSO shadow-writes every `Append` into its
+    /// queue's log (`rsm/qlog`), fsynced at each durable point ALONGSIDE the
+    /// segments. The shadow is NOT authoritative in A1 — pop/dedup/recovery
+    /// still read the segments and LMDB — so turning it on changes nothing the
+    /// replicated digest can see (it only adds files under `qlog/`); it exists
+    /// to prove the write path byte-faithful before A2 switches reads to it.
+    pub qlog: bool,
 }
 
 impl Default for ApplyConfig {
@@ -485,6 +503,9 @@ impl Default for ApplyConfig {
             // one-line switch when the package lands.
             batch_counters: true,
             pending_transitions: false,
+            // Phase A1 shadow: off by default, so an unset knob is byte-for-byte
+            // today's behaviour and no `qlog/` directory is ever created.
+            qlog: false,
         }
     }
 }
@@ -532,6 +553,7 @@ impl ApplyConfig {
                 .unwrap_or_else(default_apply_writers),
             batch_counters: flag("QUEEN_RAFT_BATCH_COUNTERS", d.batch_counters),
             pending_transitions: flag("QUEEN_RAFT_PENDING_TRANSITIONS", d.pending_transitions),
+            qlog: flag("QUEEN_RAFT_QLOG", d.qlog),
         }
     }
 }
@@ -756,6 +778,12 @@ pub struct Applier<'s, S: Store> {
     store: &'s S,
     writes: S::Write<'s>,
     segments: Segments,
+    /// The SHADOW per-queue logs (`QUEEN_RAFT_QLOG`, Phase A1). `Some` only when
+    /// the knob is on; `None` is today's path, and every qlog site below is
+    /// then a single `is_some` check that does nothing. The applier owns it like
+    /// it owns [`Applier::segments`]; it holds no threads, so dropping it (on
+    /// shutdown, or when the applier is dropped) just closes the file handles.
+    qlog: Option<QLogSet>,
     derived: Derived,
     cfg: ApplyConfig,
     notify: Arc<dyn Notify>,
@@ -882,6 +910,25 @@ impl<'s, S: Store> Applier<'s, S> {
             ))
         })?;
 
+        // Phase A1 shadow: mirror the segment writer's roll size and fsync mode
+        // into the qlog options (built BEFORE `seg_opts` is moved into
+        // `Segments::open`), so the shadow rolls and fsyncs on the same terms as
+        // the authoritative store. `None` unless `QUEEN_RAFT_QLOG` is on.
+        let qlog = cfg.qlog.then(|| {
+            let opts = crate::rsm::qlog::QLogOptions {
+                segment_bytes: seg_opts.segment_bytes,
+                fsync: match seg_opts.fsync {
+                    segments::FsyncMode::Full => crate::rsm::qlog::Fsync::Full,
+                    segments::FsyncMode::Data => crate::rsm::qlog::Fsync::Data,
+                },
+            };
+            // `<data_dir>/qlog`, sibling to `seg/`, `log/`, `store/`. `seg_root`
+            // is `<data_dir>/seg`, so its parent is the data dir.
+            let data_dir = seg_root
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."));
+            QLogSet::new(data_dir.join("qlog"), opts)
+        });
         let (mut segments, seg_recovery) = Segments::open(seg_root, seg_opts, &recorded)?;
         // PERF-C: turn on write coalescing and the write pool for this node.
         // Boot-only and node-local (I2); the pool's threads live and die with
@@ -905,6 +952,7 @@ impl<'s, S: Store> Applier<'s, S> {
             store,
             writes,
             segments,
+            qlog,
             derived,
             counters: CounterCache::new(cfg.batch_counters),
             groups_cache: HashMap::new(),
@@ -1015,6 +1063,14 @@ impl<'s, S: Store> Applier<'s, S> {
     /// durable-point pre-flush (§11.4); it mutates nothing.
     pub fn segments(&self) -> &Segments {
         &self.segments
+    }
+
+    /// The SHADOW per-queue logs (`QUEEN_RAFT_QLOG`, Phase A1), for the A1 match
+    /// test to read a record back. `None` unless the knob is on. Test-only: no
+    /// product code reads the shadow set until A2.
+    #[cfg(test)]
+    pub(crate) fn qlog(&self) -> Option<&QLogSet> {
+        self.qlog.as_ref()
     }
 
     // -- the entry ---------------------------------------------------------
@@ -1353,6 +1409,7 @@ impl<'s, S: Store> Applier<'s, S> {
                 *created_at_us,
                 hashes,
                 blob,
+                index,
                 now_us,
                 wakes,
             ),
@@ -1530,6 +1587,7 @@ impl<'s, S: Store> Applier<'s, S> {
         created_at_us: i64,
         hashes: &[u8],
         blob: &[u8],
+        index: u64,
         now_us: i64,
         wakes: &mut Vec<(String, String, Option<String>)>,
     ) -> Result<()> {
@@ -1606,6 +1664,26 @@ impl<'s, S: Store> Applier<'s, S> {
         let tenant = p.tenant.clone();
         let queue = p.queue.clone();
         self.writes.put_partition(pid, &p)?;
+
+        // Phase A1 SHADOW: the same message `segments.append` just filed, also
+        // buffered as a qlog record for its queue (flushed + fsynced at the next
+        // commit/durable point). `seq` = the entry index (the leader's order
+        // stamp); `txn` is always `None` in A1 (Phase B adds cross-queue txns).
+        // Off unless `QUEEN_RAFT_QLOG` is on; not authoritative — nothing reads
+        // it back but the A1 match test.
+        if let Some(qlog) = self.qlog.as_mut() {
+            qlog.buffer(
+                &tenant,
+                &queue,
+                index,
+                pid,
+                base_offset,
+                count,
+                created_at_us,
+                hashes,
+                blob,
+            );
+        }
 
         // §7.4: `meta.max_created_at_us` is the floor the next planner stamp
         // has to clear, and segment stamps can run ahead of `now` by a
@@ -2110,6 +2188,12 @@ impl<'s, S: Store> Applier<'s, S> {
         self.sweep(Keyspace::PartitionsByKey, &prefix)?;
         let prefix = keys::queue_partitions_prefix(tenant, queue);
         self.sweep(Keyspace::QueuePartitions, &prefix)?;
+        // Phase A1 SHADOW: drop the deleted queue's log handle and any records
+        // still buffered for it (§NA-I5). On-disk cleanup of `qlog/q<id>/` is
+        // retention, a later phase; the shadow is never read in A1.
+        if let Some(qlog) = self.qlog.as_mut() {
+            qlog.remove(tenant, queue);
+        }
         Ok(())
     }
 
@@ -2843,6 +2927,12 @@ impl<'s, S: Store> Applier<'s, S> {
         for (b, id) in seals {
             self.segments.forget_sealed(b, id);
         }
+        // Phase A1 SHADOW: drain the qlog buffer at every store commit — one
+        // `append_group` (one fsync) per touched queue — so the buffer never
+        // grows past a commit window. `None`/empty when the knob is off.
+        if let Some(qlog) = self.qlog.as_mut() {
+            qlog.flush().map_err(ApplyError::Qlog)?;
+        }
         Ok(())
     }
 
@@ -2903,6 +2993,16 @@ impl<'s, S: Store> Applier<'s, S> {
                 );
                 return Err(e.into());
             }
+        }
+        // Phase A1 SHADOW: flush + fsync every touched queue's qlog as part of
+        // completing the durable point (§5: a durable point leaves every
+        // buffered record fsynced). `append_group` fsyncs per group, so this is
+        // one fsync per touched queue. Placed after the durable store commit and
+        // before the durable index is reported, so a shadow-write failure stops
+        // the node here rather than after it has announced durability. Off/empty
+        // when the knob is off.
+        if let Some(qlog) = self.qlog.as_mut() {
+            qlog.flush().map_err(ApplyError::Qlog)?;
         }
         self.entries_since_commit = 0;
         self.dirty = false;
